@@ -206,7 +206,8 @@ jobs:
         echo Cleaning up buckets $resource 
         eval nebius --format json $resource list \
           | jq -r 'try .items[] | .metadata.id' \
-          | eval xargs -r -n 1 s3cmd del --recursive s3://{}
+          | eval xargs -r -n 1 -I {} s3cmd del --recursive s3://{}
+        done
 
     - name: Perform forced cleanup
       run: |
