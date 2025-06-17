@@ -409,11 +409,11 @@ resource "terraform_data" "check_nfs" {
 variable "k8s_version" {
   description = "Version of the k8s to be used."
   type        = string
-  default     = "1.30"
+  default     = null
 
   validation {
-    condition     = length(regexall("^[\\d]+\\.[\\d]+$", var.k8s_version)) == 1
-    error_message = "The k8s cluster version now only supports version in format `<MAJOR>.<MINOR>`."
+    condition     = var.k8s_version == null || can(regex("^[\\d]+\\.[\\d]+$", var.k8s_version))
+    error_message = "The k8s cluster version must be null or in format `<MAJOR>.<MINOR>`."
   }
 }
 
