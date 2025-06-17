@@ -1,0 +1,1 @@
+{"total":2,"items":[{"uid":"ea7d1ad07fd5fdb8127e997853eef926","name":"tests/main.tftest.hcl","statistic":{"failed":0,"broken":1,"skipped":2,"passed":1,"unknown":0,"total":4}},{"uid":"aa05e0563f980901a14e977f6fef897c","name":"tests/k8s-training-kuberay.tftest.hcl","statistic":{"failed":0,"broken":1,"skipped":1,"passed":1,"unknown":0,"total":3}}]}
