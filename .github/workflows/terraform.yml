@@ -187,6 +187,26 @@ jobs:
           --public-key-id ${{ secrets.TERRAFORM_SA_PUBLIC_KEY_ID }} \
           --parent-id ${{ env.TF_VAR_parent_id }} \
           --private-key-file /tmp/sa.pem
+    
+    - name: Setup s3cmd
+      run: |
+        pip3 install s3cmd --no-cache --quiet
+        s3cmd --configure --dump-config \
+        --access_key="${{ secrets.SA_ACCESS_KEY_ID }}" \
+        --secret_key="${{ secrets.SA_SECRET_KEY }}" \
+        --host="storage.eu-north1.nebius.cloud:443" \
+        --host-bucket="%(bucket)s.storage.eu-north1.nebius.cloud" \
+        > ~/.s3cfg
+    
+    - name: Cleanup buckets
+      run: |
+        for resource in \
+          "storage bucket" \
+        ; do
+        echo Cleaning up buckets $resource 
+        eval nebius --format json $resource list \
+          | jq -r 'try .items[] | .metadata.id' \
+          | eval xargs -r -n 1 s3cmd del --recursive s3://{}
 
     - name: Perform forced cleanup
       run: |
