@@ -13,7 +13,7 @@ variable "vpc_subnet_id" {
 variable "k8s_version" {
   description = "Version of the k8s to be used."
   type        = string
-  default     = "1.30"
+  default     = null
 }
 
 variable "name" {

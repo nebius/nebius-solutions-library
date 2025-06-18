@@ -483,8 +483,9 @@ backups_retention = {
 # region k8s
 
 # Version of the k8s to be used.
+# Set to null or don't set to use Nebius default (recommended), or specify explicitly
 # ---
-k8s_version = "1.30"
+# k8s_version = 1.30
 
 # SSH user credentials for accessing k8s nodes.
 # That option add public ip address to every node.
