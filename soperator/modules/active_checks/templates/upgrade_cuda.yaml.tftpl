@@ -18,7 +18,7 @@ resources:
               echo "Upgrading cuda"
               ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa \
                   -o StrictHostKeyChecking=no \
-                  soperatorchecks@login-0.soperator-login-svc.soperator.svc << 'EOF'
+                  soperatorchecks@${slurm_cluster_ip} << 'EOF'
 
               # Patterns of packages to process
               TARGET_PATTERNS=(

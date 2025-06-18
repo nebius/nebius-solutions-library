@@ -507,6 +507,7 @@ module "active_checks" {
   slurm_cluster_name      = local.slurm_cluster_name
   slurm_cluster_namespace = local.slurm_cluster_name
   num_of_login_nodes      = var.slurm_nodeset_login.size
+  slurm_cluster_ip        = module.login_script.ip
 
   depends_on = [
     module.slurm
