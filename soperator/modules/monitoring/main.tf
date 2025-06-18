@@ -14,7 +14,7 @@ locals {
 }
 resource "helm_release" "dashboard" {
   for_each = tomap({
-    soperator_exporter     = "soperator-exporter"
+    cluster_health         = "cluster-health"
     kube_state_metrics     = "kube-state-metrics"
     pod_resources          = "pod-resources"
     jobs_overview          = "jobs-overview"
