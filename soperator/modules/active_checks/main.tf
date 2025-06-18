@@ -54,6 +54,7 @@ resource "helm_release" "create_nebius_user" {
   namespace        = var.slurm_cluster_namespace
 
   values = [templatefile("${path.module}/templates/create_user_check.yaml.tftpl", {
+    slurm_cluster_ip        = var.slurm_cluster_ip
     slurm_cluster_namespace = var.slurm_cluster_namespace
     slurm_cluster_name      = var.slurm_cluster_name
     user_name               = var.checks.nebius_username
@@ -78,6 +79,7 @@ resource "helm_release" "install_package_check" {
   namespace        = var.slurm_cluster_namespace
 
   values = [templatefile("${path.module}/templates/install_package.yaml.tftpl", {
+    slurm_cluster_ip        = var.slurm_cluster_ip
     slurm_cluster_namespace = var.slurm_cluster_namespace
     slurm_cluster_name      = var.slurm_cluster_name
   })]
@@ -101,6 +103,7 @@ resource "helm_release" "ssh_check" {
   namespace        = var.slurm_cluster_namespace
 
   values = [templatefile("${path.module}/templates/ssh_check.yaml.tftpl", {
+    slurm_cluster_ip        = var.slurm_cluster_ip
     slurm_cluster_namespace = var.slurm_cluster_namespace
     slurm_cluster_name      = var.slurm_cluster_name
     num_of_login_nodes      = var.num_of_login_nodes
@@ -125,6 +128,7 @@ resource "helm_release" "upgrade_cuda" {
   namespace        = var.slurm_cluster_namespace
 
   values = [templatefile("${path.module}/templates/upgrade_cuda.yaml.tftpl", {
+    slurm_cluster_ip        = var.slurm_cluster_ip
     slurm_cluster_namespace = var.slurm_cluster_namespace
     slurm_cluster_name      = var.slurm_cluster_name
     cuda_version            = var.checks.cuda_version
