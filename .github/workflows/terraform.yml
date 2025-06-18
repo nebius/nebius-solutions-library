@@ -199,6 +199,7 @@ jobs:
         > ~/.s3cfg
     
     - name: Cleanup buckets
+      continue-on-error: true
       run: |
         for resource in \
           "storage bucket" \
