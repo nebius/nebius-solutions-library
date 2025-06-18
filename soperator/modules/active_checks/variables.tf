@@ -42,28 +42,8 @@ variable "checks" {
     soperatorchecks_username = "soperatorchecks"
 
     ssh_check_enabled = true
-    install_package_check_enabled = true
-    upgrade_cuda_enabled = true
+    install_package_check_enabled = false
+    upgrade_cuda_enabled = false
     cuda_version = "12.4.1-1"
-  }
-
-  validation {
-    condition = !var.checks.create_soperatorchecks_user || var.checks.create_nebius_user
-    error_message = "Create nebius user check could not be performed without soperatorchecks user creation."
-  }
-
-  validation {
-    condition = !var.checks.create_soperatorchecks_user || var.checks.ssh_check_enabled
-    error_message = "SSH check could not be performed without soperatorchecks user creation."
-  }
-
-  validation {
-    condition = !var.checks.create_soperatorchecks_user || var.checks.install_package_check_enabled
-    error_message = "Install package check could not be performed without soperatorchecks user creation."
-  }
-
-    validation {
-    condition = !var.checks.create_soperatorchecks_user || var.checks.upgrade_cuda_enabled
-    error_message = "Upgrade CUDA check could not be performed without soperatorchecks user creation."
   }
 }
