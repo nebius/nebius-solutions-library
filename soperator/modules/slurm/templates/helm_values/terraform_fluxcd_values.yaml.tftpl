@@ -675,24 +675,11 @@ resources:
               exporter:
                 enabled: ${slurm_cluster.nodes.exporter.enabled}
                 k8sNodeFilterName: ${slurm_cluster.k8s_node_filters.system.name}
-                exporter:
+                exporterContainer:
                   resources:
                     cpu: ${slurm_cluster.nodes.exporter.resources.cpu * 1000}m
                     memory: ${slurm_cluster.nodes.exporter.resources.memory}Gi
                     ephemeralStorage: ${slurm_cluster.nodes.exporter.resources.ephemeral_storage}Gi
-                munge:
-                  resources:
-                    cpu: ${slurm_cluster.nodes.munge.resources.cpu * 1000}m
-                    memory: ${slurm_cluster.nodes.munge.resources.memory}Gi
-                    ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
-                customInitContainers:
-                  - name: ensure-jail-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
-                    volumeMounts: [{ name: jail, mountPath: /volume-mount }]
-                    command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
-                volumes:
-                  jail:
-                    volumeSourceName: "jail"
 
               rest:
                 enabled: ${slurm_cluster.nodes.rest.enabled}

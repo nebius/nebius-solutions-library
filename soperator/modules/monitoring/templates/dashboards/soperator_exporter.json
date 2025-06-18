@@ -1,0 +1,1017 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 22,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 12,
+      "panels": [],
+      "title": "Slurm Nodes",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "UNKNOWN"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(128, 128, 128, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "DOWN"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(242, 73, 92, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IDLE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(51, 162, 73, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ALLOCATED"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(31, 120, 193, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ERROR"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(255, 193, 7, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MIXED"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(102, 166, 204, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "expr": "count by (base_state) (slurm_node_info)",
+          "format": "time_series",
+          "intervalFactor": 2,
+          "legendFormat": "{{base_state}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Nodes by State",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "shades"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 50,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*DOWN.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "rgba(242, 73, 92, 1)",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*drain.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node_name, base_state) (slurm_node_info{base_state=~\"DOWN|ERROR\", is_drain=\"false\"})",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{node_name}}, {{base_state}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node_name, base_state) (slurm_node_info{is_drain=\"true\"})",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{node_name}}, {{base_state}}+DRAIN",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Node Problems",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "node_name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "compute_instance_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 250
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 52,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "frameIndex": 0,
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(slurm_node_info{base_state=~\"DOWN|ERROR\", is_drain=\"false\"} or slurm_node_info{is_drain=\"true\"}) * on(node_name) group_left(reason) (slurm_node_fails_total or on(node_name) (slurm_node_info * 0))",
+          "format": "table",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Node Problems Table",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "keepLabels": [
+              "node_name",
+              "compute_instance_id",
+              "base_state",
+              "is_drain",
+              "reason",
+              "__name__"
+            ],
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "groupToNestedTable",
+          "options": {
+            "fields": {
+              "Time": {
+                "aggregations": [
+                  "first",
+                  "last"
+                ],
+                "operation": "aggregate"
+              },
+              "base_state": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "compute_instance_id": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "is_drain": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "node_name": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "reason": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "slurm_node_info": {
+                "aggregations": [
+                  "last"
+                ],
+                "operation": "aggregate"
+              }
+            },
+            "showSubframeHeaders": false
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Time (first)"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 100,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "options": {
+                "1": {
+                  "color": "rgba(255, 193, 7, 0.6)",
+                  "index": 0,
+                  "text": "DRAIN"
+                },
+                "2": {
+                  "color": "rgba(242, 73, 92, 0.6)",
+                  "index": 1,
+                  "text": "DOWN"
+                },
+                "3": {
+                  "color": "rgba(176, 41, 54, 0.6)",
+                  "index": 2,
+                  "text": "DOWN+DRAIN"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 51,
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (node_name) (\n  count by (node_name) (slurm_node_info{is_drain=\"true\", base_state!=\"DOWN\"}) * 1 or\n  count by (node_name) (slurm_node_info{is_drain=\"false\", base_state=\"DOWN\"}) * 2 or\n  count by (node_name) (slurm_node_info{is_drain=\"true\", base_state=\"DOWN\"}) * 3\n)\n",
+          "format": "time_series",
+          "intervalFactor": 2,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Node Problems Timeline",
+      "type": "state-timeline"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 13,
+      "panels": [],
+      "title": "Slurm Jobs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "count by (job_state, job_id, job_name) (slurm_job_info{job_state=~\".*ING|POWER_UP_NODE|REQUEUE.*|RESV_DEL_HOLD|STAGE_OUT|STOPPED|SUSPENDED|UPDATE_DB\", user_name=~\"$user_name\"})",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{job_id}}: {{job_state}}, {{job_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Non-Terminal Job States",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 100,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "options": {
+                "1": {
+                  "color": "light-blue",
+                  "index": 0,
+                  "text": "PENDING"
+                },
+                "2": {
+                  "color": "blue",
+                  "index": 1,
+                  "text": "CONFIGURING"
+                },
+                "3": {
+                  "color": "green",
+                  "index": 2,
+                  "text": "RUNNING"
+                },
+                "4": {
+                  "color": "yellow",
+                  "index": 3,
+                  "text": "COMPLETING"
+                },
+                "5": {
+                  "color": "rgba(51, 162, 73, 0.4)",
+                  "index": 4,
+                  "text": "COMPLETED"
+                },
+                "6": {
+                  "color": "rgba(255, 152, 48, 0.4)",
+                  "index": 5,
+                  "text": "CANCELLED"
+                },
+                "7": {
+                  "color": "rgba(242, 73, 92, 0.4)",
+                  "index": 6,
+                  "text": "FAILED"
+                },
+                "8": {
+                  "color": "rgba(176, 41, 54, 0.4)",
+                  "index": 7,
+                  "text": "TIMEOUT"
+                },
+                "9": {
+                  "color": "rgba(163, 74, 163, 0.4)",
+                  "index": 8,
+                  "text": "PREEMPTED"
+                },
+                "10": {
+                  "color": "rgba(194, 59, 79, 0.4)",
+                  "index": 9,
+                  "text": "NODE_FAIL"
+                },
+                "11": {
+                  "color": "rgba(201, 97, 20, 0.4)",
+                  "index": 10,
+                  "text": "BOOT_FAIL"
+                },
+                "12": {
+                  "color": "rgba(219, 128, 51, 0.4)",
+                  "index": 11,
+                  "text": "DEADLINE"
+                },
+                "13": {
+                  "color": "rgba(237, 129, 136, 0.4)",
+                  "index": 12,
+                  "text": "OUT_OF_MEMORY"
+                },
+                "14": {
+                  "color": "semi-dark-blue",
+                  "index": 13,
+                  "text": "REQUEUED"
+                },
+                "15": {
+                  "color": "dark-blue",
+                  "index": 14,
+                  "text": "RESIZING"
+                },
+                "16": {
+                  "color": "semi-dark-purple",
+                  "index": 15,
+                  "text": "SUSPENDED"
+                },
+                "17": {
+                  "color": "dark-yellow",
+                  "index": 16,
+                  "text": "STOPPED"
+                },
+                "18": {
+                  "color": "semi-dark-green",
+                  "index": 17,
+                  "text": "POWER_UP_NODE"
+                },
+                "19": {
+                  "color": "light-purple",
+                  "index": 18,
+                  "text": "SIGNALING"
+                },
+                "20": {
+                  "color": "light-orange",
+                  "index": 19,
+                  "text": "STAGE_OUT"
+                },
+                "21": {
+                  "color": "dark-green",
+                  "index": 20,
+                  "text": "UPDATE_DB"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 53,
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "label_join(\n  sum by (job_id, job_name)(\n    count by (job_id, job_name) (slurm_job_info{job_state=\"PENDING\", user_name=~\"$user_name\"}) * 1 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"CONFIGURING\", user_name=~\"$user_name\"}) * 2 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"RUNNING\", user_name=~\"$user_name\"}) * 3 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"COMPLETING\", user_name=~\"$user_name\"}) * 4 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"COMPLETED\", user_name=~\"$user_name\"}) * 5 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"CANCELLED\", user_name=~\"$user_name\"}) * 6 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"FAILED\", user_name=~\"$user_name\"}) * 7 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"TIMEOUT\", user_name=~\"$user_name\"}) * 8 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"PREEMPTED\", user_name=~\"$user_name\"}) * 9 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"NODE_FAIL\", user_name=~\"$user_name\"}) * 10 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"BOOT_FAIL\", user_name=~\"$user_name\"}) * 11 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"DEADLINE\", user_name=~\"$user_name\"}) * 12 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"OUT_OF_MEMORY\", user_name=~\"$user_name\"}) * 13 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"REQUEUED\", user_name=~\"$user_name\"}) * 14 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"RESIZING\", user_name=~\"$user_name\"}) * 15 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"SUSPENDED\", user_name=~\"$user_name\"}) * 16 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"STOPPED\", user_name=~\"$user_name\"}) * 17 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"POWER_UP_NODE\", user_name=~\"$user_name\"}) * 18 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"SIGNALING\", user_name=~\"$user_name\"}) * 19 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"STAGE_OUT\", user_name=~\"$user_name\"}) * 20 or\n    count by (job_id, job_name) (slurm_job_info{job_state=\"UPDATE_DB\", user_name=~\"$user_name\"}) * 21\n  ),\n  \"job_display\", \": \", \"job_id\", \"job_name\"\n)",
+          "format": "time_series",
+          "intervalFactor": 2,
+          "legendFormat": "{{job_display}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Job State Timeline",
+      "type": "state-timeline"
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 40,
+  "tags": [],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "VictoriaMetrics"
+        },
+        "definition": "label_values(slurm_job_info, user_name)",
+        "includeAll": true,
+        "label": "Job User Name",
+        "multi": true,
+        "name": "user_name",
+        "options": [],
+        "query": {
+          "qryType": "",
+          "query": "label_values(slurm_job_info, user_name)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Slurm Cluster Health",
+  "uid": "eep7yvlo8gdfkc",
+  "version": 6,
+  "weekStart": ""
+}
