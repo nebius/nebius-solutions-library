@@ -219,10 +219,10 @@
             "type": "prometheus",
             "uid": "VictoriaMetrics"
           },
-          "expr": "count by (base_state) (slurm_node_info)",
+          "expr": "count by (state_base) (slurm_node_info)",
           "format": "time_series",
           "intervalFactor": 2,
-          "legendFormat": "{{base_state}}",
+          "legendFormat": "{{state_base}}",
           "refId": "A"
         }
       ],
@@ -359,11 +359,11 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (node_name, base_state) (slurm_node_info{base_state=~\"DOWN|ERROR\", is_drain=\"false\"})",
+          "expr": "sum by (node_name, state_base) (slurm_node_info{state_base=~\"DOWN|ERROR\", state_is_drain=\"false\"})",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "{{node_name}}, {{base_state}}",
+          "legendFormat": "{{node_name}}, {{state_base}}",
           "range": true,
           "refId": "A"
         },
@@ -373,11 +373,11 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (node_name, base_state) (slurm_node_info{is_drain=\"true\"})",
+          "expr": "sum by (node_name, state_base) (slurm_node_info{state_is_drain=\"true\"})",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "{{node_name}}, {{base_state}}+DRAIN",
+          "legendFormat": "{{node_name}}, {{state_base}}+DRAIN",
           "range": true,
           "refId": "B"
         }
@@ -434,7 +434,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "compute_instance_id"
+              "options": "instance_id"
             },
             "properties": [
               {
@@ -487,7 +487,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "(slurm_node_info{base_state=~\"DOWN|ERROR\", is_drain=\"false\"} or slurm_node_info{is_drain=\"true\"}) * on(node_name) group_left(reason) (slurm_node_fails_total or on(node_name) (slurm_node_info * 0))",
+          "expr": "(slurm_node_info{state_base=~\"DOWN|ERROR\", state_is_drain=\"false\"} or slurm_node_info{state_is_drain=\"true\"}) * on(node_name) group_left(reason) (slurm_node_fails_total or on(node_name) (slurm_node_info * 0))",
           "format": "table",
           "instant": false,
           "legendFormat": "__auto",
@@ -502,9 +502,9 @@
           "options": {
             "keepLabels": [
               "node_name",
-              "compute_instance_id",
-              "base_state",
-              "is_drain",
+              "instance_id",
+              "state_base",
+              "state_is_drain",
               "reason",
               "__name__"
             ],
@@ -522,15 +522,15 @@
                 ],
                 "operation": "aggregate"
               },
-              "base_state": {
+              "state_base": {
                 "aggregations": [],
                 "operation": "groupby"
               },
-              "compute_instance_id": {
+              "instance_id": {
                 "aggregations": [],
                 "operation": "groupby"
               },
-              "is_drain": {
+              "state_is_drain": {
                 "aggregations": [],
                 "operation": "groupby"
               },
@@ -653,7 +653,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (node_name) (\n  count by (node_name) (slurm_node_info{is_drain=\"true\", base_state!=\"DOWN\"}) * 1 or\n  count by (node_name) (slurm_node_info{is_drain=\"false\", base_state=\"DOWN\"}) * 2 or\n  count by (node_name) (slurm_node_info{is_drain=\"true\", base_state=\"DOWN\"}) * 3\n)\n",
+          "expr": "sum by (node_name) (\n  count by (node_name) (slurm_node_info{state_is_drain=\"true\", state_base!=\"DOWN\"}) * 1 or\n  count by (node_name) (slurm_node_info{state_is_drain=\"false\", state_base=\"DOWN\"}) * 2 or\n  count by (node_name) (slurm_node_info{state_is_drain=\"true\", state_base=\"DOWN\"}) * 3\n)\n",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "__auto",
