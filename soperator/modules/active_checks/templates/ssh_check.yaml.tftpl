@@ -20,7 +20,7 @@ resources:
                 echo "Connecting to node login-$i via jumphost..."
                 ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa \
                     -o StrictHostKeyChecking=no \
-                    -o "ProxyCommand=ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa -o StrictHostKeyChecking=no -W %h:%p soperatorchecks@${slurm_cluster_ip} " \
+                    -o "ProxyCommand=ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa -o StrictHostKeyChecking=no -W %h:%p soperatorchecks@login-0.soperator-login-headless-svc.soperator.svc.cluster.local " \
                     soperatorchecks@login-$i hostname
               done
           image: cr.eu-north1.nebius.cloud/soperator/k8s_check_job:1.20.0-jammy-slurm24.05.7

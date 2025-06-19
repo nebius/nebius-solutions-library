@@ -18,7 +18,7 @@ resources:
               echo "Creating ${user_name} user..."
               ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa \
                   -o StrictHostKeyChecking=no \
-                  soperatorchecks@${slurm_cluster_ip} /bin/bash -c 'id "${user_name}" || echo "" | sudo createuser ${user_name} --gecos "" --home /opt/${user_name}'
+                  soperatorchecks@login-0.soperator-login-headless-svc.soperator.svc.cluster.local /bin/bash -c 'id "${user_name}" || echo "" | sudo createuser ${user_name} --gecos "" --home /opt/${user_name}'
           image: cr.eu-north1.nebius.cloud/soperator/k8s_check_job:1.20.0-jammy-slurm24.05.7
           volumes:
           - name: jail

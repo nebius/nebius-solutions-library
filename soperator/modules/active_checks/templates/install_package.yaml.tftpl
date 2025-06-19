@@ -18,7 +18,7 @@ resources:
               echo "Installing libcudnn8"
               ssh -i /mnt/jail/opt/soperatorchecks/.ssh/soperatorchecks_id_ecdsa \
                   -o StrictHostKeyChecking=no \
-                  soperatorchecks@${slurm_cluster_ip} 'sudo apt -o DPkg::Lock::Timeout=-1 update && sudo apt install -o DPkg::Lock::Timeout=-1 -y libcudnn8'
+                  soperatorchecks@login-0.soperator-login-headless-svc.soperator.svc.cluster.local 'sudo apt -o DPkg::Lock::Timeout=-1 update && sudo apt install -o DPkg::Lock::Timeout=-1 -y libcudnn8'
           image: cr.eu-north1.nebius.cloud/soperator/k8s_check_job:1.20.0-jammy-slurm24.05.7
           volumes:
           - name: jail

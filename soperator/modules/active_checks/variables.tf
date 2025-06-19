@@ -22,12 +22,6 @@ variable "num_of_login_nodes" {
   nullable    = false
 }
 
-variable "slurm_cluster_ip" {
-  description = "Public IP of the slurm cluster"
-  type        = string
-  nullable    = false
-}
-
 variable "checks" {
   description = "Defines what checks should be enabled."
   type = object({
