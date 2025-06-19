@@ -19,11 +19,11 @@ variable "region" {
   type        = string
 }
 
-# K8s cluster
+# K8s cluster 
 variable "k8s_version" {
-  description = "Kubernetes version to be used in the cluster."
+  description = "Kubernetes version to be used in the cluster. Leave null to use backend default (recommended), or choose 1.31 or above."
   type        = string
-  default     = "1.30"
+  default     = null
 }
 
 variable "etcd_cluster_size" {
