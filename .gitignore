@@ -37,3 +37,8 @@ terraform.rc
 
 # IDE
 .idea
+
+# Ignore Soperator installations in commits to this repo.
+# It's added to the root .gitignore because they shouldn't be ignored if commited to other repos.
+/soperator/installations/*
+!/soperator/installations/example
