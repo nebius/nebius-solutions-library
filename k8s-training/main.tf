@@ -11,6 +11,11 @@ resource "nebius_mk8s_v1_cluster" "k8s-cluster" {
   }
 }
 
+module "cilium-egress-gateway" {
+  count  = var.enable_egress_gateway ? 1 : 0
+  source = "../modules/cilium-egress-gateway"
+}
+
 data "nebius_iam_v1_group" "editors" {
   count     = var.enable_k8s_node_group_sa ? 1 : 0
   name      = "editors"
@@ -121,4 +126,55 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       ssh_public_key   = local.ssh_public_key
     })
   }
+}
+
+resource "nebius_mk8s_v1_node_group" "egress-gateway" {
+  count = var.enable_egress_gateway ? 1 : 0
+
+  fixed_node_count = 2
+  parent_id        = nebius_mk8s_v1_cluster.k8s-cluster.id
+  name             = join("-", ["k8s-ng-egress-gateway", local.release-suffix])
+  labels = {
+    "library-solution" : "k8s-training",
+  }
+  version = var.k8s_version
+
+  template = {
+    metadata = {
+      labels = {
+        "io.cilium/egress-gateway" = "true"
+      }
+    }
+
+    boot_disk = {
+      size_gibibytes = var.cpu_disk_size
+      type           = var.cpu_disk_type
+    }
+    cloud_init_user_data = templatefile("../modules/cloud-init/k8s-cloud-init.tftpl", {
+      enable_filestore = "false",
+      ssh_user_name    = var.ssh_user_name,
+      ssh_public_key   = local.ssh_public_key
+    })
+    network_interfaces = [
+      {
+        public_ip_address = {}
+        subnet_id         = var.subnet_id
+      }
+    ]
+    resources = {
+      platform = local.cpu_nodes_platform
+      preset   = local.egress_nodes_preset
+    }
+    service_account_id = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[0].id : null
+    underlay_required  = false
+
+    taints = [{
+      key    = "io.cilium/egress-gateway"
+      value  = "true"
+      effect = "NO_SCHEDULE"
+    }]
+  }
+  depends_on = [
+    resource.nebius_mk8s_v1_node_group.cpu-only
+  ]
 }

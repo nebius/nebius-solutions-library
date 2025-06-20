@@ -16,6 +16,8 @@ gpu_nodes_preset           = "8gpu-128vcpu-1600gb" # GPU nodes preset
 infiniband_fabric          = ""                    # Infiniband fabric name.
 gpu_nodes_driverfull_image = true
 enable_k8s_node_group_sa   = true
+enable_egress_gateway      = false
+egress_nodes_preset        = "4vcpu-16gb"
 
 # MIG configuration
 # mig_strategy =        # If set, possible values include 'single', 'mixed', 'none'

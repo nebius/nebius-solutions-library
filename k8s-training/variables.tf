@@ -32,6 +32,12 @@ variable "etcd_cluster_size" {
   default     = 3
 }
 
+variable "enable_egress_gateway" {
+  description = "Enable Cilium Egress Gateway."
+  type        = bool
+  default     = false
+}
+
 # K8s filestore
 variable "enable_filestore" {
   description = "Use Filestore."
@@ -178,6 +184,12 @@ variable "mig_parted_config" {
     condition     = var.mig_parted_config == null || contains(local.valid_mig_parted_configs[local.gpu_nodes_platform], coalesce(var.mig_parted_config, "null"))
     error_message = "Invalid MIG config '${coalesce(var.mig_parted_config, "null")}' for the selected GPU platform '${local.gpu_nodes_platform}'. Must be one of ${join(", ", local.valid_mig_parted_configs[local.gpu_nodes_platform])} or left unset."
   }
+}
+
+variable "egress_nodes_preset" {
+  description = "Preset for egress nodes."
+  type        = string
+  default     = "4vcpu-16gb"
 }
 
 # Observability
