@@ -206,7 +206,7 @@ jobs:
         ; do
         echo Cleaning up buckets $resource 
         eval nebius --format json $resource list \
-          | jq -r 'try .items[] | .metadata.id' \
+          | jq -r 'try .items[] | select(.metadata.name!="terraform-test-reports") | .metadata.name' \
           | eval xargs -r -t -n 1 -I {} s3cmd del --force --recursive s3://{}
         done
 
