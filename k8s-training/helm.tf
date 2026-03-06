@@ -42,11 +42,11 @@ module "device-plugin" {
 }
 
 module "o11y" {
-  source     = "../modules/o11y"
-  parent_id  = var.parent_id
-  tenant_id  = var.tenant_id
-  cluster_name = var.cluster_name
-  cluster_id = nebius_mk8s_v1_cluster.k8s-cluster.id
+  source                    = "../modules/o11y"
+  parent_id                 = var.parent_id
+  tenant_id                 = var.tenant_id
+  cluster_name              = var.cluster_name
+  cluster_id                = nebius_mk8s_v1_cluster.k8s-cluster.id
   k8s_node_group_sa_id      = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[0].id : null
   k8s_node_group_sa_enabled = var.enable_k8s_node_group_sa
 
