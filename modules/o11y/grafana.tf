@@ -12,7 +12,7 @@ resource "random_password" "grafana_password" {
 resource "nebius_iam_v2_access_key" "grafana_key" {
   count       = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
   parent_id   = var.parent_id
-  name        = "grafana-access-key"
+  name        = "${var.cluster_name}.grafana-access-key"
   description = "Access key for Grafana module"
   account = {
     service_account = {

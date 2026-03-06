@@ -14,6 +14,11 @@ variable "cluster_id" {
   type        = string
 }
 
+variable "cluster_name" {
+  description = "MK8s cluster name."
+  type        = string
+}
+
 variable "namespace" {
   type    = string
   default = "o11y"

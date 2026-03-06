@@ -5,6 +5,9 @@
 # NEBIUS_PROJECT_ID='project-...'
 # NEBIUS_REGION='eu-west2'
 
+#This viriable will be used for the TF state file name in the bucket
+K8S_CLUSTER_NAME=$(sed -n 's/cluster_name *= *"\([^"]*\)".*/\1/p' terraform.tfvars)
+
 if [ -z "${NEBIUS_TENANT_ID}" ]; then
   echo "Error: NEBIUS_TENANT_ID is not set"
   return 1
@@ -133,7 +136,7 @@ cat > terraform_backend_override.tf << EOF
 terraform {
   backend "s3" {
     bucket = "${NEBIUS_BUCKET_NAME}"
-    key    = "k8s-training.tfstate"
+    key    = "${K8S_CLUSTER_NAME}.tfstate"
 
     endpoints = {
       s3 = "https://storage.${NEBIUS_REGION}.nebius.cloud:443"
