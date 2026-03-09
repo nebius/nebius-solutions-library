@@ -52,9 +52,8 @@ NEBIUS_SA_NAME="k8s-training-sa"
 NEBIUS_SA_ID=$(nebius iam service-account get-by-name \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --name "${NEBIUS_SA_NAME}" \
-  --format json \
-  | jq -r '.metadata.id')
-
+  --format json 2>/dev/null \
+  | jq -r '.metadata.id // empty')
 
 if [ -z "$NEBIUS_SA_ID" ]; then
   NEBIUS_SA_ID=$(nebius iam service-account create \
