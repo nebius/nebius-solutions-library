@@ -1258,6 +1258,12 @@ variable "public_o11y_enabled" {
   default     = true
 }
 
+variable "allow_o11y_region_migration" {
+  description = "Whether to update an existing o11y logs project when its region differs from var.region."
+  type        = bool
+  default     = false
+}
+
 variable "dcgm_job_mapping_enabled" {
   description = "Whether to enable HPC job mapping by installing a separate dcgm-exporter"
   type        = bool
