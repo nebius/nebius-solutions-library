@@ -19,6 +19,7 @@ module "instance-module" {
   region                  = var.region
   boot_image_family       = var.boot_image_family
   boot_disk_size_gb       = var.boot_disk_size_gb
+  boot_disk_image         = var.boot_disk_image
   shared_filesystem_id    = var.shared_filesystem_id
   shared_filesystem_mount = var.shared_filesystem_mount
   extra_path              = var.extra_path

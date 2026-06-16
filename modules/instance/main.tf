@@ -4,7 +4,7 @@ resource "nebius_compute_v1_disk" "boot-disk" {
   block_size_bytes    = 4096
   size_bytes          = 1024 * 1024 * 1024 * var.boot_disk_size_gb
   type                = "NETWORK_SSD"
-  source_image_family = { image_family = local.boot_image_family }
+  source_image_family = { image_family = var.boot_disk_image }
 }
 
 resource "nebius_compute_v1_disk" "extra-storage-disk" {
