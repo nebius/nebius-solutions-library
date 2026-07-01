@@ -80,7 +80,9 @@ resource "nebius_compute_v1_instance" "instance" {
     aws_secret_access_key   = var.aws_secret_access_key,
     mount_bucket            = var.mount_bucket,
     s3_mount_path           = var.s3_mount_path
-    region                  = var.region
+    enable_local_disks      = var.enable_local_disks
+    local_disks_mount_mode  = var.local_disks_mount_mode
+    local_nvme_drives_path  = var.local_nvme_drives_path
   })
 }
 

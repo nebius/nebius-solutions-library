@@ -166,6 +166,17 @@ variable "enable_local_disks" {
   }
 }
 
+variable "local_disks_mount_mode" {
+  description = "How cloud-init should mount requested local NVMe disks. Use 'raid0' for a single RAID0 mount or 'raw' to mount each device separately."
+  type        = string
+  default     = "raid0"
+
+  validation {
+    condition     = contains(["raid0", "raw"], var.local_disks_mount_mode)
+    error_message = "Local disks mount mode must be one of: raid0, raw."
+  }
+}
+
 variable "local_nvme_drives_path" {
   description = "Mount path for local NVMe drives"
   type        = string

@@ -3,8 +3,10 @@ package_update: true
 package_upgrade: true
 %{if enable_local_disks}
 packages:
-  - mdadm
   - nvme-cli
+%{ if local_disks_mount_mode == "raid0" }
+  - mdadm
+%{ endif }
 
 %{endif}
 users:
@@ -17,6 +19,177 @@ users:
       - ${user.ssh_public_key}
 %{ endfor}
 
+%{if enable_local_disks}
+write_files:
+  - path: /usr/local/sbin/prepare-local-nvme.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      MODE="${local_disks_mount_mode}"
+      MD_DEV="/dev/md0"
+      MOUNTPOINT="${local_nvme_drives_path}"
+      EXPECTED_DISKS=6
+
+      log() {
+        echo "[local-nvme] $*"
+      }
+
+      discover_nvme_disks() {
+        udevadm settle || true
+
+        mapfile -t NVME_DISKS < <(
+          find /dev -maxdepth 1 -regextype posix-extended -regex '/dev/nvme[0-9]+n1' -print | sort -V
+        )
+
+        ROOT_SOURCE="$(findmnt -n -o SOURCE / || true)"
+        ROOT_PKNAME="$(lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null | head -n1 || true)"
+        if [[ -n "$ROOT_PKNAME" ]]; then
+          ROOT_DISK="/dev/$ROOT_PKNAME"
+          FILTERED=()
+          for disk in "$${NVME_DISKS[@]}"; do
+            if [[ "$disk" != "$ROOT_DISK" ]]; then
+              FILTERED+=("$disk")
+            fi
+          done
+          NVME_DISKS=("$${FILTERED[@]}")
+        fi
+
+        DISK_COUNT="$${#NVME_DISKS[@]}"
+        if [[ "$DISK_COUNT" -ne "$EXPECTED_DISKS" ]]; then
+          log "Expected $EXPECTED_DISKS local NVMe disks, found $DISK_COUNT: $${NVME_DISKS[*]}"
+          exit 1
+        fi
+      }
+
+      rewrite_fstab() {
+        tmp_fstab="$(mktemp)"
+        awk -v mountpoint="$MOUNTPOINT" '$2 != mountpoint && index($2, mountpoint "/disk-") != 1 { print }' /etc/fstab > "$tmp_fstab"
+        cat "$tmp_fstab" > /etc/fstab
+        rm -f "$tmp_fstab"
+      }
+
+      ensure_mount_permissions() {
+        local path="$1"
+
+        chown nobody:nogroup "$path"
+        chmod 777 "$path"
+      }
+
+      prepare_raid0() {
+        if mountpoint -q "$MOUNTPOINT"; then
+          ensure_mount_permissions "$MOUNTPOINT"
+          return 0
+        fi
+
+        if [[ -e "$MD_DEV" ]]; then
+          log "$MD_DEV already exists"
+        elif mdadm --examine "$${NVME_DISKS[@]}" >/dev/null 2>&1; then
+          log "Assembling existing RAID array"
+          mdadm --assemble "$MD_DEV" "$${NVME_DISKS[@]}"
+        else
+          log "Creating RAID 0 array from $${NVME_DISKS[*]}"
+          mdadm --create --force --verbose "$MD_DEV" --level=0 --raid-devices="$DISK_COUNT" "$${NVME_DISKS[@]}"
+        fi
+
+        udevadm settle || true
+
+        if ! blkid "$MD_DEV" >/dev/null 2>&1; then
+          mkfs.ext4 -F "$MD_DEV"
+        fi
+
+        UUID="$(blkid -s UUID -o value "$MD_DEV")"
+        if [[ -z "$UUID" ]]; then
+          log "Unable to determine filesystem UUID for $MD_DEV"
+          exit 1
+        fi
+
+        rewrite_fstab
+        echo "UUID=$UUID $MOUNTPOINT ext4 defaults,relatime,rw,nofail 0 0" >> /etc/fstab
+
+        mountpoint -q "$MOUNTPOINT" || mount "$MOUNTPOINT"
+        ensure_mount_permissions "$MOUNTPOINT"
+
+        mkdir -p /etc/mdadm
+        tmp_mdadm="$(mktemp)"
+        mdadm --detail --scan > "$tmp_mdadm"
+        if [[ ! -f /etc/mdadm/mdadm.conf ]] || ! cmp -s "$tmp_mdadm" /etc/mdadm/mdadm.conf; then
+          cat "$tmp_mdadm" > /etc/mdadm/mdadm.conf
+          update-initramfs -u
+        fi
+        rm -f "$tmp_mdadm"
+      }
+
+      prepare_raw() {
+        rewrite_fstab
+
+        index=0
+        for disk in "$${NVME_DISKS[@]}"; do
+          fs_type="$(blkid -s TYPE -o value "$disk" 2>/dev/null || true)"
+          if [[ -z "$fs_type" ]]; then
+            log "Creating ext4 filesystem on $disk"
+            mkfs.ext4 -F "$disk"
+            fs_type="ext4"
+          fi
+
+          if [[ "$fs_type" != "ext4" ]]; then
+            log "Unsupported existing signature on $disk: $fs_type"
+            exit 1
+          fi
+
+          uuid="$(blkid -s UUID -o value "$disk")"
+          if [[ -z "$uuid" ]]; then
+            log "Unable to determine filesystem UUID for $disk"
+            exit 1
+          fi
+
+          disk_mount="$MOUNTPOINT/disk-$index"
+          mkdir -p "$disk_mount"
+          echo "UUID=$uuid $disk_mount ext4 defaults,relatime,rw,nofail 0 0" >> /etc/fstab
+          mountpoint -q "$disk_mount" || mount "$disk_mount"
+          ensure_mount_permissions "$disk_mount"
+
+          index=$((index + 1))
+        done
+
+        ensure_mount_permissions "$MOUNTPOINT"
+      }
+
+      mkdir -p "$MOUNTPOINT"
+      discover_nvme_disks
+
+      case "$MODE" in
+        raid0)
+          prepare_raid0
+          ;;
+        raw)
+          prepare_raw
+          ;;
+        *)
+          log "Unsupported local disks mount mode: $MODE"
+          exit 1
+          ;;
+      esac
+  - path: /etc/systemd/system/local-nvme.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prepare and mount local NVMe disks
+      After=systemd-udev-settle.service
+      Wants=systemd-udev-settle.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/prepare-local-nvme.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+%{endif}
 %{ if extra_disk_id != "" || shared_filesystem_id != "" || aws_access_key_id != "" || enable_local_disks }
 runcmd:
 # mount disk if provided
@@ -80,17 +253,7 @@ runcmd:
 %{endif}
 
 %{if enable_local_disks}
-# Create RAID 0 array
-- mdadm --create --force --verbose /dev/md0 --level=0 --raid-devices=6 /dev/nvme[0-5]n1
-- mkfs.ext4 /dev/md0
-- mkdir -p ${local_nvme_drives_path}
-- mount /dev/md0 ${local_nvme_drives_path}
-- echo "/dev/md0 ${local_nvme_drives_path} ext4 defaults,relatime,rw 0 0" >> /etc/fstab
-# Configure permissions
-- chown nobody:nogroup ${local_nvme_drives_path}
-- chmod 777 ${local_nvme_drives_path}
-# Ensure mdadm config is saved
-- mdadm --detail --scan >> /etc/mdadm/mdadm.conf
-- update-initramfs -u
+- systemctl daemon-reload
+- systemctl enable --now local-nvme.service
 %{endif}
 %{ endif }
