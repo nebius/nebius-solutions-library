@@ -45,9 +45,15 @@ source "${SCRIPT_DIR}/common.sh"
 
 CHECKPOINT_SIZE_GB="${CHECKPOINT_SIZE_GB:-4}"
 CHECKPOINT_PATH="/data/checkpoint"
-WRITER_POD="checkpoint-writer"
-SAME_NODE_READER_POD="checkpoint-reader-same"
-PVC_NAME="checkpoint-restore-pvc"
+# Unique per-run suffix so two runs sharing the namespace can't collide on fixed
+# resource names or cross-delete each other's pods/PVC during cleanup.
+RUN_ID="$$-$(date +%s)"
+WRITER_POD="checkpoint-writer-${RUN_ID}"
+SAME_NODE_READER_POD="checkpoint-reader-same-${RUN_ID}"
+PVC_NAME="checkpoint-restore-pvc-${RUN_ID}"
+# part-of matches the sibling scripts, so the shared 04-cleanup also catches these;
+# the run label lets this script tear down exactly its own resources.
+RUN_LABEL="checkpoint-restore/run=${RUN_ID}"
 FAILED=0
 NODES_TESTED=0
 NODES_PASSED=0
@@ -63,14 +69,11 @@ cleanup() {
   [[ -n "${CLEANED_UP:-}" ]] && return
   CLEANED_UP=1
   log_step "Cleaning up checkpoint test resources"
-  kubectl delete pod -n "${TEST_NAMESPACE}" \
-    "${WRITER_POD}" "${SAME_NODE_READER_POD}" \
-    --ignore-not-found=true --wait=false 2>/dev/null || true
-  # Cross-node readers are named checkpoint-reader-cross-N; delete whatever exists.
-  kubectl get pods -n "${TEST_NAMESPACE}" -o name 2>/dev/null \
-    | grep '/checkpoint-reader-cross-' \
-    | xargs -r kubectl delete -n "${TEST_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-  kubectl delete pvc -n "${TEST_NAMESPACE}" "${PVC_NAME}" --ignore-not-found=true 2>/dev/null || true
+  # Scoped to THIS run via its unique label — deletes the writer, all readers, and
+  # the PVC in one shot without touching any other run's resources. Portable (no
+  # xargs -r, which is GNU-only and not available on macOS).
+  kubectl delete pod,pvc -n "${TEST_NAMESPACE}" -l "${RUN_LABEL}" \
+    --ignore-not-found=true --wait=false --request-timeout=30s 2>/dev/null || true
   log_pass "Checkpoint test resources cleaned up"
 }
 trap cleanup EXIT
@@ -83,7 +86,7 @@ trap cleanup EXIT
 wait_for_pod() {
   local pod="$1" timeout="${2:-600}" elapsed=0 phase=""
   while [ "$elapsed" -lt "$timeout" ]; do
-    phase=$(kubectl get pod -n "${TEST_NAMESPACE}" "$pod" \
+    phase=$(kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "$pod" \
       -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
     case "$phase" in
       Succeeded) return 0 ;;
@@ -100,6 +103,7 @@ log_step "Starting Checkpoint Write and Restore Validation"
 log_info "Namespace: ${TEST_NAMESPACE}"
 log_info "Checkpoint size: ${CHECKPOINT_SIZE_GB}GB"
 log_info "Checkpoint path: ${CHECKPOINT_PATH}"
+log_info "Storage class: ${FILESYSTEM_DEFAULT_STORAGE_CLASS_NAME}"
 log_info "PyTorch image: ${PYTORCH_IMAGE}"
 
 log_step "Checking required local dependencies"
@@ -114,7 +118,7 @@ log_pass "Required local commands are available"
 log_step "Detecting GPU nodes in cluster"
 
 # Auto-detect GPU instance type from node labels
-GPU_INSTANCE_TYPE=$(kubectl get nodes \
+GPU_INSTANCE_TYPE=$(kubectl get nodes --request-timeout=30s \
   -o jsonpath='{.items[*].metadata.labels.node\.kubernetes\.io/instance-type}' \
   2>/dev/null | tr ' ' '\n' | grep -v "cpu" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}' || echo "")
 
@@ -125,17 +129,17 @@ fi
 
 log_info "Detected GPU instance type: ${GPU_INSTANCE_TYPE}"
 
-# Get all GPU node names that are actually Ready.
-# kubectl -l returns nodes regardless of status, so we filter on the Ready
-# condition here — otherwise a NotReady node would be selected and its pod
-# would sit Pending until the wait times out.
+# Get all GPU node names that can actually take work: Ready AND schedulable.
+# kubectl -l returns nodes regardless of status, so we filter here — otherwise a
+# NotReady node (pod sits Pending until timeout) or a Cordoned node
+# (spec.unschedulable=true) would be selected and waste the full wait.
 GPU_NODES=()
 while IFS= read -r node; do
   [[ -n "$node" ]] && GPU_NODES+=("$node")
 done < <(kubectl get nodes -l "node.kubernetes.io/instance-type=${GPU_INSTANCE_TYPE}" \
-  --no-headers \
-  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status' \
-  2>/dev/null | awk '$2=="True" {print $1}')
+  --no-headers --request-timeout=30s \
+  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,SCHED:.spec.unschedulable' \
+  2>/dev/null | awk '$2=="True" && $3!="true" {print $1}')
 
 if [ "${#GPU_NODES[@]}" -eq 0 ]; then
   log_fail "No Ready GPU nodes found for instance type: ${GPU_INSTANCE_TYPE}"
@@ -154,10 +158,13 @@ kind: PersistentVolumeClaim
 metadata:
   name: ${PVC_NAME}
   namespace: ${TEST_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    checkpoint-restore/run: "${RUN_ID}"
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: csi-mounted-fs-path-sc
+  storageClassName: ${FILESYSTEM_DEFAULT_STORAGE_CLASS_NAME}
   resources:
     requests:
       storage: $((CHECKPOINT_SIZE_GB * 3))Gi
@@ -177,6 +184,9 @@ kind: Pod
 metadata:
   name: ${WRITER_POD}
   namespace: ${TEST_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    checkpoint-restore/run: "${RUN_ID}"
 spec:
   restartPolicy: Never
   nodeSelector:
@@ -235,7 +245,7 @@ EOF
 log_info "Waiting for writer pod to complete..."
 wait_for_pod "${WRITER_POD}" 600 || true
 
-WRITER_LOGS=$(kubectl logs -n "${TEST_NAMESPACE}" ${WRITER_POD} 2>/dev/null)
+WRITER_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${WRITER_POD}" 2>/dev/null)
 echo "$WRITER_LOGS"
 
 if echo "$WRITER_LOGS" | grep -q "WRITE_COMPLETE"; then
@@ -259,6 +269,9 @@ kind: Pod
 metadata:
   name: ${SAME_NODE_READER_POD}
   namespace: ${TEST_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    checkpoint-restore/run: "${RUN_ID}"
 spec:
   restartPolicy: Never
   nodeSelector:
@@ -315,7 +328,7 @@ EOF
 
 wait_for_pod "${SAME_NODE_READER_POD}" 600 || true
 
-SAME_NODE_LOGS=$(kubectl logs -n "${TEST_NAMESPACE}" ${SAME_NODE_READER_POD} 2>/dev/null)
+SAME_NODE_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null)
 echo "$SAME_NODE_LOGS"
 
 if echo "$SAME_NODE_LOGS" | grep -q "CHECKSUM_MATCH"; then
@@ -327,9 +340,9 @@ else
   FAILED=1
   NODES_TESTED=$(( NODES_TESTED + 1 ))
   echo "--- Pod status ---"
-  kubectl get pod -n "${TEST_NAMESPACE}" ${SAME_NODE_READER_POD} 2>/dev/null
+  kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null
   echo "--- Pod events ---"
-  kubectl describe pod -n "${TEST_NAMESPACE}" ${SAME_NODE_READER_POD} 2>/dev/null | grep -A 20 "Events:"
+  kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null | grep -A 20 "Events:"
 fi
 
 # =============================================================================
@@ -351,7 +364,7 @@ else
   NODE_INDEX=0
   for CROSS_NODE in "${OTHER_GPU_NODES[@]}"; do
     NODE_INDEX=$(( NODE_INDEX + 1 ))
-    READER_POD="checkpoint-reader-cross-${NODE_INDEX}"
+    READER_POD="checkpoint-reader-cross-${NODE_INDEX}-${RUN_ID}"
 
     log_info "Testing node ${NODE_INDEX}/${#OTHER_GPU_NODES[@]}: ${CROSS_NODE}"
 
@@ -361,6 +374,9 @@ kind: Pod
 metadata:
   name: ${READER_POD}
   namespace: ${TEST_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    checkpoint-restore/run: "${RUN_ID}"
 spec:
   restartPolicy: Never
   nodeSelector:
@@ -417,7 +433,7 @@ EOF
 
     wait_for_pod "${READER_POD}" 600 || true
 
-    CROSS_LOGS=$(kubectl logs -n "${TEST_NAMESPACE}" ${READER_POD} 2>/dev/null)
+    CROSS_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null)
     echo "$CROSS_LOGS"
     NODES_TESTED=$(( NODES_TESTED + 1 ))
 
@@ -428,11 +444,11 @@ EOF
       log_fail "Node ${NODE_INDEX} (${CROSS_NODE}): checksum mismatch or restore failed"
       FAILED=1
       echo "--- Pod status ---"
-      kubectl get pod -n "${TEST_NAMESPACE}" ${READER_POD} 2>/dev/null
+      kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null
       echo "--- Pod events ---"
-      kubectl describe pod -n "${TEST_NAMESPACE}" ${READER_POD} 2>/dev/null | grep -A 20 "Events:"
+      kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null | grep -A 20 "Events:"
       echo "--- Full pod logs ---"
-      kubectl logs -n "${TEST_NAMESPACE}" ${READER_POD} 2>/dev/null || echo "No logs available"
+      kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null || echo "No logs available"
     fi
   done
 fi
