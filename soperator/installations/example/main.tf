@@ -316,19 +316,19 @@ module "nfs-server" {
   parent_id = data.nebius_iam_v1_project.this.id
   subnet_id = data.nebius_vpc_v1_subnet.this.id
 
-  platform      = var.nfs.resource.platform
-  preset        = var.nfs.resource.preset
+  platform      = var.nfs.spec.resource.platform
+  preset        = var.nfs.spec.resource.preset
   instance_name = "${local.k8s_cluster_name}-nfs-server"
 
   nfs_disk_name_suffix = local.k8s_cluster_name
   nfs_ip_range         = data.nebius_vpc_v1_subnet.this.status.ipv4_private_cidrs[0]
-  nfs_size             = provider::units::from_gib(var.nfs.size_gibibytes)
+  nfs_size             = provider::units::from_gib(var.nfs.spec.size_gibibytes)
   nfs_path             = "/nfs"
 
   ssh_user_name   = "soperator"
   ssh_public_keys = var.slurm_login_ssh_root_public_keys
 
-  public_ip = var.nfs.public_ip
+  public_ip = var.nfs.spec.public_ip
 
 }
 
@@ -613,15 +613,15 @@ module "slurm" {
     enabled    = var.nfs.enabled
     path       = var.nfs.enabled ? module.nfs-server[0].nfs_export_path : null
     host       = var.nfs.enabled ? module.nfs-server[0].nfs_server_internal_ip : null
-    mount_path = var.nfs.enabled ? var.nfs.mount_path : null
+    mount_path = var.nfs.enabled ? var.nfs.spec.mount_path : null
   }
 
   nfs_in_k8s = {
     enabled        = var.nfs_in_k8s.enabled
-    version        = var.nfs_in_k8s.version
-    size_gibibytes = var.nfs_in_k8s.size_gibibytes
-    storage_class  = replace("compute-csi-${lower(var.nfs_in_k8s.disk_type)}-${lower(var.nfs_in_k8s.filesystem_type)}", "_", "-")
-    threads        = var.nfs_in_k8s.threads
+    version        = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.version : null
+    size_gibibytes = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.size_gibibytes : null
+    storage_class  = var.nfs_in_k8s.enabled ? replace("compute-csi-${lower(var.nfs_in_k8s.spec.disk_type)}-${lower(var.nfs_in_k8s.spec.filesystem_type)}", "_", "-") : null
+    threads        = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.threads : null
   }
   nfs_node_group_enabled = local.slurm_nodeset_nfs != null
 

@@ -121,24 +121,28 @@ filestore_accounting = {
 # region nfs-server
 
 # nfs = {
-#   enabled        = false
-#   size_gibibytes = 3720
-#   mount_path     = "/home"
-#   resource = {
-#     platform = "cpu-d3"
-#     preset   = "32vcpu-128gb"
+#   enabled = false
+#   spec = {
+#     size_gibibytes = 3720
+#     mount_path     = "/home"
+#     resource = {
+#       platform = "cpu-d3"
+#       preset   = "32vcpu-128gb"
+#     }
+#     public_ip = false
 #   }
-#   public_ip = false
 # }
 
 nfs_in_k8s = {
-  enabled         = true
-  version         = "1.2.0"
-  use_stable_repo = true
-  size_gibibytes  = 3720
-  disk_type       = "NETWORK_SSD_IO_M3"
-  filesystem_type = "ext4"
-  threads         = 128 # to match preset in slurm_nodeset_nfs
+  enabled = true
+  spec = {
+    version         = "1.2.0"
+    use_stable_repo = true
+    size_gibibytes  = 3720
+    disk_type       = "NETWORK_SSD_IO_M3"
+    filesystem_type = "ext4"
+    threads         = 128 # to match preset in slurm_nodeset_nfs
+  }
 }
 
 # endregion nfs-server
