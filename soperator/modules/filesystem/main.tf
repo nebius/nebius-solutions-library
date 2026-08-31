@@ -5,7 +5,7 @@ resource "nebius_compute_v1_filesystem" "controller_spool" {
 
   name = local.name.filesystem.controller_spool
 
-  type             = var.controller_spool.spec.disk_type
+  type             = module.resources.shared_filesystem_types.network_ssd
   size_bytes       = provider::units::from_gib(var.controller_spool.spec.size_gibibytes)
   block_size_bytes = provider::units::from_kib(var.controller_spool.spec.block_size_kibibytes)
   forbid_deletion  = var.controller_spool.spec.forbid_deletion
@@ -42,7 +42,7 @@ resource "nebius_compute_v1_filesystem" "jail" {
 
   name = local.name.filesystem.jail
 
-  type             = var.jail.spec.disk_type
+  type             = var.jail.spec.type
   size_bytes       = provider::units::from_gib(var.jail.spec.size_gibibytes)
   block_size_bytes = provider::units::from_kib(var.jail.spec.block_size_kibibytes)
   forbid_deletion  = var.jail.spec.forbid_deletion
@@ -76,7 +76,7 @@ resource "nebius_compute_v1_filesystem" "jail_submount" {
   for_each = tomap({ for submount in var.jail_submounts :
     submount.name => {
       name            = local.name.jail_submount[submount.name]
-      type            = submount.spec.disk_type
+      type            = submount.spec.type
       storage         = provider::units::from_gib(submount.spec.size_gibibytes)
       block           = provider::units::from_kib(submount.spec.block_size_kibibytes)
       forbid_deletion = submount.spec.forbid_deletion
@@ -138,7 +138,7 @@ resource "nebius_compute_v1_filesystem" "accounting" {
 
   name = local.name.filesystem.accounting
 
-  type             = var.accounting.spec.disk_type
+  type             = module.resources.shared_filesystem_types.network_ssd
   size_bytes       = provider::units::from_gib(var.accounting.spec.size_gibibytes)
   block_size_bytes = provider::units::from_kib(var.accounting.spec.block_size_kibibytes)
   forbid_deletion  = var.accounting.spec.forbid_deletion

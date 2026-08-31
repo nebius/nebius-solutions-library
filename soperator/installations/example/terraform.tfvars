@@ -55,11 +55,13 @@ filestore_controller_spool = {
 # }
 
 # Shared filesystem to be used on controller, worker, and login nodes.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # Notice that auto-backups are enabled for filesystems with size less than 12 TiB.
 # If you need backups for jail larger than 12 TiB, set 'backups_enabled' to 'force_enable' down below.
 # ---
-# filestore_jail = {
+# filesystem_jail = {
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -67,21 +69,23 @@ filestore_controller_spool = {
 # }
 # Or use existing filestore.
 # ---
-filestore_jail = {
+filesystem_jail = {
   existing = {
     id = "computefilesystem-<YOUR-FILESTORE-ID>"
   }
 }
 
 # Additional shared filesystems to be mounted inside jail.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # If a big filesystem is needed it's better to deploy this additional storage because jails bigger than 12 TiB
 # ARE NOT BACKED UP by default.
 # Do not use "/home" here. That path is reserved for the home-directory NFS mount.
 # ---
-# filestore_jail_submounts = [{
+# filesystem_jail_submounts = [{
 #   name       = "data"
 #   mount_path = "/data"
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -89,7 +93,7 @@ filestore_jail = {
 # }]
 # Or use existing filestores.
 # ---
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "data"
   mount_path = "/data"
   existing = {

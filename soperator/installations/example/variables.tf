@@ -168,13 +168,14 @@ variable "filestore_controller_spool" {
   }
 }
 
-variable "filestore_jail" {
+variable "filesystem_jail" {
   description = "Shared filesystem to be used on controller, worker, and login nodes."
   type = object({
     existing = optional(object({
       id = string
     }))
     spec = optional(object({
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -184,23 +185,35 @@ variable "filestore_jail" {
 
   validation {
     condition = (
-      (var.filestore_jail.existing != null && var.filestore_jail.spec == null) ||
-      (var.filestore_jail.existing == null && var.filestore_jail.spec != null)
+      (var.filesystem_jail.existing != null && var.filesystem_jail.spec == null) ||
+      (var.filesystem_jail.existing == null && var.filesystem_jail.spec != null)
     )
     error_message = "One of `existing` or `spec` must be provided."
+  }
+
+  validation {
+    condition = (var.filesystem_jail.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), var.filesystem_jail.spec.type)
+    )
+    error_message = format(
+      "Type should be one of [%s], got %s.",
+      join(", ", values(module.resources.shared_filesystem_types)),
+      coalesce(var.filesystem_jail.spec.type, "none")
+    )
   }
 }
 
 data "nebius_compute_v1_filesystem" "existing_jail" {
-  count = var.filestore_jail.existing != null ? 1 : 0
+  count = var.filesystem_jail.existing != null ? 1 : 0
 
-  id = var.filestore_jail.existing.id
+  id = var.filesystem_jail.existing.id
 }
 
 locals {
-  filestore_jail_calculated_size_gibibytes = (var.filestore_jail.existing != null ?
+  filesystem_jail_calculated_size_gibibytes = (var.filesystem_jail.existing != null ?
     data.nebius_compute_v1_filesystem.existing_jail[0].size_bytes / 1024 / 1024 / 1024 :
-  var.filestore_jail.spec.size_gibibytes)
+  var.filesystem_jail.spec.size_gibibytes)
 }
 
 variable "allow_empty_jail_submounts" {
@@ -209,7 +222,7 @@ variable "allow_empty_jail_submounts" {
   default     = false
 }
 
-variable "filestore_jail_submounts" {
+variable "filesystem_jail_submounts" {
   description = "Shared filesystems to be mounted inside jail."
   type = list(object({
     name       = string
@@ -218,6 +231,7 @@ variable "filestore_jail_submounts" {
       id = string
     }))
     spec = optional(object({
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -227,16 +241,28 @@ variable "filestore_jail_submounts" {
 
   validation {
     condition = length([
-      for sm in var.filestore_jail_submounts : true if
+      for sm in var.filesystem_jail_submounts : true if
       (sm.existing != null && sm.spec == null) ||
       (sm.existing == null && sm.spec != null)
-    ]) == length(var.filestore_jail_submounts)
+    ]) == length(var.filesystem_jail_submounts)
     error_message = "All submounts must have one of `existing` or `spec` provided."
   }
 
   validation {
-    condition     = var.allow_empty_jail_submounts || length(var.filestore_jail_submounts) >= 1
+    condition     = var.allow_empty_jail_submounts || length(var.filesystem_jail_submounts) >= 1
     error_message = "Creating clusters without jail submounts is not allowed."
+  }
+
+  validation {
+    condition = alltrue([for sm in var.filesystem_jail_submounts : (
+      sm.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), sm.spec.type)
+    )])
+    error_message = format(
+      "Type should be one of [%s].",
+      join(", ", values(module.resources.shared_filesystem_types))
+    )
   }
 }
 
@@ -244,10 +270,38 @@ resource "terraform_data" "check_jail_submount_paths" {
   lifecycle {
     precondition {
       condition = alltrue([
-        for sm in var.filestore_jail_submounts :
+        for sm in var.filesystem_jail_submounts :
         (sm.mount_path != "/home")
       ])
-      error_message = "filestore_jail_submounts must not use \"/home\" as mount_path. That path is reserved for home directories, and backing /home with shared filestore causes severe performance degradation."
+      error_message = "filesystem_jail_submounts must not use \"/home\" as mount_path. That path is reserved for home directories, and backing /home with shared filestore causes severe performance degradation."
+    }
+  }
+}
+
+resource "terraform_data" "check_weka_count" {
+  lifecycle {
+    precondition {
+      condition = sum(
+        concat(
+          [(var.filesystem_jail.spec == null
+            ? 0
+            : (var.filesystem_jail.spec.type == module.resources.shared_filesystem_types.weka
+              ? 1
+              : 0
+            )
+          )],
+          [for sm in var.filesystem_jail_submounts : (
+            (sm.spec == null
+              ? 0
+              : (sm.spec.type == module.resources.shared_filesystem_types.weka
+                ? 1
+                : 0
+              )
+            )
+          )]
+        )
+      ) < 2
+      error_message = "Total amount of WEKA filesystems couldn't be more than 1 for now."
     }
   }
 }

@@ -17,7 +17,6 @@ variable "controller_spool" {
       id = string
     }))
     spec = optional(object({
-      disk_type            = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -34,13 +33,13 @@ variable "controller_spool" {
 }
 
 variable "jail" {
-  description = "Filestore for jail."
+  description = "Filesystem for Jail."
   type = object({
     existing = optional(object({
       id = string
     }))
     spec = optional(object({
-      disk_type            = string
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -54,17 +53,29 @@ variable "jail" {
     ) || (var.jail.existing == null && var.jail.spec != null)
     error_message = "One of `existing` or `spec` must be provided."
   }
+
+  validation {
+    condition = (var.jail.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), var.jail.spec.type)
+    )
+    error_message = format(
+      "Type should be one of [%s], got %s.",
+      join(", ", values(module.resources.shared_filesystem_types)),
+      coalesce(var.jail.spec.type, "none")
+    )
+  }
 }
 
 variable "jail_submounts" {
-  description = "Filestores for jail submounts."
+  description = "Filesystems for jail submounts."
   type = list(object({
     name = string
     existing = optional(object({
       id = string
     }))
     spec = optional(object({
-      disk_type            = string
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -79,6 +90,18 @@ variable "jail_submounts" {
     ]) == length(var.jail_submounts)
     error_message = "All submounts must have one of `existing` or `spec` provided."
   }
+
+  validation {
+    condition = alltrue([for sm in var.jail_submounts : (
+      sm.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), sm.spec.type)
+    )])
+    error_message = format(
+      "Type should be one of [%s].",
+      join(", ", values(module.resources.shared_filesystem_types))
+    )
+  }
 }
 
 variable "accounting" {
@@ -88,7 +111,6 @@ variable "accounting" {
       id = string
     }))
     spec = optional(object({
-      disk_type            = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
