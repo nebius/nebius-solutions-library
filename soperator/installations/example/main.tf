@@ -158,7 +158,7 @@ locals {
   )
 
   backups_enabled = (var.backups_enabled == "force_enable" ||
-  (var.backups_enabled == "auto" && local.filestore_jail_calculated_size_gibibytes < 12 * 1024))
+  (var.backups_enabled == "auto" && local.filesystem_jail_calculated_size_gibibytes < 12 * 1024))
 
   # Legacy node_group_workers for old-style deployments (without nodesets).
   # Splits each normalized nodeset into mk8s node group chunks.
@@ -229,6 +229,7 @@ resource "terraform_data" "check_variables" {
     terraform_data.check_nfs,
     terraform_data.check_nfs_exclusivity,
     terraform_data.check_jail_submount_paths,
+    terraform_data.check_weka_count,
     terraform_data.check_local_nvme,
   ]
 }
@@ -242,8 +243,8 @@ module "sizing" {
   sizing_tier_override = var.sizing_tier_override
 }
 
-module "filestore" {
-  source = "../../modules/filestore"
+module "filesystem" {
+  source = "../../modules/filesystem"
 
   depends_on = [
     terraform_data.check_variables,
@@ -255,7 +256,6 @@ module "filestore" {
 
   controller_spool = {
     spec = var.filestore_controller_spool.spec != null ? {
-      disk_type            = "NETWORK_SSD"
       size_gibibytes       = var.filestore_controller_spool.spec.size_gibibytes
       block_size_kibibytes = var.filestore_controller_spool.spec.block_size_kibibytes
       forbid_deletion      = var.filestore_controller_spool.spec.forbid_deletion
@@ -267,7 +267,6 @@ module "filestore" {
 
   accounting = var.accounting_enabled ? {
     spec = var.filestore_accounting.spec != null ? {
-      disk_type            = "NETWORK_SSD"
       size_gibibytes       = var.filestore_accounting.spec.size_gibibytes
       block_size_kibibytes = var.filestore_accounting.spec.block_size_kibibytes
       forbid_deletion      = var.filestore_accounting.spec.forbid_deletion
@@ -278,21 +277,21 @@ module "filestore" {
   } : null
 
   jail = {
-    spec = var.filestore_jail.spec != null ? {
-      disk_type            = "NETWORK_SSD"
-      size_gibibytes       = var.filestore_jail.spec.size_gibibytes
-      block_size_kibibytes = var.filestore_jail.spec.block_size_kibibytes
-      forbid_deletion      = var.filestore_jail.spec.forbid_deletion
+    spec = var.filesystem_jail.spec != null ? {
+      type                 = var.filesystem_jail.spec.type
+      size_gibibytes       = var.filesystem_jail.spec.size_gibibytes
+      block_size_kibibytes = var.filesystem_jail.spec.block_size_kibibytes
+      forbid_deletion      = var.filesystem_jail.spec.forbid_deletion
     } : null
-    existing = var.filestore_jail.existing != null ? {
-      id = var.filestore_jail.existing.id
+    existing = var.filesystem_jail.existing != null ? {
+      id = var.filesystem_jail.existing.id
     } : null
   }
 
-  jail_submounts = [for submount in var.filestore_jail_submounts : {
+  jail_submounts = [for submount in var.filesystem_jail_submounts : {
     name = submount.name
     spec = submount.spec != null ? {
-      disk_type            = "NETWORK_SSD"
+      type                 = submount.spec.type
       size_gibibytes       = submount.spec.size_gibibytes
       block_size_kibibytes = submount.spec.block_size_kibibytes
       forbid_deletion      = submount.spec.forbid_deletion
@@ -306,6 +305,11 @@ module "filestore" {
     nebius = nebius
     units  = units
   }
+}
+
+moved {
+  from = module.filestore
+  to   = module.filesystem
 }
 
 module "nfs-server" {
@@ -364,7 +368,7 @@ resource "nebius_compute_v1_nvl_instance_group" "worker" {
 
 module "k8s" {
   depends_on = [
-    module.filestore,
+    module.filesystem,
     module.nfs-server,
     module.cleanup,
     terraform_data.check_slurm_nodeset_accounting,
@@ -405,20 +409,20 @@ module "k8s" {
 
   filestores = {
     controller_spool = {
-      id        = module.filestore.controller_spool.id
-      mount_tag = module.filestore.controller_spool.mount_tag
+      id        = module.filesystem.controller_spool.id
+      mount_tag = module.filesystem.controller_spool.mount_tag
     }
     jail = {
-      id        = module.filestore.jail.id
-      mount_tag = module.filestore.jail.mount_tag
+      id        = module.filesystem.jail.id
+      mount_tag = module.filesystem.jail.mount_tag
     }
-    jail_submounts = [for key, submount in module.filestore.jail_submounts : {
+    jail_submounts = [for key, submount in module.filesystem.jail_submounts : {
       id        = submount.id
       mount_tag = submount.mount_tag
     }]
     accounting = var.accounting_enabled ? {
-      id        = module.filestore.accounting.id
-      mount_tag = module.filestore.accounting.mount_tag
+      id        = module.filesystem.accounting.id
+      mount_tag = module.filesystem.accounting.mount_tag
     } : null
   }
 
@@ -591,22 +595,22 @@ module "slurm" {
 
   filestores = {
     controller_spool = {
-      size_gibibytes = module.filestore.controller_spool.size_gibibytes
-      device         = module.filestore.controller_spool.mount_tag
+      size_gibibytes = module.filesystem.controller_spool.size_gibibytes
+      device         = module.filesystem.controller_spool.mount_tag
     }
     jail = {
-      size_gibibytes = module.filestore.jail.size_gibibytes
-      device         = module.filestore.jail.mount_tag
+      size_gibibytes = module.filesystem.jail.size_gibibytes
+      device         = module.filesystem.jail.mount_tag
     }
-    jail_submounts = [for submount in var.filestore_jail_submounts : {
+    jail_submounts = [for submount in var.filesystem_jail_submounts : {
       name           = submount.name
-      size_gibibytes = module.filestore.jail_submounts[submount.name].size_gibibytes
-      device         = module.filestore.jail_submounts[submount.name].mount_tag
+      size_gibibytes = module.filesystem.jail_submounts[submount.name].size_gibibytes
+      device         = module.filesystem.jail_submounts[submount.name].mount_tag
       mount_path     = submount.mount_path
     }]
     accounting = var.accounting_enabled ? {
-      size_gibibytes = module.filestore.accounting.size_gibibytes
-      device         = module.filestore.accounting.mount_tag
+      size_gibibytes = module.filesystem.accounting.size_gibibytes
+      device         = module.filesystem.accounting.mount_tag
     } : null
   }
   nfs = {

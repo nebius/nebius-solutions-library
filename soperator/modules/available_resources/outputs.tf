@@ -51,6 +51,11 @@ output "filesystem_types" {
   value       = local.filesystem_types
 }
 
+output "shared_filesystem_types" {
+  description = "Supported shared filesystem types."
+  value       = local.shared_filesystem_types
+}
+
 output "cpu_topology_by_platform" {
   description = "CPU topologies preset by platform."
   value       = local.cpu_topologies_by_platforms

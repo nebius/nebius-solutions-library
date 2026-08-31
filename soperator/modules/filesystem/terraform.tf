@@ -9,3 +9,7 @@ terraform {
     }
   }
 }
+
+module "resources" {
+  source = "../available_resources"
+}
