@@ -278,34 +278,6 @@ resource "terraform_data" "check_jail_submount_paths" {
   }
 }
 
-resource "terraform_data" "check_weka_count" {
-  lifecycle {
-    precondition {
-      condition = sum(
-        concat(
-          [(var.filesystem_jail.spec == null
-            ? 0
-            : (var.filesystem_jail.spec.type == module.resources.shared_filesystem_types.weka
-              ? 1
-              : 0
-            )
-          )],
-          [for sm in var.filesystem_jail_submounts : (
-            (sm.spec == null
-              ? 0
-              : (sm.spec.type == module.resources.shared_filesystem_types.weka
-                ? 1
-                : 0
-              )
-            )
-          )]
-        )
-      ) < 2
-      error_message = "Total amount of WEKA filesystems couldn't be more than 1 for now."
-    }
-  }
-}
-
 variable "enroot_direct_squashfs_enabled" {
   description = "Enable Pyxis/Enroot direct SquashFS startup through squashfuse. Node-local image-storage disk creation remains controlled by node_local_image_disk.enabled."
   type        = bool
