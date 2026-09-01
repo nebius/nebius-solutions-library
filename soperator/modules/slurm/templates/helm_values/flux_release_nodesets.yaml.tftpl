@@ -83,6 +83,7 @@ nodesets:
                 readOnly: false
 
             jailSubMounts:
+            %{~ if !jail.on_weka ~}
               %{~ if jail_submounts.nfs.vds.enabled ~}
               - name: nfs
                 mountPath: ${jail_submounts.nfs.vds.mount_path}
@@ -100,6 +101,7 @@ nodesets:
                   persistentVolumeClaim:
                     claimName: home-dir
               %{~ endif ~}
+            %{~ endif ~}
 
               %{~ for sub_mount in jail_submounts.shared ~}
               - name: ${sub_mount.name}

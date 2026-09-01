@@ -17,3 +17,7 @@ terraform {
 module "labels" {
   source = "../labels"
 }
+
+module "resources" {
+  source = "../available_resources"
+}

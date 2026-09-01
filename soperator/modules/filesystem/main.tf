@@ -69,6 +69,10 @@ locals {
       one(data.nebius_compute_v1_filesystem.jail).status.size_bytes,
     )))
     mount_tag = local.const.filesystem.jail
+    backend = try(
+      one(nebius_compute_v1_filesystem.jail).type,
+      one(data.nebius_compute_v1_filesystem.jail).type,
+    )
   }
 }
 

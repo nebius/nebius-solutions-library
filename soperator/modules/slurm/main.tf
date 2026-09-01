@@ -177,6 +177,10 @@ resource "helm_release" "soperator_fluxcd_cm" {
         k8s_node_filter_name = var.login_on_worker_nodes ? local.node_filters.worker.name : local.node_filters.system.name
       }
 
+      jail = {
+        on_weka = local.jail_on_weka
+      }
+
       jail_submounts = [for submount in var.filestores.jail_submounts : {
         name       = submount.name
         mount_path = submount.mount_path
@@ -184,9 +188,19 @@ resource "helm_release" "soperator_fluxcd_cm" {
 
       controller_state_on_filestore = var.controller_state_on_filestore
 
-      nfs                    = var.nfs
-      nfs_in_k8s             = var.nfs_in_k8s
-      nfs_node_group_enabled = var.nfs_node_group_enabled
+      # NFS is used for /home, which is not needed in case of Jail on WEKA
+      nfs = (local.jail_on_weka
+        ? { enabled = false }
+        : var.nfs
+      )
+      nfs_in_k8s = (local.jail_on_weka
+        ? { enabled = false }
+        : var.nfs_in_k8s
+      )
+      nfs_node_group_enabled = (local.jail_on_weka
+        ? false
+        : var.nfs_node_group_enabled
+      )
 
       nodes = {
         accounting = {

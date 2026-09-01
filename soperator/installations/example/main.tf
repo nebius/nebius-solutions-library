@@ -601,6 +601,7 @@ module "slurm" {
     jail = {
       size_gibibytes = module.filesystem.jail.size_gibibytes
       device         = module.filesystem.jail.mount_tag
+      backend        = module.filesystem.jail.backend
     }
     jail_submounts = [for submount in var.filesystem_jail_submounts : {
       name           = submount.name

@@ -380,6 +380,7 @@ variable "filestores" {
     jail = object({
       size_gibibytes = number
       device         = string
+      backend        = string
     })
     jail_submounts = list(object({
       name           = string

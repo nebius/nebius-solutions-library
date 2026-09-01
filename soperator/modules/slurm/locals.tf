@@ -47,6 +47,8 @@ locals {
     for nodeset in var.worker_nodesets : nodeset.gres_name == "nvidia_gb300"
   ])
 
+  jail_on_weka = var.filestores.jail.backend == module.resources.shared_filesystem_types.weka
+
   active_checks_on_worker_nodes = local.gb300_enabled
 
   soperator_active_checks_gpu_counts = distinct([for worker in var.node_capacity.worker : worker.gpus if worker.gpus > 0])

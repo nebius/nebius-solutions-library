@@ -7,6 +7,10 @@ resource "local_file" "flux_release_rendered_nodesets" {
     release_name = "soperator-nodesets"
     cluster_name = var.name
 
+    jail = {
+      on_weka = local.jail_on_weka
+    }
+
     nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
       nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
       slurm_node_extra  = local.slurm_node_extra_by_nodeset[nodeset.name]
@@ -37,9 +41,16 @@ resource "local_file" "flux_release_rendered_nodesets" {
     }]
 
     jail_submounts = {
+      # NFS is used for /home, which is not needed in case of Jail on WEKA
       nfs = {
-        vds = var.nfs
-        k8s = var.nfs_in_k8s
+        vds = (local.jail_on_weka
+          ? { enabled = false }
+          : var.nfs
+        )
+        k8s = (local.jail_on_weka
+          ? { enabled = false }
+          : var.nfs_in_k8s
+        )
       }
 
       shared = [for submount in var.filestores.jail_submounts : {
