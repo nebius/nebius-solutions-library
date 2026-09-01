@@ -449,6 +449,18 @@ resource "terraform_data" "check_nfs_exclusivity" {
   }
 }
 
+resource "terraform_data" "check_nfs_sustainability" {
+  lifecycle {
+    precondition {
+      condition = (!(var.nfs.enabled || var.nfs_in_k8s.enabled)
+        ? true
+        : contains(["XS", "S", "M"], module.sizing.sizing_tier)
+      )
+      error_message = "NFS becomes a bottleneck/failure point on large clusters. Consider using WEKA instead."
+    }
+  }
+}
+
 # endregion nfs-server
 
 # region k8s
