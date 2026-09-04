@@ -23,6 +23,9 @@ public_ip      = true
 instance_count = 2
 preemptible    = false
 
+# Optional: initialize each VM boot disk from this project-local snapshot.
+# boot_disk_snapshot_id = "computedisksnapshot-..."
+
 shared_filesystem_id = ""
 mount_bucket         = ""
 

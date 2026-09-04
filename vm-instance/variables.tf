@@ -96,6 +96,17 @@ variable "boot_disk_size_gb" {
   description = "size of boot disk"
 }
 
+variable "boot_disk_snapshot_id" {
+  type        = string
+  default     = null
+  description = "ID of a project-local disk snapshot used to initialize each VM boot disk. When null, the default Ubuntu image is used."
+
+  validation {
+    condition     = var.boot_disk_snapshot_id == null || trimspace(var.boot_disk_snapshot_id) != ""
+    error_message = "boot_disk_snapshot_id must be null or a non-empty disk snapshot ID."
+  }
+}
+
 variable "public_ip" {
   type        = bool
   default     = true
