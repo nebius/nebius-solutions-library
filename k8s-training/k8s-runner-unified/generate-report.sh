@@ -42,7 +42,9 @@ fi
   echo ""
   echo "> \`busbw\` (bus bandwidth) is the hardware-utilization figure to compare against"
   echo "> reference numbers. Single-host runs exercise intra-node NVLink; multi-host runs"
-  echo "> cross the InfiniBand fabric. Peak is the max across the size sweep (some collectives"
+  echo "> cross the node-to-node fabric — InfiniBand on x86, or MNNVL/NVLink on GB300"
+  echo "> (unless NCCL_TRANSPORT=ib). The Transport column reports what NCCL actually used."
+  echo "> Peak is the max across the size sweep (some collectives"
   echo "> — notably alltoall — peak mid-sweep and decline, so the last row is not the peak)."
   echo ""
 
@@ -56,7 +58,15 @@ fi
     hosts="${base##*-}"
     test="${base%-*}"
     if [ "$hosts" -gt 1 ] 2>/dev/null; then scope="cross-node"; else scope="single-node"; fi
-    if grep -q "Using network IB" "$f" 2>/dev/null; then
+    # Transport = what NCCL ACTUALLY routed over, read from the channel lines, not
+    # inferred from host count. On GB300 a multi-host run rides MNNVL (multi-node
+    # NVLink) unless NCCL_TRANSPORT=ib forced it onto the IB fabric, so host count
+    # alone is misleading. Order matters: an explicit IB data path wins.
+    if grep -qE "via NET/IB" "$f" 2>/dev/null; then
+      transport="InfiniBand"
+    elif grep -qE "via P2P/MNNVL" "$f" 2>/dev/null; then
+      transport="NVLink (MNNVL)"
+    elif grep -q "Using network IB" "$f" 2>/dev/null; then
       transport=$([ "$hosts" -gt 1 ] 2>/dev/null && echo "InfiniBand" || echo "NVLink (IB init'd)")
     else
       transport="?"
