@@ -1089,10 +1089,16 @@ variable "slurm_nodeset_workers" {
 }
 
 variable "slurm_nodeset_login" {
-  description = "Configuration of Slurm Login node set."
+  description = "Configuration of Slurm Login node set. Login pod autoscaling is disabled by default. When enabled, its replica bounds override size for login pods."
   type = object({
     size               = number
     node_group_enabled = optional(bool, true)
+    autoscaling = optional(object({
+      enabled                           = bool
+      min_size                          = optional(number, 1)
+      max_size                          = optional(number, 4)
+      target_cpu_utilization_percentage = optional(number, 70)
+    }))
     resource = object({
       platform = string
       preset   = string
@@ -1123,6 +1129,23 @@ variable "slurm_nodeset_login" {
   validation {
     condition     = var.slurm_nodeset_login.size >= 1
     error_message = "Login replica count (slurm_nodeset_login.size) must be at least 1."
+  }
+  validation {
+    condition = var.slurm_nodeset_login.autoscaling == null ? true : (
+      var.slurm_nodeset_login.autoscaling.min_size >= 1 &&
+      floor(var.slurm_nodeset_login.autoscaling.min_size) == var.slurm_nodeset_login.autoscaling.min_size &&
+      var.slurm_nodeset_login.autoscaling.max_size >= var.slurm_nodeset_login.autoscaling.min_size &&
+      floor(var.slurm_nodeset_login.autoscaling.max_size) == var.slurm_nodeset_login.autoscaling.max_size
+    )
+    error_message = "Login autoscaling min_size and max_size must be whole numbers, min_size must be at least 1, and max_size must be greater than or equal to min_size."
+  }
+  validation {
+    condition = var.slurm_nodeset_login.autoscaling == null ? true : (
+      var.slurm_nodeset_login.autoscaling.target_cpu_utilization_percentage >= 1 &&
+      var.slurm_nodeset_login.autoscaling.target_cpu_utilization_percentage <= 100 &&
+      floor(var.slurm_nodeset_login.autoscaling.target_cpu_utilization_percentage) == var.slurm_nodeset_login.autoscaling.target_cpu_utilization_percentage
+    )
+    error_message = "Login autoscaling target_cpu_utilization_percentage must be a whole number from 1 through 100."
   }
 }
 

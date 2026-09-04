@@ -530,6 +530,7 @@ module "slurm" {
     worker     = [for workers in local.slurm_nodeset_workers : workers.size]
     login      = var.slurm_nodeset_login.size
   }
+  login_autoscaling = var.slurm_nodeset_login.autoscaling
 
   # Resolved tier (auto-derived from the worker count unless var.sizing_tier_override forces it).
   sizing_tier_override = module.sizing.sizing_tier

@@ -690,6 +690,13 @@ resources:
                     %{~ endif ~}
               login:
                 size: ${slurm_cluster.nodes.login.size}
+                %{~ if slurm_cluster.nodes.login.autoscaling != null ~}
+                autoscaling:
+                  enabled: ${slurm_cluster.nodes.login.autoscaling.enabled}
+                  minReplicas: ${slurm_cluster.nodes.login.autoscaling.min_size}
+                  maxReplicas: ${slurm_cluster.nodes.login.autoscaling.max_size}
+                  targetCPUUtilizationPercentage: ${slurm_cluster.nodes.login.autoscaling.target_cpu_utilization_percentage}
+                %{~ endif ~}
                 k8sNodeFilterName: ${slurm_cluster.nodes.login.k8s_node_filter_name}
                 sshdServiceType: "LoadBalancer"
                 %{~ if slurm_cluster.nodes.login.allocation_id != null ~}

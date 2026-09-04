@@ -441,6 +441,8 @@ use_preinstalled_gpu_drivers = true
 # Keep size as the desired login pod replica count. For GB300, Terraform uses
 # this value for Soperator login pods, then skips only the dedicated mk8s login
 # node group so login pods run on worker nodes instead.
+# Login pod autoscaling is disabled by default. The dedicated mk8s login node
+# group uses its independent, always-enabled infrastructure scaling limits.
 # ---
 slurm_nodeset_login = {
   size = 2

@@ -120,6 +120,18 @@ variable "node_count" {
   }
 }
 
+variable "login_autoscaling" {
+  description = "CPU-based login pod autoscaling. Its bounds override node_count.login when enabled."
+  type = object({
+    enabled                           = bool
+    min_size                          = optional(number, 1)
+    max_size                          = optional(number, 4)
+    target_cpu_utilization_percentage = optional(number, 70)
+  })
+  default  = null
+  nullable = true
+}
+
 # endregion Nodes
 
 # region Resources

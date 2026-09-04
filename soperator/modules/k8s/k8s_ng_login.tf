@@ -17,7 +17,16 @@ resource "nebius_mk8s_v1_node_group" "login" {
     module.labels.label_jail,
   )
 
-  fixed_node_count = var.node_group_login.size
+  # These are broad infrastructure guardrails, not desired node counts: one
+  # node keeps baseline login capacity available, while 100 caps runaway VM
+  # provisioning. The Kubernetes autoscaler adds nodes only when login pods
+  # are unschedulable and removes unused nodes down to the minimum.
+  autoscaling = {
+    min_node_count = 1
+    max_node_count = 100
+  }
+
+  fixed_node_count = null
 
   template = {
     metadata = {
