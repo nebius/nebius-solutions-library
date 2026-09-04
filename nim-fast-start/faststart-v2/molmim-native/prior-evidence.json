@@ -1,0 +1,87 @@
+{
+  "schema": "archvteams.nebius.ai/molmim-retained-baseline/v1",
+  "status": "PASS_WITH_RESTORE_REJECTED",
+  "sources": [
+    {
+      "path": "<private-evidence-root>/genmol-molmim-prep/evidence/molmim-final-verdict.md",
+      "bytes": 2079,
+      "sha256": "ac73ca9e5ca2c2fda36754c8d9e18b40340834c3b94751ea1aadc5b4c15c4215"
+    },
+    {
+      "path": "<private-evidence-root>/genmol-molmim-prep/two_call_oracle.py",
+      "bytes": 10458,
+      "sha256": "ae045cf25e85e7eb3868a2cb8b8bfe7b84c4497d962bf796096813310d58f4c0"
+    },
+    {
+      "path": "<private-evidence-root>/genmol-molmim-prep/evidence/molmim-v6/restore-oracle/summary.json",
+      "bytes": 1081,
+      "sha256": "b81fb9005c6641f2e1b2422f9d45e1c184be7f423b900f64090c07f9e96d09dd"
+    },
+    {
+      "path": "<private-evidence-root>/genmol-molmim-prep/evidence/molmim-v6/molmim_restore_v6.csv",
+      "bytes": 50,
+      "sha256": "dc32a67d311e4878e6d0231aa1d8a68a9cb639ee07e82819d8f478d7d97ba17b"
+    }
+  ],
+  "execution_identity": {
+    "node": "gpu-node-a.example.invalid",
+    "gpu": "NVIDIA H100",
+    "gpu_count": 1,
+    "image": "nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa",
+    "image_bytes": 13998727508,
+    "cache_host_path": "/snapshots/nim-caches/molmim",
+    "cache_bytes": 281612288,
+    "checkpoint_file_bytes": 281589760
+  },
+  "semantic_fixture": {
+    "path": "fixtures/request-cmaes-qed.json",
+    "bytes": 696,
+    "sha256": "053e8a5befb020695e4d27200d21b296e7171f480075125cfa6f7b5a71dbc42d",
+    "endpoint": "/generate",
+    "algorithm": "CMA-ES",
+    "property_name": "QED",
+    "calls_per_trial": 2,
+    "request_sha256": [
+      "3a59acaf04e18fc5a7ed37b27ffdeee05f2542f23734d204bf487cc5f172a55e",
+      "98ac4fccf35f4a9c3cbb3666b8d98218b24e7f2d5cff9cb174c76b2d242927da"
+    ],
+    "oracle_requires_rdkit_qed_recalculation": true
+  },
+  "conventional_cached": {
+    "demand_to_ready_seconds": [18.50183954, 20.242416263, 18.446697221],
+    "median_demand_to_ready_seconds": 18.50183954,
+    "semantic_call_milliseconds": [
+      [2916.263, 1983.863],
+      [2955.146, 2041.299],
+      [3016.521, 1999.482]
+    ]
+  },
+  "native_v5_default_inductor_fanout": {
+    "idle_compile_workers": 16,
+    "regular_file_bytes": 14262243963,
+    "restore_to_ready_seconds": 106.656
+  },
+  "native_v6_single_inductor_worker": {
+    "environment": {
+      "TORCHINDUCTOR_COMPILE_THREADS": "1"
+    },
+    "idle_compile_workers": 0,
+    "regular_file_count": 79,
+    "regular_file_bytes": 5214934444,
+    "page_image_count": 7,
+    "capture_seconds": 38.379,
+    "criu_restore_seconds": 32.912,
+    "restore_to_ready_seconds": 34.018,
+    "restore_through_two_semantic_responses_seconds": 38.184,
+    "strict_semantic_calls_seconds": [1.910043, 1.863182],
+    "inventory_sha256": "91c929294ff36f2a69a673c1ee29496b038a3cb720297f46f48f60a5ad4c7d15",
+    "pstree_sha256": "ac5b5f6c3357a1bcd81ece60044f9c3915c494525e61842383ae805df381e067"
+  },
+  "prior_decision": {
+    "restore_minus_conventional_ready_seconds": 15.51616046,
+    "restore_to_conventional_ratio": 1.838627988,
+    "restore_percent_slower": 83.862799,
+    "recommendation": "REJECT_NATIVE_RESTORE_KEEP_CONVENTIONAL_CACHED"
+  },
+  "production_qualification_note": "The retained v6 result is functionally valid but not production-shaped. Re-run conventional-cached, direct native, and true legacy-buffered native as independent n=3 demand-to-two-semantic trials. Reject restore immediately if the buffered median is not lower than the new conventional median."
+}

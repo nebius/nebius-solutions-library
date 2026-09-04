@@ -1,0 +1,41 @@
+{
+  "schema_version": "faststart-price-snapshot/v1",
+  "snapshot_id": "example-no-authoritative-price-data",
+  "captured_at": "2026-08-18T01:00:00Z",
+  "currency": null,
+  "prices": [
+    {
+      "price_id": "example-gpu-price-unavailable",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second",
+      "effective_from": "2026-08-01T00:00:00Z",
+      "effective_to": null,
+      "status": "UNAVAILABLE",
+      "currency": null,
+      "unit_price": null,
+      "source": null
+    },
+    {
+      "price_id": "example-node-price-unavailable",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second",
+      "effective_from": "2026-08-01T00:00:00Z",
+      "effective_to": null,
+      "status": "UNAVAILABLE",
+      "currency": null,
+      "unit_price": null,
+      "source": null
+    },
+    {
+      "price_id": "example-storage-price-unavailable",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second",
+      "effective_from": "2026-08-01T00:00:00Z",
+      "effective_to": null,
+      "status": "UNAVAILABLE",
+      "currency": null,
+      "unit_price": null,
+      "source": null
+    }
+  ]
+}

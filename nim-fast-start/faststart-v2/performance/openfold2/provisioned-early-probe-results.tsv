@@ -1,0 +1,4 @@
+run_id	status	demand_to_http_ready_seconds	demand_to_kubernetes_ready_seconds	worker_restore_seconds	legacy_demand_to_validation_complete_seconds	legacy_response_plus_validation_request_1_seconds	legacy_response_plus_validation_request_2_seconds	semantic_pass_count	local_evidence
+p6-earlyprobe	PASS	11.162167	11.640975	3.584	14.096900	1.929074	1.001957	2	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/p6-earlyprobe
+p7-earlyprobe	PASS	11.340513	12.588935	3.570	14.316461	1.951462	1.020497	2	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/p7-earlyprobe
+p8-earlyprobe	PASS	10.840150	11.662171	3.568	13.819209	1.955740	1.018719	2	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/p8-earlyprobe

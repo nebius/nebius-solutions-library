@@ -1,0 +1,15 @@
+{
+  "schema": "archvteams.nebius.ai/genmol-target-binding/v1",
+  "collected_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+  "run_id": "REPLACE_WITH_SAME_RUN_ID",
+  "namespace": "nim-fast-start",
+  "pod_name": "genmol-target-REPLACE_WITH_SAME_RUN_ID",
+  "pod_uid": "REPLACE_WITH_POD_UUID",
+  "container_name": "genmol",
+  "container_id": "containerd://REPLACE_WITH_64_HEX_CONTAINER_ID",
+  "cgroup": "/REPLACE_WITH_EXACT_HOST_VISIBLE_KUBEPODS_CGROUP",
+  "pod_ip": "REPLACE_WITH_POD_IP",
+  "node": "REPLACE_WITH_SAME_VERIFIED_H100_HOSTNAME",
+  "image_id": "nvcr.io/nim/nvidia/genmol@sha256:139b909a450fe1fb81198214784a15f67e172e766a93a1569827ba5aa05b4541",
+  "pod_spec_sha256": "REPLACE_WITH_CANONICAL_LIVE_POD_SPEC_SHA256"
+}

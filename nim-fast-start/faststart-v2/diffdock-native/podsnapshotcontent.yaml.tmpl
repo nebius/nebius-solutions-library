@@ -1,0 +1,18 @@
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshotContent
+metadata:
+  name: diffdock-native-f7-v1-direct-hf93
+  labels:
+    nvidia.com/snapshot-node: gpu-node-a.example.invalid
+    app.kubernetes.io/name: diffdock
+spec:
+  snapshotRef:
+    namespace: nim-fast-start
+    name: diffdock-native-f7-v1-direct-hf93
+  source:
+    nodeName: gpu-node-a.example.invalid
+    podRef:
+      name: "@@SOURCE_POD_NAME@@"
+      uid: "@@SOURCE_POD_UID@@"
+      containers:
+        - diffdock

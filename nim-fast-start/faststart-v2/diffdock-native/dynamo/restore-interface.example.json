@@ -1,0 +1,46 @@
+{
+  "schema": "archvteams.nebius.ai/dynamo-restore-interface/v1",
+  "approved": false,
+  "approval": {
+    "reviewed_by": "REPLACE_WITH_REVIEWER",
+    "reviewed_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+    "evidence_sha256": "REPLACE_WITH_64_HEX_DIGEST"
+  },
+  "source": {
+    "repository": "https://github.com/ai-dynamo/dynamo",
+    "commit": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+    "patch_sha256": "REPLACE_WITH_64_HEX_DIGEST"
+  },
+  "worker_image": "REPLACE_WITH_IMMUTABLE_PUBLIC_WORKER_IMAGE_AT_SHA256",
+  "worker_executable": "/usr/local/bin/restore-worker",
+  "worker_executable_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+  "argument_template": [
+    "restore",
+    "--target-namespace", "{target_namespace}",
+    "--target-name", "{target_name}",
+    "--target-uid", "{target_uid}",
+    "--target-container", "{target_container}",
+    "--target-container-id", "{target_container_id}",
+    "--target-cgroup", "{target_cgroup}",
+    "--target-pod-ip", "{target_pod_ip}",
+    "--target-node", "{target_node}",
+    "--target-pod-spec-sha256", "{target_pod_spec_sha256}",
+    "--expected-image-id", "{expected_image_id}",
+    "--run-id", "{run_id}",
+    "--checkpoint-id", "{checkpoint_id}",
+    "--artifact-version", "{artifact_version}",
+    "--artifact-manifest-sha256", "{artifact_manifest_sha256}",
+    "--tool-bundle-sha256", "{tool_bundle_sha256}",
+    "--container-runtime-socket", "/run/containerd/containerd.sock",
+    "--host-proc", "/host/proc",
+    "--host-cgroup", "/sys/fs/cgroup",
+    "--pod-resources-socket", "/var/lib/kubelet/pod-resources/kubelet.sock"
+  ],
+  "probe_image": "REPLACE_WITH_IMMUTABLE_PYTHON_3_12_IMAGE_AT_SHA256",
+  "probe_executable": "/usr/local/bin/python3",
+  "validator_sha256": "245ae98a98db09c34924cd7a499b99da9eb35742667043aaee3e497c33268008",
+  "tool_bundle": {
+    "layout": "archvteams-public-dynamo-tools/v1",
+    "content_sha256": "REPLACE_WITH_64_HEX_DIGEST"
+  }
+}

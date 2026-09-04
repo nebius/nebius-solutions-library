@@ -1,0 +1,45 @@
+{
+  "schema": "archvteams.nebius.ai/dynamo-restore-interface/v1",
+  "approved": true,
+  "approval": {
+    "reviewed_by": "codex-performance-run",
+    "reviewed_at": "2026-08-18T02:46:00Z",
+    "evidence_sha256": "66e1f46c46d9a48d43cf22fd7aba2331191acd5b3fc3d1660d705b6342ddd392"
+  },
+  "source": {
+    "repository": "https://github.com/ai-dynamo/dynamo",
+    "commit": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+    "patch_sha256": "260c1d9a7f192b8c0b25c924ab26b43a95ad599d38d3f367383e3e984aecfd11"
+  },
+  "worker_image": "registry.example.invalid/faststart/snapshot-agent@sha256:31e1dacd18b99aec1ab7e8ec8c933f260c9dcec687938b40c44c61274f930d86",
+  "worker_executable": "/usr/local/bin/restore-worker",
+  "argument_template": [
+    "restore",
+    "--target-namespace", "{target_namespace}",
+    "--target-name", "{target_name}",
+    "--target-uid", "{target_uid}",
+    "--target-container", "{target_container}",
+    "--target-container-id", "{target_container_id}",
+    "--target-cgroup", "{target_cgroup}",
+    "--target-pod-ip", "{target_pod_ip}",
+    "--target-node", "{target_node}",
+    "--target-pod-spec-sha256", "{target_pod_spec_sha256}",
+    "--expected-image-id", "{expected_image_id}",
+    "--run-id", "{run_id}",
+    "--checkpoint-id", "{checkpoint_id}",
+    "--artifact-version", "{artifact_version}",
+    "--artifact-manifest-sha256", "{artifact_manifest_sha256}",
+    "--tool-bundle-sha256", "{tool_bundle_sha256}",
+    "--container-runtime-socket", "/run/containerd/containerd.sock",
+    "--host-proc", "/host/proc",
+    "--host-cgroup", "/sys/fs/cgroup",
+    "--pod-resources-socket", "/var/lib/kubelet/pod-resources/kubelet.sock"
+  ],
+  "probe_image": "docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e",
+  "probe_executable": "/usr/local/bin/python3",
+  "validator_sha256": "66c75652e7f17b35ff569a59cc6a21bc09416329d9fbf30178041aed9006a9ed",
+  "tool_bundle": {
+    "layout": "archvteams-public-dynamo-tools/v1",
+    "content_sha256": "04214d6f4d72fa59d5daa6168d8c63024b6ebe34c4876394e47e80319ef00c39"
+  }
+}

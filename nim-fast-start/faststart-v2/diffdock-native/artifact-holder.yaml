@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: diffdock-native-f7-holder-hf93
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: diffdock
+    app.kubernetes.io/component: artifact-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeName: gpu-node-a.example.invalid
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: holder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -ceu
+      args:
+        - |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+
+          root = Path("/artifacts/diffdock-native-f7-v3-buffered/versions/1")
+          required = {"manifest.yaml", "inventory.img", "pstree.img", "rootfs-diff.tar"}
+          if root.is_symlink() or not root.is_dir():
+              raise SystemExit("native artifact root is absent or symlinked")
+          files = []
+          total = 0
+          for directory, names, entries in os.walk(root, followlinks=False):
+              for name in names:
+                  path = Path(directory) / name
+                  if path.is_symlink():
+                      raise SystemExit("native artifact contains a symlinked directory")
+              for name in entries:
+                  path = Path(directory) / name
+                  info = path.lstat()
+                  if not stat.S_ISREG(info.st_mode):
+                      raise SystemExit("native artifact contains a non-regular file")
+                  relative = path.relative_to(root).as_posix()
+                  files.append((relative, info.st_size, path))
+                  total += info.st_size
+          present = {name for name, _, _ in files}
+          if not required <= present or not any(name.startswith("pages-") for name in present):
+              raise SystemExit("native artifact is missing required CRIU files")
+          if len(files) != 122 or total != 7_516_058_314:
+              raise SystemExit(
+                  f"buffered artifact inventory mismatch: files={len(files)} bytes={total}"
+              )
+          def digest_file(item):
+              relative, size, path = item
+              digest = hashlib.sha256()
+              with path.open("rb", buffering=0) as source:
+                  while chunk := source.read(8 * 1024 * 1024):
+                      digest.update(chunk)
+              return relative, size, digest.hexdigest()
+          with ThreadPoolExecutor(max_workers=4) as pool:
+              hashed = sorted(pool.map(digest_file, files))
+          tree = hashlib.sha256()
+          for relative, size, digest in hashed:
+              tree.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+          manifest = root / "manifest.yaml"
+          raw = manifest.read_bytes()
+          text = raw.decode("utf-8")
+          for marker in (
+              "checkpointId: diffdock-native-f7-v3-buffered",
+              "sourceNode: gpu-node-a.example.invalid",
+              "podNamespace: nim-fast-start",
+              "cudaRestore:",
+          ):
+              if marker not in text:
+                  raise SystemExit("native artifact manifest identity mismatch")
+          manifest_sha256 = hashlib.sha256(raw).hexdigest()
+          if manifest_sha256 != "93a83188fb0adcc89c1278f136595c6dbce1b3fe9c412c3ccf65f704745ec1fe":
+              raise SystemExit("buffered artifact manifest digest mismatch")
+          if text.count("        imageIoMode: buffered\n") != 1 or "        imageIoMode: direct\n" in text:
+              raise SystemExit("buffered artifact does not select legacy buffered image I/O")
+          receipt = {
+              "schema": "archvteams.nebius.ai/diffdock-native-artifact-receipt/v1",
+              "checkpoint_id": "diffdock-native-f7-v3-buffered",
+              "artifact_version": "1",
+              "source_node": "gpu-node-a.example.invalid",
+              "regular_file_count": len(files),
+              "regular_file_bytes": total,
+              "prewarm_bytes": total,
+              "tree_sha256": tree.hexdigest(),
+              "manifest_sha256": manifest_sha256,
+          }
+          print(json.dumps(receipt, sort_keys=True, separators=(",", ":")), flush=True)
+          Path("/state/artifact-verified").touch()
+          PY
+          exec sleep 2147483647
+      resources:
+        requests:
+          cpu: 100m
+          memory: 16Mi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        # Native artifacts are emitted mode 0700 by the privileged capture
+        # worker.  The holder is read-only and capability-free, but must use
+        # uid 0 to traverse and hash that immutable tree.
+        runAsNonRoot: false
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/artifact-verified
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      volumeMounts:
+        - name: artifacts
+          mountPath: /artifacts
+          readOnly: true
+        - name: nim-cache
+          mountPath: /nim-cache
+          readOnly: true
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: diffdock-native-f7-artifacts
+        readOnly: true
+    - name: nim-cache
+      persistentVolumeClaim:
+        claimName: diffdock-native-f7-cache
+        readOnly: true
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi

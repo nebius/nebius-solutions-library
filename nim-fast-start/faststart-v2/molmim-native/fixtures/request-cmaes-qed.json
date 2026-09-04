@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "name": "caffeine",
+      "payload": {
+        "algorithm": "CMA-ES",
+        "iterations": 1,
+        "min_similarity": 0.3,
+        "minimize": false,
+        "num_molecules": 1,
+        "particles": 2,
+        "property_name": "QED",
+        "smi": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"
+      }
+    },
+    {
+      "name": "aspirin",
+      "payload": {
+        "algorithm": "CMA-ES",
+        "iterations": 1,
+        "min_similarity": 0.3,
+        "minimize": false,
+        "num_molecules": 1,
+        "particles": 2,
+        "property_name": "QED",
+        "smi": "CC(=O)Oc1ccccc1C(=O)O"
+      }
+    }
+  ],
+  "schema": "archvteams.nebius.ai/molmim-cmaes-qed-fixture/v1"
+}

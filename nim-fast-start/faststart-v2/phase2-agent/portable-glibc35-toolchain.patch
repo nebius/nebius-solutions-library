@@ -1,0 +1,151 @@
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -26,2 +26,2 @@ ARG CUDA_BUILD_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:7d56ebe2b7cd864
+-ARG CRIU_BUILD_IMAGE=ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+-ARG AGENT_BASE_IMAGE=nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1
++ARG CRIU_BUILD_IMAGE=ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
++ARG AGENT_BASE_IMAGE=nvidia/cuda:13.0.3-base-ubuntu22.04@sha256:73ab6dfb3814a5097cd456736e70650ef9dc72343be4117d0400de78168760fe
+@@ -28,0 +29 @@ ARG CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
++ARG CUDA_CHECKPOINT_HELPER_SHA256=0e44e9067d71411c775cd3b21fa0df806613504c8c699bd1944e3e7c10989298
+@@ -130,0 +132,2 @@ FROM ${CUDA_BUILD_IMAGE} AS cuda-helper-builder
++ARG CUDA_CHECKPOINT_HELPER_SHA256
++
+@@ -144 +147,2 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
+-    -lcuda
++    -lcuda \
++    && echo "${CUDA_CHECKPOINT_HELPER_SHA256}  /cuda-checkpoint-helper" | sha256sum -c -
+@@ -171,0 +176 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
++    python3-pip \
+@@ -205 +210 @@ RUN git init /tmp/cuda-checkpoint \
+-FROM ${AGENT_BASE_IMAGE} AS agent_pre
++FROM ${AGENT_BASE_IMAGE} AS agent_pre_unverified
+@@ -216 +221 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+-    libssl3t64 \
++    libssl3 \
+@@ -223 +228 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+-    libgnutls30t64 \
++    libgnutls30 \
+@@ -266 +271,2 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
+-#   tar — used by runtime.ApplyRootfsDiff
++#   tar — retained as an upstream-compatible diagnostic tool; rootfs restore
++#         uses the target image's /bin/tar with the injected library path removed
+@@ -324,0 +331,19 @@ USER root
++# =============================================================================
++# Stage: injected-bundle GLIBC compatibility gate
++# =============================================================================
++# The audit runs in the pinned Jammy CRIU builder, which already carries
++# readelf through build-essential. The final agent copies the receipt from this
++# stage, making the all-ELF GLIBC ceiling a mandatory build dependency without
++# shipping binutils in the runtime image.
++FROM criu-builder AS bundle-glibc35-audit
++COPY --from=agent_pre_unverified /snapshot-binaries /snapshot-binaries
++COPY --chmod=0755 scripts/verify-bundle-glibc.sh /usr/local/bin/verify-bundle-glibc
++RUN /usr/local/bin/verify-bundle-glibc \
++      /snapshot-binaries 2.35 /snapshot-binaries.glibc-compatibility
++
++# This is the common audited base for the compliance and task-local targets.
++FROM agent_pre_unverified AS agent_pre
++COPY --from=bundle-glibc35-audit \
++  /snapshot-binaries.glibc-compatibility \
++  /snapshot-binaries.glibc-compatibility
++
+@@ -479,4 +504,3 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
+-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
+-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
+-#     restore with "version 'GLIBC_2.38' not found".
++#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 22.04,
++#     glibc 2.35) and loaded ahead of the placeholder's own libraries via
++#     LD_LIBRARY_PATH. Targets must therefore provide glibc 2.35 or newer.
+--- a/deploy/snapshot/internal/runtime/overlay.go
++++ b/deploy/snapshot/internal/runtime/overlay.go
+@@ -171,2 +171,9 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
+-	log.Info("Applying rootfs diff", "target", targetRoot)
+-	cmd := exec.Command("tar", "--skip-old-files", "-C", targetRoot, "-xf", rootfsDiffPath)
++	// nsrestore runs in the placeholder's mount namespace. Use that exact
++	// image's tar so extraction remains compatible with older target glibc
++	// versions. The injected tool bundle intentionally stays first in PATH and
++	// LD_LIBRARY_PATH for CRIU after this child exits, but the target tar must
++	// not load the bundle's newer shared-library closure.
++	targetTar := filepath.Join(targetRoot, "bin", "tar")
++	log.Info("Applying rootfs diff", "target", targetRoot, "tar", targetTar)
++	cmd := exec.Command(targetTar, "--skip-old-files", "-C", targetRoot, "-xf", rootfsDiffPath)
++	cmd.Env = environmentWithout(os.Environ(), "LD_LIBRARY_PATH")
+@@ -180,0 +188,14 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
++// environmentWithout returns a child-process environment with every exact
++// KEY entry removed. It never mutates the current process environment: CRIU
++// therefore retains the injected bundle's PATH and LD_LIBRARY_PATH.
++func environmentWithout(environment []string, key string) []string {
++	prefix := key + "="
++	result := make([]string, 0, len(environment))
++	for _, entry := range environment {
++		if !strings.HasPrefix(entry, prefix) {
++			result = append(result, entry)
++		}
++	}
++	return result
++}
++
+--- a/deploy/snapshot/internal/runtime/overlay_test.go
++++ b/deploy/snapshot/internal/runtime/overlay_test.go
+@@ -6,0 +7 @@ import (
++	"strings"
+@@ -13,0 +15,20 @@ import (
++func installTargetTarShim(t *testing.T, targetRoot, receiptPath string) {
++	t.Helper()
++	binDir := filepath.Join(targetRoot, "bin")
++	if err := os.MkdirAll(binDir, 0755); err != nil {
++		t.Fatalf("mkdir target bin: %v", err)
++	}
++	script := `#!/bin/sh
++if env | grep -q '^LD_LIBRARY_PATH='; then
++  echo inherited-library-path >&2
++  exit 97
++fi
++printf '%s\n' "$PATH" > "$TARGET_TAR_RECEIPT"
++exec /bin/tar "$@"
++`
++	if err := os.WriteFile(filepath.Join(binDir, "tar"), []byte(script), 0755); err != nil {
++		t.Fatalf("write target tar shim: %v", err)
++	}
++	t.Setenv("TARGET_TAR_RECEIPT", receiptPath)
++}
++
+@@ -178,0 +200 @@ func TestCaptureRootfsDiff(t *testing.T) {
++		installTargetTarShim(t, targetRoot, filepath.Join(t.TempDir(), "target-tar.receipt"))
+@@ -229,0 +252,2 @@ func TestApplyRootfsDiff(t *testing.T) {
++		targetRoot := t.TempDir()
++		installTargetTarShim(t, targetRoot, filepath.Join(t.TempDir(), "target-tar.receipt"))
+@@ -233 +257 @@ func TestApplyRootfsDiff(t *testing.T) {
+-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
++		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err == nil {
+@@ -237,0 +262,29 @@ func TestApplyRootfsDiff(t *testing.T) {
++	t.Run("uses target tar without leaking child environment changes", func(t *testing.T) {
++		upperDir := t.TempDir()
++		checkpointDir := t.TempDir()
++		targetRoot := t.TempDir()
++		receiptPath := filepath.Join(t.TempDir(), "target-tar.receipt")
++		installTargetTarShim(t, targetRoot, receiptPath)
++		if err := os.WriteFile(filepath.Join(upperDir, "generated.txt"), []byte("runtime data"), 0644); err != nil {
++			t.Fatalf("write upperdir file: %v", err)
++		}
++		if _, err := CaptureRootfsDiff(upperDir, checkpointDir, types.OverlaySettings{}, nil); err != nil {
++			t.Fatalf("CaptureRootfsDiff: %v", err)
++		}
++		t.Setenv("LD_LIBRARY_PATH", "/tmp/snapshot-binaries/lib")
++		t.Setenv("PATH", "/tmp/snapshot-binaries:/usr/bin:/bin")
++		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err != nil {
++			t.Fatalf("ApplyRootfsDiff: %v", err)
++		}
++		if got := os.Getenv("LD_LIBRARY_PATH"); got != "/tmp/snapshot-binaries/lib" {
++			t.Fatalf("parent LD_LIBRARY_PATH changed to %q", got)
++		}
++		receipt, err := os.ReadFile(receiptPath)
++		if err != nil {
++			t.Fatalf("read target tar receipt: %v", err)
++		}
++		if got := strings.TrimSpace(string(receipt)); got != "/tmp/snapshot-binaries:/usr/bin:/bin" {
++			t.Fatalf("target tar PATH = %q", got)
++		}
++	})
++

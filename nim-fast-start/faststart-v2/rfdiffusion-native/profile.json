@@ -1,0 +1,119 @@
+{
+  "schema": "archvteams.nebius.ai/rfdiffusion-native-profile/v1",
+  "model": {
+    "name": "RFdiffusion",
+    "container_name": "rfdiffusion",
+    "image": "nvcr.io/nim/ipd/rfdiffusion@sha256:15e40e466d8ebe9a53f1feea599373720428c9de65da750bf4271c96ec35ceb4",
+    "start_command": [
+      "/bin/bash",
+      "/opt/nim/start_server.sh"
+    ],
+    "ready_path": "/v1/health/ready",
+    "inference_path": "/biology/ipd/rfdiffusion/generate",
+    "cache_path": "/home/user/.cache/nim",
+    "nim_cache_path": "/home/user/.cache/nim"
+  },
+  "hardware": {
+    "platform": "provisioned-h100",
+    "preset": "allowed-cluster-single-h100",
+    "gpu_product": "NVIDIA H100",
+    "compute_capability": "9.0",
+    "gpu_count": 1,
+    "full_gpu_resource": "nvidia.com/gpu",
+    "mig_allowed": false,
+    "gpu_memory_gb_marketing": 80,
+    "sku_detail_status": "live-node-verified",
+    "retained_capture_node": "gpu-node-c.example.invalid",
+    "required_node_labels": {
+      "nebius.com/gpu-name": "H100"
+    }
+  },
+  "pod_profile": {
+    "requests": {
+      "cpu": "12",
+      "memory": "128Gi",
+      "nvidia.com/gpu": "1"
+    },
+    "limits": {
+      "cpu": "12",
+      "memory": "128Gi",
+      "nvidia.com/gpu": "1"
+    },
+    "shared_memory": "64Gi",
+    "qos_class": "Guaranteed"
+  },
+  "storage": {
+    "artifact_pvc": "rfdiffusion-native-f7-artifacts",
+    "artifact_storage_class": "mlspec-archvteams-2407-io-m3",
+    "artifact_capacity": "93Gi",
+    "cache_pvc": "rfdiffusion-native-f7-cache",
+    "cache_storage_class": "compute-csi-default-sc",
+    "cache_capacity": "10Gi"
+  },
+  "runtime_topology": {
+    "validator_volume_type": "bounded_empty_dir",
+    "validator_mount_path": "/validator",
+    "validator_size_limit": "1Mi",
+    "source_capture_id": "f7-r7"
+  },
+  "artifacts": {
+    "direct": {
+      "checkpoint_id": "rfdiffusion-native-h100-v2",
+      "artifact_version": "1",
+      "image_io_mode": "direct",
+      "manifest_sha256": "21c83eaa10facc54f9483f5f47528a19cacb6d568bd46224ecfe013af5f68608"
+    },
+    "buffered": {
+      "checkpoint_id": "rfdiffusion-native-h100-v2-buffered",
+      "artifact_version": "1",
+      "image_io_mode": "buffered",
+      "manifest_sha256": "5d47f0fac7bba60bdab3e29843f2fd99150491e917f7f3758a84176aef8c7f9d",
+      "prewarm_required": true
+    }
+  },
+  "semantic_profile": {
+    "request_count": 2,
+    "fixture": "fixtures/1UBQ.pdb",
+    "fixture_sha256": "d4a6812d8951cf6594e6a0763f089e35f5a80b62acb3c117b2c5565228a7b161",
+    "contigs": "A20-60/0 20-30",
+    "diffusion_steps": 15,
+    "request_seeds": [
+      2370,
+      2371
+    ],
+    "request_body_sha256": [
+      "da696caf8aba3511e63df5a293622e91b4c063f1593c60038bedca16d4865b2d",
+      "8fa20730e48a66c62fc5d095b4d26afac00cf7c4768e59300b95e447bc200c3c"
+    ],
+    "residue_count_min": 61,
+    "residue_count_max": 71,
+    "required_backbone_atoms": [
+      "N",
+      "CA",
+      "C"
+    ],
+    "adjacent_ca_distance_angstrom": [
+      2.5,
+      5.0
+    ]
+  },
+  "retained_evidence": {
+    "root": "<private-evidence-root>/rfdiffusion-h100-perf-20260817T231936Z",
+    "durable_root": "/sfs/archvteams-2407/rfdiffusion/h100-faststart-20260817T234500Z",
+    "legacy_checkpoint_tree_sha256": "b929134e9d59e7f0df011b36f0830f7e030a02d457c930b8c62853be5a92b3f5",
+    "legacy_checkpoint_regular_file_bytes": 23364237452,
+    "legacy_checkpoint_file_count": 92,
+    "legacy_cache_tree_sha256": "18f827dcb8c2f8ffbd27f2b4f396fcb9d5df07b492965764a5ecd5f1d57a9e4e",
+    "legacy_cache_regular_file_bytes": 2590172418,
+    "legacy_cache_file_count": 675,
+    "cache_tree_sha256": "8b79aa4f4ca6a3121ca6d3d7e8083addd949a28a84b375bd5754580415eb80fd",
+    "cache_regular_file_bytes": 2590162178,
+    "cache_file_count": 674,
+    "cache_safe_internal_symlink_count": 3,
+    "cache_inventory_full_read_seconds": 166.0,
+    "critical_cache_file": "igso/T_50_omega_1000_min_sigma_0_02_min_b_1_5_max_b_2_5_schedule_linear.pkl",
+    "legacy_direct_n3_median_seconds": 189.969,
+    "legacy_buffered_n3_median_seconds": 24.593,
+    "note": "Legacy keys preserve the prior host-managed bundle. The unprefixed cache identity is the fresh full-read inventory materialized by the exact pinned image on the selected H100 lane; its three NGC snapshot symlinks resolve to regular files inside the cache root. The legacy host-managed CRIU checkpoint is not accepted as a current native artifact."
+  }
+}

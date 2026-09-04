@@ -1,0 +1,25 @@
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -201,6 +201,13 @@
+     && git fetch --depth 1 origin ${CUDA_CHECKPOINT_REF} \
+     && git checkout --detach FETCH_HEAD
+ 
++# ns-bind-mount executes in the Jammy agent/worker runtime before it enters the
++# target mount namespace. Build it on the same glibc baseline as that runtime;
++# the CUDA helper remains independently pinned to the CUDA 24.04 builder.
++FROM criu-builder AS ns-bind-mount-builder
++COPY cmd/ns-bind-mount/main.c /tmp/ns-bind-mount.c
++RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount /tmp/ns-bind-mount.c
++
+ # =============================================================================
+ # Stage: Agent (pre-compliance) - Everything that ships, minus /legal
+ # =============================================================================
+@@ -246,7 +253,7 @@
+ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+ COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+-COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
++COPY --from=ns-bind-mount-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+              /usr/local/sbin/ns-bind-mount
+ 

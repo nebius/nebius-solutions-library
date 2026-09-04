@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_CALL_LOG:?FAKE_CALL_LOG is required}"
+
+body_file=""
+url=""
+while (($# > 0)); do
+  case "$1" in
+    --data-binary)
+      body_file=${2#@}; shift 2 ;;
+    --request|--header|--max-time)
+      shift 2 ;;
+    --fail|--silent|--show-error)
+      shift ;;
+    http://*)
+      url=$1; shift ;;
+    *) exit 98 ;;
+  esac
+done
+[[ -f $body_file && -n $url ]] || exit 99
+uid=$(/usr/bin/jq -er '.preconditions.uid' "$body_file")
+[[ $uid =~ ^[0-9a-f-]+$ ]] || exit 99
+case "$url" in
+  */jobs/*semantic-*) receipt_name=semantic-probe.yaml ;;
+  */jobs/*restore-*) receipt_name=restore-worker.yaml ;;
+  */pods/*target-*) receipt_name=target.yaml ;;
+  */services/*) receipt_name=support-Service ;;
+  */networkpolicies/*) receipt_name=support-NetworkPolicy ;;
+  */configmaps/*) receipt_name=support-ConfigMap ;;
+  */serviceaccounts/*) receipt_name=support-ServiceAccount ;;
+  */rolebindings/*) receipt_name=support-RoleBinding ;;
+  */roles/*) receipt_name=support-Role ;;
+  *) exit 99 ;;
+esac
+if [[ -n ${FAKE_DELETE_FAILURE_PATTERN:-} && $url == *"$FAKE_DELETE_FAILURE_PATTERN"* ]]; then
+  printf 'delete-failed:%s\n' "$receipt_name" >> "$FAKE_CALL_LOG"
+  exit 7
+fi
+printf 'delete:%s\n' "$receipt_name" >> "$FAKE_CALL_LOG"
+printf '%s\n' '{"kind":"Status","status":"Success"}'

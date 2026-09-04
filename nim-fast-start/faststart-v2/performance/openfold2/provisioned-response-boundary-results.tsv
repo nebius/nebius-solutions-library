@@ -1,0 +1,4 @@
+run_id	status	demand_to_http_ready_seconds	demand_to_kubernetes_ready_seconds	worker_restore_seconds	semantic_request_1_seconds	semantic_request_2_seconds	demand_to_two_semantic_responses_seconds	response_timing_contract	local_evidence
+of2rb1b-0913	PASS	11.913086	12.311987	4.025	1.851894	0.984416	14.756378	request-dispatch-to-complete-http-body/v1	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/of2rb1b-0913
+of2rb2-0916	PASS	11.365660	12.904340	3.954	1.871146	0.992264	14.236758	request-dispatch-to-complete-http-body/v1	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/of2rb2-0916
+of2rb3-0918	PASS	11.238689	11.542021	3.811	1.844734	0.996515	14.087336	request-dispatch-to-complete-http-body/v1	<private-evidence-root>/openfold2-native-f7-20260818T0221Z/runs/of2rb3-0918

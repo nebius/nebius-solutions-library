@@ -1,0 +1,109 @@
+{
+  "schema": "archvteams.nebius.ai/genmol-production-shaped-results/v3",
+  "status": "PASS",
+  "timing_measurement": {
+    "t0_source": "target-submit-at.txt",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "exact_total_source": "case 2 response_received_at minus target-submit-at.txt",
+    "legacy_sidecar_filename": "corrected-submit-edge-timings.json",
+    "legacy_receipts_are_preserved_but_not_selected": true
+  },
+  "response_boundary_requalification": {
+    "status": "PASS",
+    "validator_sha256": "f85da2029aaa459d687983e5ebeec6c69dffb19a66f34c084409fe2ccc2efad4",
+    "selected_run_ids": ["run-1", "run-2", "run-3"],
+    "aggregate_private_relative_path": "<private-evidence-root>/genmol-response-boundary-n3.json",
+    "aggregate_sha256": "4739950f1032a77e896aa2673f139d9268e08d749a705fd8a86c0af58319548b",
+    "target_image_and_worker_image_resident_before_t0": true,
+    "cleanup_commands_succeeded_after_each_trial": true,
+    "semantic_pass_count": 6
+  },
+  "measured_at": "2026-08-18",
+  "node": "gpu-node-b.example.invalid",
+  "gpu": "NVIDIA H100",
+  "image": "nvcr.io/nim/nvidia/genmol@sha256:139b909a450fe1fb81198214784a15f67e172e766a93a1569827ba5aa05b4541",
+  "worker_image": "registry.example.invalid/faststart/snapshot-agent@sha256:d5ce1eaad55378a93a9bf53b35effcbc378ed15ab7e5b7f6b41df6689cefdf28",
+  "metric": {
+    "t0": "immediately before target Pod creation",
+    "ready": "first successful application HTTP readiness response",
+    "request_1": "first strict QED inference after readiness, including deferred loading",
+    "request_2": "immediate strict LogP warm inference",
+    "legacy_validation_complete": "T0 through response persistence and semantic validation",
+    "kubernetes_ready": "separate diagnostic; never substituted for HTTP readiness"
+  },
+  "direct": {
+    "checkpoint_id": "genmol-native-f7-v1",
+    "manifest_sha256": "09fe2724e9083c40e403ed37dedba90310335695f2a19764dece532fcfba7632",
+    "storage_state": "attached artifact PVC; direct/O_DIRECT restore; verification read occurred outside T0 but restore bypasses page cache",
+    "trial_count": 3,
+    "request_count": 6,
+    "demand_to_http_ready_seconds": [48.828020, 48.738868, 48.705011],
+    "demand_to_kubernetes_ready_seconds": [49.738814, 49.737615, 49.526667],
+    "semantic_request_1_seconds": [1.13862, 1.188524, 1.186392],
+    "semantic_request_2_seconds": [0.592471, 0.585748, 0.593281],
+    "legacy_demand_to_validation_complete_seconds": [50.563263, 50.517448, 50.489178],
+    "worker_restore_seconds": [41.227, 41.219, 41.198],
+    "median_seconds": {
+      "demand_to_http_ready": 48.738868,
+      "demand_to_kubernetes_ready": 49.737615,
+      "semantic_request_1": 1.186392,
+      "semantic_request_2": 0.592471,
+      "legacy_demand_to_validation_complete": 50.517448,
+      "worker_restore": 41.219
+    }
+  },
+  "buffered": {
+    "checkpoint_id": "genmol-native-f7-v2-buffered",
+    "manifest_sha256": "0be18a2585fe23799e1583e20436860bea4413eb35d055393c611e6cd7382770",
+    "storage_state": "attached artifact PVC; all 4781347930 bytes read through buffered I/O and page-resident before T0",
+    "prewarm_seconds_outside_t0": 6.328907,
+    "trial_count": 3,
+    "request_count": 6,
+    "demand_to_http_ready_seconds": [10.217778, 10.478343, 10.400351],
+    "demand_to_kubernetes_ready_seconds": [11.051287, 10.319216, 10.219599],
+    "semantic_request_1_seconds": [1.186065, 1.205458, 1.198462],
+    "semantic_request_2_seconds": [0.574723, 0.5858, 0.575554],
+    "demand_to_two_semantic_seconds": [11.981694, 12.272754, 12.177434],
+    "worker_restore_seconds": [2.907, 2.915, 2.894],
+    "median_seconds": {
+      "demand_to_http_ready": 10.400351,
+      "demand_to_kubernetes_ready": 10.319216,
+      "semantic_request_1": 1.198462,
+      "semantic_request_2": 0.575554,
+      "demand_to_two_semantic": 12.177434,
+      "worker_restore": 2.907
+    }
+  },
+  "legacy_buffered_cohort": {
+    "status": "SUPERSEDED_BY_RESPONSE_BOUNDARY_REQUALIFICATION",
+    "demand_to_http_ready_seconds": [10.733755, 10.548280, 10.435267],
+    "demand_to_kubernetes_ready_seconds": [11.880965, 11.558094, 10.433973],
+    "semantic_request_1_seconds": [1.215907, 1.211042, 1.230406],
+    "semantic_request_2_seconds": [0.593163, 0.58451, 0.5855],
+    "demand_to_validation_complete_seconds": [12.547019, 12.348272, 12.255292]
+  },
+  "speedup": {
+    "demand_to_http_ready": 4.686271453723052,
+    "worker_restore": 14.17922256621947,
+    "exact_total_direct_comparator": null,
+    "exact_total_direct_comparator_reason": "the retained direct cohort lacks call 2 response_received_at"
+  },
+  "evidence_sha256": {
+    "direct_r1": "aa34da3a5767464b76f6493cd54b6b705a02309761e165a414e880bce175e3e7",
+    "direct_r2": "753d3ad30c750092be916c7484e993c3c2e4899337edcbbf6527c3369f2e3724",
+    "direct_r3": "45ec7e47c057a57641adcb116cfc3a89f3250f144224ba028e9b0dfa5d1284f3",
+    "legacy_buffered_r1": "bafc1aaa30f3fbf06595a7cf474480156bbf4d487b2d3e842cfae6b7039ad716",
+    "legacy_buffered_r2": "34b15c6e4f24b01efb9b7d75b91cb2aa5456296183934f02af617b2b4aeead65",
+    "legacy_buffered_r3": "f3ccf66d65dc71d9c1f88e66a71bed8012b3df1d290fdfa3db0ad08a3ebfcc3a",
+    "response_boundary_r1": "852a6e41807198a5d1a9c245eb080f20b6c188c01fb44e80eda0191d4f00ceb2",
+    "response_boundary_r2": "e02fb48f1c3cab8cb1617abb8d442e49b6e83fe42376f370543ce1df2872aeae",
+    "response_boundary_r3": "038636dc648f00126b8768af3b4f9bd3ed44e9dd8b76c42738acd07649648cfb",
+    "response_boundary_aggregate": "4739950f1032a77e896aa2673f139d9268e08d749a705fd8a86c0af58319548b",
+    "response_boundary_cleanup_r1": "01df535a3fbabad7df8d632764dd77fd3c699c7882b445bba84f7c7d9ec36c0c",
+    "response_boundary_cleanup_r2": "7d8e3b25f180606b055529fe6df4565c3fb7a426aeab0f10d4111291d3449ae9",
+    "response_boundary_cleanup_r3": "8d8bf056f0c77e5944abc3fb3b4168f31362c17f6cabd4d455bc1fb638d75cb9",
+    "direct_artifact_receipt": "50a93d215de979966fcc18fc29b3c500c8b44f97d083b790c0ef62acece71556",
+    "buffered_build_receipt": "1dd58d0fdf2ee739b04052e1fff822c569f9cc8ef02636d30b74ac0685cee2a0",
+    "buffered_artifact_receipt": "a7ce88ad82544aa54e3785556e956fcc655af14f0af204186274f309838b2e4d"
+  }
+}

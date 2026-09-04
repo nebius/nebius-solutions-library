@@ -1,0 +1,233 @@
+{
+  "schema": "archvteams.nebius.ai/diffdock-native-results/v3",
+  "measured_at": "2026-08-18T12:13:25Z",
+  "cluster": "mk8scluster-example",
+  "node": "gpu-node-a.example.invalid",
+  "nim_image": "nvcr.io/nim/mit/diffdock@sha256:300696eb8331d78face40f84d835cc1e278c7d3c391c5aabbbee5884366da480",
+  "target_glibc_version": "2.35",
+  "timing_correction": {
+    "t0_source": "target-submit-at.txt",
+    "method": "subtract persisted pre-create T0 directly from independent HTTP readiness, Kubernetes Ready, and call-2 response_received_at",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "kubernetes_subsecond_normalization": "accept only an inversion below one second from whole-second Kubernetes timestamps; reject one second or more"
+  },
+  "response_boundary_requalification": {
+    "status": "PASS",
+    "selected_batch_id": "dd-rb-1209",
+    "trial_count": 3,
+    "semantic_request_count": 6,
+    "validator_sha256": "245ae98a98db09c34924cd7a499b99da9eb35742667043aaee3e497c33268008",
+    "exact_total_boundary": "T0 through the second semantic response_received_at",
+    "validation_completion_excluded_from_exact_total": true
+  },
+  "worker": {
+    "image": "registry.example.invalid/faststart/snapshot-agent@sha256:063286a3a1354d1c5969fa80f445bb5fbd2a96bc0999c7b6897495f0b4c2fd4d",
+    "executable_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+    "tool_bundle_manifest_sha256": "fc22c423deca17b4175ab42c23a66310c8e2c4d8c4b63a24c33894300020943b"
+  },
+  "capture": {
+    "source_pod_uid": "00000000-0000-4000-8000-000000000005",
+    "checkpoint_seconds": 92.542695267,
+    "criu_dump_seconds": 90.874051675,
+    "cuda_seconds": 1.648700049,
+    "source_checkpoint_id": "diffdock-native-f7-v1",
+    "source_manifest_sha256": "b1c477efdfc6bcb8e253462524cef24fef6e059f43c97a1fcb94b85dca81e0b8",
+    "source_regular_file_count": 122,
+    "source_regular_file_bytes": 7516058303,
+    "source_tree_sha256": "2c531a970d1510c15dbafc461a6f559f20560ce568ac65b1c71c03319210b8bd"
+  },
+  "direct_canary": {
+    "run_id": "dd-direct-smoke",
+    "status": "PASS",
+    "semantic_requests": 2,
+    "semantic_passes": 2,
+    "demand_to_http_ready_seconds": 72.594545,
+    "demand_to_kubernetes_ready_seconds": 73.883823,
+    "semantic_request_1_seconds": 1.321248,
+    "semantic_request_2_seconds": 0.545055,
+    "legacy_demand_to_validation_complete_seconds": 74.462790,
+    "worker_restore_seconds": 65.016
+  },
+  "buffered_artifact": {
+    "checkpoint_id": "diffdock-native-f7-v3-buffered",
+    "manifest_sha256": "93a83188fb0adcc89c1278f136595c6dbce1b3fe9c412c3ccf65f704745ec1fe",
+    "regular_file_count": 122,
+    "regular_file_bytes": 7516058314,
+    "tree_sha256": "2d9e339392d6b4c5207ddbd4ef8f26465e324b2e165bd4cd9b43530f006e1b1d",
+    "hardlinked_payload_file_count": 121,
+    "hardlinked_payload_bytes": 7516052518,
+    "prewarm_bytes": 7516058314,
+    "rootfs_diff_bytes": 184320,
+    "image_io_mode": "buffered"
+  },
+  "setup_outside_t0": {
+    "storage_attached": true,
+    "artifact_full_read_file_count": 122,
+    "artifact_full_read_bytes": 7516058314,
+    "artifact_full_read_seconds": 5.931160,
+    "artifact_full_read_started_at": "2026-08-18T12:09:19.234653387Z",
+    "artifact_full_read_completed_at": "2026-08-18T12:09:26.425914477Z",
+    "artifact_holder_uid": "00000000-0000-4000-8000-000000000006",
+    "target_worker_and_probe_images_resident": true,
+    "setup_preloader_absent_before_t0": true,
+    "post_t0_pulling_event_count": 0,
+    "worker_cpu_request_mcpu": 1000,
+    "worker_cpu_limit_mcpu": 4000,
+    "candidate_headroom_mcpu": 1970,
+    "minimum_required_headroom_mcpu": 400
+  },
+  "selected_response_boundary_n3": {
+    "status": "PASS",
+    "batch_id": "dd-rb-1209",
+    "runs": ["dd-rb-1209-r1", "dd-rb-1209-r2", "dd-rb-1209-r3"],
+    "semantic_requests": 6,
+    "semantic_passes": 6,
+    "demand_to_http_ready_seconds": {
+      "values": [12.127239, 12.057153, 12.181481],
+      "min": 12.057153,
+      "median": 12.127239,
+      "max": 12.181481
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [12.858719, 12.702105, 12.674250],
+      "min": 12.674250,
+      "median": 12.702105,
+      "max": 12.858719
+    },
+    "semantic_request_1_seconds": {
+      "values": [1.462333, 1.456961, 1.456592],
+      "min": 1.456592,
+      "median": 1.456961,
+      "max": 1.462333
+    },
+    "semantic_request_2_seconds": {
+      "values": [0.599702, 0.588161, 0.578353],
+      "min": 0.578353,
+      "median": 0.588161,
+      "max": 0.599702
+    },
+    "demand_to_two_semantic_responses_seconds": {
+      "values": [14.190621, 14.103816, 14.217744],
+      "min": 14.103816,
+      "median": 14.190621,
+      "max": 14.217744
+    },
+    "worker_restore_seconds": {
+      "values": [4.463, 4.366, 4.405],
+      "min": 4.366,
+      "median": 4.405,
+      "max": 4.463
+    },
+    "t0_at": [
+      "2026-08-18T12:09:29.141281890Z",
+      "2026-08-18T12:10:37.297895305Z",
+      "2026-08-18T12:11:45.325750714Z"
+    ],
+    "second_response_received_at": [
+      "2026-08-18T12:09:43.331902Z",
+      "2026-08-18T12:10:51.401711Z",
+      "2026-08-18T12:11:59.543494Z"
+    ],
+    "validation_finished_at": [
+      "2026-08-18T12:09:43.332661Z",
+      "2026-08-18T12:10:51.402730Z",
+      "2026-08-18T12:11:59.544288Z"
+    ]
+  },
+  "legacy_buffered_n3": {
+    "status": "PASS_LEGACY_NOT_SELECTED",
+    "runs": ["dd-buf-p1", "dd-buf-p2", "dd-buf-p3"],
+    "semantic_requests": 6,
+    "semantic_passes": 6,
+    "demand_to_http_ready_seconds": {
+      "values": [11.773042, 11.604310, 11.860136],
+      "min": 11.604310,
+      "median": 11.773042,
+      "max": 11.860136,
+      "mean": 11.745829333333333
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [12.634546, 12.426498, 12.453577],
+      "min": 12.426498,
+      "median": 12.453577,
+      "max": 12.634546,
+      "mean": 12.504873666666667
+    },
+    "semantic_request_1_seconds": {
+      "values": [1.323664, 1.350125, 1.322778],
+      "min": 1.322778,
+      "median": 1.323664,
+      "max": 1.350125,
+      "mean": 1.332189
+    },
+    "semantic_request_2_seconds": {
+      "values": [0.558473, 0.550279, 0.522857],
+      "min": 0.522857,
+      "median": 0.550279,
+      "max": 0.558473,
+      "mean": 0.54387
+    },
+    "legacy_demand_to_validation_complete_seconds": {
+      "values": [13.657086, 13.506684, 13.707841],
+      "min": 13.506684,
+      "median": 13.657086,
+      "max": 13.707841,
+      "mean": 13.623870333333333
+    },
+    "worker_restore_seconds": {
+      "values": [4.139, 4.043, 4.01],
+      "min": 4.01,
+      "median": 4.043,
+      "max": 4.139,
+      "mean": 4.064
+    }
+  },
+  "improvement_over_direct_canary": {
+    "legacy_validation_complete_speedup": 5.452319,
+    "legacy_validation_complete_reduction_percent": 81.659,
+    "worker_restore_speedup": 16.081128,
+    "worker_restore_reduction_percent": 93.782
+  },
+  "setup_exclusions": [
+    {
+      "attempt": "donor-r1",
+      "reason": "target Python 3.10 lacked datetime.UTC",
+      "semantic_requests": 0
+    },
+    {
+      "attempt": "holder-r1",
+      "reason": "capture tree mode 0700 required a read-only uid-0 holder",
+      "semantic_requests": 0
+    },
+    {
+      "attempt": "dd-image-api-test-1201",
+      "reason": "setup-only exact-image pull and UID-preconditioned deletion rehearsal; no demand T0",
+      "semantic_requests": 0,
+      "target_image_pull_bytes": 17047526597,
+      "target_image_pull_seconds": 277.895,
+      "evidence_root": "<private-evidence-root>/diffdock-response-setup-excluded-20260818T120116Z"
+    }
+  ],
+  "cleanup": {
+    "measured_run_objects_remaining": 0,
+    "uid_preconditions_enforced": true,
+    "active_gpu_requests_after_each_trial": [0, 0, 0],
+    "active_gpu_requests_final": 0,
+    "artifact_holder_retained": true,
+    "artifact_pvc_retained": true,
+    "cache_pvc_retained": true,
+    "unrelated_holders_preserved": true
+  },
+  "raw_evidence_root": "<private-evidence-root>/diffdock-native-f7-response-20260818T1209Z",
+  "legacy_raw_evidence_root": "<private-evidence-root>/diffdock-native-f7-20260818T045804Z",
+  "evidence_sha256": {
+    "aggregate": "1e582f6c571e5d9af36e362b2f75df43fef035b7a7265780a5052e2531e88f24",
+    "artifact_prewarm": "aeb1af149e0d054af810d1f670fb339342aa4066b9fbd01d8bd2d0f2058be7e8",
+    "image_residency": "544bd6523f049e527b3f9a2f91b14d42fdc5bac69fcf82d9a339695ceb87a1c4",
+    "cohort_preflight": "a910b266f86f86286514a1063a9db681741e3921490e7c52abbf5605bfba0714",
+    "final_state": "79484885d564669cac88b1b3c21d2c396dc048cbc2da5b40a9d2428be4bd5a29",
+    "run_1": "7e792c7988c0b315dca854592fa510c1b110f7def70fe2c5e103591e19f51424",
+    "run_2": "9f6c5ef792c08d8fab20a987a75a10577505939ec377a5da8aa19f76a5e22c63",
+    "run_3": "65e307ce704c249b762cf36327bff8068c542ba21567140e16cd788547ef5f81"
+  }
+}

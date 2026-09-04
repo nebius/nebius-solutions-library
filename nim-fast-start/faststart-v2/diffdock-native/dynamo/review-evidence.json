@@ -1,0 +1,49 @@
+{
+  "schema": "archvteams.nebius.ai/diffdock-local-contract-review/v1",
+  "reviewed_at": "2026-08-18T05:34:00Z",
+  "live_mutations_performed": true,
+  "worker_interface": {
+    "portable_worker_local_verification_sha256": "95590f7e36d0f4dc35042738109892680cbe5533c51858af21bf30cac8db8c72",
+    "portable_worker_remote_digest_receipt_sha256": "4e1a1b21ad53330f180bcc2b074ff15c5791422fb814ab08bedc79de87393bb0",
+    "live_bundle_verification_log_sha256": "671996f7fda20d1b12f4ce07d553d99ba7f7c425b7f6426fa015d9defa160b58",
+    "live_bundle_verification_pod_sha256": "c24a3188841f0667ee7128fef9c555c1d9b30b73787916ac66e54f3d2e87ee55",
+    "image": "registry.example.invalid/faststart/snapshot-agent@sha256:063286a3a1354d1c5969fa80f445bb5fbd2a96bc0999c7b6897495f0b4c2fd4d",
+    "executable_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+    "tool_bundle_manifest_sha256": "fc22c423deca17b4175ab42c23a66310c8e2c4d8c4b63a24c33894300020943b",
+    "source_commit": "f7f37be174d252590c4b56e25ff4262dd82466fd"
+  },
+  "diffdock_contract": {
+    "image": "nvcr.io/nim/mit/diffdock@sha256:300696eb8331d78face40f84d835cc1e278c7d3c391c5aabbbee5884366da480",
+    "validator_sha256": "e7c21e7d654518b410d2e549d167aad5035c306c7c649db073899380379b76f9",
+    "request_fixture_sha256": "f58c2b74f534529a3b7e5cdd1410e8df33a25cee64a988a62170c5c69ca80977",
+    "retained_results_sha256": "d68fba1c3849920c68cbcdb9742ff1d35891dc1a4c3770d8b11532f93e16a475",
+    "retained_evidence_index_sha256": "708f08bcc03588ff4d4a4529bfedab310481c04f74c8686d26a5da7cd4d5e069",
+    "retained_strict_pass_response_sha256": "ca0e9d0dc69928ed4017196d6eb1f75f7235f6be48dfd8e43cc4786f6da8e4a7",
+    "target_runtime_receipt_sha256": "5b0803c115d87fc3ccd57ce70447499fb0f831a93a31f7854f21a7cd652959b8",
+    "source_artifact_receipt_sha256": "9af8a5cb905b9ae8f2de119fa0c50e1dbc7f39964182b4d9ea3d3db7a0d5bb26",
+    "buffered_build_receipt_sha256": "6215e640f481279c3750a1aa6dc46037711e5534b395dcf91bfbacd580fffb33",
+    "buffered_artifact_receipt_sha256": "2f750b829bd39b38f7163bcd627dd8e37110175c0fc0108b70cb4b0ca6f9cff9",
+    "buffered_n3_receipt_sha256": "e84bbc45b27f1b2b575d510c16c170df8f5577e6408947f334d4e73d3f68dd27"
+  },
+  "compatibility_contract": {
+    "review_sha256": "e14c7752ed2bc4712b5175de515c38d6ad30dbb01f8b512f5718127280e586dc",
+    "diffdock_target_glibc": "2.35",
+    "rootfs_extraction": "target-/bin/tar-without-inherited-LD_LIBRARY_PATH",
+    "donor_manifest_sha256": "223c08b93f096c3f0532049a94462d6f4e338c643d533a8b712c9e584bf11691",
+    "rootfs_variant_tool_sha256": "d37dc95cfb5469a47f13bcc26ec3a7ac2bdd716acef3f7586496423ac91d640c",
+    "rootfs_variant_renderer_sha256": "4376183a3430e1d529df2e05fbf079beb408a922faf209f21443980b8bbfa434",
+    "semantic_probe_template_sha256": "b3764a3d35432c7bad7ac4f927842adce5ce3ed6e540a2e931228d3b290da51c",
+    "render_sha256": "569f92ece30662a6290e1d0535e3ed49405d44190faab23bc9becdffad89a984",
+    "linter_sha256": "7c040a12a27fd2b9128f2c22e143c1681677b582cc6c1281dac947e8a3ccc38c",
+    "evidence_collector_sha256": "5b9250d592e2a556f5559a419010031a5fc64179c50688089b3c2c8f627d54ac",
+    "restore_worker_template_sha256": "1bb12b72f7fa91ae47619bda246b4d8e99f105011ffbc8f2ddd2accda1a6e918"
+  },
+  "offline_verification": {
+    "capture_and_validator_tests": 32,
+    "renderer_binding_evidence_tests": 54,
+    "runner_fake_cluster_tests": 9,
+    "python_compile": "PASS",
+    "bash_syntax": "PASS",
+    "shellcheck": "PASS"
+  }
+}

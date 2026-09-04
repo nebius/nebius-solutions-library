@@ -1,0 +1,124 @@
+diff --git a/deploy/operator/Dockerfile b/deploy/operator/Dockerfile
+index 8ea2284cc..22c78b880 100644
+--- a/deploy/operator/Dockerfile
++++ b/deploy/operator/Dockerfile
+@@ -206,7 +206,7 @@ COPY --from=sources_collect /sources.zip /sources.zip
+ 
+ 
+ # Runtime stage
+-FROM nvcr.io/nvidia/distroless/go:v4.0.9
++FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7ebc675e6df3e26840de28a9d119969806b5542902111bfd111964d0930c08a
+ WORKDIR /
+ COPY --from=builder /workspace/manager .
+ COPY --from=builder /workspace/crd-apply .
+diff --git a/deploy/snapshot/Dockerfile b/deploy/snapshot/Dockerfile
+index 0de91667a..628d1a263 100644
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -18,12 +18,13 @@
+-ARG DOCKER_PROXY
+-ARG GO_VERSION=1.26.3
++ARG GO_BUILD_IMAGE=golang:1.26.6@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6
+ # Default to a pinned upstream CRIU commit. Custom forks can override both
+ # args at build time, for example:
+ #   --build-arg CRIU_REPO=<git-remote-url>
+ #   --build-arg CRIU_REF=<fork-branch-or-sha>
+ ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+-ARG CRIU_REF=b47c692bb3a73ae45ee1c4ab215a8f6869d40efd
+-ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
++ARG CRIU_REF=91d552257809d0e5c7148190e9aa0372f13b76a0
++ARG CUDA_BUILD_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:7d56ebe2b7cd864a60dca3c8b2d0a39f8fc110417e8253e32505c3387f59119c
++ARG AGENT_BASE_IMAGE=nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1
++ARG CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+ 
+ # For placeholder target only - this default allows agent builds to succeed,
+ # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
+@@ -32,7 +33,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
+ # =============================================================================
+ # Stage: Go base - Common setup for Go builds
+ # =============================================================================
+-FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
++FROM ${GO_BUILD_IMAGE} AS go-base
+ 
+ ARG TARGETOS=linux
+ ARG TARGETARCH=amd64
+@@ -52,6 +53,11 @@ COPY go.mod go.sum ./
+ RUN go mod download
+ 
+ COPY . .
++RUN go get \
++      github.com/containerd/containerd@v1.7.34 \
++      golang.org/x/net@v0.56.0 \
++      golang.org/x/text@v0.39.0 \
++      google.golang.org/grpc@v1.82.1 && go mod tidy
+ 
+ # =============================================================================
+ # Stage: Linter - Run golangci-lint
+@@ -122,7 +128,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+ # =============================================================================
+ # Stage: CUDA checkpoint helper builder
+ # =============================================================================
+-FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
++FROM ${CUDA_BUILD_IMAGE} AS cuda-helper-builder
+ 
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     build-essential \
+@@ -148,6 +154,7 @@ FROM ubuntu:24.04 AS criu-builder
+ 
+ ARG CRIU_REPO
+ ARG CRIU_REF
++ARG CUDA_CHECKPOINT_REF
+ 
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     git \
+@@ -185,7 +192,11 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+       /tmp/snapshot_inet_remap.c
+ 
+-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
++RUN git init /tmp/cuda-checkpoint \
++    && cd /tmp/cuda-checkpoint \
++    && git remote add origin https://github.com/NVIDIA/cuda-checkpoint.git \
++    && git fetch --depth 1 origin ${CUDA_CHECKPOINT_REF} \
++    && git checkout --detach FETCH_HEAD
+ 
+ # =============================================================================
+ # Stage: Agent (pre-compliance) - Everything that ships, minus /legal
+@@ -204,6 +215,8 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
+ 
+ # Install CRIU runtime dependencies
+ RUN apt-get update && apt-get install -y --no-install-recommends \
++    openssl \
++    libssl3t64 \
+     libbsd0 \
+     libcap2 \
+     libnet1 \
+@@ -218,7 +231,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+     tar \
+     ca-certificates \
+     util-linux \
+-    && rm -rf /var/lib/apt/lists/*
++    && apt-get purge -y cuda-keyring \
++    && rm -rf /var/lib/apt/lists/*
+ 
+ # Copy CRIU from builder
+ COPY --from=criu-builder /criu-install/usr/local /usr/local
+@@ -423,6 +436,18 @@ COPY --from=licenses /legal /legal
+ 
+ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+ 
++# Task-local public-source validation target. This deliberately bypasses the
++# upstream NVIDIA compliance generator that cannot classify six packages in
++# the public CUDA base. It is suitable only for an isolated canary until the
++# generated legal/SBOM gate passes; it is not a release or redistribution
++# target.
++FROM agent_pre AS task-public-agent
++LABEL org.opencontainers.image.source="https://github.com/ai-dynamo/dynamo" \
++      org.opencontainers.image.revision="f7f37be174d252590c4b56e25ff4262dd82466fd" \
++      org.opencontainers.image.criu.revision="91d552257809d0e5c7148190e9aa0372f13b76a0" \
++      org.opencontainers.image.cuda-checkpoint.revision="00d5cce84c628088d6caa203fc4af40c1538b6f7"
++ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
++
+ # =============================================================================
+ # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
+ #

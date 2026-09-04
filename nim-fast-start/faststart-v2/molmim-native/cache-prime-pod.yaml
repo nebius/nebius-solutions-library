@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: molmim-native-f7-cache-prime-t12
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: cache-prime
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+  annotations:
+    archvteams.nebius.ai/measurement-scope: setup-outside-t0
+    archvteams.nebius.ai/cache-state: exact-image-http-ready-prime
+    linkerd.io/inject: disabled
+    sidecar.istio.io/inject: "false"
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeSelector:
+    kubernetes.io/hostname: gpu-node-b.example.invalid
+  imagePullSecrets:
+    - name: nvcrio-cred
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: molmim
+      image: nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -lc
+      args:
+        - |
+          set -Eeuo pipefail
+          /opt/nvidia/nvidia_entrypoint.sh start_server &
+          server_pid=$!
+          export server_pid
+          trap 'kill "$server_pid" 2>/dev/null || true' TERM INT EXIT
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          pid = int(os.environ["server_pid"])
+          deadline = time.monotonic() + 900
+          while time.monotonic() < deadline:
+              try:
+                  os.kill(pid, 0)
+              except ProcessLookupError as exc:
+                  raise SystemExit("MolMIM exited before cache-prime readiness") from exc
+              try:
+                  with urllib.request.urlopen(
+                      "http://127.0.0.1:8000/v1/health/ready", timeout=1
+                  ) as response:
+                      if response.status == 200:
+                          break
+              except Exception:
+                  pass
+              time.sleep(1)
+          else:
+              raise SystemExit("MolMIM cache-prime readiness timed out")
+          PY
+          touch /state/http-ready
+          wait "$server_pid"
+      env:
+        - name: NIM_CACHE_PATH
+          value: /home/nvs/.cache/nim
+        - name: TORCHINDUCTOR_COMPILE_THREADS
+          value: "1"
+        - name: NGC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ngc-api-key
+              key: NGC_API_KEY
+      ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "4"
+          memory: 32Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "5"
+          memory: 40Gi
+          nvidia.com/gpu: "1"
+      securityContext:
+        privileged: false
+        allowPrivilegeEscalation: false
+        runAsUser: 0
+        runAsGroup: 0
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/http-ready
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 900
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: nim-cache
+          mountPath: /home/nvs/.cache/nim
+          readOnly: false
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: nim-cache
+      persistentVolumeClaim:
+        claimName: molmim-native-f7-cache
+        readOnly: false
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi

@@ -1,0 +1,18 @@
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshotContent
+metadata:
+  name: molmim-native-f7-v1-direct-t12
+  labels:
+    nvidia.com/snapshot-node: gpu-node-b.example.invalid
+    app.kubernetes.io/name: molmim
+spec:
+  snapshotRef:
+    namespace: nim-fast-start
+    name: molmim-native-f7-v1-direct-t12
+  source:
+    nodeName: gpu-node-b.example.invalid
+    podRef:
+      name: "@@SOURCE_POD_NAME@@"
+      uid: "@@SOURCE_POD_UID@@"
+      containers:
+        - molmim

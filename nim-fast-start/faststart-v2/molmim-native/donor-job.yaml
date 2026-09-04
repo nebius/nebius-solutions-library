@@ -1,0 +1,220 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: molmim-native-f7-donor-r1
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: checkpoint-donor
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    nvidia.com/snapshot-checkpoint-id: molmim-native-f7-v1
+  annotations:
+    archvteams.nebius.ai/validator-sha256: 0d87fd53b554a629b8fb83c5abc79b074220f223ea97f7c1d8802d48e4833bd7
+    archvteams.nebius.ai/fixture-sha256: 053e8a5befb020695e4d27200d21b296e7171f480075125cfa6f7b5a71dbc42d
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: molmim
+        app.kubernetes.io/component: checkpoint-donor
+        app.kubernetes.io/part-of: archvteams-2407-faststart
+        nvidia.com/snapshot-is-checkpoint-source: "true"
+        nvidia.com/snapshot-checkpoint-id: molmim-native-f7-v1
+      annotations:
+        nvidia.com/snapshot-artifact-version: "1"
+        nvidia.com/snapshot-target-containers: molmim
+        nvidia.com/snapshot-storage-type: pvc
+        nvidia.com/snapshot-storage-base-path: /checkpoints
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: gpu-node-b.example.invalid
+      imagePullSecrets:
+        - name: nvcrio-cred
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      containers:
+        - name: molmim
+          image: nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -Eeuo pipefail
+              umask 077
+              install -d -m 0700 /output/donor-validation
+              printf '%s' "$VALIDATOR_SOURCE" > /output/donor-validation/validate_molmim.py
+              printf '%s' "$REQUEST_JSON" > /output/donor-validation/request-cmaes-qed.json
+              unset VALIDATOR_SOURCE REQUEST_JSON
+
+              python3 - <<'PY'
+              import hashlib
+              import json
+              import os
+              import pathlib
+              import re
+              import stat
+              import subprocess
+
+              expected = {
+                  "validate_molmim.py": "0d87fd53b554a629b8fb83c5abc79b074220f223ea97f7c1d8802d48e4833bd7",
+                  "request-cmaes-qed.json": "053e8a5befb020695e4d27200d21b296e7171f480075125cfa6f7b5a71dbc42d",
+              }
+              root = pathlib.Path("/output/donor-validation")
+              for name, digest in expected.items():
+                  path = root / name
+                  mode = path.lstat().st_mode
+                  if path.is_symlink() or not stat.S_ISREG(mode):
+                      raise SystemExit(f"staged donor input is not a regular file: {name}")
+                  if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                      raise SystemExit(f"staged donor input digest mismatch: {name}")
+
+              getconf = subprocess.run(
+                  ["getconf", "GNU_LIBC_VERSION"],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout.strip()
+              ldd = subprocess.run(
+                  ["ldd", "--version"],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout.splitlines()[0].strip()
+              match = re.fullmatch(r"glibc ([0-9]+\.[0-9]+)", getconf)
+              if match is None:
+                  raise SystemExit("target GNU libc version is not canonical")
+              receipt = json.dumps(
+                  {
+                      "schema": "archvteams.nebius.ai/target-runtime/v1",
+                      "image": "nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa",
+                      "node": "gpu-node-b.example.invalid",
+                      "glibc_version": match.group(1),
+                      "getconf_gnu_libc_version": getconf,
+                      "ldd_version_line": ldd,
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8") + b"\n"
+              destination = "/snapshot-control/target-runtime.json"
+              descriptor = os.open(
+                  destination,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                  0o600,
+              )
+              with os.fdopen(descriptor, "wb") as output:
+                  output.write(receipt)
+                  output.flush()
+                  os.fsync(output.fileno())
+              PY
+
+              /opt/nvidia/nvidia_entrypoint.sh start_server &
+              server_pid=$!
+              trap 'kill "$server_pid" 2>/dev/null || true' TERM INT EXIT
+
+              python3 /output/donor-validation/validate_molmim.py \
+                --base-url http://127.0.0.1:8000 \
+                --request-file /output/donor-validation/request-cmaes-qed.json \
+                --receipt-dir /output/donor-validation/receipts \
+                --run-id native-f7-donor-a \
+                --run-id native-f7-donor-b \
+                --ready-timeout 900 \
+                --timeout 600
+
+              touch /snapshot-control/ready-for-snapshot
+              wait "$server_pid"
+          env:
+            - name: DYN_SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: NIM_CACHE_PATH
+              value: /home/nvs/.cache/nim
+            - name: TORCHINDUCTOR_COMPILE_THREADS
+              value: "1"
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-api-key
+                  key: NGC_API_KEY
+            - name: VALIDATOR_SOURCE
+              valueFrom:
+                configMapKeyRef:
+                  name: molmim-native-f7-validator-r1
+                  key: VALIDATOR_SOURCE
+            - name: REQUEST_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: molmim-native-f7-validator-r1
+                  key: REQUEST_JSON
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "4"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "5"
+              memory: 40Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            runAsGroup: 0
+          readinessProbe:
+            exec:
+              command:
+                - /bin/cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 1800
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: nim-cache
+              mountPath: /home/nvs/.cache/nim
+            - name: workspace
+              mountPath: /opt/nim/workspace
+            - name: output
+              mountPath: /output
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: molmim
+            - name: checkpoints
+              mountPath: /checkpoints
+              readOnly: true
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: nim-cache
+          persistentVolumeClaim:
+            claimName: molmim-native-f7-cache
+        - name: workspace
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: output
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: snapshot-control
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: molmim-native-f7-artifacts
+            readOnly: true

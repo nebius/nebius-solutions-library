@@ -1,0 +1,63 @@
+{
+  "schema": "archvteams.nebius.ai/dynamo-restore-interface/v1",
+  "approved": true,
+  "release_ready": false,
+  "release_blocker": "performance-validation-only image; replace it with the full agent compliance build after the exact Jammy CUDA base has a baseline SBOM and a formal release approval",
+  "worker_classification": "performance-validation-only",
+  "supported_image_io_modes": ["direct", "writeback", "buffered"],
+  "approval": {
+    "reviewed_by": "codex-performance-interface-review",
+    "reviewed_at": "2026-08-18T05:09:07Z",
+    "evidence_sha256": "76838bc28fa641ba3d3165c1deb1f019c4f63ed9fce9571b38194ff65ef7b816"
+  },
+  "source": {
+    "repository": "https://github.com/ai-dynamo/dynamo",
+    "commit": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+    "materialized_tree_sha256": "76838bc28fa641ba3d3165c1deb1f019c4f63ed9fce9571b38194ff65ef7b816",
+    "patch_inputs": {
+      "public_aio_toolchain": "de10a0609115589efb137186544c9d90a0fcc03616ef959376139c65ae9615bc",
+      "core_hardening": "260c1d9a7f192b8c0b25c924ab26b43a95ad599d38d3f367383e3e984aecfd11",
+      "compliance_closure": "32493e5da929a993976148124699f8abf99240c4ba486e6a01fda453c682ae68",
+      "source_archive_fix": "5dd45d97596bbdf068f33f0532fc71da1754c9eeb7d91f0abe547ac29f30bf0e",
+      "portable_glibc35_toolchain": "62d584ea83770c62d090bbbc15f265a6fadda064ec8c6e6a4fd0abe8328780b9",
+      "buffered_criu_io": "6a59dcb524abd0d9596697efd28afb3bd9d4e543b193f687178494452cecac15",
+      "jammy_compliance_tomli": "6fa58bcdf97c54f8ecd75e2a685150bd1ae5cede71283eb8fc9aa88bacf87156",
+      "ns_bind_mount_glibc35": "4847d7d42aae570fc7f91351a8fbf3018f10dc6247d93c2c9696754861731366"
+    }
+  },
+  "worker_image": "registry.example.invalid/faststart/snapshot-agent@sha256:d5ce1eaad55378a93a9bf53b35effcbc378ed15ab7e5b7f6b41df6689cefdf28",
+  "worker_executable": "/usr/local/bin/restore-worker",
+  "worker_executable_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+  "argument_template": [
+    "restore",
+    "--target-namespace", "{target_namespace}",
+    "--target-name", "{target_name}",
+    "--target-uid", "{target_uid}",
+    "--target-container", "{target_container}",
+    "--target-container-id", "{target_container_id}",
+    "--target-cgroup", "{target_cgroup}",
+    "--target-pod-ip", "{target_pod_ip}",
+    "--target-node", "{target_node}",
+    "--target-pod-spec-sha256", "{target_pod_spec_sha256}",
+    "--expected-image-id", "{expected_image_id}",
+    "--run-id", "{run_id}",
+    "--checkpoint-id", "{checkpoint_id}",
+    "--artifact-version", "{artifact_version}",
+    "--artifact-manifest-sha256", "{artifact_manifest_sha256}",
+    "--tool-bundle-sha256", "{tool_bundle_sha256}",
+    "--container-runtime-socket", "/run/containerd/containerd.sock",
+    "--host-proc", "/host/proc",
+    "--host-cgroup", "/sys/fs/cgroup",
+    "--pod-resources-socket", "/var/lib/kubelet/pod-resources/kubelet.sock"
+  ],
+  "probe_image": "nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa",
+  "probe_executable": "/usr/bin/python3",
+  "validator_sha256": "0d87fd53b554a629b8fb83c5abc79b074220f223ea97f7c1d8802d48e4833bd7",
+  "tool_bundle": {
+    "layout": "archvteams-public-dynamo-tools/v1",
+    "content_sha256": "c0d638100c03fa35973e82859d15b9c8dd1bcbf0fe9cb185b58cc21fae7ead1e",
+    "regular_files": 34,
+    "glibc_compatibility_sha256": "f7af5b214cb963c4cf64910dfafe16987f0c5ec886af5d0e5d7aab5b634f6950",
+    "maximum_required_glibc": "2.35"
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "schema": "archvteams.nebius.ai/openfold2-newnode-current-status/v1",
+  "audited_on": "2026-08-18",
+  "audit_mode": "offline-read-only",
+  "current_contract": {
+    "sample_count": 0,
+    "cohort_status": "NOT_RUN",
+    "poolable_run_ids": [],
+    "future_execution_path": "newnode-v2-only",
+    "required_newnode_terminal_boundary": "setup_demand_at (scale dispatch) through call_2_response_received_at",
+    "required_target_terminal_boundary": "demand_at (target submission) through call_2_response_received_at",
+    "classification": "NO_CURRENT_CONTRACT_EVIDENCE"
+  },
+  "historical_runs": [
+    {
+      "run_id": "of2-newnode-r4-0418",
+      "classification": "HISTORICAL_NONPOOLABLE",
+      "lifecycle_status": "PASS",
+      "semantic_status": "PASS",
+      "cleanup_status": "PASS",
+      "raw_evidence_root": "<private-evidence-root>/openfold2-newnode-production-20260818/runs/of2-newnode-r4-0418/",
+      "scale_dispatch_at": "2026-08-18T04:21:09.698504003Z",
+      "independent_http_ready_at": "2026-08-18T04:31:13.969498+00:00",
+      "independent_scale_to_http_ready_seconds": 604.270994,
+      "legacy_validation_finished_at": "2026-08-18T04:31:16.945739+00:00",
+      "legacy_scale_to_validation_complete_seconds": 607.247235,
+      "legacy_case_elapsed_seconds": [
+        1.916596,
+        1.055248
+      ],
+      "call_1_dispatch_to_body_seconds": null,
+      "call_2_dispatch_to_body_seconds": null,
+      "exact_scale_to_call_2_body_seconds": null,
+      "nonpoolable_reasons": [
+        "no per-call dispatch timestamp",
+        "no per-call complete-body arrival timestamp",
+        "legacy case timers include response persistence and semantic validation",
+        "legacy terminal timestamp is validation completion"
+      ],
+      "source_receipts_sha256": {
+        "scale-up-demand-at.txt": "cf7df1560ac54dc5f285fb22172172f60144fca813deea8cc36e17d34b405f6c",
+        "semantic-summary.json": "7b528b81a85dc21601aee79106a1462ad40ff2b784309e92881b4118beb4dfef",
+        "canary-evidence.json": "bd2fccbad2bf17803da76973267befa99b6ea3c0267cf9d188fd800547fa0fbf",
+        "lifecycle-evidence.json": "f5fa2452b922355179dc5ca54ed00eaa82eb7ecb766c1c16aeb8ba8e89dc3c20",
+        "cleanup-status.json": "a922afc9ff7d58dc2389101ac00d08f6c88527ba6bc250167aa2f13f3711153c"
+      }
+    },
+    {
+      "run_id": "of2-newnode-r5-regional",
+      "classification": "HISTORICAL_NONPOOLABLE",
+      "lifecycle_status": "PASS",
+      "semantic_status": "PASS",
+      "cleanup_status": "PASS",
+      "raw_evidence_root": "<private-evidence-root>/openfold2-newnode-production-20260818/runs/of2-newnode-r5-regional/",
+      "scale_dispatch_at": "2026-08-18T05:31:25.603010500Z",
+      "independent_http_ready_at": "2026-08-18T05:40:58.210143+00:00",
+      "independent_scale_to_http_ready_seconds": 572.607133,
+      "legacy_validation_finished_at": "2026-08-18T05:41:01.061988+00:00",
+      "legacy_scale_to_validation_complete_seconds": 575.458978,
+      "legacy_case_elapsed_seconds": [
+        1.888578,
+        0.958277
+      ],
+      "call_1_dispatch_to_body_seconds": null,
+      "call_2_dispatch_to_body_seconds": null,
+      "exact_scale_to_call_2_body_seconds": null,
+      "nonpoolable_reasons": [
+        "no per-call dispatch timestamp",
+        "no per-call complete-body arrival timestamp",
+        "legacy case timers include response persistence and semantic validation",
+        "legacy terminal timestamp is validation completion"
+      ],
+      "source_receipts_sha256": {
+        "scale-up-demand-at.txt": "0716319f4ce7e2bf609a16d762de471756a52cdc2df2e5e9f34db96761eb85fe",
+        "semantic-summary.json": "1c75859b477c0c790943d032ba05131418349d7d79ff476fb68ed7a35a8be311",
+        "canary-evidence.json": "a020b20308ec85234922639faffb53361ed6cca726e96c1cce2bde8ae6fdf4bf",
+        "lifecycle-evidence.json": "0b0e7da9e197268119e3ed7d0f5cb468cca365bffddd8cf4b2578bdcbe9b45fb",
+        "cleanup-status.json": "9943510edc6a7580a11884d8f6de9f9e2686e4786015209a0f943dbe81eab1c0"
+      }
+    }
+  ],
+  "v1_blockers": {
+    "shared_pipeline_pin_drift_diagnostics_only": [
+      "dynamo/render.py 95ef0a86aee8022d8fa301c98097115ebeef2dc13a86813558811e61ae748ffc -> ad1192445e5c9125687165f4c19534c2edaa011b986921970d22b467531c37cc",
+      "dynamo/lint_manifest.py 79ad4c714933d434920f7e2092853f090707adda8d5c422044fbf212ab9285ae -> 3f71c91a3fb16cc3745d51d48a53678ee7ab6c1d72f5f21900f070664bb470fb",
+      "dynamo/evidence.py 2372b5ace1ac4e515dc45f4b45443bb486087e8c375de949ee35f33d3c313b2b -> 92638eeb2cfcf13b96ebf246bfe83e746412de752ee947e3baac99f893b43975",
+      "dynamo/manifests/target.yaml.tmpl 04d68f1d7d7eb723443bada5e651986c0b21fb4ce343eb0793a8fdf3b07f9826 -> 9c7b83eff3772964b9b7471faddd9b5f059cbcf848ee74e96a48f434aebec908",
+      "dynamo/manifests/restore-worker.yaml.tmpl 717e22f17a2eb5d2792d3e55753ecf0ade8e46a3ce956964dbb24898f89cfe41 -> b04b31eb7e1f10ce2958d75bb31ca3f1d6e45a283a1ac89ea9cce514737d615d",
+      "dynamo/manifests/semantic-probe.yaml.tmpl 918a412f90c1923fac03c13b6ad2fabd84db589e32277c0bb0e854312f7e503e -> b3de3f8d0dc3a74013904642a3ffe12422f731be50193c1eb3abdd110af4916e",
+      "dynamo/restore-interface.live.json 3dd37721a990176d5ed37fe0c4435c2f6057e81db06b51a1b93f5053618d8a3f -> e9f6da8b0923a776ee305c3b5b351dcca40f1db8d914b76c64fc14aa9c03130b",
+      "validate_openfold2.py 4f3e70ef29ea9cd3113c09e6f63bd15b4d9826bf64d7d16972c6c3d0eef3090e -> 66c75652e7f17b35ff569a59cc6a21bc09416329d9fbf30178041aed9006a9ed"
+    ],
+    "shared_pipeline_matching_pins_diagnostics_only": [
+      "dynamo/bind_target.py 88613cdc726fe01a3be9aed38a8b2624677aea5b73d69b410905bc57f985cc97"
+    ],
+    "evidence_cli": [
+      "current evidence requires target-submit-at, a target-create-return proxy, and qualification receipts that the v1 runner does not supply",
+      "the current warm qualifier requires the exact target image before T0 and therefore cannot qualify an intentionally cold new node",
+      "shared evidence assigns demand_at to target submission and setup_demand_at to scale dispatch while v1 lifecycle validation requires demand_at to equal scale dispatch"
+    ],
+    "missing_current_contract_evidence": [
+      "clock receipt",
+      "image and storage phase receipts",
+      "attempt ledger",
+      "n>=20 cohort aggregator",
+      "generalized per-NIM configuration"
+    ]
+  },
+  "newnode_v2_plan": [
+    "version scale dispatch as setup_demand_at and target submission as demand_at without aliasing the two clocks",
+    "record independent HTTP readiness plus each call dispatch, complete-body arrival, and later validation completion",
+    "add a cold-node image qualifier and exact image-pull, storage-attach, and clock receipts",
+    "retain every attempt in a fail-closed ledger and aggregate at least 20 accepted samples with p50, p95, max, and the failure denominator",
+    "move node, image, storage, request, and semantic details into a generalized per-NIM configuration",
+    "complete offline and non-mutating preflight gates before any separately authorized live cohort"
+  ]
+}
