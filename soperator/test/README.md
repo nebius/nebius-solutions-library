@@ -3,6 +3,7 @@
 We offer few kinds of checks:
 - [Tests](#tests):
   - [Quick tests](./quickcheck)
+  - [Checkpointing to Nebius Object Storage](./checkpointing)
 
 ## Uploading
 
@@ -15,6 +16,7 @@ Usage: ./deliver.sh <REQUIRED_FLAGS> [FLAGS] [-h]
 Required flags:
   -t  [str ]  Test type. One of:
                 quickcheck
+                checkpointing
   -u  [str ]  SSH username
   -k  [path]  Path to private SSH key
   -a  [str ]  Address of login node (IP or domain name)
@@ -29,6 +31,7 @@ Flags:
 It accepts following parameters:
 - `-t` - type of the test you want to run. It must be one of:
   - `quickcheck` - for quick tests
+  - `checkpointing` - checkpointing to Nebius Object Storage: verification and reference example
 - `-u` - SSH **username** for login nodes
 - `-k` - path to the private part of the keypair used for **username** auth
 - `-a` - address of the Slurm login node. It could be either IP address, or domain name you gave it in `/etc/hosts`
@@ -42,6 +45,10 @@ Once it's uploaded, you can find these tests inside `/opt/slurm-test` directory 
 ## Tests
 
 For quick check tests, see its [README](./quickcheck/README.md).
+
+For the checkpointing verification and reference example (async sharded checkpoints,
+auto-resume after preemption, cross-cluster resume, `verify.sh`), see the
+[checkpointing README](./checkpointing/README.md).
 
 ## Benchmarks
 

@@ -314,3 +314,29 @@ filestore_jail_submounts = [{
 ## (Optional) Test Your Installation
 
 See the process of delivery and running of tests in [test](./test/README.md).
+
+## (Optional) Checkpoint ML Training to Nebius Object Storage
+
+Soperator installations can provision a Nebius Object Storage bucket and credentials
+for training checkpoints. Set in `terraform.tfvars`:
+
+```hcl
+checkpoint_storage_enabled = true
+```
+
+This creates a `<cluster name>-checkpoints` bucket, a service account with an access
+key (the secret value is delivered via MysteryBox and never stored in Terraform state), and renders
+`/etc/nebius-checkpoints.env` inside the jail so Slurm jobs can reach the bucket.
+
+Checkpoint data can survive cluster teardown: the destroy guard explains how to detach
+a non-empty, module-created bucket from Terraform state before teardown. A new cluster
+can then point at that bucket and resume training where the old one stopped. Combined
+with `#SBATCH --requeue` and the asynchronous checkpointing pattern, jobs can resume
+after Slurm requeues them; instance recovery and requeue policy remain platform and site
+responsibilities.
+
+The checkpointing verification and reference example - asynchronous sharded
+checkpointing with FSDP2 and PyTorch Distributed Checkpoint, auto-resume,
+retention, a scripted end-to-end verification (`verify.sh`), and guidance for
+applying the same commit protocol from any framework - live in
+[test/checkpointing](./test/checkpointing/README.md).
