@@ -62,7 +62,7 @@ variable "jail" {
     error_message = format(
       "Type should be one of [%s], got %s.",
       join(", ", values(module.resources.shared_filesystem_types)),
-      coalesce(var.jail.spec.type, "none")
+      coalesce(try(var.jail.spec.type, null), "none")
     )
   }
 }

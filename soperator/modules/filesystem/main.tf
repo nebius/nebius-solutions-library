@@ -38,10 +38,6 @@ locals {
 resource "nebius_compute_v1_filesystem" "jail" {
   count = var.jail.spec != null ? 1 : 0
 
-  depends_on = [
-    terraform_data.check_weka_count,
-  ]
-
   parent_id = var.iam_project_id
 
   name = local.name.filesystem.jail
@@ -91,10 +87,6 @@ resource "nebius_compute_v1_filesystem" "jail_submount" {
     }
     if submount.spec != null
   })
-
-  depends_on = [
-    terraform_data.check_weka_count,
-  ]
 
   parent_id = var.iam_project_id
 
@@ -172,36 +164,4 @@ locals {
     )))
     mount_tag = local.const.filesystem.accounting
   } : {}
-}
-
-resource "terraform_data" "check_weka_count" {
-  depends_on = [
-    data.nebius_compute_v1_filesystem.jail,
-    data.nebius_compute_v1_filesystem.jail_submount,
-  ]
-
-  lifecycle {
-    precondition {
-      condition = sum(
-        concat(
-          [(try(
-            var.jail.spec.type,
-            one(data.nebius_compute_v1_filesystem.jail).type
-            ) == module.resources.shared_filesystem_types.weka
-            ? 1
-            : 0
-          )],
-          [for sm in var.jail_submounts : (
-            try(
-              sm.spec.type,
-              data.nebius_compute_v1_filesystem.jail_submount[sm.name].type
-            ) == module.resources.shared_filesystem_types.weka
-            ? 1
-            : 0
-          )]
-        )
-      ) < 2
-      error_message = "Total amount of WEKA filesystems couldn't be more than 1 for now."
-    }
-  }
 }

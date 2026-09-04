@@ -199,21 +199,26 @@ variable "filesystem_jail" {
     error_message = format(
       "Type should be one of [%s], got %s.",
       join(", ", values(module.resources.shared_filesystem_types)),
-      coalesce(var.filesystem_jail.spec.type, "none")
+      coalesce(try(var.filesystem_jail.spec.type, null), "none")
     )
   }
 }
 
-data "nebius_compute_v1_filesystem" "existing_jail" {
+data "nebius_compute_v1_filesystem" "jail" {
   count = var.filesystem_jail.existing != null ? 1 : 0
 
   id = var.filesystem_jail.existing.id
 }
+moved {
+  from = data.nebius_compute_v1_filesystem.existing_jail
+  to   = data.nebius_compute_v1_filesystem.jail
+}
 
 locals {
-  filesystem_jail_calculated_size_gibibytes = (var.filesystem_jail.existing != null ?
-    data.nebius_compute_v1_filesystem.existing_jail[0].size_bytes / 1024 / 1024 / 1024 :
-  var.filesystem_jail.spec.size_gibibytes)
+  filesystem_jail_calculated_size_gibibytes = (var.filesystem_jail.existing != null
+    ? data.nebius_compute_v1_filesystem.jail[0].size_bytes / 1024 / 1024 / 1024
+    : var.filesystem_jail.spec.size_gibibytes
+  )
 }
 
 variable "allow_empty_jail_submounts" {
@@ -266,6 +271,15 @@ variable "filesystem_jail_submounts" {
   }
 }
 
+data "nebius_compute_v1_filesystem" "jail_submount" {
+  for_each = tomap({ for submount in var.filesystem_jail_submounts :
+    submount.name => submount.existing.id
+    if submount.existing != null
+  })
+
+  id = each.value
+}
+
 resource "terraform_data" "check_jail_submount_paths" {
   lifecycle {
     precondition {
@@ -274,6 +288,63 @@ resource "terraform_data" "check_jail_submount_paths" {
         (sm.mount_path != "/home")
       ])
       error_message = "filesystem_jail_submounts must not use \"/home\" as mount_path. That path is reserved for home directories, and backing /home with shared filestore causes severe performance degradation."
+    }
+  }
+}
+
+locals {
+  weka_count = sum(
+    concat(
+      [(try(
+        var.filesystem_jail.spec.type,
+        one(data.nebius_compute_v1_filesystem.jail).type
+        ) == module.resources.shared_filesystem_types.weka
+        ? 1
+        : 0
+      )],
+      [for sm in var.filesystem_jail_submounts : (
+        try(
+          sm.spec.type,
+          data.nebius_compute_v1_filesystem.jail_submount[sm.name].type
+        ) == module.resources.shared_filesystem_types.weka
+        ? 1
+        : 0
+      )]
+    )
+  )
+  weka_is_used = local.weka_count > 0
+}
+resource "terraform_data" "check_weka_count" {
+  depends_on = [
+    data.nebius_compute_v1_filesystem.jail,
+    data.nebius_compute_v1_filesystem.jail_submount,
+  ]
+
+  lifecycle {
+    precondition {
+      condition     = local.weka_count < 2
+      error_message = "Total amount of WEKA filesystems couldn't be more than 1 for now."
+    }
+  }
+}
+
+resource "terraform_data" "check_resource_presets_for_weka" {
+  count = local.weka_is_used ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition = alltrue(concat(
+        [
+          local.resources.system.sufficient["weka"],
+          local.resources.controller.sufficient["weka"],
+          local.resources.login.sufficient["weka"],
+        ],
+        [for i, worker in local.slurm_nodeset_workers :
+          local.resources.workers[i].sufficient["weka"]
+        ],
+        var.accounting_enabled ? [local.resources.accounting.sufficient["weka"]] : [],
+      ))
+      error_message = "All nodes should have sufficient preset if WEKA is requested."
     }
   }
 }
