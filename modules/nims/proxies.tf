@@ -215,7 +215,7 @@ resource "kubernetes_service_v1" "model_lbs" {
       app = each.value.app
     }
 
-    type = "LoadBalancer"
+    type = var.proxy_service_type
 
     dynamic "port" {
       for_each = local.lb_group_ports[each.key]
