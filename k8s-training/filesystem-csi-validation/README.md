@@ -50,8 +50,11 @@ Suggested order:
 1. Run `./01-verify-node-filesystem-mounts.sh`
 2. Run `./02-run-csi-smoke-test.sh`
 3. Run `./03-run-csi-rwx-cross-node-test.sh`
-4. Run `./04-cleanup-csi-test-resources.sh` to remove only the temporary test
-   resources when you are done testing
+4. Run `./05-run-checkpoint-restore-test.sh` to validate model-checkpoint
+   write/restore on the writer node and across every other GPU node (verifies
+   data integrity by checksum; cleans up its own resources on exit)
+5. Run `./04-cleanup-csi-test-resources.sh` to remove any temporary test
+   resources left from steps 01–03 when you are done testing
 
 Prerequisites:
 
