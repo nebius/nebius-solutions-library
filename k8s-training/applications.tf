@@ -48,6 +48,52 @@ module "kuberay-service" {
   serve_config_v2  = var.kuberay_serve_config_v2
 }
 
+module "kueue" {
+  count  = var.kueue.enabled ? 1 : 0
+  source = "../modules/kueue"
+
+  chart_version             = var.kueue.chart_version
+  namespace                 = var.kueue.namespace
+  timeout_seconds           = var.kueue.timeout_seconds
+  helm_values               = var.kueue.helm_values
+  topology_aware_scheduling = var.kueue.topology_aware_scheduling
+  controller_node_selector = {
+    "nebius.com/node-group-id" = nebius_mk8s_v1_node_group.cpu-only.id
+  }
+  resource_flavors = merge(
+    {
+      for index, node_group in nebius_mk8s_v1_node_group.gpu :
+      "nebius-gpu-${index}" => {
+        node_labels = {
+          "nebius.com/node-group-id" = node_group.id
+        }
+        tolerations = [{
+          key      = "nvidia.com/gpu"
+          operator = "Exists"
+          effect   = "NoSchedule"
+        }]
+      }
+    },
+    {
+      for index, rack in sort(keys(nebius_mk8s_v1_node_group.gb300)) :
+      "nebius-gpu-${index}" => {
+        node_labels = {
+          "nebius.com/node-group-id" = nebius_mk8s_v1_node_group.gb300[rack].id
+        }
+        tolerations = [{
+          key      = "nvidia.com/gpu"
+          operator = "Exists"
+          effect   = "NoSchedule"
+        }]
+      }
+    },
+  )
+
+  depends_on = [
+    nebius_mk8s_v1_node_group.cpu-only,
+  ]
+}
+
 module "opa_gatekeeper" {
   source = "../modules/opa_gatekeeper"
   count  = var.opa_gatekeeper_enable ? 1 : 0

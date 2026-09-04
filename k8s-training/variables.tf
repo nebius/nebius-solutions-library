@@ -404,6 +404,38 @@ variable "enable_kuberay_service" {
   default     = false
 }
 
+variable "kueue" {
+  description = "Optional Kueue installation with topology-aware scheduling enabled by default; queue policy remains explicit."
+  type = object({
+    enabled                   = optional(bool, false)
+    chart_version             = optional(string, "0.19.2")
+    namespace                 = optional(string, "kueue-system")
+    timeout_seconds           = optional(number, 300)
+    topology_aware_scheduling = optional(bool, true)
+    helm_values               = optional(list(string), [])
+  })
+  default = {}
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.kueue.chart_version))
+    error_message = "kueue.chart_version must be a release version such as 0.19.2."
+  }
+
+  validation {
+    condition = (
+      length(var.kueue.namespace) >= 1 &&
+      length(var.kueue.namespace) <= 63 &&
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.kueue.namespace))
+    )
+    error_message = "kueue.namespace must be a valid Kubernetes namespace name."
+  }
+
+  validation {
+    condition     = var.kueue.timeout_seconds > 0
+    error_message = "kueue.timeout_seconds must be greater than zero."
+  }
+}
+
 variable "kuberay_cpu_worker_image" {
   description = "Docker image to use for CPU worker pods"
   default     = null
