@@ -520,10 +520,23 @@ resource "terraform_data" "check_nfs_exclusivity" {
   }
 }
 
+locals {
+  nfs_enabled = var.nfs.enabled || var.nfs_in_k8s.enabled
+}
+
+resource "terraform_data" "check_nfs_exclusivity_vs_weka" {
+  lifecycle {
+    precondition {
+      condition     = !((local.nfs_enabled || var.slurm_nodeset_nfs != null) && local.weka_is_used)
+      error_message = "NFS and WEKA cannot be used together."
+    }
+  }
+}
+
 resource "terraform_data" "check_nfs_sustainability" {
   lifecycle {
     precondition {
-      condition = (!(var.nfs.enabled || var.nfs_in_k8s.enabled)
+      condition = (!local.nfs_enabled
         ? true
         : contains(["XS", "S", "M"], module.sizing.sizing_tier)
       )
