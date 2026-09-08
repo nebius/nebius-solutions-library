@@ -42,10 +42,15 @@ resource "nebius_compute_v1_filesystem" "jail" {
 
   name = local.name.filesystem.jail
 
-  type             = var.jail.spec.type
-  size_bytes       = provider::units::from_gib(var.jail.spec.size_gibibytes)
-  block_size_bytes = provider::units::from_kib(var.jail.spec.block_size_kibibytes)
-  forbid_deletion  = var.jail.spec.forbid_deletion
+  type       = var.jail.spec.type
+  size_bytes = provider::units::from_gib(var.jail.spec.size_gibibytes)
+  block_size_bytes = (var.jail.spec.type == module.resources.shared_filesystem_types.weka
+    // External filesystems should have block_size_bytes == 0.
+    // However, block_size_bytes == 0 forces TF to replace the resource during import
+    ? null // External filesystems should have block_size_bytes == 0
+    : provider::units::from_kib(var.jail.spec.block_size_kibibytes)
+  )
+  forbid_deletion = var.jail.spec.forbid_deletion
 
   lifecycle {
     ignore_changes = [
@@ -92,10 +97,13 @@ resource "nebius_compute_v1_filesystem" "jail_submount" {
 
   name = each.value.name
 
-  type             = each.value.type
-  size_bytes       = each.value.storage
-  block_size_bytes = each.value.block
-  forbid_deletion  = each.value.forbid_deletion
+  type       = each.value.type
+  size_bytes = each.value.storage
+  block_size_bytes = (each.value.type == module.resources.shared_filesystem_types.weka
+    ? 0 // External filesystems should have block_size_bytes == 0
+    : each.value.block
+  )
+  forbid_deletion = each.value.forbid_deletion
 
   lifecycle {
     ignore_changes = [
