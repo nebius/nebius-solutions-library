@@ -86,6 +86,12 @@ variable "boot_disk_size_gb" {
   description = "size of the boot disk"
 }
 
+variable "boot_disk_image" {
+  type        = string
+  default     = "ubuntu24.04-cuda13.0"
+  description = "Image family to use for the boot disk."
+}
+
 variable "extra_storage_size_gb" {
   type        = number
   default     = 50
@@ -96,6 +102,45 @@ variable "extra_storage_class" {
   type        = string
   default     = "NETWORK_SSD"
   description = "Network type of additional disk being added"
+}
+
+variable "enable_local_disks" {
+  description = "Whether to request local NVMe passthrough disks"
+  type        = bool
+  default     = false
+
+  validation {
+    condition = (
+      !var.enable_local_disks ||
+      (
+        var.platform == "gpu-b300-sxm" &&
+        var.preset == "8gpu-192vcpu-2768gb"
+      )
+    )
+    error_message = "Local disks are supported only on B300 platform with preset 8gpu-192vcpu-2768gb."
+  }
+}
+
+variable "local_disks_mount_mode" {
+  description = "How cloud-init should mount requested local NVMe disks. Use 'raid0' for a single RAID0 mount or 'raw' to mount each device separately."
+  type        = string
+  default     = "raid0"
+
+  validation {
+    condition     = contains(["raid0", "raw"], var.local_disks_mount_mode)
+    error_message = "Local disks mount mode must be one of: raid0, raw."
+  }
+}
+
+variable "local_nvme_drives_path" {
+  description = "Mount path for local NVMe drives"
+  type        = string
+  default     = "/scratch"
+
+  validation {
+    condition     = startswith(var.local_nvme_drives_path, "/")
+    error_message = "Local NVMe drives path must be an absolute path."
+  }
 }
 
 variable "public_ip" {

@@ -17,6 +17,7 @@ module "instance-module" {
   preset                  = var.preset
   platform                = var.platform
   boot_disk_size_gb       = var.boot_disk_size_gb
+  boot_disk_image         = var.boot_disk_image
   shared_filesystem_id    = var.shared_filesystem_id
   shared_filesystem_mount = var.shared_filesystem_mount
   extra_path              = var.extra_path
@@ -29,4 +30,7 @@ module "instance-module" {
   aws_access_key_id       = var.aws_access_key_id
   aws_secret_access_key   = var.aws_secret_access_key
   preemptible             = var.preemptible
+  enable_local_disks      = var.enable_local_disks
+  local_disks_mount_mode  = var.local_disks_mount_mode
+  local_nvme_drives_path  = var.local_nvme_drives_path
 }
