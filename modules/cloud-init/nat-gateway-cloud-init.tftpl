@@ -1,0 +1,35 @@
+#cloud-config
+users:
+  - name: ${ssh_user_name}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+write_files:
+  - path: /etc/sysctl.d/99-nebius-custom-nat-gateway.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      net.ipv4.ip_forward=1
+  - path: /etc/systemd/system/nebius-custom-nat-gateway.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Configure Nebius custom NAT gateway
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
+      ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE || /usr/sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE'
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable --now nebius-custom-nat-gateway.service
