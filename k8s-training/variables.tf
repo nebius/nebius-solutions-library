@@ -481,6 +481,20 @@ variable "gpu_nodes_preemptible" {
   default     = false
 }
 
+variable "gpu_nodes_reservation_policy" {
+  description = "Reservation policy for GPU node groups. Policy can be AUTO, STRICT, or FORBID."
+  type = object({
+    policy          = string
+    reservation_ids = list(string)
+  })
+  default = null
+
+  validation {
+    condition     = var.gpu_nodes_reservation_policy == null || contains(["AUTO", "STRICT", "FORBID"], var.gpu_nodes_reservation_policy.policy)
+    error_message = "Policy must be one of AUTO, STRICT, or FORBID."
+  }
+}
+
 variable "custom_driver" {
   description = "Use customized driver for the GPU Operator, e.g. to run Cuda 13 on H200"
   type        = bool

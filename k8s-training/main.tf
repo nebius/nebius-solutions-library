@@ -170,6 +170,10 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     ] : null
     gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
     gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
+    reservation_policy = var.gpu_nodes_reservation_policy != null ? {
+      policy          = var.gpu_nodes_reservation_policy.policy
+      reservation_ids = var.gpu_nodes_reservation_policy.reservation_ids
+    } : null
     preemptible = var.gpu_nodes_preemptible ? {
       on_preemption = "STOP"
       priority      = 3

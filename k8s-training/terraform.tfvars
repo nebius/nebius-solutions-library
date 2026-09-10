@@ -56,6 +56,12 @@ infiniband_fabric = "" # Leave empty to disable GPU clustering for RTX6000 deplo
 #   local_nvme                = true
 # }
 
+# gpu_nodes_reservation_policy = {
+#     policy          = "STRICT"
+#     reservation_ids = ["capacityblockgroup-e00xxxxx"]
+# }
+
+
 gpu_nodes_driverfull_image = true
 enable_k8s_node_group_sa   = true
 enable_egress_gateway      = false
