@@ -80,6 +80,18 @@ terraform-test-modules:
 		fi; \
 	done
 
+.PHONY: terraform-test-installations
+terraform-test-installations:
+	@echo 'Running Terraform installation module tests...'
+	@for installation_dir in installations/*/; do \
+		if [ -d "$$installation_dir/tests" ]; then \
+			echo "Testing module: $$installation_dir"; \
+			pushd "$$installation_dir" > /dev/null; \
+			terraform test -var-file ./tests/vars.hcl; \
+			popd > /dev/null; \
+		fi; \
+	done
+
 .PHONY: terraform-test-cloud-init
 terraform-test-cloud-init:
 	python3 test/cloud-init/test_cloud_init.py
