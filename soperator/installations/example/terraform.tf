@@ -34,7 +34,6 @@ terraform {
 }
 
 provider "nebius" {
-  domain            = "api.eu.nebius.cloud:443"
   timeout           = "10m"
   per_retry_timeout = "1m"
   retries           = 10
