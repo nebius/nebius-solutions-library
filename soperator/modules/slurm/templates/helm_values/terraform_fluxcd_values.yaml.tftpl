@@ -520,7 +520,6 @@ resources:
                 emptyDir:
                   sizeLimit: ${slurm_cluster.nodes.worker.resources.ephemeral_storage}Gi
 
-            %{~ if !slurm_cluster.jail.on_weka ~}
               %{~ if slurm_cluster.nfs.enabled ~}
               - name: nfs
                 nfs:
@@ -537,7 +536,6 @@ resources:
                 persistentVolumeClaim:
                   claimName: "home-dir"
               %{~ endif ~}
-            %{~ endif ~}
 
               %{~ if telemetry_enabled ~}
               - name: motd-nebius-o11y
@@ -763,7 +761,6 @@ resources:
                   %{~ endfor ~}
                 volumes:
                   jailSubMounts:
-                  %{~ if !slurm_cluster.jail.on_weka ~}
                     %{~ if slurm_cluster.nfs.enabled ~}
                     - mountPath: ${slurm_cluster.nfs.mount_path}
                       name: nfs
@@ -774,7 +771,6 @@ resources:
                       name: home-dir
                       volumeSourceName: home-dir
                     %{~ endif ~}
-                  %{~ endif ~}
                     %{~ if telemetry_enabled ~}
                     - mountPath: /etc/update-motd.d/95-nebius-o11y
                       subPath: 95-nebius-o11y
@@ -1020,7 +1016,7 @@ resources:
           %{~ endif ~}
 
         nfsServer:
-          enabled: ${!slurm_cluster.jail.on_weka && slurm_cluster.nfs_in_k8s.enabled}
+          enabled: ${slurm_cluster.nfs_in_k8s.enabled}
           %{~ if slurm_cluster.nfs_in_k8s.enabled ~}
           version: ${slurm_cluster.nfs_in_k8s.version}
           overrideValues:
