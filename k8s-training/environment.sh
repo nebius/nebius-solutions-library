@@ -24,11 +24,19 @@ fi
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
 
+# VPC network
+NEBIUS_VPC_NETWORK_ID=$(nebius vpc network list \
+  --parent-id "${NEBIUS_PROJECT_ID}" \
+  --format json \
+  | jq -r '.items[] | select(.metadata.name | startswith("default")) | .metadata.id')
+export NEBIUS_VPC_NETWORK_ID
+
 # VPC subnet
 NEBIUS_VPC_SUBNET_ID=$(nebius vpc subnet list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --format json \
-  | jq -r '.items[0].metadata.id')
+  | jq -r --arg NET_ID "${NEBIUS_VPC_NETWORK_ID}" \
+    '.items[] | select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default-subnet"))) | .metadata.id')
 export NEBIUS_VPC_SUBNET_ID
 
 # Object Storage Bucket
