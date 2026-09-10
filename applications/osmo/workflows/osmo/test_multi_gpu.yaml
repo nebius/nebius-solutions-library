@@ -11,7 +11,7 @@ workflow:
   name: test-multi-gpu
   resources:
     gpu-resource:
-      platform: gpu
+      platform: H100
       gpu: 8
       cpu: 16
       memory: 64Gi

@@ -1,0 +1,38 @@
+# Promtail Helm Values
+
+config:
+  clients:
+    - url: http://loki:3100/loki/api/v1/push
+  snippets:
+    pipelineStages:
+      - cri: {}
+      - json:
+          expressions:
+            level: level
+            message: msg
+      - labels:
+          level:
+      - output:
+          source: message
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+extraVolumes: []
+extraVolumeMounts: []
+
+serviceMonitor:
+  enabled: true

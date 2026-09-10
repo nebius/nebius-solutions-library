@@ -1,0 +1,48 @@
+# Network Operator Helm Values
+
+operator:
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+rdmaSharedDevicePlugin:
+  deploy: true
+  resources:
+    - name: rdma_shared_device_a
+      vendors: [15b3]
+      deviceIDs: [101b, 101d, 1017, 1019]
+      ifNames: ["*"]
+
+sriovDevicePlugin:
+  deploy: false
+
+nicClusterPolicy:
+  deploy: true
+  rdmaSharedDevicePlugin:
+    image: k8s-rdma-shared-dev-plugin
+    repository: ghcr.io/mellanox
+    version: sha-4f3eb55
+
+secondaryNetwork:
+  deploy: true
+  multus:
+    deploy: true
+    image: multus-cni
+    repository: ghcr.io/k8snetworkplumbingwg
+    version: v3.9.3
+  cniPlugins:
+    deploy: true
+    image: plugins
+    repository: ghcr.io/k8snetworkplumbingwg
+    version: v1.3.0
+  ipamPlugin:
+    deploy: true
+    image: whereabouts
+    repository: ghcr.io/k8snetworkplumbingwg
+    version: v0.6.2

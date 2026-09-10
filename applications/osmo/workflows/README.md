@@ -1,6 +1,6 @@
 # Workflow Templates
 
-OSMO workflow templates for training jobs on Nebius.
+OSMO workflow templates for training and validation jobs on Nebius.
 
 ## Available Workflows
 
@@ -8,6 +8,8 @@ OSMO workflow templates for training jobs on Nebius.
 |------|-------------|------|
 | `osmo/hello_nebius.yaml` | Hello World example with GPU | 1 |
 | `osmo/gpu_test.yaml` | GPU validation test | 1 |
+| `osmo/test_nvidia_smi.yaml` | Cross-pool `nvidia-smi` smoke test | 1 |
+| `osmo/test_isaac_sdg.yaml` | Isaac Sim SDG smoke test that writes a sample dataset output | 1 |
 | `osmo/train.yaml` | Single GPU training | 1 |
 | `osmo/train-multi-gpu.yaml` | Multi-GPU distributed training | 8 |
 
@@ -29,7 +31,40 @@ osmo workflow submit osmo/gpu_test.yaml
 
 This workflow validates GPU availability by running `nvidia-smi` on a Nebius L40S node.
 
+### Compare Two GPU Pools
+
+```bash
+osmo workflow submit osmo/test_nvidia_smi.yaml --pool <primary-gpu-pool>
+osmo workflow submit osmo/test_nvidia_smi.yaml --pool <secondary-gpu-pool>
+```
+
+This workflow uses `platform: gpu`, so each pool resolves that alias to its configured GPU platform. Compare the `nvidia-smi` logs from each run to confirm the expected GPU model.
+
 > **Note**: GPU workflows require the GPU platform to be configured. See [Configure OSMO GPU Platform](../deploy/002-setup/README.md#configure-osmo-gpu-platform).
+
+### Run Isaac Sim SDG Smoke Test
+
+```bash
+osmo workflow submit osmo/test_isaac_sdg.yaml --pool <pool-name>
+```
+
+This workflow runs the Isaac Sim scene-based SDG example and publishes the generated files as the `isaac-sim-sdg-sample` dataset.
+
+Before downloading the dataset from a local machine, create a one-time OSMO `DATA` credential for the backing object storage bucket:
+
+```bash
+osmo credential set <credential-name> --type DATA --payload \
+  access_key_id='<storage-access-key-id>' \
+  access_key='<storage-secret-access-key>' \
+  endpoint='s3://<storage-bucket-name>' \
+  region='<nebius-region>'
+```
+
+Then download the output dataset:
+
+```bash
+osmo dataset download isaac-sim-sdg-sample <output-directory>
+```
 
 ## Usage
 

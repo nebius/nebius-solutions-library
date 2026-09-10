@@ -25,7 +25,7 @@ workflow:
   name: test-shared-fs
   resources:
     gpu-resource:
-      platform: gpu
+      platform: default
       gpu: 1
       cpu: 2
       memory: 2Gi

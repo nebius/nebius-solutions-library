@@ -1,0 +1,82 @@
+# Optional overrides for the tf-deploy application Terraform root.
+#
+# This file is for app-layer overrides only.
+# CPU/GPU node counts, platforms, and presets live in ./infra/terraform.tfvars.example.
+#
+# Most required values now come from:
+#   - ./nebius-env-init.sh
+#   - ./osmo-sso.env
+#   - ./infra/terraform.tfstate
+#
+# Copy this file to terraform.tfvars only if you want to override defaults.
+
+# namespace = "osmo"
+# ingress_namespace = "ingress-nginx"
+# ingress_release_name = "ingress-nginx"
+# deploy_ingress_nginx = true
+# deploy_ui = true
+# enable_auth = true
+
+# tls_enabled         = true
+# tls_secret_name     = "osmo-tls"
+# tls_mode            = "cert-manager"
+# deploy_cert_manager = true
+# cert_manager_namespace           = "cert-manager"
+# cert_manager_chart_version       = null
+# cert_manager_email               = "your-email@example.com"
+# cert_manager_acme_server         = "https://acme-v02.api.letsencrypt.org/directory"
+# cert_manager_http01_ingress_class = "nginx"
+# cluster_issuer_name = "letsencrypt-prod"
+# oauth2_proxy_insecure_skip_tls_verify = null # Optional override. Defaults to true only for self-signed installs.
+
+# ingress_nginx_chart_version = "4.14.2"
+# redis_chart_version         = "25.3.1"
+# osmo_image_tag              = "6.2"
+# osmo_chart_version          = "1.2.1"
+
+# oauth2_proxy_cookie_refresh = "4m"
+# oauth2_proxy_cookie_secret  = "existing-cookie-secret"
+# service_base_url            = "https://osmo.89.169.122.98.nip.io"
+# mek_encoded                 = "base64-encoded-jwk"
+# keycloak_admin_password     = "existing-admin-password"
+# keycloak_db_password        = "existing-keycloak-db-password"
+
+# ingress_service_annotations = {
+#   # Add provider-specific service annotations here if your cluster requires them.
+# }
+
+# deploy_observability                 = true
+# monitoring_namespace                 = "monitoring"
+# kube_prometheus_stack_chart_version  = null
+# loki_stack_chart_version             = null
+# promtail_chart_version               = null
+# grafana_admin_password               = "existing-grafana-password"
+
+# deploy_backend_operator              = true
+# backend_operator_namespace           = "osmo-operator"
+# workflows_namespace                  = "osmo-workflows"
+# backend_operator_release_name        = "osmo-operator"
+# backend_operator_chart_version       = null
+# backend_name                         = "default"
+# backend_operator_service_url         = "http://osmo-agent.osmo.svc.cluster.local:80"
+# backend_operator_username            = "osmo-admin"
+# backend_operator_password            = "osmo-admin"
+# backend_operator_login_method        = "password"
+# backend_operator_service_token       = "existing-service-token" # optional override for enable_auth=false
+
+# deploy_gpu_infrastructure            = null
+# configure_gpu_platform               = null
+# deploy_network_operator              = false
+# gpu_operator_namespace               = "gpu-operator"
+# network_operator_namespace           = "network-operator"
+# kai_scheduler_namespace              = "kai-scheduler"
+# gpu_operator_chart_version           = null
+# gpu_driver_version                   = null
+# network_operator_chart_version       = null
+# kai_scheduler_chart_version          = "v0.9.8"
+# gpu_platform_name                    = "H100"
+
+# configure_workflow_storage           = true
+# configure_dataset_bucket             = true
+# dataset_bucket_name                  = "nebius"
+# configure_backend_scheduler          = true
