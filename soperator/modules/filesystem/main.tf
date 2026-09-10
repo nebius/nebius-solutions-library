@@ -47,7 +47,7 @@ resource "nebius_compute_v1_filesystem" "jail" {
   block_size_bytes = (var.jail.spec.type == module.resources.shared_filesystem_types.weka
     // External filesystems should have block_size_bytes == 0.
     // However, block_size_bytes == 0 forces TF to replace the resource during import
-    ? null // External filesystems should have block_size_bytes == 0
+    ? null
     : provider::units::from_kib(var.jail.spec.block_size_kibibytes)
   )
   forbid_deletion = var.jail.spec.forbid_deletion
@@ -100,7 +100,9 @@ resource "nebius_compute_v1_filesystem" "jail_submount" {
   type       = each.value.type
   size_bytes = each.value.storage
   block_size_bytes = (each.value.type == module.resources.shared_filesystem_types.weka
-    ? 0 // External filesystems should have block_size_bytes == 0
+    // External filesystems should have block_size_bytes == 0.
+    // However, block_size_bytes == 0 forces TF to replace the resource during import
+    ? null
     : each.value.block
   )
   forbid_deletion = each.value.forbid_deletion
