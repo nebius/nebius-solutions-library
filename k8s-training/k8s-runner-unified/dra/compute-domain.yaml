@@ -1,0 +1,31 @@
+# =============================================================================
+# GB300 / DRA ComputeDomain for cross-node NCCL.
+#
+# On DRA-native GB300 clusters, cross-node collectives ride MNNVL (multi-node
+# NVLink). Without a ComputeDomain the nodes aren't in a shared NVLink clique,
+# so NCCL's NVLS/MNNVL setup fails with "Cuda failure 801 'operation not
+# supported'" (transport/nvls.cc). The ComputeDomain establishes the IMEX
+# channel that lets the worker pods form one NVLink domain.
+#
+# The NVIDIA controller AUTO-CREATES the channel ResourceClaimTemplate named
+# below (nccl-channel) — do not hand-write it. Workers claim it via
+# nccl-test-template-dra.yaml. Sized to the LARGEST host count in the run so a
+# single ComputeDomain covers every 1..N-host iteration.
+#
+# Created on every DRA run regardless of NCCL_TRANSPORT: with =ib the workers
+# still claim the (now unused) channel and NCCL simply routes over InfiniBand,
+# which keeps the worker template unconditional. Harmless when unused.
+#
+# Placeholder patched by nccl_runner_unified.sh (envsubst):
+#   ${MAX_HOSTS}   largest host count in the run (= ComputeDomain size)
+# =============================================================================
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: nccl-cd
+  namespace: ${NAMESPACE}
+spec:
+  numNodes: ${MAX_HOSTS}
+  channel:
+    resourceClaimTemplate:
+      name: nccl-channel
