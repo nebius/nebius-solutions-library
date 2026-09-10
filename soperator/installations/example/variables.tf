@@ -437,21 +437,21 @@ variable "node_group_version" {
 
 
 variable "platform_cuda_versions" {
-  description = "Per-platform CUDA versions consumed by Slurm/operator (e.g., 12.8.2). Keys are platform IDs (e.g., gpu-h100-sxm)."
+  description = "Per-platform CUDA versions consumed by Slurm/operator (e.g., 13.0.3). Keys are platform IDs (e.g., gpu-h100-sxm)."
   type        = map(string)
   default = {
-    cpu-e1         = "12.9.0"
-    cpu-e2         = "12.9.0"
-    cpu-d3         = "12.9.0"
-    gpu-l40s-a     = "13.0.2"
-    gpu-l40s-d     = "13.0.2"
-    gpu-h100-sxm   = "13.0.2"
-    gpu-h200-sxm   = "13.0.2"
-    gpu-b200-sxm   = "13.0.2"
-    gpu-b200-sxm-a = "13.0.2"
-    gpu-b300-sxm   = "13.0.2"
-    gpu-rtx6000    = "13.0.2"
-    gpu-gb300      = "13.0.2"
+    cpu-e1         = "13.0.3"
+    cpu-e2         = "13.0.3"
+    cpu-d3         = "13.0.3"
+    gpu-l40s-a     = "13.0.3"
+    gpu-l40s-d     = "13.0.3"
+    gpu-h100-sxm   = "13.0.3"
+    gpu-h200-sxm   = "13.0.3"
+    gpu-b200-sxm   = "13.0.3"
+    gpu-b200-sxm-a = "13.0.3"
+    gpu-b300-sxm   = "13.0.3"
+    gpu-rtx6000    = "13.0.3"
+    gpu-gb300      = "13.0.3"
   }
 }
 
