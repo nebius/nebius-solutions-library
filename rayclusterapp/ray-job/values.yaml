@@ -1,0 +1,77 @@
+# Ray Job values for Ray job submission; example: 
+# https://github.com/ray-project/kuberay/blob/master/ray-operator/config/samples/ray-job.sample.yaml
+# rayClusterName must match the label of your target RayCluster that is already exist; From the Head pod ray.io/cluster label key.
+rayClusterName: "raycluster1-kuberay" # if kueue is enabled, this will be ignored since a RayCluster will be created by the RayJob.
+shutdownAfterJobFinishes: false # if true, the Ray cluster will be deleted after the job finishes.
+
+# This script should be present in the container image at /app/<script>.
+# You can change the script name as needed.    
+entrypoint: "python /app/train.py"
+
+# These Env variables are examples, you can add more as needed or comented them out if not needed.
+runtimeenv:
+  env_vars:
+    USE_GPU: "true"
+image:
+  repository: rezabah/rayclusterapp-py39-cu128
+  tag: "0.1.2"
+  pullPolicy: IfNotPresent
+head:
+  # you can find out the Ray version by running this command for your image, as an example:
+  # docker run --rm rayproject/ray:nightly-py39-cu128 python -c "import ray; print(ray.__version__)"
+  rayVersion: 3.0.0.dev0
+  enableInTreeAutoscaling: false
+  securityContext:
+    privileged: true
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: nebius.com/gpu
+                operator: DoesNotExist
+  resources:
+    requests:
+      cpu: "4"          
+      memory: "8Gi"    
+    limits:
+      cpu: "4"          
+      memory: "8Gi"  
+  rayStartParams:
+    dashboard-host: "0.0.0.0"
+    metrics-export-port: "9090"
+
+worker:
+  groupName: workergroup
+  replicas: 3
+  minReplicas: 1
+  maxReplicas: 5
+  securityContext:
+    privileged: true
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: nebius.com/gpu
+                operator: In
+                values:
+                  - "true"
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: 1 
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: 1
+  rayStartParams: {}
+# Kueue configuration for the RayJob
+# Be aware when you enable it, then after the job finishes, the created Ray cluster must be deleted.
+kueue:
+  enabled: false # true means a new Ray Cluster will be created and it will be managed by Kueue. if it's false, then the RayJob will use an existing RayCluster.
+  localQueueName: user-queue  # Referenced by the RayJob
+  clusterQueueName: default  # Referenced by the LocalQueue

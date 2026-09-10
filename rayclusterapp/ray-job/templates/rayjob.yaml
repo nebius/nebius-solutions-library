@@ -1,0 +1,67 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: {{ include "rayjob.fullname" . }}
+  labels:
+    app: {{ include "rayjob.name" . }}
+    {{- if .Values.kueue.enabled }}
+    kueue.x-k8s.io/queue-name: {{ .Values.kueue.localQueueName | quote }}
+    {{- end }}  
+spec:
+  entrypoint: {{ .Values.entrypoint | quote }}
+  runtimeEnvYAML: |
+    {{- toYaml .Values.runtimeenv | nindent 4 }}
+  {{- if .Values.kueue.enabled }}
+  shutdownAfterJobFinishes: true
+  {{- else }}
+  shutdownAfterJobFinishes: {{ .Values.shutdownAfterJobFinishes | default false }}
+  {{- end }}
+{{- if .Values.kueue.enabled }}
+  rayClusterSpec:
+    rayVersion: {{ .Values.head.rayVersion | default "2.21.0" }}
+    headGroupSpec:
+      serviceType: {{ .Values.head.serviceType | default "ClusterIP" }}
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+            imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+            resources:
+              {{- toYaml .Values.head.resources | nindent 14 }}
+            securityContext:
+              {{- toYaml .Values.head.securityContext | nindent 14 }}  
+          affinity:
+            {{- toYaml .Values.head.affinity | nindent 12 }}
+
+    workerGroupSpecs:
+    - groupName: {{ .Values.worker.groupName }}
+      replicas: {{ .Values.worker.replicas }}
+      minReplicas: {{ .Values.worker.minReplicas }}
+      maxReplicas: {{ .Values.worker.maxReplicas }}
+      rayStartParams: {{ toYaml .Values.worker.rayStartParams | nindent 8 }}
+      template:
+        spec:
+          containers:
+          - name: ray-worker
+            image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+            imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+            resources:
+              {{- toYaml .Values.worker.resources | nindent 14 }}
+            securityContext:
+              {{- toYaml .Values.worker.securityContext | nindent 14 }}  
+          affinity:
+            {{- toYaml .Values.worker.affinity | nindent 12 }}
+{{- else }}
+  clusterSelector:
+    ray.io/cluster: {{ .Values.rayClusterName | quote }}
+{{- end }}

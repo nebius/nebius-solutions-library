@@ -1,0 +1,5 @@
+apiVersion: v2
+name: ray-job
+description: Deploy Ray job
+type: application
+version: 0.1.0

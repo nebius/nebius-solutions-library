@@ -1,0 +1,58 @@
+image:
+    repository: rezabah/rayclusterapp-py39-cu128
+    tag: "0.1.2"
+    pullPolicy: IfNotPresent 
+
+head:
+  # you can find out the Ray version by running this command for your image, as an example:
+  # docker run --rm rayproject/ray:nightly-py39-cu128 python -c "import ray; print(ray.__version__)"
+  rayVersion: 3.0.0.dev0
+  enableInTreeAutoscaling: true # Enable Ray autoscaling
+  securityContext:
+    privileged: true
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: nebius.com/gpu
+                operator: DoesNotExist
+  resources:
+    requests:
+      cpu: "4"          
+      memory: "8Gi"    
+    limits:
+      cpu: "4"          
+      memory: "8Gi"  
+  rayStartParams:
+    dashboard-host: "0.0.0.0"
+    metrics-export-port: "9090"
+
+worker:
+  groupName: workergroup
+  replicas: 3
+  minReplicas: 1
+  maxReplicas: 3
+  securityContext:
+    privileged: true
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: nebius.com/gpu
+                operator: In
+                values:
+                  - "true"
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: 1 
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: 1
+  rayStartParams: {}

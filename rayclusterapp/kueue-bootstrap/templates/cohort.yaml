@@ -1,0 +1,9 @@
+{{- range .Values.clusterQueues }}
+{{- if .cohort }}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: Cohort
+metadata:
+  name: {{ .cohort }}
+---
+{{- end }}
+{{- end }}

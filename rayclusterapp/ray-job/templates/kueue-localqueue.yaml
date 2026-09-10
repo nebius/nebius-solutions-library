@@ -1,0 +1,8 @@
+{{- if .Values.kueue.enabled }}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: {{ .Values.kueue.localQueueName | default "user-queue" }}
+spec:
+  clusterQueue: {{ .Values.kueue.clusterQueueName | default "default" }}
+{{- end }}

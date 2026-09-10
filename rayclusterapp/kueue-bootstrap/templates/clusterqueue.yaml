@@ -1,0 +1,28 @@
+{{- range .Values.clusterQueues }}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: {{ .name }}
+spec:
+  cohort: {{ .cohort }}
+  namespaceSelector: 
+{{ toYaml .namespaceSelector | indent 4 }}
+  resourceGroups:
+    {{- range .resourceGroups }}
+    - coveredResources:
+        {{- range .coveredResources }}
+        - {{ . }}
+        {{- end }}
+      flavors:
+        {{- range .flavors }}
+        - name: {{ .name }}
+          resources:
+            {{- range .resources }}
+            - name: {{ .name }}
+              nominalQuota: {{ .nominalQuota | quote }}
+            {{- end }}
+        {{- end }}
+    {{- end }}
+---
+{{- end }}
+

@@ -1,0 +1,59 @@
+resourceFlavors:
+  - name: cpu-flavor
+    nodeLabels:
+      node.kubernetes.io/instance-type: cpu-d3
+  - name: gpu-flavor
+    nodeLabels:
+      nebius.com/gpu: "true"
+  - name: default-flavor
+    nodeLabels: {}
+
+clusterQueues:
+  - name: gpu
+    cohort: gpu-cohort
+    namespaceSelector: {}
+    resourceGroups:
+      - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+        flavors:
+          - name: gpu-flavor
+            resources:
+              - name: cpu
+                nominalQuota: "256000"
+              - name: memory
+                nominalQuota: "3.2Ti"
+              - name: nvidia.com/gpu
+                nominalQuota: "16"
+  - name: cpu
+    cohort: cpu-cohort
+    namespaceSelector: {}
+    resourceGroups:
+      - coveredResources: ["cpu", "memory"]
+        flavors:
+          - name: cpu-flavor
+            resources:
+              - name: cpu
+                nominalQuota: "16000"
+              - name: memory
+                nominalQuota: "64Gi"
+  - name: default
+    cohort: default-cohort
+    namespaceSelector: {}
+    resourceGroups:
+      - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+        flavors:
+          - name: gpu-flavor
+            resources:
+              - name: cpu
+                nominalQuota: "256000"
+              - name: memory
+                nominalQuota: "3.2Ti"
+              - name: nvidia.com/gpu
+                nominalQuota: "16"
+          - name: cpu-flavor
+            resources:
+              - name: cpu
+                nominalQuota: "16000"
+              - name: memory
+                nominalQuota: "64Gi"  
+              - name: nvidia.com/gpu
+                nominalQuota: "0"                              
