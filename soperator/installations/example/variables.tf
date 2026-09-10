@@ -168,13 +168,14 @@ variable "filestore_controller_spool" {
   }
 }
 
-variable "filestore_jail" {
+variable "filesystem_jail" {
   description = "Shared filesystem to be used on controller, worker, and login nodes."
   type = object({
     existing = optional(object({
       id = string
     }))
     spec = optional(object({
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -184,23 +185,40 @@ variable "filestore_jail" {
 
   validation {
     condition = (
-      (var.filestore_jail.existing != null && var.filestore_jail.spec == null) ||
-      (var.filestore_jail.existing == null && var.filestore_jail.spec != null)
+      (var.filesystem_jail.existing != null && var.filesystem_jail.spec == null) ||
+      (var.filesystem_jail.existing == null && var.filesystem_jail.spec != null)
     )
     error_message = "One of `existing` or `spec` must be provided."
   }
+
+  validation {
+    condition = (var.filesystem_jail.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), var.filesystem_jail.spec.type)
+    )
+    error_message = format(
+      "Type should be one of [%s], got %s.",
+      join(", ", values(module.resources.shared_filesystem_types)),
+      coalesce(try(var.filesystem_jail.spec.type, null), "none")
+    )
+  }
 }
 
-data "nebius_compute_v1_filesystem" "existing_jail" {
-  count = var.filestore_jail.existing != null ? 1 : 0
+data "nebius_compute_v1_filesystem" "jail" {
+  count = var.filesystem_jail.existing != null ? 1 : 0
 
-  id = var.filestore_jail.existing.id
+  id = var.filesystem_jail.existing.id
+}
+moved {
+  from = data.nebius_compute_v1_filesystem.existing_jail
+  to   = data.nebius_compute_v1_filesystem.jail
 }
 
 locals {
-  filestore_jail_calculated_size_gibibytes = (var.filestore_jail.existing != null ?
-    data.nebius_compute_v1_filesystem.existing_jail[0].size_bytes / 1024 / 1024 / 1024 :
-  var.filestore_jail.spec.size_gibibytes)
+  filesystem_jail_calculated_size_gibibytes = (var.filesystem_jail.existing != null
+    ? data.nebius_compute_v1_filesystem.jail[0].size_bytes / 1024 / 1024 / 1024
+    : var.filesystem_jail.spec.size_gibibytes
+  )
 }
 
 variable "allow_empty_jail_submounts" {
@@ -209,7 +227,7 @@ variable "allow_empty_jail_submounts" {
   default     = false
 }
 
-variable "filestore_jail_submounts" {
+variable "filesystem_jail_submounts" {
   description = "Shared filesystems to be mounted inside jail."
   type = list(object({
     name       = string
@@ -218,6 +236,7 @@ variable "filestore_jail_submounts" {
       id = string
     }))
     spec = optional(object({
+      type                 = string
       size_gibibytes       = number
       block_size_kibibytes = number
       forbid_deletion      = optional(bool, false)
@@ -227,16 +246,134 @@ variable "filestore_jail_submounts" {
 
   validation {
     condition = length([
-      for sm in var.filestore_jail_submounts : true if
+      for sm in var.filesystem_jail_submounts : true if
       (sm.existing != null && sm.spec == null) ||
       (sm.existing == null && sm.spec != null)
-    ]) == length(var.filestore_jail_submounts)
+    ]) == length(var.filesystem_jail_submounts)
     error_message = "All submounts must have one of `existing` or `spec` provided."
   }
 
   validation {
-    condition     = var.allow_empty_jail_submounts || length(var.filestore_jail_submounts) >= 1
+    condition     = var.allow_empty_jail_submounts || length(var.filesystem_jail_submounts) >= 1
     error_message = "Creating clusters without jail submounts is not allowed."
+  }
+
+  validation {
+    condition = alltrue([for sm in var.filesystem_jail_submounts : (
+      sm.spec == null
+      ? true
+      : contains(values(module.resources.shared_filesystem_types), sm.spec.type)
+    )])
+    error_message = format(
+      "Type should be one of [%s].",
+      join(", ", values(module.resources.shared_filesystem_types))
+    )
+  }
+}
+
+data "nebius_compute_v1_filesystem" "jail_submount" {
+  for_each = tomap({ for submount in var.filesystem_jail_submounts :
+    submount.name => submount.existing.id
+    if submount.existing != null
+  })
+
+  id = each.value
+}
+
+resource "terraform_data" "check_jail_submount_paths" {
+  lifecycle {
+    precondition {
+      condition = (
+        # Has no NFS mounted to /home
+        !(
+          (var.nfs.enabled
+            ? var.nfs.spec.mount_path == "/home"
+            : false
+          )
+          ||
+          var.nfs_in_k8s.enabled
+        )
+
+        # No guardrail
+        ? true
+
+        # Shared submounts should not be mounted to /home if there's already NFS for that
+        : alltrue([
+          for sm in var.filesystem_jail_submounts :
+          (sm.mount_path != "/home")
+        ])
+      )
+      error_message = <<EOT
+        filesystem_jail_submounts must not use "/home" as mount_path if NFS on VDS is set to the same directory, or NFS on K8s is used.
+        NOTE: backing /home with shared filestore causes severe performance degradation.
+      EOT
+    }
+
+    precondition {
+      condition = (
+        length([for sm in var.filesystem_jail_submounts : sm.mount_path])
+        ==
+        length(distinct([for sm in var.filesystem_jail_submounts : sm.mount_path]))
+      )
+      error_message = "Different filesystem_jail_submounts can't be mounted to the same directory."
+    }
+  }
+}
+
+locals {
+  weka_count = sum(
+    concat(
+      [(try(
+        var.filesystem_jail.spec.type,
+        one(data.nebius_compute_v1_filesystem.jail).type
+        ) == module.resources.shared_filesystem_types.weka
+        ? 1
+        : 0
+      )],
+      [for sm in var.filesystem_jail_submounts : (
+        try(
+          sm.spec.type,
+          data.nebius_compute_v1_filesystem.jail_submount[sm.name].type
+        ) == module.resources.shared_filesystem_types.weka
+        ? 1
+        : 0
+      )]
+    )
+  )
+  weka_is_used = local.weka_count > 0
+}
+resource "terraform_data" "check_weka_count" {
+  depends_on = [
+    data.nebius_compute_v1_filesystem.jail,
+    data.nebius_compute_v1_filesystem.jail_submount,
+  ]
+
+  lifecycle {
+    precondition {
+      condition     = local.weka_count < 2
+      error_message = "Total amount of WEKA filesystems couldn't be more than 1 for now."
+    }
+  }
+}
+
+resource "terraform_data" "check_resource_presets_for_weka" {
+  count = local.weka_is_used ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition = alltrue(concat(
+        [
+          local.resources.system.sufficient["weka"],
+          local.resources.controller.sufficient["weka"],
+          local.resources.login.sufficient["weka"],
+        ],
+        [for i, worker in local.slurm_nodeset_workers :
+          local.resources.workers[i].sufficient["weka"]
+        ],
+        var.accounting_enabled ? [local.resources.accounting.sufficient["weka"]] : [],
+      ))
+      error_message = "All nodes should have sufficient preset if WEKA is requested."
+    }
   }
 }
 
@@ -279,54 +416,38 @@ variable "filestore_accounting" {
 
 variable "nfs" {
   type = object({
-    enabled        = bool
-    size_gibibytes = number
-    mount_path     = optional(string, "/home")
-    resource = object({
-      platform = string
-      preset   = string
-    })
-    public_ip = bool
+    enabled = bool
+    spec = optional(object({
+      size_gibibytes = number
+      mount_path     = string
+      resource = object({
+        platform = string
+        preset   = string
+      })
+      public_ip = bool
+    }))
   })
   default = {
-    enabled        = false
-    size_gibibytes = 93
-    resource = {
-      platform = "cpu-d3"
-      preset   = "32vcpu-128gb"
-    }
-    public_ip = false
+    enabled = false
+  }
+
+  validation {
+    condition = (var.nfs.enabled
+      ? var.nfs.spec != null
+      : true
+    )
+    error_message = "If .enabled, .spec should be provided."
   }
 
   validation {
     condition = (var.nfs.enabled
       ? (
-        var.nfs.size_gibibytes % 93 == 0 &&
-        var.nfs.size_gibibytes <= 262074
+        var.nfs.spec.size_gibibytes % 93 == 0 &&
+        var.nfs.spec.size_gibibytes <= 262074
       )
       : true
     )
     error_message = "NFS size must be a multiple of 93 GiB and maximum value is 262074 GiB"
-  }
-}
-resource "terraform_data" "check_nfs_exclusivity" {
-  lifecycle {
-    precondition {
-      condition     = !(var.nfs.enabled && var.nfs_in_k8s.enabled)
-      error_message = "nfs.enabled and nfs_in_k8s.enabled cannot both be true. Choose one NFS backend: either an external NFS server (nfs.enabled) or the in-cluster NFS provisioner (nfs_in_k8s.enabled)."
-    }
-  }
-}
-
-resource "terraform_data" "check_jail_submount_paths" {
-  lifecycle {
-    precondition {
-      condition = alltrue([
-        for sm in var.filestore_jail_submounts :
-        sm.mount_path != "/home"
-      ])
-      error_message = "filestore_jail_submounts must not use \"/home\" as mount_path. That path is reserved for home directories, and backing /home with shared filestore causes severe performance degradation."
-    }
   }
 }
 
@@ -338,80 +459,104 @@ resource "terraform_data" "check_nfs" {
   lifecycle {
     precondition {
       condition = (var.nfs.enabled
-        ? contains(module.resources.platforms, var.nfs.resource.platform)
+        ? contains(module.resources.platforms, var.nfs.spec.resource.platform)
         : true
       )
-      error_message = "Unsupported platform '${var.nfs.resource.platform}'."
+      error_message = "Unsupported platform '${try(var.nfs.spec.resource.platform, "<PLATFORM>")}'."
     }
 
     precondition {
       condition = (var.nfs.enabled
-        ? contains(keys(module.resources.by_platform[var.nfs.resource.platform]), var.nfs.resource.preset)
+        ? contains(keys(module.resources.by_platform[var.nfs.spec.resource.platform]), var.nfs.spec.resource.preset)
         : true
       )
-      error_message = "Unsupported preset '${var.nfs.resource.preset}' for platform '${var.nfs.resource.platform}'."
+      error_message = "Unsupported preset '${try(var.nfs.spec.resource.preset, "<PRESET>")}' for platform '${try(var.nfs.spec.resource.platform, "<PLATFORM>")}'."
     }
 
     precondition {
       condition = (var.nfs.enabled
-        ? contains(module.resources.platform_regions[var.nfs.resource.platform], var.region)
+        ? contains(module.resources.platform_regions[var.nfs.spec.resource.platform], var.region)
         : true
       )
-      error_message = "Unsupported platform '${var.nfs.resource.platform}' in region '${var.region}'. See https://docs.nebius.com/compute/virtual-machines/types"
+      error_message = "Unsupported platform '${try(var.nfs.spec.resource.platform, "<PLATFORM>")}' in region '${var.region}'. See https://docs.nebius.com/compute/virtual-machines/types"
     }
   }
 }
 
 variable "nfs_in_k8s" {
   type = object({
-    enabled         = bool
-    version         = optional(string)
-    use_stable_repo = optional(bool, true)
-    size_gibibytes  = optional(number)
-    disk_type       = optional(string)
-    filesystem_type = optional(string)
-    threads         = optional(number)
+    enabled = bool
+    spec = optional(object({
+      version         = string
+      use_stable_repo = bool
+      size_gibibytes  = number
+      disk_type       = string
+      filesystem_type = string
+      threads         = number
+    }))
   })
   default = {
     enabled = false
   }
+
   validation {
-    condition = (
-      !var.nfs_in_k8s.enabled
-      ||
-      (
-        var.nfs_in_k8s.filesystem_type != null
-        && var.nfs_in_k8s.disk_type != null
-        && var.nfs_in_k8s.size_gibibytes != null
-        && (
-          !contains(["NETWORK_SSD_IO_M3", "NETWORK_SSD_NON_REPLICATED"], var.nfs_in_k8s.disk_type)
-          || (var.nfs_in_k8s.size_gibibytes % 93 == 0)
-        )
+    condition = (var.nfs_in_k8s.enabled
+      ? var.nfs_in_k8s.spec != null
+      : true
+    )
+    error_message = "If .enabled, .spec should be provided."
+  }
+
+  validation {
+    condition = (var.nfs_in_k8s.enabled
+      ? contains(
+        ["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED", "NETWORK_SSD_IO_M3"],
+        var.nfs_in_k8s.spec.disk_type
       )
+      : true
     )
-
-    error_message = <<EOT
-If NFS in K8s is enabled, filesystem_type, disk_type, and size_gibibytes must be set.
-Additionally, if disk_type is NETWORK_SSD_IO_M3 or NETWORK_SSD_NON_REPLICATED, size_gibibytes must be a multiple of 93.
-EOT
+    error_message = "nfs_in_k8s.spec.disk_type must be one of: NETWORK_SSD, NETWORK_SSD_NON_REPLICATED, NETWORK_SSD_IO_M3."
   }
 
   validation {
-    condition = (
-      !var.nfs_in_k8s.enabled
-      || var.nfs_in_k8s.disk_type == null
-      || contains(["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED", "NETWORK_SSD_IO_M3"], var.nfs_in_k8s.disk_type)
+    condition = (var.nfs_in_k8s.enabled
+      ? (
+        !contains(["NETWORK_SSD_IO_M3", "NETWORK_SSD_NON_REPLICATED"], var.nfs_in_k8s.spec.disk_type)
+        || (var.nfs_in_k8s.spec.size_gibibytes % 93 == 0)
+      )
+      : true
     )
-    error_message = "nfs_in_k8s.disk_type must be one of: NETWORK_SSD, NETWORK_SSD_NON_REPLICATED, NETWORK_SSD_IO_M3."
+
+    error_message = "If disk_type is NETWORK_SSD_IO_M3 or NETWORK_SSD_NON_REPLICATED, size_gibibytes must be a multiple of 93."
   }
 
   validation {
-    condition = (
-      !var.nfs_in_k8s.enabled
-      || var.nfs_in_k8s.filesystem_type == null
-      || contains(["ext4", "xfs"], var.nfs_in_k8s.filesystem_type)
+    condition = (var.nfs_in_k8s.enabled
+      ? contains(["ext4", "xfs"], var.nfs_in_k8s.spec.filesystem_type)
+      : true
     )
-    error_message = "nfs_in_k8s.filesystem_type must be one of: ext4, xfs."
+    error_message = "nfs_in_k8s.spec.filesystem_type must be one of: ext4, xfs."
+  }
+}
+
+resource "terraform_data" "check_nfs_exclusivity" {
+  lifecycle {
+    precondition {
+      condition     = !(var.nfs.enabled && var.nfs_in_k8s.enabled)
+      error_message = "nfs.enabled and nfs_in_k8s.enabled cannot both be true. Choose one NFS backend: either an external NFS server (nfs.enabled) or the in-cluster NFS provisioner (nfs_in_k8s.enabled)."
+    }
+  }
+}
+
+resource "terraform_data" "check_nfs_sustainability" {
+  lifecycle {
+    precondition {
+      condition = (!(var.nfs.enabled || var.nfs_in_k8s.enabled)
+        ? true
+        : contains(["XS", "S", "M"], module.sizing.sizing_tier)
+      )
+      error_message = "NFS becomes a bottleneck/failure point on large clusters."
+    }
   }
 }
 
