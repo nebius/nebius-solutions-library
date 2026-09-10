@@ -146,3 +146,82 @@ run "home_submount_is_prohibited_with_nfs_on_k8s" {
     target = [terraform_data.check_jail_submount_paths]
   }
 }
+
+run "exclusive_paths_are_allowed" {
+  command = plan
+
+  variables {
+    nfs        = { enabled = false }
+    nfs_in_k8s = { enabled = false }
+    filesystem_jail_submounts = [{
+      name       = "home"
+      mount_path = "/home"
+      spec = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 2048
+        block_size_kibibytes = 4
+      }
+      }, {
+      name       = "dome"
+      mount_path = "/dome"
+      spec = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 2048
+        block_size_kibibytes = 4
+      }
+    }]
+  }
+
+  plan_options {
+    target = [terraform_data.check_jail_submount_paths]
+  }
+}
+
+run "duplicate_paths_are_prohibited" {
+  command = plan
+
+  variables {
+    nfs        = { enabled = false }
+    nfs_in_k8s = { enabled = false }
+    filesystem_jail_submounts = [{
+      name       = "home"
+      mount_path = "/home"
+      spec = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 2048
+        block_size_kibibytes = 4
+      }
+      }, {
+      name       = "dome"
+      mount_path = "/home"
+      spec = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 2048
+        block_size_kibibytes = 4
+      }
+    }]
+  }
+
+  expect_failures = [
+    terraform_data.check_jail_submount_paths,
+  ]
+
+  plan_options {
+    target = [terraform_data.check_jail_submount_paths]
+  }
+}
+
+run "no_submounts_is_fine" {
+  command = plan
+
+  variables {
+    nfs                        = { enabled = false }
+    nfs_in_k8s                 = { enabled = false }
+    allow_empty_jail_submounts = true
+    filesystem_jail_submounts  = []
+  }
+
+  plan_options {
+    target = [terraform_data.check_jail_submount_paths]
+  }
+}

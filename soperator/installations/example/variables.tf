@@ -308,6 +308,15 @@ resource "terraform_data" "check_jail_submount_paths" {
         NOTE: backing /home with shared filestore causes severe performance degradation.
       EOT
     }
+
+    precondition {
+      condition = (
+        length([for sm in var.filesystem_jail_submounts : sm.mount_path])
+        ==
+        length(distinct([for sm in var.filesystem_jail_submounts : sm.mount_path]))
+      )
+      error_message = "Different filesystem_jail_submounts can't be mounted to the same directory."
+    }
   }
 }
 
