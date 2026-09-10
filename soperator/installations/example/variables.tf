@@ -283,11 +283,30 @@ data "nebius_compute_v1_filesystem" "jail_submount" {
 resource "terraform_data" "check_jail_submount_paths" {
   lifecycle {
     precondition {
-      condition = alltrue([
-        for sm in var.filesystem_jail_submounts :
-        (sm.mount_path != "/home")
-      ])
-      error_message = "filesystem_jail_submounts must not use \"/home\" as mount_path. That path is reserved for home directories, and backing /home with shared filestore causes severe performance degradation."
+      condition = (
+        # Has no NFS mounted to /home
+        !(
+          (var.nfs.enabled
+            ? var.nfs.spec.mount_path == "/home"
+            : false
+          )
+          ||
+          var.nfs_in_k8s.enabled
+        )
+
+        # No guardrail
+        ? true
+
+        # Shared submounts should not be mounted to /home if there's already NFS for that
+        : alltrue([
+          for sm in var.filesystem_jail_submounts :
+          (sm.mount_path != "/home")
+        ])
+      )
+      error_message = <<EOT
+        filesystem_jail_submounts must not use "/home" as mount_path if NFS on VDS is set to the same directory, or NFS on K8s is used.
+        NOTE: backing /home with shared filestore causes severe performance degradation.
+      EOT
     }
   }
 }
