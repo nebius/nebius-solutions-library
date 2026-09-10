@@ -1,0 +1,4 @@
+[mcp_servers.nebius_bionemo]
+url = "https://bionemo.example.com/mcp"
+bearer_token_env_var = "BIONEMO_MCP_TOKEN"
+tool_timeout_sec = 3600

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nebius-bionemo-mcp
+description: Authenticated MCP gateway for a customer-owned BioNeMo NIM fleet
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
