@@ -495,6 +495,11 @@ module "slurm" {
     # writing to the bucket during aws s3 rm, causing BucketNotEmpty. See
     # SCHED-1401.
     module.backups_store,
+    # Same destroy-order reasoning as backups_store: Slurm jobs may still have
+    # checkpoint uploads in flight while the cluster tears down.
+    # (checkpoints_access intentionally NOT here: it depends on this module
+    # instead, because its credentials-render Job needs the jail PVC.)
+    module.checkpoints_store,
   ]
 
   source = "../../modules/slurm"
@@ -787,6 +792,105 @@ module "backups" {
   depends_on = [
     module.k8s,
   ]
+}
+
+module "checkpoints_store" {
+  count = var.checkpoint_storage_enabled ? 1 : 0
+
+  source = "../../modules/checkpoints_store"
+
+  iam_project_id = var.iam_project_id
+  instance_name  = local.k8s_cluster_name
+  region         = var.region
+
+  bucket = var.checkpoint_storage_bucket
+
+  depends_on = [
+    module.k8s,
+    module.fluxcd,
+  ]
+}
+
+module "checkpoints_access" {
+  count = var.checkpoint_storage_enabled ? 1 : 0
+
+  source = "../../modules/checkpoints_access"
+
+  k8s_cluster_context = module.k8s.cluster_context
+  k8s_cluster_id      = module.k8s.cluster_id
+
+  iam_project_id = var.iam_project_id
+  # Project scope is sufficient for the normal case and avoids requiring
+  # tenant-wide IAM administration. A cross-project bucket needs a tenant-scoped
+  # group so the workload service account can receive access outside its project.
+  iam_group_parent_id = (
+    coalesce(try(var.checkpoint_storage_bucket.existing.project_id, null), var.iam_project_id) == var.iam_project_id
+    ? var.iam_project_id
+    : var.iam_tenant_id
+  )
+  instance_name       = local.k8s_cluster_name
+  soperator_namespace = local.slurm_cluster_name
+
+  # For a cross-region existing bucket, credentials must carry the BUCKET's
+  # region (for SigV4), which is encoded in its endpoint.
+  region = (var.checkpoint_storage_bucket.existing != null && var.checkpoint_storage_bucket.existing.endpoint != null
+    ? regex("storage\\.([a-z0-9-]+)\\.nebius", var.checkpoint_storage_bucket.existing.endpoint)[0]
+    : var.region
+  )
+  bucket_id       = module.checkpoints_store[0].id
+  bucket_name     = module.checkpoints_store[0].name
+  bucket_endpoint = module.checkpoints_store[0].endpoint
+
+  jail_env_file_owner = var.checkpoint_storage_env_file_owner
+  jail_env_file_mode  = var.checkpoint_storage_env_file_mode
+
+  providers = {
+    nebius = nebius
+  }
+
+  # After Slurm: the credentials-render Job mounts the jail PVC, which is
+  # created by the Slurm deployment. This also destroys credentials before
+  # the cluster on teardown.
+  depends_on = [
+    module.k8s,
+    module.slurm,
+  ]
+}
+
+# Created after the checkpoint modules, so it is destroyed before checkpoint
+# access, Slurm, and checkpoint storage on teardown: if the created bucket still
+# holds checkpoints, the checkpoint branch stops up front - before its access key
+# is revoked - and prints the retain/empty/force options. Deleting data requires
+# CHECKPOINTS_FORCE_CLEANUP=<bucket> in the destroy process environment; an env
+# var is read at execution time, so it can never be stale like state- or
+# plan-captured values, and it lives outside saved plans by construction.
+resource "terraform_data" "checkpoint_storage_destroy_guard" {
+  count = var.checkpoint_storage_enabled && var.checkpoint_storage_bucket.existing == null ? 1 : 0
+
+  triggers_replace = {
+    bucket_name = module.checkpoints_store[0].name
+    endpoint    = module.checkpoints_store[0].endpoint
+  }
+
+  depends_on = [
+    module.checkpoints_store,
+    module.checkpoints_access,
+    # These otherwise-independent helpers were observed starting their destroy
+    # in parallel with the guard. Keep the guard ahead of every resource that
+    # can mutate the live cluster or its generated access files.
+    module.k8s_cleanup,
+    module.login_script,
+    terraform_data.check_driver_presets,
+  ]
+
+  # The guard logic lives in the checkpoints_store module scripts, shared with
+  # the module's own destroy-time cleanup so the object/multipart inventory
+  # handling is written once.
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    command     = "bash '${path.module}/../../modules/checkpoints_store/scripts/bucket_teardown.sh' guard '${self.triggers_replace.bucket_name}' '${self.triggers_replace.endpoint}'"
+  }
 }
 
 module "fluxcd" {

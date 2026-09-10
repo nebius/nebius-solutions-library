@@ -1745,6 +1745,73 @@ variable "cleanup_bucket_on_destroy" {
 
 # endregion Backups
 
+# region Checkpoint storage
+
+variable "checkpoint_storage_enabled" {
+  description = "Whether to provision Nebius Object Storage for training checkpoints: a bucket and access credentials for jobs to write checkpoints to it. Whether and how jobs actually write checkpoints is controlled by the training workload, not by Terraform."
+  type        = bool
+  default     = false
+}
+
+variable "checkpoint_storage_bucket" {
+  description = "Nebius Object Storage bucket for training checkpoints. Provide `existing` to reuse a bucket (e.g. to resume training from another cluster's checkpoints), or `spec` to create one. Set `existing.project_id` for a bucket in another project of the same tenant and `existing.endpoint` for a bucket in another region (e.g. https://storage.<region>.nebius.cloud:443). Cross-tenant bucket reuse is not supported."
+  type = object({
+    existing = optional(object({
+      name       = string
+      endpoint   = optional(string)
+      project_id = optional(string)
+    }))
+    spec = optional(object({
+      name = optional(string)
+    }))
+  })
+  default  = { spec = {} }
+  nullable = false
+
+  validation {
+    condition = (
+      (var.checkpoint_storage_bucket.existing != null && var.checkpoint_storage_bucket.spec == null) ||
+      (var.checkpoint_storage_bucket.existing == null && var.checkpoint_storage_bucket.spec != null)
+    )
+    error_message = "One of `existing` or `spec` must be provided."
+  }
+
+  validation {
+    condition = (
+      try(var.checkpoint_storage_bucket.existing.project_id, null) == null ||
+      can(regex("^project-[a-z0-9]+$", try(var.checkpoint_storage_bucket.existing.project_id, "")))
+    )
+    error_message = "`existing.project_id` must be a Nebius project ID such as `project-...`."
+  }
+
+  validation {
+    condition = (
+      try(var.checkpoint_storage_bucket.existing.endpoint, null) == null ||
+      can(regex("^https://storage\\.[a-z0-9-]+\\.nebius\\.cloud(:443)?/?$", try(var.checkpoint_storage_bucket.existing.endpoint, "")))
+    )
+    error_message = "`existing.endpoint` must be a Nebius Object Storage endpoint such as `https://storage.eu-north1.nebius.cloud:443`."
+  }
+}
+
+variable "checkpoint_storage_env_file_owner" {
+  description = "Numeric `uid:gid` owner of /etc/nebius-checkpoints.env in the jail. Set to the uid:gid (or 0:<shared gid>) of the users who submit training jobs."
+  type        = string
+  default     = "0:0"
+}
+
+variable "checkpoint_storage_env_file_mode" {
+  description = "File mode of /etc/nebius-checkpoints.env in the jail. Use 640 with a group owner to grant a user group read access."
+  type        = string
+  default     = "600"
+
+  validation {
+    condition     = can(regex("^0?[0-7]{3}$", var.checkpoint_storage_env_file_mode))
+    error_message = "Must be a three-digit octal mode with an optional leading zero, e.g. \"600\", \"640\", or \"0640\"."
+  }
+}
+
+# endregion Checkpoint storage
+
 # region Apparmor
 variable "use_default_apparmor_profile" {
   description = "Whether to use default AppArmor profile."

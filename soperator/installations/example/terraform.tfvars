@@ -746,6 +746,59 @@ cleanup_bucket_on_destroy = false
 
 #----------------------------------------------------------------------------------------------------------------------#
 #                                                                                                                      #
+#                                                  Checkpoint storage                                                  #
+#                                                                                                                      #
+#----------------------------------------------------------------------------------------------------------------------#
+# region Checkpoint storage
+
+# Whether to provision Nebius Object Storage for ML training checkpoints. This only creates the
+# storage side: bucket `<cluster name>-checkpoints`, a service account with an access key, and
+# the `jail-checkpoints` secret in the Slurm namespace holding Nebius Object Storage
+# credentials and bucket connection details.
+# Whether and how training jobs write checkpoints there is up to the workload.
+# ---
+checkpoint_storage_enabled = false
+
+# Checkpoint data is never deleted by an ordinary `terraform destroy`. Destroying
+# an installation whose created checkpoint bucket is not empty stops early and
+# prints the three options: keep the bucket (state rm), empty it yourself, or
+# force deletion with `CHECKPOINTS_FORCE_CLEANUP=<bucket-name> terraform destroy`
+# (requires the `aws` CLI compatibility client). Existing buckets are never
+# emptied or deleted.
+# ---
+
+# Bucket to store checkpoints in. Provide exactly one of `spec` (create a bucket) or
+# `existing` (reuse one - e.g. to resume training from checkpoints written by another,
+# possibly already destroyed, cluster). Existing buckets are never cleaned up or deleted
+# on destroy.
+# ---
+checkpoint_storage_bucket = {
+  # Create a new bucket, named `<cluster name>-checkpoints` unless `name` is set.
+  spec = {}
+
+  # Or reuse an existing bucket:
+  # existing = {
+  #   name = "my-other-cluster-checkpoints"
+  #   # Required when the bucket belongs to another project of the same tenant.
+  #   # Cross-tenant bucket reuse is not supported.
+  #   project_id = "project-..."
+  #   # Required when the bucket is in another region. Its region is also used
+  #   # as the SigV4 signing region in checkpoint jobs.
+  #   endpoint = "https://storage.eu-west1.nebius.cloud:443"
+  # }
+}
+
+# Owner and mode of /etc/nebius-checkpoints.env inside the jail. The root-only defaults
+# work for jobs submitted as root. For non-root jobs, use the submitter's numeric
+# uid:gid, or a shared group owner such as 0:<gid> together with mode 640.
+# ---
+checkpoint_storage_env_file_owner = "0:0"
+checkpoint_storage_env_file_mode  = "600"
+
+# endregion Checkpoint storage
+
+#----------------------------------------------------------------------------------------------------------------------#
+#                                                                                                                      #
 #                                                      Kubernetes                                                      #
 #                                                                                                                      #
 #----------------------------------------------------------------------------------------------------------------------#
