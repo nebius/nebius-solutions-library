@@ -80,6 +80,18 @@ terraform-test-modules:
 		fi; \
 	done
 
+.PHONY: terraform-test-installations
+terraform-test-installations:
+	@echo 'Running Terraform installation module tests...'
+	@for installation_dir in installations/*/; do \
+		if [ -d "$$installation_dir/tests" ]; then \
+			echo "Testing module: $$installation_dir"; \
+			pushd "$$installation_dir" > /dev/null; \
+			terraform test -var-file ./tests/vars.hcl; \
+			popd > /dev/null; \
+		fi; \
+	done
+
 .PHONY: terraform-check
 terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules
 	@echo 'All Terraform checks passed successfully!'

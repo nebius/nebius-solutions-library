@@ -9,16 +9,6 @@ mock_provider "string-functions" {}
 mock_provider "kubernetes" {}
 mock_provider "helm" {}
 
-variables {
-  region             = "region-test"
-  iam_tenant_id      = "tenant-test"
-  iam_project_id     = "project-test"
-  o11y_iam_tenant_id = "tenant-test"
-  o11y_profile       = "profile-test"
-  vpc_subnet_id      = "vpcsubnet-test"
-  production         = false
-}
-
 run "home_submount_is_allowed_without_nfs" {
   command = plan
 
