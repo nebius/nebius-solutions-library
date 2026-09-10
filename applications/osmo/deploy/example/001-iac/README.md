@@ -80,7 +80,7 @@ terraform apply
 ├── variables.tf         # Input variables
 ├── outputs.tf           # Output values
 ├── locals.tf            # Local values
-├── versions.tf          # Provider versions
+├── provider.tf          # Provider versions and configuration
 ├── terraform.tfvars.*.example
 └── modules/
     ├── platform/        # VPC, Storage, DB, Container Registry
