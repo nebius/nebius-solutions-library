@@ -1,0 +1,4 @@
+controller:
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists

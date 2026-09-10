@@ -1,0 +1,34 @@
+# This example NodePool will provision general purpose instances
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: driverful-gpu-nodepool
+spec:
+  template:
+    metadata:
+      labels:
+        nebius.com/gpu: "true"
+    spec:
+      requirements:
+        - key: karpenter.k8s.nebius/instance-gpu-count
+          operator: Exists
+      nodeClassRef:
+        group: karpenter.k8s.nebius
+        kind: NebiusNodeClass
+        name: driverful-gpu
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: nodepool
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.k8s.nebius/instance-gpu-count
+          operator: DoesNotExist
+      nodeClassRef:
+        group: karpenter.k8s.nebius
+        kind: NebiusNodeClass
+        name: default
