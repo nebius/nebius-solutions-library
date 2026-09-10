@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diffdock-native-f7-v3-buffered-build
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: diffdock
+    app.kubernetes.io/component: artifact-variant-builder
+    archvteams.nebius.ai/checkpoint-id: diffdock-native-f7-v3-buffered
+immutable: true
+data:
+  build.py: |-
+    import hashlib
+    import json
+    import os
+    import pathlib
+    import shutil
+    import stat
+
+    SOURCE_ID = "diffdock-native-f7-v1"
+    DESTINATION_ID = "diffdock-native-f7-v3-buffered"
+    SOURCE_MANIFEST_SHA256 = "b1c477efdfc6bcb8e253462524cef24fef6e059f43c97a1fcb94b85dca81e0b8"
+    SOURCE_FILE_COUNT = 122
+    SOURCE_REGULAR_BYTES = 7_516_058_303
+    ROOTFS_DIFF_BYTES = 184_320
+    SOURCE = pathlib.Path("/checkpoints") / SOURCE_ID / "versions" / "1"
+    DESTINATION_ROOT = pathlib.Path("/checkpoints") / DESTINATION_ID
+    DESTINATION = DESTINATION_ROOT / "versions" / "1"
+    TEMP_ROOT = pathlib.Path("/checkpoints") / f".{DESTINATION_ID}.building"
+    TEMP_DESTINATION = TEMP_ROOT / "versions" / "1"
+
+    def sha256(data):
+        return hashlib.sha256(data).hexdigest()
+
+    if DESTINATION_ROOT.exists() or TEMP_ROOT.exists():
+        raise SystemExit("refusing to overwrite an existing destination or staging directory")
+    source_manifest = (SOURCE / "manifest.yaml").read_bytes()
+    if sha256(source_manifest) != SOURCE_MANIFEST_SHA256:
+        raise SystemExit("source manifest digest does not match the reviewed f7 artifact")
+    old_id = f"checkpointId: {SOURCE_ID}\n".encode()
+    new_id = f"checkpointId: {DESTINATION_ID}\n".encode()
+    old_mode = b"        imageIoMode: direct\n"
+    new_mode = b"        imageIoMode: buffered\n"
+    if not source_manifest.startswith(old_id) or source_manifest.count(old_id) != 1:
+        raise SystemExit("source manifest checkpoint identity is not exact")
+    if source_manifest.count(old_mode) != 1 or new_mode in source_manifest:
+        raise SystemExit("source manifest image I/O mode is not exactly direct")
+
+    source_members = sorted(SOURCE.iterdir(), key=lambda item: item.name)
+    source_bytes = sum(member.lstat().st_size for member in source_members)
+    if len(source_members) != SOURCE_FILE_COUNT or source_bytes != SOURCE_REGULAR_BYTES:
+        raise SystemExit(
+            f"source inventory mismatch: files={len(source_members)} bytes={source_bytes}"
+        )
+
+    try:
+        TEMP_DESTINATION.mkdir(mode=0o700, parents=True, exist_ok=False)
+        linked = 0
+        linked_bytes = 0
+        for source in source_members:
+            mode = source.lstat().st_mode
+            if not stat.S_ISREG(mode) or source.is_symlink():
+                raise RuntimeError(f"unexpected non-regular artifact member: {source.name}")
+            if source.name == "manifest.yaml":
+                continue
+            destination = TEMP_DESTINATION / source.name
+            os.link(source, destination, follow_symlinks=False)
+            if source.stat().st_ino != destination.stat().st_ino:
+                raise RuntimeError(f"artifact member was not hard-linked: {source.name}")
+            linked += 1
+            linked_bytes += source.stat().st_size
+
+        destination_manifest = source_manifest.replace(old_id, new_id, 1).replace(
+            old_mode, new_mode, 1
+        )
+        manifest_path = TEMP_DESTINATION / "manifest.yaml"
+        descriptor = os.open(
+            manifest_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(destination_manifest)
+            output.flush()
+            os.fsync(output.fileno())
+        if sha256((SOURCE / "manifest.yaml").read_bytes()) != SOURCE_MANIFEST_SHA256:
+            raise RuntimeError("source manifest changed during variant construction")
+        rootfs = TEMP_DESTINATION / "rootfs-diff.tar"
+        if (
+            not rootfs.is_file()
+            or rootfs.is_symlink()
+            or rootfs.stat().st_size != ROOTFS_DIFF_BYTES
+        ):
+            raise RuntimeError("rootfs delta was not preserved exactly")
+        os.rename(TEMP_ROOT, DESTINATION_ROOT)
+        parent_descriptor = os.open("/checkpoints", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    except BaseException:
+        shutil.rmtree(TEMP_ROOT, ignore_errors=True)
+        raise
+
+    regular_files = []
+    regular_bytes = 0
+    for member in sorted(DESTINATION.iterdir(), key=lambda item: item.name):
+        if member.is_symlink() or not member.is_file():
+            raise RuntimeError(f"variant member is not a regular file: {member.name}")
+        regular_files.append(member.name)
+        regular_bytes += member.stat().st_size
+    published_manifest = (DESTINATION / "manifest.yaml").read_bytes()
+    if published_manifest.count(new_mode) != 1 or old_mode in published_manifest:
+        raise RuntimeError("published manifest does not select legacy buffered I/O")
+    print(
+        json.dumps(
+            {
+                "schema": "archvteams.nebius.ai/diffdock-buffered-build/v1",
+                "status": "PASS",
+                "source_checkpoint_id": SOURCE_ID,
+                "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
+                "checkpoint_id": DESTINATION_ID,
+                "version": "1",
+                "manifest_sha256": sha256(published_manifest),
+                "regular_file_count": len(regular_files),
+                "regular_bytes": regular_bytes,
+                "hardlinked_payload_file_count": linked,
+                "hardlinked_payload_bytes": linked_bytes,
+                "rootfs_diff_present": True,
+                "rootfs_diff_bytes": (DESTINATION / "rootfs-diff.tar").stat().st_size,
+                "image_io_mode": "buffered",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: diffdock-native-f7-v3-buffered-build
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: diffdock
+    app.kubernetes.io/component: artifact-variant-builder
+    archvteams.nebius.ai/checkpoint-id: diffdock-native-f7-v3-buffered
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - gpu-node-a.example.invalid
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: builder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /usr/local/bin/python3
+      args:
+        - /builder/build.py
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: builder
+          mountPath: /builder
+          readOnly: true
+        - name: checkpoints
+          mountPath: /checkpoints
+  volumes:
+    - name: builder
+      configMap:
+        name: diffdock-native-f7-v3-buffered-build
+        defaultMode: 0444
+    - name: checkpoints
+      persistentVolumeClaim:
+        claimName: diffdock-native-f7-artifacts

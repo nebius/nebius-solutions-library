@@ -1,0 +1,51 @@
+runtime:
+  type: containerd
+
+storage:
+  type: pvc
+  accessMode: agentMount
+  pvc:
+    create: false
+    name: mlspec-archvteams-2407-ckpt-m3
+    basePath: /checkpoints
+
+daemonset:
+  image:
+    repository: registry.example.invalid/faststart/snapshot-agent
+    tag: f7f37be-criu91d552-generic-compliant-20260818
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: archvteams-2407-registry-pull
+  snapshotLogLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  nodeSelector:
+    kubernetes.io/hostname: gpu-node-b.example.invalid
+    nvidia.com/gpu.present: null
+  tolerations: []
+  initContainer:
+    image: busybox:1.36.1
+    imagePullPolicy: IfNotPresent
+
+seccomp:
+  deploy: true
+
+rbac:
+  create: true
+  namespaceRestricted: true
+
+config:
+  restore:
+    restoreTimeoutSeconds: 900
+  criu:
+    imageIoMode: direct
+    leaveRunning: true
+    tcpClose: false
+    tcpEstablished: true
+    manageCgroupsMode: soft
+    mntnsCompatMode: false

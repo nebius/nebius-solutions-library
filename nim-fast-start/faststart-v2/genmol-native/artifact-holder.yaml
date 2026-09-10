@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: genmol-native-f7-holder-t12-v2
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: genmol
+    app.kubernetes.io/component: artifact-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeName: gpu-node-b.example.invalid
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: holder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -ceu
+      args:
+        - |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+
+          root = Path("/artifacts/genmol-native-f7-v1/versions/1")
+          required = {"manifest.yaml", "inventory.img", "pstree.img", "rootfs-diff.tar"}
+          if root.is_symlink() or not root.is_dir():
+              raise SystemExit("native artifact root is absent or symlinked")
+          files = []
+          total = 0
+          for directory, names, entries in os.walk(root, followlinks=False):
+              for name in names:
+                  path = Path(directory) / name
+                  if path.is_symlink():
+                      raise SystemExit("native artifact contains a symlinked directory")
+              for name in entries:
+                  path = Path(directory) / name
+                  info = path.lstat()
+                  if not stat.S_ISREG(info.st_mode):
+                      raise SystemExit("native artifact contains a non-regular file")
+                  relative = path.relative_to(root).as_posix()
+                  files.append((relative, info.st_size, path))
+                  total += info.st_size
+          present = {name for name, _, _ in files}
+          if not required <= present or not any(name.startswith("pages-") for name in present):
+              raise SystemExit("native artifact is missing required CRIU files")
+          if len(files) < 20 or total < 1_000_000_000:
+              raise SystemExit("native artifact is implausibly small")
+          def digest_file(item):
+              relative, size, path = item
+              digest = hashlib.sha256()
+              with path.open("rb", buffering=0) as source:
+                  while chunk := source.read(8 * 1024 * 1024):
+                      digest.update(chunk)
+              return relative, size, digest.hexdigest()
+          with ThreadPoolExecutor(max_workers=4) as pool:
+              hashed = sorted(pool.map(digest_file, files))
+          tree = hashlib.sha256()
+          for relative, size, digest in hashed:
+              tree.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+          manifest = root / "manifest.yaml"
+          raw = manifest.read_bytes()
+          text = raw.decode("utf-8")
+          for marker in (
+              "checkpointId: genmol-native-f7-v1",
+              "sourceNode: gpu-node-b.example.invalid",
+              "podNamespace: nim-fast-start",
+              "cudaRestore:",
+              "imageIoMode: direct",
+          ):
+              if marker not in text:
+                  raise SystemExit("native artifact manifest identity mismatch")
+          receipt = {
+              "schema": "archvteams.nebius.ai/genmol-native-artifact-receipt/v1",
+              "checkpoint_id": "genmol-native-f7-v1",
+              "artifact_version": "1",
+              "source_node": "gpu-node-b.example.invalid",
+              "regular_file_count": len(files),
+              "regular_file_bytes": total,
+              "prewarm_bytes": total,
+              "tree_sha256": tree.hexdigest(),
+              "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+              "image_io_mode": "direct",
+          }
+          print(json.dumps(receipt, sort_keys=True, separators=(",", ":")), flush=True)
+          Path("/state/artifact-verified").touch()
+          PY
+          exec sleep 2147483647
+      resources:
+        requests:
+          cpu: 100m
+          memory: 16Mi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/artifact-verified
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      volumeMounts:
+        - name: artifacts
+          mountPath: /artifacts
+          readOnly: true
+        - name: nim-cache
+          mountPath: /nim-cache
+          readOnly: true
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: genmol-native-f7-artifacts
+        readOnly: true
+    - name: nim-cache
+      persistentVolumeClaim:
+        claimName: genmol-native-f7-cache
+        readOnly: true
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi

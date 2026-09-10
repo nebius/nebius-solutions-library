@@ -1,0 +1,17 @@
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshotContent
+metadata:
+  name: openfold2-native-f7-v1-direct
+  labels:
+    nvidia.com/snapshot-node: gpu-node-b.example.invalid
+spec:
+  snapshotRef:
+    namespace: nim-fast-start
+    name: openfold2-native-f7-v1-direct
+  source:
+    nodeName: gpu-node-b.example.invalid
+    podRef:
+      name: @@SOURCE_POD_NAME@@
+      uid: @@SOURCE_POD_UID@@
+      containers:
+        - openfold2

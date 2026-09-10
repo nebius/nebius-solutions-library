@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "@@CACHE_HOLDER@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: conventional-cache-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  nodeName: "@@TARGET_NODE@@"
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: holder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /usr/local/bin/python3
+        - -c
+      args:
+        - |
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import time
+          from datetime import UTC, datetime
+
+          prewarm_started_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+          prewarm_started_ns = time.monotonic_ns()
+          cache_root = pathlib.Path("/cache").resolve(strict=True)
+          root = pathlib.Path(
+              "/cache/ngc/hub/models--nim--colabfold--msa-search/"
+              "snapshots/pdb70_220313-m18v1"
+          )
+          index = root / "pdb70_220313/pdb70_220313.idx"
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit("PDB70 snapshot root is absent or symlinked")
+          resolved_index = index.resolve(strict=True)
+          resolved_index.relative_to(cache_root)
+          if not resolved_index.is_file() or resolved_index.stat().st_size <= 0:
+              raise SystemExit("PDB70 index does not resolve to a cached regular file")
+          digest = hashlib.sha256()
+          paths = []
+          total = 0
+          seen = set()
+          model_root = root.parent.parent
+          for path in sorted(model_root.rglob("*")):
+              if path.is_file() or path.is_symlink():
+                  resolved = path.resolve(strict=True)
+                  resolved.relative_to(cache_root)
+                  info = resolved.stat()
+                  key = (info.st_dev, info.st_ino)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  paths.append(path.relative_to(model_root).as_posix())
+                  with resolved.open("rb", buffering=0) as source:
+                      while True:
+                          block = source.read(8 * 1024 * 1024)
+                          if not block:
+                              break
+                          total += len(block)
+                          digest.update(block)
+          prewarm_completed_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+          receipt = {
+              "schema": "archvteams.nebius.ai/msa-search-conventional-cache-holder/v1",
+              "status": "PASS",
+              "storage_attached": True,
+              "prewarm_outside_t0": True,
+              "prewarm_started_at": prewarm_started_at,
+              "prewarm_completed_at": prewarm_completed_at,
+              "prewarm_elapsed_seconds": round((time.monotonic_ns() - prewarm_started_ns) / 1_000_000_000, 6),
+              "regular_file_count": len(paths),
+              "prewarm_bytes": total,
+              "content_stream_sha256": digest.hexdigest(),
+              "pdb70_index_bytes": resolved_index.stat().st_size,
+          }
+          print(json.dumps(receipt, sort_keys=True, separators=(",", ":")), flush=True)
+          pathlib.Path("/run/holder/ready").touch()
+          while True:
+              time.sleep(3600)
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: "1"
+          memory: 128Mi
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /run/holder/ready
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        runAsUser: 0
+        runAsGroup: 0
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+          readOnly: true
+        - name: scratch
+          mountPath: /run/holder
+  volumes:
+    - name: cache
+      persistentVolumeClaim:
+        claimName: "@@CACHE_PVC@@"
+        readOnly: true
+    - name: scratch
+      emptyDir:
+        sizeLimit: 1Mi

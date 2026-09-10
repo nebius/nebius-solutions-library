@@ -1,0 +1,18 @@
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -367,10 +367,11 @@
+ RUN mkdir -p /runtime-root/var/lib /runtime-root/usr/share \
+     && cp -a /var/lib/dpkg /runtime-root/var/lib/ \
+     && cp -a /usr/share/doc /runtime-root/usr/share/
+-# Install python3 + python3-yaml for the compliance tooling only. PyYAML is
+-# required for license_overrides.yaml; dpkg scanning reads /runtime-root so
+-# these helper packages are not attributed as shipped content.
+-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
++# Install Python, PyYAML, and the tomllib compatibility module for the
++# compliance tooling only. Ubuntu 22.04 provides Python 3.10, so the policy
++# validator imports tomli. Dpkg scanning reads /runtime-root, therefore these
++# helper packages are not attributed as shipped content.
++RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml python3-tomli \
+     && apt-get clean && rm -rf /var/lib/apt/lists/*
+ COPY --from=compliance . /opt/compliance
+ ENV PYTHONPATH=/opt

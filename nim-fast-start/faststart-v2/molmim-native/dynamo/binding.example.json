@@ -1,0 +1,15 @@
+{
+  "schema": "archvteams.nebius.ai/molmim-target-binding/v1",
+  "collected_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+  "run_id": "REPLACE_WITH_SAME_RUN_ID",
+  "namespace": "nim-fast-start",
+  "pod_name": "molmim-target-REPLACE_WITH_SAME_RUN_ID",
+  "pod_uid": "REPLACE_WITH_POD_UUID",
+  "container_name": "molmim",
+  "container_id": "containerd://REPLACE_WITH_64_HEX_CONTAINER_ID",
+  "cgroup": "/REPLACE_WITH_EXACT_HOST_VISIBLE_KUBEPODS_CGROUP",
+  "pod_ip": "REPLACE_WITH_POD_IP",
+  "node": "REPLACE_WITH_SAME_VERIFIED_H100_HOSTNAME",
+  "image_id": "nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa",
+  "pod_spec_sha256": "REPLACE_WITH_CANONICAL_LIVE_POD_SPEC_SHA256"
+}

@@ -1,0 +1,107 @@
+{
+  "schema": "archvteams.nebius.ai/openfold3-native-results/v2",
+  "status": "PASS",
+  "legacy_timing_correction": {
+    "scope": "superseded 20260818T055003Z cohort only; never applied to the selected fresh response-boundary cohort",
+    "t0_source": "target-submit-at.txt",
+    "method": "legacy sidecar subtracts retained submit timestamp from HTTP, Kubernetes Ready, and validator-finished timestamps",
+    "sidecar_filename": "corrected-submit-edge-timings.json"
+  },
+  "response_boundary_requalification": {
+    "status": "PASS",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "exact_total_source": "per-run T0 through case 2 response_received_at",
+    "trial_count": 3,
+    "semantic_call_count": 6,
+    "validator_sha256": "679b3e027b18e78b4646569e8c6395fb5f62c4647704bb5089aa2385a20d11f5",
+    "aggregate_receipt": {
+      "path": "<private-evidence-root>/openfold3-response-boundary/aggregate.json",
+      "bytes": 6791,
+      "sha256": "a8c8469759452aaf709aeeb5200e5b773337bae85788a94b7384e8f862d244f3"
+    },
+    "excluded_attempt": {
+      "path": "<private-evidence-root>/openfold3-response-boundary-excluded/EXCLUDED.json",
+      "bytes": 268,
+      "sha256": "97b42c114aa49bd6737fedcbde783dcee3e84c0ba81f837bc20ac32e9316e1a1",
+      "cleanup_receipt_sha256": "c3c8773390a1f9da3af2ea97a7f0f2d9b146b6359a2ea1299e2fead1c43f2d17",
+      "reason": "a sub-second Kubernetes probe-finish timestamp quantization exposed a verifier gap; the cohort was excluded before aggregation and its run was not reused"
+    }
+  },
+  "measurement_contract": {
+    "t0": "immediately before target Pod creation on an already provisioned H100 with storage attached",
+    "readiness": "first successful application HTTP readiness response",
+    "call_1": "first strict semantic response, including deferred model or JIT loading",
+    "call_2": "immediate second strict semantic response",
+    "kubernetes_ready_is_not_http_ready": true,
+    "exact_total": "T0 through call 2 response_received_at, computed per run"
+  },
+  "selected": {
+    "checkpoint_id": "openfold3-native-f7-v2-buffered",
+    "artifact_version": "1",
+    "manifest_sha256": "5df221e0736a4c6f369781ea0dbc7c36783c26d3f35dcd874b4ced8f5f9e009f",
+    "image_io_mode": "buffered",
+    "storage_state": "attached and fully prewarmed before T0",
+    "trial_count": 3,
+    "semantic_call_count": 6,
+    "demand_to_http_ready_seconds": [12.088885, 12.271182, 12.36917],
+    "demand_to_kubernetes_ready_seconds": [12.651241, 12.966096, 12.887492],
+    "semantic_request_1_seconds": [9.098247, 9.180301, 9.070079],
+    "semantic_request_2_seconds": [9.166892, 9.11261, 9.174043],
+    "demand_to_two_semantic_responses_seconds": [30.354807, 30.564921, 30.614101],
+    "worker_restore_seconds": [4.925, 4.924, 4.915],
+    "medians_seconds": {
+      "demand_to_http_ready": 12.271182,
+      "demand_to_kubernetes_ready": 12.887492,
+      "semantic_request_1": 9.098247,
+      "semantic_request_2": 9.166892,
+      "demand_to_two_semantic_responses": 30.564921,
+      "worker_restore": 4.924
+    },
+    "setup": {
+      "worker_request_mcpu": 500,
+      "worker_limit_mcpu": 4000,
+      "candidate_cpu_headroom_mcpu": 470,
+      "initial_1000m_preflight_receipt_sha256": "61fe4f9442792297ce9657295c1081ee001605ec6460999c38b075bc54656630",
+      "selected_500m_preflight_receipt_sha256": "e47178f0106c6e522f8d5224ec306d059f564e4903c3e39da5c0a6c2fb1e5f67",
+      "artifact_full_read_seconds": 7.386615,
+      "artifact_full_read_receipt_sha256": "4e2ce483ed27d817f8e00fc26ef7f53fb9ad2b35f094b59ca44f97fb56abc7e9",
+      "image_residency_receipt_sha256": "e456d8410c95dc3bca4f0b43086de364523a5f876eada374d0fc1cd24aa0f613",
+      "final_state_receipt_sha256": "914ef402442db45e10419a5958ceb57eaa49645d4fe96d1764d1f8ea5037fffe"
+    },
+    "legacy_aggregate_receipt_superseded": {
+      "path": "<private-evidence-root>/openfold3-native-f7-20260818T055003Z/n3-of3-buf-buffered.json",
+      "bytes": 1081,
+      "sha256": "167e6ef6df1b7b83d9f076a83305f5b185b96c0b32ad372bd9ee61b9d3999728"
+    }
+  },
+  "direct_comparator": {
+    "checkpoint_id": "openfold3-native-f7-v1",
+    "artifact_version": "1",
+    "manifest_sha256": "86faa2d4149492ac1735823d625d160bc29a68098b47082cd67ce63241238b53",
+    "image_io_mode": "direct",
+    "storage_state": "attached; direct I/O bypassed page cache",
+    "trial_count": 1,
+    "semantic_call_count": 2,
+    "timings_seconds": {
+      "demand_to_http_ready": 87.284431,
+      "demand_to_kubernetes_ready": 88.224833,
+      "semantic_request_1": 8.611488,
+      "semantic_request_2": 8.548598,
+      "legacy_demand_to_validation_complete": 104.445954,
+      "worker_restore": 79.997
+    },
+    "legacy_receipt_superseded": {
+      "path": "<private-evidence-root>/openfold3-native-f7-20260818T055003Z/runs/of3-direct-r2/canary-evidence.json",
+      "bytes": 2331,
+      "sha256": "2475778dc09489ad12122cab6ddd2918a105dcc1eb88f5497b67db464fcff5d8"
+    }
+  },
+  "worker": {
+    "image": "registry.example.invalid/faststart/snapshot-agent@sha256:d5ce1eaad55378a93a9bf53b35effcbc378ed15ab7e5b7f6b41df6689cefdf28",
+    "classification": "performance-validation-only",
+    "release_ready": false,
+    "restore_worker_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+    "tool_bundle_manifest_sha256": "c0d638100c03fa35973e82859d15b9c8dd1bcbf0fe9cb185b58cc21fae7ead1e",
+    "source_materialized_tree_sha256": "76838bc28fa641ba3d3165c1deb1f019c4f63ed9fce9571b38194ff65ef7b816"
+  }
+}

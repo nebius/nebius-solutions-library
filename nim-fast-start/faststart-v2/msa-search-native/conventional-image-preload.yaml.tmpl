@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "@@PRELOAD_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: conventional-image-preload
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  nodeName: "@@TARGET_NODE@@"
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-preload
+      image: "@@TARGET_IMAGE@@"
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - -lc
+      args:
+        - touch /tmp/image-resident && exec sleep 3600
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: "1"
+          memory: 256Mi
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /tmp/image-resident
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 600
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        runAsUser: 0
+        runAsGroup: 0

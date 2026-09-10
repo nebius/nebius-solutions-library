@@ -1,0 +1,673 @@
+from __future__ import annotations
+
+import copy
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+import sys
+
+TEST_DIR = Path(__file__).resolve().parent
+MODULE_DIR = TEST_DIR.parent
+sys.path.insert(0, str(MODULE_DIR))
+
+import bind_target  # noqa: E402
+import evidence  # noqa: E402
+import render  # noqa: E402
+try:
+    from test_scaffold import approved_contract, run_config  # noqa: E402
+except ImportError:  # pragma: no cover - package discovery path
+    from .test_scaffold import approved_contract, run_config  # type: ignore[no-redef] # noqa: E402
+
+
+POD_UID = "11111111-1111-4111-8111-111111111111"
+CONTAINER_ID = "containerd://" + "a" * 64
+CROSS_LANGUAGE_SPEC_SHA256 = (
+    "74dcff50b5758bce2d4a5bd08b251619982ad4b864b58766fbcd6576ac87d090"
+)
+
+
+def live_target() -> dict:
+    contract = render.validate_contract(approved_contract())
+    run = render.validate_run(run_config())
+    documents = render.render_target(run, contract)
+    pod = copy.deepcopy(next(item for item in documents if item["kind"] == "Pod"))
+    pod["metadata"].update(
+        {
+            "uid": POD_UID,
+            "creationTimestamp": "2026-08-17T20:00:01Z",
+        }
+    )
+    # These fields represent API defaulting plus scheduler placement.  They are
+    # deliberately part of the canonical hash rather than the source template.
+    pod["spec"].update(
+        {
+            "nodeName": "gpu-node-a.example.invalid",
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "serviceAccountName": "default",
+        }
+    )
+    # The API server marshals these plain false bools with `omitempty`; a live
+    # `GET /pods/...` response therefore omits them even though the submitted
+    # manifest states them explicitly.
+    for omitted_false in ("hostIPC", "hostNetwork", "hostPID"):
+        del pod["spec"][omitted_false]
+    pod["status"] = {
+        "phase": "Running",
+        "qosClass": "Burstable",
+        "podIP": "10.50.42.7",
+        "podIPs": [{"ip": "10.50.42.7"}],
+        "conditions": [
+            {
+                "type": "PodScheduled",
+                "status": "True",
+                "lastTransitionTime": "2026-08-17T20:00:02Z",
+            },
+            {
+                "type": "Ready",
+                "status": "True",
+                "lastTransitionTime": "2026-08-17T20:00:07Z",
+            },
+        ],
+        "containerStatuses": [
+            {
+                "name": "openfold2",
+                "containerID": CONTAINER_ID,
+                "imageID": render.NIM_IMAGE,
+                "state": {"running": {"startedAt": "2026-08-17T20:00:03Z"}},
+            }
+        ],
+    }
+    return pod
+
+
+def bound_inputs() -> tuple[dict, dict, dict]:
+    run = render.validate_run(run_config())
+    target = live_target()
+    binding, _ = bind_target.build_binding(
+        target, run, approved_contract(), "2026-08-17T20:00:03Z"
+    )
+    target["metadata"]["annotations"][bind_target.POD_SPEC_HASH_KEY] = binding[
+        "pod_spec_sha256"
+    ]
+    return run, target, binding
+
+
+def evidence_inputs() -> dict:
+    run, target, binding = bound_inputs()
+    contract = render.validate_contract(approved_contract())
+    run_id = run["run_id"]
+    worker_name = f"of2-restore-{run_id}"
+    probe_name = f"of2-semantic-{run_id}"
+    worker_job = copy.deepcopy(
+        next(
+            item
+            for item in render.render_restore(run, contract, binding)
+            if item["kind"] == "Job"
+        )
+    )
+    worker_job["status"] = {
+        "succeeded": 1,
+        "completionTime": "2026-08-17T20:00:06.100000Z",
+    }
+    worker_pod = {
+        "status": {
+            "containerStatuses": [
+                {
+                    "name": "restore-worker",
+                    "state": {
+                        "terminated": {
+                            "exitCode": 0,
+                            "startedAt": "2026-08-17T20:00:04Z",
+                            "finishedAt": "2026-08-17T20:00:06Z",
+                        }
+                    },
+                }
+            ]
+        }
+    }
+    worker_receipt = {
+        "schema": evidence.WORKER_RECEIPT_SCHEMA,
+        "status": "succeeded",
+        "completed_at": "2026-08-17T20:00:05.900000Z",
+        "duration_ms": 1500,
+        "run_id": run_id,
+        "target_namespace": render.NAMESPACE,
+        "target_name": f"of2-target-{run_id}",
+        "target_uid": POD_UID,
+        "target_container_id": CONTAINER_ID,
+        "target_image_id": binding["image_id"],
+        "target_node": binding["node"],
+        "target_pod_ip": binding["pod_ip"],
+        "target_pod_spec_sha256": binding["pod_spec_sha256"],
+        "checkpoint_id": run["checkpoint_id"],
+        "artifact_version": run["artifact_version"],
+        "checkpoint_manifest_sha256": run["artifact_manifest_sha256"],
+        "tool_bundle_manifest_sha256": approved_contract()["tool_bundle"][
+            "content_sha256"
+        ],
+    }
+    probe_job = copy.deepcopy(
+        next(
+            item
+            for item in render.render_probe(run, contract, binding)
+            if item["kind"] == "Job"
+        )
+    )
+    probe_job["status"] = {
+        "succeeded": 1,
+        "completionTime": "2026-08-17T20:00:10.100000Z",
+    }
+    probe_pod = {
+        "status": {
+            "containerStatuses": [
+                {
+                    "name": "semantic-probe",
+                    "state": {
+                        "terminated": {
+                            "exitCode": 0,
+                            "startedAt": "2026-08-17T20:00:08Z",
+                            "finishedAt": "2026-08-17T20:00:10Z",
+                        }
+                    },
+                }
+            ]
+        }
+    }
+    service_name = f"of2-canary-{run_id}"
+    service = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": service_name,
+            "namespace": render.NAMESPACE,
+            "uid": "33333333-3333-4333-8333-333333333333",
+        },
+        "spec": {
+            "type": "ClusterIP",
+            "clusterIP": "10.96.42.7",
+            "selector": {
+                "app.kubernetes.io/name": "openfold2",
+                "app.kubernetes.io/component": "restore-target",
+                "archvteams.nebius.ai/run-id": run_id,
+            },
+            "ports": [
+                {
+                    "name": "http",
+                    "port": 8000,
+                    "targetPort": "http",
+                    "protocol": "TCP",
+                }
+            ],
+        },
+    }
+    slices = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSliceList",
+        "items": [
+            {
+                "metadata": {
+                    "labels": {"kubernetes.io/service-name": service_name},
+                    "ownerReferences": [
+                        {
+                            "kind": "Service",
+                            "uid": "33333333-3333-4333-8333-333333333333",
+                            "controller": True,
+                        }
+                    ],
+                },
+                "endpoints": [
+                    {
+                        "addresses": [binding["pod_ip"]],
+                        "conditions": {"ready": True},
+                        "targetRef": {"uid": POD_UID},
+                    }
+                ],
+            }
+        ],
+    }
+    semantic = {
+        "schema_version": 2,
+        "validator": "openfold2-faststart-semantic-v1",
+        "base_url": f"http://{service_name}:8000",
+        "endpoint": (
+            f"http://{service_name}:8000/biology/openfold/openfold2/"
+            "predict-structure-from-msa-and-template"
+        ),
+        "inference_path": (
+            "/biology/openfold/openfold2/predict-structure-from-msa-and-template"
+        ),
+        "proxy_policy": "disabled",
+        "redirect_policy": "reject",
+        "ok": True,
+        "status": "PASS",
+        "passed_case_count": 2,
+        "failed_case_count": 0,
+        "exit_code": 0,
+        "request_count": 2,
+        "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+        "started_at": "2026-08-17T20:00:08.100000Z",
+        "ready_wait": {
+            "attempts": 3,
+            "elapsed_seconds": 0.1,
+            "endpoint": f"http://{service_name}:8000/v1/health/ready",
+            "finished_at": "2026-08-17T20:00:08.200000Z",
+            "started_at": "2026-08-17T20:00:08.100000Z",
+            "status": "PASS",
+        },
+        "finished_at": "2026-08-17T20:00:09.900000Z",
+        "validation_finished_at": "2026-08-17T20:00:09.900000Z",
+        "total_elapsed_seconds": 1.8,
+        "validation_total_elapsed_seconds": 1.8,
+        "cases": [
+            {
+                "index": 1,
+                "input_id": f"{run_id}-semantic-a",
+                "ok": True,
+                "status": "PASS",
+                "exit_code": 0,
+                "elapsed_seconds": 0.8,
+                "request_started_at": "2026-08-17T20:00:08.300000Z",
+                "response_received_at": "2026-08-17T20:00:09.000000Z",
+                "invariant": {"pdb": {"residue_count": 20}},
+            },
+            {
+                "index": 2,
+                "input_id": f"{run_id}-semantic-b",
+                "ok": True,
+                "status": "PASS",
+                "exit_code": 0,
+                "elapsed_seconds": 0.9,
+                "request_started_at": "2026-08-17T20:00:09.100000Z",
+                "response_received_at": "2026-08-17T20:00:09.600000Z",
+                "invariant": {"pdb": {"residue_count": 20}},
+            },
+        ],
+    }
+    return {
+        "contract": approved_contract(),
+        "run": run,
+        "binding": binding,
+        "target": target,
+        "service": service,
+        "endpoint_slices": slices,
+        "worker_job": worker_job,
+        "worker_pod": worker_pod,
+        "worker_receipt": worker_receipt,
+        "probe_job": probe_job,
+        "probe_pod": probe_pod,
+        "semantic_summary": semantic,
+        "target_submit_at": "2026-08-17T20:00:00Z",
+        "target_create_response_at": "2026-08-17T20:00:00.200000Z",
+        "qualification_receipt": {
+            "schema": "archvteams.nebius.ai/warm-instance-qualification/v3",
+            "status": "PASS",
+            "model": "openfold2",
+            "run_id": run_id,
+            "target": {
+                "namespace": render.NAMESPACE,
+                "name": f"of2-target-{run_id}",
+                "uid": POD_UID,
+                "pod_spec_sha256": binding["pod_spec_sha256"],
+                "image": render.NIM_IMAGE,
+            },
+            "timing_boundaries": {
+                "acceptance_response_proxy": {
+                    "label": "client-observed-api-create-response-return/v1",
+                    "timestamp": "2026-08-17T20:00:00.200000Z",
+                    "is_exact_server_acceptance": False,
+                }
+            },
+            "warm_instance": {
+                "target_image_already_present_before_t0": True,
+                "target_image_pull_or_download_after_t0": False,
+            },
+            "gpu_health": {
+                "status": "PASS",
+                "host_xid_check": {"status": "unavailable"},
+            },
+            "boot_time_alignment": {
+                "status": "PASS",
+                "conservative_upper_bounds": {
+                    "http_ready_complete_body": {"upper_bound_seconds": 8.2},
+                    "first_semantic_response_complete_body": {
+                        "upper_bound_seconds": 9.0
+                    },
+                    "two_semantic_responses_complete_body": {
+                        "upper_bound_seconds": 9.6
+                    },
+                },
+            },
+        },
+    }
+
+
+class BindingTests(unittest.TestCase):
+    def test_python_matches_go_worker_canonical_pod_spec_fixture(self) -> None:
+        fixture_path = TEST_DIR / "fixtures" / "openfold2-api-pod-spec.json"
+        spec = json.loads(fixture_path.read_text(encoding="utf-8"))
+        # This fixed digest is generated by the worker's Go path: unmarshal the
+        # API-returned JSON into corev1.PodSpec, json.Marshal it, decode with
+        # UseNumber, then sorted compact encoding with HTML escaping disabled.
+        self.assertEqual(bind_target.pod_spec_sha256(spec), CROSS_LANGUAGE_SPEC_SHA256)
+        self.assertEqual(spec, live_target()["spec"])
+
+    def test_live_defaulted_pod_spec_is_hashed_and_uid_patched(self) -> None:
+        run = render.validate_run(run_config())
+        pod = live_target()
+        binding, patch = bind_target.build_binding(
+            pod, run, approved_contract(), "2026-08-17T20:00:03Z"
+        )
+        expected = bind_target.pod_spec_sha256(pod["spec"])
+        self.assertEqual(binding["pod_spec_sha256"], expected)
+        self.assertEqual(patch[0], {"op": "test", "path": "/metadata/uid", "value": POD_UID})
+        self.assertEqual(patch[1]["value"], expected)
+
+    def test_spec_change_after_existing_binding_is_rejected(self) -> None:
+        run, pod, _ = bound_inputs()
+        pod["spec"]["terminationGracePeriodSeconds"] = 7
+        with self.assertRaisesRegex(bind_target.BindingError, "existing target PodSpec"):
+            bind_target.build_binding(
+                pod, run, approved_contract(), "2026-08-17T20:00:03Z"
+            )
+
+    def test_runtime_cgroup_is_derived_from_bound_uid_and_container(self) -> None:
+        binding, _ = bind_target.build_binding(
+            live_target(),
+            render.validate_run(run_config()),
+            approved_contract(),
+            "2026-08-17T20:00:03Z",
+        )
+        self.assertIn(POD_UID.replace("-", "_"), binding["cgroup"])
+        self.assertIn("a" * 64, binding["cgroup"])
+
+    def test_non_burstable_qos_is_rejected_before_cgroup_derivation(self) -> None:
+        pod = live_target()
+        pod["status"]["qosClass"] = "Guaranteed"
+        with self.assertRaisesRegex(bind_target.BindingError, "QoS"):
+            bind_target.build_binding(
+                pod,
+                render.validate_run(run_config()),
+                approved_contract(),
+                "2026-08-17T20:00:03Z",
+            )
+
+    def test_bind_cli_writes_new_binding_and_uid_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            inputs = {
+                "contract.json": approved_contract(),
+                "run.json": run_config(),
+                "pod.json": live_target(),
+            }
+            for name, value in inputs.items():
+                (root / name).write_text(json.dumps(value), encoding="utf-8")
+            stdout, stderr = StringIO(), StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                status = bind_target.main(
+                    [
+                        "--contract",
+                        str(root / "contract.json"),
+                        "--run-config",
+                        str(root / "run.json"),
+                        "--pod-json",
+                        str(root / "pod.json"),
+                        "--collected-at",
+                        "2026-08-17T20:00:03Z",
+                        "--binding-output",
+                        str(root / "binding.json"),
+                        "--patch-output",
+                        str(root / "patch.json"),
+                    ]
+                )
+            self.assertEqual(status, 0, stderr.getvalue())
+            binding = json.loads((root / "binding.json").read_text(encoding="utf-8"))
+            patch = json.loads((root / "patch.json").read_text(encoding="utf-8"))
+            self.assertEqual(binding["pod_spec_sha256"], patch[1]["value"])
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "bound")
+
+
+class EvidenceTests(unittest.TestCase):
+    def test_probe_may_start_before_worker_and_wait_for_readiness(self) -> None:
+        inputs = evidence_inputs()
+        terminated = inputs["probe_pod"]["status"]["containerStatuses"][0]["state"][
+            "terminated"
+        ]
+        terminated["startedAt"] = "2026-08-17T20:00:03.500000Z"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["status"], "PASS")
+
+    def test_two_semantic_responses_produce_demand_timing(self) -> None:
+        receipt = evidence.build_evidence(**evidence_inputs())
+        self.assertEqual(receipt["status"], "PASS")
+        self.assertEqual(receipt["request_count"], 2)
+        self.assertEqual(
+            receipt["response_timing_contract"],
+            "request-dispatch-to-complete-http-body/v1",
+        )
+        self.assertEqual(
+            receipt["timings_seconds"]["demand_to_two_semantic_responses"], 9.6
+        )
+        self.assertEqual(receipt["timings_seconds"]["demand_to_http_ready"], 8.2)
+        self.assertEqual(
+            receipt["timings_seconds"]["demand_to_kubernetes_ready"], 7.0
+        )
+        self.assertEqual(receipt["timings_seconds"]["semantic_request_1"], 0.8)
+        self.assertEqual(receipt["timings_seconds"]["semantic_request_2"], 0.9)
+        self.assertEqual(
+            receipt["evidence"]["validation_finished_at"],
+            "2026-08-17T20:00:09.900000Z",
+        )
+        self.assertEqual(
+            receipt["evidence"]["http_ready_at"],
+            "2026-08-17T20:00:08.200000+00:00",
+        )
+        self.assertEqual(receipt["timings_seconds"]["worker_restore"], 1.5)
+        self.assertEqual(
+            receipt["timings_seconds"]["target_create_api_round_trip"], 0.2
+        )
+        self.assertEqual(
+            receipt["timings_seconds"][
+                "acceptance_response_proxy_to_two_semantic_responses"
+            ],
+            9.4,
+        )
+        self.assertFalse(
+            receipt["qualification"]["timing_boundaries"][
+                "acceptance_response_proxy"
+            ]["is_exact_server_acceptance"]
+        )
+
+    def test_pre_submit_render_time_is_excluded_from_startup_metrics(self) -> None:
+        inputs = evidence_inputs()
+        baseline = evidence.build_evidence(**inputs)
+        inputs["run"]["demand_at"] = "2026-08-17T19:59:50Z"
+        delayed_render = evidence.build_evidence(**inputs)
+        self.assertEqual(baseline["timings_seconds"], delayed_render["timings_seconds"])
+        self.assertEqual(delayed_render["t0_source"], "target-submit-at.txt")
+
+    def test_kubernetes_ready_duration_tolerates_only_subsecond_quantization(self) -> None:
+        demand = evidence._timestamp("2026-08-17T20:00:00.900000Z", "demand")
+        same_second = evidence._timestamp("2026-08-17T20:00:00Z", "Ready")
+        self.assertEqual(evidence._kubernetes_seconds(demand, same_second), 0.0)
+        previous_second = evidence._timestamp("2026-08-17T19:59:59Z", "Ready")
+        with self.assertRaisesRegex(evidence.EvidenceError, "reversed timestamps"):
+            evidence._kubernetes_seconds(demand, previous_second)
+
+    def test_submit_edge_tolerates_only_same_second_api_timestamp_quantization(self) -> None:
+        inputs = evidence_inputs()
+        inputs["target_submit_at"] = "2026-08-17T20:00:01.900000Z"
+        inputs["target_create_response_at"] = "2026-08-17T20:00:01.950000Z"
+        inputs["qualification_receipt"]["timing_boundaries"][
+            "acceptance_response_proxy"
+        ]["timestamp"] = inputs["target_create_response_at"]
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["timings_seconds"]["demand_to_target_created"], 0.0)
+
+        inputs["target_submit_at"] = "2026-08-17T20:00:02.100000Z"
+        inputs["target_create_response_at"] = "2026-08-17T20:00:02.200000Z"
+        inputs["qualification_receipt"]["timing_boundaries"][
+            "acceptance_response_proxy"
+        ]["timestamp"] = inputs["target_create_response_at"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "target creation"):
+            evidence.build_evidence(**inputs)
+
+    def test_probe_finish_tolerates_only_same_second_kubelet_quantization(self) -> None:
+        inputs = evidence_inputs()
+        terminated = inputs["probe_pod"]["status"]["containerStatuses"][0]["state"][
+            "terminated"
+        ]
+        terminated["finishedAt"] = "2026-08-17T20:00:09Z"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["status"], "PASS")
+
+        terminated["finishedAt"] = "2026-08-17T20:00:08Z"
+        with self.assertRaisesRegex(evidence.EvidenceError, "at least one second"):
+            evidence.build_evidence(**inputs)
+
+    def test_endpoint_uid_mismatch_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        inputs["endpoint_slices"]["items"][0]["endpoints"][0]["targetRef"]["uid"] = (
+            "22222222-2222-4222-8222-222222222222"
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "ready bound target"):
+            evidence.build_evidence(**inputs)
+
+    def test_generic_kubectl_list_envelope_is_accepted(self) -> None:
+        inputs = evidence_inputs()
+        inputs["endpoint_slices"]["apiVersion"] = "v1"
+        inputs["endpoint_slices"]["kind"] = "List"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["status"], "PASS")
+
+    def test_kubernetes_ready_before_worker_receipt_is_accepted(self) -> None:
+        inputs = evidence_inputs()
+        for condition in inputs["target"]["status"]["conditions"]:
+            if condition["type"] == "Ready":
+                condition["lastTransitionTime"] = "2026-08-17T20:00:05Z"
+        inputs["worker_receipt"]["completed_at"] = "2026-08-17T20:00:05.900000Z"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["status"], "PASS")
+
+    def test_kubernetes_ready_timeline_is_independent_of_worker_receipt(self) -> None:
+        inputs = evidence_inputs()
+        for condition in inputs["target"]["status"]["conditions"]:
+            if condition["type"] == "Ready":
+                condition["lastTransitionTime"] = "2026-08-17T20:00:04Z"
+        inputs["worker_receipt"]["completed_at"] = "2026-08-17T20:00:05.900000Z"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["timings_seconds"]["demand_to_kubernetes_ready"], 4.0)
+        self.assertEqual(receipt["timings_seconds"]["demand_to_http_ready"], 8.2)
+
+    def test_http_ready_may_precede_independent_worker_receipt(self) -> None:
+        inputs = evidence_inputs()
+        inputs["worker_receipt"]["completed_at"] = "2026-08-17T20:00:08.500000Z"
+        receipt = evidence.build_evidence(**inputs)
+        self.assertEqual(receipt["status"], "PASS")
+        self.assertEqual(receipt["timings_seconds"]["demand_to_http_ready"], 8.2)
+        self.assertEqual(receipt["timings_seconds"]["demand_to_restore_receipt"], 8.5)
+
+    def test_missing_successful_http_readiness_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        del inputs["semantic_summary"]["ready_wait"]
+        with self.assertRaisesRegex(evidence.EvidenceError, "HTTP readiness receipt"):
+            evidence.build_evidence(**inputs)
+
+    def test_http_readiness_after_semantic_completion_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        inputs["semantic_summary"]["ready_wait"]["finished_at"] = (
+            "2026-08-17T20:00:10Z"
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "probe timestamps"):
+            evidence.build_evidence(**inputs)
+
+    def test_more_than_two_semantic_cases_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        inputs["semantic_summary"]["cases"].append(
+            copy.deepcopy(inputs["semantic_summary"]["cases"][1])
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "exactly two cases"):
+            evidence.build_evidence(**inputs)
+
+    def test_legacy_response_boundary_evidence_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        del inputs["semantic_summary"]["cases"][1]["response_received_at"]
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.build_evidence(**inputs)
+
+    def test_worker_argument_drift_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        args = inputs["worker_job"]["spec"]["template"]["spec"]["containers"][0][
+            "args"
+        ]
+        args[args.index("--target-uid") + 1] = "22222222-2222-4222-8222-222222222222"
+        with self.assertRaisesRegex(evidence.EvidenceError, "args does not match"):
+            evidence.build_evidence(**inputs)
+
+    def test_semantic_summary_from_another_service_is_rejected(self) -> None:
+        inputs = evidence_inputs()
+        inputs["semantic_summary"]["base_url"] = "http://another-service:8000"
+        with self.assertRaisesRegex(evidence.EvidenceError, "canary Service"):
+            evidence.build_evidence(**inputs)
+
+    def test_evidence_cli_emits_one_pass_receipt(self) -> None:
+        values = evidence_inputs()
+        filenames = {
+            "contract": "contract.json",
+            "run": "run.json",
+            "binding": "binding.json",
+            "target": "target.json",
+            "service": "service.json",
+            "endpoint_slices": "slices.json",
+            "worker_job": "worker-job.json",
+            "worker_pod": "worker-pod.json",
+            "worker_receipt": "worker-receipt.json",
+            "probe_job": "probe-job.json",
+            "probe_pod": "probe-pod.json",
+            "semantic_summary": "semantic.json",
+            "target_submit_at": "target-submit-at.txt",
+            "target_create_response_at": "target-create-response-at.txt",
+            "qualification_receipt": "qualification.json",
+        }
+        flags = {
+            "contract": "--contract",
+            "run": "--run-config",
+            "binding": "--binding",
+            "target": "--target-pod",
+            "service": "--service",
+            "endpoint_slices": "--endpoint-slices",
+            "worker_job": "--worker-job",
+            "worker_pod": "--worker-pod",
+            "worker_receipt": "--worker-receipt",
+            "probe_job": "--probe-job",
+            "probe_pod": "--probe-pod",
+            "semantic_summary": "--semantic-summary",
+            "target_submit_at": "--target-submit-at",
+            "target_create_response_at": "--target-create-response-at",
+            "qualification_receipt": "--qualification-receipt",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            argv: list[str] = []
+            for key, filename in filenames.items():
+                path = root / filename
+                path.write_text(
+                    values[key]
+                    if key in {"target_submit_at", "target_create_response_at"}
+                    else json.dumps(values[key]),
+                    encoding="utf-8",
+                )
+                argv.extend([flags[key], str(path)])
+            stdout, stderr = StringIO(), StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                status = evidence.main(argv)
+            self.assertEqual(status, 0, stderr.getvalue())
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "PASS")
+
+
+if __name__ == "__main__":
+    unittest.main()

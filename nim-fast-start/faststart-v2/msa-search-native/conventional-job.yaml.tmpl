@@ -1,0 +1,143 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "@@JOB_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: conventional-cold-start
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  annotations:
+    archvteams.nebius.ai/storage-state: attached-and-prewarmed-before-demand
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msa-search
+        app.kubernetes.io/component: conventional-cold-start
+        archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+      annotations:
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeName: "@@TARGET_NODE@@"
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      containers:
+        - name: msa-search
+          image: "@@TARGET_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |-
+              set -Eeuo pipefail
+              umask 077
+              python3 - <<'PY'
+              import os
+              import pathlib
+
+              data = pathlib.Path("/validator/request-pdb70.json").read_bytes()
+              descriptor = os.open(
+                  "/output/request-pdb70.json",
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                  0o600,
+              )
+              with os.fdopen(descriptor, "wb") as output:
+                  output.write(data)
+                  output.flush()
+                  os.fsync(output.fileno())
+              PY
+              bash /opt/nim/start_server.sh &
+              server_pid=$!
+              trap 'kill "$server_pid" 2>/dev/null || true' TERM INT EXIT
+              python3 /validator/validate_msa_search.py \
+                --base-url http://127.0.0.1:8000 \
+                --request-file /output/request-pdb70.json \
+                --receipt-dir /output/semantic \
+                --run-id "@@RUN_ID@@-semantic-a" \
+                --run-id "@@RUN_ID@@-semantic-b" \
+                --ready-timeout 120 \
+                --timeout 30 | tee /output/semantic-summary.json
+              python3 /validator/verify_mmseqs_pipe.py | tee /output/mmseqs-pipe.json
+              sleep 10
+          env:
+            - name: NIM_CACHE_PATH
+              value: /opt/nim/.cache
+            - name: NIM_MODEL_PROFILE
+              value: ad5086cc67393792e71fa57444f13eaff8425658e8fb5feea07070ca3b2d34bb
+            - name: NIM_GLOBAL_MAX_MSA_DEPTH
+              value: "500"
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-api-key
+                  key: NGC_API_KEY
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "10"
+              memory: 128Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "15"
+              memory: 180Gi
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /v1/health/ready
+              port: http
+              scheme: HTTP
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 180
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: nim-cache
+              mountPath: /opt/nim/.cache
+            - name: nim-cache
+              mountPath: /opt/nim/workspace
+            - name: validator
+              mountPath: /validator
+              readOnly: true
+            - name: output
+              mountPath: /output
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: nim-cache
+          persistentVolumeClaim:
+            claimName: "@@CACHE_PVC@@"
+        - name: validator
+          configMap:
+            name: "@@INPUTS_NAME@@"
+            defaultMode: 0444
+        - name: output
+          emptyDir:
+            sizeLimit: 8Mi

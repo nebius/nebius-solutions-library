@@ -1,0 +1,147 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: molmim-native-f7-cache-seed-r1
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: cache-seed
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: molmim
+        app.kubernetes.io/component: cache-seed
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpu-node-a.example.invalid
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: seed
+          image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/python3
+            - -c
+          args:
+            - |
+              import hashlib
+              import json
+              import os
+              import stat
+              from pathlib import Path
+
+              source = Path("/retained-cache")
+              destination = Path("/cache")
+              receipt_path = destination / ".molmim-cache-receipt.json"
+              if source.is_symlink() or not source.is_dir():
+                  raise SystemExit("retained MolMIM cache is absent or symlinked")
+              existing = [path for path in destination.iterdir() if path.name != "lost+found"]
+              if existing or receipt_path.exists():
+                  raise SystemExit("destination cache is not empty; refusing overwrite")
+
+              source_files = []
+              source_bytes = 0
+              checkpoint_count = 0
+              for directory, names, entries in os.walk(source, followlinks=False):
+                  for name in names:
+                      path = Path(directory) / name
+                      if path.is_symlink():
+                          raise SystemExit("retained cache contains a symlinked directory")
+                  for name in entries:
+                      path = Path(directory) / name
+                      info = path.lstat()
+                      if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+                          raise SystemExit("retained cache contains a non-regular file")
+                      relative = path.relative_to(source)
+                      source_files.append((relative, info.st_size, path))
+                      source_bytes += info.st_size
+                      if info.st_size == 281589760:
+                          checkpoint_count += 1
+              if not source_files or source_bytes != 284497920:
+                  raise SystemExit("retained cache byte identity does not match the pinned source")
+              if checkpoint_count != 1:
+                  raise SystemExit("retained cache does not contain exactly one 281589760-byte checkpoint")
+
+              copied = []
+              for relative, size, path in sorted(source_files):
+                  target = destination / relative
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  digest = hashlib.sha256()
+                  descriptor = os.open(
+                      target,
+                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                      0o444,
+                  )
+                  with path.open("rb", buffering=0) as input_file, os.fdopen(
+                      descriptor, "wb", buffering=0
+                  ) as output_file:
+                      while block := input_file.read(8 * 1024 * 1024):
+                          digest.update(block)
+                          output_file.write(block)
+                      output_file.flush()
+                      os.fsync(output_file.fileno())
+                  if target.stat().st_size != size:
+                      raise SystemExit("short MolMIM cache copy")
+                  copied.append((relative.as_posix(), size, digest.hexdigest()))
+
+              tree = hashlib.sha256()
+              for relative, size, digest in copied:
+                  tree.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+              receipt = {
+                  "schema": "archvteams.nebius.ai/molmim-cache-receipt/v1",
+                  "source_host_path": "/snapshots/nim-caches/molmim",
+                  "regular_file_count": len(copied),
+                  "regular_file_bytes": source_bytes,
+                  "checkpoint_file_bytes": 281589760,
+                  "tree_sha256": tree.hexdigest(),
+                  "prewarm_bytes": source_bytes,
+                  "status": "PASS",
+              }
+              raw = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
+              descriptor = os.open(
+                  receipt_path,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                  0o444,
+              )
+              with os.fdopen(descriptor, "wb") as output_file:
+                  output_file.write(raw)
+                  output_file.flush()
+                  os.fsync(output_file.fileno())
+              print(raw.decode().rstrip(), flush=True)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: retained-cache
+              mountPath: /retained-cache
+              readOnly: true
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: retained-cache
+          hostPath:
+            path: /snapshots/nim-caches/molmim
+            type: Directory
+        - name: cache
+          persistentVolumeClaim:
+            claimName: molmim-native-f7-cache

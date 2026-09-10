@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_CALL_LOG:?FAKE_CALL_LOG is required}"
+: "${FAKE_EXPECTED_KUBECONFIG:?FAKE_EXPECTED_KUBECONFIG is required}"
+: "${FAKE_NODE:?FAKE_NODE is required}"
+
+if [[ ${1:-} != "--kubeconfig" || ${2:-} != "$FAKE_EXPECTED_KUBECONFIG" ]]; then
+  printf 'unexpected kubeconfig argument\n' >&2
+  exit 90
+fi
+shift 2
+
+if [[ ${1:-} == "config" && ${2:-} == "view" ]]; then
+  printf '%s\n' "config-view" >> "$FAKE_CALL_LOG"
+  printf '%s' "${FAKE_SERVER:-https://kubernetes-api.example.invalid:443}"
+  exit 0
+fi
+
+if [[ ${1:-} != "-n" || ${2:-} != "nim-fast-start" ]]; then
+  printf 'unexpected namespace arguments\n' >&2
+  exit 91
+fi
+shift 2
+
+case "${1:-}:${2:-}" in
+  get:pod)
+    pod_name=${3:?pod name is required}
+    if [[ $pod_name == "molmim-native-f7-cache-holder-t12" ]]; then
+      printf '%s\n' "cache-holder-get" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_CACHE_HOLDER_READY:-true} == "true" ]]; then
+        holder_status=True
+        container_ready=true
+      else
+        holder_status=False
+        container_ready=false
+      fi
+      /usr/bin/jq -n \
+        --arg node "$FAKE_NODE" \
+        --arg status "$holder_status" \
+        --argjson container_ready "$container_ready" \
+        '{
+          metadata:{name:"molmim-native-f7-cache-holder-t12"},
+          spec:{
+            nodeName:$node,
+            volumes:[
+              {name:"cache",persistentVolumeClaim:{claimName:"molmim-native-f7-cache",readOnly:true}}
+            ]
+          },
+          status:{
+            conditions:[{type:"Ready",status:$status}],
+            containerStatuses:[{name:"holder",ready:$container_ready}]
+          }
+        }'
+    elif [[ $pod_name == "molmim-native-f7-image-holder-t12" ]]; then
+      printf '%s\n' "image-holder-get" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_IMAGE_HOLDER_READY:-true} == "true" ]]; then
+        holder_status=True
+        container_ready=true
+      else
+        holder_status=False
+        container_ready=false
+      fi
+      /usr/bin/jq -n \
+        --arg node "$FAKE_NODE" \
+        --arg status "$holder_status" \
+        --argjson container_ready "$container_ready" \
+        '{
+          metadata:{name:"molmim-native-f7-image-holder-t12"},
+          spec:{
+            nodeName:$node,
+            containers:[{
+              name:"holder",
+              image:"nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa",
+              imagePullPolicy:"IfNotPresent"
+            }]
+          },
+          status:{
+            conditions:[{type:"Ready",status:$status}],
+            containerStatuses:[{name:"holder",ready:$container_ready}]
+          }
+        }'
+    elif [[ $pod_name == "${FAKE_HOLDER_NAME:?FAKE_HOLDER_NAME is required}" ]]; then
+      printf '%s\n' "holder-get" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_HOLDER_READY:-true} == "true" ]]; then
+        holder_status=True
+        container_ready=true
+      else
+        holder_status=False
+        container_ready=false
+      fi
+      /usr/bin/jq -n \
+        --arg node "$FAKE_NODE" \
+        --arg status "$holder_status" \
+        --argjson container_ready "$container_ready" \
+        '{
+          metadata:{name:"holder"},
+          spec:{
+            nodeName:$node,
+            volumes:[
+              {name:"artifacts",persistentVolumeClaim:{claimName:"molmim-native-f7-artifacts",readOnly:true}},
+              {name:"nim-cache",persistentVolumeClaim:{claimName:"molmim-native-f7-cache",readOnly:true}}
+            ]
+          },
+          status:{
+            conditions:[{type:"Ready",status:$status}],
+            containerStatuses:[{name:"holder",ready:$container_ready}]
+          }
+        }'
+    else
+      printf '%s\n' "pod-get:$pod_name" >> "$FAKE_CALL_LOG"
+      /usr/bin/jq -n --arg name "$pod_name" --arg node "$FAKE_NODE" \
+        '{metadata:{name:$name},spec:{nodeName:$node},status:{}}'
+    fi
+    ;;
+  get:job)
+    printf '%s\n' "job-get:${3:?job name is required}" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{"status":{"succeeded":1}}'
+    ;;
+  get:pods)
+    job_name=""
+    for argument in "$@"; do
+      if [[ $argument == job-name=* ]]; then
+        job_name=${argument#job-name=}
+      fi
+    done
+    [[ -n $job_name ]] || exit 92
+    printf '%s\n' "pods-get:$job_name" >> "$FAKE_CALL_LOG"
+    /usr/bin/jq -n --arg name "${job_name}-pod" \
+      '{kind:"List",items:[{metadata:{name:$name}}]}'
+    ;;
+  get:service)
+    printf '%s\n' "service-get:${3:?service name is required}" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{}'
+    ;;
+  get:endpointslices.discovery.k8s.io)
+    printf '%s\n' "endpoints-get" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{"kind":"List","items":[]}'
+    ;;
+  create:-f)
+    manifest=${3:?manifest path is required}
+    printf 'create:%s\n' "${manifest##*/}" >> "$FAKE_CALL_LOG"
+    ;;
+  delete:-f)
+    manifest=${3:?manifest path is required}
+    printf 'delete:%s\n' "${manifest##*/}" >> "$FAKE_CALL_LOG"
+    printf 'deleted %s\n' "${manifest##*/}"
+    ;;
+  patch:pod)
+    printf '%s\n' "target-patch" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{}'
+    ;;
+  wait:*)
+    if [[ " $* " == *"containerStatuses[0].state.running"* ]]; then
+      printf '%s\n' "wait-placeholder-running" >> "$FAKE_CALL_LOG"
+    elif [[ " $* " == *"condition=Ready"* ]]; then
+      printf '%s\n' "wait-target-ready" >> "$FAKE_CALL_LOG"
+    else
+      printf 'unexpected wait invocation\n' >&2
+      exit 93
+    fi
+    ;;
+  logs:*)
+    pod_name=${2:?log pod name is required}
+    printf '%s\n' "logs:$pod_name" >> "$FAKE_CALL_LOG"
+    if [[ $pod_name == molmim-native-f7-cache-holder-t12 ]]; then
+      printf '%s\n' '{"schema":"archvteams.nebius.ai/molmim-cache-holder-receipt/v1","status":"PASS","mode":"cache-full-read","regular_file_count":2,"regular_file_bytes":284497920,"unique_bytes":284497920,"prewarm_bytes":284497920,"tree_sha256":"5ff815495b2b90ec6f4d9e5df24216b11a60d49f711e68999347036b0f43056c","full_read_elapsed_seconds":0.25}'
+    elif [[ $pod_name == "${FAKE_HOLDER_NAME:?}" ]]; then
+      printf '%s\n' '{"schema":"archvteams.nebius.ai/molmim-native-artifact-receipt/v1","status":"PASS","checkpoint_id":"molmim-native-f7-v1","artifact_version":"1","source_node":"gpu-node-b.example.invalid","regular_file_count":42,"regular_file_bytes":5214934444,"unique_bytes":5214934444,"prewarm_bytes":5214934444,"tree_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","image_io_mode":"direct","full_read_elapsed_seconds":3.25}'
+    elif [[ $pod_name == molmim-restore-* ]]; then
+      printf '%s\n' '{"status":"succeeded"}'
+    elif [[ $pod_name == molmim-semantic-* ]]; then
+      printf '%s\n' '{"status":"PASS","passed_case_count":2}'
+    else
+      exit 94
+    fi
+    ;;
+  *)
+    printf 'unexpected kubectl invocation: %s\n' "$*" >&2
+    exit 95
+    ;;
+esac

@@ -1,0 +1,195 @@
+diff --git a/deploy/snapshot/Dockerfile b/deploy/snapshot/Dockerfile
+index 0de9166..c7af2b2 100644
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -79,6 +79,7 @@ ARG TARGETARCH=amd64
+ 
+ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
+ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
++RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /restore-worker ./cmd/restore-worker
+ 
+ # Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
+ # deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
+@@ -235,6 +236,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
+ 
+ # Copy the built binaries
+ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
++COPY --from=builder /restore-worker /usr/local/bin/restore-worker
+ 
+ # Assemble the injection bundle: bind-mounted read-only into the placeholder's
+ # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
+@@ -295,6 +297,15 @@ RUN set -eu; \
+       fi; \
+     done
+ 
++# Deterministic inventory outside the injected tree. The one-shot worker binds
++# the SHA-256 of this file and verifies every listed file plus the absence of
++# unlisted files before it touches the target runtime.
++RUN cd /snapshot-binaries \
++    && find . -type f -print0 \
++    | sort -z \
++    | xargs -0 sha256sum > /snapshot-binaries.manifest \
++    && test -s /snapshot-binaries.manifest
++
+ # Create directories
+ RUN mkdir -p /checkpoints /var/run/snapshot
+ 
+diff --git a/deploy/snapshot/internal/executor/restore.go b/deploy/snapshot/internal/executor/restore.go
+index c1d6377..0a19747 100644
+--- a/deploy/snapshot/internal/executor/restore.go
++++ b/deploy/snapshot/internal/executor/restore.go
+@@ -8,7 +8,6 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+-	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -40,6 +39,10 @@ type RestoreRequest struct {
+ 	TargetPodIP                 string
+ 	ContainerName               string
+ 	Clientset                   kubernetes.Interface
++	// RequireCleanUnmount makes a bundle-unmount failure terminal. One-shot
++	// workers set this so they never release the restored workload or emit a
++	// success receipt while privileged tools may remain mounted in its namespace.
++	RequireCleanUnmount bool
+ }
+ 
+ // Restore performs external restore for the given request.
+@@ -83,6 +86,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
+ 			// so surfacing a cleanup failure here would destroy a workload that
+ 			// already restored successfully. Log it and let the pod continue.
+ 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
++			if req.RequireCleanUnmount {
++				placeholderPID = 0
++				retErr = fmt.Errorf("fail-closed bundle cleanup failed: %w", cleanupErr)
++			}
+ 		}
+ 	}()
+ 
+@@ -234,10 +241,10 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
+ //
+ // Security hardening in place:
+ //
+-//  1. Mount-namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at
+-//     mount time. Passing it via --mount=/proc/self/fd/N to nsenter pins the mount
+-//     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
+-//     pid) are still resolved via -t <pid> and are not protected against reuse.
++//  1. Namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at mount
++//     time. UTS, IPC, network, and PID namespace fds are opened below while the
++//     process start time is stable. Every namespace is passed to nsenter through
++//     /proc/self/fd/N, so no namespace is resolved through a reusable PID.
+ //
+ //  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
+ //     before entering any namespace and exec it via /proc/self/fd/N. This protects
+@@ -262,32 +269,33 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
+ 	}
+ 	defer binaryFile.Close()
+ 
+-	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
++	nsFd := mp.NsFd()
++	if nsFd == nil {
++		return nil, fmt.Errorf("execNSRestore: mp.NsFd() is nil; mount point was not properly initialized")
++	}
++	pinnedNamespaces, err := openPinnedRestoreNamespaces(snapshotruntime.HostProcPath, snap.PlaceholderPID, nsFd)
++	if err != nil {
++		return nil, fmt.Errorf("pin restore namespaces: %w", err)
++	}
++	defer pinnedNamespaces.close()
++
++	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4, followed
++	// by UTS, IPC, network, and PID namespace fds at 5..8.
+ 	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
+ 	const (
+ 		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
+ 		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
++		otherNSFirst  = 5
+ 	)
+ 
+ 	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
+ 	var args []string
+ 
+-	nsFd := mp.NsFd()
+-	if nsFd != nil {
+-		// Use the pinned ns fd for the mount namespace; keep -t for the other
+-		// namespaces (user, ipc, net, pid). This decouples mount-ns entry from
+-		// PID liveness.
+-		args = []string{
+-			fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild),
+-			"-t", strconv.Itoa(snap.PlaceholderPID),
+-			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
+-			// from the host-visible hierarchy so --cgroup-root remap works.
+-			"-u", "-i", "-n", "-p",
+-			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
+-		}
+-	} else {
+-		return nil, fmt.Errorf("execNSRestore: mp.NsFd() is nil; mount point was not properly initialized")
+-	}
++	args = []string{fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild)}
++	args = append(args, pinnedNamespaces.nsenterArgs(otherNSFirst)...)
++	// Intentionally exclude the cgroup namespace: CRIU must manage cgroups
++	// from the host-visible hierarchy so --cgroup-root remap works.
++	args = append(args, "--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild))
+ 	args = append(args,
+ 		"--checkpoint-path", checkpointPath,
+ 		"--bundle-dir", bundleDir,
+@@ -305,7 +313,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
+ 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+ 	// Inherit the agent environment so nsrestore uses the same logger settings.
+ 	cmd.Env = os.Environ()
+-	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
++	cmd.ExtraFiles = append([]*os.File{nsFd, binaryFile}, pinnedNamespaces.files...)
+ 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
+ 
+	var stdout bytes.Buffer
+diff --git a/deploy/snapshot/internal/executor/checkpoint.go b/deploy/snapshot/internal/executor/checkpoint.go
+--- a/deploy/snapshot/internal/executor/checkpoint.go
++++ b/deploy/snapshot/internal/executor/checkpoint.go
+@@ -272,19 +272,37 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
+ 	}
+ 	timings.CRIUDumpDuration = criuDumpDuration
+ 
+-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
+-	// propagated — a checkpoint without overlay diffs is still valid for restore
+-	// (the base container image provides the filesystem).
+ 	if state.UpperDir != "" {
+ 		overlayCaptureStart := time.Now()
+-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
+-			log.Error(err, "Failed to capture rootfs diff")
+-		}
+-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
+-			log.Error(err, "Failed to capture deleted files")
++		err := captureOverlayState(
++			state.UpperDir,
++			checkpointDir,
++			data.Overlay.Exclusions,
++			data.Overlay.BindMountDests,
++			snapshotruntime.CaptureRootfsDiff,
++			snapshotruntime.CaptureDeletedFiles,
++		)
++		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
++		if err != nil {
++			return nil, err
+ 		}
+-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+ 	}
+ 
+ 	return timings, nil
+ }
++
++func captureOverlayState(
++	upperDir, checkpointDir string,
++	exclusions types.OverlaySettings,
++	bindMountDests []string,
++	captureRootfsDiff func(string, string, types.OverlaySettings, []string) (string, error),
++	captureDeletedFiles func(string, string) (bool, error),
++) error {
++	if _, err := captureRootfsDiff(upperDir, checkpointDir, exclusions, bindMountDests); err != nil {
++		return fmt.Errorf("rootfs diff capture failed: %w", err)
++	}
++	if _, err := captureDeletedFiles(upperDir, checkpointDir); err != nil {
++		return fmt.Errorf("deleted-file capture failed: %w", err)
++	}
++	return nil
++}

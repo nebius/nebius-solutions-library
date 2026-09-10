@@ -1,0 +1,256 @@
+{
+  "schema_version": "faststart-usage-receipt/v1",
+  "receipt_id": "example-explicit-observation",
+  "run": {
+    "run_id": "example-warm-provisioned-attached-storage",
+    "model_id": "example-nim",
+    "measurement_class": "warm-provisioned-attached-storage",
+    "observed_from": "2026-08-18T00:00:00Z",
+    "observed_until": null,
+    "attempt_count": 2,
+    "successful_attempt_count": 1,
+    "failed_attempt_count": 1
+  },
+  "attempts": [
+    {
+      "attempt_id": "attempt-001",
+      "outcome": "SUCCEEDED",
+      "t0_at": "2026-08-18T00:00:10Z",
+      "http_ready_at": "2026-08-18T00:00:18Z",
+      "call1_dispatched_at": "2026-08-18T00:00:18.1Z",
+      "call1_response_received_at": "2026-08-18T00:00:20.4Z",
+      "call2_dispatched_at": "2026-08-18T00:00:20.5Z",
+      "call2_response_received_at": "2026-08-18T00:00:21.1Z",
+      "validation_completed_at": "2026-08-18T00:00:21.3Z",
+      "failure_at": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "attempt-002",
+      "outcome": "FAILED",
+      "t0_at": "2026-08-18T00:00:30Z",
+      "http_ready_at": null,
+      "call1_dispatched_at": null,
+      "call1_response_received_at": null,
+      "call2_dispatched_at": null,
+      "call2_response_received_at": null,
+      "validation_completed_at": null,
+      "failure_at": "2026-08-18T00:00:33Z",
+      "failure": {
+        "stage": "restore",
+        "code": "EXAMPLE_FAILURE"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "resource_id": "example-node-meter",
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second",
+      "quantity": "1",
+      "shared": true,
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "allocated_at": "2026-08-18T00:00:00Z",
+      "released_at": null,
+      "intervals": [
+        {
+          "interval_id": "node-provision",
+          "attempt_id": "attempt-001",
+          "phase": "node_provision",
+          "start_at": "2026-08-18T00:00:00Z",
+          "end_at": "2026-08-18T00:00:05Z"
+        },
+        {
+          "interval_id": "node-setup",
+          "attempt_id": "attempt-001",
+          "phase": "pre_t0_setup",
+          "start_at": "2026-08-18T00:00:05Z",
+          "end_at": "2026-08-18T00:00:10Z"
+        },
+        {
+          "interval_id": "node-success",
+          "attempt_id": "attempt-001",
+          "phase": "gpu_critical_path",
+          "start_at": "2026-08-18T00:00:10Z",
+          "end_at": "2026-08-18T00:00:21.1Z"
+        },
+        {
+          "interval_id": "node-cleanup-1",
+          "attempt_id": "attempt-001",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "end_at": "2026-08-18T00:00:22Z"
+        },
+        {
+          "interval_id": "node-idle-between",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:22Z",
+          "end_at": "2026-08-18T00:00:30Z"
+        },
+        {
+          "interval_id": "node-failure",
+          "attempt_id": "attempt-002",
+          "phase": "failed_attempt",
+          "start_at": "2026-08-18T00:00:30Z",
+          "end_at": "2026-08-18T00:00:33Z"
+        },
+        {
+          "interval_id": "node-cleanup-2",
+          "attempt_id": "attempt-002",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:33Z",
+          "end_at": "2026-08-18T00:00:34Z"
+        },
+        {
+          "interval_id": "node-idle-open",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:34Z",
+          "end_at": null
+        }
+      ]
+    },
+    {
+      "resource_id": "example-gpu-meter",
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second",
+      "quantity": "1",
+      "shared": true,
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "allocated_at": "2026-08-18T00:00:05Z",
+      "released_at": null,
+      "intervals": [
+        {
+          "interval_id": "gpu-setup",
+          "attempt_id": "attempt-001",
+          "phase": "pre_t0_setup",
+          "start_at": "2026-08-18T00:00:05Z",
+          "end_at": "2026-08-18T00:00:10Z"
+        },
+        {
+          "interval_id": "gpu-success",
+          "attempt_id": "attempt-001",
+          "phase": "gpu_critical_path",
+          "start_at": "2026-08-18T00:00:10Z",
+          "end_at": "2026-08-18T00:00:21.1Z"
+        },
+        {
+          "interval_id": "gpu-cleanup-1",
+          "attempt_id": "attempt-001",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "end_at": "2026-08-18T00:00:22Z"
+        },
+        {
+          "interval_id": "gpu-idle-between",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:22Z",
+          "end_at": "2026-08-18T00:00:30Z"
+        },
+        {
+          "interval_id": "gpu-failure",
+          "attempt_id": "attempt-002",
+          "phase": "failed_attempt",
+          "start_at": "2026-08-18T00:00:30Z",
+          "end_at": "2026-08-18T00:00:33Z"
+        },
+        {
+          "interval_id": "gpu-cleanup-2",
+          "attempt_id": "attempt-002",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:33Z",
+          "end_at": "2026-08-18T00:00:34Z"
+        },
+        {
+          "interval_id": "gpu-idle-open",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:34Z",
+          "end_at": null
+        }
+      ]
+    },
+    {
+      "resource_id": "example-storage-meter",
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second",
+      "quantity": "100",
+      "shared": true,
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "allocated_at": "2026-08-18T00:00:00Z",
+      "released_at": null,
+      "intervals": [
+        {
+          "interval_id": "storage-idle-before-setup",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:00Z",
+          "end_at": "2026-08-18T00:00:05Z"
+        },
+        {
+          "interval_id": "storage-setup",
+          "attempt_id": "attempt-001",
+          "phase": "pre_t0_setup",
+          "start_at": "2026-08-18T00:00:05Z",
+          "end_at": "2026-08-18T00:00:10Z"
+        },
+        {
+          "interval_id": "storage-success",
+          "attempt_id": "attempt-001",
+          "phase": "gpu_critical_path",
+          "start_at": "2026-08-18T00:00:10Z",
+          "end_at": "2026-08-18T00:00:21.1Z"
+        },
+        {
+          "interval_id": "storage-cleanup-1",
+          "attempt_id": "attempt-001",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "end_at": "2026-08-18T00:00:22Z"
+        },
+        {
+          "interval_id": "storage-idle-between",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:22Z",
+          "end_at": "2026-08-18T00:00:30Z"
+        },
+        {
+          "interval_id": "storage-failure",
+          "attempt_id": "attempt-002",
+          "phase": "failed_attempt",
+          "start_at": "2026-08-18T00:00:30Z",
+          "end_at": "2026-08-18T00:00:33Z"
+        },
+        {
+          "interval_id": "storage-cleanup-2",
+          "attempt_id": "attempt-002",
+          "phase": "cleanup",
+          "start_at": "2026-08-18T00:00:33Z",
+          "end_at": "2026-08-18T00:00:34Z"
+        },
+        {
+          "interval_id": "storage-idle-open",
+          "attempt_id": null,
+          "phase": "idle_retained",
+          "start_at": "2026-08-18T00:00:34Z",
+          "end_at": null
+        }
+      ]
+    }
+  ]
+}

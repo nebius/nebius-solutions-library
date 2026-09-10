@@ -1,0 +1,239 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "@@TARGET_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: restore-target
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+    archvteams.nebius.ai/semantic-qualified: "false"
+    nvidia.com/snapshot-is-restore-target: "true"
+    nvidia.com/snapshot-checkpoint-id: "@@CHECKPOINT_ID@@"
+  annotations:
+    linkerd.io/inject: disabled
+    sidecar.istio.io/inject: "false"
+    archvteams.nebius.ai/demand-at: "@@DEMAND_AT@@"
+    nvidia.com/snapshot-target-containers: msa-search
+    nvidia.com/snapshot-artifact-version: "@@ARTIFACT_VERSION@@"
+    nvidia.com/snapshot-storage-type: pvc
+    nvidia.com/snapshot-storage-base-path: /checkpoints
+    archvteams.nebius.ai/artifact-manifest-sha256: "@@ARTIFACT_MANIFEST_SHA256@@"
+    archvteams.nebius.ai/tool-bundle-sha256: "@@TOOL_BUNDLE_SHA256@@"
+    archvteams.nebius.ai/image-io-mode: "@@IMAGE_IO_MODE@@"
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  hostPID: false
+  hostIPC: false
+  hostNetwork: false
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - "@@TARGET_NODE@@"
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+    - name: msa-search
+      image: nvcr.io/nim/colabfold/msa-search@sha256:944f3cf845761be8e42b33147ae08b68c61eca7cad67bf5251e1708d03c0165c
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sleep
+      args:
+        - "2147483647"
+      env:
+        - name: DYN_SNAPSHOT_RESTORE_STANDBY
+          value: "1"
+        - name: DYN_SNAPSHOT_CONTROL_DIR
+          value: /snapshot-control
+        - name: NIM_CACHE_PATH
+          value: /opt/nim/.cache
+        - name: NIM_MODEL_PROFILE
+          value: ad5086cc67393792e71fa57444f13eaff8425658e8fb5feea07070ca3b2d34bb
+        - name: NIM_GLOBAL_MAX_MSA_DEPTH
+          value: "500"
+      ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "10"
+          memory: 128Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "15"
+          memory: 180Gi
+          nvidia.com/gpu: "1"
+      securityContext:
+        privileged: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        runAsUser: 0
+        runAsGroup: 0
+      startupProbe:
+        exec:
+          command:
+            - /bin/test
+            - -f
+            - /snapshot-control/restore-complete
+        failureThreshold: 1800
+        periodSeconds: 1
+        timeoutSeconds: 1
+      readinessProbe:
+        httpGet:
+          path: /v1/health/ready
+          port: http
+        failureThreshold: 3
+        periodSeconds: 1
+        timeoutSeconds: 1
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: nim-cache
+          mountPath: /opt/nim/.cache
+          readOnly: true
+        - name: nim-cache
+          mountPath: /opt/nim/workspace
+          readOnly: true
+        - name: output
+          mountPath: /output
+        - name: snapshot-control
+          mountPath: /snapshot-control
+          subPath: msa-search
+        - name: checkpoints
+          mountPath: /checkpoints
+          readOnly: true
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: nim-cache
+      persistentVolumeClaim:
+        claimName: "@@CACHE_PVC@@"
+        readOnly: true
+    - name: output
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: snapshot-control
+      emptyDir:
+        sizeLimit: 16Mi
+    - name: checkpoints
+      persistentVolumeClaim:
+        claimName: "@@ARTIFACT_PVC@@"
+        readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "@@CANARY_SERVICE@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: canary-service
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: restore-target
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "@@QUALIFIED_SERVICE@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: qualified-service
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: restore-target
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+    archvteams.nebius.ai/semantic-qualified: "true"
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "@@TARGET_NETWORK_POLICY@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: restore-target
+      archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: semantic-probe
+              archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "@@PROBE_NETWORK_POLICY@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: semantic-probe
+      archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: restore-target
+              archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+      ports:
+        - port: 8000
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

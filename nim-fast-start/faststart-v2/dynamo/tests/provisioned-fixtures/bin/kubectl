@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_CALL_LOG:?FAKE_CALL_LOG is required}"
+: "${FAKE_EXPECTED_KUBECONFIG:?FAKE_EXPECTED_KUBECONFIG is required}"
+: "${FAKE_NODE:?FAKE_NODE is required}"
+
+if [[ ${1:-} != "--kubeconfig" || ${2:-} != "$FAKE_EXPECTED_KUBECONFIG" ]]; then
+  printf 'unexpected kubeconfig argument\n' >&2
+  exit 90
+fi
+shift 2
+
+uid_for_kind() {
+  case "$1" in
+    Pod) printf '11111111-1111-4111-8111-111111111111' ;;
+    Job) printf '22222222-2222-4222-8222-222222222222' ;;
+    Service) printf '33333333-3333-4333-8333-333333333333' ;;
+    NetworkPolicy) printf '44444444-4444-4444-8444-444444444444' ;;
+    ConfigMap) printf '55555555-5555-4555-8555-555555555555' ;;
+    ServiceAccount) printf '66666666-6666-4666-8666-666666666666' ;;
+    Role) printf '77777777-7777-4777-8777-777777777777' ;;
+    RoleBinding) printf '88888888-8888-4888-8888-888888888888' ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ ${1:-} == "config" && ${2:-} == "view" ]]; then
+  printf '%s\n' "config-view" >> "$FAKE_CALL_LOG"
+  printf '%s' "${FAKE_SERVER:-https://kubernetes-api.example.invalid:443}"
+  exit 0
+fi
+
+if [[ ${1:-} != "-n" || ${2:-} != "nim-fast-start" ]]; then
+  printf 'unexpected namespace arguments\n' >&2
+  exit 91
+fi
+shift 2
+
+case "${1:-}:${2:-}" in
+  get:pod)
+    pod_name=${3:?pod name is required}
+    if [[ $pod_name == "${FAKE_HOLDER_NAME:-}" || ",${FAKE_HOLDER_NAMES:-}," == *",${pod_name},"* ]]; then
+      printf '%s\n' "holder-get" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_HOLDER_READY:-true} == "true" ]]; then
+        holder_status=True
+        container_ready=true
+      else
+        holder_status=False
+        container_ready=false
+      fi
+      if [[ $pod_name == *cache* ]]; then
+        holder_uid=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+      else
+        holder_uid=99999999-9999-4999-8999-999999999999
+      fi
+      fixture_artifact_pvc=${OF2_ARTIFACT_PVC:-openfold2-artifacts-example}
+      if [[ ${FAKE_MODEL:-openfold2} == boltz2 ]]; then
+        fixture_artifact_pvc=${B2_ARTIFACT_PVC:-boltz2-artifacts-example}
+      fi
+      /usr/bin/jq -n \
+        --arg node "$FAKE_NODE" \
+        --arg name "$pod_name" \
+        --arg uid "$holder_uid" \
+        --arg status "$holder_status" \
+        --arg holder_image "docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e" \
+        --argjson container_ready "$container_ready" \
+        --arg artifact_pvc "$fixture_artifact_pvc" \
+        --arg openfold_cache_pvc "${OF2_CACHE_PVC:-openfold2-cache-example}" \
+        --arg boltz_cache_pvc "${B2_CACHE_PVC:-boltz2-cache-example}" \
+        '{
+          apiVersion:"v1",kind:"Pod",
+          metadata:{name:$name,namespace:"nim-fast-start",uid:$uid},
+          spec:{nodeName:$node,
+            volumes:(if ($name|contains("cache")) then
+              [{name:"storage",persistentVolumeClaim:{claimName:$boltz_cache_pvc}}]
+            else
+              [{name:"artifacts",persistentVolumeClaim:{claimName:$artifact_pvc}},
+               {name:"openfold-cache",persistentVolumeClaim:{claimName:$openfold_cache_pvc}}]
+            end),
+            containers:[{name:"holder",image:$holder_image,resources:{},volumeMounts:(if ($name|contains("cache")) then
+              [{name:"storage",mountPath:"/storage",readOnly:true}]
+            else
+              [{name:"artifacts",mountPath:"/artifacts",readOnly:true},
+               {name:"openfold-cache",mountPath:"/cache",readOnly:true}]
+            end)}]},
+          status:{
+            phase:"Running",
+            conditions:[{type:"Ready",status:$status}],
+            containerStatuses:[{name:"holder",image:"sha256:content",imageID:$holder_image,
+              ready:$container_ready,restartCount:0,state:{running:{startedAt:"2026-08-17T23:00:00Z"}}}]
+          }
+        }'
+    else
+      printf '%s\n' "pod-get:$pod_name" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_MODEL:-openfold2} == boltz2 ]]; then
+        container_name=boltz2
+        image="registry.example/boltz2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      else
+        container_name=openfold2
+        image="registry.example/openfold2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      fi
+      target_uid="11111111-1111-4111-8111-111111111111"
+      if [[ ${FAKE_CLEANUP_UID_MISMATCH:-false} == true && " $* " == *" --ignore-not-found "* ]]; then
+        target_uid="ffffffff-ffff-4fff-8fff-ffffffffffff"
+      fi
+      /usr/bin/jq -n --arg name "$pod_name" --arg node "$FAKE_NODE" \
+        --arg uid "$target_uid" \
+        --arg image "$image" --arg container_name "$container_name" \
+        '{apiVersion:"v1",kind:"Pod",
+          metadata:{name:$name,namespace:"nim-fast-start",uid:$uid,
+            creationTimestamp:"2026-08-18T00:00:00Z",
+            annotations:{"archvteams.nebius.ai/target-pod-spec-sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+          spec:{nodeName:$node,containers:[{name:$container_name,image:$image}]},
+          status:{phase:"Running",containerStatuses:[{name:$container_name,restartCount:0,
+            state:{running:{startedAt:"2026-08-18T00:00:01Z"}},lastState:{}}]}}'
+    fi
+    ;;
+  get:job)
+    printf '%s\n' "job-get:${3:?job name is required}" >> "$FAKE_CALL_LOG"
+    if [[ ${FAKE_FAIL_WORKER:-false} == true && ( ${3:-} == of2-restore-* || ${3:-} == b2-restore-* ) ]]; then
+      /usr/bin/jq -n --arg name "$3" '{apiVersion:"batch/v1",kind:"Job",
+        metadata:{name:$name,namespace:"nim-fast-start",
+          uid:"22222222-2222-4222-8222-222222222222"},status:{failed:1}}'
+    else
+      /usr/bin/jq -n --arg name "$3" '{apiVersion:"batch/v1",kind:"Job",
+        metadata:{name:$name,namespace:"nim-fast-start",
+          uid:"22222222-2222-4222-8222-222222222222"},status:{succeeded:1}}'
+    fi
+    ;;
+  get:pods)
+    job_name=""
+    for argument in "$@"; do
+      if [[ $argument == job-name=* ]]; then
+        job_name=${argument#job-name=}
+      fi
+    done
+    [[ -n $job_name ]] || exit 92
+    printf '%s\n' "pods-get:$job_name" >> "$FAKE_CALL_LOG"
+    /usr/bin/jq -n --arg name "${job_name}-pod" \
+      '{kind:"List",items:[{metadata:{name:$name}}]}'
+    ;;
+  get:service)
+    printf '%s\n' "service-get:${3:?service name is required}" >> "$FAKE_CALL_LOG"
+    /usr/bin/jq -n --arg name "$3" \
+      '{apiVersion:"v1",kind:"Service",metadata:{name:$name,
+        namespace:"nim-fast-start",uid:"33333333-3333-4333-8333-333333333333"}}'
+    ;;
+  get:endpointslices.discovery.k8s.io)
+    printf '%s\n' "endpoints-get" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{"kind":"List","items":[]}'
+    ;;
+  get:events)
+    printf '%s\n' "events-get" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{"apiVersion":"v1","kind":"EventList","items":[]}'
+    ;;
+  get:daemonsets)
+    printf '%s\n' "daemonsets-get" >> "$FAKE_CALL_LOG"
+    if [[ ${FAKE_DAEMONSET_ERROR:-false} == true ]]; then
+      exit 1
+    fi
+    if [[ ${FAKE_CAPTURE_AGENT_PRESENT:-false} == true ]]; then
+      printf '%s\n' '{"apiVersion":"apps/v1","kind":"DaemonSetList","items":[{"metadata":{"name":"archvteams-2407-native-snapshot-agent"}}]}'
+    else
+      printf '%s\n' '{"apiVersion":"apps/v1","kind":"DaemonSetList","items":[]}'
+    fi
+    ;;
+  get:networkpolicy|get:configmap|get:serviceaccount|get:role|get:rolebinding)
+    case "${2:-}" in
+      networkpolicy) object_kind=NetworkPolicy; object_api=networking.k8s.io/v1 ;;
+      configmap) object_kind=ConfigMap; object_api=v1 ;;
+      serviceaccount) object_kind=ServiceAccount; object_api=v1 ;;
+      role) object_kind=Role; object_api=rbac.authorization.k8s.io/v1 ;;
+      rolebinding) object_kind=RoleBinding; object_api=rbac.authorization.k8s.io/v1 ;;
+    esac
+    object_uid=$(uid_for_kind "$object_kind")
+    /usr/bin/jq -n --arg api "$object_api" --arg kind "$object_kind" \
+      --arg name "${3:?resource name is required}" --arg uid "$object_uid" \
+      '{apiVersion:$api,kind:$kind,metadata:{name:$name,
+        namespace:"nim-fast-start",uid:$uid}}'
+    ;;
+  create:-f)
+    manifest=${3:?manifest path is required}
+    object_kind=$(/usr/bin/jq -er '.kind' "$manifest")
+    object_name=$(/usr/bin/jq -er '.metadata.name' "$manifest")
+    object_uid=$(uid_for_kind "$object_kind")
+    case "$object_kind:$object_name" in
+      Pod:*) call_name=target.yaml ;;
+      Job:of2-semantic-*|Job:b2-semantic-*) call_name=semantic-probe.yaml ;;
+      Job:of2-restore-*|Job:b2-restore-*) call_name=restore-worker.yaml ;;
+      *) call_name="support-${object_kind}" ;;
+    esac
+    printf 'create:%s\n' "$call_name" >> "$FAKE_CALL_LOG"
+    /usr/bin/jq --arg uid "$object_uid" \
+      '.metadata.uid=$uid | .metadata.creationTimestamp="2026-08-18T00:00:00Z"' \
+      "$manifest"
+    create_count=$(rg -c '^create:' "$FAKE_CALL_LOG")
+    if [[ -n ${FAKE_CREATE_FAIL_NUMBER:-} && $create_count == "$FAKE_CREATE_FAIL_NUMBER" ]]; then
+      exit 1
+    fi
+    ;;
+  proxy:*)
+    printf '%s\n' 'Starting to serve on 127.0.0.1:43191'
+    while :; do sleep 1; done
+    ;;
+  patch:pod)
+    printf '%s\n' "target-patch" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{}'
+    ;;
+  wait:*)
+    if [[ " $* " == *" --for=delete "* ]]; then
+      printf '%s\n' "wait-delete:${3:-unknown}" >> "$FAKE_CALL_LOG"
+      if [[ ${FAKE_DELETE_WAIT_FAILURE:-false} == true ]]; then
+        exit 1
+      fi
+    elif [[ " $* " == *"containerStatuses[0].state.running"* ]]; then
+      printf '%s\n' "wait-placeholder-running" >> "$FAKE_CALL_LOG"
+    elif [[ " $* " == *"condition=Ready"* ]]; then
+      printf '%s\n' "wait-target-ready" >> "$FAKE_CALL_LOG"
+    else
+      printf 'unexpected wait invocation\n' >&2
+      exit 93
+    fi
+    ;;
+  logs:*)
+    pod_name=${2:?log pod name is required}
+    printf '%s\n' "logs:$pod_name" >> "$FAKE_CALL_LOG"
+    if [[ $pod_name == of2-restore-* || $pod_name == b2-restore-* ]]; then
+      printf '%s\n' '{"status":"succeeded"}'
+    elif [[ $pod_name == of2-semantic-* || $pod_name == b2-semantic-* ]]; then
+      printf '%s\n' '{"status":"PASS","ok":true,"passed_case_count":2,"failed_case_count":0}'
+    else
+      exit 94
+    fi
+    ;;
+  exec:*)
+    if [[ " $* " == *" /bin/test -d "* ]]; then
+      printf '%s\n' "holder-mount-check" >> "$FAKE_CALL_LOG"
+    elif [[ " $* " == *" python3 -c "* ]]; then
+      printf '%s\n' "holder-boottime-anchor" >> "$FAKE_CALL_LOG"
+      printf '%s\n' '{"schema":"archvteams.nebius.ai/semantic-node-boottime/v1","clock_id":"CLOCK_BOOTTIME","boottime_ns":5000000000000,"clock_resolution_ns":1,"boot_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","timens_offsets":[{"clock":"monotonic","seconds":0,"nanoseconds":0},{"clock":"boottime","seconds":0,"nanoseconds":0}]}'
+    elif [[ " $* " == *" /bin/date "* ]]; then
+      printf '%s\n' "target-clock" >> "$FAKE_CALL_LOG"
+      /bin/date -u +%Y-%m-%dT%H:%M:%S.%NZ
+    else
+      printf '%s\n' "target-nvidia-smi" >> "$FAKE_CALL_LOG"
+      printf '%s\n' '<nvidia_smi_log><attached_gpus>1</attached_gpus><gpu><product_name>NVIDIA H100</product_name><uuid>GPU-fake</uuid></gpu></nvidia_smi_log>'
+    fi
+    ;;
+  *)
+    printf 'unexpected kubectl invocation: %s\n' "$*" >&2
+    exit 95
+    ;;
+esac

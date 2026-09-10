@@ -1,0 +1,924 @@
+{
+  "attempts": [
+    {
+      "attempt_id": "attempt-001",
+      "call1_dispatched_at": "2026-08-18T00:00:18.1Z",
+      "call1_response_received_at": "2026-08-18T00:00:20.4Z",
+      "call2_dispatched_at": "2026-08-18T00:00:20.5Z",
+      "call2_response_received_at": "2026-08-18T00:00:21.1Z",
+      "derived_intervals": [
+        {
+          "duration_seconds": "8",
+          "end_at": "2026-08-18T00:00:18Z",
+          "name": "demand_to_http_ready",
+          "start_at": "2026-08-18T00:00:10Z"
+        },
+        {
+          "duration_seconds": "2.3",
+          "end_at": "2026-08-18T00:00:20.4Z",
+          "name": "first_inference_call",
+          "start_at": "2026-08-18T00:00:18.1Z"
+        },
+        {
+          "duration_seconds": "0.6",
+          "end_at": "2026-08-18T00:00:21.1Z",
+          "name": "second_inference_call",
+          "start_at": "2026-08-18T00:00:20.5Z"
+        },
+        {
+          "duration_seconds": "11.1",
+          "end_at": "2026-08-18T00:00:21.1Z",
+          "name": "demand_to_second_response",
+          "start_at": "2026-08-18T00:00:10Z"
+        },
+        {
+          "duration_seconds": "0.2",
+          "end_at": "2026-08-18T00:00:21.3Z",
+          "name": "validation_tail",
+          "start_at": "2026-08-18T00:00:21.1Z"
+        }
+      ],
+      "failure": null,
+      "failure_at": null,
+      "http_ready_at": "2026-08-18T00:00:18Z",
+      "outcome": "SUCCEEDED",
+      "t0_at": "2026-08-18T00:00:10Z",
+      "validation_completed_at": "2026-08-18T00:00:21.3Z"
+    },
+    {
+      "attempt_id": "attempt-002",
+      "call1_dispatched_at": null,
+      "call1_response_received_at": null,
+      "call2_dispatched_at": null,
+      "call2_response_received_at": null,
+      "derived_intervals": [
+        {
+          "duration_seconds": "3",
+          "end_at": "2026-08-18T00:00:33Z",
+          "name": "failed_attempt",
+          "start_at": "2026-08-18T00:00:30Z"
+        }
+      ],
+      "failure": {
+        "code": "EXAMPLE_FAILURE",
+        "stage": "restore"
+      },
+      "failure_at": "2026-08-18T00:00:33Z",
+      "http_ready_at": null,
+      "outcome": "FAILED",
+      "t0_at": "2026-08-18T00:00:30Z",
+      "validation_completed_at": null
+    }
+  ],
+  "ledger_id": "usage-ledger/example-warm-provisioned-attached-storage",
+  "pricing": {
+    "currency": null,
+    "reason_codes": [
+      "OPEN_USAGE_INTERVAL",
+      "PRICE_UNAVAILABLE"
+    ],
+    "snapshot_captured_at": "2026-08-18T01:00:00Z",
+    "snapshot_id": "example-no-authoritative-price-data",
+    "snapshot_sha256": "ef4d58d0b0826943f00673ec25002007b52befcf1f64a1226f37598f9b349e02",
+    "status": "INCOMPLETE",
+    "total_cost": null
+  },
+  "resources": [
+    {
+      "allocated_at": "2026-08-18T00:00:05Z",
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "intervals": [
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "5",
+          "end_at": "2026-08-18T00:00:10Z",
+          "interval_id": "gpu-setup",
+          "phase": "pre_t0_setup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:05Z",
+          "usage_quantity": "5"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "11.1",
+          "end_at": "2026-08-18T00:00:21.1Z",
+          "interval_id": "gpu-success",
+          "phase": "gpu_critical_path",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:10Z",
+          "usage_quantity": "11.1"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "0.9",
+          "end_at": "2026-08-18T00:00:22Z",
+          "interval_id": "gpu-cleanup-1",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "usage_quantity": "0.9"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "8",
+          "end_at": "2026-08-18T00:00:30Z",
+          "interval_id": "gpu-idle-between",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:22Z",
+          "usage_quantity": "8"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "3",
+          "end_at": "2026-08-18T00:00:33Z",
+          "interval_id": "gpu-failure",
+          "phase": "failed_attempt",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:30Z",
+          "usage_quantity": "3"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "1",
+          "end_at": "2026-08-18T00:00:34Z",
+          "interval_id": "gpu-cleanup-2",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:33Z",
+          "usage_quantity": "1"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-gpu-price-unavailable",
+            "price_sku": "example-h100-80gb",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "gpu-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": null,
+          "end_at": null,
+          "interval_id": "gpu-idle-open",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:34Z",
+          "usage_quantity": null
+        }
+      ],
+      "quantity": "1",
+      "released_at": null,
+      "resource_id": "example-gpu-meter",
+      "resource_type": "gpu",
+      "shared": true,
+      "sku": "example-h100-80gb",
+      "source_receipt_ids": [
+        "example-explicit-observation"
+      ],
+      "usage_unit": "gpu-second"
+    },
+    {
+      "allocated_at": "2026-08-18T00:00:00Z",
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "intervals": [
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "5",
+          "end_at": "2026-08-18T00:00:05Z",
+          "interval_id": "node-provision",
+          "phase": "node_provision",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:00Z",
+          "usage_quantity": "5"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "5",
+          "end_at": "2026-08-18T00:00:10Z",
+          "interval_id": "node-setup",
+          "phase": "pre_t0_setup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:05Z",
+          "usage_quantity": "5"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "11.1",
+          "end_at": "2026-08-18T00:00:21.1Z",
+          "interval_id": "node-success",
+          "phase": "gpu_critical_path",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:10Z",
+          "usage_quantity": "11.1"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "0.9",
+          "end_at": "2026-08-18T00:00:22Z",
+          "interval_id": "node-cleanup-1",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "usage_quantity": "0.9"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "8",
+          "end_at": "2026-08-18T00:00:30Z",
+          "interval_id": "node-idle-between",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:22Z",
+          "usage_quantity": "8"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "3",
+          "end_at": "2026-08-18T00:00:33Z",
+          "interval_id": "node-failure",
+          "phase": "failed_attempt",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:30Z",
+          "usage_quantity": "3"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "1",
+          "end_at": "2026-08-18T00:00:34Z",
+          "interval_id": "node-cleanup-2",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:33Z",
+          "usage_quantity": "1"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-node-price-unavailable",
+            "price_sku": "example-h100-node",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "node-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": null,
+          "end_at": null,
+          "interval_id": "node-idle-open",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:34Z",
+          "usage_quantity": null
+        }
+      ],
+      "quantity": "1",
+      "released_at": null,
+      "resource_id": "example-node-meter",
+      "resource_type": "node",
+      "shared": true,
+      "sku": "example-h100-node",
+      "source_receipt_ids": [
+        "example-explicit-observation"
+      ],
+      "usage_unit": "node-second"
+    },
+    {
+      "allocated_at": "2026-08-18T00:00:00Z",
+      "applies_to_attempt_ids": [
+        "attempt-001",
+        "attempt-002"
+      ],
+      "intervals": [
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "5",
+          "end_at": "2026-08-18T00:00:05Z",
+          "interval_id": "storage-idle-before-setup",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:00Z",
+          "usage_quantity": "500"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "5",
+          "end_at": "2026-08-18T00:00:10Z",
+          "interval_id": "storage-setup",
+          "phase": "pre_t0_setup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:05Z",
+          "usage_quantity": "500"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "11.1",
+          "end_at": "2026-08-18T00:00:21.1Z",
+          "interval_id": "storage-success",
+          "phase": "gpu_critical_path",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:10Z",
+          "usage_quantity": "1110"
+        },
+        {
+          "attempt_id": "attempt-001",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "0.9",
+          "end_at": "2026-08-18T00:00:22Z",
+          "interval_id": "storage-cleanup-1",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:21.1Z",
+          "usage_quantity": "90"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "8",
+          "end_at": "2026-08-18T00:00:30Z",
+          "interval_id": "storage-idle-between",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:22Z",
+          "usage_quantity": "800"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "3",
+          "end_at": "2026-08-18T00:00:33Z",
+          "interval_id": "storage-failure",
+          "phase": "failed_attempt",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:30Z",
+          "usage_quantity": "300"
+        },
+        {
+          "attempt_id": "attempt-002",
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": "1",
+          "end_at": "2026-08-18T00:00:34Z",
+          "interval_id": "storage-cleanup-2",
+          "phase": "cleanup",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:33Z",
+          "usage_quantity": "100"
+        },
+        {
+          "attempt_id": null,
+          "cost": {
+            "amount": null,
+            "currency": null,
+            "effective_from": "2026-08-01T00:00:00Z",
+            "effective_to": null,
+            "price_id": "example-storage-price-unavailable",
+            "price_sku": "example-attached-storage",
+            "price_status": "UNAVAILABLE",
+            "price_usage_unit": "storage-gibibyte-second",
+            "status": "INCOMPLETE",
+            "unit_price": null
+          },
+          "duration_seconds": null,
+          "end_at": null,
+          "interval_id": "storage-idle-open",
+          "phase": "idle_retained",
+          "source_receipt_ids": [
+            "example-explicit-observation"
+          ],
+          "start_at": "2026-08-18T00:00:34Z",
+          "usage_quantity": null
+        }
+      ],
+      "quantity": "100",
+      "released_at": null,
+      "resource_id": "example-storage-meter",
+      "resource_type": "storage",
+      "shared": true,
+      "sku": "example-attached-storage",
+      "source_receipt_ids": [
+        "example-explicit-observation"
+      ],
+      "usage_unit": "storage-gibibyte-second"
+    }
+  ],
+  "run": {
+    "attempt_count": 2,
+    "failed_attempt_count": 1,
+    "measurement_class": "warm-provisioned-attached-storage",
+    "model_id": "example-nim",
+    "observed_from": "2026-08-18T00:00:00Z",
+    "observed_until": null,
+    "run_id": "example-warm-provisioned-attached-storage",
+    "successful_attempt_count": 1
+  },
+  "schema_version": "faststart-usage-ledger/v1",
+  "source_receipts": [
+    {
+      "receipt_id": "example-explicit-observation",
+      "sha256": "cb5214f44f846c80ca5e1c26cffbbc5e3c9aa4cd5e72516a4964934bdd514a50"
+    }
+  ],
+  "usage_summary": [
+    {
+      "closed_duration_seconds": "1.9",
+      "closed_interval_count": 2,
+      "closed_usage_quantity": "1.9",
+      "open_interval_count": 0,
+      "phase": "cleanup",
+      "resource_ids": [
+        "example-gpu-meter"
+      ],
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second"
+    },
+    {
+      "closed_duration_seconds": "1.9",
+      "closed_interval_count": 2,
+      "closed_usage_quantity": "1.9",
+      "open_interval_count": 0,
+      "phase": "cleanup",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "1.9",
+      "closed_interval_count": 2,
+      "closed_usage_quantity": "190",
+      "open_interval_count": 0,
+      "phase": "cleanup",
+      "resource_ids": [
+        "example-storage-meter"
+      ],
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second"
+    },
+    {
+      "closed_duration_seconds": "3",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "3",
+      "open_interval_count": 0,
+      "phase": "failed_attempt",
+      "resource_ids": [
+        "example-gpu-meter"
+      ],
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second"
+    },
+    {
+      "closed_duration_seconds": "3",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "3",
+      "open_interval_count": 0,
+      "phase": "failed_attempt",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "3",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "300",
+      "open_interval_count": 0,
+      "phase": "failed_attempt",
+      "resource_ids": [
+        "example-storage-meter"
+      ],
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second"
+    },
+    {
+      "closed_duration_seconds": "11.1",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "11.1",
+      "open_interval_count": 0,
+      "phase": "gpu_critical_path",
+      "resource_ids": [
+        "example-gpu-meter"
+      ],
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second"
+    },
+    {
+      "closed_duration_seconds": "11.1",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "11.1",
+      "open_interval_count": 0,
+      "phase": "gpu_critical_path",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "11.1",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "1110",
+      "open_interval_count": 0,
+      "phase": "gpu_critical_path",
+      "resource_ids": [
+        "example-storage-meter"
+      ],
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second"
+    },
+    {
+      "closed_duration_seconds": "8",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "8",
+      "open_interval_count": 1,
+      "phase": "idle_retained",
+      "resource_ids": [
+        "example-gpu-meter"
+      ],
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second"
+    },
+    {
+      "closed_duration_seconds": "8",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "8",
+      "open_interval_count": 1,
+      "phase": "idle_retained",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "13",
+      "closed_interval_count": 2,
+      "closed_usage_quantity": "1300",
+      "open_interval_count": 1,
+      "phase": "idle_retained",
+      "resource_ids": [
+        "example-storage-meter"
+      ],
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second"
+    },
+    {
+      "closed_duration_seconds": "5",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "5",
+      "open_interval_count": 0,
+      "phase": "node_provision",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "5",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "5",
+      "open_interval_count": 0,
+      "phase": "pre_t0_setup",
+      "resource_ids": [
+        "example-gpu-meter"
+      ],
+      "resource_type": "gpu",
+      "sku": "example-h100-80gb",
+      "usage_unit": "gpu-second"
+    },
+    {
+      "closed_duration_seconds": "5",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "5",
+      "open_interval_count": 0,
+      "phase": "pre_t0_setup",
+      "resource_ids": [
+        "example-node-meter"
+      ],
+      "resource_type": "node",
+      "sku": "example-h100-node",
+      "usage_unit": "node-second"
+    },
+    {
+      "closed_duration_seconds": "5",
+      "closed_interval_count": 1,
+      "closed_usage_quantity": "500",
+      "open_interval_count": 0,
+      "phase": "pre_t0_setup",
+      "resource_ids": [
+        "example-storage-meter"
+      ],
+      "resource_type": "storage",
+      "sku": "example-attached-storage",
+      "usage_unit": "storage-gibibyte-second"
+    }
+  ]
+}

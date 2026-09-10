@@ -1,0 +1,172 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: boltz2-artifact-wb-prewarm-t12
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: boltz2
+    app.kubernetes.io/component: artifact-prewarm
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: boltz2-wb-prewarm-1
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: boltz2
+        app.kubernetes.io/component: artifact-prewarm
+        app.kubernetes.io/part-of: archvteams-2407-faststart
+        archvteams.nebius.ai/run-id: boltz2-wb-prewarm-1
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - gpu-node-b.example.invalid
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: artifact-prewarm
+          image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/python3
+            - -c
+            - |
+              import hashlib
+              import json
+              import os
+              import shutil
+              import time
+              from pathlib import Path
+
+              source_root = Path("/checkpoints/boltz2-native-f7-v1")
+              source = source_root / "versions" / "1"
+              destination_root = Path("/checkpoints/boltz2-native-f7-wb-v1")
+              temporary_root = Path("/checkpoints/.boltz2-native-f7-wb-v1.tmp")
+              destination = destination_root / "versions" / "1"
+              if not source.is_dir() or not (source / "manifest.yaml").is_file():
+                  raise RuntimeError("immutable source artifact is incomplete")
+              if destination_root.exists() or temporary_root.exists():
+                  raise RuntimeError("writeback destination already exists")
+              temporary = temporary_root / "versions" / "1"
+              temporary.mkdir(parents=True, mode=0o700)
+              try:
+                  linked_files = 0
+                  linked_bytes = 0
+                  for entry in sorted(source.iterdir(), key=lambda item: item.name):
+                      if not entry.is_file() or entry.is_symlink():
+                          raise RuntimeError(f"unexpected source entry: {entry.name}")
+                      if entry.name == "manifest.yaml":
+                          continue
+                      os.link(entry, temporary / entry.name)
+                      linked_files += 1
+                      linked_bytes += entry.stat().st_size
+                  source_manifest = (source / "manifest.yaml").read_bytes()
+                  old_id = b"checkpointId: boltz2-native-f7-v1\n"
+                  old_mode = b"        imageIoMode: direct\n"
+                  if source_manifest.count(old_id) != 1 or source_manifest.count(old_mode) != 1:
+                      raise RuntimeError("source manifest identity or direct mode is not exact")
+                  manifest = source_manifest.replace(
+                      old_id, b"checkpointId: boltz2-native-f7-wb-v1\n"
+                  ).replace(old_mode, b"        imageIoMode: writeback\n")
+                  manifest_path = temporary / "manifest.yaml"
+                  descriptor = os.open(
+                      manifest_path,
+                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                      0o600,
+                  )
+                  try:
+                      os.write(descriptor, manifest)
+                      os.fsync(descriptor)
+                  finally:
+                      os.close(descriptor)
+                  os.rename(temporary_root, destination_root)
+                  parent_fd = os.open(destination_root.parent, os.O_RDONLY | os.O_DIRECTORY)
+                  try:
+                      os.fsync(parent_fd)
+                  finally:
+                      os.close(parent_fd)
+              except BaseException:
+                  shutil.rmtree(temporary_root, ignore_errors=True)
+                  raise
+
+              started = time.monotonic_ns()
+              warmed_files = 0
+              warmed_bytes = 0
+              for entry in sorted(destination.iterdir(), key=lambda item: item.name):
+                  if not entry.is_file() or entry.is_symlink():
+                      raise RuntimeError(f"unexpected destination entry: {entry.name}")
+                  with entry.open("rb", buffering=8 * 1024 * 1024) as handle:
+                      if hasattr(os, "posix_fadvise"):
+                          os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_WILLNEED)
+                      while True:
+                          chunk = handle.read(8 * 1024 * 1024)
+                          if not chunk:
+                              break
+                          warmed_bytes += len(chunk)
+                  warmed_files += 1
+              elapsed = (time.monotonic_ns() - started) / 1_000_000_000
+              manifest_sha = hashlib.sha256((destination / "manifest.yaml").read_bytes()).hexdigest()
+              source_page_inode = (source / "pages-12.img").stat().st_ino
+              destination_page_inode = (destination / "pages-12.img").stat().st_ino
+              source_manifest_inode = (source / "manifest.yaml").stat().st_ino
+              destination_manifest_inode = (destination / "manifest.yaml").stat().st_ino
+              print(json.dumps({
+                  "schema": "archvteams.nebius.ai/boltz2-writeback-prewarm/v1",
+                  "status": "PASS",
+                  "source_checkpoint_id": "boltz2-native-f7-v1",
+                  "checkpoint_id": "boltz2-native-f7-wb-v1",
+                  "artifact_version": "1",
+                  "manifest_sha256": manifest_sha,
+                  "linked_file_count": linked_files,
+                  "linked_bytes": linked_bytes,
+                  "warmed_file_count": warmed_files,
+                  "warmed_bytes": warmed_bytes,
+                  "prewarm_seconds": round(elapsed, 6),
+                  "page_inode_shared": source_page_inode == destination_page_inode,
+                  "manifest_inode_distinct": source_manifest_inode != destination_manifest_inode,
+              }, sort_keys=True, separators=(",", ":")))
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              cpu: "4"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /checkpoints
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: mlspec-archvteams-2407-ckpt-m3
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

@@ -1,0 +1,10 @@
+{
+  "sequence": "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG",
+  "databases": [
+    "pdb70_220313"
+  ],
+  "max_msa_sequences": 500,
+  "output_alignment_formats": [
+    "a3m"
+  ]
+}

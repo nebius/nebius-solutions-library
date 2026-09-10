@@ -1,0 +1,55 @@
+{
+  "schema": "archvteams.nebius.ai/openfold3-retained-baseline/v2",
+  "status": "PASS",
+  "source": {
+    "path": "<private-evidence-root>/openfold3-h100-faststart-20260817T231544Z/results.json",
+    "bytes": 5710,
+    "sha256": "f2b3832a91bb745c678589bf16c378ca2f2aac7d3d3064c21b714aa8ab6b7236"
+  },
+  "execution_identity": {
+    "node": "gpu-node-a.example.invalid",
+    "gpu": "NVIDIA H100",
+    "gpu_count": 1,
+    "image": "nvcr.io/nim/openfold/openfold3@sha256:6286cc7c02247ed3efe42f0f1af6c2f6f6a680b1e5cae669512c44b636aa42d2"
+  },
+  "semantic_fixture": {
+    "path": "fixtures/request-20aa.json",
+    "bytes": 532,
+    "sha256": "09b30bf2132e3764f99d4f417b47713cd6350bd332fe3100cceb1be11589f8ae",
+    "endpoint": "/biology/openfold/openfold3/predict",
+    "calls_per_trial": 2
+  },
+  "conventional_start": {
+    "pod_creation_to_ready_seconds": 202.0,
+    "container_start_to_ready_seconds": 181.0,
+    "model_cache_bytes": 3305746737,
+    "model_cache_file_count": 10,
+    "uvloop_absent_before_capture": true
+  },
+  "checkpoint": {
+    "checkpoint_id": "openfold3-native-f7-v2-buffered",
+    "artifact_version": "1",
+    "manifest_sha256": "5df221e0736a4c6f369781ea0dbc7c36783c26d3f35dcd874b4ced8f5f9e009f",
+    "regular_file_count": 148,
+    "regular_file_bytes": 9263246107,
+    "tree_sha256": "f488019348551f356a153ce17cd9568a9d59497ead375c81a84ddef3bc3972c2",
+    "receipt_path": "<private-evidence-root>/openfold3-native-f7-20260818T055003Z/artifact-buffered-receipt.json",
+    "receipt_sha256": "f780779202dcd93180b49c6d9e40e20044fd7fcb7ceea85b60c964ed8e994550",
+    "prewarm_elapsed_seconds": null,
+    "prewarm_elapsed_retained": false
+  },
+  "retained_page_cache_n3_medians_seconds": {
+    "criu_restore": 4.249,
+    "manual_cuda_restore_unlock": 0.688,
+    "http_ready": 5.454,
+    "first_semantic_response": 8.375062,
+    "second_semantic_response": 8.474428,
+    "restore_through_two_semantic_responses": 22.298048
+  },
+  "cold_root_disk_n1_seconds": {
+    "criu_restore": 67.978,
+    "http_ready": 69.44,
+    "restore_through_two_semantic_responses": 90.322516
+  },
+  "qualification_note": "The timings are retained experimental baselines, not production-shaped Dynamo qualification results. The checkpoint identity is the authoritative selected buffered-artifact receipt; its full-read elapsed time was not retained and must not be inferred."
+}
