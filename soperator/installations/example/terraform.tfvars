@@ -428,7 +428,7 @@ slurm_nodeset_workers = [
   },
 ]
 
-# Per-platform CUDA versions consumed by Slurm/operator (e.g., 12.9.0). Keys are platform IDs (e.g., gpu-h100-sxm).
+# Per-platform CUDA versions consumed by Slurm/operator (e.g., 13.0.3). Keys are platform IDs (e.g., gpu-h100-sxm).
 #platform_cuda_versions = {}
 
 # Per-platform GPU driver presets. Keys are platform IDs (e.g., gpu-h100-sxm); values are driver presets (e.g., cuda13.0).

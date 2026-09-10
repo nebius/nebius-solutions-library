@@ -1048,5 +1048,5 @@ variable "slurm_nodesets_partitions" {
 variable "cuda_version" {
   description = "CUDA version used for populate-jail image selection and active checks."
   type        = string
-  default     = "13.0.2"
+  default     = "13.0.3"
 }
