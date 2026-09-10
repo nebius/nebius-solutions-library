@@ -23,10 +23,6 @@ terraform {
   }
 }
 
-provider "nebius" {
-  domain = "api.eu.nebius.cloud:443"
-}
-
 provider "helm" {
   kubernetes = {
     host                   = nebius_mk8s_v1_cluster.k8s-cluster.status.control_plane.endpoints.public_endpoint
