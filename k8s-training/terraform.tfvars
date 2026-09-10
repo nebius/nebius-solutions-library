@@ -125,6 +125,14 @@ kuberay_max_gpu_replicas = 8
 # Enable to deploy KubeRay Operator with RayService CR 
 enable_kuberay_service = false
 
+# Kueue job admission and queueing (disabled by default).
+# Enabling Kueue installs its controller and CRDs, explicitly enables
+# topology-aware scheduling, and creates a ResourceFlavor for each GPU node
+# group. Define ClusterQueue and LocalQueue policy before submitting queued jobs.
+kueue = {
+  enabled = false
+}
+
 # Optional Kubernetes RBAC bindings for Kubernetes cluster access.
 # Keep disabled until the access model is approved.
 # k8s_rbac_bindings = {
