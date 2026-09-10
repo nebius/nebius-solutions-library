@@ -100,6 +100,9 @@ jobs:
     name: 'Terraform ${{ matrix.solution }}'
     environment:
       name: project-e02s5a0dpr00nk11bgb0p9
+    concurrency:
+      group: ${{ matrix.solution == 'k8s-training' && 'project-e02s5a0dpr00nk11bgb0p9' || format('terraform-{0}-{1}', github.run_id, matrix.solution) }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -161,11 +164,16 @@ jobs:
         echo "NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN" >> $GITHUB_ENV
         echo "TF_VAR_iam_token=$TF_VAR_iam_token" >> $GITHUB_ENV
 
+    - name: Set unique k8s-training resource names
+      if: matrix.solution == 'k8s-training'
+      run: echo "TF_VAR_cluster_name=k8s-training-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
     # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "v1.11.4"
+        terraform_wrapper: false
 
     # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
     - name: Terraform Init
@@ -199,7 +207,19 @@ jobs:
 
         stop_test() {
           if kill -0 "${test_pid}" 2>/dev/null; then
-            kill "${test_pid}" || true
+            echo "Interrupting terraform test and allowing it to tear down resources"
+            kill -INT "${test_pid}" || true
+
+            for _ in $(seq 1 360); do
+              if ! kill -0 "${test_pid}" 2>/dev/null; then
+                wait "${test_pid}" || true
+                return
+              fi
+              sleep 5
+            done
+
+            echo "Terraform did not exit after 30 minutes; terminating it"
+            kill -TERM "${test_pid}" || true
             wait "${test_pid}" || true
           fi
         }
@@ -253,6 +273,55 @@ jobs:
         done
 
         wait "${test_pid}"
+
+    - name: Cleanup k8s-training test service account
+      if: always() && matrix.solution == 'k8s-training'
+      run: |
+        service_account_name="${TF_VAR_cluster_name}-k8s-node-group-sa"
+        service_account_id="$(
+          nebius --format json iam service-account list --parent-id "${TF_VAR_parent_id}" --all \
+            | jq -r --arg name "${service_account_name}" '
+                [(.items // [])[] | select(.metadata.name == $name)]
+                | first
+                | .metadata.id // empty
+              '
+        )"
+
+        if [ -z "${service_account_id}" ]; then
+          echo "No leftover test service account named ${service_account_name}"
+          exit 0
+        fi
+
+        echo "Cleaning up leftover test service account ${service_account_name}"
+
+        nebius --format json iam v2 access-key list --parent-id "${TF_VAR_parent_id}" --all \
+          | jq -r --arg service_account_id "${service_account_id}" '
+              (.items // [])[]
+              | select((.spec.account.service_account.id // "") == $service_account_id)
+              | .metadata.id
+            ' \
+          | while read -r key_id; do
+              nebius iam v2 access-key delete --id "${key_id}"
+            done
+
+        nebius --format json iam static-key list --parent-id "${TF_VAR_parent_id}" --all \
+          | jq -r --arg service_account_id "${service_account_id}" '
+              (.items // [])[]
+              | select((.spec.account.service_account.id // "") == $service_account_id)
+              | .metadata.id
+            ' \
+          | while read -r key_id; do
+              nebius iam static-key delete --id "${key_id}"
+            done
+
+        nebius --format json iam group-membership list-member-of \
+          --subject-id "${service_account_id}" --page-size 1000 \
+          | jq -r '(.items // [])[] | .metadata.id' \
+          | while read -r membership_id; do
+              nebius iam group-membership delete --id "${membership_id}"
+            done
+
+        nebius iam service-account delete --id "${service_account_id}"
 
     - name: Set date in report
       run: |
