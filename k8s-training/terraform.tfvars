@@ -77,9 +77,13 @@ enable_grafana           = true # Enable or disable Grafana® solution by Nebius
 
 # Local Observability installation
 enable_prometheus = false # Enable or disable Prometheus and Grafana deployment with true or false
+
+# Loki is DEPRICATED, as observability functionality has been moved to the Nebius Observability service.
+# Nebius Observability is enabled by default via the `enable_nebius_o11y_agent` variable.                   
+# https://docs.nebius.com/observability/agents/nebius-o11y-agent#nebius-observability-agent-for-kubernetes
 loki = {
-  enabled            = true # Enable or disable Loki deployment with true or false
-  replication_factor = 2    # Number of Loki replicas for each log chunk (higher = better availability, more storage/network cost)
+  enabled            = false # Enable or disable Loki deployment with true or false
+  replication_factor = 2     # Number of Loki replicas for each log chunk (higher = better availability, more storage/network cost)
 }
 # Storage
 enable_filestore               = false # Enable or disable Filestore integration with true or false
