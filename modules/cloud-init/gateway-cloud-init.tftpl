@@ -1,0 +1,17 @@
+users:
+ - name: ${ssh_user_name}
+   sudo: ALL=(ALL) NOPASSWD:ALL
+   shell: /bin/bash
+   ssh_authorized_keys:
+    - ${ssh_public_key}
+
+package_update: true
+package_upgrade: true
+
+packages:
+ - iptables-persistent
+
+runcmd:
+  - sysctl -w net.ipv4.ip_forward=1
+  - sed -i -E 's/^(#\s?)?net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+  - iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
