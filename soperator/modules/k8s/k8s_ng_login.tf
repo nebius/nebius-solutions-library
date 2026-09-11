@@ -3,6 +3,7 @@ resource "nebius_mk8s_v1_node_group" "login" {
 
   depends_on = [
     nebius_mk8s_v1_cluster.this,
+    nebius_mk8s_v1_node_group.system.this,
     terraform_data.check_resource_preset_sufficiency,
   ]
 
