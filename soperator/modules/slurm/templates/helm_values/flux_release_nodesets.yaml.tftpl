@@ -256,7 +256,7 @@ nodesets:
           # SCHED-1418: wait before worker-init/slurmd creation so the NVIDIA runtime can inject the host socket.
           # Reuse the driver volume's host /run directory to observe newly created sockets in the waiter.
           - name: wait-for-nvidia-persistenced
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts:
               - name: nvidia-driver-root
                 subPath: run
@@ -273,32 +273,32 @@ nodesets:
           %{~ endif ~}
 
           - name: ensure-jail-virtiofs
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: jail, mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
 
           %{~ for sub_mount in jail_submounts.shared ~}
           - name: ensure-jail-submount-${sub_mount.name}-virtiofs
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
           %{~ endfor ~}
 
           %{~ for sub_mount in nodeset.node_local_jail_submounts ~}
           - name: ensure-node-local-jail-submount-${sub_mount.name}-${sub_mount.filesystem_type}
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
             command: ["grep", ' /volume-mount ${sub_mount.filesystem_type} ', "/proc/mounts"]
           %{~ endfor ~}
 
           %{~ if nodeset.node_local_image_storage.enabled ~}
           - name: ensure-node-local-image-storage-${nodeset.node_local_image_storage.spec.filesystem_type}
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command: ["grep", ' /volume-mount ${nodeset.node_local_image_storage.spec.filesystem_type} ', "/proc/mounts"]
 
           - name: prepare-node-local-image-storage
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command:
             - "sh"
