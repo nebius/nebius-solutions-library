@@ -50,6 +50,7 @@ resource "local_file" "flux_release_rendered_nodesets" {
 
     gpu = {
       use_preinstalled_drivers = var.use_preinstalled_gpu_drivers
+      wait_for_persistenced    = var.wait_for_nvidia_persistenced
     }
 
     munge = {

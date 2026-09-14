@@ -486,6 +486,13 @@ variable "nfs_in_k8s" {
 
 # region Config
 
+variable "wait_for_nvidia_persistenced" {
+  description = "Whether GPU workers with preinstalled drivers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "shared_memory_size_gibibytes" {
   description = "Shared memory size for Slurm controller and worker nodes in GiB."
   type        = number

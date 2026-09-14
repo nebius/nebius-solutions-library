@@ -574,6 +574,14 @@ active_checks_scope = ""
 #----------------------------------------------------------------------------------------------------------------------#
 # region Config
 
+# Wait for the host NVIDIA persistence socket before starting GPU workers so the NVIDIA runtime can inject it.
+# Mitigates the suspected startup race behind intermittent persistence health-check failures (SCHED-1418).
+# Only applies to GPU nodesets when use_preinstalled_gpu_drivers is true.
+# GPU workers stay in init until /run/nvidia-persistenced/socket exists; CPU workers are unaffected.
+# By default, true.
+# ---
+slurm_wait_for_nvidia_persistenced = true
+
 # Shared memory size for Slurm controller and worker nodes in GiB.
 # By default, 64.
 # ---
