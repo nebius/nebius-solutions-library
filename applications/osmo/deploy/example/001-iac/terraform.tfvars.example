@@ -15,7 +15,7 @@ parent_id = "your-project-id" # From NEBIUS_PROJECT_ID
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-north1"    # eu-north1, eu-north2, eu-west1, me-west1, uk-south1, us-central1
+region       = "eu-west2"     # eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1
 environment  = "dev"          # dev, staging, prod
 project_name = "osmo"         # Used for resource naming
 
@@ -40,14 +40,14 @@ cpu_nodes_assign_public_ip = false  # Private nodes only
 # -----------------------------------------------------------------------------
 gpu_nodes_count_per_group  = 1
 gpu_node_groups            = 1
-gpu_nodes_platform         = "gpu-h100-sxm"  # See locals.tf for all GPU platforms per region
-gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+gpu_nodes_platform         = null  # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null  # Use the selected region's default from locals.tf
 gpu_disk_size_gib          = 1023
 gpu_nodes_assign_public_ip = false  # Private nodes only
 enable_gpu_cluster         = true   # InfiniBand
 enable_gpu_taints          = true
 gpu_nodes_preemptible      = false  # Preemptible requires project permissions
-gpu_nodes_driverfull_image = false  # Set true for Nebius pre-installed drivers (recommended for B200/B300)
+gpu_nodes_driverfull_image = true   # Nebius pre-installed drivers are recommended for B200/B300
 
 # -----------------------------------------------------------------------------
 # Storage

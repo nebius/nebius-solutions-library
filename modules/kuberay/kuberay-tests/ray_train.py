@@ -83,9 +83,9 @@ scaling_config = ray.train.ScalingConfig(
 # AWS_ENDPOINT_URL_S3
 #    key=os.environ["S_"NAKI6SGGP3UHT43RGH6W",
 #    secret="GWZFw9lhM5EHXxwBg5Tqkbd0CQlyz9z9n7D8KLz1",
-#    endpoint_url="https://storage.eu-north1.nebius.cloud:443",
+#    endpoint_url=os.environ["AWS_ENDPOINT_URL"],
 #    client_kwargs={
-#        "region_name": "eu-north1",
+#        "region_name": os.environ["AWS_REGION"],
 #    },
 # )
 # custom_fs = PyFileSystem(FSSpecHandler(s3_fs))

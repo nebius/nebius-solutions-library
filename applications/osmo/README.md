@@ -9,6 +9,7 @@ Deploy [NVIDIA OSMO](https://nvidia.github.io/OSMO/main/user_guide/index.html) o
 | `eu-north1` | gpu-h100-sxm, gpu-h200-sxm, gpu-l40s-a, gpu-l40s-d |
 | `eu-north2` | gpu-h200-sxm |
 | `eu-west1` | gpu-h200-sxm |
+| `eu-west2` | gpu-b300-sxm (NVIDIA B300) |
 | `me-west1` | gpu-b200-sxm-a (NVIDIA B200) |
 | `uk-south1` | gpu-b300-sxm (NVIDIA B300) |
 | `us-central1` | gpu-h200-sxm, gpu-b200-sxm (NVIDIA B200) |
@@ -146,7 +147,7 @@ This interactive script:
 2. **Checks authentication** - If not authenticated, provides instructions to run `nebius profile create`
 3. **Lists tenants** - Auto-detects if you have only one tenant
 4. **Configures project** - Select existing project, create new one, or list available projects
-5. **Sets region** - Choose from `eu-north1`, `eu-north2`, `eu-west1`, `me-west1`, `uk-south1`, `us-central1`
+5. **Sets region** - Choose from `eu-north1`, `eu-north2`, `eu-west1`, `eu-west2`, `me-west1`, `uk-south1`, `us-central1`
 6. **Exports environment variables** - Sets `NEBIUS_*` and `TF_VAR_*` variables for Terraform
 
 ### 3. Initialize Secrets (REQUIRED)
@@ -350,12 +351,12 @@ See [Terraform README](deploy/001-iac/README.md) for configuration options, and 
 
 | Tier | GPU Type | GPU Nodes | Security | Est. Cost/6h |
 |------|----------|-----------|----------|--------------|
-| **Cost-Optimized Secure** (recommended) | 1x L40S | 1 | WireGuard VPN | **~$15-25** |
-| **Cost-Optimized** | 1x L40S | 1 | Public endpoints | ~$10-15 |
-| **Standard** | 1x H100 | 1 | Public endpoints | ~$30-40 |
-| **Production** | 8x H200 | 4+ | WireGuard VPN | ~$1000+ |
+| **Cost-Optimized Secure** (recommended) | 1x B300 | 1 | WireGuard VPN | Smallest eu-west2 footprint |
+| **Cost-Optimized** | 1x B300 | 1 | Public endpoints | Smallest eu-west2 footprint |
+| **Standard** | 1x B300 | 1 | Public endpoints | Region-specific |
+| **Production** | 8x B300 | 4+ | WireGuard VPN | Region-specific |
 
-**Recommended:** Use `terraform.tfvars.cost-optimized-secure.example` for development.
+**Recommended:** For eu-west2 development, use `terraform.tfvars.cost-optimized-secure.example` for the smallest B300 footprint.
 
 See `deploy/001-iac/terraform.tfvars.*.example` files for all configuration options.
 
@@ -373,10 +374,10 @@ See `deploy/001-iac/terraform.tfvars.*.example` files for all configuration opti
 | `gpu-b200-sxm` | `8gpu-160vcpu-1792gb` | 8 | 160 | 1792GB | Yes | us-central1 |
 | `gpu-b200-sxm-a` | `1gpu-20vcpu-224gb` | 1 | 20 | 224GB | No | me-west1 |
 | `gpu-b200-sxm-a` | `8gpu-160vcpu-1792gb` | 8 | 160 | 1792GB | Yes | me-west1 |
-| `gpu-b300-sxm` | `1gpu-24vcpu-346gb` | 1 | 24 | 346GB | No | uk-south1 |
-| `gpu-b300-sxm` | `8gpu-192vcpu-2768gb` | 8 | 192 | 2768GB | Yes | uk-south1 |
+| `gpu-b300-sxm` | `1gpu-24vcpu-346gb` | 1 | 24 | 346GB | No | eu-west2, uk-south1 |
+| `gpu-b300-sxm` | `8gpu-192vcpu-2768gb` | 8 | 192 | 2768GB | Yes | eu-west2, uk-south1 |
 
-**Recommendation:** Use `gpu-l40s-a` for development/testing in eu-north1 (cheapest option).
+**Recommendation:** In eu-west2, use the single-GPU B300 preset for the smallest development configuration.
 
 ## Required Permissions
 
@@ -454,8 +455,8 @@ The `deploy/001-iac/` directory includes several pre-configured `terraform.tfvar
 
 | Preset | GPU | WireGuard | Public API | Use Case |
 |--------|-----|-----------|------------|----------|
-| `terraform.tfvars.cost-optimized.example` | L40S | No | Yes | **Recommended for development** - Lowest cost, quick testing |
-| `terraform.tfvars.cost-optimized-secure.example` | L40S | Yes | No | Development with VPN-only access |
+| `terraform.tfvars.cost-optimized.example` | B300 | No | Yes | Development with the smallest eu-west2 GPU preset |
+| `terraform.tfvars.cost-optimized-secure.example` | B300 | Yes | No | Development with the smallest eu-west2 GPU preset and VPN-only access |
 | `terraform.tfvars.secure.example` | H100 | Yes | No | Staging with full security |
 | `terraform.tfvars.production.example` | H200 | Yes | No | Production with maximum performance |
 | `terraform.tfvars.example` | H100 | No | Yes | Basic template with all options documented |
@@ -466,12 +467,12 @@ The `deploy/001-iac/` directory includes several pre-configured `terraform.tfvar
 
 | Preset | GPU Nodes | CPU Nodes | etcd Size | Preemptible | Security |
 |--------|-----------|-----------|-----------|-------------|----------|
-| **cost-optimized-secure** | 1x L40S | 2x small | 1 | Yes | VPN only |
-| **cost-optimized** | 1x L40S | 2x small | 1 | Yes | Public endpoints |
+| **cost-optimized-secure** | 1x B300 | 2x small | 1 | Yes | VPN only |
+| **cost-optimized** | 1x B300 | 2x small | 1 | Yes | Public endpoints |
 | **secure** | 8x H100 | 3x medium | 3 | No | VPN only |
 | **production** | 4x 8-GPU H200 | 3x large | 3 | No | VPN only |
 
-**Recommendation:** Start with `terraform.tfvars.cost-optimized-secure.example` for development, then scale up as needed.
+**Recommendation:** For eu-west2 development, start with `terraform.tfvars.cost-optimized-secure.example`, then scale up as needed.
 
 ## Cleanup
 
