@@ -656,6 +656,7 @@ module "slurm" {
   worker_sshd_config_map_ref_name = var.slurm_worker_sshd_config_map_ref_name
   login_on_worker_nodes           = local.gb300_enabled
   shared_memory_size_gibibytes    = var.slurm_shared_memory_size_gibibytes
+  wait_for_nvidia_persistenced    = var.slurm_wait_for_nvidia_persistenced
   slurm_partition_config_type     = var.slurm_partition_config_type
   slurm_partition_raw_config      = var.slurm_partition_raw_config
   slurm_health_check_config       = var.slurm_health_check_config

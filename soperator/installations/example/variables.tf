@@ -1454,6 +1454,13 @@ variable "slurm_rest_enabled" {
 
 # region Config
 
+variable "slurm_wait_for_nvidia_persistenced" {
+  description = "Whether GPU workers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "slurm_shared_memory_size_gibibytes" {
   description = "Shared memory size for Slurm controller and worker nodes in GiB."
   type        = number

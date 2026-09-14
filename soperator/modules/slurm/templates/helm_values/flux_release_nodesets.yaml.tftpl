@@ -149,6 +149,17 @@ nodesets:
             %{~ endif ~}
 
             customVolumeMounts:
+              %{~ if gpu.wait_for_persistenced && resources[i].gpus > 0 ~}
+              # Mount the host directory so the waiter can observe the socket appearing after pod creation.
+              - name: host-run
+                mountPath: /host-run
+                readOnly: true
+                volumeSource:
+                  hostPath:
+                    path: /run
+                    type: Directory
+              %{~ endif ~}
+
               - name: slurm-scripts
                 mountPath: /opt/slurm_scripts/
                 volumeSource:
@@ -252,6 +263,24 @@ nodesets:
         %{~ endif ~}
 
         customInitContainers:
+          %{~ if gpu.wait_for_persistenced && resources[i].gpus > 0 ~}
+          # SCHED-1418: wait before worker-init/slurmd creation so the NVIDIA runtime can inject the host socket.
+          - name: wait-for-nvidia-persistenced
+            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            volumeMounts:
+              - name: host-run
+                mountPath: /host-run
+                readOnly: true
+            command: ["/bin/sh", "-ec"]
+            args:
+              - |
+                until [ -S /host-run/nvidia-persistenced/socket ]; do
+                    echo "Waiting for the NVIDIA persistenced socket on the host..."
+                    sleep 5
+                done
+                echo "NVIDIA persistenced socket is ready"
+          %{~ endif ~}
+
           - name: ensure-jail-virtiofs
             image: cr.eu-north1.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: jail, mountPath: /volume-mount }]
