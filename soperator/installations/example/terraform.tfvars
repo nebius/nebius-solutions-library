@@ -757,7 +757,7 @@ k8s_version = 1.35
 
 # Version of the node group to be used.
 # ---
-node_group_version = 72
+node_group_version = 74
 
 # SSH user credentials for accessing k8s nodes.
 # By default, empty list.
