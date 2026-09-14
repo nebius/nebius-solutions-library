@@ -92,10 +92,10 @@ sky check kubernetes
 
 ### 4.1 Bring up a Sky cluster on Kubernetes
 
-Use all 8 H100s:
+Use all 8 B300s:
 
 ```bash
-sky launch -c mk8s-eu-north1 --cloud kubernetes --gpus H100:8 "nvidia-smi"
+sky launch -c mk8s-eu-west2 --cloud kubernetes --gpus B300:8 "nvidia-smi"
 sky status
 ```
 
@@ -110,7 +110,7 @@ export HF_TOKEN=<your_hf_token>
 Launch training:
 
 ```bash
-sky launch -c mk8s-eu-north1 skypilot/llama7b_finetune.yaml --env HF_TOKEN=$HF_TOKEN
+sky launch -c mk8s-eu-west2 skypilot/llama7b_finetune.yaml --env HF_TOKEN=$HF_TOKEN
 ```
 
 After the job starts, you can use the MLflow UI to track training progress, metrics, and runs.
@@ -137,7 +137,7 @@ terraform output -raw mlflow_admin_password
 Monitor:
 
 ```bash
-sky logs mk8s-eu-north1
+sky logs mk8s-eu-west2
 ```
 
 ---
@@ -187,7 +187,7 @@ If you switch to a chat model (e.g. `meta-llama/Llama-2-7b-chat-hf`), use:
 
 ```bash
 sky serve down llama7b-svc -y
-sky down mk8s-eu-north1 -y
+sky down mk8s-eu-west2 -y
 ```
 
 If needed, destroy infra:

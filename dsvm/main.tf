@@ -17,8 +17,8 @@ resource "nebius_compute_v1_instance" "dsvm_instance" {
   ]
 
   resources = {
-    platform = var.platform
-    preset   = var.preset
+    platform = local.platform
+    preset   = local.preset
   }
 
   cloud_init_user_data = templatefile("./files/dsvm-cloud-init.tftpl", {

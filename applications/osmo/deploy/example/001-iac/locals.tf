@@ -34,6 +34,13 @@ locals {
       postgresql_platform  = "cpu-d3"
       postgresql_disk_type = "network-ssd"
     }
+    eu-west2 = {
+      gpu_nodes_platform   = "gpu-b300-sxm"
+      gpu_nodes_preset     = "8gpu-192vcpu-2768gb"
+      infiniband_fabric    = "eu-west2-a"
+      postgresql_platform  = "cpu-d3"
+      postgresql_disk_type = "network-ssd"
+    }
     me-west1 = {
       gpu_nodes_platform   = "gpu-b200-sxm-a"
       gpu_nodes_preset     = "8gpu-160vcpu-1792gb"
@@ -70,6 +77,9 @@ locals {
   #
   # eu-west1:
   #   - gpu-h200-sxm   (NVIDIA H200)               presets: 1gpu-16vcpu-200gb, 8gpu-128vcpu-1600gb
+  #
+  # eu-west2:
+  #   - gpu-b300-sxm   (NVIDIA B300 SXM6 AC)       presets: 1gpu-24vcpu-346gb, 8gpu-192vcpu-2768gb
   #
   # me-west1:
   #   - gpu-b200-sxm-a (NVIDIA B200)               presets: 1gpu-20vcpu-224gb, 8gpu-160vcpu-1792gb

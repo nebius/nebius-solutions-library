@@ -4,7 +4,7 @@ resource "nebius_compute_v1_disk" "boot-disk" {
   block_size_bytes    = 4096
   size_bytes          = 1024 * 1024 * 1024 * var.boot_disk_size_gb
   type                = "NETWORK_SSD"
-  source_image_family = { image_family = "ubuntu24.04-cuda12" }
+  source_image_family = { image_family = local.boot_image_family }
 }
 
 resource "nebius_compute_v1_disk" "extra-storage-disk" {
@@ -80,6 +80,7 @@ resource "nebius_compute_v1_instance" "instance" {
     aws_secret_access_key   = var.aws_secret_access_key,
     mount_bucket            = var.mount_bucket,
     s3_mount_path           = var.s3_mount_path
+    region                  = var.region
   })
 }
 
