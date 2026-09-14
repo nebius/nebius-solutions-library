@@ -119,7 +119,7 @@ log_success "Database: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 # -----------------------------------------------------------------------------
 # Select Nebius Region
 # -----------------------------------------------------------------------------
-VALID_REGIONS=("eu-north1" "me-west1")
+VALID_REGIONS=("eu-north1" "eu-west2" "me-west1")
 
 if [[ -n "${NEBIUS_REGION:-}" ]]; then
     NEBIUS_SELECTED_REGION="$NEBIUS_REGION"

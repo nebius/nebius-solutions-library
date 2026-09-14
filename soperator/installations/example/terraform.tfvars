@@ -345,18 +345,27 @@ slurm_nodeset_workers = [
       min_size = 0
     }
     resource = {
-      platform = "gpu-h100-sxm"
-      preset   = "8gpu-128vcpu-1600gb"
+      platform = "gpu-b300-sxm"
+      preset   = "8gpu-192vcpu-2768gb"
     }
     boot_disk = {
       type                 = "NETWORK_SSD"
       size_gibibytes       = 128
       block_size_kibibytes = 4
     }
+    # This 8-GPU preset requires a GPU cluster. Choose a fabric compatible with
+    # the selected region and GPU platform:
+    # https://docs.nebius.com/compute/clusters/gpu/index#infiniband-fabrics
+    # Platform and preset availability:
+    # https://docs.nebius.com/compute/virtual-machines/types
     gpu_cluster = {
-      # id                = "gpucluster-..."
       infiniband_fabric = ""
     }
+
+    # Or attach an existing GPU cluster:
+    # gpu_cluster = {
+    #   id = "gpucluster-..."
+    # }
     # Change to preemptible = {} in case you want to use preemptible nodes
     preemptible = null
     # Use reservation_policy to leverage compute reservations (capacity blocks)

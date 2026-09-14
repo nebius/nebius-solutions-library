@@ -12,6 +12,11 @@ locals {
       preset   = "16vcpu-64gb"
     }
 
+    eu-west2 = {
+      platform = "cpu-d3"
+      preset   = "16vcpu-64gb"
+    }
+
     eu-north2 = {
       platform = "cpu-d3"
       preset   = "16vcpu-64gb"

@@ -17,14 +17,15 @@ gpu_node_groups           = 1 # In case you need more then 100 nodes in cluster 
 cpu_nodes_platform = "cpu-d3"     # CPU nodes platform
 cpu_nodes_preset   = "4vcpu-16gb" # CPU nodes preset
 # GPU platform and preset: https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
-# Specify GPU node platform and preset for each region:
-gpu_nodes_platform_primary   = "gpu-h100-sxm"        # GPU nodes platform for primary region
-gpu_nodes_platform_secondary = "gpu-h200-sxm"        # GPU nodes platform for secondary region (change as needed)
-gpu_nodes_preset_primary     = "8gpu-128vcpu-1600gb" # GPU nodes preset for primary region
-gpu_nodes_preset_secondary   = "8gpu-128vcpu-1600gb" # GPU nodes preset for secondary region (change as needed)
+# By default, GPU platforms, presets, and fabrics are selected from the region map in locals.tf.
+# Set any of these to override an individual region.
+# gpu_nodes_platform_primary   = "gpu-b300-sxm"
+# gpu_nodes_platform_secondary = "gpu-h200-sxm"
+# gpu_nodes_preset_primary     = "8gpu-192vcpu-2768gb"
+# gpu_nodes_preset_secondary   = "8gpu-128vcpu-1600gb"
 # Infiniband fabrics: https://docs.nebius.com/compute/clusters/gpu#fabrics
-infiniband_fabric_primary   = "fabric-3" # Infiniband fabric for primary region
-infiniband_fabric_secondary = "fabric-5" # Infiniband fabric for secondary region
+# infiniband_fabric_primary   = "eu-west2-a"
+# infiniband_fabric_secondary = "fabric-5"
 
 gpu_nodes_driverfull_image = true
 enable_k8s_node_group_sa   = true

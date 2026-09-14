@@ -14,7 +14,7 @@
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-north1"
+region       = "eu-west2"
 environment  = "staging"
 project_name = "osmo-secure"
 
@@ -39,14 +39,14 @@ cpu_nodes_assign_public_ip = false  # Private only
 # -----------------------------------------------------------------------------
 gpu_nodes_count_per_group  = 1
 gpu_node_groups            = 1
-gpu_nodes_platform         = "gpu-h100-sxm"
-gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+gpu_nodes_platform         = null  # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null  # Use the selected region's default from locals.tf
 gpu_disk_size_gib          = 1023
 gpu_nodes_assign_public_ip = false  # Private only
 enable_gpu_cluster         = true
 enable_gpu_taints          = true
 gpu_nodes_preemptible      = false  # Preemptible requires project permissions
-gpu_nodes_driverfull_image = false  # Set true for Nebius pre-installed drivers (recommended for B200/B300)
+gpu_nodes_driverfull_image = true   # Nebius pre-installed drivers are recommended for B200/B300
 
 # -----------------------------------------------------------------------------
 # Storage
