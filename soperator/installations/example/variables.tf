@@ -1455,7 +1455,7 @@ variable "slurm_rest_enabled" {
 # region Config
 
 variable "slurm_wait_for_nvidia_persistenced" {
-  description = "Whether GPU workers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
+  description = "Whether GPU workers with preinstalled drivers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
   type        = bool
   default     = true
   nullable    = false

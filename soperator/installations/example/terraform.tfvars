@@ -576,6 +576,7 @@ active_checks_scope = ""
 
 # Wait for the host NVIDIA persistence socket before starting GPU workers so the NVIDIA runtime can inject it.
 # Mitigates the suspected startup race behind intermittent persistence health-check failures (SCHED-1418).
+# Only applies to GPU nodesets when use_preinstalled_gpu_drivers is true.
 # GPU workers stay in init until /run/nvidia-persistenced/socket exists; CPU workers are unaffected.
 # By default, true.
 # ---
