@@ -1,4 +1,71 @@
 #cloud-config
+%{ if use_default_apparmor_profile }
+bootcmd:
+  - |
+    set -eu
+    command -v apparmor_parser >/dev/null || { echo "AppArmor parser is unavailable" >&2; exit 1; }
+    test -r /sys/kernel/security/apparmor/profiles || { echo "AppArmor kernel interface is unavailable" >&2; exit 1; }
+    apparmor_parser --replace <<'SOPERATOR_APPARMOR_EOF'
+    #include <tunables/global>
+
+    profile soperator-default flags=(attach_disconnected,mediate_deleted) {
+      include <abstractions/base>
+
+      file,
+      mount,
+      capability,
+      network,
+      dbus,
+      pivot_root,
+      remount,
+      ptrace,
+      signal,
+      umount,
+      unix,
+
+      /** lrixw,
+
+      deny /usr/lib/x86_64-linux-gnu/libGLES* w,
+      deny /usr/lib/x86_64-linux-gnu/libGLX_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/libnvcuvid* w,
+      deny /usr/lib/x86_64-linux-gnu/gbm/nvidia-* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/_nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so w,
+      deny /usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia w,
+      deny /usr/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib64/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/bin/nvidia-smi w,
+      deny /usr/bin/nvidia-debugdump w,
+      deny /usr/bin/nvidia-persistenced w,
+      deny /usr/bin/nv-fabricmanager w,
+      deny /usr/bin/nvidia-cuda-mps-control w,
+      deny /usr/bin/nvidia-cuda-mps-server w,
+      deny /lib/firmware/nvidia/**/gsp_*.bin w,
+    }
+    SOPERATOR_APPARMOR_EOF
+    grep -Fxq 'soperator-default (enforce)' /sys/kernel/security/apparmor/profiles || { echo "soperator-default is not in enforce mode" >&2; exit 1; }
+%{ endif }
+
 %{ if length(ssh_users) > 0 }
 users:
 %{ for user in ssh_users }

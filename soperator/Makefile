@@ -80,6 +80,10 @@ terraform-test-modules:
 		fi; \
 	done
 
+.PHONY: terraform-test-cloud-init
+terraform-test-cloud-init:
+	python3 test/cloud-init/test_cloud_init.py
+
 .PHONY: terraform-check
-terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules
+terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-cloud-init
 	@echo 'All Terraform checks passed successfully!'

@@ -80,15 +80,6 @@ locals {
       L  = { cpu = 2, memory = 4 }
       XL = { cpu = 2, memory = 4 }
     }
-    # Runs on: system nodes. The SecurityProfilesOperator singleton; watches cluster-wide
-    # objects, so it grows with the cluster (its DaemonSet half is constant, see constant_presets).
-    spo_controller = {
-      XS = { cpu = "500m", memory = "3Gi" }
-      S  = { cpu = "500m", memory = "3Gi" }
-      M  = { cpu = "500m", memory = "3Gi" }
-      L  = { cpu = "750m", memory = "4Gi" }
-      XL = { cpu = "1000m", memory = "6Gi" }
-    }
     # Runs on: system nodes.
     kruise_manager = {
       XS = { cpu = "1", memory = "2Gi" }
@@ -218,9 +209,6 @@ locals {
     # its load is bounded by one node's log volume, not by the cluster size. Runs on worker
     # nodes only, so it is not part of the system-node capacity guard below.
     jail_logs_collector = { memory = "256Mi", cpu = "200m" }
-    # Installs the security profiles onto its own node; the profile count is defined by the
-    # workload (soperator ships essentially one static profile), not by the cluster size.
-    spo_daemon = { cpu = "100m", memory = "128Mi" }
     # Runs on: every node (DaemonSet). The rebooter no longer holds cluster-sized state
     # (its cache is restricted to the pod's own node with a server-side field selector),
     # so its footprint does not depend on the cluster size.
@@ -239,8 +227,6 @@ locals {
     dcgm_exporter               = coalesce(var.component_overrides.dcgm_exporter, local.component_presets.dcgm_exporter[local.sizing_tier])
     kruise_daemon               = coalesce(var.component_overrides.kruise_daemon, local.constant_presets.kruise_daemon)
     nfs_server                  = coalesce(var.component_overrides.nfs_server, local.component_presets.nfs_server[local.sizing_tier])
-    spo_controller              = coalesce(var.component_overrides.spo_controller, local.component_presets.spo_controller[local.sizing_tier])
-    spo_daemon                  = coalesce(var.component_overrides.spo_daemon, local.constant_presets.spo_daemon)
     kruise_manager              = coalesce(var.component_overrides.kruise_manager, local.component_presets.kruise_manager[local.sizing_tier])
     kube_state_metrics          = coalesce(var.component_overrides.kube_state_metrics, local.component_presets.kube_state_metrics[local.sizing_tier])
     vm_single                   = coalesce(var.component_overrides.vm_single, local.component_presets.vm_single[local.sizing_tier])
@@ -312,10 +298,6 @@ locals {
         cpu    = local.component_presets.nfs_server[tier].cpu
         memory = local.component_presets.nfs_server[tier].memory
       }
-      spo_controller = {
-        cpu    = tonumber(trimsuffix(local.component_presets.spo_controller[tier].cpu, "m")) / 1000
-        memory = tonumber(trimsuffix(local.component_presets.spo_controller[tier].memory, "Gi"))
-      }
       kruise_manager = {
         cpu    = tonumber(local.component_presets.kruise_manager[tier].cpu)
         memory = tonumber(trimsuffix(local.component_presets.kruise_manager[tier].memory, "Gi"))
@@ -348,8 +330,7 @@ locals {
   }
 
   # Per-node DaemonSet agents: they occupy every node, including each system node.
-  # Only node_configurator is modeled; the smaller constant agents (kruise daemon,
-  # logs agent, spo daemon) are not.
+  # Only node_configurator is modeled; the smaller constant agents (kruise daemon, logs agent) are not.
   daemonset_requests = {
     cpu    = local.constant_presets.node_configurator.requests.cpu
     memory = local.constant_presets.node_configurator.requests.memory

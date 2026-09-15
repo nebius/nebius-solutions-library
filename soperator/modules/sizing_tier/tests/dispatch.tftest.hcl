@@ -223,10 +223,6 @@ run "constants_do_not_scale_with_tier" {
     error_message = "jail_logs_collector must stay constant at XL (per-worker agent, load bounded by its own node)"
   }
   assert {
-    condition     = output.preset.spo_daemon.memory == "128Mi" && output.preset.spo_daemon.cpu == "100m"
-    error_message = "spo_daemon must stay constant at XL"
-  }
-  assert {
     condition     = output.preset.node_configurator.requests.cpu == 0.5 && output.preset.node_configurator.requests.memory == 0.25 && output.preset.node_configurator.limits.memory == 0.25
     error_message = "node_configurator must stay constant at XL"
   }
@@ -264,10 +260,6 @@ run "xs_matches_legacy_defaults" {
   assert {
     condition     = output.preset.events_collector.memory == "128Mi"
     error_message = "XS events_collector must equal the legacy default 128Mi"
-  }
-  assert {
-    condition     = output.preset.spo_controller.memory == "3Gi" && output.preset.spo_daemon.memory == "128Mi"
-    error_message = "XS SPO must equal the legacy default 3Gi controller / 128Mi daemon"
   }
   assert {
     condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "8vcpu-32gb"

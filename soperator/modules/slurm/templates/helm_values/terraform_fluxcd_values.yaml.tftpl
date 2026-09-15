@@ -315,30 +315,6 @@ resources:
                 limits:
                   memory: ${resources.nccl_profiles_collector.memory}
 
-        securityProfilesOperator:
-          enabled: ${apparmor_enabled}
-          interval: 5m
-          timeout: 5m
-          %{~ if security_profiles_operator_version != "" ~}
-          version: ${security_profiles_operator_version}
-          %{~ endif ~}
-          values:
-            # SecurityProfilesOperator resources scale with cluster size; it OOM-ed on big clusters.
-            # Driven by local.resources.spo.
-            daemon:
-              resources:
-                limits:
-                  memory: ${resources.spo.daemon.memory}
-                requests:
-                  cpu: ${resources.spo.daemon.cpu}
-                  memory: ${resources.spo.daemon.memory}
-            resources:
-              limits:
-                cpu: ${resources.spo.controller.cpu}
-                memory: ${resources.spo.controller.memory}
-              requests:
-                cpu: ${resources.spo.controller.cpu}
-                memory: ${resources.spo.controller.memory}
         slurmCluster:
           enabled: true
           interval: 5m

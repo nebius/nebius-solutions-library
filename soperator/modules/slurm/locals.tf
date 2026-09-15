@@ -9,7 +9,6 @@ locals {
       slurm_stable = "oci://cr.nebius.cloud/soperator"
       mariadb      = "https://helm.mariadb.com/mariadb-operator"
       raw          = "https://bedag.github.io/helm-charts/"
-      spo          = "oci://cr.nebius.cloud/soperator"
     }
 
     chart = {
@@ -18,7 +17,6 @@ locals {
       slurm_operator_crds   = "soperator-crds"
       nodeconfigurator      = "nodeconfigurator"
       raw                   = "raw"
-      spo                   = "security-profiles-operator"
 
       operator = {
         slurm       = "soperator"
@@ -31,7 +29,6 @@ locals {
       slurm   = var.operator_version
       mariadb = "25.10.2"
       raw     = "2.0.0"
-      spo     = "0.8.4-soperator"
     }
   }
 
@@ -126,10 +123,6 @@ locals {
     soperator_checks_controller = local.selected_preset.soperator_checks_controller
     kruise_daemon               = local.selected_preset.kruise_daemon
     dcgm_exporter               = local.selected_preset.dcgm_exporter
-    spo = {
-      daemon     = local.selected_preset.spo_daemon
-      controller = local.selected_preset.spo_controller
-    }
     # The NFS server pod fills its dedicated node, so when an NFS nodeset exists
     # its node capacity (var.node_capacity.nfs) wins over the tier value.
     nfs_server = {

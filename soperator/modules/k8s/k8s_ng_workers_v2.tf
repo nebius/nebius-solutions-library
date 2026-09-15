@@ -251,11 +251,12 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
     os = "ubuntu24.04"
 
     cloud_init_user_data = (
-      local.node_ssh_access.enabled ||
+      local.node_cloud_init.enabled ||
       (local.node_group_gpu_present_v2.worker[count.index] && length(var.nvidia_config_lines) > 0)
       ) ? templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-        ssh_users           = var.node_ssh_access_users
-        nvidia_config_lines = local.node_group_gpu_present_v2.worker[count.index] ? var.nvidia_config_lines : []
+        ssh_users                    = var.node_ssh_access_users
+        use_default_apparmor_profile = var.use_default_apparmor_profile
+        nvidia_config_lines          = local.node_group_gpu_present_v2.worker[count.index] ? var.nvidia_config_lines : []
     }) : null
   }
 

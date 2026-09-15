@@ -277,3 +277,9 @@ variable "use_preinstalled_gpu_drivers" {
   type        = bool
   default     = false
 }
+
+variable "use_default_apparmor_profile" {
+  description = "Load the soperator-default AppArmor profile on every node at each boot. Requires AppArmor and apparmor_parser in the node image."
+  type        = bool
+  default     = true
+}
