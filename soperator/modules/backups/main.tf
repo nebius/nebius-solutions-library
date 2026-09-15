@@ -15,7 +15,10 @@ resource "terraform_data" "backups_service_account_ready" {
     }
     command = <<-EOT
       "${path.module}/../scripts/retry.sh" -n 30 -i 5 -- \
-        nebius iam service-account get --id "$SERVICE_ACCOUNT_ID" >/dev/null
+        nebius iam group-membership list-member-of \
+          --subject-id "$SERVICE_ACCOUNT_ID" \
+          --page-size 1 \
+          --format json >/dev/null
     EOT
   }
 }
