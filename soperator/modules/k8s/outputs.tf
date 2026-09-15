@@ -14,6 +14,7 @@ output "cluster_id" {
 output "cluster_context" {
   description = "Context name of the K8s cluster."
   value       = local.context_name
+  depends_on  = [terraform_data.kubectl_cluster_context]
 }
 
 output "static_ip_allocation_id" {

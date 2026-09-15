@@ -374,6 +374,8 @@ module "k8s" {
 
   source = "../../modules/k8s"
 
+  node_groups_dependency = module.fluxcd_bootstrap.ready
+
   iam_project_id  = data.nebius_iam_v1_project.this.id
   vpc_subnet_id   = data.nebius_vpc_v1_subnet.this.id
   login_public_ip = var.slurm_login_public_ip
@@ -498,6 +500,9 @@ module "slurm" {
   ]
 
   source = "../../modules/slurm"
+
+  bootstrap_managed_externally = true
+  external_bootstrap_ready     = module.fluxcd_bootstrap.bootstrap_ready
 
   active_checks_scope = var.active_checks_scope
 
@@ -788,9 +793,25 @@ module "backups" {
 }
 
 module "fluxcd" {
-  depends_on = [
-    module.k8s,
-  ]
   source              = "../../modules/fluxcd"
   k8s_cluster_context = module.k8s.cluster_context
+}
+
+module "fluxcd_bootstrap" {
+  depends_on = [module.fluxcd]
+  source     = "../../modules/fluxcd_bootstrap"
+
+  full_values_ready = module.slurm.fluxcd_values_ready
+
+  k8s_cluster_context = module.k8s.cluster_context
+  k8s_cluster_id      = module.k8s.cluster_id
+  namespace           = local.flux_namespace
+  slurm_namespace     = local.slurm_cluster_name
+  operator_version    = var.slurm_operator_version
+  operator_stable     = var.slurm_operator_stable
+}
+
+moved {
+  from = module.slurm.helm_release.soperator_fluxcd_bootstrap[0]
+  to   = module.fluxcd_bootstrap.helm_release.soperator_fluxcd_bootstrap
 }

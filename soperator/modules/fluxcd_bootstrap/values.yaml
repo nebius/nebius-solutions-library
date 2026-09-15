@@ -1,0 +1,38 @@
+certManager:
+  enabled: true
+storageClasses:
+  enabled: true
+soperator:
+  # main gates both the Kruise chart and its repositories on this flag.
+  # The post-renderer keeps only the four foundation HelmReleases.
+  enabled: true
+  kruise:
+    enabled: true
+  nodeConfigurator:
+    enabled: false
+  soperatorChecks:
+    enabled: false
+  monitoringDashboards:
+    enabled: false
+slurmCluster:
+  enabled: false
+nodesets:
+  enabled: false
+soperatorActiveChecks:
+  enabled: false
+customConfigmaps:
+  enabled: false
+backup:
+  enabled: false
+mariadbOperator:
+  enabled: false
+observability:
+  enabled: false
+securityProfilesOperator:
+  enabled: false
+nfsServer:
+  enabled: false
+tailscale:
+  enabled: false
+notifier:
+  enabled: false

@@ -3,6 +3,7 @@ resource "nebius_mk8s_v1_node_group" "accounting" {
 
   depends_on = [
     nebius_mk8s_v1_cluster.this,
+    terraform_data.before_node_groups,
     terraform_data.check_resource_preset_sufficiency,
   ]
 

@@ -1,6 +1,8 @@
 resource "terraform_data" "wait_for_slurm_cluster_hr" {
   depends_on = [
     helm_release.soperator_fluxcd_bootstrap,
+    helm_release.soperator_fluxcd_cm,
+    terraform_data.external_bootstrap,
   ]
 
   provisioner "local-exec" {
@@ -16,6 +18,7 @@ resource "terraform_data" "wait_for_slurm_cluster_hr" {
 resource "terraform_data" "wait_for_soperator_activechecks_hr" {
   depends_on = [
     helm_release.soperator_fluxcd_bootstrap,
+    helm_release.soperator_fluxcd_cm,
     terraform_data.wait_for_slurm_cluster_hr,
   ]
 
@@ -51,6 +54,8 @@ resource "terraform_data" "wait_for_slurm_cluster_available" {
 }
 
 resource "helm_release" "soperator_fluxcd_cm" {
+  depends_on = [terraform_data.wait_for_bootstrap_releases]
+
   name       = "terraform-fluxcd-values"
   repository = local.helm.repository.raw
   chart      = local.helm.chart.raw
@@ -356,6 +361,8 @@ resource "helm_release" "soperator_fluxcd_cm" {
 }
 
 resource "helm_release" "soperator_fluxcd_bootstrap" {
+  count = var.bootstrap_managed_externally ? 0 : 1
+
   depends_on = [
     helm_release.soperator_fluxcd_cm,
   ]
