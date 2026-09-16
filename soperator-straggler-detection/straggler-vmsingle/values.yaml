@@ -1,0 +1,111 @@
+# P26.5 MVP defaults. Every value below is real and justified in README.md
+# -- none of this is a placeholder guess. Flagged-for-review items are
+# marked explicitly; nothing here is presented as final.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Applied to every label this chart sets (the VMSingle CR itself, and the
+# Service/PVC/Pod the operator generates from it). Use this to tag a second
+# instance distinctly (e.g. instance: "b") -- see README "second instance"
+# section. This is the ONLY thing that needs to differ between two
+# installs, together with the release name/namespace/storage below.
+commonLabels: {}
+
+vmsingle:
+  # --- dedup: the entire reason this chart exists ---
+  # Real, measured requirement: P19c_dedup_storage/stage1_dedup_findings.md
+  # measured that a 30s dedup window (the shared platform instance's own
+  # real, confirmed setting -- see helm/soperator-fluxcd/values.yaml's
+  # vmStack.values.vmsingle.spec.extraArgs["dedup.minScrapeInterval"]: 30s)
+  # discards 84.4% of this pipeline's real aggregate-at-source samples
+  # (measured: 1024 pushed, 160 survived) even AFTER aggregate-at-source
+  # cadence already reduced raw per-collective emission's ~50/sec/rank rate
+  # down to one point every 2-6s. That 30s window sits entirely inside a
+  # single CV persistence check's 3-window (18s) span, which can degenerate
+  # 2-of-3 persistence gating down to "did the 1 surviving sample happen to
+  # land during the fault" -- see that report for the full real evidence.
+  # 0s (the same setting the standing ~/P20_metrics/ reference instance
+  # already runs, confirmed via its own live process args) is the
+  # confirmed-safe default. Kept as a REAL, overridable value rather than
+  # hardcoded 0s specifically because Evgeny's still-open "0 vm(single|
+  # clusters)" question might mean something other than dedup (e.g.
+  # instance COUNT) -- if that turns out to be the case, this value can
+  # still be changed without touching the chart.
+  dedupMinScrapeInterval: "0s"
+
+  # Matches ~/P20_metrics/'s own real, already-running retention (its
+  # process args: -retentionPeriod=90d) -- the functional spec this chart
+  # reproduces, not a new number invented here.
+  retentionPeriod: "90d"
+
+  # Any additional VMSingle CLI flags beyond dedup, as a real map (e.g.
+  # {"search.maxUniqueTimeseries": "500000"}, the same flag the shared
+  # instance sets) -- merged alongside dedup.minScrapeInterval above.
+  extraArgs: {}
+
+  # --- resources ---
+  # Real sizing basis (see README "resource sizing" section for the full
+  # numbers): the standing ~/P20_metrics/ reference instance -- serving
+  # EVERY real workload shape this project has tested (DDP, TP2, TP4,
+  # FSDP, MoE, ResNet, ViT, TP-inference) continuously for 9.3 real days --
+  # has ingested 2,014,662,130 rows total (real counter:
+  # vm_rows_inserted_total{type="prometheus"}), averaging ~2,500 rows/sec,
+  # using only ~1.2GB on disk (~0.6 bytes/row compressed, real measured
+  # ratio) and comfortably under 1 CPU core / a few hundred MB RSS the
+  # entire time. Sized here with real margin above that measured average
+  # for a dedicated, continuously-loaded production instance (flagged in
+  # README as a review item: the true sustained multi-job customer rate
+  # hasn't been measured yet, only this session's test cadence has).
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      # No CPU limit -- matches the shared platform instance's own real
+      # spec (helm/soperator-fluxcd/values.yaml: vmsingle.spec.resources
+      # has no cpu limit either, only a memory limit). Throttling VM's
+      # merge/compaction work with a CPU cap is a known self-inflicted
+      # latency risk; the platform's own convention already avoids it.
+      memory: 2Gi
+
+  # --- storage: durable, survives pod restarts (PersistentVolumeClaim,
+  # not ephemeral) ---
+  # Real basis: 90d retention x the measured ~2,500 rows/sec average x
+  # ~0.6 bytes/row -> ~12GB at the measured average rate; sized to 30Gi
+  # for real margin above a test-session average, matching the shared
+  # platform instance's own real storage size exactly (30Gi, see
+  # helm/soperator-fluxcd/values.yaml vmsingle.spec.storage). Flagged in
+  # README as a review item alongside resources above.
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    size: 30Gi
+    # "" = cluster default StorageClass. Set explicitly if this platform's
+    # default class isn't appropriate (e.g. needs to be a specific
+    # durable/replicated class) -- not confirmed either way here.
+    storageClassName: ""
+
+  # HTTP port VMSingle listens on (matches the shared instance's own
+  # 8429 -- see vmsingle-metrics-victoria-metrics-k8s-stack:8429).
+  port: 8429
+
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+
+  # Deliberately left empty. The VM operator applies its own default
+  # liveness/readiness probes (HTTP GET on VMSingle's own /health
+  # endpoint) when these are unset -- confirmed by the shared platform
+  # instance's own real spec, which ALSO leaves both unset and is running
+  # healthy in production right now. Overriding these is an available,
+  # supported escape hatch (the VMSingle CRD accepts a full
+  # corev1.Probe-shaped object here), not something this MVP needed to
+  # hand-rewrite.
+  livenessProbe: {}
+  readinessProbe: {}
+
+  # Real per-pod metadata (annotations/labels) to attach to the Pod the
+  # operator generates, if ever needed (e.g. a Prometheus scrape
+  # annotation). Empty by default.
+  podMetadata: {}

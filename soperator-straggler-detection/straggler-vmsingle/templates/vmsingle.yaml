@@ -1,0 +1,82 @@
+# A VMSingle custom resource -- the exact same resource kind/apiVersion
+# the platform's own shared victoria-metrics-k8s-stack release already
+# uses for its own VictoriaMetrics instance (confirmed real:
+# helm/soperator-fluxcd/templates/vm-stack.yaml renders a `vmsingle:` block
+# straight into the victoria-metrics-k8s-stack chart's values, which that
+# chart turns into this exact CR kind). This chart does NOT install its
+# own copy of the VictoriaMetrics operator or its CRDs -- both are already
+# installed cluster-wide (a shared, singleton control-plane component,
+# confirmed via the separate victoria-metrics-operator-crds HelmRelease
+# dependency in vm-stack.yaml) and will reconcile this CR the same way it
+# already reconciles the shared instance's own VMSingle. A from-scratch
+# StatefulSet+PVC+Service+probe chart would be a second, inconsistent
+# deployment mechanism running in parallel with how every other
+# VictoriaMetrics instance on this platform is actually managed.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMSingle
+metadata:
+  name: {{ include "straggler-vmsingle.fullname" . }}
+  labels:
+    {{- include "straggler-vmsingle.labels" . | nindent 4 }}
+spec:
+  retentionPeriod: {{ .Values.vmsingle.retentionPeriod | quote }}
+
+  extraArgs:
+    dedup.minScrapeInterval: {{ .Values.vmsingle.dedupMinScrapeInterval | quote }}
+    {{- range $k, $v := .Values.vmsingle.extraArgs }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+
+  port: {{ .Values.vmsingle.port | quote }}
+
+  # Durable storage -- a real PersistentVolumeClaim the operator creates
+  # and attaches, surviving pod restarts (this is the concrete mechanism
+  # behind the "doesn't need manual relaunching, data intact" requirement;
+  # see README's restart test for the live proof).
+  storage:
+    accessModes:
+      {{- toYaml .Values.vmsingle.storage.accessModes | nindent 6 }}
+    resources:
+      requests:
+        storage: {{ .Values.vmsingle.storage.size | quote }}
+    {{- if .Values.vmsingle.storage.storageClassName }}
+    storageClassName: {{ .Values.vmsingle.storage.storageClassName | quote }}
+    {{- end }}
+
+  resources:
+    {{- toYaml .Values.vmsingle.resources | nindent 4 }}
+
+  {{- with .Values.vmsingle.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.vmsingle.affinity }}
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.vmsingle.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.vmsingle.podMetadata }}
+  podMetadata:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{/*
+  livenessProbe/readinessProbe deliberately omitted unless overridden --
+  see values.yaml's own comment: the operator applies its own default
+  probes when unset, the same way it already does for the shared
+  instance's real, running-healthy VMSingle.
+  */}}
+  {{- with .Values.vmsingle.livenessProbe }}
+  livenessProbe:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.vmsingle.readinessProbe }}
+  readinessProbe:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
