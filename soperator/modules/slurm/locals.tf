@@ -1,4 +1,6 @@
 locals {
+  apparmor_profile = var.use_default_apparmor_profile ? "soperator-default" : "unconfined"
+
   kube_rbac_proxy = {
     image = "gcr.io/kubebuilder/kube-rbac-proxy"
     tag   = "v0.15.0"

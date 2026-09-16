@@ -325,7 +325,6 @@ resources:
           overrideValues:
             clusterName: ${name}
             cudaVersion: ${slurm_cluster.cuda_version}
-            useDefaultAppArmorProfile: ${apparmor_enabled}
             maintenance: ${slurm_cluster.maintenance}
             plugStackConfig:
               pyxis:
@@ -690,6 +689,7 @@ resources:
                   %{~ endfor ~}
                 %{~ endif ~}
                 sshd:
+                  appArmorProfile: ${jsonencode(apparmor_profile)}
                   resources:
                     cpu: ${slurm_cluster.nodes.login.resources.cpu * 1000}m
                     memory: ${slurm_cluster.nodes.login.resources.memory}Gi

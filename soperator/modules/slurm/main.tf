@@ -92,7 +92,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     docker_enabled = anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
 
     tailscale_enabled       = var.tailscale_enabled
-    apparmor_enabled        = var.use_default_apparmor_profile
+    apparmor_profile        = local.apparmor_profile
     enable_soperator_checks = var.enable_soperator_checks
 
     operator_version                          = var.operator_version
