@@ -236,7 +236,6 @@ nodesets:
         sssdConfSecretRefName: ${jsonencode(sssd.conf_secret_ref_name)}
         sssdLdapCAConfigMapRefName: ${jsonencode(sssd.ldap_ca_config_map_ref_name)}
 
-        configMapRefSupervisord: custom-supervisord-config
         configMapRefSshd: ${sshd.config_map_ref}
 
         enableHostUserNamespace: true
