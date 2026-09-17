@@ -77,11 +77,22 @@ By default, `soperator-telemetry` is used as a profile for public o11y setup. Yo
 
 ### 4. (Optional) Create Storage Infrastructure
 
-Create a "jail" filesystem in the Nebius Console. Jail is a shared filesystem for all Slurm nodes.
+Create a "jail" filesystem - a shared filesystem for all Slurm nodes.
 It is called "jail" because it resembles [FreeBSD jail mechanism](https://en.wikipedia.org/wiki/FreeBSD_jail).
 
 This step is required for those who want to persist their jail data after the cluster deletion.
-You can offload storage creation to the Terraform script instead, but it will be deleted with the cluster unless you set `forbid_deletion = true` in the filesystem `spec`.
+
+Depending on the type of shared filesystem, it could be created in few ways:
+
+| Filesystem type | Nebius Web UI | Nebius CLI | Terraform |
+| :-------------- | :-----------: | :--------: | :-------: |
+| Filestore       |      ✅       |     ✅     |    ✅     |
+| WEKA            |      ❌       |     ✅     |    ✅     |
+
+You can offload storage creation to the Terraform script instead,
+but it will be deleted with the cluster unless you set `forbid_deletion = true` in the filesystem `spec`.
+
+#### Filestore
 
 ![Create Filesystem 1](imgs/create_fs_1.png)
 ![Create Filesystem 2](imgs/create_fs_2.png)
@@ -91,6 +102,57 @@ You can offload storage creation to the Terraform script instead, but it will be
 > - Note down the filesystem ID for your terraform configuration
 > - **Attaching an existing filesystem as a Jail will cause the cluster to overwrite data. Use submounts to avoid this behavior!**
 > ![Create Filesystem 2](imgs/create_fs_3.png)
+
+#### WEKA
+
+WEKA deployment consumes more time and is not supported via Nebius Web UI yet.
+
+There is a separate [WEKA module](./modules/weka/README.md) to simplify the creation of WEKA storages.
+It is sourced in [weka.tf](./installations/example/weka.tf), and is disabled by default via `count = 0`.
+
+In order to pre-create WEKA with this module:
+1. Set `count = 1`
+2. Provide specifications of the needed filesystems in `fs` block
+3. Run `terraform apply -target module.weka` from your installation directory
+4. Wait for the resources to be fully created, and get the IDs of the filesystems
+5. Use the IDs as values for `existing.id` fields of `filesystem_jail` and `filesystem_jail_submounts`
+
+The waiting step 4 could take more than Terraform timeout.
+If that happens:
+1. Wait for the requested filesystem to be ready in Nebius Web UI
+2. See if Terraform is able to get fresh data for the requested resources with no replacements
+
+    ```shell
+    terraform plan -target module.weka
+    ```
+
+3. If Terraform requires replacement of the resources
+
+    ```bash
+    # Get list of resource paths 
+    terraform state list module.weka
+    # For each resource
+    terraform state rm 'module.weka[0].nebius_compute_v1_filesystem.this["<fs.name>"]'
+    terraform import 'module.weka[0].nebius_compute_v1_filesystem.this["<fs.name>"]' '<computefilesystem-ID>'
+    # End for each
+    ```
+    
+    Where:
+    - `<fs.name>` is the name field of each filesystem specified in `fs` variable of the module.
+    - `<computefilesystem-ID>` is the ID of particular filesystem obtained during `apply` stage, or via Nebius Web UI
+
+4. If Terraform fails on the `import` stage
+
+    ```bash
+    terraform state rm module.weka
+    ```
+    
+    Set `count = 0`.
+    And simply use obtained IDs for `filesystem_jail` and `filesystem_jail_submounts` variables.
+    
+    This is the last resort.
+    This module's data won't be stored in Terraform state,
+    only unused configuration will be stored as a code for the installation.
 
 ### 5. Configure Your Cluster
 
@@ -103,14 +165,14 @@ company_name = "<YOUR-COMPANY-NAME>"
 # ...
 
 # Use your manually created jail filesystem
-filestore_jail = {
+filesystem_jail = {
   existing = {
     id = "computefilesystem-<YOUR-FILESYSTEM-ID>"
   }
 }
 
 # Or create the jail filesystem with Terraform and protect it from deletion
-# filestore_jail = {
+# filesystem_jail = {
 #   spec = {
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
@@ -216,27 +278,33 @@ or connect using the login script:
 
 ### 9. (Optional) Destroy the Cluster and Retain Terraform-Created Shared Filesystems
 
-If Terraform created the shared filesystems from `spec` blocks and you want to delete the cluster while keeping the data, first protect the filesystems and then remove only those retained filesystems from Terraform state before running `terraform destroy`.
+If Terraform created the shared filesystems from `spec` blocks, and you want to delete the cluster while keeping the data, first protect the filesystems and then remove only those retained filesystems from Terraform state before running `terraform destroy`.
 
-1. Enable deletion protection on each Terraform-created shared filesystem that must be retained.
+1. Enable deletion protection on each Terraform-created shared filesystem that must be retained (if not done yet).
 
 ```hcl
-filestore_jail = {
+# terraform.tfvars
+
+filesystem_jail = {
   spec = {
-    size_gibibytes       = 2048
-    block_size_kibibytes = 4
+    # ...
     forbid_deletion      = true
   }
 }
 
-filestore_jail_submounts = [{
-  name       = "data"
-  mount_path = "/data"
+filesystem_jail_submounts = [{
+  # ...
   spec = {
-    size_gibibytes       = 4096
-    block_size_kibibytes = 32
+    # ...
     forbid_deletion      = true
   }
+}]
+
+# module "weka"
+
+fs = [{
+    # ...
+    forbid_deletion      = true
 }]
 ```
 
@@ -252,9 +320,9 @@ Confirm the plan only updates deletion protection on the filesystems you intend 
 3. Record the retained filesystem IDs and the exact Terraform resource addresses.
 
 ```bash
-terraform state list | grep 'module.filestore.nebius_compute_v1_filesystem'
-terraform state show 'module.filestore.nebius_compute_v1_filesystem.jail[0]'
-terraform state show 'module.filestore.nebius_compute_v1_filesystem.jail_submount["data"]'
+terraform state list | grep 'module.filesystem.nebius_compute_v1_filesystem\|module.weka\[0\].nebius_compute_v1_filesystem'
+terraform state show 'module.filesystem.nebius_compute_v1_filesystem.jail[0]'
+terraform state show 'module.filesystem.nebius_compute_v1_filesystem.jail_submount["data"]'
 ```
 
 4. Back up the Terraform state according to your team's state-management process. For a local backup, store the state file securely because it may contain sensitive values.
@@ -266,15 +334,16 @@ terraform state pull > terraform-state-before-retaining-filesystems.tfstate
 5. Remove only the retained filesystems from Terraform state. This makes Terraform forget those filesystems so the cluster destroy does not try to delete them.
 
 ```bash
-terraform state rm 'module.filestore.nebius_compute_v1_filesystem.jail[0]'
-terraform state rm 'module.filestore.nebius_compute_v1_filesystem.jail_submount["data"]'
+terraform state rm 'module.filesystem.nebius_compute_v1_filesystem.jail[0]'
+terraform state rm 'module.filesystem.nebius_compute_v1_filesystem.jail_submount["data"]'
+terraform state rm 'module.weka[0].nebius_compute_v1_filesystem.this["<fs.name>"]'
 ```
 
 If you also created and want to retain controller spool or accounting filesystems, remove their resource addresses as well:
 
 ```bash
-terraform state rm 'module.filestore.nebius_compute_v1_filesystem.controller_spool[0]'
-terraform state rm 'module.filestore.nebius_compute_v1_filesystem.accounting[0]'
+terraform state rm 'module.filesystem.nebius_compute_v1_filesystem.controller_spool[0]'
+terraform state rm 'module.filesystem.nebius_compute_v1_filesystem.accounting[0]'
 ```
 
 6. Verify the destroy plan before applying it.
@@ -294,13 +363,13 @@ terraform destroy
 8. To reuse the retained filesystems in a future cluster, configure them as `existing` filesystems with the IDs recorded earlier.
 
 ```hcl
-filestore_jail = {
+filesystem_jail = {
   existing = {
     id = "computefilesystem-<RETAINED-JAIL-ID>"
   }
 }
 
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "data"
   mount_path = "/data"
   existing = {
