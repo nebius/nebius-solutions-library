@@ -1,5 +1,4 @@
-[![Nebius](./.assets/nebius-dark.png)](https://nebius.ai/#gh-dark-mode-only)
-[![Nebius](./.assets/nebius-light.png)](https://nebius.ai/#gh-light-mode-only)
+[![Nebius](./.assets/nebius_logo.png)](https://nebius.ai/)
 
 # Nebius Solution Library
 
