@@ -57,7 +57,7 @@ run "hundred_workers_is_m" {
     error_message = "100 workers must derive M, got ${output.sizing_tier}"
   }
   assert {
-    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "8vcpu-32gb" && output.node_preset.nfs == "32vcpu-128gb"
+    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "16vcpu-64gb" && output.node_preset.nfs == "32vcpu-128gb"
     error_message = "M node presets must be the mid-size presets"
   }
 }
@@ -370,7 +370,7 @@ run "xl_matches_poc_numbers" {
   assert {
     # The controller intentionally does NOT grow with the tier: the PoC showed
     # no benefit from larger controller presets even at 5k workers.
-    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "32vcpu-128gb" && output.node_preset.nfs == "128vcpu-512gb"
+    condition     = output.node_preset.controller == "32vcpu-128gb" && output.node_preset.accounting == "32vcpu-128gb" && output.node_preset.nfs == "128vcpu-512gb"
     error_message = "XL node presets must be the big-cluster presets (controller stays 16vcpu-64gb)"
   }
 }

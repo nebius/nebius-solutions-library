@@ -372,7 +372,10 @@ resource "terraform_data" "check_resource_presets_for_weka" {
         ],
         var.accounting_enabled ? [local.resources.accounting.sufficient["weka"]] : [],
       ))
-      error_message = "All nodes should have sufficient preset if WEKA is requested."
+      error_message = <<EOT
+        All nodes should have sufficient preset if WEKA is requested.
+        Use sizing tier L or use >=32vcpu preset for all nodes.
+      EOT
     }
   }
 }
