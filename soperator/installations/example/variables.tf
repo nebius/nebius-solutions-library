@@ -303,7 +303,7 @@ resource "terraform_data" "check_jail_submount_paths" {
           (sm.mount_path != "/home")
         ])
       )
-      error_message = <<EOT
+      error_message = <<-EOT
         filesystem_jail_submounts must not use "/home" as mount_path if NFS on VDS is set to the same directory, or NFS on K8s is used.
         NOTE: backing /home with shared filestore causes severe performance degradation.
       EOT
@@ -372,7 +372,7 @@ resource "terraform_data" "check_resource_presets_for_weka" {
         ],
         var.accounting_enabled ? [local.resources.accounting.sufficient["weka"]] : [],
       ))
-      error_message = <<EOT
+      error_message = <<-EOT
         All nodes should have sufficient preset if WEKA is requested.
         Use sizing tier L or use >=32vcpu preset for all nodes.
       EOT
