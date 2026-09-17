@@ -422,9 +422,10 @@ module "k8s" {
     } : null
   }
 
-  node_ssh_access_users     = var.k8s_cluster_node_ssh_access_users
-  node_ssh_access_public_ip = var.k8s_cluster_node_ssh_access_public_ip
-  nvidia_config_lines       = var.nvidia_config_lines
+  node_ssh_access_users        = var.k8s_cluster_node_ssh_access_users
+  node_ssh_access_public_ip    = var.k8s_cluster_node_ssh_access_public_ip
+  nvidia_config_lines          = var.nvidia_config_lines
+  use_default_apparmor_profile = var.use_default_apparmor_profile
 
   providers = {
     nebius = nebius

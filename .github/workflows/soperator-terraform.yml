@@ -33,6 +33,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "v1.12.2"
+          terraform_wrapper: false
 
       # fmt check + init/validate of all modules and installations + module tests
       - name: Terraform Check - Modules and Installations

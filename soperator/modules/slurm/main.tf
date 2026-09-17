@@ -92,7 +92,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     docker_enabled = anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
 
     tailscale_enabled       = var.tailscale_enabled
-    apparmor_enabled        = var.use_default_apparmor_profile
+    apparmor_profile        = local.apparmor_profile
     enable_soperator_checks = var.enable_soperator_checks
 
     operator_version                          = var.operator_version
@@ -107,7 +107,6 @@ resource "helm_release" "soperator_fluxcd_cm" {
     opentelemetry_delete_jail_logs_after_read = var.opentelemetry_delete_jail_logs_after_read
     opentelemetry_delete_jail_logs_min_age    = var.opentelemetry_delete_jail_logs_min_age
     prometheus_crds_version                   = var.prometheus_crds_version
-    security_profiles_operator_version        = var.security_profiles_operator_version
     vmstack_version                           = var.vmstack_version
     vmstack_crds_version                      = var.vmstack_crds_version
     vmlogs_version                            = var.vmlogs_version
@@ -337,7 +336,6 @@ resource "helm_release" "soperator_fluxcd_cm" {
       soperator_checks_controller = local.resources.soperator_checks_controller
       dcgm_exporter               = local.resources.dcgm_exporter
       nfs_server                  = local.resources.nfs_server
-      spo                         = local.resources.spo
       kruise_manager              = local.selected_preset.kruise_manager
       kube_state_metrics          = local.selected_preset.kube_state_metrics
     }

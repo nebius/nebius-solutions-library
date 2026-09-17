@@ -314,3 +314,38 @@ filestore_jail_submounts = [{
 ## (Optional) Test Your Installation
 
 See the process of delivery and running of tests in [test](./test/README.md).
+
+## AppArmor provisioning
+
+`use_default_apparmor_profile` (default `true`) loads `soperator-default` on every
+Soperator node group through cloud-init and selects it for login and worker
+containers by setting `slurmNodes.login.sshd.appArmorProfile` and
+`slurmd.security.appArmorProfile` for each worker NodeSet. Other containers retain
+their `unconfined` defaults. This works without SSH users or NVIDIA settings,
+including on CPU workers. `bootcmd` replaces the profile at every boot and verifies enforce mode.
+The policy is embedded in `modules/k8s/templates/cloud_init.yaml.tftpl`; its rules
+are unchanged from the former SPO-managed profile.
+
+Ubuntu node images must already provide AppArmor, securityfs, `apparmor_parser`,
+and its `tunables/global` and `abstractions/base` includes before `bootcmd` runs.
+No profile download or package installation is performed. Cloud-init reports an
+error if the profile cannot be loaded. NVIDIA configuration remains GPU-only.
+
+Deploy this recipe together with the Soperator release that uses
+`soperator-default`. For an existing cluster, use a maintenance window and
+recreate nodes with the new user-data before resuming protected workloads.
+Updating Terraform alone does not guarantee updated user-data on existing VMs;
+a reboot only reruns their available user-data. Remove old AppArmorProfile CRs
+while SPO can still process their finalizers, then remove SPO. See the detailed
+[AppArmor configuration and provisioning](https://github.com/nebius/soperator/blob/main/docs/apparmor.md).
+Remove obsolete SPO version/resource overrides from installation configuration.
+Future policy updates also require reprovisioning with the updated template.
+
+Setting the option to `false` skips profile loading and sets login and worker
+profiles to `unconfined`; it does not unload profiles from running nodes. Managed
+Soperator and users of other provisioning systems must load the profile separately
+before selecting it.
+
+Run the [cloud-init regression tests](test/cloud-init/README.md) after changing the
+loader or template. Actual boot and AppArmor enforcement still require Linux
+acceptance checks.

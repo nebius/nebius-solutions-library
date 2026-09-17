@@ -215,7 +215,7 @@ nodesets:
             sharedMemorySize: ${resources[i].shared_memory}Gi
 
           security:
-            appArmorProfile: unconfined
+            appArmorProfile: ${jsonencode(apparmor_profile)}
 
         munge:
           resources:

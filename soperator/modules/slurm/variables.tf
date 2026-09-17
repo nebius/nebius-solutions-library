@@ -168,8 +168,6 @@ variable "component_overrides" {
     dcgm_exporter               = optional(object({ cpu = number, memory = number }))
     kruise_daemon               = optional(object({ cpu = number, memory = number }))
     nfs_server                  = optional(object({ cpu = number, memory = number }))
-    spo_controller              = optional(object({ cpu = string, memory = string }))
-    spo_daemon                  = optional(object({ cpu = string, memory = string }))
     kruise_manager              = optional(object({ cpu = string, memory = string }))
     kube_state_metrics          = optional(object({ requests = object({ cpu = string, memory = string }), limits = object({ memory = string }) }))
     vm_single                   = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
@@ -652,7 +650,7 @@ variable "slurm_accounting_config" {
 
 # region Apparmor
 variable "use_default_apparmor_profile" {
-  description = "Whether to use default AppArmor profile."
+  description = "Use the soperator-default AppArmor profile, which must be loaded on nodes by provisioning."
   type        = bool
   default     = true
 }
@@ -836,11 +834,6 @@ variable "opentelemetry_collector_version" {
 
 variable "prometheus_crds_version" {
   description = "The version of the prometheus crds."
-  type        = string
-  default     = ""
-}
-variable "security_profiles_operator_version" {
-  description = "The version of the security profiles operator."
   type        = string
   default     = ""
 }

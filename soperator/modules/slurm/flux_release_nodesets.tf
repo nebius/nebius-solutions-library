@@ -2,10 +2,11 @@ resource "local_file" "flux_release_rendered_nodesets" {
   filename = "${path.root}/assets/render/flux_release_nodesets.yaml"
 
   content = templatefile("${path.module}/templates/helm_values/flux_release_nodesets.yaml.tftpl", {
-    version      = var.operator_version
-    namespace    = "soperator"
-    release_name = "soperator-nodesets"
-    cluster_name = var.name
+    version          = var.operator_version
+    namespace        = "soperator"
+    release_name     = "soperator-nodesets"
+    cluster_name     = var.name
+    apparmor_profile = local.apparmor_profile
 
     nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
       nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
