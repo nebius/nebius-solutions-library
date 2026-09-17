@@ -363,6 +363,8 @@ slurm_nodeset_workers = [
     # placement_policy_nodes = []
     # Provide a list of strings to set Slurm Node features
     features = null
+    # Overrides slurm_nodeset_auto_resume for this worker. false renders AutoResume=Off.
+    # auto_resume = false
     # Set to `true` to create partition for the NodeSet by default
     create_partition = null
     # Whether to enable ephemeral nodes behavior for this worker nodeset.

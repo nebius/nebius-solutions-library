@@ -813,6 +813,7 @@ variable "slurm_nodeset_workers" {
     extra_labels                   = optional(map(string), {})
     placement_policy_nodes         = optional(list(string))
     features                       = optional(list(string))
+    auto_resume                    = optional(bool)
     create_partition               = optional(bool)
     ephemeral_nodes                = optional(bool, false)
     initial_number_ephemeral_nodes = optional(number, 0)
@@ -1084,6 +1085,12 @@ variable "slurm_nodeset_workers" {
     ])
     error_message = "When worker persistent_volume_claim_retention_policy is set, when_deleted and when_scaled must be `Retain` or `Delete`."
   }
+}
+
+variable "slurm_nodeset_auto_resume" {
+  description = "Whether Slurm should automatically resume worker nodes by default. false renders AutoResume=Off; individual workers can override this with auto_resume."
+  type        = bool
+  default     = false
 }
 
 variable "slurm_nodeset_login" {

@@ -923,6 +923,7 @@ variable "worker_nodesets" {
     cpu_topology                   = map(number)
     gres_name                      = optional(string)
     gres_config                    = list(string)
+    auto_resume                    = optional(bool, false)
     create_partition               = bool
     partition_topology             = string
     ephemeral_nodes                = optional(bool, false)

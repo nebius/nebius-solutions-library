@@ -67,6 +67,7 @@ locals {
           contains(local.local_nvme_default_enabled_platforms, nodeset.resource.platform),
         )
       })
+      auto_resume = coalesce(nodeset.auto_resume, var.slurm_nodeset_auto_resume)
     })
   ]
 
@@ -688,6 +689,7 @@ module "slurm" {
     cpu_topology                             = module.resources.cpu_topology_by_platform[nodeset.resource.platform][nodeset.resource.preset]
     gres_name                                = lookup(module.resources.gres_name_by_platform, nodeset.resource.platform, null)
     gres_config                              = lookup(module.resources.gres_config_by_platform, nodeset.resource.platform, null)
+    auto_resume                              = nodeset.auto_resume
     create_partition                         = nodeset.create_partition != null ? nodeset.create_partition : false
     partition_topology                       = nodeset.resource.platform == local.gb300_platform ? "block-nvl72" : startswith(nodeset.resource.platform, "gpu-") ? "tree-ib" : "flat"
     ephemeral_nodes                          = nodeset.ephemeral_nodes

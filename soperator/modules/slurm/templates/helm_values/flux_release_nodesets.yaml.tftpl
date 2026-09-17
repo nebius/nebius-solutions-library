@@ -37,6 +37,7 @@ nodesets:
         %{~ endif ~}
 
         nodeConfig:
+          autoResume: ${nodeset.auto_resume}
           %{~ if length(nodeset.features) > 0 ~}
           features:
             %{~ for feature in nodeset.features ~}
