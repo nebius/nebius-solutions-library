@@ -624,11 +624,12 @@ module "slurm" {
   }
 
   nfs_in_k8s = {
-    enabled        = var.nfs_in_k8s.enabled
-    version        = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.version : null
-    size_gibibytes = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.size_gibibytes : null
-    storage_class  = var.nfs_in_k8s.enabled ? replace("compute-csi-${lower(var.nfs_in_k8s.spec.disk_type)}-${lower(var.nfs_in_k8s.spec.filesystem_type)}", "_", "-") : null
-    threads        = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.threads : null
+    enabled         = var.nfs_in_k8s.enabled
+    version         = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.version : null
+    use_stable_repo = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.use_stable_repo : null
+    size_gibibytes  = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.size_gibibytes : null
+    storage_class   = var.nfs_in_k8s.enabled ? replace("compute-csi-${lower(var.nfs_in_k8s.spec.disk_type)}-${lower(var.nfs_in_k8s.spec.filesystem_type)}", "_", "-") : null
+    threads         = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec.threads : null
   }
   nfs_node_group_enabled = local.slurm_nodeset_nfs != null
 
