@@ -231,6 +231,7 @@ resource "terraform_data" "check_variables" {
     terraform_data.check_nfs_sustainability,
     terraform_data.check_jail_submount_paths,
     terraform_data.check_weka_count,
+    terraform_data.check_resource_presets_for_weka,
     terraform_data.check_local_nvme,
   ]
 }
