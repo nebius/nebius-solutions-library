@@ -7,9 +7,8 @@ module "weka" {
   k8s_cluster_name = local.k8s_cluster_name
 
   fs = [{
-    name                 = "jail"
-    size_gibibytes       = 2048
-    block_size_kibibytes = 32
-    forbid_deletion      = true
+    name            = "jail"
+    size_gibibytes  = 2048
+    forbid_deletion = true
   }]
 }
