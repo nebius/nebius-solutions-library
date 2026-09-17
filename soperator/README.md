@@ -149,7 +149,42 @@ If that happens:
     - `<fs.name>` is the name field of each filesystem specified in `fs` variable of the module.
     - `<computefilesystem-ID>` is the ID of particular filesystem obtained during `apply` stage, or via Nebius Web UI
 
-4. If Terraform fails on the `import` stage
+4. If Terraform fails on the `import` stage with `Invalid provider configuration`
+
+    Terraform doesn't perform targeted import and tries to validate the infrastructure.
+    In order to bypass it,
+    create `terraform_provider_override.tf` file inside your installation and add the following content there:
+
+    ```terraform
+    provider "kubernetes" {
+      host                   = "https://127.0.0.1"
+      cluster_ca_certificate = ""
+    }
+    
+    provider "flux" {
+      kubernetes = {
+        host  = "https://127.0.0.1"
+        token = "unused"
+      }
+    }
+    
+    provider "helm" {
+      kubernetes {
+        host  = "https://127.0.0.1"
+        token = "unused"
+      }
+    }
+    ```
+
+    Comment out the `module "login_script"` section in `main.tf`.
+
+    Re-run `terraform import` commands.
+
+    Delete `terraform_provider_override.tf` file and un-comment `module "login_script"` section.
+
+5. If nothing helps
+
+    This is the last resort.
 
     ```bash
     terraform state rm module.weka
@@ -158,7 +193,6 @@ If that happens:
     Set `count = 0`.
     And simply use obtained IDs for `filesystem_jail` and `filesystem_jail_submounts` variables.
 
-    This is the last resort.
     This module's data won't be stored in Terraform state,
     only unused configuration will be stored as a code for the installation.
 
