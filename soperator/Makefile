@@ -98,7 +98,7 @@ terraform-test-cloud-init:
 	python3 test/cloud-init/test_cloud_init.py
 
 .PHONY: terraform-check
-terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-cloud-init
+terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-installations terraform-test-cloud-init
 	@echo 'All Terraform checks passed successfully!'
 
 # markdownlint-cli2
