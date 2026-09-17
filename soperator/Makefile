@@ -1,5 +1,5 @@
-SHELL = /usr/bin/env bash -o pipefail
-.SHELLFLAGS = -ec
+SHELL = /usr/bin/env bash -euo pipefail
+.SHELLFLAGS = -euc
 
 # Provider downloads flake on slow networks: the registry client gives up after
 # 10s / 2 attempts by default and `terraform init` fails on the checksum fetch.
@@ -86,9 +86,10 @@ terraform-test-installations:
 	@for installation_dir in installations/*/; do \
 		if [ -d "$$installation_dir/tests" ]; then \
 			echo "Testing module: $$installation_dir"; \
-			pushd "$$installation_dir" > /dev/null; \
-			terraform test -var-file ./tests/vars.hcl; \
-			popd > /dev/null; \
+			cd "$$installation_dir"; \
+			TF_DATA_DIR=.terraform-test terraform init -upgrade -backend=false; \
+			TF_DATA_DIR=.terraform-test terraform test -compact-warnings -var-file ./tests/vars.hcl; \
+			cd - > /dev/null; \
 		fi; \
 	done
 
