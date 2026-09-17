@@ -216,6 +216,7 @@ filesystem_jail = {
 # Or create the jail filesystem with Terraform and protect it from deletion
 # filesystem_jail = {
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = true

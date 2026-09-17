@@ -65,10 +65,11 @@ You can create storage within this Terraform recipe, as in provided [terraform.t
 ```terraform
 # Shared filesystems to be mounted inside jail.
 # ---
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "benchmark-data"
   mount_path = "/data"
   spec = {
+    type                 = "NETWORK_SSD"
     size_gibibytes       = 4096
     block_size_kibibytes = 32
     forbid_deletion      = true
@@ -76,7 +77,7 @@ filestore_jail_submounts = [{
 }]
 ```
 
-Or, you can use the same filestore for multiple clusters.
+Or, you can use the same filesystem for multiple clusters.
 In order to do this, create it on your own with the Nebius CLI
 
 ```shell
@@ -92,11 +93,11 @@ And provide its ID to the recipe as follows:
 ```terraform
 # Shared filesystems to be mounted inside jail.
 # ---
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "benchmark-data"
   mount_path = "/data"
   existing = {
-    id = "<ID of created filestore>"
+    id = "<ID of created filesystem>"
   }
 }]
 ```
