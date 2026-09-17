@@ -100,3 +100,10 @@ terraform-test-cloud-init:
 .PHONY: terraform-check
 terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-cloud-init
 	@echo 'All Terraform checks passed successfully!'
+
+# markdownlint-cli2
+# https://github.com/DavidAnson/markdownlint-cli2
+.PHONY: mdlint
+mdlint:
+	@echo 'Running Markdown lint...'
+	markdownlint-cli2 README.md modules/weka/README.md test/README.md test/quickcheck/README.md; \

@@ -1,6 +1,7 @@
 # Slurm cluster testing and benchmarking
 
 We offer few kinds of checks:
+
 - [Tests](#tests):
   - [Quick tests](./quickcheck)
 
@@ -27,6 +28,7 @@ Flags:
 ```
 
 It accepts following parameters:
+
 - `-t` - type of the test you want to run. It must be one of:
   - `quickcheck` - for quick tests
 - `-u` - SSH **username** for login nodes
@@ -48,10 +50,12 @@ For quick check tests, see its [README](./quickcheck/README.md).
 Benchmarks need datasets and checkpoints to be downloaded to the cluster.
 As well as some configuration needed to be done before running training.
 
-Please follow instructions [here](https://github.com/NVIDIA/dgxc-benchmarking?tab=readme-ov-file#quick-start-guide) for NVIDIA DGXC benchamrks.
+Please follow instructions
+[here](https://github.com/NVIDIA/dgxc-benchmarking?tab=readme-ov-file#quick-start-guide)
+for NVIDIA DGXC benchmarks.
 
-In case benchmark scripts require path to the data directory it's better to have it on dedicated shared storage that can handle multiple connections from Slurm workers
-(aka Jail sub-mounts).
+In case benchmark scripts require path to the data directory it's better to have it on dedicated shared storage
+that can handle multiple connections from Slurm workers (aka Jail sub-mounts).
 
 <details>
 <summary>Creating storage for benchmarks</summary>
