@@ -771,11 +771,12 @@ cleanup_bucket_on_destroy = false
 
 # Version of the k8s to be used.
 # ---
-k8s_version = 1.35
+k8s_version = "1.36"
 
 # Version of the node group to be used.
+# NodeInfraVersion 76 includes Kubernetes 1.36.3 images and is marked untested.
 # ---
-node_group_version = 74
+node_group_version = "76"
 
 # SSH user credentials for accessing k8s nodes.
 # By default, empty list.
