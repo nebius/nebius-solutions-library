@@ -26,7 +26,6 @@ resource "nebius_mk8s_v1_node_group" "system" {
         module.labels.label_nodeset_system,
         module.labels.label_workload_cpu,
         module.labels.label_jail,
-        module.labels.label_exclude_from_external_lb,
       )
     }
 
@@ -70,7 +69,7 @@ resource "nebius_mk8s_v1_node_group" "system" {
 
     os = "ubuntu24.04"
 
-    cloud_init_user_data = local.node_ssh_access.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
+    cloud_init_user_data = local.node_cloud_init.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
   }
 
   lifecycle {

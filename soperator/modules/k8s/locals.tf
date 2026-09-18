@@ -8,20 +8,11 @@ locals {
   }
 
   node_cloud_init = {
-    enabled = length(var.node_ssh_access_users) > 0 || length(var.nvidia_config_lines) > 0
-    cloud_init_data = templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-      ssh_users                  = var.node_ssh_access_users
-      nvidia_config_lines        = var.nvidia_config_lines
-      local_nvme_enabled         = false
-      local_nvme_mount_path      = "/mnt/local-nvme"
-      local_nvme_filesystem_type = "ext4"
-    })
+    enabled = local.node_ssh_access.enabled || var.use_default_apparmor_profile
     cloud_init_data_no_nvidia = templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-      ssh_users                  = var.node_ssh_access_users
-      nvidia_config_lines        = []
-      local_nvme_enabled         = false
-      local_nvme_mount_path      = "/mnt/local-nvme"
-      local_nvme_filesystem_type = "ext4"
+      ssh_users                    = var.node_ssh_access_users
+      use_default_apparmor_profile = var.use_default_apparmor_profile
+      nvidia_config_lines          = []
     })
   }
 
@@ -61,6 +52,36 @@ locals {
   node_group_workload_label_v2 = {
     worker = [for worker in local.node_group_gpu_present_v2.worker :
       (worker ? module.labels.label_workload_gpu : module.labels.label_workload_cpu)
+    ]
+  }
+
+  # Normalize optional NVLink IDs to strings. "" means the worker should not get
+  # an nvlink block or NVLink label.
+  node_group_nvl_instance_group_id_v2 = {
+    worker = [
+      for worker in var.node_group_workers_v2 :
+      try(trimspace(worker.nvl_instance_group_id), "")
+    ]
+  }
+
+  # Convert NVLink IDs into label maps that can be merged unconditionally.
+  # Example: ["nvl-1", ""] becomes
+  # [{ "nebius.com/nvlink-instance-group" = "nvl-1" }, {}].
+  node_group_nvl_instance_group_label_v2 = {
+    worker = [
+      for nvl_instance_group_id in local.node_group_nvl_instance_group_id_v2.worker :
+      nvl_instance_group_id != "" ? tomap({
+        (module.labels.key_nebius_nvlink_instance_group) = nvl_instance_group_id
+      }) : tomap({})
+    ]
+  }
+
+  # Normalize optional placement-policy node lists. [] means the provider
+  # placement_policy block should be omitted for that worker.
+  node_group_placement_policy_nodes_v2 = {
+    worker = [
+      for worker in var.node_group_workers_v2 :
+      coalesce(try(worker.placement_policy_nodes, null), [])
     ]
   }
 

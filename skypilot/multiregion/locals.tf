@@ -4,7 +4,8 @@ locals {
   fileexists(var.ssh_public_key.path) ? file(var.ssh_public_key.path) : null)
 
   filestore = {
-    mount_tag = "data"
+    mount_tag  = "data"
+    mount_path = "/mnt/data"
   }
 
   regions_default = {

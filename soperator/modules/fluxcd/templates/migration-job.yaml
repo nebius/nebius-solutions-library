@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flux-api-migration
+  namespace: flux-system
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      serviceAccountName: kustomize-controller
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/fluxcd/flux-cli:FLUX_VERSION
+          args:
+            - migrate

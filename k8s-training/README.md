@@ -94,6 +94,87 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### GB300 production racks
+
+GB300 uses a separate rack-aware deployment path. Setting `gb300.rack_count` to
+a positive whole number replaces the generic GPU node groups with one fixed MK8s
+node group and one NVLink instance group per rack. A production rack contains 18
+`gpu-gb300` nodes using the `4gpu-112vcpu-800gb` preset, for 72 GPUs per rack.
+
+The GB300 resources require Nebius Terraform provider `0.5.232` or newer and an
+explicit zero-surge rollout strategy. Replacing nodes one at a time avoids
+requesting capacity above the physical 18-node rack. An InfiniBand fabric is
+optional for one rack and required for deployments with two or more racks:
+
+GB300 boot disks default to 1 TiB (1024 GiB). Set `local_nvme = true` to
+request the host NVMe devices and combine them into kubelet ephemeral storage.
+Local NVMe data is erased when a node is restarted or replaced.
+
+```hcl
+node_group_strategy = {
+  max_unavailable = { count = 1 }
+  max_surge       = { count = 0 }
+}
+```
+
+#### One rack
+
+One rack creates one 18-node MK8s node group and one 18-node NVLink instance
+group. Leave `infiniband_fabric` empty when the rack does not require an
+InfiniBand GPU cluster:
+
+```hcl
+infiniband_fabric = ""
+
+gb300 = {
+  rack_count = 1
+}
+```
+
+#### Two racks
+
+Two racks create 36 MK8s nodes and two separate NVLink instance groups. Both
+racks use the single XDR fabric selected by `infiniband_fabric`:
+
+```hcl
+infiniband_fabric = "fabric-4"
+
+gb300 = {
+  rack_count                = 2
+  boot_disk_size_gibibytes = 1024
+  local_nvme                = true
+}
+```
+
+Use the same syntax for larger deployments; for example, `rack_count = 6`
+creates six 18-node groups and six NVLink instance groups. Terraform generates
+stable sequential rack keys (`rack-001`, `rack-002`, and so on), so increasing
+the count adds racks without changing the addresses of existing racks. Reducing
+the count removes the highest-numbered racks.
+
+When configured, all racks attach to the same XDR InfiniBand fabric, while each
+rack receives its own NVLink instance group. A fabricless single rack remains
+inside its 72-GPU NVLink domain and has no cross-rack InfiniBand connectivity.
+The node groups use Ubuntu 24.04 driverfull images with the `cuda13.0` driver
+preset. Set `rack_count = 0` or omit `gb300` to disable this path.
+
+Capacity policies such as 17+1 or 16+2 are scheduling and operational policies
+over a complete 18-node rack. They do not reduce the MK8s node-group or NVLink
+instance-group size. Spare nodes should remain part of the rack and be excluded
+from normal workloads through Kubernetes scheduling policy.
+
+IMEX configuration is owned by MK8s Node Infrastructure for driverfull GB300
+node groups. Before deploying, confirm the selected Node Infrastructure version
+includes managed GB300 IMEX support. Do not install the Omega PoC IMEX
+DaemonSet: MK8s writes `/etc/nvidia-imex/nodes_config.cfg` and manages
+`nvidia-imex.service`. DRA mode is intentionally not exposed by this template
+until MK8s provides a supported public selection path.
+
+The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
+MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
+bundled KubeRay profiles. These guardrails keep the initial production path
+within the components validated for Grace ARM rack deployments.
+
 ### Nvidia Multi Instance GPU (MIG) configuration
 
 ```hcl
@@ -158,6 +239,66 @@ filesystem_csi = {
 ```
 
 This Terraform automation installs the CSI driver and configures the StorageClass only. Verification, pod-level validation, and cleanup remain in `filesystem-csi-validation/` as an explicit opt-in workflow.
+
+### Kubernetes RBAC access bindings
+
+Kubernetes RBAC can be managed by Terraform after the access model has been
+approved. It is disabled by default.
+
+An approved Nebius Cloud group cluster-admin binding can be declared like this:
+
+```hcl
+k8s_rbac_bindings = {
+  enabled = true
+  cluster_role_bindings = {
+    nebius_viewer_cluster_admin = {
+      name      = "nebius-cluster-admin"
+      role_name = "cluster-admin"
+      subjects = [
+        {
+          kind      = "Group"
+          name      = "nebius:viewer"
+          api_group = "rbac.authorization.k8s.io"
+        }
+      ]
+    }
+  }
+}
+```
+
+For namespace-only access, create the namespace and bind one of the built-in
+ClusterRoles such as `view`, `edit`, or `admin`:
+
+```hcl
+k8s_rbac_bindings = {
+  enabled = true
+  namespaces = {
+    workload = {
+      name = "workload"
+    }
+  }
+  namespace_role_bindings = {
+    workload_admin = {
+      name      = "workload-admin"
+      namespace = "workload"
+      role_kind = "ClusterRole"
+      role_name = "admin"
+      subjects = [
+        {
+          kind      = "Group"
+          name      = "nebius:viewer"
+          api_group = "rbac.authorization.k8s.io"
+        }
+      ]
+    }
+  }
+}
+```
+
+Temporary elevated access should be kept as an explicit Terraform change and
+removed after validation so Terraform destroys the binding on the next apply.
+This module does not manage Nebius IAM group membership, kubeconfig sharing, or
+private endpoint/bastion access.
 
 ## Connecting to the cluster
 

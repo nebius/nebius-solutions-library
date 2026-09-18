@@ -1,13 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-kubectl create namespace "$NAMESPACE" --context "$K8S_CLUSTER_CONTEXT" || true
+readonly kubectl_apply_with_retries_script="$(dirname "$0")/../../scripts/kubectl_apply_with_retries.sh"
+
+kubectl create namespace "$NAMESPACE" --context "$K8S_CLUSTER_CONTEXT" --dry-run=client -o yaml \
+  | "$kubectl_apply_with_retries_script" --context "$K8S_CLUSTER_CONTEXT"
 
 AKID=$(nebius iam v2 access-key create --parent-id "$IAM_PROJECT_ID" \
   --account-service-account-id "$SERVICE_ACCOUNT_ID" \
   --format json | jq -r '.metadata.id')
 
-kubectl apply --server-side --context "$K8S_CLUSTER_CONTEXT" -f - <<EOF
+"$kubectl_apply_with_retries_script" --server-side --context "$K8S_CLUSTER_CONTEXT" <<EOF
 apiVersion: v1
 kind: Secret
 type: Opaque

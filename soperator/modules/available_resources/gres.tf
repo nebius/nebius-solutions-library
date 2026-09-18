@@ -5,6 +5,7 @@ locals {
     (local.platforms.gpu-b200-sxm)   = "nvidia_b200"
     (local.platforms.gpu-b200-sxm-a) = "nvidia_b200"
     (local.platforms.gpu-b300-sxm)   = "nvidia_b300_sxm6_ac"
+    (local.platforms.gpu-gb300)      = "nvidia_gb300"
   })
 
   # The list of GPUs should be sorted by Links field to correspond to the GPU order in nvidia-smi
@@ -64,6 +65,12 @@ locals {
       "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-b300-sxm]} File=/dev/nvidia2 Cores=48-95 Links=1,1,1,1,1,-1,1,1 Flags=nvidia_gpu_env",
       "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-b300-sxm]} File=/dev/nvidia1 Cores=48-95 Links=1,1,1,1,1,1,-1,1 Flags=nvidia_gpu_env",
       "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-b300-sxm]} File=/dev/nvidia0 Cores=48-95 Links=1,1,1,1,1,1,1,-1 Flags=nvidia_gpu_env",
+    ]
+    (local.platforms.gpu-gb300) = [
+      "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-gb300]} File=/dev/nvidia3 Cores=0-55 Links=-1,1,1,1 Flags=nvidia_gpu_env",
+      "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-gb300]} File=/dev/nvidia2 Cores=0-55 Links=1,-1,1,1 Flags=nvidia_gpu_env",
+      "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-gb300]} File=/dev/nvidia1 Cores=56-111 Links=1,1,-1,1 Flags=nvidia_gpu_env",
+      "AutoDetect=off Name=gpu Type=${local.gres_by_platforms[local.platforms.gpu-gb300]} File=/dev/nvidia0 Cores=56-111 Links=1,1,1,-1 Flags=nvidia_gpu_env",
     ]
   })
 }

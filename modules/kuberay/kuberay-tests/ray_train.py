@@ -76,20 +76,6 @@ scaling_config = ray.train.ScalingConfig(
     num_workers=3, use_gpu=True, resources_per_worker={"CPU": 14, "GPU": 1}
 )
 
-# s3_fs = s3fs.S3FileSystem(
-# AWS_ACCESS_KEY_ID
-# AWS_SECRET_ACCESS_KEY
-# AWS_REGION
-# AWS_ENDPOINT_URL_S3
-#    key=os.environ["S_"NAKI6SGGP3UHT43RGH6W",
-#    secret="GWZFw9lhM5EHXxwBg5Tqkbd0CQlyz9z9n7D8KLz1",
-#    endpoint_url="https://storage.eu-north1.nebius.cloud:443",
-#    client_kwargs={
-#        "region_name": "eu-north1",
-#    },
-# )
-# custom_fs = PyFileSystem(FSSpecHandler(s3_fs))
-
 # [5] Launch distributed training job.
 trainer = ray.train.torch.TorchTrainer(
     train_func,

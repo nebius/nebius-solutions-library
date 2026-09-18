@@ -1,15 +1,16 @@
 locals {
+  apparmor_profile = var.use_default_apparmor_profile ? "soperator-default" : "unconfined"
+
   kube_rbac_proxy = {
     image = "gcr.io/kubebuilder/kube-rbac-proxy"
     tag   = "v0.15.0"
   }
   helm = {
     repository = {
-      slurm        = "oci://cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-      slurm_stable = "oci://cr.eu-north1.nebius.cloud/soperator"
+      slurm        = "oci://cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+      slurm_stable = "oci://cr.nebius.cloud/soperator"
       mariadb      = "https://helm.mariadb.com/mariadb-operator"
       raw          = "https://bedag.github.io/helm-charts/"
-      spo          = "oci://cr.eu-north1.nebius.cloud/e00xdc03sb7gpqfd0a"
     }
 
     chart = {
@@ -18,7 +19,6 @@ locals {
       slurm_operator_crds   = "soperator-crds"
       nodeconfigurator      = "nodeconfigurator"
       raw                   = "raw"
-      spo                   = "security-profiles-operator"
 
       operator = {
         slurm       = "soperator"
@@ -31,15 +31,27 @@ locals {
       slurm   = var.operator_version
       mariadb = "25.10.2"
       raw     = "2.0.0"
-      spo     = "0.8.4-soperator"
     }
   }
 
   image = {
-    repository        = "cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-    repository_stable = "cr.eu-north1.nebius.cloud/soperator"
+    repository        = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+    repository_stable = "cr.nebius.cloud/soperator"
     tag               = var.operator_version
   }
+
+  public_o11y_tsa_token_writer_source = "imds"
+
+  gb300_enabled = anytrue([
+    for nodeset in var.worker_nodesets : nodeset.gres_name == "nvidia_gb300"
+  ])
+
+  active_checks_on_worker_nodes = local.gb300_enabled
+
+  soperator_active_checks_gpu_counts = distinct([for worker in var.node_capacity.worker : worker.gpus if worker.gpus > 0])
+  // We don't support heterogenous clusters with mixed number of GPUs (or basically GB series mixed with the rest) yet.
+  // So taking the first GPU count is fine for now.
+  soperator_active_checks_gpus_per_node = length(local.soperator_active_checks_gpu_counts) == 1 ? tostring(local.soperator_active_checks_gpu_counts[0]) : null
 
   node_filters = {
     label = {
@@ -64,8 +76,8 @@ locals {
     }
     worker = {
       name        = module.labels.name_nodeset_worker
-      matches     = [for i in range(length(var.node_count.worker)) : join("-", [module.labels.name_nodeset_worker, i])]
-      gpu_present = length([for i in range(length(var.node_count.worker)) : var.resources.worker[i].gpus]) > 0
+      matches     = [module.labels.name_nodeset_worker]
+      gpu_present = length([for i in range(length(var.node_count.worker)) : var.node_capacity.worker[i].gpus]) > 0
     }
     login = {
       name  = module.labels.name_nodeset_login
@@ -102,85 +114,60 @@ locals {
       memory            = 0.5
       ephemeral_storage = 5
     }
-    exporter = {
-      cpu               = var.resources.exporter != null ? var.resources.exporter.cpu_cores : 0.25
-      memory            = var.resources.exporter != null ? var.resources.exporter.memory_gibibytes : 0.25
-      ephemeral_storage = var.resources.exporter != null ? var.resources.exporter.ephemeral_storage_gibibytes : 0.5
-    }
-    rest = {
-      cpu               = var.resources.rest != null ? var.resources.rest.cpu_cores : 2
-      memory            = var.resources.rest != null ? var.resources.rest.memory_gibibytes : 8
-      ephemeral_storage = var.resources.rest != null ? var.resources.rest.ephemeral_storage_gibibytes : 0.5
-    }
-    mariadb = {
-      cpu               = var.resources.mariadb != null ? var.resources.mariadb.cpu_cores : 2
-      memory            = var.resources.mariadb != null ? var.resources.mariadb.memory_gibibytes : 12
-      ephemeral_storage = var.resources.mariadb != null ? var.resources.mariadb.ephemeral_storage_gibibytes : 16
-    }
-    node_configurator = {
-      limits = {
-        memory = var.resources.node_configurator != null ? var.resources.node_configurator.limits.memory_gibibytes : 0.25
-      }
-      requests = {
-        memory = var.resources.node_configurator != null ? var.resources.node_configurator.requests.memory_gibibytes : 0.25
-        cpu    = var.resources.node_configurator != null ? var.resources.node_configurator.requests.cpu_cores : 0.5
-      }
-    }
-    slurm_operator = {
-      limits = {
-        memory = var.resources.slurm_operator != null ? var.resources.slurm_operator.limits.memory_gibibytes : 2
-      }
-      requests = {
-        memory = var.resources.slurm_operator != null ? var.resources.slurm_operator.requests.memory_gibibytes : 2
-        cpu    = var.resources.slurm_operator != null ? var.resources.slurm_operator.requests.cpu_cores : 1
-      }
-    }
-    slurm_checks = {
-      limits = {
-        memory = var.resources.slurm_checks != null ? var.resources.slurm_checks.limits.memory_gibibytes : 2
-      }
-      requests = {
-        memory = var.resources.slurm_checks != null ? var.resources.slurm_checks.requests.memory_gibibytes : 2
-        cpu    = var.resources.slurm_checks != null ? var.resources.slurm_checks.requests.cpu_cores : 0.5
-      }
-    }
-    kruise_daemon = {
-      cpu    = var.resources.kruise_daemon != null ? var.resources.kruise_daemon.cpu_cores : 0.05
-      memory = var.resources.kruise_daemon != null ? var.resources.kruise_daemon.memory_gibibytes : 0.128
-    }
-    dcgm_exporter = {
-      cpu    = var.resources.dcgm_exporter != null ? var.resources.dcgm_exporter.cpu_cores : 0.05
-      memory = var.resources.dcgm_exporter != null ? var.resources.dcgm_exporter.memory_gibibytes : 0.5
-    }
+    # System/observability components are sized by the sizing tier,
+    # with per-component overrides merged inside ../sizing_tier (see var.component_overrides).
+    # local.selected_preset is the post-merge result.
+    exporter                    = local.selected_preset.exporter
+    rest                        = local.selected_preset.rest
+    mariadb                     = local.selected_preset.mariadb
+    node_configurator           = local.selected_preset.node_configurator
+    soperator_main_controller   = local.selected_preset.soperator_main_controller
+    soperator_checks_controller = local.selected_preset.soperator_checks_controller
+    kruise_daemon               = local.selected_preset.kruise_daemon
+    dcgm_exporter               = local.selected_preset.dcgm_exporter
+    # The NFS server pod fills its dedicated node, so when an NFS nodeset exists
+    # its node capacity (var.node_capacity.nfs) wins over the tier value.
     nfs_server = {
       limits = {
-        memory = var.resources.nfs != null ? var.resources.nfs.memory_gibibytes : 1
+        memory = var.node_capacity.nfs != null ? var.node_capacity.nfs.memory_gibibytes : local.selected_preset.nfs_server.memory
       }
       requests = {
-        memory = var.resources.nfs != null ? var.resources.nfs.memory_gibibytes : 1
-        cpu    = var.resources.nfs != null ? var.resources.nfs.cpu_cores : 1
+        memory = var.node_capacity.nfs != null ? var.node_capacity.nfs.memory_gibibytes : local.selected_preset.nfs_server.memory
+        cpu    = var.node_capacity.nfs != null ? var.node_capacity.nfs.cpu_cores : local.selected_preset.nfs_server.cpu
       }
     }
   }
 
-  slurm_node_extra = "\\\"{ \\\\\\\"ib_pod\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER2\\\\\\\", \\\\\\\"ib_su\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER1\\\\\\\" }\\\""
+  slurm_node_extra = chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
+    rack_number           = null
+    nvl_instance_group_id = ""
+  }))
+
+  slurm_node_extra_by_nodeset = {
+    for nodeset in var.worker_nodesets : nodeset.name => chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
+      rack_number           = try(nodeset.rack_number, null)
+      nvl_instance_group_id = try(trimspace(nodeset.nvl_instance_group_id), "")
+    }))
+  }
 
   # Calculate vmagent remote write queue count based on cluster size
   # This sets metrics ingestion capacity for larger clusters properly
   vm_agent_queue_count = 2 + floor(sum(var.node_count.worker) / 60)
 
-  # kube-state-metrics starts exceeding the default 32MiB scrape limit around 1.1k workers.
-  kube_state_metrics_large_cluster_worker_threshold = 1000
-  kube_state_metrics_large_cluster_max_scrape_size  = 150554432
+  # Cap on the kube-state-metrics scrape response: an explicit var wins, otherwise the sizing
+  # tier decides (null below M keeps vmagent's global 32MiB guard).
   kube_state_metrics_max_scrape_size = (
     var.kube_state_metrics_max_scrape_size != null
     ? var.kube_state_metrics_max_scrape_size
-    : (
-      sum(var.node_count.worker) >= local.kube_state_metrics_large_cluster_worker_threshold
-      ? local.kube_state_metrics_large_cluster_max_scrape_size
-      : null
-    )
+    : module.sizing.kube_state_metrics_max_scrape_size
   )
+
+  # Total declared worker nodes across all worker nodesets. Drives the sizing tier.
+  worker_count = length(var.node_count.worker) > 0 ? sum(var.node_count.worker) : 0
+
+  # Sizing tier + effective per-component preset (tier column with var.component_overrides already merged).
+  sizing_tier     = module.sizing.sizing_tier
+  selected_preset = module.sizing.preset
 
   opentelemetry_batch_enabled = (
     var.opentelemetry_batch != null
@@ -188,6 +175,15 @@ locals {
       var.opentelemetry_batch.timeout != null,
       var.opentelemetry_batch.send_batch_size != null,
       var.opentelemetry_batch.send_batch_max_size != null,
+    ])
+    : false
+  )
+
+  opentelemetry_sending_queue_enabled = (
+    var.opentelemetry_sending_queue != null
+    ? anytrue([
+      var.opentelemetry_sending_queue.size != null,
+      var.opentelemetry_sending_queue.num_consumers != null,
     ])
     : false
   )

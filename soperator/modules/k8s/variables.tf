@@ -23,15 +23,14 @@ variable "k8s_version" {
   default     = null
 }
 
-variable "name" {
-  description = "Name of the k8s cluster."
+variable "node_group_version" {
+  description = "Nebius version of node group. Contains bundle of different component versions, e.g. driver, linux_kernel, doca, etc."
   type        = string
 }
 
-variable "etcd_cluster_size" {
-  description = "Size of the etcd cluster."
-  type        = number
-  default     = 3
+variable "name" {
+  description = "Name of the k8s cluster."
+  type        = string
 }
 
 variable "company_name" {
@@ -122,7 +121,8 @@ variable "node_group_workers" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible   = optional(object({}))
     nodeset_index = number
@@ -133,11 +133,12 @@ variable "node_group_workers" {
 variable "node_group_workers_v2" {
   description = "Worker node groups specification for nodesets (v2)."
   type = list(object({
-    name        = string
-    size        = number
-    min_size    = number
-    max_size    = number
-    autoscaling = bool
+    name            = string
+    node_group_name = optional(string)
+    size            = number
+    min_size        = number
+    max_size        = number
+    autoscaling     = bool
     resource = object({
       platform = string
       preset   = string
@@ -148,18 +149,25 @@ variable "node_group_workers_v2" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible = optional(object({}))
     reservation_policy = optional(object({
       policy          = optional(string)
       reservation_ids = optional(list(string))
     }))
-    max_pods = optional(number, 32)
+    nvl_instance_group_id = optional(string)
+    # Additional labels applied to the mk8s worker node template.
+    extra_labels           = optional(map(string), {})
+    max_pods               = optional(number, 32)
+    placement_policy_nodes = optional(list(string))
     local_nvme = optional(object({
-      enabled         = optional(bool, false)
-      mount_path      = optional(string, "/mnt/local-nvme")
-      filesystem_type = optional(string, "ext4")
+      enabled                   = optional(bool, false)
+      device_count              = optional(number)
+      device_capacity_gigabytes = optional(number)
+      mount_path                = optional(string, "/mnt/local-nvme")
+      size_limit_gibibytes      = optional(number)
     }), {})
     nodeset_index = number
     subset_index  = number
@@ -176,9 +184,10 @@ variable "node_group_workers_v2" {
 }
 
 variable "node_group_login" {
-  description = "Controller node group specification."
+  description = "Login node group specification."
   type = object({
-    size = number
+    size               = number
+    node_group_enabled = optional(bool, true)
     resource = object({
       platform = string
       preset   = string
@@ -267,4 +276,10 @@ variable "use_preinstalled_gpu_drivers" {
   description = "Enable preinstalled mode for worker nodes."
   type        = bool
   default     = false
+}
+
+variable "use_default_apparmor_profile" {
+  description = "Load the soperator-default AppArmor profile on every node at each boot. Requires AppArmor and apparmor_parser in the node image."
+  type        = bool
+  default     = true
 }

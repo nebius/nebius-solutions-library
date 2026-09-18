@@ -21,6 +21,8 @@ locals {
     p-8g-128c-1600g = "8gpu-128vcpu-1600gb"
     p-8g-160c-1792g = "8gpu-160vcpu-1792gb"
     p-8g-192c-2768g = "8gpu-192vcpu-2768gb"
+
+    p-4gpu-112vcpu-800g = "4gpu-112vcpu-800gb"
   }
 
   presets_cpu = {
@@ -36,6 +38,7 @@ locals {
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = false
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-4vcpu-16gb = {
@@ -46,10 +49,11 @@ locals {
       sufficient = {
         (module.labels.name_nodeset_system)     = false
         (module.labels.name_nodeset_controller) = true
-        (module.labels.name_nodeset_worker)     = false
+        (module.labels.name_nodeset_worker)     = true
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-8vcpu-32gb = {
@@ -64,6 +68,7 @@ locals {
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-16vcpu-64gb = {
@@ -78,6 +83,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-32vcpu-128gb = {
@@ -92,6 +98,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-48vcpu-192gb = {
@@ -106,6 +113,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-64vcpu-256gb = {
@@ -120,6 +128,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-80vcpu-320gb = {
@@ -134,6 +143,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-96vcpu-384gb = {
@@ -148,6 +158,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-128vcpu-512gb = {
@@ -162,6 +173,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-160vcpu-640gb = {
@@ -176,6 +188,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-192vcpu-768gb = {
@@ -190,6 +203,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-224vcpu-896gb = {
@@ -204,6 +218,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-256vcpu-1024gb = {
@@ -218,6 +233,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
   }
@@ -235,6 +251,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-128vcpu-1600gb = {
@@ -249,6 +266,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     g-1gpu-20vcpu-224gb = {
@@ -263,6 +281,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-160vcpu-1792gb = {
@@ -277,6 +296,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     g-1gpu-24vcpu-346gb = {
@@ -291,6 +311,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-192vcpu-2768gb = {
@@ -305,14 +326,33 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
+      }
+    }
+    g-4gpu-112vcpu-800gb = {
+      cpu_cores              = 112 * local.reserve.cpu.coefficient - local.reserve.cpu.count
+      memory_gibibytes       = 800 * local.reserve.ram.coefficient - local.reserve.ram.count
+      gpus                   = 4
+      gpu_cluster_compatible = true
+      sufficient = {
+        (module.labels.name_nodeset_system)     = false
+        (module.labels.name_nodeset_controller) = false
+        (module.labels.name_nodeset_worker)     = true
+        (module.labels.name_nodeset_login)      = true
+        (module.labels.name_nodeset_accounting) = false
+        (module.labels.name_nodeset_nfs)        = false
+        weka                                    = true
       }
     }
   }
 
-  # Allow-list: "${region}/${platform}/${preset}"
+  # Allow-list patterns: "${region}/${platform}/${preset}".
+  # Use "*" in any section to match every value for that section.
   local_nvme_supported_true_region_platform_preset = toset([
     # gpu-b300-sxm
     "${local.regions.uk-south1}/${local.platforms.gpu-b300-sxm}/${local.presets.p-8g-192c-2768g}",
+    # gpu-gb300 in all regions and presets
+    "*/${local.platforms.gpu-gb300}/*",
   ])
 
   presets_by_platforms_raw = tomap({
@@ -367,12 +407,22 @@ locals {
       (local.presets.p-1g-24c-346g)   = local.presets_gpu.g-1gpu-24vcpu-346gb
       (local.presets.p-8g-192c-2768g) = local.presets_gpu.g-8gpu-192vcpu-2768gb
     })
+
+    (local.platforms.gpu-gb300) = tomap({
+      (local.presets.p-4gpu-112vcpu-800g) = local.presets_gpu.g-4gpu-112vcpu-800gb
+    })
   })
 
   local_nvme_supported_by_region_platform_preset = tomap({
     for region in [for _, region in local.regions : region] : region => tomap({
       for platform, presets in local.presets_by_platforms_raw : platform => tomap({
-        for preset, _ in presets : preset => contains(local.local_nvme_supported_true_region_platform_preset, "${region}/${platform}/${preset}")
+        for preset, _ in presets : preset => anytrue([
+          for candidate in setproduct(
+            [region, "*"],
+            [platform, "*"],
+            [preset, "*"],
+          ) : contains(local.local_nvme_supported_true_region_platform_preset, join("/", candidate))
+        ])
       })
     })
   })
@@ -380,6 +430,7 @@ locals {
   presets_by_platforms = tomap({
     for platform, presets in local.presets_by_platforms_raw : platform => tomap({
       for preset, resources in presets : preset => merge(resources, {
+        cpu_platform = local.cpu_platform_by_platform[platform]
         local_nvme_supported = anytrue([
           for region in [for _, region in local.regions : region] : try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
         ])

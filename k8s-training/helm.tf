@@ -2,6 +2,7 @@ module "network-operator" {
   depends_on = [
     nebius_mk8s_v1_node_group.cpu-only,
     nebius_mk8s_v1_node_group.gpu,
+    nebius_mk8s_v1_node_group.gb300,
   ]
   source     = "../modules/network-operator"
   parent_id  = var.parent_id
@@ -9,7 +10,7 @@ module "network-operator" {
 }
 
 module "gpu-operator" {
-  count = (!var.gpu_nodes_driverfull_image && !var.custom_driver) ? 1 : 0
+  count = (!local.use_driverfull_gpu && !var.custom_driver) ? 1 : 0
 
   depends_on = [
     module.network-operator
@@ -33,7 +34,7 @@ module "gpu-operator-custom" {
 
 
 module "device-plugin" {
-  count = var.gpu_nodes_driverfull_image ? 1 : 0
+  count = local.use_driverfull_gpu ? 1 : 0
 
   source     = "../modules/device-plugin"
   parent_id  = var.parent_id
@@ -70,7 +71,7 @@ module "o11y" {
 }
 
 module "nccl-test" {
-  count = var.test_mode ? 1 : 0
+  count = var.test_mode && !local.gb300_enabled ? 1 : 0
   depends_on = [
     module.gpu-operator,
   ]

@@ -45,17 +45,23 @@ jobs:
           pattern='^(k8s-training|wireguard|bastion|dsvm)$'
           matched=()
 
-          for file in ${ALL_CHANGED_FILES[@]}; do
-            solution=$(echo "$file" | cut -d "/" -f1)
-            if [[ $solution =~ $pattern ]]; then
-                matched+=("$solution")
-            elif [[ $solution == "modules" ]]; then
-              matched=("k8s-training wireguard bastion dsvm")
+          for file in $ALL_CHANGED_FILES; do
+            solution="${file%%/*}"
+            if [[ "$solution" == "modules" ]]; then
+              matched=("k8s-training" "wireguard" "bastion" "dsvm")
+              break
+            elif [[ "$solution" =~ $pattern ]]; then
+              matched+=("$solution")
             fi
           done
-          unique=$(echo "${matched[@]}" | tr ' ' '\n' | uniq);
-          json=$(printf '%s\n' "${unique[@]}" | jq -R . | jq -s -c .)
-          echo "solutions=$json" >> $GITHUB_OUTPUT
+
+          if ((${#matched[@]} == 0)); then
+            json='[]'
+          else
+            json=$(printf '%s\n' "${matched[@]}" | awk 'NF && !seen[$0]++' | jq -R . | jq -s -c .)
+          fi
+
+          echo "solutions=$json" >> "$GITHUB_OUTPUT"
     
   terraform-format:
     needs: detect-changes
@@ -276,7 +282,7 @@ jobs:
         path: gh-pages
 
     - name: Build test report
-      uses: simple-elf/allure-report-action@v1.13
+      uses: simple-elf/allure-report-action@v1.15
       if: always()
       with:
         gh_pages: gh-pages

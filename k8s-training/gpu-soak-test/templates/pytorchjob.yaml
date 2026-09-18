@@ -1,0 +1,146 @@
+# =============================================================================
+# GPU Soak Test — PyTorchJob
+#
+# Single image (PyTorch NGC) for BOTH master and workers, so torch.distributed
+# ranks launch cleanly on every pod (no mpirun/SSH, no launcher/worker image
+# split). The kubeflow Training Operator injects MASTER_ADDR / MASTER_PORT /
+# RANK / WORLD_SIZE per pod; torchrun uses those to launch one rank per GPU.
+#
+# The workload (scripts/soak.py) is mounted from a ConfigMap created by
+# run-soak-test.sh, so the manifest stays free of inlined Python.
+#
+# Placeholders patched by run-soak-test.sh:
+#   __GPU_INSTANCE_TYPE__  node.kubernetes.io/instance-type value
+#   __WORKER_REPLICAS__    number of Worker pods (total nodes - 1)
+#   __DURATION__           soak duration in seconds
+#   __FILL_FRACTION__      HBM fill fraction (0-1)
+#   __SLOTS__              GPUs per node (nproc_per_node)
+#   __SOAK_IMAGE__         container image (must match GPU arch + CPU arch)
+# =============================================================================
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: gpu-soak-test
+  namespace: gpu-soak
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: Never
+      template:
+        metadata:
+          labels:
+            app: gpu-soak
+        spec:
+          nodeSelector:
+            node.kubernetes.io/instance-type: __GPU_INSTANCE_TYPE__
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          containers:
+          - name: pytorch          # PyTorchJob REQUIRES this container name
+            image: __SOAK_IMAGE__
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              set -e
+              echo "Node rank ${RANK}/${WORLD_SIZE}  master=${MASTER_ADDR}:${MASTER_PORT}"
+              torchrun \
+                --nnodes="${WORLD_SIZE}" \
+                --node_rank="${RANK}" \
+                --nproc_per_node="${NPROC_PER_NODE}" \
+                --master_addr="${MASTER_ADDR}" \
+                --master_port="${MASTER_PORT}" \
+                /workspace/soak.py
+            env:
+            - name: NPROC_PER_NODE
+              value: "__SLOTS__"
+            - name: SOAK_DURATION_SECONDS
+              value: "__DURATION__"
+            - name: HBM_FILL_FRACTION
+              value: "__FILL_FRACTION__"
+            - name: NCCL_DEBUG
+              value: "WARN"
+            - name: NCCL_IB_GID_INDEX
+              value: "3"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            resources:
+              limits:
+                nvidia.com/gpu: "__SLOTS__"
+            securityContext:
+              privileged: true
+            volumeMounts:
+            - name: soak-script
+              mountPath: /workspace
+            - name: shm
+              mountPath: /dev/shm
+          volumes:
+          - name: soak-script
+            configMap:
+              name: soak-script
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+    Worker:
+      replicas: __WORKER_REPLICAS__
+      restartPolicy: Never
+      template:
+        metadata:
+          labels:
+            app: gpu-soak
+        spec:
+          nodeSelector:
+            node.kubernetes.io/instance-type: __GPU_INSTANCE_TYPE__
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          containers:
+          - name: pytorch
+            image: __SOAK_IMAGE__
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              set -e
+              echo "Node rank ${RANK}/${WORLD_SIZE}  master=${MASTER_ADDR}:${MASTER_PORT}"
+              torchrun \
+                --nnodes="${WORLD_SIZE}" \
+                --node_rank="${RANK}" \
+                --nproc_per_node="${NPROC_PER_NODE}" \
+                --master_addr="${MASTER_ADDR}" \
+                --master_port="${MASTER_PORT}" \
+                /workspace/soak.py
+            env:
+            - name: NPROC_PER_NODE
+              value: "__SLOTS__"
+            - name: SOAK_DURATION_SECONDS
+              value: "__DURATION__"
+            - name: HBM_FILL_FRACTION
+              value: "__FILL_FRACTION__"
+            - name: NCCL_DEBUG
+              value: "WARN"
+            - name: NCCL_IB_GID_INDEX
+              value: "3"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+            resources:
+              limits:
+                nvidia.com/gpu: "__SLOTS__"
+            securityContext:
+              privileged: true
+            volumeMounts:
+            - name: soak-script
+              mountPath: /workspace
+            - name: shm
+              mountPath: /dev/shm
+          volumes:
+          - name: soak-script
+            configMap:
+              name: soak-script
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi

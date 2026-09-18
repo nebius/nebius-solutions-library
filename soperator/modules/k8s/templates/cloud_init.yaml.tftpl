@@ -1,4 +1,71 @@
 #cloud-config
+%{ if use_default_apparmor_profile }
+bootcmd:
+  - |
+    set -eu
+    command -v apparmor_parser >/dev/null || { echo "AppArmor parser is unavailable" >&2; exit 1; }
+    test -r /sys/kernel/security/apparmor/profiles || { echo "AppArmor kernel interface is unavailable" >&2; exit 1; }
+    apparmor_parser --replace <<'SOPERATOR_APPARMOR_EOF'
+    #include <tunables/global>
+
+    profile soperator-default flags=(attach_disconnected,mediate_deleted) {
+      include <abstractions/base>
+
+      file,
+      mount,
+      capability,
+      network,
+      dbus,
+      pivot_root,
+      remount,
+      ptrace,
+      signal,
+      umount,
+      unix,
+
+      /** lrixw,
+
+      deny /usr/lib/x86_64-linux-gnu/libGLES* w,
+      deny /usr/lib/x86_64-linux-gnu/libGLX_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/libnvcuvid* w,
+      deny /usr/lib/x86_64-linux-gnu/gbm/nvidia-* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/_nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so w,
+      deny /usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia w,
+      deny /usr/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib64/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/bin/nvidia-smi w,
+      deny /usr/bin/nvidia-debugdump w,
+      deny /usr/bin/nvidia-persistenced w,
+      deny /usr/bin/nv-fabricmanager w,
+      deny /usr/bin/nvidia-cuda-mps-control w,
+      deny /usr/bin/nvidia-cuda-mps-server w,
+      deny /lib/firmware/nvidia/**/gsp_*.bin w,
+    }
+    SOPERATOR_APPARMOR_EOF
+    grep -Fxq 'soperator-default (enforce)' /sys/kernel/security/apparmor/profiles || { echo "soperator-default is not in enforce mode" >&2; exit 1; }
+%{ endif }
+
 %{ if length(ssh_users) > 0 }
 users:
 %{ for user in ssh_users }
@@ -12,19 +79,8 @@ users:
 %{ endfor }
 %{ endif }
 
-%{ if local_nvme_enabled }
-package_update: true
-packages:
-  - mdadm
-  - nvme-cli
-%{ if local_nvme_filesystem_type == "xfs" }
-  - xfsprogs
-%{ endif }
-%{ endif }
-
-%{ if length(nvidia_config_lines) > 0 || local_nvme_enabled }
-write_files:
 %{ if length(nvidia_config_lines) > 0 }
+write_files:
   - path: /etc/modprobe.d/nvidia_config.conf
     owner: root:root
     permissions: "0644"
@@ -226,111 +282,7 @@ write_files:
         fi
 
         log "end"
-%{ endif }
-%{ if local_nvme_enabled }
-  - path: /usr/local/sbin/prepare-disks.sh
-    owner: root:root
-    permissions: "0755"
-    content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
 
-      MOUNTPOINT="$${1:-/mnt/local-nvme}"
-      FILESYSTEM_TYPE="${local_nvme_filesystem_type}"
-      MD_DEV="/dev/md0"
-      case "$${FILESYSTEM_TYPE}" in
-        ext4)
-          MOUNT_OPTS="noatime,nodiratime,lazytime,commit=60"
-          MKFS_CMD=(mkfs.ext4 -F -m 0)
-          ;;
-        xfs)
-          MOUNT_OPTS="noatime,nodiratime,logbufs=8,inode64"
-          MKFS_CMD=(mkfs.xfs -f)
-          ;;
-        *)
-          echo "Unsupported filesystem type: $${FILESYSTEM_TYPE}"
-          exit 1
-          ;;
-      esac
-
-      echo "Detecting NVMe disks..."
-      nvme list
-
-      mapfile -t NVME_DISKS < <(
-        nvme list | awk 'NR>2 && $1 ~ /^\/dev\/nvme[0-9]+n[0-9]+$/ { print $1 }' | sort -V | uniq
-      )
-
-      ROOT_SOURCE="$(findmnt -n -o SOURCE / || true)"
-      ROOT_PKNAME="$(lsblk -no PKNAME "$${ROOT_SOURCE}" 2>/dev/null || true)"
-      if [[ -n "$${ROOT_PKNAME}" ]]; then
-        ROOT_DISK="/dev/$${ROOT_PKNAME}"
-        FILTERED=()
-        for d in "$${NVME_DISKS[@]}"; do
-          if [[ "$${d}" != "$${ROOT_DISK}" ]]; then
-            FILTERED+=("$${d}")
-          fi
-        done
-        NVME_DISKS=("$${FILTERED[@]}")
-      fi
-
-      DISK_COUNT="$${#NVME_DISKS[@]}"
-      if (( DISK_COUNT < 2 || DISK_COUNT > 8 )); then
-        echo "Expected 2..8 NVMe disks for RAID0, found $${DISK_COUNT}: $${NVME_DISKS[*]}"
-        exit 1
-      fi
-
-      for d in "$${NVME_DISKS[@]}"; do
-        [[ -b "$${d}" ]] || { echo "Block device not found: $${d}"; exit 1; }
-      done
-
-      echo "Using $${DISK_COUNT} NVMe disk(s): $${NVME_DISKS[*]}"
-
-      for d in "$${NVME_DISKS[@]}"; do
-        DISK_BASENAME="$(basename "$${d}")"
-        SCHEDULER_PATH="/sys/block/$${DISK_BASENAME}/queue/scheduler"
-        if [[ -w "$${SCHEDULER_PATH}" ]]; then
-          echo none | tee "$${SCHEDULER_PATH}" >/dev/null
-        else
-          echo "Skipping scheduler update for $${d}: $${SCHEDULER_PATH} is not writable"
-        fi
-      done
-
-      if [[ -e "$${MD_DEV}" ]]; then
-        mdadm --stop "$${MD_DEV}" || true
-      fi
-
-      mdadm --create "$${MD_DEV}" \
-        --level=0 \
-        --raid-devices="$${DISK_COUNT}" \
-        "$${NVME_DISKS[@]}"
-
-      udevadm settle
-
-      "$${MKFS_CMD[@]}" "$${MD_DEV}"
-
-      mkdir -p "$${MOUNTPOINT}"
-      mount -o "$${MOUNT_OPTS}" "$${MD_DEV}" "$${MOUNTPOINT}"
-
-      UUID="$(blkid -s UUID -o value "$${MD_DEV}")"
-      grep -q "$${UUID}" /etc/fstab || echo "UUID=$${UUID} $${MOUNTPOINT} $${FILESYSTEM_TYPE} $${MOUNT_OPTS},nofail 0 2" >> /etc/fstab
-
-      if [[ -d /etc/mdadm ]]; then
-        mdadm --detail --scan > /etc/mdadm/mdadm.conf
-      fi
-
-      echo "Done."
-      echo "RAID device: $${MD_DEV}"
-      echo "Mounted at : $${MOUNTPOINT}"
-      df -h "$${MOUNTPOINT}"
-%{ endif }
-%{ endif }
-
-%{ if length(nvidia_config_lines) > 0 || local_nvme_enabled }
 runcmd:
-%{ if length(nvidia_config_lines) > 0 }
   - [ bash, -lc, "/usr/local/bin/nvidia-config-check.sh >> /var/log/nvidia-config-check.log 2>&1" ]
-%{ endif }
-%{ if local_nvme_enabled }
-  - [ bash, -lc, "/usr/local/sbin/prepare-disks.sh ${local_nvme_mount_path} > /var/log/prepare-disks.log 2>&1" ]
-%{ endif }
 %{ endif }

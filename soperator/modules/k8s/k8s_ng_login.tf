@@ -1,4 +1,6 @@
 resource "nebius_mk8s_v1_node_group" "login" {
+  count = var.node_group_login.node_group_enabled ? 1 : 0
+
   depends_on = [
     nebius_mk8s_v1_cluster.this,
     terraform_data.check_resource_preset_sufficiency,
@@ -15,7 +17,16 @@ resource "nebius_mk8s_v1_node_group" "login" {
     module.labels.label_jail,
   )
 
-  fixed_node_count = var.node_group_login.size
+  # These are broad infrastructure guardrails, not desired node counts: one
+  # node keeps baseline login capacity available, while 100 caps runaway VM
+  # provisioning. The Kubernetes autoscaler adds nodes only when login pods
+  # are unschedulable and removes unused nodes down to the minimum.
+  autoscaling = {
+    min_node_count = 1
+    max_node_count = 100
+  }
+
+  fixed_node_count = null
 
   template = {
     metadata = {
@@ -73,7 +84,7 @@ resource "nebius_mk8s_v1_node_group" "login" {
 
     os = "ubuntu24.04"
 
-    cloud_init_user_data = local.node_ssh_access.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
+    cloud_init_user_data = local.node_cloud_init.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
   }
 
   lifecycle {

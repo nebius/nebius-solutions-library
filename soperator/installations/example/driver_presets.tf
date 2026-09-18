@@ -1,24 +1,15 @@
 locals {
   supported_gpu_driver_presets_by_k8s = {
-    "1.32" = {
-      gpu-l40s-a     = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-l40s-d     = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-h100-sxm   = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-h200-sxm   = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-b200-sxm   = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-b200-sxm-a = ["cuda12", "cuda12.8", "cuda13.0"]
-      gpu-b300-sxm   = ["cuda13.0"]
-      gpu-rtx6000    = ["cuda13.0"]
-    }
-    "1.33" = {
+    "1.35" = {
       gpu-l40s-a     = ["cuda13.0"]
       gpu-l40s-d     = ["cuda13.0"]
       gpu-h100-sxm   = ["cuda13.0"]
       gpu-h200-sxm   = ["cuda13.0"]
       gpu-b200-sxm   = ["cuda13.0"]
-      gpu-b200-sxm-a = ["cuda12.8", "cuda13.0"]
+      gpu-b200-sxm-a = ["cuda13.0"]
       gpu-b300-sxm   = ["cuda13.0"]
       gpu-rtx6000    = ["cuda13.0"]
+      gpu-gb300      = ["cuda13.0"]
     }
   }
 
@@ -79,7 +70,7 @@ resource "terraform_data" "check_driver_presets" {
         toset(keys(var.platform_cuda_versions))
       )) == 0
       error_message = format(
-        "Missing CUDA version (12.X.Y form) for GPU platform(s): %s",
+        "Missing CUDA version (13.X.Y form) for GPU platform(s): %s",
         join(
           ", ",
           setsubtract(

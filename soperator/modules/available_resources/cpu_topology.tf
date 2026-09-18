@@ -155,6 +155,13 @@ locals {
       threads_per_core  = 2
       cpus              = 192
     }
+    g-4gpu-112vcpu-800gb = {
+      boards            = 1
+      sockets_per_board = 2
+      cores_per_socket  = 56
+      threads_per_core  = 1
+      cpus              = 112
+    }
   }
 
   cpu_topologies_by_platforms = tomap({
@@ -208,6 +215,10 @@ locals {
     (local.platforms.gpu-b300-sxm) = tomap({
       (local.presets.p-1g-24c-346g)   = local.cpu_topologies.g-1gpu-24vcpu-346gb
       (local.presets.p-8g-192c-2768g) = local.cpu_topologies.g-8gpu-192vcpu-2768gb
+    })
+
+    (local.platforms.gpu-gb300) = tomap({
+      (local.presets.p-4gpu-112vcpu-800g) = local.cpu_topologies.g-4gpu-112vcpu-800gb
     })
   })
 }
