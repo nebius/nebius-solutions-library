@@ -1,0 +1,46 @@
+# Optional queue policy example for topology-aware Nebius GPU workloads.
+# This file is not applied by the Kueue module.
+# It creates queue policy only; workloads opt in separately with a queue label
+# and a topology annotation on their Pod template.
+# The quotas below are deliberately conservative examples. Adjust them to the
+# allocatable capacity reserved for Kueue-managed workloads.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kueue-training
+  labels:
+    kueue.nebius.com/managed: "true"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: nebius-gpu
+spec:
+  namespaceSelector:
+    matchLabels:
+      kueue.nebius.com/managed: "true"
+  resourceGroups:
+    - coveredResources:
+        - cpu
+        - memory
+        - nvidia.com/gpu
+      flavors:
+        # Uses the first GPU node group's generated flavor. Change this to
+        # target another flavor listed by:
+        # terraform output -json kueue | jq -r '.resource_flavor_names[]'
+        - name: nebius-gpu-0
+          resources:
+            - name: cpu
+              nominalQuota: "1"
+            - name: memory
+              nominalQuota: 1Gi
+            - name: nvidia.com/gpu
+              nominalQuota: "1"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: training
+  namespace: kueue-training
+spec:
+  clusterQueue: nebius-gpu

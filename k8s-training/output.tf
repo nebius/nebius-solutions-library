@@ -39,6 +39,24 @@ output "filesystem_csi" {
   } : null
 }
 
+output "kueue" {
+  description = "Kueue installation and topology-aware scheduling details. Null when Kueue is disabled."
+  value = var.kueue.enabled ? {
+    release_name              = one(module.kueue).release_name
+    namespace                 = one(module.kueue).namespace
+    chart_version             = one(module.kueue).chart_version
+    status                    = one(module.kueue).status
+    topology_aware_scheduling = one(module.kueue).topology_aware_scheduling
+    topology_name             = one(module.kueue).topology_name
+    resource_flavor_names     = one(module.kueue).resource_flavor_names
+    controller_node_group_id  = nebius_mk8s_v1_node_group.cpu-only.id
+    gpu_node_group_ids = concat(
+      nebius_mk8s_v1_node_group.gpu[*].id,
+      [for node_group in values(nebius_mk8s_v1_node_group.gb300) : node_group.id],
+    )
+  } : null
+}
+
 output "gb300_racks" {
   description = "GB300 rack resources and the MK8s-managed IMEX mode. Empty when GB300 is disabled."
   value = {

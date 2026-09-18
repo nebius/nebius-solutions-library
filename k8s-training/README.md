@@ -286,6 +286,31 @@ removed after validation so Terraform destroys the binding on the next apply.
 This module does not manage Nebius IAM group membership, kubeconfig sharing, or
 private endpoint/bastion access.
 
+### Kueue Job queueing
+
+[Kueue](https://kueue.sigs.k8s.io/) provides Kubernetes-native Job queueing. It
+controls when Jobs may start, while Kubernetes continues to schedule their
+Pods.
+
+Kueue is disabled by default. Enable it in `terraform.tfvars`:
+
+```hcl
+kueue = {
+  enabled = true
+}
+```
+
+Terraform installs Kueue on the CPU node group, enables topology-aware
+scheduling, and creates a `ResourceFlavor` for each GPU node group.
+
+Queue quotas and namespace access remain configurable through Kueue
+`ClusterQueue` and `LocalQueue` resources. See the
+[Kueue module guide](../modules/kueue/README.md) and its editable
+[GPU queue-policy example](../modules/kueue/examples/topology-aware-gpu-queue.yaml)
+for the short setup workflow.
+
+Only Jobs labeled with `kueue.x-k8s.io/queue-name` are managed by Kueue.
+
 ## Connecting to the cluster
 
 ### Preparing the environment
