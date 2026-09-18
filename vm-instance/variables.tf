@@ -136,26 +136,3 @@ variable "preemptible" {
   type        = bool
   default     = false
 }
-
-variable "enable_local_disks" {
-  description = "Whether to request local NVMe passthrough disks"
-  type        = bool
-  default     = false
-
-  validation {
-    condition = (
-      !var.enable_local_disks ||
-      (
-        var.platform == "gpu-b300-sxm" &&
-        var.preset == "8gpu-192vcpu-2768gb"
-      )
-    )
-    error_message = "Local disks are supported only on B300 platform with preset 8gpu-192vcpu-2768gb."
-  }
-}
-
-variable "local_nvme_drives_path" {
-  description = "Mount path for local NVMe drives"
-  type        = string
-  default     = "/scratch"
-}

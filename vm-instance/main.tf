@@ -29,6 +29,4 @@ module "instance-module" {
   aws_access_key_id       = var.aws_access_key_id
   aws_secret_access_key   = var.aws_secret_access_key
   preemptible             = var.preemptible
-  enable_local_disks      = var.enable_local_disks
-  local_nvme_drives_path  = var.local_nvme_drives_path
 }

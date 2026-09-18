@@ -25,6 +25,5 @@ preemptible    = false
 
 shared_filesystem_id = ""
 mount_bucket         = ""
-enable_local_disks = false # Only B300 supportes local disk
 
 fabric = "fabric-n"

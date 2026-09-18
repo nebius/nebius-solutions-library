@@ -50,13 +50,6 @@ resource "nebius_compute_v1_instance" "instance" {
 
 
   gpu_cluster = var.gpu_cluster != "" ? { id = var.gpu_cluster } : {}
-  local_disks = var.enable_local_disks ? {
-    passthrough_group = {
-      requested = true
-    }
-  } : null
-
-
   secondary_disks = var.add_extra_storage ? [
     {
       attach_mode = "READ_WRITE"
@@ -87,12 +80,12 @@ resource "nebius_compute_v1_instance" "instance" {
     aws_secret_access_key   = var.aws_secret_access_key,
     mount_bucket            = var.mount_bucket,
     s3_mount_path           = var.s3_mount_path
-    enable_local_disks      = var.enable_local_disks
-    local_nvme_drives_path  = var.local_nvme_drives_path
   })
 }
 
 resource "local_file" "cloud_init_variables_log" {
   content  = local.cloud_init_log
   filename = "${path.module}/cloud-init-variables.log"
+
+
 }
