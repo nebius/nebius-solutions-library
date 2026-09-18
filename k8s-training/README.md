@@ -127,6 +127,20 @@ You can use Filestore to add external storage to K8s clusters, this allows you t
 
 For more information on how to access storage in K8s, refer [here](#accessing-storage).
 
+### Local NVMe ephemeral storage
+
+For the supported B300 platform (`gpu-b300-sxm`, preset `8gpu-192vcpu-2768gb`), enable local disks with:
+
+```hcl
+gpu_enable_local_disks = true
+```
+
+The GPU node template sets `local_disks.config.kubelet_ephemeral = true` and requests local disk passthrough. This corresponds to the CLI flags `--template-local-disks-config-kubelet-ephemeral` and `--template-local-disks-passthrough-group-requested` in the [Nebius node-group reference](https://docs.nebius.com/cli/reference/mk8s/node-group/create).
+
+MK8S combines the local disks into a volume for kubelet ephemeral storage. The shared Kubernetes cloud-init template contains no custom RAID creation, formatting, or mounting commands. The former `/scratch` mount is not created. The obsolete `local_nvme_drives_path` variable has been removed; remove it from existing tfvars files if present.
+
+Workloads can use disk-backed `emptyDir` volumes and specify `ephemeral-storage` requests and limits. This storage is temporary, not persistent application storage. Existing workloads using `/scratch` must be updated before rolling out this change. Review `terraform plan` for node replacement or rollout before applying; changing the template does not migrate existing data.
+
 ### Shared filesystem CSI automation
 
 When a shared filesystem is present, either because this stack created it or because `existing_filestore` was provided, Terraform can also install the Nebius Shared Filesystem CSI driver and promote its StorageClass to the cluster default.

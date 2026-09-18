@@ -2,35 +2,14 @@
 package_update: true
 package_upgrade: false
 
-%{ if gpu_enable_local_disks }
-packages:
-  - mdadm
-  - nvme-cli
-
-%{ endif }
 %{ if enable_filestore != "false" }
 mounts:
   - [ data, ${filestore_mount_path}, virtiofs, "defaults", 0, 2 ]
 
-%{ endif }
-%{ if enable_filestore != "false" || gpu_enable_local_disks }
 runcmd:
-%{ if enable_filestore != "false" }
   - [ modprobe, fuse ]
   - [ mkdir, "-p", ${filestore_mount_path} ]
   - [ mount, "-a" ]
-%{ endif }
-%{ if gpu_enable_local_disks }
-  - [ mdadm, --create, --force, --verbose, /dev/md0, --level=0, --raid-devices=6, /dev/nvme0n1, /dev/nvme1n1, /dev/nvme2n1, /dev/nvme3n1, /dev/nvme4n1, /dev/nvme5n1 ]
-  - [ mkfs.ext4, /dev/md0 ]
-  - [ mkdir, "-p", ${local_nvme_drives_path} ]
-  - [ mount, /dev/md0, ${local_nvme_drives_path} ]
-  - [ bash, -lc, 'echo "/dev/md0 ${local_nvme_drives_path} ext4 defaults,relatime,rw 0 0" >> /etc/fstab' ]
-  - [ chown, nobody:nogroup, ${local_nvme_drives_path} ]
-  - [ chmod, "777", ${local_nvme_drives_path} ]
-  - [ bash, -lc, "mdadm --detail --scan >> /etc/mdadm/mdadm.conf" ]
-  - [ update-initramfs, -u ]
-%{ endif }
 %{ endif }
 
 users:

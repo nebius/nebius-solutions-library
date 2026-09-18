@@ -51,15 +51,3 @@ variable "subnet_id" {
   description = "Subnet ID"
   type        = string
 }
-
-variable "gpu_enable_local_disks" {
-  description = "Whether to request local NVMe passthrough disks"
-  type        = bool
-  default     = false
-}
-
-variable "local_nvme_drives_path" {
-  description = "Mount path for local NVMe drives"
-  type        = string
-  default     = "/scratch"
-}

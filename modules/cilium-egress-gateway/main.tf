@@ -83,8 +83,6 @@ resource "nebius_mk8s_v1_node_group" "egress-gateway" {
       filestore_mount_path = "/mnt/data",
       ssh_user_name        = var.ssh_user_name,
       ssh_public_key       = var.ssh_public_key
-      gpu_enable_local_disks = false
-      local_nvme_drives_path = ""
     })
     network_interfaces = [
       {

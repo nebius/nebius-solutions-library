@@ -251,7 +251,7 @@ variable "mig_parted_config" {
 }
 
 variable "gpu_enable_local_disks" {
-  description = "Whether to request local NVMe passthrough disks"
+  description = "Whether to request local NVMe passthrough disks and use them as managed kubelet ephemeral storage"
   type        = bool
   default     = false
 
@@ -267,16 +267,6 @@ variable "gpu_enable_local_disks" {
   }
 }
 
-variable "local_nvme_drives_path" {
-  description = "Mount path for local NVMe drives"
-  type        = string
-  default     = "/scratch"
-
-  validation {
-    condition     = startswith(var.local_nvme_drives_path, "/")
-    error_message = "Local NVMe drives path must be an absolute path."
-  }
-}
 
 # Observability
 
