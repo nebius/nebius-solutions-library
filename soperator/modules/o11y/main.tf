@@ -28,7 +28,7 @@ unset NEBIUS_IAM_TOKEN
 if ! nebius profile list | grep -Fxq ${self.triggers_replace.o11y_profile}; then
   CURRENT_PROFILE=$(nebius profile current)
   # The o11y IAM tenant is managed through the EU control plane; log ingestion itself is region-specific.
-  nebius profile create --endpoint api.eu.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
+  nebius profile create --endpoint api.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
   nebius profile activate $CURRENT_PROFILE
 fi
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
