@@ -1,0 +1,28 @@
+{
+  "calls": [
+    {
+      "name": "qed",
+      "payload": {
+        "noise": "1",
+        "num_molecules": 1,
+        "scoring": "QED",
+        "smiles": "[*{20-30}]",
+        "step_size": 1,
+        "temperature": "1",
+        "unique": false
+      }
+    },
+    {
+      "name": "logp",
+      "payload": {
+        "noise": "1",
+        "num_molecules": 1,
+        "scoring": "LogP",
+        "smiles": "[*{12-18}]",
+        "step_size": 1,
+        "temperature": "0.9",
+        "unique": false
+      }
+    }
+  ]
+}

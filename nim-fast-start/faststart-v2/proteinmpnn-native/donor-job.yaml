@@ -1,0 +1,155 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proteinmpnn-native-f7-donor-r2
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: proteinmpnn
+    app.kubernetes.io/component: checkpoint-donor
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    nvidia.com/snapshot-checkpoint-id: proteinmpnn-native-f7-v1
+  annotations:
+    archvteams.nebius.ai/validator-sha256: 2e3c21af0987f4b9c7da2cef3f3e4d210a7b223049f231c24e871e2a553b48d3
+    archvteams.nebius.ai/fixture-sha256: 42511546f59eb92479149df1fad8d713ae00176b89316b07a83d04586905938e
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proteinmpnn
+        app.kubernetes.io/component: checkpoint-donor
+        app.kubernetes.io/part-of: archvteams-2407-faststart
+        nvidia.com/snapshot-is-checkpoint-source: "true"
+        nvidia.com/snapshot-checkpoint-id: proteinmpnn-native-f7-v1
+      annotations:
+        nvidia.com/snapshot-artifact-version: "1"
+        nvidia.com/snapshot-target-containers: proteinmpnn
+        nvidia.com/snapshot-storage-type: pvc
+        nvidia.com/snapshot-storage-base-path: /checkpoints
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: gpu-node-a.example.invalid
+      imagePullSecrets:
+        - name: nvcrio-cred
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      containers:
+        - name: proteinmpnn
+          image: nvcr.io/nim/ipd/proteinmpnn@sha256:b55a0aa6733e267e6e6fe06434e98aea61eff14bc5545127555607fef6f38aa5
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              printf '%s' "$VALIDATOR_SOURCE" > /tmp/validate_proteinmpnn.py
+              printf '%s' "$REQUEST_JSON" > /tmp/1ubq-request.json
+              unset VALIDATOR_SOURCE REQUEST_JSON
+
+              bash /opt/nim/start_server.sh &
+              server_pid=$!
+              trap 'kill "$server_pid" 2>/dev/null || true' TERM INT EXIT
+
+              python3 /tmp/validate_proteinmpnn.py \
+                --base-url http://127.0.0.1:8000 \
+                --request-file /tmp/1ubq-request.json \
+                --receipt-dir /tmp/native-f7-donor-semantic \
+                --run-id native-f7-donor-a \
+                --run-id native-f7-donor-b \
+                --ready-timeout 900 \
+                --timeout 300
+
+              touch /snapshot-control/ready-for-snapshot
+              wait "$server_pid"
+          env:
+            - name: DYN_SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: NIM_CACHE_PATH
+              value: /opt/nim/.cache
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-api-key
+                  key: NGC_API_KEY
+            - name: VALIDATOR_SOURCE
+              valueFrom:
+                configMapKeyRef:
+                  name: proteinmpnn-native-f7-validator-r2
+                  key: VALIDATOR_SOURCE
+            - name: REQUEST_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: proteinmpnn-native-f7-validator-r2
+                  key: REQUEST_JSON
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "8"
+              memory: 48Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "15"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            runAsGroup: 0
+          readinessProbe:
+            exec:
+              command:
+                - /bin/cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 1800
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: nim-cache
+              mountPath: /opt/nim/.cache
+            - name: workspace
+              mountPath: /opt/nim/workspace
+            - name: output
+              mountPath: /output
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: proteinmpnn
+            - name: checkpoints
+              mountPath: /checkpoints
+              readOnly: true
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: nim-cache
+          persistentVolumeClaim:
+            claimName: proteinmpnn-native-f7-cache
+        - name: workspace
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: output
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: snapshot-control
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: proteinmpnn-native-f7-artifacts
+            readOnly: true

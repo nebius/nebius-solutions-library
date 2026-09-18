@@ -1,0 +1,25 @@
+{
+  "request_id": "openfold3-h100-faststart",
+  "inputs": [
+    {
+      "input_id": "openfold3-h100-faststart",
+      "output_format": "cif",
+      "molecules": [
+        {
+          "type": "protein",
+          "id": "A",
+          "sequence": "ACDEFGHIKLMNPQRSTVWY",
+          "diffusion_samples": 1,
+          "msa": {
+            "main": {
+              "a3m": {
+                "alignment": ">query\nACDEFGHIKLMNPQRSTVWY",
+                "format": "a3m"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

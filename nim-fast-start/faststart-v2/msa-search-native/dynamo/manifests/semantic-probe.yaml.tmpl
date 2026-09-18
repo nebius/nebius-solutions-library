@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "@@PROBE_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: semantic-probe-config
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  annotations:
+    archvteams.nebius.ai/validator-sha256: "@@VALIDATOR_SHA256@@"
+    archvteams.nebius.ai/fixture-sha256: "@@FIXTURE_SHA256@@"
+    archvteams.nebius.ai/image-io-mode: "@@IMAGE_IO_MODE@@"
+immutable: true
+data:
+  validate_msa_search.py: |-
+    @@VALIDATOR_SOURCE@@
+  request-pdb70.json: |-
+    @@REQUEST_FIXTURE@@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "@@PROBE_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: msa-search
+    app.kubernetes.io/component: semantic-probe
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  annotations:
+    archvteams.nebius.ai/demand-at: "@@DEMAND_AT@@"
+    archvteams.nebius.ai/target-pod: "@@TARGET_NAME@@"
+    archvteams.nebius.ai/target-pod-uid: "@@TARGET_UID@@"
+    archvteams.nebius.ai/target-pod-spec-sha256: "@@TARGET_POD_SPEC_SHA256@@"
+    archvteams.nebius.ai/validator-sha256: "@@VALIDATOR_SHA256@@"
+    archvteams.nebius.ai/fixture-sha256: "@@FIXTURE_SHA256@@"
+    archvteams.nebius.ai/image-io-mode: "@@IMAGE_IO_MODE@@"
+spec:
+  backoffLimit: 0
+  completions: 1
+  completionMode: NonIndexed
+  parallelism: 1
+  activeDeadlineSeconds: 660
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msa-search
+        app.kubernetes.io/component: semantic-probe
+        archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+      annotations:
+        archvteams.nebius.ai/image-io-mode: "@@IMAGE_IO_MODE@@"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      hostPID: false
+      hostIPC: false
+      hostNetwork: false
+      terminationGracePeriodSeconds: 1
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "@@TARGET_NODE@@"
+      securityContext:
+        fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: stage-validator
+          image: "@@PROBE_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command:
+            - "@@PROBE_EXECUTABLE@@"
+          args:
+            - -c
+            - |-
+              import hashlib
+              import os
+              import pathlib
+              import stat
+
+              expected = {
+                  "validate_msa_search.py": "20e8951ceaaa1b81e8129d86b787c6bb009cf2e207d55829cf13f4fa9489188b",
+                  "request-pdb70.json": "874b0e5e3be9776ea289fb46444032e04b63875d9d4110f1560e5435de72686a",
+              }
+              source_root = pathlib.Path("/validator-source")
+              destination_root = pathlib.Path("/validator")
+              os.umask(0o077)
+              for name, digest in expected.items():
+                  data = (source_root / name).read_bytes()
+                  if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
+                      raise SystemExit(f"staged validator input digest mismatch: {name}")
+                  destination = destination_root / name
+                  descriptor = os.open(
+                      destination,
+                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                      0o600,
+                  )
+                  with os.fdopen(descriptor, "wb") as output:
+                      output.write(data)
+                      output.flush()
+                      os.fsync(output.fileno())
+                  mode = destination.lstat().st_mode
+                  if destination.is_symlink() or not stat.S_ISREG(mode):
+                      raise SystemExit(f"staged validator input is not regular: {name}")
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: validator-source
+              mountPath: /validator-source
+              readOnly: true
+            - name: validator
+              mountPath: /validator
+      containers:
+        - name: semantic-probe
+          image: "@@PROBE_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command:
+            - "@@PROBE_EXECUTABLE@@"
+          args:
+            - /validator/validate_msa_search.py
+            - --base-url
+            - "http://@@CANARY_SERVICE@@:8000"
+            - --request-file
+            - /validator/request-pdb70.json
+            - --receipt-dir
+            - /evidence/semantic
+            - --run-id
+            - "@@PROBE_RUN_ID_1@@"
+            - --run-id
+            - "@@PROBE_RUN_ID_2@@"
+            - --ready-timeout
+            - "300"
+            - --timeout
+            - "300"
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: validator
+              mountPath: /validator
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: validator-source
+          configMap:
+            name: "@@PROBE_NAME@@"
+            defaultMode: 0444
+        - name: validator
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: evidence
+          emptyDir:
+            sizeLimit: 40Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

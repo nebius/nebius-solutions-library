@@ -1,0 +1,786 @@
+{
+  "$id": "urn:nebius:faststart:usage-ledger:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempts": {
+      "items": {
+        "$ref": "#/$defs/attempt"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "ledger_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "pricing": {
+      "$ref": "#/$defs/pricing"
+    },
+    "resources": {
+      "items": {
+        "$ref": "#/$defs/resource"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "run": {
+      "$ref": "#/$defs/run"
+    },
+    "schema_version": {
+      "const": "faststart-usage-ledger/v1"
+    },
+    "source_receipts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "usage_summary": {
+      "items": {
+        "$ref": "#/$defs/usage_summary"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "ledger_id",
+    "source_receipts",
+    "run",
+    "attempts",
+    "resources",
+    "usage_summary",
+    "pricing"
+  ],
+  "title": "Fast-start resource usage ledger",
+  "type": "object",
+  "$defs": {
+    "attempt": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "SUCCEEDED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "call1_dispatched_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "call1_response_received_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "call2_dispatched_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "call2_response_received_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "failure": {
+                "type": "null"
+              },
+              "failure_at": {
+                "type": "null"
+              },
+              "http_ready_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "validation_completed_at": {
+                "$ref": "#/$defs/timestamp"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "FAILED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "call1_dispatched_at": {
+                "type": "null"
+              },
+              "call1_response_received_at": {
+                "type": "null"
+              },
+              "call2_dispatched_at": {
+                "type": "null"
+              },
+              "call2_response_received_at": {
+                "type": "null"
+              },
+              "failure": {
+                "$ref": "#/$defs/failure"
+              },
+              "failure_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "http_ready_at": {
+                "type": "null"
+              },
+              "validation_completed_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "call1_dispatched_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "call1_response_received_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "call2_dispatched_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "call2_response_received_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "derived_intervals": {
+          "items": {
+            "$ref": "#/$defs/derived_interval"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "failure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "http_ready_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED"
+          ]
+        },
+        "t0_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "validation_completed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "attempt_id",
+        "outcome",
+        "t0_at",
+        "http_ready_at",
+        "call1_dispatched_at",
+        "call1_response_received_at",
+        "call2_dispatched_at",
+        "call2_response_received_at",
+        "validation_completed_at",
+        "failure_at",
+        "failure",
+        "derived_intervals"
+      ],
+      "type": "object"
+    },
+    "cost": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/nullable_decimal"
+        },
+        "currency": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "effective_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_to": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "price_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "price_sku": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "price_status": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE",
+            null
+          ]
+        },
+        "price_usage_unit": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "INCOMPLETE"
+          ]
+        },
+        "unit_price": {
+          "$ref": "#/$defs/nullable_decimal"
+        }
+      },
+      "required": [
+        "status",
+        "price_id",
+        "price_status",
+        "price_sku",
+        "price_usage_unit",
+        "effective_from",
+        "effective_to",
+        "currency",
+        "unit_price",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "decimal": {
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+      "type": "string"
+    },
+    "positive_decimal": {
+      "pattern": "^(?:[1-9][0-9]*(?:\\.[0-9]+)?|0\\.[0-9]*[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "derived_interval": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "$ref": "#/$defs/decimal"
+        },
+        "end_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "name": {
+          "enum": [
+            "demand_to_http_ready",
+            "first_inference_call",
+            "second_inference_call",
+            "demand_to_second_response",
+            "validation_tail",
+            "failed_attempt"
+          ]
+        },
+        "start_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "name",
+        "start_at",
+        "end_at",
+        "duration_seconds"
+      ],
+      "type": "object"
+    },
+    "failure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "stage": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "code"
+      ],
+      "type": "object"
+    },
+    "interval": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "idle_retained"
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attempt_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "attempt_id": {
+                "minLength": 1,
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "cost": {
+          "$ref": "#/$defs/cost"
+        },
+        "duration_seconds": {
+          "$ref": "#/$defs/nullable_decimal"
+        },
+        "end_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interval_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "node_provision",
+            "pre_t0_setup",
+            "gpu_critical_path",
+            "cleanup",
+            "idle_retained",
+            "failed_attempt"
+          ]
+        },
+        "source_receipt_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "start_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "usage_quantity": {
+          "$ref": "#/$defs/nullable_decimal"
+        }
+      },
+      "required": [
+        "interval_id",
+        "attempt_id",
+        "phase",
+        "start_at",
+        "end_at",
+        "source_receipt_ids",
+        "duration_seconds",
+        "usage_quantity",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "nullable_decimal": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/decimal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullable_string": {
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pricing": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "reason_codes": {
+          "items": {
+            "enum": [
+              "PRICE_SNAPSHOT_NOT_JOINED",
+              "PRICE_UNAVAILABLE",
+              "OPEN_USAGE_INTERVAL"
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "snapshot_captured_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/nullable_string"
+        },
+        "snapshot_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "INCOMPLETE"
+          ]
+        },
+        "total_cost": {
+          "$ref": "#/$defs/nullable_decimal"
+        }
+      },
+      "required": [
+        "status",
+        "snapshot_id",
+        "snapshot_sha256",
+        "snapshot_captured_at",
+        "currency",
+        "total_cost",
+        "reason_codes"
+      ],
+      "type": "object"
+    },
+    "resource": {
+      "additionalProperties": false,
+      "properties": {
+        "applies_to_attempt_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "allocated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "intervals": {
+          "items": {
+            "$ref": "#/$defs/interval"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "quantity": {
+          "$ref": "#/$defs/positive_decimal"
+        },
+        "resource_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "resource_type": {
+          "enum": [
+            "node",
+            "gpu",
+            "cpu",
+            "memory",
+            "storage"
+          ]
+        },
+        "released_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "sku": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_receipt_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "usage_unit": {
+          "enum": [
+            "node-second",
+            "gpu-second",
+            "vcpu-second",
+            "memory-gibibyte-second",
+            "storage-gibibyte-second"
+          ]
+        }
+      },
+      "required": [
+        "resource_id",
+        "resource_type",
+        "sku",
+        "usage_unit",
+        "quantity",
+        "shared",
+        "applies_to_attempt_ids",
+        "allocated_at",
+        "released_at",
+        "source_receipt_ids",
+        "intervals"
+      ],
+      "type": "object"
+    },
+    "run": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "failed_attempt_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "measurement_class": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "model_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "observed_from": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "observed_until": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "successful_attempt_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "model_id",
+        "measurement_class",
+        "observed_from",
+        "observed_until",
+        "attempt_count",
+        "successful_attempt_count",
+        "failed_attempt_count"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$",
+      "type": "string"
+    },
+    "usage_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "closed_duration_seconds": {
+          "$ref": "#/$defs/decimal"
+        },
+        "closed_interval_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "closed_usage_quantity": {
+          "$ref": "#/$defs/decimal"
+        },
+        "open_interval_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "enum": [
+            "node_provision",
+            "pre_t0_setup",
+            "gpu_critical_path",
+            "cleanup",
+            "idle_retained",
+            "failed_attempt"
+          ]
+        },
+        "resource_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "resource_type": {
+          "enum": [
+            "node",
+            "gpu",
+            "cpu",
+            "memory",
+            "storage"
+          ]
+        },
+        "sku": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "usage_unit": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "resource_type",
+        "sku",
+        "usage_unit",
+        "resource_ids",
+        "closed_interval_count",
+        "open_interval_count",
+        "closed_duration_seconds",
+        "closed_usage_quantity"
+      ],
+      "type": "object"
+    }
+  }
+}

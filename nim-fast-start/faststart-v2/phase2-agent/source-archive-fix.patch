@@ -1,0 +1,17 @@
+diff --git a/container/compliance/collect_sources.py b/container/compliance/collect_sources.py
+index 8ae3ee1..fa1bd29 100644
+--- a/container/compliance/collect_sources.py
++++ b/container/compliance/collect_sources.py
+@@ -482,7 +482,11 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
+             continue
+         dest = output_dir / item.name
+         if item.is_dir():
+-            shutil.copytree(item, dest)
++            # Builder stages may leave generated relative symlinks in native
++            # source trees (CRIU does this under compel/include after make).
++            # Preserve those links as source metadata; following them can
++            # recurse indefinitely and makes the source-archive build fail.
++            shutil.copytree(item, dest, symlinks=True)
+         else:
+             shutil.copy2(item, dest)
+         copied += 1
