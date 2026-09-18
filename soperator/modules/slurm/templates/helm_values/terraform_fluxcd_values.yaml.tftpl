@@ -324,6 +324,7 @@ resources:
           releaseName: soperator
           overrideValues:
             clusterName: ${name}
+            workloadNamePrefix: disabled
             cudaVersion: ${slurm_cluster.cuda_version}
             maintenance: ${slurm_cluster.maintenance}
             plugStackConfig:
