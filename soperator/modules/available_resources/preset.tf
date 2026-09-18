@@ -49,7 +49,7 @@ locals {
       sufficient = {
         (module.labels.name_nodeset_system)     = false
         (module.labels.name_nodeset_controller) = true
-        (module.labels.name_nodeset_worker)     = false
+        (module.labels.name_nodeset_worker)     = true
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
