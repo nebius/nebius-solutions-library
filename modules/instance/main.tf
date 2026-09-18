@@ -4,7 +4,7 @@ resource "nebius_compute_v1_disk" "boot-disk" {
   block_size_bytes    = 4096
   size_bytes          = 1024 * 1024 * 1024 * var.boot_disk_size_gb
   type                = "NETWORK_SSD"
-  source_image_family = { image_family = "ubuntu24.04-cuda12" }
+  source_image_family = { image_family = var.boot_disk_image }
 }
 
 resource "nebius_compute_v1_disk" "extra-storage-disk" {
@@ -50,6 +50,13 @@ resource "nebius_compute_v1_instance" "instance" {
 
 
   gpu_cluster = var.gpu_cluster != "" ? { id = var.gpu_cluster } : {}
+  local_disks = var.enable_local_disks ? {
+    passthrough_group = {
+      requested = true
+    }
+  } : null
+
+
   secondary_disks = var.add_extra_storage ? [
     {
       attach_mode = "READ_WRITE"
@@ -80,12 +87,13 @@ resource "nebius_compute_v1_instance" "instance" {
     aws_secret_access_key   = var.aws_secret_access_key,
     mount_bucket            = var.mount_bucket,
     s3_mount_path           = var.s3_mount_path
+    enable_local_disks      = var.enable_local_disks
+    local_disks_mount_mode  = var.local_disks_mount_mode
+    local_nvme_drives_path  = var.local_nvme_drives_path
   })
 }
 
 resource "local_file" "cloud_init_variables_log" {
   content  = local.cloud_init_log
   filename = "${path.module}/cloud-init-variables.log"
-
-
 }
