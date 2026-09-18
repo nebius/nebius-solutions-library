@@ -36,6 +36,7 @@ cpu_nodes_preset   = "4vcpu-16gb" # CPU nodes preset
 # GPU platform and preset: https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
 gpu_nodes_platform = "gpu-h200-sxm"        # GPU nodes platform: gpu-h100-sxm, gpu-h200-sxm, gpu-b200-sxm
 gpu_nodes_preset   = "8gpu-128vcpu-1600gb" # GPU nodes preset: 8gpu-128vcpu-1600gb, 8gpu-128vcpu-1600gb, 8gpu-160vcpu-1792gb
+gpu_enable_local_disks = false # Only B300 supportes local disk
 # Infiniband fabrics: https://docs.nebius.com/compute/clusters/gpu#fabrics
 # New B300 region fabrics: eu-west2-a (eu-west2), us-north1-a (us-north1).
 infiniband_fabric = "" # Leave empty to disable GPU clustering for RTX6000 deployments or single-node deployments.

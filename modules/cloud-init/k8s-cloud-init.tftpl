@@ -1,3 +1,4 @@
+#cloud-config
 package_update: true
 package_upgrade: false
 
@@ -84,8 +85,8 @@ runcmd:
 %{ endif ~}
 
 users:
- - name: ${ssh_user_name}
-   sudo: ALL=(ALL) NOPASSWD:ALL
-   shell: /bin/bash
-   ssh_authorized_keys:
-    - ${ssh_public_key}
+  - name: ${ssh_user_name}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
