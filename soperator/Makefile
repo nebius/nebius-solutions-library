@@ -1,5 +1,5 @@
-SHELL = /usr/bin/env bash -o pipefail
-.SHELLFLAGS = -ec
+SHELL = /usr/bin/env bash -euo pipefail
+.SHELLFLAGS = -euc
 
 # Provider downloads flake on slow networks: the registry client gives up after
 # 10s / 2 attempts by default and `terraform init` fails on the checksum fetch.
@@ -80,10 +80,30 @@ terraform-test-modules:
 		fi; \
 	done
 
+.PHONY: terraform-test-installations
+terraform-test-installations:
+	@echo 'Running Terraform installation module tests...'
+	@for installation_dir in installations/*/; do \
+		if [ -d "$$installation_dir/tests" ]; then \
+			echo "Testing module: $$installation_dir"; \
+			cd "$$installation_dir"; \
+			TF_DATA_DIR=.terraform-test terraform init -upgrade -backend=false; \
+			TF_DATA_DIR=.terraform-test terraform test -compact-warnings -var-file ./tests/vars.hcl; \
+			cd - > /dev/null; \
+		fi; \
+	done
+
 .PHONY: terraform-test-cloud-init
 terraform-test-cloud-init:
 	python3 test/cloud-init/test_cloud_init.py
 
 .PHONY: terraform-check
-terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-cloud-init
+terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-installations terraform-test-cloud-init
 	@echo 'All Terraform checks passed successfully!'
+
+# markdownlint-cli2
+# https://github.com/DavidAnson/markdownlint-cli2
+.PHONY: mdlint
+mdlint:
+	@echo 'Running Markdown lint...'
+	markdownlint-cli2 README.md modules/weka/README.md test/README.md test/quickcheck/README.md; \

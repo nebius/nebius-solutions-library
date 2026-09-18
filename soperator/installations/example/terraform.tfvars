@@ -55,11 +55,13 @@ filestore_controller_spool = {
 # }
 
 # Shared filesystem to be used on controller, worker, and login nodes.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # Notice that auto-backups are enabled for filesystems with size less than 12 TiB.
 # If you need backups for jail larger than 12 TiB, set 'backups_enabled' to 'force_enable' down below.
 # ---
-# filestore_jail = {
+# filesystem_jail = {
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -67,21 +69,23 @@ filestore_controller_spool = {
 # }
 # Or use existing filestore.
 # ---
-filestore_jail = {
+filesystem_jail = {
   existing = {
     id = "computefilesystem-<YOUR-FILESTORE-ID>"
   }
 }
 
 # Additional shared filesystems to be mounted inside jail.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # If a big filesystem is needed it's better to deploy this additional storage because jails bigger than 12 TiB
 # ARE NOT BACKED UP by default.
 # Do not use "/home" here. That path is reserved for the home-directory NFS mount.
 # ---
-# filestore_jail_submounts = [{
+# filesystem_jail_submounts = [{
 #   name       = "data"
 #   mount_path = "/data"
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -89,7 +93,7 @@ filestore_jail = {
 # }]
 # Or use existing filestores.
 # ---
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "data"
   mount_path = "/data"
   existing = {
@@ -121,24 +125,28 @@ filestore_accounting = {
 # region nfs-server
 
 # nfs = {
-#   enabled        = false
-#   size_gibibytes = 3720
-#   mount_path     = "/home"
-#   resource = {
-#     platform = "cpu-d3"
-#     preset   = "32vcpu-128gb"
+#   enabled = false
+#   spec = {
+#     size_gibibytes = 3720
+#     mount_path     = "/home"
+#     resource = {
+#       platform = "cpu-d3"
+#       preset   = "32vcpu-128gb"
+#     }
+#     public_ip = false
 #   }
-#   public_ip = false
 # }
 
 nfs_in_k8s = {
-  enabled         = true
-  version         = "1.2.0"
-  use_stable_repo = true
-  size_gibibytes  = 3720
-  disk_type       = "NETWORK_SSD_IO_M3"
-  filesystem_type = "ext4"
-  threads         = 128 # to match preset in slurm_nodeset_nfs
+  enabled = true
+  spec = {
+    version         = "1.2.0"
+    use_stable_repo = true
+    size_gibibytes  = 3720
+    disk_type       = "NETWORK_SSD_IO_M3"
+    filesystem_type = "ext4"
+    threads         = 128 # to match preset in slurm_nodeset_nfs
+  }
 }
 
 # endregion nfs-server

@@ -150,14 +150,14 @@ locals {
       XS = "16vcpu-64gb"
       S  = "16vcpu-64gb"
       M  = "16vcpu-64gb"
-      L  = "16vcpu-64gb"
-      XL = "16vcpu-64gb"
+      L  = "32vcpu-128gb"
+      XL = "32vcpu-128gb"
     }
     accounting = {
       XS = "8vcpu-32gb"
       S  = "8vcpu-32gb"
-      M  = "8vcpu-32gb"
-      L  = "16vcpu-64gb"
+      M  = "16vcpu-64gb"
+      L  = "32vcpu-128gb"
       XL = "32vcpu-128gb"
     }
     nfs = {

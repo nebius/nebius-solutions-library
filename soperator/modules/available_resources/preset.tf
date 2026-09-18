@@ -38,6 +38,7 @@ locals {
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = false
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-4vcpu-16gb = {
@@ -52,6 +53,7 @@ locals {
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-8vcpu-32gb = {
@@ -66,6 +68,7 @@ locals {
         (module.labels.name_nodeset_login)      = false
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-16vcpu-64gb = {
@@ -80,6 +83,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     c-32vcpu-128gb = {
@@ -94,6 +98,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-48vcpu-192gb = {
@@ -108,6 +113,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-64vcpu-256gb = {
@@ -122,6 +128,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-80vcpu-320gb = {
@@ -136,6 +143,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-96vcpu-384gb = {
@@ -150,6 +158,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-128vcpu-512gb = {
@@ -164,6 +173,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-160vcpu-640gb = {
@@ -178,6 +188,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-192vcpu-768gb = {
@@ -192,6 +203,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-224vcpu-896gb = {
@@ -206,6 +218,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     c-256vcpu-1024gb = {
@@ -220,6 +233,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
   }
@@ -237,6 +251,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-128vcpu-1600gb = {
@@ -251,6 +266,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     g-1gpu-20vcpu-224gb = {
@@ -265,6 +281,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-160vcpu-1792gb = {
@@ -279,6 +296,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     g-1gpu-24vcpu-346gb = {
@@ -293,6 +311,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = false
       }
     }
     g-8gpu-192vcpu-2768gb = {
@@ -307,6 +326,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
+        weka                                    = true
       }
     }
     g-4gpu-112vcpu-800gb = {
@@ -321,6 +341,7 @@ locals {
         (module.labels.name_nodeset_login)      = true
         (module.labels.name_nodeset_accounting) = false
         (module.labels.name_nodeset_nfs)        = false
+        weka                                    = true
       }
     }
   }
