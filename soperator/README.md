@@ -311,6 +311,11 @@ filestore_jail_submounts = [{
 
 `forbid_deletion = true` prevents accidental provider-side deletion, but removing the retained filesystems from Terraform state is what allows `terraform destroy` to complete without trying to delete them.
 
+## Backup permissions
+
+Terraform creates a project group `${instance_name}-backup` with
+`storage.object-editor` and `storage.viewer` access to the backup bucket only.
+
 ## (Optional) Test Your Installation
 
 See the process of delivery and running of tests in [test](./test/README.md).
