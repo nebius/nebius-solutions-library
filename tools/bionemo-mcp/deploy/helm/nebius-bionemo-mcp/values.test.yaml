@@ -1,0 +1,46 @@
+image:
+  repository: nebius-bionemo-mcp
+  tag: test
+
+auth:
+  existingSecret: bionemo-mcp-auth
+
+objectStorage:
+  bucket: archvteams-2370-test
+  endpointUrl: https://storage.us-central1.nebius.cloud
+  existingSecret: bionemo-mcp-s3
+
+nimCatalog:
+  boltz2:
+    display_name: Boltz2
+    enabled: true
+    deployment_name: boltz2
+    pod_selector_labels:
+      app: boltz2
+    service_name: boltz2-svc
+    service_port: 8000
+    service_url: http://boltz2-svc.nims.svc.cluster.local:8000
+    image: nvcr.io/nim/mit/boltz2
+    version: "1.0.0"
+    lb_group: protein-apps
+    proxy_port: 8000
+    scaling_enabled: true
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: bionemo.example.com
+      paths:
+        - path: /mcp
+          pathType: Exact
+  tls:
+    - secretName: bionemo-example-tls
+      hosts:
+        - bionemo.example.com
+
+networkPolicy:
+  nimIsolation:
+    namespace: nims
+    namespaceLabels:
+      kubernetes.io/metadata.name: nims

@@ -1,0 +1,76 @@
+name: BioNeMo MCP
+
+on:
+  pull_request:
+    paths:
+      - tools/bionemo-mcp/**
+      - .github/workflows/bionemo-mcp.yml
+  push:
+    branches:
+      - main
+    paths:
+      - tools/bionemo-mcp/**
+      - .github/workflows/bionemo-mcp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/bionemo-mcp
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: 0.11.7
+          enable-cache: true
+          cache-dependency-glob: tools/bionemo-mcp/uv.lock
+
+      - name: Install Python and dependencies
+        run: uv sync --frozen --all-groups --python 3.11
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Test
+        run: uv run pytest --cov=nebius_bionemo_mcp --cov-report=term-missing
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.2.3
+
+      - name: Lint and render Helm chart
+        run: |
+          helm lint deploy/helm/nebius-bionemo-mcp \
+            --values deploy/helm/nebius-bionemo-mcp/values.test.yaml --strict
+          helm template test deploy/helm/nebius-bionemo-mcp \
+            --namespace bionemo \
+            --values deploy/helm/nebius-bionemo-mcp/values.test.yaml \
+            > /tmp/nebius-bionemo-mcp.yaml
+          grep -Fq 'nginx.ingress.kubernetes.io/proxy-buffering: "off"' /tmp/nebius-bionemo-mcp.yaml
+          grep -Fq 'nginx.ingress.kubernetes.io/proxy-request-buffering: "off"' /tmp/nebius-bionemo-mcp.yaml
+          grep -Fq 'nginx.ingress.kubernetes.io/proxy-read-timeout: "7200"' /tmp/nebius-bionemo-mcp.yaml
+          grep -Fq 'nginx.ingress.kubernetes.io/proxy-send-timeout: "7200"' /tmp/nebius-bionemo-mcp.yaml
+          grep -A1 -F 'name: BIONEMO_MAX_RESPONSE_BYTES' /tmp/nebius-bionemo-mcp.yaml \
+            | grep -Fq 'value: "134217728"'
+          grep -A2 -F 'name: test-nebius-bionemo-mcp-nim-ingress' /tmp/nebius-bionemo-mcp.yaml \
+            | grep -Fq 'namespace: nims'
+          grep -A5 -F 'namespaceSelector:' /tmp/nebius-bionemo-mcp.yaml \
+            | grep -Fq 'kubernetes.io/metadata.name: bionemo'
+          grep -A2 -F 'livenessProbe:' /tmp/nebius-bionemo-mcp.yaml \
+            | grep -Fq 'path: /livez'
+
+      - name: Build container
+        run: docker build --tag nebius-bionemo-mcp:test .

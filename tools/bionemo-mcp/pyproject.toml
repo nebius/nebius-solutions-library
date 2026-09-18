@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling==1.29.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nebius-bionemo-mcp"
+version = "0.1.0"
+description = "MCP gateway for a customer-owned BioNeMo NIM fleet on Nebius"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Nebius" }]
+dependencies = [
+  "boto3>=1.40,<2",
+  "httpx>=0.28,<1",
+  "mcp==2.0.0",
+  "pydantic-settings>=2.10,<3",
+]
+
+[project.scripts]
+nebius-bionemo-mcp = "nebius_bionemo_mcp.cli:main"
+nebius-bionemo-download = "nebius_bionemo_mcp.download:main"
+
+[dependency-groups]
+dev = [
+  "boto3-stubs[s3]>=1.40,<2",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nebius_bionemo_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "N", "S", "UP"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["nebius_bionemo_mcp"]

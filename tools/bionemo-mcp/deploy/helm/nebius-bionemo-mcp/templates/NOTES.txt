@@ -1,0 +1,12 @@
+The MCP Service is cluster-internal at:
+  http://{{ include "nebius-bionemo-mcp.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/mcp
+
+{{- if .Values.ingress.enabled }}
+The authenticated, TLS-protected endpoint is:
+  https://{{ (index .Values.ingress.hosts 0).host }}/mcp
+{{- else }}
+No external endpoint was created. Configure ingress.hosts and ingress.tls to expose only /mcp.
+{{- end }}
+
+Run the chart test after rollout:
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
