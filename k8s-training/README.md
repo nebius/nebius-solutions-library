@@ -165,8 +165,7 @@ from normal workloads through Kubernetes scheduling policy.
 
 IMEX configuration is owned by MK8s Node Infrastructure for driverfull GB300
 node groups. Before deploying, confirm the selected Node Infrastructure version
-includes managed GB300 IMEX support. Do not install the Omega PoC IMEX
-DaemonSet: MK8s writes `/etc/nvidia-imex/nodes_config.cfg` and manages
+includes managed GB300 IMEX support. MK8s writes `/etc/nvidia-imex/nodes_config.cfg` and manages
 `nvidia-imex.service`. DRA mode is intentionally not exposed by this template
 until MK8s provides a supported public selection path.
 
