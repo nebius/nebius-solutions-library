@@ -599,6 +599,7 @@ variable "platform_cuda_versions" {
     gpu-b200-sxm-a = "13.0.3"
     gpu-b300-sxm   = "13.0.3"
     gpu-rtx6000    = "13.0.3"
+    gpu-rtx6000-a  = "13.0.3"
     gpu-gb300      = "13.0.3"
   }
 }
@@ -618,6 +619,7 @@ variable "platform_driver_presets" {
     gpu-b200-sxm-a = "cuda13.0"
     gpu-b300-sxm   = "cuda13.0"
     gpu-rtx6000    = "cuda13.0"
+    gpu-rtx6000-a  = "cuda13.0"
     gpu-gb300      = "cuda13.0"
   }
 }
