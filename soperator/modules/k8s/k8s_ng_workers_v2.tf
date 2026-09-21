@@ -145,7 +145,7 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
     max_surge = {
       percent = 0
     }
-    drain_timeout = null
+    drain_timeout = var.node_group_workers_v2[count.index].drain_timeout
   }
 
   template = {

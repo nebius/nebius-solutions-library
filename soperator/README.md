@@ -94,6 +94,17 @@ You can offload storage creation to the Terraform script instead, but it will be
 
 ### 5. Configure Your Cluster
 
+Configure rollout separately for each entry in `slurm_nodeset_workers`:
+
+- `rolling_update_strategy`: `"slurmAwareRollingUpdate"` (default) coordinates worker updates and Kubernetes node drains
+  with Slurm; `"rollingUpdate"` uses ordinary rolling updates. The Slurm-aware strategy requires a Soperator version
+  whose NodeSet CRD and chart support it.
+- `drain_timeout`: `"0s"` (default) waits indefinitely for graceful eviction of Kubernetes worker pods. Use a duration
+  such as `"30m"` or `"2h"` to allow forced pod deletion after that time.
+
+Every generated Slurm NodeSet and Kubernetes worker node group inherits the corresponding setting from its source
+nodeset, including GB300 rack splits. Other Kubernetes node groups do not use this drain timeout.
+
 Edit `terraform.tfvars` with your requirements:
 
 ```hcl
@@ -122,6 +133,8 @@ filestore_jail = {
 
 # Configuration of Slurm Worker node sets.
 slurm_nodeset_workers = [{
+  rolling_update_strategy = "slurmAwareRollingUpdate"
+  drain_timeout           = "0s"
   size                    = <TOTAL_NODES_NUMBER> # Recommended value for soperator development is 2.
   max_unavailable_percent = 50
   resource = {
