@@ -339,14 +339,14 @@ resource "helm_release" "soperator_fluxcd_bootstrap" {
   ]
 
   name       = "soperator-fluxcd-bootstrap"
-  repository = var.operator_stable ? "oci://cr.nebius.cloud/soperator" : "oci://cr.nebius.cloud/soperator-unstable"
+  repository = var.operator_stable ? "oci://cr.eu-north1.nebius.cloud/soperator" : "oci://cr.eu-north1.nebius.cloud/soperator-unstable"
   chart      = "helm-soperator-fluxcd-bootstrap"
   version    = var.operator_version
   namespace  = var.flux_namespace
 
   set {
     name  = "helmRepository.url"
-    value = var.operator_stable ? "oci://cr.nebius.cloud/soperator" : "oci://cr.nebius.cloud/soperator-unstable"
+    value = var.operator_stable ? "oci://cr.eu-north1.nebius.cloud/soperator" : "oci://cr.eu-north1.nebius.cloud/soperator-unstable"
   }
 }
 

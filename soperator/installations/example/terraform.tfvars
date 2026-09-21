@@ -573,10 +573,6 @@ soperator_notifier = {
 
 public_o11y_enabled = true
 
-# Existing public o11y logs projects are not moved between regions unless this is explicitly enabled.
-# ---
-# allow_o11y_region_migration = true
-
 # endregion Telemetry
 
 #----------------------------------------------------------------------------------------------------------------------#

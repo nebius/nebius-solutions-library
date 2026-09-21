@@ -370,13 +370,11 @@ module "o11y" {
 
   source = "../../modules/o11y"
 
-  iam_project_id              = var.iam_project_id
-  o11y_iam_tenant_id          = var.o11y_iam_tenant_id
-  o11y_profile                = var.o11y_profile
-  region                      = var.region
-  allow_o11y_region_migration = var.allow_o11y_region_migration
-  k8s_cluster_context         = module.k8s.cluster_context
-  company_name                = var.company_name
+  iam_project_id      = var.iam_project_id
+  o11y_iam_tenant_id  = var.o11y_iam_tenant_id
+  o11y_profile        = var.o11y_profile
+  k8s_cluster_context = module.k8s.cluster_context
+  company_name        = var.company_name
 }
 
 module "slurm" {

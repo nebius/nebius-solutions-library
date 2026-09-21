@@ -5,11 +5,11 @@ locals {
   }
   helm = {
     repository = {
-      slurm        = "oci://cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-      slurm_stable = "oci://cr.nebius.cloud/soperator"
+      slurm        = "oci://cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+      slurm_stable = "oci://cr.eu-north1.nebius.cloud/soperator"
       mariadb      = "https://helm.mariadb.com/mariadb-operator"
       raw          = "https://bedag.github.io/helm-charts/"
-      spo          = "oci://cr.nebius.cloud/soperator"
+      spo          = "oci://cr.eu-north1.nebius.cloud/e00xdc03sb7gpqfd0a"
     }
 
     chart = {
@@ -36,8 +36,8 @@ locals {
   }
 
   image = {
-    repository        = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-    repository_stable = "cr.nebius.cloud/soperator"
+    repository        = "cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+    repository_stable = "cr.eu-north1.nebius.cloud/soperator"
     tag               = var.operator_version
   }
 

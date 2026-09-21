@@ -525,7 +525,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.nebius.cloud/soperator/busybox
+                    image: cr.eu-north1.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                 %{~ endif ~}
@@ -545,7 +545,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.nebius.cloud/soperator/busybox
+                    image: cr.eu-north1.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                 volumes:
@@ -592,12 +592,12 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.nebius.cloud/soperator/busybox
+                    image: cr.eu-north1.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ if tailscale_enabled ~}
                   - name: tailscale
-                    image: cr.nebius.cloud/soperator/tailscale:latest # v1.88.4
+                    image: cr.eu-north1.nebius.cloud/soperator/tailscale:latest # v1.88.4
                     imagePullPolicy: Always
                     restartPolicy: Always
                     securityContext:
@@ -622,7 +622,7 @@ resources:
                   %{~ endif ~}
                   %{~ for sub_mount in slurm_cluster.jail_submounts ~}
                   - name: ensure-jail-submount-${sub_mount.name}-virtiofs
-                    image: cr.nebius.cloud/soperator/busybox
+                    image: cr.eu-north1.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ endfor ~}
@@ -676,7 +676,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.rest.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.nebius.cloud/soperator/busybox
+                    image: cr.eu-north1.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
 
@@ -821,11 +821,11 @@ resources:
             overrideValues:
               manager:
                 image:
-                  repository: cr.nebius.cloud/soperator/kruise-manager
+                  repository: cr.eu-north1.nebius.cloud/soperator/kruise-manager
                   tag: v1.8.3
               helmHooks:
                 image:
-                  repository: cr.nebius.cloud/soperator/kruise-helm-hook
+                  repository: cr.eu-north1.nebius.cloud/soperator/kruise-helm-hook
                   tag: v0.1.0
           soperatorChecks:
             enabled: true

@@ -9,9 +9,6 @@ resource "terraform_data" "o11y_static_key_secret" {
     o11y_profile                     = var.o11y_profile
     iam_project_id                   = var.iam_project_id
     company_name                     = var.company_name
-    # If region changes, recreate the secret and rerun the script: project region
-    # is set on the create call and verified on subsequent applies.
-    region = var.region
   }
 
   provisioner "local-exec" {
@@ -27,15 +24,14 @@ unset NEBIUS_IAM_TOKEN
 # Ensuring that profile exists
 if ! nebius profile list | grep -Fxq ${self.triggers_replace.o11y_profile}; then
   CURRENT_PROFILE=$(nebius profile current)
-  # The o11y IAM tenant is managed through the EU control plane; log ingestion itself is region-specific.
-  nebius profile create --endpoint api.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
+  nebius profile create --endpoint api.eu.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
   nebius profile activate $CURRENT_PROFILE
 fi
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
 
 # Creating new project for cluster logs
-echo "Creating new project for cluster logs in ${self.triggers_replace.region}..."
-nebius iam project create --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --region ${self.triggers_replace.region} --labels original-project-id=${self.triggers_replace.iam_project_id},company-name=${self.triggers_replace.company_name} || true
+echo "Creating new project for cluster logs..."
+nebius iam project create --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --labels original-project-id=${self.triggers_replace.iam_project_id},company-name=${self.triggers_replace.company_name} || true
 output=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --format json)
 status=$?
 if [ $status -ne 0 ]; then
@@ -45,16 +41,6 @@ fi
 
 PROJECT_ID=$(echo "$output" | jq -r .metadata.id)
 echo "Project for logs $PROJECT_ID"
-
-PROJECT_REGION=$(echo "$output" | jq -r '.spec.region // ""')
-if [ "$PROJECT_REGION" != "${self.triggers_replace.region}" ]; then
-  if [ "${var.allow_o11y_region_migration}" = "true" ]; then
-    echo "Updating project region from '$PROJECT_REGION' to '${self.triggers_replace.region}'..."
-    nebius iam project update --id "$PROJECT_ID" --region ${self.triggers_replace.region}
-  else
-    echo "Existing o11y logs project $PROJECT_ID is in region '$PROJECT_REGION', expected '${self.triggers_replace.region}'. Set allow_o11y_region_migration=true to update it explicitly."
-  fi
-fi
 
 # Creating group, service account, group-membership and access-permit.
 echo "Creating service account..."
@@ -182,14 +168,12 @@ resource "terraform_data" "opentelemetry_collector_cm" {
   ]
 
   triggers_replace = {
-    k8s_cluster_context  = var.k8s_cluster_context
-    o11y_resources_name  = local.o11y_resources_name
-    o11y_iam_tenant_id   = var.o11y_iam_tenant_id
-    o11y_profile         = var.o11y_profile
-    configmap_name       = var.opentelemetry_collector_cm
-    iam_project_id       = var.iam_project_id
-    region               = var.region
-    logs_public_endpoint = local.logs_public_endpoint
+    k8s_cluster_context = var.k8s_cluster_context
+    o11y_resources_name = local.o11y_resources_name
+    o11y_iam_tenant_id  = var.o11y_iam_tenant_id
+    o11y_profile        = var.o11y_profile
+    configmap_name      = var.opentelemetry_collector_cm
+    iam_project_id      = var.iam_project_id
   }
 
   provisioner "local-exec" {
@@ -220,9 +204,6 @@ data:
     observability:
       logsProjectId: $PROJECT_ID
       metricsProjectId: ${self.triggers_replace.iam_project_id}
-      region: ${self.triggers_replace.region}
-      opentelemetry:
-        publicEndpoint: ${self.triggers_replace.logs_public_endpoint}
     soperatorActiveChecks:
       overrideValues:
         checks:
