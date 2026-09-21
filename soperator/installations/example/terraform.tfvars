@@ -325,6 +325,12 @@ slurm_nodeset_workers = [
   {
     name = "worker"
     size = 128
+    # Worker pod update strategy for this nodeset: slurmAwareRollingUpdate (default) or rollingUpdate.
+    # slurmAwareRollingUpdate requires a Soperator version whose chart and CRD support it.
+    rolling_update_strategy = "slurmAwareRollingUpdate"
+    # Graceful drain timeout for every Kubernetes worker node group generated from this nodeset.
+    # 0s means unlimited waiting (default); use e.g. 30m or 2h for a finite timeout.
+    drain_timeout = "0s"
     # Autoscaling configuration. Set enabled = false to use fixed node count instead.
     autoscaling = {
       enabled = true

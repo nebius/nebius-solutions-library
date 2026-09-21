@@ -110,7 +110,7 @@ variable "node_group_workers" {
     size                    = number
     max_unavailable_percent = number
     max_surge_percent       = optional(number)
-    drain_timeout           = optional(string)
+    drain_timeout           = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string
@@ -139,6 +139,7 @@ variable "node_group_workers_v2" {
     min_size        = number
     max_size        = number
     autoscaling     = bool
+    drain_timeout   = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string

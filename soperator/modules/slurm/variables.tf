@@ -917,6 +917,7 @@ variable "worker_nodesets" {
     platform                       = string
     replicas                       = number
     max_unavailable                = string
+    rolling_update_strategy        = optional(string, "slurmAwareRollingUpdate")
     rack_number                    = optional(number)
     nvl_instance_group_id          = optional(string)
     features                       = list(string)
@@ -960,6 +961,14 @@ variable "worker_nodesets" {
     }))
   }))
   default = []
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
+      contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
+    ])
+    error_message = "worker_nodesets.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
 
   validation {
     condition = alltrue([

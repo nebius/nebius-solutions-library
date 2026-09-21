@@ -929,8 +929,11 @@ variable "slurm_nodeset_controller" {
 variable "slurm_nodeset_workers" {
   description = "Configuration of Slurm Worker node sets."
   type = list(object({
-    name = string
-    size = number
+    name                    = string
+    size                    = number
+    rolling_update_strategy = optional(string, "slurmAwareRollingUpdate")
+    # Applies to every Kubernetes worker node group generated from this nodeset; 0s means unlimited waiting.
+    drain_timeout = optional(string, "0s")
     autoscaling = optional(object({
       enabled  = optional(bool, true)
       min_size = optional(number, 0)
@@ -1011,6 +1014,14 @@ variable "slurm_nodeset_workers" {
     }
     node_local_jail_submounts = []
   }]
+
+  validation {
+    condition = alltrue([
+      for worker in var.slurm_nodeset_workers :
+      contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
+    ])
+    error_message = "slurm_nodeset_workers.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
 
   validation {
     condition = alltrue([

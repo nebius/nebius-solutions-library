@@ -17,6 +17,7 @@ nodesets:
 
         replicas: ${nodeset.replicas}
         maxUnavailable: ${nodeset.max_unavailable}
+        updateStrategy: ${nodeset.rolling_update_strategy}
         %{~ if nodeset.ephemeral_nodes ~}
         ephemeralNodes: true
         initialNumberEphemeralNodes: ${nodeset.initial_number_ephemeral_nodes}

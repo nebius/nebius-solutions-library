@@ -169,7 +169,7 @@ locals {
       size                    = min(nodeset.nodes_per_nodegroup, nodeset.size - subset * nodeset.nodes_per_nodegroup)
       max_unavailable_percent = 50
       max_surge_percent       = null
-      drain_timeout           = null
+      drain_timeout           = nodeset.drain_timeout
       resource                = nodeset.resource
       boot_disk               = nodeset.boot_disk
       gpu_cluster             = nodeset.gpu_cluster
@@ -199,6 +199,7 @@ locals {
       )
       max_size               = nodeset.resource.platform == local.gb300_platform ? nodeset.size : max(1, min(nodeset.nodes_per_nodegroup, nodeset.size - subset * nodeset.nodes_per_nodegroup))
       autoscaling            = nodeset.resource.platform == local.gb300_platform ? false : nodeset.autoscaling.enabled
+      drain_timeout          = nodeset.drain_timeout
       resource               = nodeset.resource
       boot_disk              = nodeset.boot_disk
       gpu_cluster            = nodeset.gpu_cluster
@@ -681,12 +682,13 @@ module "slurm" {
     config       = partition.config
   }]
   worker_nodesets = [for nodeset in local.slurm_nodeset_workers : {
-    name                  = nodeset.name
-    platform              = nodeset.resource.platform
-    replicas              = nodeset.size
-    max_unavailable       = "20%"
-    rack_number           = try(nodeset.rack_number, null)
-    nvl_instance_group_id = try(nebius_compute_v1_nvl_instance_group.worker[nodeset.name].id, null)
+    name                    = nodeset.name
+    platform                = nodeset.resource.platform
+    replicas                = nodeset.size
+    max_unavailable         = "20%"
+    rolling_update_strategy = nodeset.rolling_update_strategy
+    rack_number             = try(nodeset.rack_number, null)
+    nvl_instance_group_id   = try(nebius_compute_v1_nvl_instance_group.worker[nodeset.name].id, null)
     features = concat(
       [
         provider::string-functions::snake_case(nodeset.resource.platform),
