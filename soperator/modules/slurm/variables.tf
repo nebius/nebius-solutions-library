@@ -236,6 +236,11 @@ resource "terraform_data" "check_worker_nodesets" {
     }
 
     precondition {
+      condition     = alltrue([for memory in local.worker_memory : memory > 0])
+      error_message = "Worker capacity must leave positive Slurmd memory after sidecar and agent reservations."
+    }
+
+    precondition {
       condition = alltrue([
         for i, nodeset in var.worker_nodesets :
         !try(nodeset.local_nvme.enabled, false) ||

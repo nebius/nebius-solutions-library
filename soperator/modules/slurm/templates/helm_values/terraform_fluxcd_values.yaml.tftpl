@@ -977,12 +977,13 @@ resources:
             interval: 5m
             timeout: 5m
             values:
-              resources:
-                requests:
-                  memory: ${resources.node_configurator.requests.memory}Gi
-                  cpu: ${resources.node_configurator.requests.cpu * 1000}m
-                limits:
-                  memory: ${resources.node_configurator.limits.memory}Gi
+              rebooter:
+                resources:
+                  requests:
+                    memory: ${resources.node_configurator.requests.memory}Gi
+                    cpu: ${resources.node_configurator.requests.cpu * 1000}m
+                  limits:
+                    memory: ${resources.node_configurator.limits.memory}Gi
 
         notifier:
           enabled: ${notifier.enabled}

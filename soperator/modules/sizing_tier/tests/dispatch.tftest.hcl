@@ -219,8 +219,8 @@ run "constants_do_not_scale_with_tier" {
     error_message = "logs_collector must stay constant at XL"
   }
   assert {
-    condition     = output.preset.jail_logs_collector.memory == "256Mi" && output.preset.jail_logs_collector.cpu == "200m"
-    error_message = "jail_logs_collector must stay constant at XL (per-worker agent, load bounded by its own node)"
+    condition     = output.preset.jail_logs_collector.memory == "512Mi" && output.preset.jail_logs_collector.cpu == "200m"
+    error_message = "jail_logs_collector must keep the shared 512Mi memory and 200m CPU preset at XL"
   }
   assert {
     condition     = output.preset.node_configurator.requests.cpu == 0.5 && output.preset.node_configurator.requests.memory == 0.25 && output.preset.node_configurator.limits.memory == 0.25

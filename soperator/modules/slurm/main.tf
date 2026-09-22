@@ -237,11 +237,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
               -local.resources.munge.cpu
               -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
             ) - local.resources.kruise_daemon.cpu
-            memory = floor(
-              var.node_capacity.worker[0].memory_gibibytes
-              -local.resources.munge.memory
-              -(var.sssd_enabled ? local.resources.sssd.memory : 0)
-            ) - local.resources.kruise_daemon.memory
+            memory = local.worker_memory[0]
             ephemeral_storage = floor(
               var.node_capacity.worker[0].ephemeral_storage_gibibytes
               -local.resources.munge.ephemeral_storage
