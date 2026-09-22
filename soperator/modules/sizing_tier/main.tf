@@ -208,7 +208,7 @@ locals {
     # Per-worker DaemonSet reading Slurm workload outputs from its own node's boot disk;
     # its load is bounded by one node's log volume, not by the cluster size. Runs on worker
     # nodes only, so it is not part of the system-node capacity guard below.
-    jail_logs_collector = { memory = "256Mi", cpu = "200m" }
+    jail_logs_collector = { memory = "512Mi", cpu = "200m" }
     # Runs on: every node (DaemonSet). The rebooter no longer holds cluster-sized state
     # (its cache is restricted to the pod's own node with a server-side field selector),
     # so its footprint does not depend on the cluster size.

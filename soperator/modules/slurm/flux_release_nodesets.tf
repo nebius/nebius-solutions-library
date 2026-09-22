@@ -18,11 +18,7 @@ resource "local_file" "flux_release_rendered_nodesets" {
         -local.resources.munge.cpu
         -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
       ) - local.resources.kruise_daemon.cpu
-      memory_gibibytes = floor(
-        res.memory_gibibytes
-        -local.resources.munge.memory
-        -(var.sssd_enabled ? local.resources.sssd.memory : 0)
-      ) - local.resources.kruise_daemon.memory
+      memory_gibibytes = local.worker_memory[i]
       ephemeral_storage_gibibytes = (
         try(var.worker_nodesets[i].local_nvme.enabled, false) &&
         try(var.worker_nodesets[i].local_nvme.size_limit_gibibytes, null) != null
