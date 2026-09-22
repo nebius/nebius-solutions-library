@@ -175,6 +175,15 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       priority      = 3
     } : null
 
+    local_disks = var.gpu_enable_local_disks ? {
+      config = {
+        kubelet_ephemeral = true
+      }
+      passthrough_group = {
+        requested = true
+      }
+    } : null
+
     underlay_required = false
     cloud_init_user_data = templatefile("${path.module}/../modules/cloud-init/k8s-cloud-init.tftpl", {
       enable_filestore         = var.enable_filestore ? "true" : "false",
