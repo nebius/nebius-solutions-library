@@ -44,6 +44,10 @@ Installs the Anyscale operator on Nebius AI Cloud and offers integration with An
 
 Offers seamless integration with SkyPilot, simplifying the process of launching and managing distributed AI workloads on powerful GPU instances.
 
+[Skypilot multi-region on Nebius Managed Kubernetes](./skypilot/multiregion/README.md)
+
+Provision two Nebius Managed Kubernetes clusters in different regions and use SkyPilot to run training in one region and serving in another.
+
 ## Prerequisites
 
 These solutions are built for Nebius AI Cloud, for more information please check our [website](https://nebius.ai/).

@@ -1,0 +1,39 @@
+service:
+  ports: 8000
+  readiness_probe:
+    path: /health
+    initial_delay_seconds: 600
+  replicas: 1
+
+resources:
+  cloud: kubernetes
+  accelerators: H200:8
+  cpus: 16+
+  memory: 120+
+  ports: 8000
+
+envs:
+  MODEL_ID: meta-llama/Llama-2-7b-hf
+  TENSOR_PARALLEL_SIZE: 1
+  MAX_MODEL_LEN: 4096
+
+
+setup: |
+  set -euo pipefail
+  python -m pip install --upgrade pip
+  python -m pip install vllm
+
+run: |
+  set -euo pipefail
+  if [ -z "${HF_TOKEN:-}" ]; then
+    echo "HF_TOKEN is required for gated Llama models."
+    exit 1
+  fi
+  export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+  python -m vllm.entrypoints.openai.api_server \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --model "${MODEL_ID}" \
+    --dtype bfloat16 \
+    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+    --max-model-len "${MAX_MODEL_LEN}"

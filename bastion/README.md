@@ -11,6 +11,8 @@ Also installed on the host:
 - kubectl and configured to connect to first mk8s cluster available in project by --internal flag
   (scanned by: `nebius mk8s v1 cluster list`)
 
+The solution creates a managed Nebius security group by default. The security group allows SSH and WireGuard UDP access only from the configured CIDR blocks; when no SSH CIDRs are provided, no managed inbound SSH or WireGuard rule is created. The WireGuard UI port is not exposed unless `bastion_allowed_wireguard_ui_cidrs` is set. Outbound traffic is unrestricted by default for package installation, Nebius APIs, and container/object storage access; set `bastion_egress_cidrs = []` to create no default egress rule.
+
 ## How to connect over bastion
 
 ### Edit your local ssh config
@@ -99,6 +101,48 @@ Update the following variables in the `terraform.tfvars` file with your own valu
 
 - `ssh_user_name`
 - `ssh_public_key`
+- `bastion_allowed_ssh_cidrs` if you want the managed security group to allow SSH access
+
+Security group variables:
+
+- `enable_bastion_security_group`: Create and attach the managed security group. Defaults to `true`.
+- `bastion_allowed_ssh_cidrs`: CIDRs allowed to access SSH on TCP 22. When unset or empty, no managed SSH ingress rule is created.
+- `bastion_allowed_wireguard_cidrs`: CIDRs allowed to access WireGuard on UDP 51820. Defaults to `bastion_allowed_ssh_cidrs`; set to `[]` to create no managed WireGuard ingress rule.
+- `bastion_allowed_wireguard_ui_cidrs`: CIDRs allowed to access the WireGuard UI on TCP 5000. Defaults to no public UI access. Set this explicitly only for trusted admin CIDRs.
+- `bastion_allow_unrestricted_ingress_rules`: Set to `true` only when intentionally allowing ingress rules from `0.0.0.0/0` or an empty source.
+- `bastion_security_group_name`: Name of the managed bastion security group. Override this when deploying multiple bastion instances in one project; the default keeps the existing single-bastion naming pattern.
+- `bastion_egress_cidrs`: CIDRs the bastion can reach. Defaults to `["0.0.0.0/0"]`. Set to `[]` to create no default egress rule; add explicit `bastion_extra_egress_rules` for stricter deployments.
+- `bastion_extra_security_group_ids`: Existing security group IDs to attach in addition to the managed security group.
+- `bastion_extra_ingress_rules`: Additional managed ingress rules merged with the SSH, WireGuard, and optional WireGuard UI defaults.
+- `bastion_extra_egress_rules`: Additional managed egress rules merged with the default egress rule when `bastion_egress_cidrs` is not empty.
+
+When `enable_bastion_security_group = true` and no SSH CIDRs are configured, Terraform emits a check warning and `bastion_security_group_access_note` to make the locked-down access posture visible in the plan and outputs.
+
+Example:
+
+```hcl
+bastion_allowed_ssh_cidrs = ["203.0.113.10/32"]
+
+# Optional: expose WireGuard UI only to trusted admin CIDRs.
+bastion_allowed_wireguard_ui_cidrs = ["203.0.113.10/32"]
+```
+
+For a stricter egress posture, disable the default egress rule and add only the explicit destinations your deployment needs:
+
+```hcl
+bastion_egress_cidrs = []
+```
+
+Without egress, first boot may fail to install packages or reach Nebius APIs unless equivalent access is provided through extra egress rules or another attached security group.
+
+For a quick test from a dynamic source IP, you can temporarily use unrestricted ingress:
+
+```hcl
+bastion_allowed_ssh_cidrs          = ["0.0.0.0/0"]
+bastion_allow_unrestricted_ingress_rules = true
+```
+
+Do not use unrestricted ingress for a durable deployment.
 
 ## Creating and using a public IP allocation
 
@@ -110,7 +154,7 @@ This step allows you to retain the IP address even if the VM is deleted. If you 
    --parent-id <project-id> --name wireguard_allocation_pub \
    --format json | jq -r '.metadata.id'
    ```
-2. Assign the value from the previous step to the `public_ip_allocation_id` variable in [variables.tf](./variables.tf):
+2. Assign the value from the previous step to the `public_ip_allocation_id` variable in `terraform.tfvars`:
 
 ```bash
 public_ip_allocation_id = <public_ip_allocation_id>
@@ -132,6 +176,8 @@ public_ip_allocation_id = <public_ip_allocation_id>
    ```
    http://<instance_public_ip>:5000
    ```
+
+   The managed security group allows this only when `bastion_allowed_wireguard_ui_cidrs` is set. If the variable is unset or empty, the UI service may be running on the VM, but TCP 5000 is not opened by the managed security group.
 
 4. Log in with the following credentials:
    - **Username:** `admin`

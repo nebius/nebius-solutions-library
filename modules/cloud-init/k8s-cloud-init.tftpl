@@ -1,16 +1,87 @@
 package_update: true
 package_upgrade: false
 
-%{ if enable_filestore != "false" }
-mounts:
-- [ data, ${filestore_mount_path}, virtiofs, "defaults", 0, 2 ]
+%{ if kubelet_numa_config != null ~}
+packages:
+  - python3-yaml
 
+write_files:
+  - path: /etc/systemd/system/kubelet.service.d/config-patch.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStartPre=/usr/local/bin/patch-kubelet-config.sh
+
+  - path: /usr/local/bin/patch-kubelet-config.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      CONFIG=/etc/kubernetes/kubelet/config.yaml
+      BACKUP=/etc/kubernetes/kubelet/config.yaml.pre-cloud-init.$(date +%s)
+      CPU_STATE=/var/lib/kubelet/cpu_manager_state
+      MEMORY_STATE=/var/lib/kubelet/memory_manager_state
+
+      cp "$CONFIG" "$BACKUP"
+
+      PATCH_YAML=$(cat <<'EOF'
+      ${indent(6, kubelet_numa_config_yaml)}
+      EOF
+      )
+
+      export PATCH_YAML
+
+      python3 - <<'PY'
+      import os
+      import yaml
+
+      path = "/etc/kubernetes/kubelet/config.yaml"
+      patch = yaml.safe_load(os.environ["PATCH_YAML"]) or {}
+
+      with open(path) as f:
+          data = yaml.safe_load(f) or {}
+
+      for key, value in patch.items():
+          if isinstance(value, dict) and isinstance(data.get(key), dict):
+              merged = dict(data[key])
+              merged.update(value)
+              data[key] = merged
+          else:
+              data[key] = value
+
+      with open(path, "w") as f:
+          yaml.safe_dump(data, f, sort_keys=False)
+      PY
+
+      rm -f "$CPU_STATE"
+      rm -f "$MEMORY_STATE"
+
+      echo "[PATCHER] kubelet config patched successfully"
+      grep -E '^(cpuManagerPolicy|topologyManagerPolicy|memoryManagerPolicy):' "$CONFIG" || true
+      grep -A5 '^kubeReserved:' "$CONFIG" || true
+      grep -A8 '^reservedMemory:' "$CONFIG" || true
+%{ endif ~}
+
+%{ if enable_filestore != "false" ~}
+mounts:
+  - [ data, ${filestore_mount_path}, virtiofs, "defaults", 0, 2 ]
+%{ endif ~}
+
+%{ if enable_filestore != "false" || kubelet_numa_config != null ~}
 runcmd:
- - [ modprobe, fuse ]
- - [ mkdir, '-p', ${filestore_mount_path} ]
- - [ mount, '-a' ]
- 
-%{ endif }
+%{ if enable_filestore != "false" ~}
+  - [ modprobe, fuse ]
+  - [ mkdir, '-p', ${filestore_mount_path} ]
+  - [ mount, '-a' ]
+%{ endif ~}
+%{ if kubelet_numa_config != null ~}
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, restart, kubelet ]
+%{ endif ~}
+%{ endif ~}
 
 users:
  - name: ${ssh_user_name}
