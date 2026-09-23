@@ -105,9 +105,9 @@ locals {
     vm_single = {
       XS = { memory = "24Gi", cpu = "6000m", size = "558Gi", gomaxprocs = 6 }
       S  = { memory = "24Gi", cpu = "6000m", size = "558Gi", gomaxprocs = 6 }
-      M  = { memory = "24Gi", cpu = "8000m", size = "558Gi", gomaxprocs = 8 }
-      L  = { memory = "24Gi", cpu = "12000m", size = "1023Gi", gomaxprocs = 12 }
-      XL = { memory = "24Gi", cpu = "25000m", size = "2046Gi", gomaxprocs = 25 }
+      M  = { memory = "48Gi", cpu = "8000m", size = "558Gi", gomaxprocs = 8 }
+      L  = { memory = "96Gi", cpu = "12000m", size = "1023Gi", gomaxprocs = 12 }
+      XL = { memory = "96Gi", cpu = "25000m", size = "2046Gi", gomaxprocs = 25 }
     }
     # Runs on: system nodes.
     vm_agent = {
