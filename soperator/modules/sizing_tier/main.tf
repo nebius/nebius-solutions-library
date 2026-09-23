@@ -19,11 +19,11 @@ locals {
   component_presets = {
     # Runs on: system nodes.
     exporter = {
-      XS = { cpu = 0.25, memory = 0.25, ephemeral_storage = 0.5 }
-      S  = { cpu = 0.5, memory = 0.5, ephemeral_storage = 0.5 }
-      M  = { cpu = 1, memory = 1, ephemeral_storage = 1 }
-      L  = { cpu = 1, memory = 1, ephemeral_storage = 1 }
-      XL = { cpu = 2, memory = 2, ephemeral_storage = 2 }
+      XS = { cpu = 0.25, memory = 1, ephemeral_storage = 0.5 }
+      S  = { cpu = 0.5, memory = 2, ephemeral_storage = 0.5 }
+      M  = { cpu = 1, memory = 4, ephemeral_storage = 1 }
+      L  = { cpu = 1, memory = 4, ephemeral_storage = 1 }
+      XL = { cpu = 2, memory = 8, ephemeral_storage = 2 }
     }
     # Runs on: system nodes.
     rest = {
