@@ -289,8 +289,15 @@ nodesets:
           - name: ensure-node-local-jail-submount-${sub_mount.name}-${sub_mount.filesystem_type}
             image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
-            command: ["grep", ' /volume-mount ${sub_mount.filesystem_type} ', "/proc/mounts"]
+            command: ["sh", "-c", "grep ' /volume-mount ${sub_mount.filesystem_type} ' /proc/mounts && chmod 777 /volume-mount"]
           %{~ endfor ~}
+
+          %{~ if try(nodeset.local_nvme.enabled, false) ~}
+          - name: prepare-local-nvme-permissions
+            image: cr.nebius.cloud/soperator/busybox
+            volumeMounts: [{ name: 'local-nvme', mountPath: /volume-mount }]
+            command: ["chmod", "777", "/volume-mount"]
+          %{~ endif ~}
 
           %{~ if nodeset.node_local_image_storage.enabled ~}
           - name: ensure-node-local-image-storage-${nodeset.node_local_image_storage.spec.filesystem_type}
