@@ -34,12 +34,13 @@ gpu_node_groups = 1 # In case you need more then 100 nodes in cluster you have t
 cpu_nodes_platform = "cpu-d3"     # CPU nodes platform
 cpu_nodes_preset   = "4vcpu-16gb" # CPU nodes preset
 # GPU platform and preset: https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
-gpu_nodes_platform     = "gpu-h200-sxm"        # GPU nodes platform: gpu-h100-sxm, gpu-h200-sxm, gpu-b200-sxm
-gpu_nodes_preset       = "8gpu-128vcpu-1600gb" # GPU nodes preset: 8gpu-128vcpu-1600gb, 8gpu-128vcpu-1600gb, 8gpu-160vcpu-1792gb
-gpu_enable_local_disks = false                 # Only B300 supportes local disk
+# By default, these are selected from the region map in locals.tf.
+# gpu_nodes_platform = "gpu-b300-sxm"
+# gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
+gpu_enable_local_disks = false # Only B300 supports local disks.
 # Infiniband fabrics: https://docs.nebius.com/compute/clusters/gpu#fabrics
 # New B300 region fabrics: eu-west2-a (eu-west2), us-north1-a (us-north1).
-infiniband_fabric = "" # Leave empty to disable GPU clustering for RTX6000 deployments or single-node deployments.
+# infiniband_fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2; set to "" to disable clustering.
 
 # Node-group rollout strategy. GB300 requires max_surge to be zero and the
 # recommended production rollout replaces one node at a time.
@@ -62,6 +63,9 @@ enable_k8s_node_group_sa   = true
 enable_egress_gateway      = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
+
+# NCCL test image used when test_mode = true. Override for the selected GPU/CUDA platform.
+# nccl_test_image = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
 
 cpu_nodes_public_ips         = false
 gpu_nodes_public_ips         = false
@@ -91,7 +95,9 @@ filestore_forbid_deletion      = false # Set to true to protect Terraform-create
 
 # Shared filesystem CSI driver. Enable only when using Shared Filesystem.
 # filesystem_csi = {
+#   chart_repository                    = "oci://cr.nebius.cloud/mk8s/helm"
 #   chart_version                       = "0.1.5"
+#   image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
 #   namespace                           = "kube-system"
 #   make_default_storage_class          = true
 #   previous_default_storage_class_name = "compute-csi-default-sc"

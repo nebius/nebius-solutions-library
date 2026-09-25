@@ -24,7 +24,7 @@ variable "instance_name" {
 variable "platform" {
   description = "VM platform."
   type        = string
-  default     = "cpu-e2"
+  default     = "cpu-d3"
 }
 
 variable "preset" {
@@ -64,7 +64,13 @@ variable "shared_filesystem_mount" {
 variable "region" {
   type        = string
   description = "region"
-  default     = "eu-north1"
+  default     = "eu-west2"
+}
+
+variable "boot_image_family" {
+  type        = string
+  description = "Boot image family."
+  default     = null
 }
 
 variable "add_extra_storage" {

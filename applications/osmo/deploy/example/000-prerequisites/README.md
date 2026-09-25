@@ -212,7 +212,7 @@ After running `nebius-env-init.sh`, these variables are set:
 |----------|-------------|
 | `NEBIUS_TENANT_ID` | Your Nebius tenant ID |
 | `NEBIUS_PROJECT_ID` | Your Nebius project ID |
-| `NEBIUS_REGION` | Deployment region (default: eu-north1) |
+| `NEBIUS_REGION` | Deployment region (default: eu-west2) |
 | `TF_VAR_tenant_id` | Terraform variable for tenant |
 | `TF_VAR_parent_id` | Terraform variable for project |
 | `TF_VAR_region` | Terraform variable for region |
@@ -258,7 +258,7 @@ Run the installer:
 
 Or install manually:
 ```bash
-curl -sSL https://storage.eu-north1.nebius.cloud/nebius/install.sh | bash
+curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
 export PATH="$HOME/.nebius/bin:$PATH"
 ```
 

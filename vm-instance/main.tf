@@ -16,6 +16,8 @@ module "instance-module" {
   users                   = var.users
   preset                  = var.preset
   platform                = var.platform
+  region                  = var.region
+  boot_image_family       = var.boot_image_family
   boot_disk_size_gb       = var.boot_disk_size_gb
   shared_filesystem_id    = var.shared_filesystem_id
   shared_filesystem_mount = var.shared_filesystem_mount

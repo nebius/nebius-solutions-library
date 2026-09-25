@@ -410,6 +410,17 @@ variable "test_mode" {
   default     = false
 }
 
+variable "nccl_test_image" {
+  description = "Container image used by the NCCL test deployed in test mode. Override it for a different GPU architecture or CUDA/NCCL combination."
+  type        = string
+  default     = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
+
+  validation {
+    condition     = length(trimspace(var.nccl_test_image)) > 0
+    error_message = "nccl_test_image must not be empty."
+  }
+}
+
 variable "enable_kuberay_cluster" {
   description = "Enable kuberay and deploy RayCluster"
   type        = bool
@@ -514,12 +525,24 @@ variable "custom_driver" {
 variable "filesystem_csi" {
   description = "Configuration for Nebius Shared Filesystem CSI installation when a shared filesystem is present. Set previous_default_storage_class_name to an empty string to skip demoting another StorageClass."
   type = object({
+    chart_repository                    = optional(string, "oci://cr.nebius.cloud/mk8s/helm")
     chart_version                       = optional(string, "0.1.5")
+    image_repository                    = optional(string, "cr.nebius.cloud/mk8s/csi-mounted-fs-path")
     namespace                           = optional(string, "kube-system")
     make_default_storage_class          = optional(bool, true)
     previous_default_storage_class_name = optional(string, "compute-csi-default-sc")
   })
   default = {}
+
+  validation {
+    condition     = startswith(var.filesystem_csi.chart_repository, "oci://")
+    error_message = "filesystem_csi.chart_repository must be an OCI repository URL beginning with oci://."
+  }
+
+  validation {
+    condition     = length(trimspace(var.filesystem_csi.chart_version)) > 0 && length(trimspace(var.filesystem_csi.image_repository)) > 0
+    error_message = "filesystem_csi.chart_version and filesystem_csi.image_repository must not be empty."
+  }
 }
 
 variable "opa_gatekeeper_enable" {

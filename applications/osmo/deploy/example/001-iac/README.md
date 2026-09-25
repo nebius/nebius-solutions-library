@@ -40,8 +40,8 @@ terraform apply
 
 | File | Use Case | GPU | Security | Est. Cost/6h |
 |------|----------|-----|----------|--------------|
-| `terraform.tfvars.cost-optimized-secure.example` (recommended) | Dev | 1x L40S | WireGuard | **~$15-25** |
-| `terraform.tfvars.cost-optimized.example` | Dev (cheapest) | 1x L40S | Public | ~$10-15 |
+| `terraform.tfvars.cost-optimized-secure.example` (recommended) | Dev | 1x B300 | WireGuard | Smallest eu-west2 footprint |
+| `terraform.tfvars.cost-optimized.example` | Dev | 1x B300 | Public | Smallest eu-west2 footprint |
 | `terraform.tfvars.secure.example` | Staging | 8x H100 | WireGuard | ~$300-400 |
 | `terraform.tfvars.production.example` | Production | 32x H200 | WireGuard | ~$1000+ |
 
@@ -90,23 +90,18 @@ terraform apply
 
 ## GPU Options
 
-### Available Platforms (eu-north1)
+### Available Platforms (eu-west2)
 
 | Platform | GPU | VRAM | ~Cost/hr | Best For |
 |----------|-----|------|----------|----------|
-| `gpu-l40s-a` | L40S Intel | 48GB | **$1.55** | Dev/Testing (cheapest) |
-| `gpu-l40s-d` | L40S AMD | 48GB | **$1.55** | Dev/Testing |
-| `gpu-h100-sxm` | H100 | 80GB | ~$4-5 | Training |
-| `gpu-h200-sxm` | H200 | 141GB | ~$5-6 | Large models |
+| `gpu-b300-sxm` | B300 | 346GB | Region-specific | Training and large models |
 
 ### Presets
 
 | Platform | Preset | GPUs | vCPUs | RAM |
 |----------|--------|------|-------|-----|
-| L40S | `1gpu-8vcpu-32gb` | 1 | 8 | 32GB |
-| L40S | `2gpu-16vcpu-64gb` | 2 | 16 | 64GB |
-| H100/H200 | `1gpu-16vcpu-200gb` | 1 | 16 | 200GB |
-| H100/H200 | `8gpu-128vcpu-1600gb` | 8 | 128 | 1600GB |
+| B300 | `1gpu-24vcpu-346gb` | 1 | 24 | 346GB |
+| B300 | `8gpu-192vcpu-2768gb` | 8 | 192 | 2768GB |
 
 ## Security Options
 
@@ -243,3 +238,4 @@ Check your Nebius quota in the console and request increases if needed.
 Verify the platform is available in your region:
 - `eu-north1`: H100
 - `eu-west1`: H200
+- `eu-west2`: B300

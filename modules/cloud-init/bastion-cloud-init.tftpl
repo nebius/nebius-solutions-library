@@ -84,11 +84,11 @@ write_files:
 runcmd:
   - echo "### Install Nebius CLI" >> /tmp/csa-install.log 2>&1
   - su - ${ssh_user_name} -c 'export HOME=/home/${ssh_user_name}' >> /tmp/csa-install.log 2>&1
-  - su - ${ssh_user_name} -c 'curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash' >> /tmp/csa-install.log 2>&1
+  - su - ${ssh_user_name} -c 'curl -sSL ${cli_install_url} | bash' >> /tmp/csa-install.log 2>&1
   - su - ${ssh_user_name} -c 'source "/home/${ssh_user_name}/.bashrc"' >> /tmp/csa-install.log 2>&1
   
   - echo "### Nebius CLI profile create" >> /tmp/csa-install.log 2>&1
-  - su - ${ssh_user_name} -c '/home/${ssh_user_name}/.nebius/bin/nebius profile create --endpoint api.eu.nebius.cloud --token-endpoint http://metadata.nebius.internal/v1/iam/sa/token --profile default --parent-id ${parent_id}' >> /tmp/csa-install.log 2>&1
+  - su - ${ssh_user_name} -c '/home/${ssh_user_name}/.nebius/bin/nebius profile create --endpoint ${api_endpoint} --token-endpoint http://metadata.nebius.internal/v1/iam/sa/token --profile default --parent-id ${parent_id}' >> /tmp/csa-install.log 2>&1
 
   - echo "### Install kubectl" >> /tmp/csa-install.log 2>&1
   - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" >> /tmp/csa-install.log 2>&1

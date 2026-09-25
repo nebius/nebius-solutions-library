@@ -11,11 +11,21 @@ source "${SCRIPT_DIR}/defaults.sh"
 OSMO_URL="${OSMO_URL:-http://localhost:8080}"
 OSMO_NAMESPACE="${OSMO_NAMESPACE:-osmo}"
 
-# Require NEBIUS_REGION (set by nebius-env-init.sh)
-if [[ -z "${NEBIUS_REGION:-}" ]]; then
-    echo "ERROR: NEBIUS_REGION is not set. Run 'source ../000-prerequisites/nebius-env-init.sh' first."
+# Resolve the Object Storage settings from the bucket created by Terraform.
+STORAGE_REGION=$(get_tf_output "storage_bucket.region" "../001-iac" 2>/dev/null || echo "")
+STORAGE_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" 2>/dev/null || echo "")
+
+if [[ -z "$STORAGE_REGION" || -z "$STORAGE_ENDPOINT" ]]; then
+    log_error "Could not retrieve the Object Storage region and endpoint from Terraform"
     exit 1
 fi
+
+if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$STORAGE_REGION" ]]; then
+    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${STORAGE_REGION}'"
+    exit 1
+fi
+
+STORAGE_ENDPOINT=$(normalize_nebius_storage_endpoint "$STORAGE_ENDPOINT")
 
 # -----------------------------------------------------------------------------
 # Determine GPU platform name
@@ -92,9 +102,12 @@ fi
 # -----------------------------------------------------------------------------
 log_info "Creating gpu_tolerations pod template..."
 
-# Substitute {{NEBIUS_REGION}} placeholder in the template
+# Substitute the authoritative bucket region and endpoint in the template.
 GPU_POD_TEMPLATE_RESOLVED="/tmp/gpu_pod_template_resolved.json"
-sed "s/{{NEBIUS_REGION}}/${NEBIUS_REGION}/g" "${SCRIPT_DIR}/gpu_pod_template.json" > "${GPU_POD_TEMPLATE_RESOLVED}"
+sed \
+  -e "s|{{NEBIUS_REGION}}|${STORAGE_REGION}|g" \
+  -e "s|{{NEBIUS_STORAGE_ENDPOINT}}|${STORAGE_ENDPOINT}|g" \
+  "${SCRIPT_DIR}/gpu_pod_template.json" > "${GPU_POD_TEMPLATE_RESOLVED}"
 
 RESPONSE=$(osmo_curl PUT "${OSMO_URL}/api/configs/pod_template/gpu_tolerations" \
   -w "\n%{http_code}" \

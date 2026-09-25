@@ -4,7 +4,7 @@ terraform {
   required_providers {
     nebius = {
       source  = "nebius/nebius"
-      version = ">= 0.5.232"
+      version = ">= 0.6.23"
     }
 
     flux = {
@@ -34,7 +34,6 @@ terraform {
 }
 
 provider "nebius" {
-  domain            = "api.eu.nebius.cloud:443"
   timeout           = "10m"
   per_retry_timeout = "1m"
   retries           = 10
