@@ -1,0 +1,117 @@
+# =============================================================================
+# NCCL test — MPIJob (DRA / GB300 variant)
+#
+# Identical to nccl-test-template.yaml (same unique-name + label scheme) EXCEPT
+# how the Worker pods request GPUs:
+#   - device-plugin (x86):  resources.requests/limits."nvidia.com/gpu"
+#   - DRA (this file):      pod resourceClaims + container resources.claims
+#
+# Used ONLY on DRA clusters (Grace/GB300); nccl_runner_unified.sh auto-selects it.
+# The claim templates it references are created first, in the same namespace:
+#   nccl-gpus     from dra/gpu-resourceclaim-template.yaml
+#   nccl-channel  auto-created by the NVIDIA ComputeDomain controller (dra/compute-domain.yaml)
+#
+# The Launcher only runs mpirun (no GPUs), so it matches the x86 template. Two extra
+# mpirun -x flags carry the cross-node transport choice to the ranks:
+#   NCCL_MNNVL_ENABLE / NCCL_NVLS_ENABLE  (auto -> 1/1 = NVLink; ib -> 0/0 = InfiniBand)
+# =============================================================================
+apiVersion: kubeflow.org/${MPIJOB_API_VERSION}
+kind: MPIJob
+metadata:
+  name: ${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    nccl-runner/run: "${RUN_SUFFIX}"
+    nccl-runner/owner: "${RUN_OWNER}"
+spec:
+  slotsPerWorker: ${GPUS_PER_NODE}
+  ${LAUNCHER_CREATION_POLICY_LINE}
+  runPolicy:
+    cleanPodPolicy: Running
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            nccl-runner/run: "${RUN_SUFFIX}"
+            nccl-runner/role: launcher
+        spec:
+          containers:
+            - image: ${IMAGE}
+              name: nccl-test
+              env:
+                - name: OMPI_ALLOW_RUN_AS_ROOT
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                  value: "1"
+              command: ["/bin/bash", "-c"]
+              args:
+                - >
+                  mpirun
+                  -bind-to ${BIND_TO}
+                  --map-by ${MAP_BY_SPEC}
+                  -x NCCL_SOCKET_IFNAME=eth0
+                  -x UCX_NET_DEVICES=${UCX_NET_DEVICE}
+                  -x OMPI_MCA_coll_hcoll_enable=0
+                  -x OMPI_MCA_coll_ucc_enable=0
+                  -x NCCL_DEBUG=INFO
+                  -x NCCL_IB_HCA=${NCCL_IB_HCA}
+                  -x NCCL_MNNVL_ENABLE=${NCCL_MNNVL_ENABLE}
+                  -x NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE}
+                  -x UCX_DC_MLX5_TX_POLICY=hw_dcs
+                  /opt/nccl_tests/build/${TEST_BINARY}_perf -b 8 -e 64G -f 2 -g 1 -t 1
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 128Mi
+    Worker:
+      replicas: ${WORKER_REPLICAS}
+      template:
+        metadata:
+          labels:
+            nccl-runner/run: "${RUN_SUFFIX}"
+            nccl-runner/role: worker
+        spec:
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nebius.com/node-group-id
+                        operator: In
+                        values:
+                          - ${NODE_GROUP_ID}
+          # DRA: claim GPUs (and the ComputeDomain channel for cross-node NCCL)
+          # instead of requesting nvidia.com/gpu from the device plugin.
+          resourceClaims:
+            - name: gpus
+              resourceClaimTemplateName: nccl-gpus
+            - name: compute-domain-channel
+              resourceClaimTemplateName: nccl-channel
+          containers:
+            - image: ${IMAGE}
+              name: nccl-test
+              securityContext:
+                privileged: true
+              resources:
+                claims:
+                  - name: gpus
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "${WORKER_CPU}"
+                  memory: ${WORKER_MEMORY}
+                limits:
+                  cpu: "${WORKER_CPU_LIMIT}"
+                  memory: ${WORKER_MEMORY}
+              volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory

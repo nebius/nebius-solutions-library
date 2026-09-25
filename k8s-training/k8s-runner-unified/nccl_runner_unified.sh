@@ -45,6 +45,12 @@ cleanup() {
   kubectl delete mpijob "$JOB_NAME" -n "$NAMESPACE" \
     --ignore-not-found --cascade=foreground --wait=false >/dev/null 2>&1 || true
   kubectl delete pod ib-discovery -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+  # On DRA/GB300, also tear down the ComputeDomain + GPU claim template this run
+  # created, so no cross-node NVLink domain lingers. GPU_MODE is read at exit time.
+  if [ "${GPU_MODE:-}" = "dra" ]; then
+    kubectl delete computedomain nccl-cd -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete resourceclaimtemplate nccl-gpus -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -52,12 +58,19 @@ trap 'exit 143' TERM
 
 # ============ CONFIGURE FOR YOUR CLUSTER ============
 NAMESPACE=nccl-tests
-TEMPLATE=nccl-test-template.yaml
+TEMPLATE=nccl-test-template.yaml          # x86/device-plugin; DRA path swaps to the -dra variant
+TEMPLATE_DRA=nccl-test-template-dra.yaml  # GB300/DRA (GPU claims instead of nvidia.com/gpu limits)
+# The image is multi-arch (amd64 + arm64/Grace), so the same tag runs on x86 and GB300.
 IMAGE="cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26"
 
-# GPU node group ID — SET THIS for your cluster. Get it via:
+# GPU node group ID — SET THIS for your cluster (env-overridable). Get it via:
 #   kubectl get nodes -o custom-columns='NAME:.metadata.name,GROUP:.metadata.labels.nebius\.com/node-group-id,GPU:.status.capacity.nvidia\.com/gpu'
-NODE_GROUP_ID="<your-node-group-id>"   # e.g. mk8snodegroup-xxxxxxxxxxxxxxxxxx
+NODE_GROUP_ID="${NODE_GROUP_ID:-<your-node-group-id>}"   # e.g. mk8snodegroup-xxxxxxxxxxxxxxxxxx
+
+# Cross-node transport on DRA/GB300 only (ignored on device-plugin/x86). On GB300 the
+# nodes fuse into one MNNVL (multi-node NVLink) domain, so cross-node NCCL defaults to
+# NVLink. Set NCCL_TRANSPORT=ib to disable MNNVL/NVLS and measure the InfiniBand fabric.
+NCCL_TRANSPORT="${NCCL_TRANSPORT:-auto}"
 
 # Worker resource sizing — auto-detected below from actual node capacity.
 # RESERVE values are headroom left for kubelet, device plugins, DaemonSets, etc.
@@ -70,12 +83,15 @@ RESERVE_MEM_GI=50
 # fast (launcher crash-loops within ~1 min), so we just relaunch a few times.
 MAX_LAUNCH_ATTEMPTS=6
 
-HOSTS=(1 2 3 4)
+# Host counts to sweep, and which collectives to run. Both overridable from the
+# environment (space-separated) for a quick single run, e.g.:
+#   NCCL_HOSTS="1 2" NCCL_TESTS="all_reduce" ./nccl_runner_unified.sh
+HOSTS=(${NCCL_HOSTS:-1 2 3 4})
 # The two tests that actually matter for validating a cluster: all_reduce
 # (canonical bus-bandwidth number) and alltoall (stresses the fabric hardest).
 # The other NCCL collectives are nice-to-haves — add them here if you want a
 # fuller sweep: all_gather reduce_scatter reduce gather broadcast scatter
-TESTS=(all_reduce alltoall)
+TESTS=(${NCCL_TESTS:-all_reduce alltoall})
 # ======================================================
 
 if [ -z "$NODE_GROUP_ID" ] || [[ "$NODE_GROUP_ID" == "<"* ]]; then
@@ -121,11 +137,41 @@ HOSTS=("${CAPPED_HOSTS[@]}")
 
 ALLOC_CPU_RAW=$(kubectl get node "$NODE_NAME" -o jsonpath='{.status.allocatable.cpu}')
 ALLOC_MEM_RAW=$(kubectl get node "$NODE_NAME" -o jsonpath='{.status.allocatable.memory}')
+# GPU request mechanism: device-plugin (nvidia.com/gpu) vs DRA (gpu.nvidia.com
+# DeviceClass, GB300/Grace). DRA nodes advertise NO allocatable nvidia.com/gpu, so
+# detect that and switch to claims + the DRA template. The x86 path is unchanged.
 GPUS_PER_NODE=$(kubectl get node "$NODE_NAME" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
-if [ -z "$GPUS_PER_NODE" ] || [ "$GPUS_PER_NODE" -le 0 ] 2>/dev/null; then
-  echo "ERROR: node '$NODE_NAME' reports no allocatable nvidia.com/gpu — is this a GPU node group?"
+if [ -n "$GPUS_PER_NODE" ] && [ "$GPUS_PER_NODE" -gt 0 ] 2>/dev/null; then
+  GPU_MODE="device-plugin"
+elif kubectl get deviceclass gpu.nvidia.com >/dev/null 2>&1; then
+  GPU_MODE="dra"
+  TEMPLATE="$TEMPLATE_DRA"
+  # DRA advertises no allocatable nvidia.com/gpu; take GPUs/node from the GFD
+  # label, falling back to counting this node's gpu.nvidia.com devices in the
+  # published resourceslices (portable awk, no jq / grep -P).
+  GPUS_PER_NODE=$(kubectl get node "$NODE_NAME" -o jsonpath='{.metadata.labels.nvidia\.com/gpu\.count}' 2>/dev/null)
+  if [ -z "$GPUS_PER_NODE" ] || [ "$GPUS_PER_NODE" -le 0 ] 2>/dev/null; then
+    GPUS_PER_NODE=$(kubectl get resourceslices \
+      -o jsonpath='{range .items[*]}{.spec.driver}{"\t"}{range .spec.devices[*]}{.name}{","}{end}{"\n"}{end}' 2>/dev/null \
+      | awk -F'\t' '$1=="gpu.nvidia.com" && !seen {n=gsub(/,/,",",$2); if(n>0){print n; seen=1}}')
+  fi
+else
+  echo "ERROR: node '$NODE_NAME' reports no allocatable nvidia.com/gpu and no gpu.nvidia.com"
+  echo "DeviceClass — is this a GPU node group? (device-plugin and DRA both absent)"
   exit 1
 fi
+if [ -z "$GPUS_PER_NODE" ] || [ "$GPUS_PER_NODE" -le 0 ] 2>/dev/null; then
+  echo "ERROR: could not determine GPUs/node on '$NODE_NAME' (mode=$GPU_MODE)."
+  exit 1
+fi
+
+# Transport knob only applies on DRA; map it to the NCCL env the DRA template carries.
+if [ "$GPU_MODE" = "dra" ] && [ "$NCCL_TRANSPORT" = "ib" ]; then
+  NCCL_MNNVL_ENABLE=0; NCCL_NVLS_ENABLE=0
+else
+  NCCL_MNNVL_ENABLE=1; NCCL_NVLS_ENABLE=1
+fi
+echo "GPU mode: $GPU_MODE$([ "$GPU_MODE" = dra ] && echo " (transport: $NCCL_TRANSPORT -> $([ "$NCCL_TRANSPORT" = ib ] && echo InfiniBand || echo MNNVL/NVLink))")"
 
 # CPU may be reported as whole cores ("128") or millicores ("127900m") — normalize to millicores.
 if [[ "$ALLOC_CPU_RAW" == *m ]]; then
@@ -306,6 +352,34 @@ watch_job() {
   echo TIMEOUT
 }
 
+# On DRA/GB300, create the GPU claim template and a ComputeDomain once, up front.
+# The ComputeDomain is sized to the LARGEST host count in this run so a single
+# domain covers every 1..N-host iteration; its controller auto-creates the channel
+# claim template (nccl-channel) the worker pods attach to for cross-node NCCL. Both
+# live in $NAMESPACE and are torn down by cleanup() on exit.
+if [ "$GPU_MODE" = "dra" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  MAX_HOSTS=0; for h in "${HOSTS[@]}"; do [ "$h" -gt "$MAX_HOSTS" ] && MAX_HOSTS="$h"; done
+  echo "=== DRA: applying GPU claim template + ComputeDomain (numNodes=$MAX_HOSTS) ==="
+  NAMESPACE="$NAMESPACE" GPUS_PER_NODE="$GPUS_PER_NODE" \
+    envsubst < "$SCRIPT_DIR/dra/gpu-resourceclaim-template.yaml" | kubectl apply -f - >/dev/null
+  NAMESPACE="$NAMESPACE" MAX_HOSTS="$MAX_HOSTS" \
+    envsubst < "$SCRIPT_DIR/dra/compute-domain.yaml" | kubectl apply -f - >/dev/null
+  echo "Waiting for the ComputeDomain channel template (nccl-channel)..."
+  CH_OK=0
+  for _ in $(seq 1 30); do
+    if kubectl get resourceclaimtemplate nccl-channel -n "$NAMESPACE" --request-timeout=10s >/dev/null 2>&1; then
+      CH_OK=1; break
+    fi
+    sleep 2
+  done
+  if [ "$CH_OK" -ne 1 ]; then
+    echo "ERROR: ComputeDomain channel template (nccl-channel) never appeared."
+    echo "Is the NVIDIA DRA / ComputeDomain controller running on this cluster?"
+    exit 1
+  fi
+fi
+
 OUTPUT_PATH=results/nccl-$(date +"%Y-%m-%d_%H-%M-%S")
 mkdir -p "$OUTPUT_PATH"
 
@@ -343,6 +417,8 @@ for HOST_NUM in "${HOSTS[@]}"; do
     TEST_BINARY="$TEST" \
     MPIJOB_API_VERSION="$MPIJOB_API_VERSION" \
     LAUNCHER_CREATION_POLICY_LINE="$LAUNCHER_CREATION_POLICY_LINE" \
+    NCCL_MNNVL_ENABLE="${NCCL_MNNVL_ENABLE:-1}" \
+    NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-1}" \
     envsubst < "$TEMPLATE" > "$RENDERED"
 
     # Launch, retrying on the transient launcher hwloc glitch (see MAX_LAUNCH_ATTEMPTS).
