@@ -51,13 +51,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ============ CONFIGURE FOR YOUR CLUSTER ============
-NAMESPACE=nccl-tests
-TEMPLATE=nccl-test-template.yaml
-IMAGE="cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26"
+NAMESPACE="${NAMESPACE:-nccl-tests}"
+TEMPLATE="${TEMPLATE:-nccl-test-template.yaml}"
+IMAGE="${IMAGE:-cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26}"
 
 # GPU node group ID — SET THIS for your cluster. Get it via:
 #   kubectl get nodes -o custom-columns='NAME:.metadata.name,GROUP:.metadata.labels.nebius\.com/node-group-id,GPU:.status.capacity.nvidia\.com/gpu'
-NODE_GROUP_ID="<your-node-group-id>"   # e.g. mk8snodegroup-xxxxxxxxxxxxxxxxxx
+NODE_GROUP_ID="${NODE_GROUP_ID:-<your-node-group-id>}"   # e.g. mk8snodegroup-xxxxxxxxxxxxxxxxxx
 
 # Worker resource sizing — auto-detected below from actual node capacity.
 # RESERVE values are headroom left for kubelet, device plugins, DaemonSets, etc.
@@ -79,7 +79,7 @@ TESTS=(all_reduce alltoall)
 # ======================================================
 
 if [ -z "$NODE_GROUP_ID" ] || [[ "$NODE_GROUP_ID" == "<"* ]]; then
-  echo "ERROR: set NODE_GROUP_ID at the top of this script to your GPU node group ID."
+  echo "ERROR: set NODE_GROUP_ID in the environment or at the top of this script."
   echo "Find it with:"
   echo "  kubectl get nodes -o custom-columns='NAME:.metadata.name,GROUP:.metadata.labels.nebius\\.com/node-group-id'"
   exit 1

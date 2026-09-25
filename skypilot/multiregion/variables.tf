@@ -476,6 +476,17 @@ variable "test_mode" {
   default     = false
 }
 
+variable "nccl_test_image" {
+  description = "Container image used by the NCCL test deployed in test mode. Override it for a different GPU architecture or CUDA/NCCL combination."
+  type        = string
+  default     = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
+
+  validation {
+    condition     = length(trimspace(var.nccl_test_image)) > 0
+    error_message = "nccl_test_image must not be empty."
+  }
+}
+
 variable "mig_strategy" {
   description = "MIG strategy for GPU operator"
   type        = string

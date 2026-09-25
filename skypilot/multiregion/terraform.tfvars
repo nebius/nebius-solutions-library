@@ -33,6 +33,9 @@ enable_egress_gateway      = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
 
+# NCCL test image used when test_mode = true. Override for the selected GPU/CUDA platform.
+# nccl_test_image = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
+
 cpu_nodes_public_ips         = false
 gpu_nodes_public_ips         = false
 mk8s_cluster_public_endpoint = true # Set it to FALSE only in case if you've deployed the [bastion](https://github.com/nebius/nebius-solutions-library/blob/main/bastion/README.md)
