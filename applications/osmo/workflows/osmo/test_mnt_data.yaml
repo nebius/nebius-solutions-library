@@ -9,7 +9,7 @@ workflow:
   name: test-mnt-data
   resources:
     gpu-resource:
-      platform: gpu
+      platform: default
       gpu: 1
       cpu: 4
       memory: 4Gi

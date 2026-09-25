@@ -1,0 +1,10 @@
+# KAI Scheduler Helm Values
+
+global:
+  nodeSelector: {}
+  tolerations: []
+
+scheduler:
+  additionalArgs:
+    - --default-staleness-grace-period=-1s
+    - --update-pod-eviction-condition=true

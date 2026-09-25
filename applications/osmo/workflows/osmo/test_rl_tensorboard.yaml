@@ -1,0 +1,56 @@
+# based on https://nvidia.github.io/OSMO/main/user_guide/how_to/reinforcement_learning.html
+# tensorboard: osmo workflow port-forward <workflow ID> train --port 6006
+workflow:
+  name: train-robot-policy
+  resources:
+    default:
+      platform: L40S # set to GPU platform
+      cpu: 8
+      gpu: 1
+      memory: 64Gi
+      storage: 64Gi
+  tasks:
+    - name: train
+      image: nvcr.io/nvidia/isaac-lab:2.2.0
+      command: ["bash"]
+      args: ["/tmp/entry.sh"]
+      environment:
+        ACCEPT_EULA: Y
+        NO_NUCLEUS: Y
+        OMNI_KIT_ALLOW_ROOT: '1'
+        OMNI_SERVER: isaac-dev.ov.nvidia.com
+      files:
+        - path: /tmp/entry.sh
+          contents: |
+            set -euo pipefail
+
+            cleanup() {
+              pkill -f "python3 -m tensorboard.main --logdir=logs" || true
+            }
+
+            trap cleanup EXIT
+
+            mkdir -p logs
+
+            # Launch TensorBoard using the Isaac Lab native command.
+            ./isaaclab.sh -p -m tensorboard.main --logdir=logs &
+
+            # Launch training.
+            ./isaaclab.sh -p scripts/reinforcement_learning/sb3/train.py \
+              --task Isaac-Velocity-Flat-Unitree-A1-v0 --headless
+
+            # Stop TensorBoard once training is done.
+            cleanup
+
+            # Install ffmpeg for video recording.
+            apt update && apt install -y ffmpeg
+
+            # Launch the play script to record a video of the trained policy.
+            ./isaaclab.sh -p scripts/reinforcement_learning/sb3/play.py \
+              --task Isaac-Velocity-Flat-Unitree-A1-v0 --headless --video --video_length 200
+
+            # Move all logs, checkpoints, and videos to the output dataset.
+            mv logs/ {{output}}/
+      outputs:
+        - dataset:
+            name: robot-policy-dataset

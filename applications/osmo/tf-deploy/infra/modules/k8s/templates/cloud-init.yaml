@@ -1,0 +1,28 @@
+#cloud-config
+%{ if ssh_public_key != null && ssh_public_key != "" ~}
+users:
+  - name: ${ssh_user_name}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+%{ endif ~}
+
+package_update: true
+packages:
+  - nfs-common
+  - curl
+  - jq
+
+%{ if enable_filestore ~}
+runcmd:
+  # Mount filestore if attached (virtiofs is not a block device, check sysfs tags)
+  - |
+    if grep -qs '^data$' /sys/fs/virtiofs/*/tag 2>/dev/null; then
+      mkdir -p /mnt/data
+      mount -t virtiofs data /mnt/data || true
+      if ! grep -qs 'virtiofs.*mnt/data' /etc/fstab; then
+        echo "data /mnt/data virtiofs defaults 0 0" >> /etc/fstab
+      fi
+    fi
+%{ endif ~}

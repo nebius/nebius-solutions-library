@@ -1,0 +1,77 @@
+{
+  "configs": {
+    "spec": {
+      "tolerations": [
+        {
+          "key": "nvidia.com/gpu",
+          "operator": "Exists",
+          "effect": "NoSchedule"
+        }
+      ],
+      "containers": [
+        {
+          "name": "{{USER_CONTAINER_NAME}}",
+          "env": [
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "value": "{{STORAGE_ENDPOINT}}"
+            },
+            {
+              "name": "AWS_S3_FORCE_PATH_STYLE",
+              "value": "true"
+            },
+            {
+              "name": "AWS_DEFAULT_REGION",
+              "value": "{{NEBIUS_REGION}}"
+            },
+            {
+              "name": "OSMO_LOGIN_DEV",
+              "value": "true"
+            },
+            {
+              "name": "OSMO_SKIP_DATA_AUTH",
+              "value": "1"
+            }
+          ],
+          "resources": {
+            "limits": {
+              "nvidia.com/gpu": "{{USER_GPU}}"
+            },
+            "requests": {
+              "nvidia.com/gpu": "{{USER_GPU}}"
+            }
+          }
+        },
+        {
+          "name": "osmo-ctrl",
+          "env": [
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "value": "{{STORAGE_ENDPOINT}}"
+            },
+            {
+              "name": "AWS_S3_FORCE_PATH_STYLE",
+              "value": "true"
+            },
+            {
+              "name": "AWS_DEFAULT_REGION",
+              "value": "{{NEBIUS_REGION}}"
+            },
+            {
+              "name": "OSMO_LOGIN_DEV",
+              "value": "true"
+            },
+            {
+              "name": "OSMO_SKIP_DATA_AUTH",
+              "value": "1"
+            }
+          ]
+        }
+      ],
+      "nodeSelector": {
+        "nvidia.com/gpu.present": "true"
+      }
+    }
+  },
+  "description": "Add compute pod template"
+}

@@ -14,7 +14,7 @@ workflow:
   name: test-shared-fs-cross-node
   resources:
     gpu-resource:
-      platform: gpu
+      platform: default
       gpu: 1
       cpu: 2
       memory: 2Gi

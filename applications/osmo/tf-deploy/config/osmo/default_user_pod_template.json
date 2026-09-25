@@ -1,0 +1,24 @@
+{
+  "configs": {
+    "spec": {
+      "containers": [
+        {
+          "name": "{{USER_CONTAINER_NAME}}",
+          "resources": {
+            "limits": {
+              "cpu": "{{USER_CPU}}",
+              "memory": "{{USER_MEMORY}}",
+              "ephemeral-storage": "{{USER_STORAGE}}"
+            },
+            "requests": {
+              "cpu": "{{USER_CPU}}",
+              "memory": "{{USER_MEMORY}}",
+              "ephemeral-storage": "{{USER_STORAGE}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "description": "Default user container template (GPU resources moved to gpu_tolerations template)"
+}

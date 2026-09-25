@@ -1,0 +1,102 @@
+# tf-deploy infrastructure variables.
+#
+# Copy this file to terraform.tfvars only if you want to override the values
+# already exported by ../nebius-env-init.sh.
+
+# -----------------------------------------------------------------------------
+# Required Settings
+# -----------------------------------------------------------------------------
+# Get these from: source ../nebius-env-init.sh
+#
+# tenant_id = "tenant-e00abc123def456"
+# parent_id = "project-e00abc123def456"
+
+# -----------------------------------------------------------------------------
+# Environment Settings
+# -----------------------------------------------------------------------------
+region       = "eu-north1"    # eu-north1, eu-north2, eu-west1, me-west1, uk-south1, us-central1
+environment  = "dev"          # dev, staging, prod
+project_name = "osmo"         # Used for resource naming
+
+# -----------------------------------------------------------------------------
+# Kubernetes Cluster
+# -----------------------------------------------------------------------------
+k8s_version            = null  # null for latest
+etcd_cluster_size      = 3     # 1, 3, or 5
+enable_public_endpoint = true  # Set false if using WireGuard
+
+# -----------------------------------------------------------------------------
+# Common Presets
+# -----------------------------------------------------------------------------
+# Copy one of these blocks into infra/terraform.tfvars if you want a faster
+# starting point than editing the raw values one by one.
+#
+# CPU-only:
+# enable_gpu_cluster         = false
+# gpu_node_groups            = 0
+# gpu_nodes_count_per_group  = 0
+# cpu_nodes_count            = 3
+# cpu_nodes_platform         = "cpu-d3"
+# cpu_nodes_preset           = "32vcpu-128gb"
+#
+# GPU-enabled:
+# enable_gpu_cluster         = true
+# gpu_node_groups            = 1
+# gpu_nodes_count_per_group  = 1
+# gpu_nodes_platform         = "gpu-h100-sxm"
+# gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+# enable_gpu_taints          = true
+
+# -----------------------------------------------------------------------------
+# CPU Node Group
+# -----------------------------------------------------------------------------
+cpu_nodes_count            = 3
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "32vcpu-128gb"  # Redis requests 8vCPU+52Gi; 16vcpu-64gb leaves the node nearly full
+cpu_disk_size_gib          = 128
+cpu_nodes_assign_public_ip = false  # Private nodes only
+
+# -----------------------------------------------------------------------------
+# GPU Node Group
+# -----------------------------------------------------------------------------
+gpu_nodes_count_per_group  = 1
+gpu_node_groups            = 1
+gpu_nodes_platform         = "gpu-h100-sxm"  # See locals.tf for all GPU platforms per region
+gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+gpu_disk_size_gib          = 1023
+gpu_nodes_assign_public_ip = false  # Private nodes only
+enable_gpu_cluster         = true   # InfiniBand
+enable_gpu_taints          = true
+gpu_nodes_preemptible      = false  # Preemptible requires project permissions
+gpu_nodes_driverfull_image = false  # Set true for Nebius pre-installed drivers (recommended for B200/B300)
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+enable_filestore   = true
+filestore_size_gib = 1024
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Nebius Managed Service)
+# -----------------------------------------------------------------------------
+# Platform depends on region: cpu-e2 (eu-north1), cpu-d3 (all other regions)
+# postgresql_platform    = null           # Auto: cpu-e2 (eu-north1), cpu-d3 (other regions)
+postgresql_preset        = "4vcpu-16gb"   # Available presets vary by region
+# postgresql_disk_type   = null           # Auto: network-ssd (eu-north1), nbs-csi-sc (other regions)
+postgresql_disk_size_gib = 50
+postgresql_host_count    = 1
+
+# -----------------------------------------------------------------------------
+# SSH Access
+# -----------------------------------------------------------------------------
+# Optional. Leave unset to skip SSH key injection on cluster nodes / WireGuard.
+# ssh_public_key = {
+#   path = "/absolute/path/to/id_ed25519.pub"  # or: key = "ssh-ed25519 AAAA..."
+# }
+
+# -----------------------------------------------------------------------------
+# WireGuard VPN (Optional)
+# -----------------------------------------------------------------------------
+enable_wireguard = false
+# wireguard_port   = 51820
+# wireguard_ui_port = 5000
