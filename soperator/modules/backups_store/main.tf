@@ -7,7 +7,9 @@ resource "terraform_data" "cleanup_bucket" {
   count = var.cleanup_bucket_on_destroy ? 1 : 0
 
   triggers_replace = {
-    bucket_name = nebius_storage_v1_bucket.backups_bucket.name
+    bucket_name     = nebius_storage_v1_bucket.backups_bucket.name
+    bucket_endpoint = "https://${nebius_storage_v1_bucket.backups_bucket.status.domain_name}:443"
+    bucket_region   = nebius_storage_v1_bucket.backups_bucket.status.region
   }
 
   depends_on = [
@@ -22,7 +24,9 @@ resource "terraform_data" "cleanup_bucket" {
       set -eu
       command -v aws >/dev/null || { echo "aws cli not found, skipping"; exit 0; }
       bucket="${self.triggers_replace.bucket_name}"
-      if ! aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+      endpoint="${self.triggers_replace.bucket_endpoint}"
+      region="${self.triggers_replace.bucket_region}"
+      if ! aws --endpoint-url "$endpoint" --region "$region" s3api head-bucket --bucket "$bucket" 2>/dev/null; then
         echo "Bucket $bucket doesn't exist, skipping cleanup"
         exit 0
       fi
@@ -32,9 +36,9 @@ resource "terraform_data" "cleanup_bucket" {
       # Loop until list-objects-v2 confirms the bucket is empty so the subsequent bucket delete
       # doesn't race with the termination tail.
       for i in 1 2 3 4 5; do
-        aws s3 rm "s3://$bucket/" --recursive || true
+        aws --endpoint-url "$endpoint" --region "$region" s3 rm "s3://$bucket/" --recursive || true
         sleep 5
-        count=$(aws s3api list-objects-v2 --bucket "$bucket" --query 'KeyCount' --output text 2>/dev/null || echo "?")
+        count=$(aws --endpoint-url "$endpoint" --region "$region" s3api list-objects-v2 --bucket "$bucket" --query 'KeyCount' --output text 2>/dev/null || echo "?")
         if [ "$count" = "0" ] || [ "$count" = "None" ]; then
           echo "Bucket $bucket emptied on pass $i"
           exit 0
