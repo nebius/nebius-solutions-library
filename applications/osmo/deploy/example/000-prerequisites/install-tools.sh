@@ -27,6 +27,7 @@ print_error() {
 TERRAFORM_MIN_VERSION="1.5.0"
 KUBECTL_MIN_VERSION="1.28.0"
 HELM_MIN_VERSION="3.12.0"
+NEBIUS_CLI_INSTALL_URL="${NEBIUS_CLI_INSTALL_URL:-https://storage.eu-north1.nebius.cloud/cli/install.sh}"
 
 # Detect OS
 detect_os() {
@@ -195,7 +196,7 @@ install_helm() {
 install_nebius() {
     echo "Installing Nebius CLI..."
     # Note: URL updated per https://docs.nebius.com/cli/install
-    curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+    curl -sSL "$NEBIUS_CLI_INSTALL_URL" | bash
     
     # Add to PATH for current session
     export PATH="$HOME/.nebius/bin:$PATH"

@@ -258,7 +258,7 @@ Run the installer:
 
 Or install manually:
 ```bash
-curl -sSL https://storage.eu-north1.nebius.cloud/nebius/install.sh | bash
+curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
 export PATH="$HOME/.nebius/bin:$PATH"
 ```
 

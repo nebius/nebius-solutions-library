@@ -19,6 +19,10 @@ workflow:
         PARENT_ID: "project-XXX"
         NEBIUS_IAM_TOKEN: "<nebius iam get-access-token result>"
         NGC_API_KEY: "nvapi-XXX"
+        NEBIUS_CLI_INSTALL_URL: "https://storage.eu-north1.nebius.cloud/cli/install.sh"
+        NEBIUS_API_ENDPOINT: "api.nebius.cloud:443"
+        SERVERLESS_PLATFORM: "gpu-l40s-d"
+        SERVERLESS_PRESET: "1gpu-16vcpu-96gb"
       command:
         - bash
         - -lc
@@ -29,15 +33,15 @@ workflow:
           echo "--- 1. Install Nebius CLI ---"
           apt-get update && apt-get install -y curl bash jq
 
-          curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+          curl -sSL "$NEBIUS_CLI_INSTALL_URL" | bash
 
           export PATH="$PATH:/root/.nebius/bin"
           nebius version
 
           echo "--- 2. Configure Nebius credentials ---"
           mkdir -p /root/.nebius
-          printf 'current-profile: default\nprofiles:\n  default:\n    endpoint: api.eu-north1.nebius.cloud:443\n    parent-id: %s\n' \
-            "$PARENT_ID" > /root/.nebius/config.yaml
+          printf 'current-profile: default\nprofiles:\n  default:\n    endpoint: %s\n    parent-id: %s\n' \
+            "$NEBIUS_API_ENDPOINT" "$PARENT_ID" > /root/.nebius/config.yaml
 
           echo "--- 3. Launch Isaac Lab L40S job ---"
           # The OSMO task is just a CPU launcher pod. The actual serverless
@@ -47,8 +51,8 @@ workflow:
             --image "nvcr.io/nvidia/isaac-lab:2.3.2" \
             --registry-username "\$oauthtoken" \
             --registry-password "$NGC_API_KEY" \
-            --platform "gpu-l40s-d" \
-            --preset "1gpu-16vcpu-96gb" \
+            --platform "$SERVERLESS_PLATFORM" \
+            --preset "$SERVERLESS_PRESET" \
             --container-command "bash" \
             --args "-c '/workspace/isaaclab/isaaclab.sh -p -c \"import isaaclab; print(isaaclab.__version__)\"'" \
             --timeout "60m" \
