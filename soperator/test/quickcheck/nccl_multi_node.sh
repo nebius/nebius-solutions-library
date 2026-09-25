@@ -7,6 +7,8 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=1280G
+# The line below is to make sure that the job runs on all available nodes. Otherwise, the job runs on a single node.
+#SBATCH --nodes=1-10000
 
 # Run a multi-node MPI NCCL test
 srun --mpi=pmix \
