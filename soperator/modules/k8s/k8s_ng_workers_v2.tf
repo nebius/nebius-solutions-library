@@ -97,19 +97,19 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
       # Don't recreate the node if it's not ready for 5 minutes
       # to avoid races with Soperator, since it does the same
       {
-        type     = "NodeReady"
+        type     = "Ready"
         status   = "FALSE"
         disabled = true
       },
       # Don't restart nodes with not responding kubelet
       # to avoid races with Soperator, since it does the same
       {
-        type     = "NodeReady"
+        type     = "Ready"
         status   = "UNKNOWN"
         disabled = true
       },
       # Don't recreate nodes with broken boot disks
-      # since it's covered by NodeReady=Unknown
+      # since it's covered by Ready=Unknown
       {
         type     = "NebiusBootDiskIOError"
         status   = "TRUE"
@@ -123,7 +123,7 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
         disabled = true
       },
       # Don't restart nodes with broken containerd
-      # since it's covered by NodeReady=False
+      # since it's covered by Ready=False
       {
         type     = "NebiusContainerRuntimeError"
         status   = "TRUE"
