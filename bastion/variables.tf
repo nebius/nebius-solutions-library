@@ -39,6 +39,28 @@ variable "ssh_private_key_path" {
   default     = null
 }
 
+variable "nebius_cli_install_url" {
+  description = "Nebius CLI installer URL used by bastion cloud-init."
+  type        = string
+  default     = "https://storage.eu-north1.nebius.cloud/cli/install.sh"
+
+  validation {
+    condition     = can(regex("^https://[^'[:space:]]+$", var.nebius_cli_install_url))
+    error_message = "nebius_cli_install_url must be an HTTPS URL without whitespace or shell quotes."
+  }
+}
+
+variable "nebius_api_endpoint" {
+  description = "Nebius API endpoint used by the CLI profile created on the bastion."
+  type        = string
+  default     = "api.eu.nebius.cloud"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9.-]+(:[0-9]+)?$", var.nebius_api_endpoint))
+    error_message = "nebius_api_endpoint must be a hostname with an optional port."
+  }
+}
+
 # Access By IP
 variable "public_ip_allocation_id" {
   description = "Id of a manually created public_ip_allocation."

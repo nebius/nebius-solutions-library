@@ -16,6 +16,7 @@
 NEBIUS_TENANT_ID="${NEBIUS_TENANT_ID:-}"        # e.g. tenant-abc123def456
 NEBIUS_PROJECT_ID="${NEBIUS_PROJECT_ID:-}"      # e.g. project-abc123def456
 NEBIUS_REGION="${NEBIUS_REGION:-eu-west2}"      # eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1
+NEBIUS_CLI_INSTALL_URL="${NEBIUS_CLI_INSTALL_URL:-https://storage.eu-north1.nebius.cloud/cli/install.sh}"
 
 OSMO_INGRESS_HOSTNAME="${OSMO_INGRESS_HOSTNAME:-}"  # e.g. myapp.eu-west2.osmo.nebius.cloud
 KEYCLOAK_HOSTNAME="${KEYCLOAK_HOSTNAME:-}"          # e.g. auth.myapp.eu-west2.osmo.nebius.cloud
@@ -55,7 +56,7 @@ check_nebius_cli() {
         echo -e "${RED}[ERROR]${NC} Nebius CLI is not installed."
         echo ""
         echo "Install it by running: ./install-tools.sh"
-        echo "Or manually: curl -sSL https://storage.eu-north1.nebius.cloud/nebius/install.sh | bash"
+        echo "Or manually: curl -sSL $NEBIUS_CLI_INSTALL_URL | bash"
         return 1
     fi
 

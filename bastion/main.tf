@@ -31,6 +31,8 @@ resource "nebius_compute_v1_instance" "bastion_instance" {
     ssh_public_key     = local.ssh_public_key
     parent_id          = var.parent_id
     service_account_id = local.service_account_id
+    cli_install_url    = var.nebius_cli_install_url
+    api_endpoint       = var.nebius_api_endpoint
   })
 
   depends_on = [
