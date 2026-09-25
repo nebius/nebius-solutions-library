@@ -1,0 +1,239 @@
+{
+  "schema": "archvteams.nebius.ai/rfdiffusion-native-live-results/v1",
+  "status": "PASS",
+  "measured_at": "2026-08-18",
+  "model": "RFdiffusion",
+  "image": "nvcr.io/nim/ipd/rfdiffusion@sha256:15e40e466d8ebe9a53f1feea599373720428c9de65da750bf4271c96ec35ceb4",
+  "cluster": {
+    "id": "mk8scluster-example",
+    "api_server": "https://kubernetes-api.example.invalid:443",
+    "namespace": "nim-fast-start",
+    "node": "gpu-node-c.example.invalid",
+    "boot_id": "00000000-0000-4000-8000-000000000001",
+    "gpu_topology": "1x NVIDIA H100, full GPU, non-MIG"
+  },
+  "metric_contract": {
+    "warm_instance": true,
+    "storage_attached_before_t0": true,
+    "t0": "timestamp persisted on the line immediately before kubectl create of the target",
+    "http_ready": "first successful semantic application response from GET /v1/health/ready",
+    "kubernetes_ready": "Pod Ready condition transition, reported separately",
+    "call_latency": "request dispatch through completion of the HTTP response body",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "calls_per_trial": 2,
+    "calls_are_distinct": true,
+    "t0_through_call_2": "target submit through completion of the second inference response body",
+    "validation_completion_is_separate": true
+  },
+  "capture": {
+    "capture_id": "f7-r7",
+    "pod_snapshot_content": "rfd-f7-r7",
+    "pod_snapshot_content_uid": "00000000-0000-4000-8000-000000000006",
+    "source_pod": "rfd-donor-f7-r7-8npz7",
+    "source_pod_uid": "00000000-0000-4000-8000-000000000002",
+    "ready_at": "2026-08-18T09:24:14Z",
+    "checkpoint_wall_seconds": 270.51258188,
+    "criu_dump_seconds": 264.621051939,
+    "donor_call_seconds": [
+      5.678462,
+      5.565097
+    ],
+    "donor_residue_counts": [
+      67,
+      70
+    ],
+    "runtime_topology": {
+      "validator_volume_type": "bounded_empty_dir",
+      "validator_mount_path": "/validator",
+      "validator_size_limit": "1Mi"
+    }
+  },
+  "artifacts": {
+    "direct": {
+      "checkpoint_id": "rfdiffusion-native-h100-v2",
+      "version": "1",
+      "image_io_mode": "direct",
+      "regular_file_count": 90,
+      "regular_bytes": 22087352218,
+      "manifest_sha256": "21c83eaa10facc54f9483f5f47528a19cacb6d568bd46224ecfe013af5f68608",
+      "aggregate_sha256": "f69f043b96d2a42c74952ecfecc67cac3b317c6d58419ede6cbfb9408649ead0"
+    },
+    "buffered": {
+      "checkpoint_id": "rfdiffusion-native-h100-v2-buffered",
+      "version": "1",
+      "image_io_mode": "buffered",
+      "regular_file_count": 90,
+      "regular_bytes": 22087352229,
+      "manifest_sha256": "5d47f0fac7bba60bdab3e29843f2fd99150491e917f7f3758a84176aef8c7f9d",
+      "aggregate_sha256": "8f3b3f66b2b8e886b2b04880d6e511ee138b409bf55471849dfd9657a6df44fb",
+      "hardlinked_payload_file_count": 89,
+      "hardlinked_payload_bytes": 22087346372
+    },
+    "cache": {
+      "regular_file_count": 674,
+      "regular_bytes": 2590162178,
+      "safe_internal_symlink_count": 3,
+      "tree_sha256": "8b79aa4f4ca6a3121ca6d3d7e8083addd949a28a84b375bd5754580415eb80fd"
+    }
+  },
+  "setup_outside_t0": {
+    "initial_image_prepull_seconds": 239.64121,
+    "post_reboot_canonical_image_holder_ready_seconds": 2.930674,
+    "direct_holder": {
+      "cache_full_read_seconds": 166.073282,
+      "artifact_metadata_seconds": 0.001613,
+      "artifact_payload_read": false,
+      "total_seconds": 166.074895
+    },
+    "selected_buffered_holder_refresh": {
+      "pod_uid": "00000000-0000-4000-8000-000000000004",
+      "ready_at": "2026-08-18T10:05:45Z",
+      "cache_full_read_seconds": 32.633541,
+      "artifact_full_read_seconds": 16.332096,
+      "total_full_read_seconds": 48.965637,
+      "create_to_ready_seconds": 50.644535,
+      "receipt_sha256": "17afc7961933a10cd7b1ab6d0d391a54f459bf1f5db67bbb51be61cae5d0920d",
+      "receipt_path": "<private-evidence-root>/rfdiffusion-native-f7-20260818T080831Z/setup/buffered-holder-r7-refresh-receipt.json"
+    }
+  },
+  "direct_canary": {
+    "run_id": "rfd-f7-direct-canary6",
+    "status": "PASS",
+    "worker_restore_seconds": 193.032,
+    "demand_to_http_ready_seconds": 199.036267,
+    "demand_to_kubernetes_ready_seconds": 201.661203,
+    "semantic_request_1_seconds": 8.323738,
+    "semantic_request_2_seconds": 5.639307,
+    "demand_to_two_semantic_seconds": 213.009981,
+    "demand_to_semantic_validation_seconds": 213.014973,
+    "semantic_validation_overhang_seconds": 0.004992,
+    "summary_sha256": "e3ac58f35ca7bb15b771394ab790de9d1d610e8786894671de9d22567f72f734",
+    "summary_path": "<private-evidence-root>/rfdiffusion-native-f7-20260818T080831Z/runs/rfd-f7-direct-canary6/trial-summary.json"
+  },
+  "selected_n3": {
+    "status": "PASS",
+    "image_io_mode": "buffered",
+    "storage_state": "buffered_fully_prewarmed",
+    "run_ids": [
+      "rfd-f7-warm-1",
+      "rfd-f7-warm-2",
+      "rfd-f7-warm-3"
+    ],
+    "semantic_pass_count": 6,
+    "demand_to_http_ready_seconds": {
+      "values": [
+        17.965447,
+        17.456876,
+        17.662044
+      ],
+      "median": 17.662044,
+      "minimum": 17.456876,
+      "maximum": 17.965447
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [
+        21.124378,
+        19.532522,
+        19.609357
+      ],
+      "median": 19.609357,
+      "minimum": 19.532522,
+      "maximum": 21.124378
+    },
+    "semantic_request_1_seconds": {
+      "values": [
+        7.892573,
+        7.792848,
+        7.98068
+      ],
+      "median": 7.892573,
+      "minimum": 7.792848,
+      "maximum": 7.98068
+    },
+    "semantic_request_2_seconds": {
+      "values": [
+        5.552619,
+        5.584081,
+        5.726694
+      ],
+      "median": 5.584081,
+      "minimum": 5.552619,
+      "maximum": 5.726694
+    },
+    "demand_to_two_semantic_seconds": {
+      "values": [
+        31.420852,
+        30.843879,
+        31.379359
+      ],
+      "median": 31.379359,
+      "minimum": 30.843879,
+      "maximum": 31.420852
+    },
+    "demand_to_semantic_validation_seconds": {
+      "values": [
+        31.430252,
+        30.849501,
+        31.383563
+      ],
+      "median": 31.383563,
+      "minimum": 30.849501,
+      "maximum": 31.430252
+    },
+    "semantic_validation_overhang_seconds": {
+      "values": [
+        0.0094,
+        0.005622,
+        0.004204
+      ],
+      "median": 0.005622,
+      "minimum": 0.004204,
+      "maximum": 0.0094
+    },
+    "worker_restore_seconds": {
+      "values": [
+        11.554,
+        11.487,
+        11.521
+      ],
+      "median": 11.521,
+      "minimum": 11.487,
+      "maximum": 11.554
+    },
+    "aggregate_sha256": "5e27493276dfd1eda3eb640c1bfe4655e378060ceba8a77619abb3271f27f0b6",
+    "aggregate_path": "<private-evidence-root>/rfdiffusion-native-f7-20260818T080831Z/aggregates/rfd-f7-warm-buffered-n3.json"
+  },
+  "excluded_evidence": {
+    "provider_reboot": "setup/excluded-preemption-r7.json",
+    "pre_t0_setup_attempts": "setup/excluded-cache-populator-r*.json and setup/excluded-donor-r5-cache-inventory.json",
+    "direct_setup_canaries": "runs/rfd-f7-direct-canary through runs/rfd-f7-direct-canary5",
+    "stale_buffered_residency_cohort": {
+      "runs": [
+        "rfd-f7-buf-1",
+        "rfd-f7-buf-2",
+        "rfd-f7-buf-3"
+      ],
+      "reason": "the retained holder read preceded direct restore activity; the 175.616 to 11.999 second restore discontinuity showed that the old receipt no longer described live residency",
+      "receipt_sha256": "eeb4aec76c14d4d48f632d83bcde80d098c0f07b1e807952be9840adb9902817"
+    }
+  },
+  "evidence_root": "<private-evidence-root>/rfdiffusion-native-f7-20260818T080831Z",
+  "retained_resources": {
+    "pod_snapshot_contents": [
+      "rfd-f7-r6",
+      "rfd-f7-r7"
+    ],
+    "pvcs": [
+      "rfdiffusion-native-f7-artifacts",
+      "rfdiffusion-native-f7-cache"
+    ],
+    "cpu_holders": [
+      "rfdiffusion-native-f7-image-holder-nkpcb",
+      "rfd-direct-holder-f7-r7",
+      "rfd-buffered-holder-f7-r7"
+    ],
+    "active_run_gpu_requests_after_cleanup": 0,
+    "final_state_path": "<private-evidence-root>/rfdiffusion-native-f7-20260818T080831Z/final-cluster-state.json",
+    "final_state_sha256": "153db897876cbb7a748758db8e5fe74418cddeb3eef478f192f2bab2c2f5e77c"
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "purpose": "reproducible source, build, and validation provenance for the generic one-shot raw-NIM restore worker",
+  "dynamo": {
+    "repository": "https://github.com/ai-dynamo/dynamo",
+    "commit": "f7f37be174d252590c4b56e25ff4262dd82466fd"
+  },
+  "retained_phase2_image": {
+    "reference": "registry.example.invalid/upstream/snapshot-agent@sha256:c9df66930fbe31c2910752c6601ca4798f422c048f4df6d200df1624357729d9",
+    "local_image_id": "sha256:22501fa2418190f559777dc15875c0e6590bec78a4c39ae93b9b044987e5888f",
+    "created": "2026-08-14T13:37:09.090427658Z",
+    "classification": "experimental-feasibility-only",
+    "source_patch_sha256": "d1625b04f216d939ad6e88ceda994a16fdedb423b46815a3e428d61700b3d16e",
+    "wrapper_dockerfile_sha256": "bd98ba11353ec7b2dba9e9b7fb348325a5f09cd4d6aa48270675a4edcc68d1d0"
+  },
+  "retained_phase2_toolchain": {
+    "criu_commit": "b47c692bb3a73ae45ee1c4ab215a8f6869d40efd",
+    "criu_version": "4.2",
+    "snapshot_agent_sha256": "d479604484dde77bb18c0447d134f0668032fef6d7568c975c0585532679bc84",
+    "ns_bind_mount_sha256": "9c87852505e24b111199aa3e52e484ee9668d56149d861b8befd053967dfef13",
+    "injected_nsrestore_sha256": "2e1a1fdd7454c3a34123c133d6c987217477ba0d8df0037309c7cd8c8a447b7a",
+    "injected_criu_sha256": "920b21bb333e1a4c8266e4724384aa3a53f4de7cd23dbf4aa75032cf6d5964b7",
+    "cuda_checkpoint_sha256": "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db",
+    "cuda_checkpoint_source_note": "The Phase 2 Dockerfile cloned the default branch without a ref. Its shipped binary is byte-identical to the independently built Phase 1 binary pinned to 00d5cce84c628088d6caa203fc4af40c1538b6f7, but the retained image alone is not source-provenance proof."
+  },
+  "upgrade_toolchain": {
+    "criu_commit": "91d552257809d0e5c7148190e9aa0372f13b76a0",
+    "criu_contains": {
+      "native_aio_vma_restore_commit": "2b660dd2cd5fc9819d23822943bd700c516951a1",
+      "parallel_memfd_restore_commit": "e33b8559cc902c2bb344c6eece4ca26ab6f9bce3"
+    },
+    "cuda_checkpoint_commit": "00d5cce84c628088d6caa203fc4af40c1538b6f7",
+    "go_build_image": "golang:1.26.6@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6",
+    "cuda_helper_build_image": "nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:7d56ebe2b7cd864a60dca3c8b2d0a39f8fc110417e8253e32505c3387f59119c",
+    "criu_build_image": "ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc",
+    "agent_runtime_image": "nvidia/cuda:13.0.3-base-ubuntu22.04@sha256:73ab6dfb3814a5097cd456736e70650ef9dc72343be4117d0400de78168760fe",
+    "retained_cuda_checkpoint_helper_sha256": "0e44e9067d71411c775cd3b21fa0df806613504c8c699bd1944e3e7c10989298",
+    "public_operator_base": "gcr.io/distroless/static-debian12:nonroot@sha256:b7ebc675e6df3e26840de28a9d119969806b5542902111bfd111964d0930c08a",
+    "patch": "public-aio-toolchain.patch",
+    "patch_sha256": "de10a0609115589efb137186544c9d90a0fcc03616ef959376139c65ae9615bc",
+    "compliance_closure_patch": "compliance-closure.patch",
+    "compliance_closure_patch_sha256": "32493e5da929a993976148124699f8abf99240c4ba486e6a01fda453c682ae68",
+    "source_archive_fix_patch": "source-archive-fix.patch",
+    "source_archive_fix_patch_sha256": "5dd45d97596bbdf068f33f0532fc71da1754c9eeb7d91f0abe547ac29f30bf0e",
+    "portable_toolchain_patch": "portable-glibc35-toolchain.patch",
+    "portable_toolchain_patch_sha256": "62d584ea83770c62d090bbbc15f265a6fadda064ec8c6e6a4fd0abe8328780b9",
+    "buffered_io_patch": "buffered-criu-io.patch",
+    "buffered_io_patch_sha256": "6a59dcb524abd0d9596697efd28afb3bd9d4e543b193f687178494452cecac15",
+    "jammy_compliance_patch": "jammy-compliance-tomli.patch",
+    "jammy_compliance_patch_sha256": "6fa58bcdf97c54f8ecd75e2a685150bd1ae5cede71283eb8fc9aa88bacf87156",
+    "ns_bind_mount_runtime_patch": "ns-bind-mount-glibc35.patch",
+    "ns_bind_mount_runtime_patch_sha256": "4847d7d42aae570fc7f91351a8fbf3018f10dc6247d93c2c9696754861731366",
+    "injected_elf_gate": {
+      "script": "deploy/snapshot/scripts/verify-bundle-glibc.sh",
+      "script_sha256": "7849fea3931032dfa35c9d9cc0ecc577d94185160910ef37dc5b2573a08cc406",
+      "maximum_required_glibc": "2.35",
+      "receipt": "/snapshot-binaries.glibc-compatibility",
+      "build_stage": "bundle-glibc35-audit"
+    },
+    "reproducibility_scope": {
+      "source_and_base_image_inputs_pinned": true,
+      "ubuntu_apt_repository_snapshot_pinned": false,
+      "note": "The mandatory helper hash and GLIBC gate fail closed on incompatible drift, but a clean release build must record its new immutable image and bundle digests."
+    },
+    "dependency_snapshot": {
+      "go_mod_sha256": "7e8580094f486fe9e0f5dc37b9cd8ecf1ed153cdd1a6a2293cc53bb3530cebc1",
+      "go_sum_sha256": "cc3ffd4efe77d70fc65b5c47689931a18080d65619b093250ea3011e20675822",
+      "build_time_go_get": false
+    }
+  },
+  "integrated_source_validation": {
+    "classification": "offline-local-no-image-build",
+    "materialized_tree_sha256": "76838bc28fa641ba3d3165c1deb1f019c4f63ed9fce9571b38194ff65ef7b816",
+    "materialized_tree_hash_algorithm": "SHA-256 of path-sorted sha256sum records for every regular file, relative to the materialization root",
+    "independent_materializations_equal": true,
+    "tester_image_id": "sha256:44c161e4bd6894ee223311c92c348dfdf5954a460b6c732e0dc6ae11b76f34a6",
+    "go_test_network": "none",
+    "go_test_result": "passed",
+    "go_test_log_sha256": "8d8e576c49c9d9499d014fce40799df9863974557177b5730f6c090d9620aa04",
+    "docker_build_check_targets": [
+      "task-public-agent",
+      "agent"
+    ],
+    "docker_build_check_network": "none",
+    "docker_build_check_result": "passed-no-warnings",
+    "docker_build_check_log_sha256": "edb60971db3d4f549ba85e6b924a6fb3c1c25e52957b65a3e0f045289b710b19",
+    "image_built": false,
+    "image_pushed": false
+  },
+  "integrated_performance_validation_image": {
+    "classification": "exact-eight-patch-task-public-agent-performance-validation",
+    "reference": "registry.example.invalid/faststart/snapshot-agent@sha256:d5ce1eaad55378a93a9bf53b35effcbc378ed15ab7e5b7f6b41df6689cefdf28",
+    "local_image_id": "sha256:37f40bd5cab98100c9abab76fb718f352eff397edd687f94858a2f6db7db932b",
+    "image_size_bytes": 657638908,
+    "snapshot_agent_sha256": "eaf82aa012ec052d13b685de87c31996437e4f881cc25ce8494454008b3626a9",
+    "restore_worker_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+    "nsrestore_sha256": "4772d8b9da454870e65dfab1e1f6b4bd49f3bc7deb3ef5bbeb42c61be78d020b",
+    "tool_bundle_manifest_sha256": "c0d638100c03fa35973e82859d15b9c8dd1bcbf0fe9cb185b58cc21fae7ead1e",
+    "tool_bundle_regular_files": 34,
+    "glibc_compatibility_receipt_sha256": "f7af5b214cb963c4cf64910dfafe16987f0c5ec886af5d0e5d7aab5b634f6950",
+    "ns_bind_mount_sha256": "4fa66737c2963cb0fac4305a058fbd39e95819d10b8e1b14776c3a212087b2d5",
+    "ns_bind_mount_runtime_glibc": "2.35",
+    "maximum_required_glibc": "2.35",
+    "supports_image_io_modes": [
+      "direct",
+      "writeback",
+      "buffered"
+    ],
+    "pushed": true,
+    "release_qualification": "pending-full-agent-compliance-build"
+  },
+  "integrated_release_build": {
+    "classification": "blocked-before-image-publication",
+    "target": "agent",
+    "tomli_compatibility_fixed": true,
+    "remaining_blocker": "The exact Jammy CUDA runtime base has no captured baseline SBOM in the pinned compliance corpus; without subtraction, inherited base packages correctly fail the policy gate.",
+    "image_built": false,
+    "image_pushed": false
+  },
+  "local_preclosure_compliance_build": {
+    "reference": "archvteams-2407-restore-worker:f7f37be-criu91d552-compliant-base",
+    "local_image_id": "sha256:b93b25b7790c3d225a200541c1033eaf2fc4b5bf718b999a945cefd7c4f8d1c6",
+    "classification": "local-validation-only-precedes-compliance-closure-patch",
+    "policy_result": "passed",
+    "policy_package_count": 246,
+    "registry_digest": null,
+    "pushed": false,
+    "deployed": false,
+    "note": "This build validated that the pinned CUDA base can pass the upstream compliance target. It does not contain compliance-closure.patch and is not provenance for the current materialized candidate."
+  },
+  "one_shot_restore_worker": {
+    "classification": "portable-source-materialized-with-historical-noble-image-validation",
+    "core_patch": "core-hardening.patch",
+    "core_patch_sha256": "260c1d9a7f192b8c0b25c924ab26b43a95ad599d38d3f367383e3e984aecfd11",
+    "compliance_closure_patch": "compliance-closure.patch",
+    "compliance_closure_patch_sha256": "32493e5da929a993976148124699f8abf99240c4ba486e6a01fda453c682ae68",
+    "source_archive_fix_patch": "source-archive-fix.patch",
+    "source_archive_fix_patch_sha256": "5dd45d97596bbdf068f33f0532fc71da1754c9eeb7d91f0abe547ac29f30bf0e",
+    "portable_toolchain_patch": "portable-glibc35-toolchain.patch",
+    "portable_toolchain_patch_sha256": "62d584ea83770c62d090bbbc15f265a6fadda064ec8c6e6a4fd0abe8328780b9",
+    "buffered_io_patch": "buffered-criu-io.patch",
+    "buffered_io_patch_sha256": "6a59dcb524abd0d9596697efd28afb3bd9d4e543b193f687178494452cecac15",
+    "jammy_compliance_patch": "jammy-compliance-tomli.patch",
+    "jammy_compliance_patch_sha256": "6fa58bcdf97c54f8ecd75e2a685150bd1ae5cede71283eb8fc9aa88bacf87156",
+    "ns_bind_mount_runtime_patch": "ns-bind-mount-glibc35.patch",
+    "ns_bind_mount_runtime_patch_sha256": "4847d7d42aae570fc7f91351a8fbf3018f10dc6247d93c2c9696754861731366",
+    "overlay_tree_sha256": "5363391ab0faed88612308fa1d7a1a9664d464fc9ba440973e89e8bc4ca2a0ed",
+    "pinned_binary_dockerfile": "Dockerfile.restore-worker",
+    "pinned_binary_dockerfile_sha256": "f0fb42c68ad7bf8dd39e27a5e070a1613953e7ec2cac0f19027cbea63a509570",
+    "interface": {
+      "scope": "generic single-container NIM restore target",
+      "run_label": "archvteams.nebius.ai/run-id",
+      "target_spec_annotation": "archvteams.nebius.ai/target-pod-spec-sha256",
+      "required_bindings": [
+        "namespace",
+        "name",
+        "uid",
+        "container name and full containerd ID",
+        "immutable image ID",
+        "cgroup",
+        "Pod IP",
+        "node",
+        "canonical PodSpec SHA-256",
+        "run ID",
+        "checkpoint and artifact version",
+        "artifact manifest SHA-256",
+        "tool-bundle manifest SHA-256"
+      ],
+      "checkpoint_manifest": "/checkpoints/<checkpoint-id>/versions/<artifact-version>/manifest.yaml",
+      "tool_manifest": "/snapshot-binaries.manifest"
+    },
+    "compliance_inventory": {
+      "restore_worker_go_sbom": "/sbom-restore-worker-go.cdx.json",
+      "go_sbom_inputs_are_deduplicated": true,
+      "native_revisions": {
+        "CRIU": "91d552257809d0e5c7148190e9aa0372f13b76a0",
+        "cuda-checkpoint": "00d5cce84c628088d6caa203fc4af40c1538b6f7",
+        "cuda-checkpoint-helper": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+        "ns-bind-mount": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+        "snapshot-inet-remap": "f7f37be174d252590c4b56e25ff4262dd82466fd"
+      }
+    },
+    "built_image": {
+      "source_relation": "historical-pre-portable-toolchain-patch",
+      "reference": "registry.example.invalid/faststart/snapshot-agent@sha256:31e1dacd18b99aec1ab7e8ec8c933f260c9dcec687938b40c44c61274f930d86",
+      "local_image_id": "sha256:dc7806d8440c967fcf1efd713ec0a9bcb6496a7741f97fe65e28a66d66a91314",
+      "restore_worker_sha256": "8873c760a1760c0dc3b3e331c7aedf879e7737ad11aed7f028513f057bbbee6e",
+      "tool_bundle_manifest_sha256": "04214d6f4d72fa59d5daa6168d8c63024b6ebe34c4876394e47e80319ef00c39"
+    },
+    "verification_note": "The historical Noble image passed the upstream tester target and three provisioned-node OpenFold2 restores. The portable source verifier materializes the exact Git object, eight patches, and overlay without network access; a new immutable compliance-target image is still required for byte provenance."
+  },
+  "jammy_compatibility_validation": {
+    "classification": "pre-integration-task-public-agent-validation-only",
+    "reference": "registry.example.invalid/faststart/snapshot-agent@sha256:b3801ee9272b9032da7e46c4cea8f6a20ac1bf2f3c7fa25c604b4ad15cd761a3",
+    "local_image_id": "sha256:3915634b8c44b613894b7dce821956301c9c78e1003d30888bd8e2263f2c390b",
+    "tool_bundle_manifest_sha256": "fbee62d23781a1298fe7b1173ce39e50edd1ea451476ffb147319d92fa88e44c",
+    "bundle_regular_files": 34,
+    "bundle_elf_files": 34,
+    "bundle_versioned_elf_files": 33,
+    "maximum_required_glibc": "2.35",
+    "criu_sha256": "6b2cbba994b252fddbbe632cb055ca81257cf4e3cab2c26f1f33355f4d71764c",
+    "cuda_checkpoint_sha256": "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db",
+    "cuda_checkpoint_helper_sha256": "37a48743fe2f86affbb8c142112c25bd32e05901cb8fb6a420cb25fad7b5f929",
+    "exact_target_image": "nvcr.io/nim/ipd/proteinmpnn@sha256:b55a0aa6733e267e6e6fe06434e98aea61eff14bc5545127555607fef6f38aa5",
+    "exact_target_glibc": "2.35-0ubuntu3.8",
+    "source_relation": "validates the Jammy strategy but predates the mandatory in-build gate and rebuilt the CUDA helper on Jammy",
+    "go_test_log_sha256": "9e6850af9f6ad46734e4905aace98660ff4ff25f5ea21ffd9c36a087a1a7b608",
+    "external_bundle_gate_sha256": "a27043766b18636ea956dd3b06bde8155c89d20e5bc4f1c034975a89f456d4f5",
+    "exact_target_selftest_sha256": "32413dd12a8aa8f19381afcc0226a3e2f74bee8b7208ccc28b3cd4e77424611b"
+  },
+  "openfold2_provisioned_evidence": {
+    "image": "nvcr.io/nim/openfold/openfold2@sha256:fc64916731fee39e124225829dca78e80ec24fe1891be47057d0d69209b93ab4",
+    "artifact_id": "openfold2-native-f7-v1",
+    "artifact_version": "1",
+    "artifact_manifest_sha256": "78368af3e6f143d7dc681632c4150b29f6354717103638b56e776244d9631b04",
+    "artifact_bytes": 7290652785,
+    "artifact_file_count": 202,
+    "successful_restores": 3,
+    "attempted_restores": 3,
+    "run_ids": [
+      "p2-20260818t0249",
+      "p3-20260818t0251",
+      "p4-20260818t0252"
+    ],
+    "demand_to_http_ready_median_seconds": 11.0,
+    "demand_to_two_semantic_responses_median_seconds": 22.733563,
+    "worker_restore_median_seconds": 3.599,
+    "semantic_passes_per_run": 2,
+    "semantic_validator_sha256": "980540c9da007ad17b23fcd2edcc4db846110b1398a5ef45fcb003bbd79207d2",
+    "local_evidence_root": "<private-evidence-root>/openfold2-native-f7-20260818T0221Z"
+  }
+}

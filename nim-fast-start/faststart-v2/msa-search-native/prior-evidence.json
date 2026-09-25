@@ -1,0 +1,67 @@
+{
+  "schema": "archvteams.nebius.ai/msa-search-retained-baseline/v1",
+  "status": "PASS",
+  "source": {
+    "path": "<private-evidence-root>/msa-search-h100-faststart-20260817T233710Z/results.json",
+    "bytes": 5807,
+    "sha256": "77696fd9204276e1c77a177cdda1a3490fda7db1553b01628d3a05545a71b7ca"
+  },
+  "execution_identity": {
+    "node": "gpu-node-b.example.invalid",
+    "gpu": "NVIDIA H100",
+    "gpu_count": 1,
+    "image": "nvcr.io/nim/colabfold/msa-search@sha256:944f3cf845761be8e42b33147ae08b68c61eca7cad67bf5251e1708d03c0165c",
+    "model_profile": "ad5086cc67393792e71fa57444f13eaff8425658e8fb5feea07070ca3b2d34bb",
+    "database": "pdb70_220313",
+    "global_max_msa_depth": 500
+  },
+  "semantic_fixture": {
+    "primary_path": "fixtures/request-pdb70.json",
+    "primary_bytes": 213,
+    "primary_sha256": "874b0e5e3be9776ea289fb46444032e04b63875d9d4110f1560e5435de72686a",
+    "mutant_sha256": "459cb2f2313c8293cfe8225b0088a3420a819a7d77d975456a3bd18aecf5b749",
+    "endpoint": "/biology/colabfold/msa-search/predict",
+    "calls_per_trial": 2,
+    "records_per_response": 128,
+    "non_query_homologs_per_response": 127,
+    "query_length": 76
+  },
+  "cached_conventional_start": {
+    "pod_creation_to_ready_seconds": 6.0,
+    "application_log_to_ready_seconds": 3.8623,
+    "semantic_call_seconds": [0.396933, 0.388381],
+    "model_cache_bytes": 112748012,
+    "model_cache_file_count": 14,
+    "uvloop_absent_before_capture": true
+  },
+  "checkpoint": {
+    "regular_file_count": 73,
+    "regular_file_bytes": 1589852856,
+    "process_count": 4,
+    "cuda_context_count": 2,
+    "io_uring_fd_count": 0
+  },
+  "retained_page_cache_n3_medians_seconds": {
+    "criu_restore": 1.210,
+    "manual_cuda_restore_unlock": 0.826,
+    "http_ready": 3.117,
+    "first_semantic_response": 0.035843,
+    "second_semantic_response": 0.034294,
+    "restore_through_two_semantic_responses": 3.186845
+  },
+  "disk_cold_n3_medians_seconds": {
+    "criu_restore": 12.035,
+    "manual_cuda_restore_unlock": 0.845,
+    "http_ready": 14.250,
+    "first_semantic_response": 0.313566,
+    "second_semantic_response": 0.042655,
+    "restore_through_two_semantic_responses": 14.610180
+  },
+  "restored_process_contract": {
+    "mmseqs_fd": 1,
+    "api_worker_fd": 24,
+    "shared_pipe_verified": true,
+    "cuda_states": ["running", "running"]
+  },
+  "qualification_note": "These are retained experimental baselines, not production-shaped Dynamo demand-to-two qualification results."
+}

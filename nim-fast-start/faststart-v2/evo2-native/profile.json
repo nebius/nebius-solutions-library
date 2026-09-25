@@ -1,0 +1,86 @@
+{
+  "schema": "archvteams.nebius.ai/evo2-40b-native-profile/v1",
+  "model": {
+    "name": "Evo2-40B",
+    "container_name": "evo2",
+    "image": "nvcr.io/nim/arc/evo2-40b@sha256:561886bab1d2d0da836ebf5bec403f9de2baf6e92deb7eedf1b316aa994b5dd2",
+    "start_command": [
+      "/bin/bash",
+      "/opt/nim/start_server.sh"
+    ],
+    "ready_path": "/v1/health/ready",
+    "inference_path": "/biology/arc/evo2/generate",
+    "cache_path": "/opt/nim/.cache/ngc",
+    "nim_cache_path": "/opt/nim/.cache"
+  },
+  "hardware": {
+    "platform": "gpu-h200-sxm",
+    "preset": "1gpu-16vcpu-200gb",
+    "gpu_product": "NVIDIA H200 SXM",
+    "compute_capability": "9.0",
+    "gpu_count": 1,
+    "full_gpu_resource": "nvidia.com/gpu",
+    "mig_allowed": false,
+    "gpu_memory_gb_marketing": 141,
+    "retained_capture_node": "h200-node.example.invalid",
+    "required_node_labels": {
+      "nebius.com/gpu-name": "H200"
+    }
+  },
+  "pod_profile": {
+    "requests": {
+      "cpu": "4",
+      "memory": "32Gi",
+      "nvidia.com/gpu": "1"
+    },
+    "limits": {
+      "cpu": "32",
+      "memory": "180Gi",
+      "nvidia.com/gpu": "1"
+    },
+    "shared_memory": "64Gi",
+    "qos_class": "Burstable"
+  },
+  "storage": {
+    "artifact_pvc": "evo2-native-h200-artifacts",
+    "artifact_storage_class": "mlspec-archvteams-2407-io-m3",
+    "artifact_capacity": "256Gi",
+    "cache_pvc": "evo2-native-h200-cache",
+    "cache_storage_class": "compute-csi-default-sc",
+    "cache_capacity": "150Gi"
+  },
+  "artifacts": {
+    "direct": {
+      "checkpoint_id": "evo2-40b-native-h200-v1",
+      "artifact_version": "1",
+      "image_io_mode": "direct",
+      "manifest_sha256": null
+    },
+    "buffered": {
+      "checkpoint_id": "evo2-40b-native-h200-v1-buffered",
+      "artifact_version": "1",
+      "image_io_mode": "buffered",
+      "manifest_sha256": null,
+      "prewarm_required": true
+    }
+  },
+  "semantic_profile": {
+    "request_count": 2,
+    "num_tokens": 20,
+    "request_seeds": [
+      2407001,
+      2407002
+    ],
+    "expected_sequences": [
+      "ATCGATCGATCGATCGATCG",
+      "GATTACAGATTACAGATTAC"
+    ]
+  },
+  "retained_evidence": {
+    "root": "<private-evidence-root>/evo2-h200-faststart-20260817T234216Z",
+    "legacy_checkpoint": "/m3/evo2-40b/criu42-h200-warm20-20260817T234216Z",
+    "legacy_checkpoint_bytes": 99959572798,
+    "legacy_direct_n3_median_seconds": 67.39,
+    "note": "The legacy artifact proves the image, H200 topology, requests, semantics, and native direct-I/O opportunity. A new manifest-bound native artifact is required by this lane."
+  }
+}

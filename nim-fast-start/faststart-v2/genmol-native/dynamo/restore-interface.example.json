@@ -1,0 +1,63 @@
+{
+  "schema": "archvteams.nebius.ai/dynamo-restore-interface/v1",
+  "approved": false,
+  "release_ready": false,
+  "release_blocker": "REPLACE_WITH_RELEASE_BLOCKER_UNTIL_FINAL_INTERFACE_IS_APPROVED",
+  "worker_classification": "full-agent-compliance-release",
+  "supported_image_io_modes": ["direct", "writeback", "buffered"],
+  "approval": {
+    "reviewed_by": "REPLACE_WITH_REVIEWER",
+    "reviewed_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+    "evidence_sha256": "REPLACE_WITH_64_HEX_DIGEST"
+  },
+  "source": {
+    "repository": "https://github.com/ai-dynamo/dynamo",
+    "commit": "f7f37be174d252590c4b56e25ff4262dd82466fd",
+    "materialized_tree_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+    "patch_inputs": {
+      "public_aio_toolchain": "REPLACE_WITH_64_HEX_DIGEST",
+      "core_hardening": "REPLACE_WITH_64_HEX_DIGEST",
+      "compliance_closure": "REPLACE_WITH_64_HEX_DIGEST",
+      "source_archive_fix": "REPLACE_WITH_64_HEX_DIGEST",
+      "portable_glibc35_toolchain": "REPLACE_WITH_64_HEX_DIGEST",
+      "buffered_criu_io": "REPLACE_WITH_64_HEX_DIGEST",
+      "jammy_compliance_tomli": "REPLACE_WITH_64_HEX_DIGEST",
+      "ns_bind_mount_glibc35": "REPLACE_WITH_64_HEX_DIGEST"
+    }
+  },
+  "worker_image": "REPLACE_WITH_IMMUTABLE_PUBLIC_WORKER_IMAGE_AT_SHA256",
+  "worker_executable": "/usr/local/bin/restore-worker",
+  "worker_executable_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+  "argument_template": [
+    "restore",
+    "--target-namespace", "{target_namespace}",
+    "--target-name", "{target_name}",
+    "--target-uid", "{target_uid}",
+    "--target-container", "{target_container}",
+    "--target-container-id", "{target_container_id}",
+    "--target-cgroup", "{target_cgroup}",
+    "--target-pod-ip", "{target_pod_ip}",
+    "--target-node", "{target_node}",
+    "--target-pod-spec-sha256", "{target_pod_spec_sha256}",
+    "--expected-image-id", "{expected_image_id}",
+    "--run-id", "{run_id}",
+    "--checkpoint-id", "{checkpoint_id}",
+    "--artifact-version", "{artifact_version}",
+    "--artifact-manifest-sha256", "{artifact_manifest_sha256}",
+    "--tool-bundle-sha256", "{tool_bundle_sha256}",
+    "--container-runtime-socket", "/run/containerd/containerd.sock",
+    "--host-proc", "/host/proc",
+    "--host-cgroup", "/sys/fs/cgroup",
+    "--pod-resources-socket", "/var/lib/kubelet/pod-resources/kubelet.sock"
+  ],
+  "probe_image": "REPLACE_WITH_PINNED_GENMOL_IMAGE_AT_SHA256",
+  "probe_executable": "/usr/bin/python3",
+  "validator_sha256": "f85da2029aaa459d687983e5ebeec6c69dffb19a66f34c084409fe2ccc2efad4",
+  "tool_bundle": {
+    "layout": "archvteams-public-dynamo-tools/v1",
+    "content_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+    "regular_files": 34,
+    "glibc_compatibility_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+    "maximum_required_glibc": "2.35"
+  }
+}

@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: "@@WORKER_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: restore-worker
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: "@@WORKER_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: restore-worker
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    resourceNames:
+      - "@@TARGET_NAME@@"
+    verbs:
+      - get
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: "@@WORKER_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: restore-worker
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: "@@WORKER_NAME@@"
+subjects:
+  - kind: ServiceAccount
+    name: "@@WORKER_NAME@@"
+    namespace: nim-fast-start
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "@@WORKER_NAME@@"
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: restore-worker
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+  annotations:
+    archvteams.nebius.ai/target-pod: "@@TARGET_NAME@@"
+    archvteams.nebius.ai/target-pod-uid: "@@TARGET_UID@@"
+    archvteams.nebius.ai/target-container-id: "@@TARGET_CONTAINER_ID@@"
+    archvteams.nebius.ai/target-cgroup: "@@TARGET_CGROUP@@"
+    archvteams.nebius.ai/target-pod-ip: "@@TARGET_POD_IP@@"
+    archvteams.nebius.ai/target-node: "@@TARGET_NODE@@"
+    archvteams.nebius.ai/target-pod-spec-sha256: "@@TARGET_POD_SPEC_SHA256@@"
+    archvteams.nebius.ai/artifact-manifest-sha256: "@@ARTIFACT_MANIFEST_SHA256@@"
+    archvteams.nebius.ai/tool-bundle-sha256: "@@TOOL_BUNDLE_SHA256@@"
+    archvteams.nebius.ai/image-io-mode: "@@IMAGE_IO_MODE@@"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: molmim
+        app.kubernetes.io/component: restore-worker
+        archvteams.nebius.ai/run-id: "@@RUN_ID@@"
+    spec:
+      serviceAccountName: "@@WORKER_NAME@@"
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      restartPolicy: Never
+      hostPID: true
+      hostIPC: false
+      hostNetwork: false
+      runtimeClassName: nvidia
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "@@TARGET_NODE@@"
+      securityContext:
+        seccompProfile:
+          type: Unconfined
+      containers:
+        - name: restore-worker
+          image: "@@WORKER_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command:
+            - "@@WORKER_EXECUTABLE@@"
+          args:
+            - "@@RESTORE_ARGS@@"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: runtime-socket
+              mountPath: /run/containerd/containerd.sock
+            - name: host-proc
+              mountPath: /host/proc
+            - name: host-cgroup
+              mountPath: /sys/fs/cgroup
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources/kubelet.sock
+              readOnly: true
+            - name: checkpoints
+              mountPath: /checkpoints
+              readOnly: true
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: runtime-socket
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources/kubelet.sock
+            type: Socket
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: "@@ARTIFACT_PVC@@"
+            readOnly: true
+        - name: scratch
+          emptyDir:
+            sizeLimit: 1Gi

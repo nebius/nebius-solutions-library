@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_CALL_LOG:?FAKE_CALL_LOG is required}"
+
+script_path=${1:?Python script path is required}
+shift
+script_name=${script_path##*/}
+
+option_value() {
+  local wanted=$1
+  shift
+  while (($# > 0)); do
+    if [[ $1 == "$wanted" ]]; then
+      (($# >= 2)) || exit 96
+      printf '%s' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+case "$script_name" in
+  render.py)
+    mode=${1:?render mode is required}
+    printf 'python-render:%s\n' "$mode" >> "$FAKE_CALL_LOG"
+    printf '%s\n' \
+      'apiVersion: v1' \
+      'kind: ConfigMap' \
+      'metadata:' \
+      "  name: fake-${mode}"
+    ;;
+  lint_manifest.py)
+    printf 'python-lint:%s\n' "${1##*/}" >> "$FAKE_CALL_LOG"
+    ;;
+  bind_target.py)
+    binding_output=$(option_value --binding-output "$@")
+    patch_output=$(option_value --patch-output "$@")
+    printf '%s\n' "python-bind" >> "$FAKE_CALL_LOG"
+    printf '%s\n' '{"schema":"fake-binding"}' > "$binding_output"
+    printf '%s\n' '[]' > "$patch_output"
+    ;;
+  evidence.py)
+    run_config=$(option_value --run-config "$@")
+    run_id=$(/usr/bin/jq -er '.run_id' "$run_config")
+    printf '%s\n' "python-evidence" >> "$FAKE_CALL_LOG"
+    /usr/bin/jq -n --arg run_id "$run_id" '{
+      run_id:$run_id,
+      status:"PASS",
+      request_count:2,
+      semantic_pass_count:2,
+      timings_seconds:{
+        demand_to_http_ready:12.0,
+        worker_restore:3.5,
+        demand_to_two_semantic_responses:14.0
+      }
+    }'
+    ;;
+  *)
+    printf 'unexpected Python entry point: %s\n' "$script_path" >&2
+    exit 97
+    ;;
+esac

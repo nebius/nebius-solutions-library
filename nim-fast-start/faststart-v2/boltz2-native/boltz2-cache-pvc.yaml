@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: boltz2-nim-cache-native-f7-r3
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: boltz2
+    app.kubernetes.io/component: model-cache
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: compute-csi-default-sc

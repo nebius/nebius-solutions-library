@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_N3_LOG:?}"
+run_id=""
+evidence_root=""
+checkpoint_id=""
+image_io_mode=""
+artifact_manifest_sha256=""
+target_glibc_version=""
+while (($# > 0)); do
+  case "$1" in
+    --run-id) run_id=$2; shift 2 ;;
+    --evidence-root) evidence_root=$2; shift 2 ;;
+    --checkpoint-id) checkpoint_id=$2; shift 2 ;;
+    --image-io-mode) image_io_mode=$2; shift 2 ;;
+    --artifact-manifest-sha256) artifact_manifest_sha256=$2; shift 2 ;;
+    --target-glibc-version) target_glibc_version=$2; shift 2 ;;
+    --cleanup|--allow-performance-validation-worker) shift ;;
+    *) shift 2 ;;
+  esac
+done
+printf '%s %s %s\n' "$run_id" "$checkpoint_id" "$image_io_mode" >> "$FAKE_N3_LOG"
+case "$run_id" in
+  *-r1) demand=20.0; validation=20.2; restore=4.0; ready=15.0; kready=15.5; call_1=3.0; call_2=2.0 ;;
+  *-r2) demand=18.0; validation=18.2; restore=3.0; ready=13.0; kready=13.5; call_1=3.1; call_2=1.9 ;;
+  *-r3) demand=22.0; validation=22.2; restore=5.0; ready=17.0; kready=17.5; call_1=2.9; call_2=2.1 ;;
+  *) exit 91 ;;
+esac
+mkdir -m 0700 -- "$evidence_root/runs/$run_id"
+receipt_run_id=${FAKE_N3_RECEIPT_RUN_ID:-$run_id}
+jq -n --arg run "$receipt_run_id" --arg checkpoint "$checkpoint_id" \
+  --arg mode "$image_io_mode" --arg manifest "$artifact_manifest_sha256" \
+  --arg glibc "$target_glibc_version" \
+  --argjson demand "$demand" --argjson restore "$restore" \
+  --argjson validation "$validation" \
+  --argjson ready "$ready" --argjson kready "$kready" \
+  --argjson call1 "$call_1" --argjson call2 "$call_2" '{
+    schema:"archvteams.nebius.ai/molmim-production-canary-evidence/v1",
+    status:"PASS",run_id:$run,request_count:2,semantic_pass_count:2,
+    artifact:{checkpoint_id:$checkpoint,version:"1",manifest_sha256:$manifest,
+      target_glibc_version:$glibc,image_io_mode:$mode},
+    storage_prewarm:{captured_at:"2026-08-18T00:00:00Z",
+      cache:{mode:"cache-full-read",unique_bytes:284497920,
+        tree_sha256:"5ff815495b2b90ec6f4d9e5df24216b11a60d49f711e68999347036b0f43056c",
+        full_read_elapsed_seconds:0.25},
+      artifact:{mode:$mode,unique_bytes:5214934444,
+        tree_sha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        manifest_sha256:$manifest,full_read_elapsed_seconds:3.25}},
+    timings_seconds:{demand_to_two_semantic_responses:$demand,worker_restore:$restore,
+      demand_to_http_ready:$ready,demand_to_kubernetes_ready:$kready,
+      semantic_request_1:$call1,semantic_request_2:$call2,
+      demand_to_validation_complete:$validation}
+  }' > "$evidence_root/runs/$run_id/canary-evidence.json"
+printf '%s\n' cleaned > "$evidence_root/runs/$run_id/cleanup.log"
+printf '%s\n' '2026-08-18T00:00:01Z' > "$evidence_root/runs/$run_id/cleanup-verified-at.txt"
+if [[ ${FAKE_N3_NONFINITE_RUN_ID:-} == "$run_id" ]]; then
+  python3 - "$evidence_root/runs/$run_id/canary-evidence.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+value["timings_seconds"]["demand_to_two_semantic_responses"] = float("nan")
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, allow_nan=True)
+PY
+fi

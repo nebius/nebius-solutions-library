@@ -1,0 +1,13 @@
+{
+  "schema": "archvteams.nebius.ai/openfold3-faststart-run/v1",
+  "demand_at": "REPLACE_WITH_RFC3339_TIMESTAMP_CAPTURED_BEFORE_TARGET_CREATE",
+  "run_id": "REPLACE_WITH_UNIQUE_DNS_LABEL",
+  "target_node": "REPLACE_WITH_VERIFIED_ALLOWED_H100_HOSTNAME",
+  "target_glibc_version": "REPLACE_WITH_DONOR_TARGET_RUNTIME_MAJOR.MINOR",
+  "image_io_mode": "REPLACE_WITH_DIRECT_OR_BUFFERED",
+  "checkpoint_id": "REPLACE_WITH_NATIVE_DYNAMO_CHECKPOINT_ID",
+  "artifact_version": "REPLACE_WITH_ARTIFACT_VERSION",
+  "artifact_manifest_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+  "artifact_pvc": "REPLACE_WITH_READ_ONLY_ARTIFACT_PVC",
+  "cache_pvc": "REPLACE_WITH_READ_ONLY_OPENFOLD3_CACHE_PVC"
+}
