@@ -24,8 +24,13 @@ output "storage_bucket_name" {
 }
 
 output "storage_endpoint" {
-  description = "S3-compatible storage endpoint (dynamic from region)"
-  value       = "https://storage.${var.region}.nebius.cloud"
+  description = "S3-compatible storage endpoint returned by the bucket resource"
+  value       = "https://${nebius_storage_v1_bucket.main.status.domain_name}"
+}
+
+output "storage_region" {
+  description = "Region returned by the bucket resource"
+  value       = nebius_storage_v1_bucket.main.status.region
 }
 
 # Legacy TOS-format endpoint retained for compatibility with older experiments.
@@ -33,7 +38,7 @@ output "storage_endpoint" {
 # override_url=https://storage.<region>.nebius.cloud.
 output "storage_tos_endpoint" {
   description = "TOS-format endpoint for OSMO workflow configuration"
-  value       = "tos://storage.${var.region}.nebius.cloud/${nebius_storage_v1_bucket.main.name}"
+  value       = "tos://${nebius_storage_v1_bucket.main.status.domain_name}/${nebius_storage_v1_bucket.main.name}"
 }
 
 output "storage_access_key_id" {
@@ -48,7 +53,7 @@ output "storage_access_key_id" {
 #     --key secret_access_key --format json | jq -r '.data.string_value'
 output "storage_secret_access_key" {
   description = "Storage secret access key - use CLI command above to retrieve (ephemeral, not in state)"
-  value       = null  # Ephemeral values cannot be output; use MysteryBox CLI
+  value       = null # Ephemeral values cannot be output; use MysteryBox CLI
   sensitive   = true
 }
 
@@ -103,8 +108,8 @@ output "postgresql_password" {
   description = "PostgreSQL password (null - always use MysteryBox to retrieve)"
   # Note: Password is stored in MysteryBox and cannot be output directly.
   # Use the CLI to retrieve: nebius mysterybox v1 payload get-by-key --secret-id <id> --key password
-  value       = null
-  sensitive   = true
+  value     = null
+  sensitive = true
 }
 
 output "postgresql_mysterybox_secret_id" {

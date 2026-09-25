@@ -117,44 +117,24 @@ log_info "Using Nebius Managed PostgreSQL..."
 log_success "Database: ${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 
 # -----------------------------------------------------------------------------
-# Select Nebius Region
+# Resolve the Object Storage region from the bucket created by Terraform.
 # -----------------------------------------------------------------------------
-VALID_REGIONS=("eu-north1" "eu-west2" "me-west1")
+TF_STORAGE_REGION=$(get_tf_output "storage_bucket.region" "../001-iac" || echo "")
+TF_STORAGE_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" || echo "")
 
-if [[ -n "${NEBIUS_REGION:-}" ]]; then
-    NEBIUS_SELECTED_REGION="$NEBIUS_REGION"
-    matched=false
-    for r in "${VALID_REGIONS[@]}"; do
-        [[ "$r" == "$NEBIUS_SELECTED_REGION" ]] && matched=true && break
-    done
-    if ! $matched; then
-        log_error "Invalid NEBIUS_REGION '${NEBIUS_SELECTED_REGION}'. Valid options: ${VALID_REGIONS[*]}"
-        exit 1
-    fi
-    log_info "Using region from NEBIUS_REGION: ${NEBIUS_SELECTED_REGION}"
-else
-    echo "Select the Nebius region for storage:"
-    echo ""
-    _idx=1
-    for _r in "${VALID_REGIONS[@]}"; do
-        echo "  ${_idx}) ${_r}"
-        _idx=$((_idx + 1))
-    done
-    echo ""
-    while true; do
-        printf "Enter choice [1-${#VALID_REGIONS[@]}]: "
-        read -r choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#VALID_REGIONS[@]} )); then
-            NEBIUS_SELECTED_REGION="${VALID_REGIONS[$((choice - 1))]}"
-            break
-        fi
-        echo "Invalid selection. Please enter a number between 1 and ${#VALID_REGIONS[@]}."
-    done
-    log_info "Selected region: ${NEBIUS_SELECTED_REGION}"
+if [[ -z "$TF_STORAGE_REGION" || -z "$TF_STORAGE_ENDPOINT" ]]; then
+    log_error "Could not retrieve the Object Storage region and endpoint from Terraform"
+    exit 1
 fi
 
-S3_NEBIUS_ENDPOINT="https://storage.${NEBIUS_SELECTED_REGION}.nebius.cloud"
-S3_NEBIUS_ENDPOINT_HTTPS=$(normalize_nebius_storage_endpoint "${S3_NEBIUS_ENDPOINT}")
+if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$TF_STORAGE_REGION" ]]; then
+    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${TF_STORAGE_REGION}'"
+    exit 1
+fi
+
+NEBIUS_SELECTED_REGION="$TF_STORAGE_REGION"
+S3_NEBIUS_ENDPOINT_HTTPS=$(normalize_nebius_storage_endpoint "$TF_STORAGE_ENDPOINT")
+log_info "Using Object Storage region from Terraform: ${NEBIUS_SELECTED_REGION}"
 
 # -----------------------------------------------------------------------------
 # Get Storage Configuration
@@ -162,7 +142,7 @@ S3_NEBIUS_ENDPOINT_HTTPS=$(normalize_nebius_storage_endpoint "${S3_NEBIUS_ENDPOI
 log_info "Retrieving storage configuration..."
 
 S3_BUCKET=$(get_tf_output "storage_bucket.name" "../001-iac" || echo "")
-S3_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" || echo "${S3_NEBIUS_ENDPOINT}")
+S3_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" || echo "")
 S3_ACCESS_KEY=$(get_tf_output "storage_credentials.access_key_id" "../001-iac" || echo "")
 S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
 

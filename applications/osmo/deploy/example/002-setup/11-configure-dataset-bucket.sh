@@ -27,36 +27,28 @@ DATASET_BUCKET_NAME="${DATASET_BUCKET_NAME:-nebius}"
 check_kubectl || exit 1
 
 # -----------------------------------------------------------------------------
-# Nebius Region (from nebius-env-init.sh)
-# -----------------------------------------------------------------------------
-if [[ -z "${NEBIUS_REGION:-}" ]]; then
-    log_error "NEBIUS_REGION is not set. Run 'source ../000-prerequisites/nebius-env-init.sh' first."
-    exit 1
-fi
-REGION="$NEBIUS_REGION"
-log_info "Using region: ${REGION}"
-
-S3_REGION_FOR_BOTO="${REGION}"
-
-# -----------------------------------------------------------------------------
 # Get Storage Configuration from Terraform
 # -----------------------------------------------------------------------------
 log_info "Retrieving storage configuration from Terraform..."
 
 S3_BUCKET=$(get_tf_output "storage_bucket.name" "../001-iac" 2>/dev/null || echo "")
 S3_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" 2>/dev/null || echo "")
+REGION=$(get_tf_output "storage_bucket.region" "../001-iac" 2>/dev/null || echo "")
 
-if [[ -z "$S3_ENDPOINT" ]]; then
-    S3_ENDPOINT="https://storage.${REGION}.nebius.cloud"
-fi
-S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
-
-if [[ -z "$S3_BUCKET" ]]; then
-    log_error "Could not retrieve storage bucket name from Terraform"
+if [[ -z "$S3_BUCKET" || -z "$S3_ENDPOINT" || -z "$REGION" ]]; then
+    log_error "Could not retrieve the storage bucket name, endpoint, and region from Terraform"
     echo ""
     echo "Run 'terraform apply' in deploy/001-iac and ensure storage is enabled."
     exit 1
 fi
+
+if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$REGION" ]]; then
+    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${REGION}'"
+    exit 1
+fi
+
+S3_REGION_FOR_BOTO="${REGION}"
+S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
 
 # Datasets are stored under the osmo-datasets prefix within the bucket.
 # The path uses the standard s3://<bucket>/<prefix> format.
