@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nebius-bionemo-mcp.fullname" . }}-catalog
+  labels:
+    {{- include "nebius-bionemo-mcp.labels" . | nindent 4 }}
+data:
+  nim-catalog.json: |
+    {{- .Values.nimCatalog | toPrettyJson | nindent 4 }}

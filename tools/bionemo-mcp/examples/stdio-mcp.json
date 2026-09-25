@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "nebius-bionemo": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/tools/bionemo-mcp",
+        "run",
+        "nebius-bionemo-mcp",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "BIONEMO_CATALOG_FILE": "/absolute/path/to/nim-catalog.json"
+      }
+    }
+  }
+}

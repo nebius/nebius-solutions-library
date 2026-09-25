@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nebius-bionemo-mcp.fullname" . }}
+  labels:
+    {{- include "nebius-bionemo-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nebius-bionemo-mcp.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        checksum/catalog: {{ .Values.nimCatalog | toJson | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "nebius-bionemo-mcp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nebius-bionemo-mcp.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: gateway
+          image: {{ include "nebius-bionemo-mcp.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --transport
+            - streamable-http
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: BIONEMO_CATALOG_FILE
+              value: /etc/nebius-bionemo/nim-catalog.json
+            - name: BIONEMO_BEARER_TOKEN_FILE
+              value: /var/run/secrets/nebius-bionemo/token
+            - name: BIONEMO_ARTIFACT_BACKEND
+              value: s3
+            - name: BIONEMO_S3_BUCKET
+              value: {{ .Values.objectStorage.bucket | quote }}
+            - name: BIONEMO_S3_ENDPOINT_URL
+              value: {{ .Values.objectStorage.endpointUrl | quote }}
+            - name: BIONEMO_S3_REGION
+              value: {{ .Values.objectStorage.region | quote }}
+            - name: BIONEMO_S3_PREFIX
+              value: {{ .Values.objectStorage.prefix | quote }}
+            - name: BIONEMO_REQUEST_TIMEOUT_SECONDS
+              value: {{ .Values.runtime.requestTimeoutSeconds | quote }}
+            - name: BIONEMO_STARTUP_PROBE_TIMEOUT_SECONDS
+              value: {{ .Values.runtime.startupProbeTimeoutSeconds | quote }}
+            - name: BIONEMO_MAX_RESPONSE_BYTES
+              value: {{ .Values.runtime.maxResponseBytes | int64 | quote }}
+            - name: BIONEMO_PRESIGN_TTL_SECONDS
+              value: {{ .Values.runtime.presignTtlSeconds | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.existingSecret }}
+                  key: {{ .Values.objectStorage.accessKeyIdKey }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.existingSecret }}
+                  key: {{ .Values.objectStorage.secretAccessKeyKey }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: catalog
+              mountPath: /etc/nebius-bionemo
+              readOnly: true
+            - name: bearer-token
+              mountPath: /var/run/secrets/nebius-bionemo
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: catalog
+          configMap:
+            name: {{ include "nebius-bionemo-mcp.fullname" . }}-catalog
+        - name: bearer-token
+          secret:
+            secretName: {{ .Values.auth.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.auth.tokenKey }}
+                path: token
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

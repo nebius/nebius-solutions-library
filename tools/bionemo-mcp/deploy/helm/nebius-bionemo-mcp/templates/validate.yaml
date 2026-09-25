@@ -1,0 +1,41 @@
+{{- if not .Values.nimCatalog }}
+{{- fail "nimCatalog must contain the modules/nims nim_catalog output" }}
+{{- end }}
+{{- if not .Values.auth.existingSecret }}
+{{- fail "auth.existingSecret is required" }}
+{{- end }}
+{{- if not .Values.objectStorage.existingSecret }}
+{{- fail "objectStorage.existingSecret is required" }}
+{{- end }}
+{{- if not .Values.objectStorage.bucket }}
+{{- fail "objectStorage.bucket is required" }}
+{{- end }}
+{{- if not .Values.objectStorage.endpointUrl }}
+{{- fail "objectStorage.endpointUrl is required" }}
+{{- end }}
+{{- range $key, $model := .Values.nimCatalog }}
+{{- if not (get (default (dict) $model.pod_selector_labels) "app") }}
+{{- fail (printf "nimCatalog.%s.pod_selector_labels.app is required" $key) }}
+{{- end }}
+{{- end }}
+{{- if ne .Values.service.type "ClusterIP" }}
+{{- fail "service.type must remain ClusterIP; expose only /mcp through the TLS ingress" }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.hosts }}
+{{- fail "ingress.hosts is required when ingress is enabled" }}
+{{- end }}
+{{- if not .Values.ingress.tls }}
+{{- fail "ingress.tls is required when ingress is enabled because bearer tokens require transport security" }}
+{{- end }}
+{{- range .Values.ingress.hosts }}
+{{- if not .host }}
+{{- fail "every ingress host must be non-empty" }}
+{{- end }}
+{{- range .paths }}
+{{- if or (ne .path "/mcp") (ne .pathType "Exact") }}
+{{- fail "ingress may expose only exact path /mcp" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
