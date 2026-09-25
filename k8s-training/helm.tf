@@ -77,4 +77,5 @@ module "nccl-test" {
   ]
   source          = "../modules/nccl-test"
   number_of_hosts = nebius_mk8s_v1_node_group.gpu[0].fixed_node_count
+  image           = var.nccl_test_image
 }

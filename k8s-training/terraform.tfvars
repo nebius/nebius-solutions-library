@@ -64,6 +64,9 @@ enable_egress_gateway      = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
 
+# NCCL test image used when test_mode = true. Override for the selected GPU/CUDA platform.
+# nccl_test_image = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
+
 cpu_nodes_public_ips         = false
 gpu_nodes_public_ips         = false
 mk8s_cluster_public_endpoint = true # Set it to FALSE only in case if you've deployed the [bastion](https://github.com/nebius/nebius-solutions-library/blob/main/bastion/README.md)
@@ -92,7 +95,9 @@ filestore_forbid_deletion      = false # Set to true to protect Terraform-create
 
 # Shared filesystem CSI driver. Enable only when using Shared Filesystem.
 # filesystem_csi = {
+#   chart_repository                    = "oci://cr.nebius.cloud/mk8s/helm"
 #   chart_version                       = "0.1.5"
+#   image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
 #   namespace                           = "kube-system"
 #   make_default_storage_class          = true
 #   previous_default_storage_class_name = "compute-csi-default-sc"

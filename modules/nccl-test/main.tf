@@ -108,6 +108,10 @@ resource "helm_release" "nccl-test" {
       name  = "numberOfHosts"
       value = var.number_of_hosts
     },
+    {
+      name  = "image"
+      value = var.image
+    },
   ]
 }
 
