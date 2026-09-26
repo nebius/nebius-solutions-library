@@ -1,0 +1,17 @@
+# Stage 3 -- same real copytruncate/size/rotate reasoning as alert_engine_
+# supervised.logrotate (see that file's own comments for the full
+# rationale): run_aggregator_supervised.sh also writes via a plain shell
+# `>> "$LOG"` redirect held open for the supervised python3 invocation's
+# entire lifetime, so copytruncate is required for the same reason.
+# Per-node aggregator logs are lower-volume than alert_engine's own alert
+# stream (one line per poll cycle plus periodic heartbeats, not one line
+# per fired alert), so a smaller cap is enough margin here.
+/root/P20c_alerting/aggregator_supervised.log {
+    size 20M
+    rotate 10
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

@@ -27,9 +27,13 @@ Real formula, three real phases a test must clear:
 
 minimum_duration_s = (CALIB_MIN_TOTAL_SAMPLES / rate) + BUCKET_MATURITY_GRACE_S + (CV_WINDOW / rate)
 """
+import os
 import sys
 
-sys.path.insert(0, "/root/P20c_alerting")
+# Stage 3 fix: this file was missed by Stage 2's item-4 sys.path sweep
+# (it's a tools/ helper, not one of the core alerting/aggregator modules
+# that sweep targeted) -- same real-location fix as every other file.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aggregator"))
 from node_aggregator_ref import CALIB_MIN_TOTAL_SAMPLES, BUCKET_MATURITY_GRACE_S, MEAN_WINDOW, CV_WINDOW
 
 

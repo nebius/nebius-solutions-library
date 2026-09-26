@@ -23,7 +23,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # real Block/LayerNorm/GPT classes, reused directly (imported, not
 # reimplemented) at this project's own established n_layer=6, n_head=6,
 # n_embd=384 config (same as TP2/long-context/hybrid).
-sys.path.insert(0, '/root/P21_multicomm/nanoGPT_tp')
+# Stage 3 fix: missed by Stage 2's item-4 sys.path sweep -- same real-
+# location fix as every other file (tp2/'s model.py is the real
+# "nanoGPT_tp" this file always meant, per train_node_tp.sh's own comment
+# distinguishing it from the plain nanogpt-base model).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tp2"))
 from model import GPTConfig, GPT
 
 N_LAYER = 6

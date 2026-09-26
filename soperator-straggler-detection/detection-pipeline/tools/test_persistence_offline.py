@@ -6,16 +6,26 @@ already used to validate the classifier itself, so this is a genuine
 second check with real data, not a synthetic sanity test.
 """
 import json
+import os
 import sys
 
-sys.path.insert(0, "/root/P20c_alerting")
+# Stage 3 fix: this file was missed by Stage 2's item-4 sys.path sweep
+# (a tools/ helper, not one of the core alerting/aggregator/classifier
+# modules that sweep targeted) -- same real-location fix as every other
+# file. This previously "worked" on THIS dev machine only because
+# /root/P20c_alerting still happens to exist here as leftover state; it
+# would fail on a genuinely fresh cluster.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "alerting"))
 from persistence import CVPersistenceTracker
 import thresholds as T
 
 # P20a healthy long-run, bucket C, (ts_us, worst_rank, z) -- the same
 # sequence tune_persistence.py used to validate the classifier's own
-# threshold+persistence choice.
-HEALTHY_SEQ = "/root/P20b_hardening/cv_zsequence.json"
+# threshold+persistence choice. Real copy shipped alongside this script
+# (was silently reading the original dev-host path instead, which only
+# "worked" by coincidence on this same machine).
+HEALTHY_SEQ = os.path.join(_HERE, "cv_zsequence.json")
 
 
 def replay(seq_path, z_thresh, persist_window, persist_required):

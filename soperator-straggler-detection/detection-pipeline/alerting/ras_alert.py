@@ -30,12 +30,16 @@ Design: one ncclras -m lifecycle subprocess per job, supervised. Its exit
 fail-stop trigger. A `ncclras -v` snapshot taken just before/at trigger
 time supplies best-effort context.
 """
+import os
 import subprocess
 import re
 import sys
 import time
 
-sys.path.insert(0, "/root/P20c_alerting")
+# Stage 3 fix: missed by Stage 2's item-4 sys.path sweep -- same real-
+# location fix as every other file (health_exclusions.py is co-located,
+# right next to this file, in alerting/).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import health_exclusions  # noqa: E402
 
 MISMATCH_RANK_RE = re.compile(r"^\s*Rank (\d+) (?:--|has launched)")

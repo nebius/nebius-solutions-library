@@ -353,6 +353,84 @@ not hidden**:
 touched or restarted that process; it ran entirely separate test jobs
 against the same cluster).
 
+## Stage 3: `run.sh` + `tools/self_test.sh`
+
+`run.sh` launches the standing pipeline (`node_aggregator_ref.py` per real
+node, the supervised `alert_engine.py`, a confirm-only Grafana check) using
+ONLY `cluster.env`'s real values written by `install.sh` — it never
+re-implements node/environment discovery. `tools/self_test.sh` is the
+one-command "does this actually work on THIS cluster" proof: it injects
+one real, software fault (`STRAGGLER_SLEEP_MS`/`STRAGGLER_TARGET_RANKS`)
+into a real nanoGPT job at a rank on the second real node, establishes
+ground truth (real rank → real PID) from the job's own dump files, then
+confirms the already-running pipeline's own real alert matches that exact
+PID/host — never just "an alert fired somewhere."
+
+**Real bugs found and fixed only by actually running this live** (static
+review would not have caught any of these):
+- **SSH-backgrounding hang**: `ssh node "cmd &"` never returned — ssh
+  waits for every fd inherited by the backgrounded process, and even
+  `setsid`+redirected stdin wasn't enough on its own; `cmd1 && cmd2 &`
+  backgrounds the whole `&&`-list as one job, so `cmd2`'s own redirects
+  didn't fully detach it until `cmd2` itself finished. Fixed by using `;`
+  instead of `&&` so `&` binds to only the final simple command (confirmed
+  via a minimal `sleep 8` reproduction: 8.5s → 0.5s).
+- **VictoriaMetrics ingestion 400s**: `node_aggregator_ref.py` POSTs
+  directly to whatever `vm_url` it's given, with no path appended — it
+  needs the real `/api/v1/import/prometheus` endpoint, not the bare
+  `cluster.env` `VM_URL` (correct as-is for `alert_engine.py`/health
+  probes). Every push failed with HTTP 400 until this was appended in
+  `run_aggregator_supervised.sh` specifically (not in `cluster.env`
+  itself, which stays correct for its other, already-working uses).
+- **`grep -c PATTERN file || echo 0` double-counts on zero matches** —
+  `grep -c` already prints `0` (not an error) but exits 1 for "no
+  matches," so the `|| echo 0` fallback ALSO fires, capturing `"0\n0"`
+  and breaking `$((...))` arithmetic. Fixed by dropping the `||` fallback
+  entirely (grep -c's own output is already always a valid number).
+- **Log-line-growth is not a valid alert_engine.py liveness signal** —
+  its own pipeline-health check only prints when something is DOWN; once
+  the aggregators are genuinely healthy, a fully healthy cycle produces
+  no new log output at all, so a "did the log grow" check fails on the
+  exact success case it should confirm. Fixed by checking real CPU-tick
+  advancement in `/proc/<pid>/stat` instead — proves active work
+  regardless of how quiet a healthy cycle's own output is.
+- **`hostname -f` inside a Soperator pod resolves to a Kubernetes-internal
+  DNS name** (`*.svc.cluster.local`), unreachable outside the cluster's
+  own private network, and this host has no public IP either (`ip addr`
+  confirmed) — consistent with this project's own deliberate "no public
+  IP" access design. `install.sh` now detects this and falls back to the
+  host's own real private IP for `GRAFANA_ACCESS_HOST`, with an explicit
+  disclosure that this is still not a public address.
+- **Six more hardcoded-absolute-path instances missed by Stage 2's own
+  sys.path sweep** (it targeted the core alerting/aggregator/classifier
+  modules, not every `tools/`/`workloads/` helper): `tools/
+  preflight_duration_check.py` and `tools/test_persistence_offline.py`
+  (both `sys.path.insert(0, "/root/P20c_alerting")`, plus the latter's own
+  `HEALTHY_SEQ` pointing at `/root/P20b_hardening/cv_zsequence.json`
+  instead of its own shipped, byte-identical copy at `tools/
+  cv_zsequence.json`), `alerting/ras_alert.py`, `classifier/
+  cause_metrics.py`'s `query_matmul_tflops` (a second hardcoded default
+  for the same bench script `health_exclusions.py` already fixed),
+  `workloads/long-context/train_longctx.py`, and `workloads/multi-modal/
+  train_vlm.py` (both importing the TP-shaped model via `/root/
+  P21_multicomm/nanoGPT_tp` instead of the shipped `workloads/tp2/
+  model.py`). All fixed the same way as every other Stage 2 item — real,
+  `__file__`-relative resolution, no new hardcoded value.
+
+**Real, live validation performed**: `install.sh` then `run.sh` run
+end-to-end on the current 2-node cluster; both real aggregators confirmed
+via a genuine `agg_aggregator_heartbeat` sample in VictoriaMetrics (not
+just "the ssh command didn't error"); `alert_engine.py` confirmed cycling
+via real CPU-tick advancement; the printed `ssh -L 3000:localhost:3000 -N
+root@10.24.142.162` command was actually used to reach Grafana's real
+`/api/health` through the tunnel — genuine, working access, not just
+plausible-looking text. `tools/self_test.sh` then ran a real fault
+injection end to end: real target rank 8 → real PID 15114 on worker-1
+(established from the job's own dump files, before looking at any alert);
+the pipeline's own real `[ALERT] rank=15114 ... node=worker-1` appeared
+within the wait window and matched exactly. `[CHECK-FAILED]` count: 0,
+confirmed before and after.
+
 ## Explicitly excluded from this package (and why)
 
 - `nccl-2.28-src/ext-profiler/inspector/*.bak_p22`, `*.bak_p32_pre_fix`,

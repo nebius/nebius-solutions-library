@@ -285,6 +285,80 @@ sed "s|path: /root/P20g_pr_ready/dashboards_dropin|path: $PKG_ROOT/observability
 info "Wrote real, templated Grafana provisioning configs to $GEN_PROV_DIR (point your Grafana instance's own provisioning directory at these, or copy them into place -- this script does not assume where that is)."
 
 # =========================================================================
+# Step 4.6 -- real Grafana reachability + auth-posture discovery (Stage 3
+# gap-closure: run.sh needs to print real, working access commands and
+# never a placeholder -- see Stage 2's own established precedent, VM_URL
+# above: a real live probe, never an assumption. This project's own
+# real, validated deployment history (straggler-vmsingle/DEPRECATED.md,
+# vm-standalone/README.md) confirmed Kubernetes API access RBAC-blocked
+# on every real cluster tested so far -- so a Kubernetes Service is
+# checked for live here, never assumed, and this script does not launch
+# or manage Grafana itself either way (same scope boundary as Step 4.5).
+# =========================================================================
+
+info "Checking for a real, reachable Grafana instance and its real auth posture..."
+GRAFANA_URL="${GRAFANA_URL:-}"
+GRAFANA_K8S_NAMESPACE=""
+GRAFANA_K8S_SVC=""
+GRAFANA_K8S_PORT=""
+if command -v kubectl >/dev/null 2>&1; then
+  _svc_line="$(kubectl get svc -A --no-headers 2>/dev/null | grep -i grafana | head -1)"
+  if [ -n "$_svc_line" ]; then
+    GRAFANA_K8S_NAMESPACE="$(echo "$_svc_line" | awk '{print $1}')"
+    GRAFANA_K8S_SVC="$(echo "$_svc_line" | awk '{print $2}')"
+    GRAFANA_K8S_PORT="$(echo "$_svc_line" | awk '{print $6}' | grep -oP '^\d+')"
+    info "Found a real Grafana Kubernetes Service: $GRAFANA_K8S_NAMESPACE/$GRAFANA_K8S_SVC (port $GRAFANA_K8S_PORT)."
+  else
+    info "kubectl is available but no Service matching 'grafana' was found in any namespace this credential can list (consistent with this project's own disclosed RBAC-blocked history -- see straggler-vmsingle/DEPRECATED.md)."
+  fi
+else
+  info "kubectl not found -- skipping the Kubernetes Grafana path entirely (not printed as an option unless it's real; see vm-standalone/README.md for why this project's own real deployments don't depend on Kubernetes access anyway)."
+fi
+if [ -z "$GRAFANA_URL" ] && curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:3000/api/health" 2>/dev/null | grep -q 200; then
+  GRAFANA_URL="http://localhost:3000"
+  info "Found a real, reachable Grafana instance directly on this host (health check passed live at http://localhost:3000)."
+fi
+if [ -z "$GRAFANA_URL" ] && [ -z "$GRAFANA_K8S_SVC" ]; then
+  warn "No real, reachable Grafana instance found (neither a Kubernetes Service named like 'grafana' nor a local process on port 3000 answered). This is not fatal -- this project's pipeline (aggregator/alert_engine/VM) works without Grafana -- but run.sh will not be able to print a real access command until one is running. This script does not launch Grafana itself (see Step 4.5's own comment on this scope boundary)."
+fi
+GRAFANA_ACCESS_HOST=""
+GRAFANA_ACCESS_USER=""
+GRAFANA_ANON_ENABLED="unknown"
+if [ -n "$GRAFANA_URL" ]; then
+  # Real, live-confirmed finding: this control/login node's own `hostname
+  # -f` resolves to a Kubernetes-internal-only DNS name (e.g. ending
+  # *.svc.cluster.local) on a Soperator cluster -- NOT reachable from
+  # outside the cluster's own private network, and there is genuinely no
+  # public IP on this host's own interfaces either (confirmed via `ip
+  # addr` -- consistent with this project's own "no public IP" access
+  # design). The real, concrete value this script CAN discover is this
+  # host's own private network IP -- reachable by whatever VPN/bastion
+  # path already gets an operator's own SSH client into this cluster's
+  # private network (that outer path is real infrastructure knowledge
+  # this script, running inside that same private network, cannot
+  # discover about itself -- reported honestly rather than guessed).
+  _fqdn="$(hostname -f 2>/dev/null || true)"
+  if [ -n "$_fqdn" ] && ! echo "$_fqdn" | grep -qE '\.svc\.|\.cluster\.local$'; then
+    GRAFANA_ACCESS_HOST="$_fqdn"
+  else
+    GRAFANA_ACCESS_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -z "$GRAFANA_ACCESS_HOST" ] && GRAFANA_ACCESS_HOST="$(hostname)"
+    if [ -n "$_fqdn" ]; then
+      warn "This host's own hostname -f ($_fqdn) is a Kubernetes-internal-only DNS name, not reachable outside this cluster's private network -- using this host's own real private IP ($GRAFANA_ACCESS_HOST) for GRAFANA_ACCESS_HOST instead. This is still NOT a public address -- see this project's own 'no public IP' access design; reach it via whatever VPN/bastion path already gets you into this cluster's private network."
+    fi
+  fi
+  GRAFANA_ACCESS_USER="$(whoami)"
+  _org_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GRAFANA_URL/api/org" 2>/dev/null)"
+  if [ "$_org_code" = "200" ]; then
+    GRAFANA_ANON_ENABLED="true"
+    warn "Grafana at $GRAFANA_URL answers /api/org WITHOUT any credentials (HTTP 200) -- anonymous access is enabled on this instance (confirmed live, real check, not assumed). This is a genuine, disclosed gap on the currently-running instance, not something this script fixes for you (it does not manage this Grafana instance's own config) -- disable [auth.anonymous] in that instance's own grafana.ini/custom.ini to enforce real per-user auth."
+  else
+    GRAFANA_ANON_ENABLED="false"
+    info "Grafana at $GRAFANA_URL requires real credentials (/api/org returned HTTP $_org_code without them, confirmed live) -- auth is enforced."
+  fi
+fi
+
+# =========================================================================
 # Step 5 -- write cluster.env, the single source of real, discovered
 # truth every other script in this package reads instead of hardcoding.
 # =========================================================================
@@ -297,6 +371,13 @@ NUM_NODES="$NUM_NODES"
 GPUS_PER_NODE="$GPUS_PER_NODE"
 NCCL_LIB_PATH="$NCCL_LIB_PATH"
 VM_URL="$VM_URL"
+GRAFANA_URL="$GRAFANA_URL"
+GRAFANA_ACCESS_HOST="$GRAFANA_ACCESS_HOST"
+GRAFANA_ACCESS_USER="$GRAFANA_ACCESS_USER"
+GRAFANA_ANON_ENABLED="$GRAFANA_ANON_ENABLED"
+GRAFANA_K8S_NAMESPACE="$GRAFANA_K8S_NAMESPACE"
+GRAFANA_K8S_SVC="$GRAFANA_K8S_SVC"
+GRAFANA_K8S_PORT="$GRAFANA_K8S_PORT"
 EOF
 info "Wrote $PKG_ROOT/cluster.env:"
 sed 's/^/  /' "$PKG_ROOT/cluster.env"

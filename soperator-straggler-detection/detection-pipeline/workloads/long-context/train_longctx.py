@@ -5,7 +5,11 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
 
-sys.path.insert(0, '/root/P21_multicomm/nanoGPT_tp')
+# Stage 3 fix: missed by Stage 2's item-4 sys.path sweep -- same real-
+# location fix as every other file (tp2/'s model.py is the real
+# "nanoGPT_tp" this file always meant, per train_node_tp.sh's own comment
+# distinguishing it from the plain nanogpt-base model).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tp2"))
 from model import GPTConfig, GPT
 
 # P29 -- long-context training: the same TP2 model config/sharding this

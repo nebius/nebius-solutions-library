@@ -6,11 +6,20 @@ All queries run at the host/pod level via SSH (matching how GPU health has
 been checked throughout this investigation), since dcgmi/nvidia-smi need
 the host's driver stack and /sys-host needs an explicit container mount.
 """
+import os
 import subprocess
 import json
 import sys
 import time
 import concurrent.futures
+
+# Stage 3 fix: query_matmul_tflops's own default path below was missed by
+# Stage 2's item-4 sys.path/hardcoded-path sweep (that sweep fixed health_
+# exclusions.py's degraded_gpus_live default the same way -- this is the
+# same real script, same real fix, just a second hardcoded default for it
+# that sweep didn't also catch).
+_BENCH_SCRIPT_DEFAULT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "health-checks", "bench_all_gpus.py"))
 
 # P27-hotfix-stall -- real, reproduced (n=2, confirmed via live gdb thread
 # dumps) availability gap: every per-GPU/per-device/per-host query below
@@ -640,7 +649,7 @@ def _host_has_active_job(host, timeout=5):
         return False
 
 
-def query_matmul_tflops(host, run_health_check_path="/root/P4d_clean/health/bench_all_gpus.py"):
+def query_matmul_tflops(host, run_health_check_path=_BENCH_SCRIPT_DEFAULT):
     """Isolated matmul TFLOPS, every real GPU on host -- reuses the exact
     benchmark from run_health_check.sh via a fresh container invocation.
 
