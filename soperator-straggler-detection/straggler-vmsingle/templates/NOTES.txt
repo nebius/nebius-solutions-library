@@ -1,0 +1,19 @@
+Dedicated straggler-detection VMSingle instance installed as: {{ include "straggler-vmsingle.fullname" . }} (namespace: {{ .Release.Namespace }})
+
+The VictoriaMetrics operator will reconcile this into a real Deployment,
+PersistentVolumeClaim, and Service. Check status with:
+
+  kubectl -n {{ .Release.Namespace }} get vmsingle {{ include "straggler-vmsingle.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+In-cluster URL for node_aggregator.py / alert_engine.py once the pod is Ready:
+
+  http://vmsingle-{{ include "straggler-vmsingle.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.vmsingle.port }}
+
+(the operator's own real naming convention, "vmsingle-<CR name>" --
+confirmed directly from the shared platform instance's own Service name,
+vmsingle-metrics-victoria-metrics-k8s-stack, not guessed. Still worth a
+one-time `kubectl -n {{ .Release.Namespace }} get svc` check after first
+install, per README.md's validation section.)
+
+See README.md for the full install/validate/point-node_aggregator walkthrough.

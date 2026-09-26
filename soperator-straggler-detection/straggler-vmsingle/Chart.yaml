@@ -1,0 +1,14 @@
+apiVersion: v2
+name: straggler-vmsingle
+description: >-
+  Dedicated, single-tenant VictoriaMetrics VMSingle instance for the GPU
+  straggler-detection pipeline (P26.5 MVP). Wraps the same VMSingle custom
+  resource this platform's own shared victoria-metrics-k8s-stack release
+  already uses (operator.victoriametrics.com/v1beta1 VMSingle), not a
+  from-scratch chart -- see README.md for why a dedicated instance exists
+  (the shared instance's dedup.minScrapeInterval=30s, confirmed real via the
+  shared release's own values, was measured to discard 84.4% of this
+  pipeline's real aggregate-at-source samples).
+type: application
+version: 0.1.0
+appVersion: "0.1.0-mvp"
