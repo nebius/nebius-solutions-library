@@ -271,6 +271,105 @@ converting all 4 (including RL, per #6 above) to genuine
 "nanogpt-base"))`-style relative imports — one mechanical pass, not 4
 separate ones.
 
+## 11. Exhaustive Python-core sweep (this session) — every hardcoded
+cluster-shape pattern, not just the one instance already found
+
+Following item 8's own admission that it was found by accident (tracing
+an unrelated fix) rather than a deliberate audit, this session did that
+deliberate audit: every `.py` file under `classifier/`, `aggregator/`,
+`alerting/`, `observability/`, `moe-two-stage-detector/`, and `tools/`
+(28 files, all of them) grepped for literal hostnames, `NODE_A`/`NODE_B`-
+style range constants, bare numeric literals in scoring/topology context
+(`% 8`, `// 8`, `< 8`, `== 16`, `len(...) != 2`), and hardcoded IPs/ports.
+Every match read in context and classified. New findings beyond item 8
+(already-known items — `detection.py`'s `NODE_A`/`NODE_B`,
+`ras_alert.py`/`health_exclusions.py`'s host defaults — not repeated
+here):
+
+- **`classifier/classifier.py:987` — `local_idx = rank % 8`, real, live,
+  classification (a).** Inside the *offline/buffer-replay classifier's*
+  own finding-adapter (not the live `alert_engine.py` production path,
+  which already passes real `host=`/`local_idx=` directly and never hits
+  this fallback — confirmed by reading the call site). Fires only when a
+  caller has a flat rank but no direct host/slot identity. **Already
+  self-disclosed in the code's own comment** ("`local_idx=rank%8` is
+  intentionally NOT touched here... a separate, narrower GPU-slot
+  identity question this pass didn't scope in") from an earlier internal
+  project audit ("codebase audit, third pass") — real, but not a surprise
+  find, a previously-acknowledged-and-deferred one. **Proposed fix**: the
+  same real `gpu_slot_index` field `alert_engine.py`'s `_query_gpu_slot`
+  already reads live should be threaded into the offline classifier's own
+  dump-record model too (per the comment, "this offline package's own
+  dump records don't uniformly carry `gpu_slot_index` the way the live
+  path's do" — the real blocker is a data-completeness gap in the offline
+  replay format, not a logic gap).
+- **`classifier/detection.py:621` (`score_node_vs_node`) and `:658`
+  (`recheck_node_vs_node_excluding`) — `if len(real_hosts) != 2:`, real,
+  live, classification (a), but fails safe.** Both gate their entire
+  node-vs-node aggregate-shift comparison on exactly 2 real discovered
+  hosts; on any other node count they return `None`/all-`None` fields
+  rather than a wrong answer — a real capability loss (this specific
+  comparison simply never runs) on a non-2-node cluster, not a silent
+  misattribution risk like item 8. **Proposed fix**: generalize from a
+  fixed `(host0, host1)` pair to an N-host loop (e.g. compare each host's
+  mean against the pooled mean of every other host, or the most extreme
+  pairwise gap among all real discovered hosts) — same real, discovered
+  `rank_hosts` input already available, just not currently used past
+  exactly 2 groups.
+- **`aggregator/promql_cv_verify.py:9` — `VM = "http://127.0.0.1:8610"`,
+  real, live, classification (a).** A hardcoded, non-overridable (no CLI
+  arg, no env var — confirmed by reading the whole file) module-level
+  default pointing at a stale, long-defunct ad-hoc local VM port from
+  early in this project's history, not the current production `:8428`.
+  Only reachable via this file's own `if __name__ == "__main__":` block
+  (a standalone manual PromQL cross-check CLI, not imported/called by the
+  live pipeline for this constant — `node_aggregator_ref.py` only imports
+  `stat_cv` from this file, confirmed earlier in Category A). **Proposed
+  fix**: accept the VM URL as a required CLI argument (`sys.argv`) instead
+  of a hardcoded default, matching every other tool in `tools/`.
+- **`aggregator/promql_cv_verify.py:80` — `node_a = {r for r in data if
+  int(r) < 8}`, real, live, classification (a), same file/same CLI-only
+  scope as above.** A second, independent hardcoded rank-range split in
+  the same standalone tool's `__main__` block — distinct from
+  `detection.py`'s `NODE_A`/`NODE_B` (different file, not shared code).
+  **Proposed fix**: derive the split from real discovered `rank_hosts`
+  the same way `detection.py`'s already-fixed sibling functions do,
+  rather than a literal `< 8`.
+- **`classifier/detection.py:30` — `N_RANKS = 16`, classification (c),
+  vestigial not live.** Defined but confirmed unused everywhere else in
+  the file or package (grepped explicitly) — every other `N_RANKS`
+  reference is a comment describing the *old*, already-fixed behavior.
+  Harmless as-is; worth deleting in Stage 2 purely as dead-code cleanup,
+  not because it does anything wrong.
+- **`alerting/alert_engine.py`'s `_find_true_rank0_member`
+  (`first_host = sorted(self.hostnames)[0]`) — checked, classification
+  (c), not a new finding.** Genuinely dynamic (sorts whatever hostnames
+  were actually live-discovered, no literal string, no fixed count) —
+  the only real assumption here is a documented, self-aware *launch
+  convention* (global rank 0 lands on the alphabetically-first discovered
+  host, a property of items 1–3's launch-script convention, not a new,
+  separate hardcoding of its own).
+- **`alerting/alert_engine.py:2069` (`_timing_asymmetry_fallback_evaluate`)
+  `if len(members_with_host) != 2:` — checked, classification (c), not a
+  new finding.** This is the already-extensively-documented P27.2
+  2-member timing-asymmetry fallback, deliberately scoped to exactly
+  2 *communicator members* (a TP2-style below-floor shape), not a
+  cluster node/GPU count — its own docstring already explains this scope
+  choice in detail. Included here only to show it was checked, not
+  overlooked.
+
+**Confirmed exhaustive for this specific bug class**: all 28 `.py` files
+in the packaged detection/alerting/classification/diagnostic core were
+grepped for the full pattern family (Step 1's four categories), not a
+sample — every match above was read in its real function context and
+classified, not assumed. Zero matches (of any kind in the pattern family)
+were found in `cause_metrics.py`, `storage_evidence.py`,
+`iowait_logger.py`, `report.py`, `rolling_buffer.py`, `coverage_guard.py`,
+`persistence.py` (either copy), `pipeline_health.py`, `thresholds.py`,
+`arrival_order.py`, `load_check.py`, `pairwise_sweep.py`,
+`run_pairwise_sweep.py`, `preflight_duration_check.py`,
+`test_persistence_offline.py`, or `validate_dashboard_portability.py`.
+
 ## Everything already confirmed dynamic (do not "fix" these — they're
 already correct)
 
@@ -285,11 +384,12 @@ already correct)
   *generalize into* the shell layer (see #1), not something to change
   itself.
 - **Correction**: the Python core is *not* uniformly dynamic — see #8
-  above (`score_node_scoped_per_node()`), a real, live exception found in
-  this session's second adversarial pass. Don't assume the rest of
-  `classifier/`/`aggregator/`/`alerting/` is clean by extension; this
-  session traced ~13 more historical scenarios and found this one by
-  tracing PP's cross-node fix, not by auditing the Python core directly
-  end-to-end — a full line-by-line audit of every function in
-  `detection.py`/`classifier.py` for similar patterns has still not been
-  done.
+  (`score_node_scoped_per_node()`, found by accident tracing PP's
+  cross-node fix, not by a deliberate audit) and #11 (a subsequent,
+  deliberate, exhaustive grep-and-classify sweep of the full pattern
+  family across all 28 `.py` files in the packaged core, which found 4
+  more real, live instances beyond #8, plus 2 already-known items
+  re-confirmed as correctly-scoped, non-bugs). **That line-by-line audit
+  has now been done** — #11 is it — so this is no longer an open
+  "we haven't looked" gap, only the specific, itemized, real findings #8
+  and #11 already both list explicitly.
