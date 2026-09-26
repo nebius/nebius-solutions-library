@@ -199,6 +199,19 @@ already contains, exactly the same fix pattern already proven correct in
 mechanism to design, just extending an already-established one to this
 one remaining call site.
 
+**Related, lower-severity finding from the same targeted grep**:
+`alerting/ras_alert.py`'s own functions (`query_ras_snapshot`,
+`compute_current_exclusions`, `RASFailStopWatcher.__init__`) all default
+`host="worker-0"` / `hosts=("worker-0", "worker-1")`, and
+`alerting/health_exclusions.py`'s `degraded_gpus_live(hosts=("worker-0",
+"worker-1"), ...)` is only ever called (from `ras_alert.py`) with that
+same default passed straight through. Lower severity than the
+`detection.py` finding above because `ras_alert.py` is already documented
+(top README) as a standalone tool not auto-wired into the production
+alert loop — but if it's ever wired in or run manually on a differently-
+shaped cluster, these defaults need the same real-hostname-discovery
+treatment, not silent reliance on 2 literal strings.
+
 ## 9. `LD_LIBRARY_PATH` is now confirmed set by 2 of 15 workloads, not 1 —
 a real, disclosed version inconsistency, not a single outlier
 
