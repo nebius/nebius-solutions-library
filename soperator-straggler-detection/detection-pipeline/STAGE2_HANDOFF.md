@@ -79,6 +79,23 @@ host")
   /root/_v1beta_dryrun/train_node_shape1.sh` — same category of
   hardcoded absolute path as everything else here, inherited from the
   original V1 Beta dry-run scripts this file was copied from unmodified.
+- `moe-two-stage-detector/telemetry_check.py` (found missing entirely,
+  added in the third completeness pass): `sys.path.insert(0,
+  "/root/P18k_classifier")`.
+- `moe-two-stage-detector/run_pairwise_sweep.py` (same pass):
+  `sys.path.insert(0, "/root/P30_moe_detector")` and hardcodes
+  `SCRIPT = "/root/P30_moe_detector/pairwise_sweep.py"`.
+- `inspector-crash-repro/run_repro_node.sh` / `run_repro_v2_node.sh` /
+  `run_repro_v3_node.sh` (found missing entirely, added in the third
+  completeness pass): all three `cd /root/P32_inspector_repro` and set
+  their own `LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:...` — see #9
+  below, a third instance of this pattern.
+- `workloads/nanogpt-longrun/train_node_nanogpt_longrun.sh` (found
+  missing entirely, added in the third completeness pass): `cd
+  /root/P3_real_workload/nanoGPT` — a fourth distinct hardcoded absolute
+  directory this package's various nanoGPT-family scripts collectively
+  reference (alongside the P20d/P21_multicomm/P4b_jitter ones already
+  listed above).
 - **Proposed fix**: convert to relative/package-style imports resolved
   from the installed package root (e.g. an installer-set `PYTHONPATH`
   pointing at `detection-pipeline/`, with each `sys.path.insert` replaced
@@ -212,8 +229,9 @@ alert loop — but if it's ever wired in or run manually on a differently-
 shaped cluster, these defaults need the same real-hostname-discovery
 treatment, not silent reliance on 2 literal strings.
 
-## 9. `LD_LIBRARY_PATH` is now confirmed set by 2 of 15 workloads, not 1 —
-a real, disclosed version inconsistency, not a single outlier
+## 9. `LD_LIBRARY_PATH` is now confirmed set by 2 of 15 workloads plus one
+diagnostic tool, not 1 — a real, disclosed version inconsistency, not a
+single outlier
 
 `workloads/long-context/run_longctx_node.sh` and
 `workloads/rl/train_node_rl.sh` both set
@@ -221,11 +239,17 @@ a real, disclosed version inconsistency, not a single outlier
 forcing those two shapes to link against the Inspector-plugin build
 tree's own NCCL 2.28.9, while the other 13 shapes rely on the host-bind-
 mount-shadowing behavior documented in INVENTORY.md's Inspector-plugin-
-provenance section (which lands on NCCL 2.30.1 instead). **Stage 2 needs
-to decide, deliberately, whether every workload should standardize on
-one NCCL version or whether this per-shape difference is intentional and
-should be preserved** — right now it's an accident of which shapes
-happened to get this line added and which didn't, not a documented
+provenance section (which lands on NCCL 2.30.1 instead). **Found in the
+third completeness pass**: `inspector-crash-repro/`'s three
+`run_repro*_node.sh` scripts do the same — makes sense for that one
+specifically, since the whole point of that harness is reproducing a bug
+against the exact NCCL build the Inspector plugin is compiled against,
+not an accident to fix. **Stage 2 needs to decide, deliberately, whether
+every *workload* (not the repro harness, which has a real reason) should
+standardize on one NCCL version or whether this per-shape difference is
+intentional and should be preserved** — right now it's an accident of
+which shapes happened to get this line added and which didn't, not a
+documented
 design decision.
 
 ## 10. `model.py`/`configurator.py` are now duplicated 4 ways

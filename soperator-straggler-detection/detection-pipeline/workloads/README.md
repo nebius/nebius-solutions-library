@@ -69,3 +69,21 @@ present) still hardcodes this project's original 2-node/8-GPU-per-node
 cluster shape (`worker-0`/`worker-1`, `--nodes=2 --gpus-per-node=8`) —
 this is the single largest item flagged for the next-stage
 `install.sh`/`run.sh` work, not something silently glossed over here.
+
+**`nanogpt-longrun/` — found missing entirely in the third completeness
+pass.** This is not one of the 15 fault-injection shapes above — it's the
+real, dedicated launch harness (`run_nanogpt_longrun.sh` +
+`train_node_nanogpt_longrun.sh`) this project used for its own sustained,
+multi-hour continuous-run hardening and blind end-to-end validation (see
+`../docs/straggler_dectection_history.md` Phase 5/6), distinct from every
+other nanoGPT launch convention in this directory in one specific way:
+its own `train.py` is a genuinely **plain, unpatched** copy (no
+`STRAGGLER_*` fault-injection support at all — confirmed via direct diff:
+identical to nanogpt-base's model logic, but missing every
+`STRAGGLER_SLEEP_MS`/`STRAGGLER_TARGET_RANKS`/`file_trigger` addition the
+other nanoGPT copies carry). This is deliberate, not stale: this harness's
+whole purpose is testing sustained stability (memory leaks, log growth,
+metric drift) under real, unmodified, hours-long training, not testing
+fault injection. `train_node_nanogpt_longrun.sh` itself `cd`s into a
+fourth hardcoded absolute path not seen elsewhere in this package
+(`/root/P3_real_workload/nanoGPT`) — added to `../STAGE2_HANDOFF.md`.

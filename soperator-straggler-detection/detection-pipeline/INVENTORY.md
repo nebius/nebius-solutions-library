@@ -433,3 +433,58 @@ in this list could not be located at all.
   silently become alerting ground truth). Kept as two files, in two
   separate package directories, exactly as the live code already
   structures them.
+
+## Category H — Third completeness pass: primary-source-derived master list
+
+A prior session's two adversarial passes worked from a curated scope
+(named fix sessions + all 15 workload shapes). This pass explicitly did
+**not** start from any curated list — it built a master list directly
+from every project history/methodology document findable on this
+filesystem (`straggler_dectection_history.md`'s full Phase 0-18
+narrative, `TESTING_METHODOLOGY.md`, every `P19*` stage/design doc, every
+`P20*` final_report, and a direct filesystem sweep for undocumented
+P-numbered directories), then cross-checked that list against what the
+prior two passes actually covered. No "Final Roadmap to Production"
+document was found anywhere on this filesystem, despite an explicit,
+thorough search — worth stating plainly rather than assuming one exists
+somewhere unchecked.
+
+**Real gaps found this pass, all added to the package:**
+- `moe-two-stage-detector/` — a real, standalone 5-file MoE
+  straggler-localization diagnostic (arrival-order signal, token-load
+  check, telemetry wiring, isolated pairwise sweep), referenced nowhere
+  by name in either prior pass's own scope, found only by tracing a
+  filesystem-level `P30_moe_detector/` directory no doc explicitly named.
+  See `moe-two-stage-detector/README.md`.
+- `inspector-crash-repro/` — the real, iterative reproduction harness
+  (3 versions) that root-caused the Inspector plugin's use-after-free
+  crash, whose *fix* was already confirmed present but whose supporting
+  evidence never was. See `inspector-crash-repro/README.md`.
+- `docs/TESTING_METHODOLOGY.md` — a real, load-bearing methodology doc
+  (3 mandatory pre-flight/validation rules) that lived in the same
+  directory as the live pipeline code the whole time and was simply
+  never read or copied by either prior pass.
+- `workloads/nanogpt-longrun/` — the dedicated sustained/multi-hour
+  continuous-run validation harness (a deliberately *plain, unpatched*
+  `train.py`, distinct from every fault-injection-capable nanoGPT copy
+  already in the package), referenced by name in `P20d_e2e_validation`'s
+  own operational logs but never itself located or packaged.
+
+**Confirmed already fully covered, not re-done**: the storage-classifier
+timing-gap fix, the log-rotation fix, and the dashboard-update session
+(5 new panels + datasource fix) this session was told to check — all
+three were verified directly present and correct in the live code
+already packaged (`anomaly_ts` threading in `alerting/alert_engine.py`,
+`RotatingFileHandler` in `observability/iowait_logger.py`, the 18-panel
+dashboard JSON with the corrected datasource) — no new work needed.
+
+**Confirmed as superseded/no-gap, not silently assumed clean**: every
+`P1`-`P19`-series prototype/design/investigation document (in-plugin
+aggregation feasibility, dedup findings, connector change estimate,
+network-detection design, the `node_aggregator.py` prototype and its own
+bugfix report, the P6 IB-counter and P5 RAS early feasibility scripts)
+represents real, historical R&D whose conclusions are already folded
+into the current live code (confirmed directly — e.g. `query_ib_counters`/
+`query_network_snapshot` already exist in `classifier/cause_metrics.py`)
+— not repackaged separately, since there is no surviving distinct
+artifact beyond what's already in `classifier/`/`aggregator/`/`alerting/`.

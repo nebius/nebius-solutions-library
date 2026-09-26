@@ -62,12 +62,28 @@ tools/              Standalone validation utilities (pre-flight test-
                     real captured fixture used by one of them
 workloads/          All 15 validated fault-injection workload shapes,
                     one directory each, plus a shared nanoGPT base
-                    (model.py/configurator.py/LICENSE) and a shared,
+                    (model.py/configurator.py/LICENSE), a shared,
                     pre-built Shakespeare-char dataset used by several
-                    of them
+                    of them, and nanogpt-longrun/ (the separate,
+                    unpatched sustained/long-run validation harness)
+moe-two-stage-detector/ A real, standalone 5-step diagnostic pipeline for
+                    localizing a MoE straggler once job-wide detection
+                    has already flagged one — arrival-order signal,
+                    token-load check, telemetry wiring, and an isolated
+                    pairwise diagnostic sweep. Found missing entirely in
+                    a third completeness pass; not part of the always-on
+                    alert loop
+inspector-crash-repro/ The real, iterative reproduction harness that
+                    root-caused the Inspector plugin's use-after-free
+                    crash (the fix itself lives in inspector-plugin/;
+                    this is the supporting evidence for why). Found
+                    missing entirely in the same pass
 docs/               This project's own accumulated history/reference
                     docs (carried forward as-is — real prior investigation
-                    notes, not rewritten)
+                    notes, not rewritten), including TESTING_METHODOLOGY.md
+                    (found missing in the third completeness pass — the
+                    3 mandatory pre-flight/validation rules this project
+                    holds every new-workload test to)
 INVENTORY.md        The full Step-3 audit this layout is based on: every
                     Python dependency, every environment variable, every
                     hardcoded path/hostname, every external tool and
