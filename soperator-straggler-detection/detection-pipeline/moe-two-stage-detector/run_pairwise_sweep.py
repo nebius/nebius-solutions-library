@@ -11,17 +11,23 @@ a second of real GPU time per side.
 Usage: run_pairwise_sweep.py <suspect_rank> <peer_rank> <dump_dir> [<dump_dir> ...]
 """
 import json
+import os
 import subprocess
 import sys
 import time
-import time
 
-sys.path.insert(0, '/root/P30_moe_detector')
+# Stage 2 cluster-topology-agnostic fix: was a hardcoded absolute path to
+# this project's original development-host layout (/root/P30_moe_detector,
+# this file's own original directory) -- both this sys.path entry and
+# SCRIPT/log paths below are now resolved relative to this file's own
+# real, installed location instead.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
 from telemetry_check import discover_suspect_identity
 
 PORT = "29800"
 N_ROUNDS = 20
-SCRIPT = "/root/P30_moe_detector/pairwise_sweep.py"
+SCRIPT = os.path.join(_HERE, "pairwise_sweep.py")
 
 
 def launch_side(host, gpu_slot, role, local_rank, master_addr, log_path):
@@ -61,8 +67,8 @@ def run_one_pair(rank_a, rank_b, dump_dirs, tag):
     if host_a is None or host_b is None:
         return {"error": f"could not discover host/gpu_slot for rank {rank_a} or {rank_b}"}
 
-    log_a = f"/root/P30_moe_detector/_pairwise_{tag}_a.log"
-    log_b = f"/root/P30_moe_detector/_pairwise_{tag}_b.log"
+    log_a = os.path.join(_HERE, f"_pairwise_{tag}_a.log")
+    log_b = os.path.join(_HERE, f"_pairwise_{tag}_b.log")
     master_addr = host_a
 
     p_a = launch_side(host_a, slot_a, "a", 0, master_addr, log_a)

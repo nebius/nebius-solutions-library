@@ -27,10 +27,6 @@ import json
 import statistics as st
 from collections import Counter, defaultdict
 
-N_RANKS = 16
-NODE_A = set(range(0, 8))
-NODE_B = set(range(8, 16))
-
 # Cluster-topology-agnostic fix (this session): BUCKET_B/BUCKET_C used to
 # be hardcoded exact byte counts (12295680/28323840) -- calibrated for
 # ONE specific workload's own real AllReduce message sizes, the exact
@@ -430,9 +426,9 @@ def score_node_scoped(per_rank, stat_name):
     }
 
 
-def score_node_scoped_per_node(per_rank, stat_name):
+def score_node_scoped_per_node(per_rank, stat_name, rank_hosts):
     """P18c Stage 4 fix: score_node_scoped picks ONE global worst rank per
-    statistic across all 16 ranks -- even though peers are drawn only
+    statistic across all real ranks -- even though peers are drawn only
     from the winner's own node, the winner-selection itself is global.
     When two DIFFERENT nodes each have a real, independent single-rank
     fault of the same statistic (found via the two-different-nodes test:
@@ -443,10 +439,20 @@ def score_node_scoped_per_node(per_rank, stat_name):
     classify() only ever looks at score_node_scoped's single winner.
 
     This computes the worst rank INDEPENDENTLY per node, so a real fault
-    on worker-1 can't be shadowed by a more extreme one on worker-0."""
+    on one node can't be shadowed by a more extreme one on another.
+
+    Stage 2 cluster-topology-agnostic fix: used to hardcode exactly 2
+    nodes (NODE_A=range(0,8)/NODE_B=range(8,16), keyed by the literal
+    strings "worker-0"/"worker-1") -- silently misattributed or dropped
+    any rank outside that fixed range on a differently-shaped cluster,
+    with no error raised. Now groups by whatever real hosts `rank_hosts`
+    (the same live, discovered rank->hostname mapping every sibling
+    function in this module already takes -- see rank_node's own
+    docstring) actually contains -- any node count, any hostnames."""
+    hosts = sorted({rank_hosts[r] for r in per_rank if r in rank_hosts})
     return {
-        "worker-0": score_node_scoped({r: v for r, v in per_rank.items() if r in NODE_A}, stat_name),
-        "worker-1": score_node_scoped({r: v for r, v in per_rank.items() if r in NODE_B}, stat_name),
+        host: score_node_scoped({r: v for r, v in per_rank.items() if rank_hosts.get(r) == host}, stat_name)
+        for host in hosts
     }
 
 
@@ -562,13 +568,13 @@ def chunk_windows(per_rank, per_rank_ts, window_size, start_offset=0):
     return windows, start
 
 
-def windowed_scores_per_node(per_rank, per_rank_ts, stat_name, window_size, start_offset=0):
+def windowed_scores_per_node(per_rank, per_rank_ts, stat_name, window_size, start_offset, rank_hosts):
     """Runs score_node_scoped_per_node on each window in turn. Returns
     (list of {"t0","t1","per_node"} dicts, new_offset)."""
     windows, new_offset = chunk_windows(per_rank, per_rank_ts, window_size, start_offset)
     out = []
     for w, t0, t1 in windows:
-        out.append({"t0": t0, "t1": t1, "per_node": score_node_scoped_per_node(w, stat_name)})
+        out.append({"t0": t0, "t1": t1, "per_node": score_node_scoped_per_node(w, stat_name, rank_hosts)})
     return out, new_offset
 
 
@@ -717,7 +723,7 @@ def _score_one_comm_result(per_rank, n_ranks, dropped, rank_hosts):
     results = {}
     for stat_name in STATS:
         results[stat_name] = score_node_scoped(per_rank, stat_name)
-        results[stat_name + "_per_node"] = score_node_scoped_per_node(per_rank, stat_name)
+        results[stat_name + "_per_node"] = score_node_scoped_per_node(per_rank, stat_name, rank_hosts)
     results["node_vs_node"] = score_node_vs_node(per_rank, rank_hosts)
     results["cv_rank0_special"] = score_rank0_cv(per_rank, rank_hosts)
     results["_coverage"] = coverage

@@ -29,6 +29,7 @@ offline classifier's use case of investigating a whole job after the fact)
 persistence firing and cause-gathering could read weaker (PROBABLE/
 UNCONFIRMED) than the offline classifier would find with its buffer.
 """
+import os
 import sys
 import time
 import json
@@ -40,12 +41,19 @@ import urllib.request
 import urllib.parse
 from collections import deque, defaultdict
 
-sys.path.insert(0, "/root/P18k_classifier")
+# Stage 2 cluster-topology-agnostic fix: these used to be hardcoded
+# absolute paths into this project's original development-host layout
+# (/root/P18k_classifier, /root/P20c_alerting) -- resolved relative to
+# this file's own real, installed location instead (classifier/ and
+# alerting/, both siblings under the packaged tree's root), so imports
+# work wherever the package actually gets installed.
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_PKG_ROOT, "classifier"))
 import classifier as p18k  # noqa: E402
 import storage_evidence  # noqa: E402
 import report as p18k_report  # noqa: E402
 
-sys.path.insert(0, "/root/P20c_alerting")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import thresholds as T  # noqa: E402
 import coverage_guard  # noqa: E402
 import pipeline_health  # noqa: E402
@@ -208,7 +216,17 @@ TIMING_FALLBACK_STOPGAP_ACTIVE = False
 # not deployed on that host yet) degrades honestly to "storage (eBPF
 # io-wait): no persisted iowait log for this host", not a crash or a
 # fabricated answer.
-IOWAIT_LOG_DIR = "/root/P20c_alerting/iowait_logs"
+# Stage 2 cluster-topology-agnostic fix: was a hardcoded absolute path
+# into this project's original development-host layout
+# (/root/P20c_alerting/iowait_logs). This is real runtime STATE (written
+# by a separately-run iowait_logger.py process, not packaged source), so
+# unlike the sys.path fixes above it needs a real writable location, not
+# just a package-relative one -- overridable via IOWAIT_LOG_DIR_OVERRIDE
+# for a real deployment's own chosen data directory, defaulting to a
+# var/ directory alongside this installed package.
+IOWAIT_LOG_DIR = os.environ.get(
+    "IOWAIT_LOG_DIR_OVERRIDE",
+    os.path.join(_PKG_ROOT, "var", "iowait_logs"))
 
 # P20k-closeout-followup -- _fresh()'s real staleness threshold. Reused
 # directly from pipeline_health.py's own already-measured, already-

@@ -5,8 +5,14 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # host-visible path (under /root, bind-mounted)
 
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_job_nodes
+cluster_topology_discover_rank
+cluster_topology_discover_rdzv_host
+cluster_topology_discover_gpu_count
 HN=$(hostname)
-if [ "$HN" = "worker-0" ]; then RANK=0; else RANK=1; fi
+RANK=$NODE_RANK
 
 mkdir -p "$DUMPDIR" "$OUTDIR"
 
@@ -22,9 +28,9 @@ export NCCL_INSPECTOR_PROM_DUMP=0
 # (captured via cudaGetDevice() in the Inspector plugin) reports the true
 # physical slot -- exactly the methodology fix carried forward from the
 # P22-prereq session's disclosed CUDA_VISIBLE_DEVICES mistake.
-cd /root/P22_fsdp
-torchrun --nnodes=2 --nproc_per_node=8 --node_rank=$RANK \
-  --rdzv_id=p22_fsdp --rdzv_backend=c10d --rdzv_endpoint=worker-0:$PORT \
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
+  --rdzv_id=p22_fsdp --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
   train_fsdp.py \
   --max_iters=$STEPS --lr_decay_iters=$STEPS --warmup_iters=100 \
   --eval_interval=3000 --eval_iters=200 --log_interval=50 \

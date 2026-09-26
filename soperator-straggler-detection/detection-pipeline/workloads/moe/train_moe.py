@@ -111,7 +111,10 @@ device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-data_dir = os.path.join('data', dataset)
+# Stage 2 cluster-topology-agnostic fix: 'data' used to be a bare
+# CWD-relative string -- now resolved against this package's real,
+# shared dataset location (../shared-data/), regardless of CWD.
+data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared-data', dataset)
 def get_batch(split):
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')

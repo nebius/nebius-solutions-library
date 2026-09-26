@@ -25,7 +25,17 @@ each identified by the real underlying cause rather than a fixed rank:
    GPU the health-check already flags).
 """
 import json
+import os
 import subprocess
+
+# Stage 2 cluster-topology-agnostic fix: was a hardcoded absolute path
+# into this project's original development-host layout
+# (/root/P4d_clean/health/bench_all_gpus.py) -- resolved relative to this
+# package's own installed location instead (health-checks/bench_all_gpus.py,
+# a sibling of alerting/ in the packaged tree), so it works wherever the
+# package actually gets installed, not just on the original host.
+_BENCH_SCRIPT_DEFAULT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "health-checks", "bench_all_gpus.py"))
 
 
 def rendezvous_coordinator_rank(node_rank_of_host, local_ranks_per_host, coordinator_host):
@@ -41,8 +51,8 @@ def rendezvous_coordinator_rank(node_rank_of_host, local_ranks_per_host, coordin
     return None
 
 
-def degraded_gpus_live(hosts=("worker-0", "worker-1"), margin_pct=10.0,
-                        bench_script="/root/P4d_clean/health/bench_all_gpus.py",
+def degraded_gpus_live(hosts, margin_pct=10.0,
+                        bench_script=_BENCH_SCRIPT_DEFAULT,
                         image="nvcr.io#nvidia/pytorch:25.01-py3"):
     """Runs the same isolated-matmul TFLOPS benchmark run_health_check.sh
     uses, live, and returns {host: set(gpu_indices)} for GPUs more than
@@ -50,6 +60,13 @@ def degraded_gpus_live(hosts=("worker-0", "worker-1"), margin_pct=10.0,
     run_health_check.sh already applies. No cached/stale list: this is a
     fresh, real query each call, matching how every fault/health
     determination has been made throughout this project.
+
+    Stage 2 cluster-topology-agnostic fix: `hosts` used to default to the
+    literal ("worker-0", "worker-1") -- silently checking only those 2
+    names regardless of the real cluster shape. Now a required argument:
+    every real caller (compute_current_exclusions, moe-two-stage-detector's
+    telemetry_check.py) already has, or now derives, its own real,
+    discovered host list and must pass it explicitly.
     """
     mounts = ("/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,"
               "/usr/lib64:/usr/lib64,/root:/root")

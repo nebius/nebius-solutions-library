@@ -17,6 +17,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+import sys
 import time
 import math
 import pickle
@@ -28,6 +29,15 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+# Stage 2 cluster-topology-agnostic fix: model.py/configurator.py used to
+# be duplicated into this directory because a bare `from model import`
+# and `exec(open('configurator.py'))` both only resolve relative to the
+# process's own CWD, not this script's real location -- and this
+# package's launch scripts `cd` elsewhere before running. Both now
+# resolve relative to the shared ../nanogpt-base/ directory explicitly,
+# regardless of CWD -- one real copy, not a duplicate per shape.
+_NANOGPT_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nanogpt-base")
+sys.path.insert(0, _NANOGPT_BASE)
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -75,7 +85,7 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+exec(open(os.path.join(_NANOGPT_BASE, 'configurator.py')).read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -189,7 +199,10 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # poor man's data loader
-data_dir = os.path.join('data', dataset)
+# Stage 2 cluster-topology-agnostic fix: 'data' used to be a bare
+# CWD-relative string -- now resolved against this package's real,
+# shared dataset location (../shared-data/), regardless of CWD.
+data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared-data', dataset)
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122

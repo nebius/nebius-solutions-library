@@ -67,6 +67,7 @@ import argparse
 import glob
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -75,14 +76,23 @@ import urllib.request
 import statistics as st
 from collections import deque, defaultdict, Counter
 
-sys.path.insert(0, "/root/P19a_metrics")
+# Stage 2 cluster-topology-agnostic fix: these used to be hardcoded
+# absolute paths into this project's original development-host layout
+# (/root/P19a_metrics, /root/P18k_classifier). promql_cv_verify.py is
+# co-located in this same package directory (aggregator/) -- its own
+# directory is already on sys.path implicitly when this file is run
+# directly, but insert it explicitly too so `import` works the same way
+# when this module is imported rather than executed. detection.py lives
+# under classifier/, a sibling directory under the packaged tree's root.
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from promql_cv_verify import stat_cv as verified_stat_cv  # noqa: E402  (exact fidelity)
 
 # P21.5 -- these two were imported from detection.py before (BUCKET_B/
 # BUCKET_C, the exact hardcoded byte values this fix removes). Only the
 # genuinely workload-independent window-size tuning constants remain
 # sourced from there.
-sys.path.insert(0, "/root/P18k_classifier")
+sys.path.insert(0, os.path.join(_PKG_ROOT, "classifier"))
 from detection import CV_TRIM_EACH_SIDE, STAT_WINDOW_SIZE  # noqa: E402
 
 CV_WINDOW = STAT_WINDOW_SIZE["cv"]

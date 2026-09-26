@@ -4,17 +4,23 @@ STEPS=$1
 OUTDIR=$2
 PORT=$3
 DUMPBASE=$4
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_job_nodes
+cluster_topology_discover_rank
+cluster_topology_discover_rdzv_host
+cluster_topology_discover_gpu_count
 HN=$(hostname)
-if [ "$HN" = "worker-0" ]; then NODE_RANK=0; else NODE_RANK=1; fi
+NODE_RANK=$NODE_RANK
 mkdir -p "$OUTDIR"
-export LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH="${NCCL_LIB_PATH:-}:${LD_LIBRARY_PATH:-}"
 export NCCL_PROFILER_PLUGIN=/root/nccl-2.28-src/ext-profiler/inspector/libnccl-profiler-inspector.so
 export NCCL_INSPECTOR_ENABLE=1
 export NCCL_INSPECTOR_DUMP_VERBOSE=1
 export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
 export NCCL_INSPECTOR_PROM_DUMP=0
 export MAX_ITERS=$STEPS
-cd /root/P28_hybrid
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # P28 -- 2 ranks per node (rank0,1=worker-0=PP stage0's TP pair;
 # rank2,3=worker-1=PP stage1's TP pair), each rank needs its OWN dump
 # dir (node_aggregator_ref.py's convention: one aggregator per node,
@@ -25,8 +31,8 @@ cd /root/P28_hybrid
 DUMPDIR="$DUMPBASE/dump_w$NODE_RANK"
 mkdir -p "$DUMPDIR"
 export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
-torchrun --nnodes=2 --nproc_per_node=2 --node_rank=$NODE_RANK \
-  --rdzv_id=p28_hybrid --rdzv_backend=c10d --rdzv_endpoint=worker-0:$PORT \
+torchrun --nnodes="$NUM_NODES" --nproc_per_node=2 --node_rank=$NODE_RANK \
+  --rdzv_id=p28_hybrid --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
   train_hybrid_tp_pp.py \
   > $OUTDIR/train_$HN.log 2>&1
 EC=$?

@@ -17,8 +17,19 @@
 # relaunches within a few seconds, logging it loudly -- instead of relying on
 # a human's next manual liveness recheck to notice at all.
 set -u
+# Stage 2 cluster-topology-agnostic fix: VM_URL's own default and every
+# absolute path below used to hardcode this project's original
+# development-host layout (http://worker-0:8428, /root/P20c_alerting/...).
+# install.sh always passes the real, discovered VM_URL explicitly (see
+# its own cluster.env generation) -- the default here is only a
+# convenience fallback for manual invocation, not something to rely on.
+# Every path is now resolved relative to this script's own real,
+# installed location instead.
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_PKG_ROOT="$(cd "$_HERE/.." && pwd)"
 VM_URL="${1:-http://worker-0:8428}"
-LOG="${2:-/root/P20c_alerting/alert_engine_supervised.log}"
+LOG="${2:-$_PKG_ROOT/var/alert_engine_supervised.log}"
+mkdir -p "$(dirname "$LOG")"
 
 # P27.3-log-rotation-fix -- real, standard logrotate (see alert_engine_
 # supervised.logrotate's own comments for the size/retention/copytruncate
@@ -32,9 +43,17 @@ LOG="${2:-/root/P20c_alerting/alert_engine_supervised.log}"
 # meaningful overhead (logrotate's own state-file check is a cheap stat,
 # not a real cost, when the file is still under threshold).
 if command -v logrotate >/dev/null 2>&1; then
+  # logrotate's own config format has no shell-variable interpolation --
+  # it needs a real, resolved absolute path in the file itself, which
+  # depends on where LOG actually ended up. Generate a real config with
+  # that real path substituted in, rather than shipping one with this
+  # project's original hardcoded path baked in statically.
+  _GENERATED_LOGROTATE="$_PKG_ROOT/var/alert_engine_supervised.logrotate.generated"
+  sed "s|^/root/P20c_alerting/alert_engine_supervised.log {|$LOG {|" \
+    "$_HERE/alert_engine_supervised.logrotate" > "$_GENERATED_LOGROTATE"
   (
     while true; do
-      logrotate --state /root/P20c_alerting/.logrotate_state /root/P20c_alerting/alert_engine_supervised.logrotate 2>>/root/P20c_alerting/logrotate_errors.log
+      logrotate --state "$_PKG_ROOT/var/.logrotate_state" "$_GENERATED_LOGROTATE" 2>>"$_PKG_ROOT/var/logrotate_errors.log"
       sleep 300
     done
   ) &
@@ -47,7 +66,7 @@ echo "[supervisor] starting, vm_url=$VM_URL log=$LOG" | tee -a "$LOG"
 while true; do
   START_TS=$(date -u +%FT%TZ)
   echo "[supervisor] launching alert_engine.py at $START_TS" | tee -a "$LOG"
-  python3 /root/P20c_alerting/alert_engine.py "$VM_URL" --duration 0 >> "$LOG" 2>&1
+  python3 "$_PKG_ROOT/alerting/alert_engine.py" "$VM_URL" --duration 0 >> "$LOG" 2>&1
   EC=$?
   END_TS=$(date -u +%FT%TZ)
   echo "[supervisor] alert_engine.py EXITED unexpectedly (--duration 0 means it should never return on its own) exit_code=$EC start=$START_TS end=$END_TS -- relaunching in 3s" | tee -a "$LOG"

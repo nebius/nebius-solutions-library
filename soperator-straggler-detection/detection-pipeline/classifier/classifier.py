@@ -587,7 +587,7 @@ def classify_incremental(dump_dirs, state=None, dcgm_host_map=None, ib_hosts=Non
         offset_key = f"{stat_name}_offset"
         window_size = STAT_WINDOW_SIZE[stat_name]
         window_results, new_offset = windowed_scores_per_node(per_rank, per_rank_ts, stat_name,
-                                                                window_size, state[offset_key])
+                                                                window_size, state[offset_key], rank_hosts)
         state[offset_key] = new_offset
         # P18f Stage 1 fix, found via Stage 3's healthy re-check: a
         # single noisy CV window can cross the whole-run-calibrated

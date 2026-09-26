@@ -23,9 +23,14 @@
 # the instant this rank's own QPs reach RTS) -- entirely within this
 # one process, no cross-rank NCCL negotiation involved, so it carries
 # none of Candidate A's failure mode.
+# Stage 2 cluster-topology-agnostic fix: both absolute paths below used
+# to hardcode this project's original development-host layout
+# (/root/P23_moe) -- resolved relative to this script's own real,
+# installed location instead.
 set -u
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_RANK="${FAULT_TARGET_RANK:-4}"
 if [ "${RANK:-}" = "$TARGET_RANK" ]; then
-  export LD_PRELOAD="/root/P23_moe/qp_rate_limit_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+  export LD_PRELOAD="$_HERE/qp_rate_limit_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
-exec python3 /root/P23_moe/train_moe.py "$@"
+exec python3 "$_HERE/train_moe.py" "$@"

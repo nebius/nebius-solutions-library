@@ -8,9 +8,15 @@ host-contention, and NVLink/network checks against exactly that host
 (and that GPU index for DCGM)."""
 import glob
 import json
+import os
 import sys
 
-sys.path.insert(0, '/root/P18k_classifier')
+# Stage 2 cluster-topology-agnostic fix: was a hardcoded absolute path
+# into this project's original development-host layout
+# (/root/P18k_classifier) -- resolved relative to this package's own
+# installed location instead (classifier/, a sibling of
+# moe-two-stage-detector/ in the packaged tree).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "classifier"))
 from cause_metrics import query_dcgm_all_gpus, query_nvlink_snapshot, query_network_snapshot
 from classifier import live_host_load_ratios
 
@@ -31,10 +37,32 @@ def discover_suspect_identity(dump_dirs, suspect_rank):
     return None, None
 
 
-def run_telemetry_check(dump_dirs, suspect_rank, all_cluster_hosts=("worker-0", "worker-1")):
+def discover_all_cluster_hosts(dump_dirs):
+    """Every real hostname actually present across all dump files given --
+    same real, live metadata scan discover_suspect_identity already does,
+    just collecting every host instead of stopping at one rank."""
+    hosts = set()
+    for d in dump_dirs:
+        for fp in glob.glob(d + "/*.log"):
+            with open(fp) as f:
+                first_line = f.readline()
+            if not first_line.strip():
+                continue
+            rec = json.loads(first_line)
+            hosts.add(rec["metadata"]["hostname"])
+    return sorted(hosts)
+
+
+def run_telemetry_check(dump_dirs, suspect_rank, all_cluster_hosts=None):
+    """Stage 2 cluster-topology-agnostic fix: `all_cluster_hosts` used to
+    default to the literal ("worker-0", "worker-1"). Now discovered live
+    from the same real dump-file metadata this function already reads,
+    when the caller doesn't supply an explicit list."""
     host, gpu_slot = discover_suspect_identity(dump_dirs, suspect_rank)
     if host is None:
         return {"error": f"rank {suspect_rank} not found in any dump file -- cannot discover real host/gpu_slot_index"}
+    if all_cluster_hosts is None:
+        all_cluster_hosts = discover_all_cluster_hosts(dump_dirs)
 
     result = {"suspect_rank": suspect_rank, "host": host, "gpu_slot_index": gpu_slot}
 

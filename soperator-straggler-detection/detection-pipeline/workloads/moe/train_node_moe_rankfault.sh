@@ -5,8 +5,14 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # host-visible path (under /root, bind-mounted)
 
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_job_nodes
+cluster_topology_discover_rank
+cluster_topology_discover_rdzv_host
+cluster_topology_discover_gpu_count
 HN=$(hostname)
-if [ "$HN" = "worker-0" ]; then NODE_RANK=0; else NODE_RANK=1; fi
+NODE_RANK=$NODE_RANK
 
 mkdir -p "$DUMPDIR" "$OUTDIR"
 
@@ -26,9 +32,9 @@ export NCCL_INSPECTOR_PROM_DUMP=0
 # established precedent as every prior real-training test in this
 # project -- GPU3 participates normally, never excluded, only never a
 # fault-injection TARGET.
-cd /root/P23_moe
-torchrun --nnodes=2 --nproc_per_node=8 --node_rank=$NODE_RANK \
-  --rdzv_id=p23_moe_rf --rdzv_backend=c10d --rdzv_endpoint=worker-0:$PORT \
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$NODE_RANK \
+  --rdzv_id=p23_moe_rf --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
   --no-python \
   ./rank_fault_wrapper.sh \
   --max_iters=$STEPS --lr_decay_iters=$STEPS --warmup_iters=100 \

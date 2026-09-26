@@ -9,19 +9,26 @@ corroborates a slow rank against multiple independent evidence sources
 and an alert engine that fires CONFIRMED/PROBABLE/UNCONFIRMED findings
 into a Grafana dashboard.
 
-This is a **structural packaging pass** — an exhaustive, code-verified
-inventory of every real component this system depends on, organized into
-one portable tree. It is **not yet a one-command installer**: `install.sh`
-and `run.sh` are explicitly out of scope for this pass (next stage). Every
-file here is a direct copy of the live, currently-running code on the
-2-node development cluster this system was built and validated on — see
-`INVENTORY.md` for the full audit this layout is based on, including every
-piece of evidence gathered against the actual code (not documentation, not
-memory).
+This package went through two stages: **Stage 1** was a structural
+packaging pass — an exhaustive, code-verified inventory of every real
+component this system depends on (see `INVENTORY.md`), plus four
+completeness passes that found and closed real gaps the first pass
+missed (see `STAGE2_HANDOFF.md`'s own history). **Stage 2** (this
+version) replaced every hardcoded cluster-shape assumption `STAGE2_HANDOFF.md`
+found with real, live discovery, and built `install.sh` — see its own
+section below. `run.sh` (launching an actual workload/fault-injection
+test end-to-end) is Stage 3, still out of scope.
 
 ## Layout
 
 ```
+install.sh          Stage 2: brings a fresh cluster to a ready-to-run
+                    state using only real, live discovery -- see its own
+                    section below
+lib/                 cluster_topology.sh: real, live node/rank/GPU-count/
+                    rendezvous-host discovery, sourced by every launch
+                    script instead of each hardcoding this project's
+                    original 2-node/8-GPU shape
 classifier/        Stage 1-4 detection logic (rolling per-rank cause-metric
                     sampling, calibration, detection, classification,
                     storage-evidence corroboration, report formatting)
@@ -249,6 +256,102 @@ with a proposed generic fix for each — start there for Stage 2, not here.**
    writeup, including that same session's separate, more load-bearing
    finding: Inspector's own profiling overhead dominates ResNet's
    iteration time regardless of cuDNN state.
+
+## Stage 2: `install.sh`
+
+`install.sh` brings a fresh cluster from nothing to a ready-to-run state
+using only real, live discovery — no hardcoded node count, names, or
+GPU-per-node assumption anywhere. It:
+
+1. **Discovers the real cluster shape** — every node (`sinfo`), the real
+   per-node GPU count (`scontrol show node`'s own live `Gres` field,
+   checked per-node, not assumed uniform — warns and uses the minimum if
+   the fleet genuinely isn't uniform).
+2. **Detects the real NCCL/CUDA/compiler state per node** — reports the
+   host's own real, currently-installed NCCL library explicitly (the
+   version-shadowing risk documented in `INVENTORY.md`'s Inspector-plugin-
+   provenance section), rather than assuming any particular version.
+3. **Detects real `/tmp` filesystem type per node** (the storage
+   classifier's fault mechanism needs a real local-disk `/tmp`, not
+   tmpfs — checked on the host, which is what actually gets bind-mounted
+   into the training containers).
+4. **Checks and fixes bpftrace/tracefs per node** — installs bpftrace if
+   missing; probes whether a real tracepoint can already be attached
+   directly, and only installs the tracefs bind-mount wrapper
+   (`storage-ebpf/bpftrace-tracefs-wrapper.sh`) where that probe actually
+   fails, never unconditionally; checks for (but does not blindly
+   "fix") a possible libLLVM SONAME conflict.
+5. **Installs `libibverbs-dev`** per node if missing (MoE's RDMA fault
+   shim's build dependency).
+6. **Builds the Inspector plugin from source** (NVIDIA's own upstream
+   tree, confirmed patches already applied) and **MoE's RDMA fault shim**
+   from source.
+7. **Detects a real, reachable VictoriaMetrics instance** (probes the
+   conventional `http://<first-node>:8428/health` live) or reports
+   precisely that one needs to be launched per `vm-standalone/README.md`
+   — it does not launch one itself (that needs a real binary staged on a
+   node and a real Slurm allocation, a substantially different kind of
+   step than everything else here).
+8. **Generates real, templated Grafana provisioning configs**
+   (`var/grafana_provisioning_generated/`) with the real discovered
+   `VM_URL` and this package's real installed path substituted in.
+9. **Writes `cluster.env`** — the single source of real, discovered truth
+   every launch script reads (via `lib/cluster_topology.sh`) instead of
+   hardcoding.
+
+Fails loudly and specifically on any genuinely missing prerequisite
+(exits non-zero with a real, specific `FATAL:` message) rather than
+silently proceeding with a guessed value.
+
+### Real, live validation performed
+
+Run against this project's own real 2-node H200 cluster. **Real values
+detected, live** (not simulated): `NODE_LIST=worker-0,worker-1`,
+`NUM_NODES=2`, `GPUS_PER_NODE=8` (from `scontrol`'s own live `Gres=gpu:
+nvidia_h200:8` field on each node), host NCCL library
+`libnccl.so.2.30.1` on both nodes, `/tmp` = real `ext4` on both nodes,
+bpftrace already able to attach real tracepoints directly on both nodes
+(no wrapper install needed), `libibverbs-dev` missing on worker-0 only
+(installed live), a real, reachable VictoriaMetrics instance found at
+`http://worker-0:8428`.
+
+**Two real, live failures were caught and fixed during this validation,
+not hidden**:
+- The Inspector plugin build failed the first real run:
+  `profiler.h`/`common.h` not found. Root cause: the packaged
+  `inspector-plugin/` was missing an entire `nccl/` subdirectory (9 real
+  NVIDIA public profiler-API headers) that the plugin's own Makefile
+  requires via `-Inccl` — a real gap in the original Stage 1 packaging,
+  found only because this was an actual build, not a file-presence
+  check. Fixed by copying that directory in. A second, related bug in
+  `install.sh` itself was also found and fixed in the same run: `make`'s
+  own `NCCL_HOME := ../../build` (a plain `:=` assignment) is not
+  overridden by an environment variable of the same name — only by a
+  real command-line `make NCCL_HOME=...` override, which `install.sh`
+  now uses.
+- A full, real, live 2-node training job launched through one of the
+  now-fixed `run_*.sh` scripts (`workloads/nanogpt/run_shape1_nomonitor.sh`,
+  no fault injection) failed twice, for two more real, genuine reasons,
+  each fixed in turn: (1) `scontrol` (a Slurm client binary) is present
+  on the bare host but **not inside the training container** these
+  scripts actually exec into — `lib/cluster_topology.sh`'s
+  `cluster_topology_job_nodes` now falls back to the real node list
+  `install.sh` already discovered (`cluster.env`) when `scontrol` isn't
+  found, rather than assuming it's always available; (2) the
+  nanoGPT-family `train.py`/`train_fsdp.py`/`train_moe.py` scripts'
+  own `data_dir` was still a bare, CWD-relative `'data/<dataset>'` string
+  — now resolved relative to each script's real location, against the
+  package's actual shared `workloads/shared-data/` directory. **After
+  both fixes, the exact same launch command completed cleanly on both
+  nodes** (`TORCHRUN_EXIT: 0`), with real training loss decreasing
+  (4.31 → 2.68 over 20 iterations) — confirmed via the job's own real
+  log output, not assumed.
+
+`[CHECK-FAILED]` count in the standing, already-running production
+`alert_engine.py` process throughout this entire validation: **0**
+(confirmed before and after every live step — this validation never
+touched or restarted that process; it ran entirely separate test jobs
+against the same cluster).
 
 ## Explicitly excluded from this package (and why)
 

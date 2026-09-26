@@ -1,34 +1,55 @@
 #!/bin/bash
 set -u
 LABEL=${1:-check}
-BASE=/root/P4d_clean/health
-OUTDIR=/root/P4d_clean/health/runs/$LABEL
+# Stage 2 cluster-topology-agnostic fix: BASE/OUTDIR used to be hardcoded
+# absolute paths into this project's original development-host layout
+# (/root/P4d_clean/health) -- BASE now resolves to this script's own real
+# location; OUTDIR defaults to a var/ directory alongside the package
+# (overridable via HEALTH_CHECK_OUTDIR for a real deployment's own
+# chosen data directory), matching the same convention already used for
+# alert_engine.py's IOWAIT_LOG_DIR.
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTDIR="${HEALTH_CHECK_OUTDIR:-$BASE/../var/health_check_runs}/$LABEL"
 mkdir -p "$OUTDIR"
 IMAGE="nvcr.io#nvidia/pytorch:25.01-py3"
 MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib64,/root:/root"
+
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_available_nodes
+# Real bash array from NODE_LIST (comma-separated) -- plain `for` below,
+# not `| while read`, so nothing here runs in a subshell that would lose
+# array/variable updates once the loop ends.
+IFS=',' read -ra NODES <<< "$NODE_LIST"
 
 echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then
   echo "ABORT: soperatorchecks job active"; exit 1
 fi
 
-echo "=== running matmul+sleep benchmark on both nodes ==="
-srun --nodes=1 --ntasks=1 --gpus-per-node=8 -w worker-0 \
-  --container-image="$IMAGE" --container-mounts="$MOUNTS" \
-  python3 "$BASE/bench_all_gpus.py" > "$OUTDIR/bench_worker0.json" 2>"$OUTDIR/bench_worker0.err" &
-P0=$!
-srun --nodes=1 --ntasks=1 --gpus-per-node=8 -w worker-1 \
-  --container-image="$IMAGE" --container-mounts="$MOUNTS" \
-  python3 "$BASE/bench_all_gpus.py" > "$OUTDIR/bench_worker1.json" 2>"$OUTDIR/bench_worker1.err" &
-P1=$!
-wait $P0 $P1
+# Stage 2 cluster-topology-agnostic fix: used to be exactly 2 hardcoded
+# `srun ... -w worker-0`/`-w worker-1` invocations -- now one per real,
+# discovered node, whatever the real count/names are.
+echo "=== running matmul+sleep benchmark on every real discovered node ==="
+for node in "${NODES[@]}"; do
+  srun --nodes=1 --ntasks=1 --gpus-per-node="$GPUS_PER_NODE" -w "$node" \
+    --container-image="$IMAGE" --container-mounts="$MOUNTS" \
+    python3 "$BASE/bench_all_gpus.py" > "$OUTDIR/bench_$node.json" 2>"$OUTDIR/bench_$node.err" &
+done
+wait
 
 echo "=== gathering NVML counters ==="
-bash "$BASE/nvml_counters.sh" worker-0 > "$OUTDIR/nvml_worker0.csv"
-bash "$BASE/nvml_counters.sh" worker-1 > "$OUTDIR/nvml_worker1.csv"
+for node in "${NODES[@]}"; do
+  bash "$BASE/nvml_counters.sh" "$node" > "$OUTDIR/nvml_$node.csv"
+done
 
 echo "=== REPORT: $LABEL ==="
-python3 "$BASE/gpu_health_check.py" "$OUTDIR/bench_worker0.json" "$OUTDIR/nvml_worker0.csv" "$OUTDIR/bench_worker1.json" "$OUTDIR/nvml_worker1.csv"
+REPORT_ARGS=()
+for node in "${NODES[@]}"; do
+  REPORT_ARGS+=("$OUTDIR/bench_$node.json" "$OUTDIR/nvml_$node.csv")
+done
+python3 "$BASE/gpu_health_check.py" "${REPORT_ARGS[@]}"
 
-scontrol update nodename=worker-0 state=resume >/dev/null 2>&1
-scontrol update nodename=worker-1 state=resume >/dev/null 2>&1
+for node in "${NODES[@]}"; do
+  scontrol update nodename="$node" state=resume >/dev/null 2>&1
+done

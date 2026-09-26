@@ -3,10 +3,14 @@ set -u
 STEPS=$1
 OUTDIR=$2
 PORT=$3
-DUMPDIR_W0=$4
-DUMPDIR_W1=$5
+DUMPDIR_BASE=$4
 IMAGE="nvcr.io#nvidia/pytorch:25.01-py3"
 MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib64,/root:/root"
+
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_available_nodes
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "### vit-p26 steps=$STEPS outdir=$OUTDIR port=$PORT"
 echo "--- queue check ---"
@@ -15,10 +19,10 @@ if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER al
 
 mkdir -p "$OUTDIR"
 
-srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --gpus-per-node=8 -w worker-0,worker-1 \
+srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
-  bash -c 'if [ "$(hostname)" = "worker-0" ]; then DD='"$DUMPDIR_W0"'; else DD='"$DUMPDIR_W1"'; fi; bash /root/P20c_alerting/train_node_vit_p26.sh '"$STEPS $OUTDIR $PORT"' $DD' \
+  bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_vit_p26.sh" '"$STEPS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"
 disown

@@ -5,8 +5,14 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # unused, kept for arg-position parity
 
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
+source "$_LIB"
+cluster_topology_job_nodes
+cluster_topology_discover_rank
+cluster_topology_discover_rdzv_host
+cluster_topology_discover_gpu_count
 HN=$(hostname)
-if [ "$HN" = "worker-0" ]; then RANK=0; else RANK=1; fi
+RANK=$NODE_RANK
 
 mkdir -p "$OUTDIR"
 
@@ -14,10 +20,10 @@ mkdir -p "$OUTDIR"
 # (no NCCL_PROFILER_PLUGIN, no NCCL_INSPECTOR_ENABLE), same real model/
 # batch/block config as the monitored Shape 1 run, same log_interval so
 # the two real per-iteration time samples are directly comparable.
-cd /root/P20d_e2e_validation/p20k_mean_test/nanoGPT_straggler
-torchrun --nnodes=2 --nproc_per_node=8 --node_rank=$RANK \
-  --rdzv_id=v1beta_shape1_nomon --rdzv_backend=c10d --rdzv_endpoint=worker-0:$PORT \
-  train.py config/train_shakespeare_char.py \
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
+  --rdzv_id=v1beta_shape1_nomon --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
+  train.py "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../nanogpt-base/config/train_shakespeare_char.py" \
   --n_layer=12 --n_head=12 --n_embd=768 --block_size=512 --dropout=0.0 \
   --batch_size=12 --gradient_accumulation_steps=32 \
   --max_iters=$STEPS --lr_decay_iters=$STEPS --warmup_iters=200 \

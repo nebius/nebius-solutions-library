@@ -35,10 +35,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
 
-sys.path.insert(0, "/root/P20d_e2e_validation/p20k_mean_test/nanoGPT_straggler")
+# Stage 2 cluster-topology-agnostic fix: both were hardcoded absolute
+# paths into this project's original development-host layout -- now
+# resolved relative to this package's own shared nanogpt-base/ and
+# shared-data/ directories instead (the same convention nanogpt/tp2/fsdp
+# already use).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nanogpt-base"))
 from model import GPTConfig, GPT
 
-DATA_DIR = "/root/P20d_e2e_validation/p20k_mean_test/nanoGPT_straggler/data/shakespeare_char"
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared-data", "shakespeare_char")
 MAX_ITERS = int(os.environ.get("MAX_ITERS", "300"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "32"))
 BLOCK_SIZE = int(os.environ.get("BLOCK_SIZE", "128"))

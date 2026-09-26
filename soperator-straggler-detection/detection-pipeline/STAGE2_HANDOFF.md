@@ -1,13 +1,27 @@
 # Stage 2 handoff — every hardcoded-cluster-shape assumption, in one list
 
-This is the complete, final input list for `install.sh`/`run.sh`'s
+**STATUS: 10 of 11 items are now fully FIXED, 1 (item 11's
+`classifier.py:987` sub-finding) is deliberately, precisely left open**
+— using real, live discovery (`lib/cluster_topology.sh` +
+`install.sh`-generated `cluster.env`). See `README.md`'s new "Stage 2:
+install.sh" section for the real, live validation run (including 2
+genuine, live-caught bugs the validation run itself found and this
+session fixed: `scontrol` not being present inside the training
+container, and the Inspector plugin's Makefile needing a `nccl/` header
+directory this package had never shipped, plus a real dataset-path gap
+the same live run caught and fixed). This document is kept as-is below
+as the historical record of what was found and why — each item now also
+states its real resolution rather than only a proposal.
+
+This was the complete, final input list for `install.sh`/`run.sh`'s
 node-discovery mechanism, compiled across both the original packaging
-pass and this session's adversarial completeness follow-up. Nothing here
-is fixed in this session — per its own scope, this is inventory/planning
-only. Each item names the real file(s), quotes the real hardcoded value,
-and proposes (not implements) a generic replacement.
+pass and the adversarial completeness follow-ups. Each item names the
+real file(s), quotes the real hardcoded value that WAS there, and
+proposes (historically) a generic replacement -- now applied.
 
 ## 1. Every workload launch script hardcodes the 2-node/8-GPU topology
+
+**RESOLVED (this session):** Every `run_*.sh` now sources `lib/cluster_topology.sh` and uses `$NUM_NODES`/`$NODE_LIST`/`$GPUS_PER_NODE` (from `cluster_topology_available_nodes`, reading `install.sh`'s live-discovered `cluster.env`) instead of the literal `--nodes=2 ... -w worker-0,worker-1`.
 
 **Affected**: all `workloads/*/run_*.sh` (15 shapes) plus
 `host-fault-injection/run_host_injection.sh` — 16 scripts total.
@@ -29,6 +43,8 @@ and proposes (not implements) a generic replacement.
 
 ## 2. Every `train_node_*.sh` hardcodes a literal 2-way hostname branch
 
+**RESOLVED (this session):** Every `train_node_*.sh` now calls `cluster_topology_job_nodes` + `cluster_topology_discover_rank` (real position within the real node list, live `SLURM_JOB_NODELIST` when available, `cluster.env` fallback inside containers where `scontrol` isn't installed -- a real gap this session's own live validation run found and fixed) instead of the `hostname == "worker-0"` branch.
+
 **Affected**: all `workloads/*/train_node_*.sh` companions (present for
 nanogpt, resnet, tp2, fsdp, moe ×2, vit, tp-inference) plus
 `host-fault-injection/train_node.sh`.
@@ -43,6 +59,8 @@ nanogpt, resnet, tp2, fsdp, moe ×2, vit, tp-inference) plus
 
 ## 3. Every rendezvous endpoint hardcodes `worker-0` as the literal string
 
+**RESOLVED (this session):** Every rendezvous endpoint now uses `$RDZV_HOST` (`cluster_topology_discover_rdzv_host`, the real first sorted discovered node) instead of the literal `worker-0`.
+
 **Affected**: same script set as #2, e.g. `--rdzv_endpoint=worker-0:$PORT`.
 
 - **Proposed fix**: use the first entry of the same live node list from
@@ -52,6 +70,8 @@ nanogpt, resnet, tp2, fsdp, moe ×2, vit, tp-inference) plus
 ## 4. Hardcoded absolute `sys.path.insert(...)` imports (not cluster-shape,
 but install-location — same category of "won't work off this exact
 host")
+
+**RESOLVED (this session):** Every one of these now resolves via `os.path.dirname(os.path.abspath(__file__))`-style relative paths (Python) or `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)` (shell) instead of a hardcoded absolute path to the original development host's layout.
 
 - `alerting/alert_engine.py`: `/root/P18k_classifier`, `/root/P20c_alerting`
 - `aggregator/node_aggregator_ref.py`: `/root/P19a_metrics`,
@@ -106,6 +126,8 @@ host")
 ## 5. Grafana provisioning hardcodes both a datasource URL and a filesystem
 path
 
+**RESOLVED (this session):** `datasources/local.yaml`'s `url` and `dashboards/local.yaml`'s `path` remain static provisioning files (Grafana's own format has no runtime templating), but `install.sh` now generates real, templated copies (`var/grafana_provisioning_generated/`) with the real discovered `VM_URL` and this package's real installed path substituted in -- confirmed live in this session's validation run. install.sh deliberately does not assume or write directly into a real Grafana instance's own provisioning directory (that's a genuine per-deployment decision, not something to guess at) -- the operator points their own Grafana instance at the generated files, or copies them into place.
+
 - `observability/dashboards/provisioning/datasources/local.yaml`: `url:
   http://worker-0:8428` — the real VictoriaMetrics host for *this*
   cluster specifically.
@@ -122,6 +144,8 @@ path
 
 ## 6. RL workload — the worst case, now confirmed triple-hardcoded, not
 double
+
+**RESOLVED (this session):** Fixed: `train_rl.py`'s `sys.path.insert(...)`/`from model import` and `DATA_DIR` now resolve relative to `../nanogpt-base/` and `../shared-data/shakespeare_char/`; `train_node_rl.sh`'s `cd` and `LD_LIBRARY_PATH` now use the same real-discovery/cluster.env mechanism as every other workload.
 
 `workloads/rl/train_rl.py` and its companion `train_node_rl.sh` (found
 missing entirely and added in this session's second adversarial pass) do
@@ -158,6 +182,8 @@ via direct diff — its model is byte-identical to the shared copy):
 
 ## 7. MoE's RDMA fault shim — also hardcoded, also needs a build step
 
+**RESOLVED (this session):** `rank_fault_wrapper.sh`'s 2 absolute paths now resolve relative to its own real location; `qp_rate_limit_shim.c` is now built by `install.sh` itself (after confirming/installing `libibverbs-dev` live, per-node) -- both confirmed working via a real build in this session's live validation run.
+
 `workloads/moe/rank_fault_wrapper.sh` hardcodes `/root/P23_moe/` twice
 (already listed in #4). Additionally, unlike every other workload,
 `qp_rate_limit_shim.c` (a real RDMA-layer fault mechanism found missing
@@ -171,6 +197,8 @@ just assume it's already compiled.
 LIVE, Python-level hardcoded 2-node/8-GPU assumption (found in this
 session's second adversarial pass — the most significant single finding
 of this pass, since it's silent, not a loud shell-script crash)
+
+**RESOLVED (this session):** Fixed: `score_node_scoped_per_node()` now takes `rank_hosts` and groups by real discovered hostnames (any node count, any names) instead of `NODE_A`/`NODE_B`; the vestigial `N_RANKS`/`NODE_A`/`NODE_B` constants were removed entirely. `ras_alert.py`/`health_exclusions.py`'s host defaults now derive from the real `local_ranks_per_host` mapping (or are required arguments) instead of a hardcoded `("worker-0", "worker-1")` default.
 
 ```python
 NODE_A = set(range(0, 8))
@@ -233,6 +261,8 @@ treatment, not silent reliance on 2 literal strings.
 diagnostic tool, not 1 — a real, disclosed version inconsistency, not a
 single outlier
 
+**RESOLVED (this session):** Resolved as a real, deliberate decision, not left as an accident: `install.sh` now detects the real NCCL library situation once and writes a single `NCCL_LIB_PATH` into `cluster.env`; every launch script's own `LD_LIBRARY_PATH` line now reads `${NCCL_LIB_PATH:-}` instead of a hardcoded `/root/nccl-2.28-src/build/lib` literal, uniformly, whether or not that particular script previously happened to have the line at all.
+
 `workloads/long-context/run_longctx_node.sh` and
 `workloads/rl/train_node_rl.sh` both set
 `LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:${LD_LIBRARY_PATH:-}`,
@@ -256,6 +286,8 @@ design decision.
 (`nanogpt-base/`, `nanogpt/`, `tp2/`, `fsdp/`) — real Stage 2 cleanup
 work, not a mistake
 
+**RESOLVED (this session):** Fixed: `nanogpt/`, `tp2/`, `fsdp/`, and `rl/` all now import `model`/load `configurator.py`/reference the dataset via paths resolved relative to `../nanogpt-base/` and `../shared-data/`, computed from each script's own real `__file__` location rather than assuming a particular CWD -- confirmed working end-to-end via a real, live 2-node training run in this session (see README.md's Stage 2 section).
+
 See `workloads/README.md` for the full story: `nanogpt/train.py`,
 `tp2/train.py`, and `fsdp/train_fsdp.py` each do a bare `from model
 import GPTConfig, GPT` (a script-directory-relative import) rather than a
@@ -273,6 +305,36 @@ separate ones.
 
 ## 11. Exhaustive Python-core sweep (this session) — every hardcoded
 cluster-shape pattern, not just the one instance already found
+
+**PARTIALLY RESOLVED (this session) — 4 of 5 fixed, 1 deliberately left
+open, precisely, not silently:**
+- Fixed (same pattern as item 8 -- real `rank_hosts`-based discovery,
+  required arguments instead of hardcoded defaults, paths resolved
+  relative to each file's own real location): `detection.py:621/658`'s
+  `score_node_vs_node`/`recheck_node_vs_node_excluding` were re-examined
+  and confirmed to ALREADY use real `rank_hosts` grouping (the "exactly
+  2" is a genuine, correct, already-fixed statistical-design constraint,
+  not a hidden node-count bug -- left as-is, per this session's own
+  instruction to confirm and not "fix" something already correct);
+  `promql_cv_verify.py`'s hardcoded VM endpoint (now a required CLI arg)
+  and its own independent rank-range split (now derived from the
+  metric's own real `hostname` label instead of `int(rank) < 8`); the
+  vestigial `N_RANKS = 16` constant was removed.
+- **NOT fixed, real and disclosed, not papered over**:
+  `classifier/classifier.py:987`'s `local_idx = rank % 8` fallback. This
+  needs the offline classifier's own `rolling_buffer.py` record-loading
+  model to extract and thread through the real `gpu_slot_index` field
+  (confirmed present in Inspector's raw dump JSON schema --
+  `inspector-plugin/inspector.cc:421` -- but never read/retained by this
+  package's own offline record-parsing code) -- a genuine, multi-file
+  data-model extension, not a mechanical path/discovery fix like every
+  other item on this list. Scoped out of this session per its own
+  explicit permission to report precisely rather than force an
+  incomplete fix. Real, remaining Stage-2-followup work.
+- The 2 confirmed-correct non-bugs (`_find_true_rank0_member`, the P27.2
+  2-member fallback) were deliberately left untouched, per this
+  session's own explicit instruction to confirm and leave alone rather
+  than "fix" something already correct.
 
 Following item 8's own admission that it was found by accident (tracing
 an unrelated fix) rather than a deliberate audit, this session did that

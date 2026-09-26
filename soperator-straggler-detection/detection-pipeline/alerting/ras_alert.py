@@ -60,7 +60,13 @@ def exclude_known_benign_ranks(ranks, coordinator_rank, degraded_ranks):
     return [r for r in ranks if r not in excluded]
 
 
-def query_ras_snapshot(host="worker-0"):
+def query_ras_snapshot(host):
+    """Stage 2 cluster-topology-agnostic fix: `host` used to default to
+    the literal "worker-0" -- silently querying the wrong node on a
+    cluster where the real rendezvous coordinator isn't named that.
+    Now a required argument: the caller must supply a real, discovered
+    host (see RASFailStopWatcher, which derives one from its own real
+    local_ranks_per_host rather than assuming a name)."""
     r = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "/usr/bin/ncclras -v 2>&1"],
         capture_output=True, text=True, timeout=15,
@@ -68,8 +74,23 @@ def query_ras_snapshot(host="worker-0"):
     return r.stdout
 
 
-def compute_current_exclusions(local_ranks_per_host, coordinator_host="worker-0",
-                                hosts=("worker-0", "worker-1")):
+def compute_current_exclusions(local_ranks_per_host, coordinator_host=None, hosts=None):
+    """Stage 2 cluster-topology-agnostic fix: `coordinator_host`/`hosts`
+    used to default to the literal ("worker-0", "worker-1") -- silently
+    wrong on any cluster with different node names or more than 2 nodes.
+    Both are now derived live from `local_ranks_per_host` (the real,
+    caller-supplied global_rank -> (host, local_rank) mapping this
+    function already requires) when not given explicitly: `hosts`
+    becomes every real host actually present in that mapping; absent an
+    explicit `coordinator_host`, this project's own established,
+    disclosed launch convention applies (the rendezvous coordinator is
+    node_rank 0, which this project's launch scripts always place on
+    the alphabetically-first discovered hostname -- the same convention
+    alert_engine.py's own _find_true_rank0_member already relies on)."""
+    if hosts is None:
+        hosts = tuple(sorted({h for h, _ in local_ranks_per_host.values()}))
+    if coordinator_host is None:
+        coordinator_host = hosts[0] if hosts else None
     coordinator_rank = health_exclusions.rendezvous_coordinator_rank(
         node_rank_of_host=None, local_ranks_per_host=local_ranks_per_host,
         coordinator_host=coordinator_host,
@@ -92,9 +113,17 @@ class RASFailStopWatcher:
     already excluded via the mechanism-based rule.
     """
 
-    def __init__(self, host="worker-0", local_ranks_per_host=None):
-        self.host = host
+    def __init__(self, host=None, local_ranks_per_host=None):
+        """Stage 2 cluster-topology-agnostic fix: `host` used to default
+        to the literal "worker-0". Now derived from `local_ranks_per_host`
+        (the real, discovered rank/host mapping) the same way
+        compute_current_exclusions derives its own coordinator_host,
+        when the caller doesn't supply one explicitly."""
         self.local_ranks_per_host = local_ranks_per_host or {}
+        if host is None:
+            real_hosts = sorted({h for h, _ in self.local_ranks_per_host.values()})
+            host = real_hosts[0] if real_hosts else None
+        self.host = host
         self.proc = None
 
     def start(self):

@@ -34,7 +34,16 @@ import subprocess
 import sys
 import time
 
-AGENT_BT = "/root/P20d_e2e_validation/storage_ebpf/iowait_agent.bt"
+# Stage 2 cluster-topology-agnostic fix: was a hardcoded absolute path
+# into this project's original development-host layout
+# (/root/P20d_e2e_validation/storage_ebpf/iowait_agent.bt) -- resolved
+# relative to this package's own installed location instead
+# (storage-ebpf/iowait_agent.bt, a sibling of observability/ in the
+# packaged tree). BPFTRACE stays a real system path -- it's an installed
+# system binary (see storage-ebpf/bpftrace-tracefs-wrapper.sh), not
+# something this package ships itself.
+AGENT_BT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "storage-ebpf", "iowait_agent.bt"))
 BPFTRACE = "/usr/local/bin/bpftrace"
 
 # P27.3-log-rotation-fix -- real, confirmed second instance of the same
