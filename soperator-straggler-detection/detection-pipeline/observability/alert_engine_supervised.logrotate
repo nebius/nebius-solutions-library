@@ -1,0 +1,42 @@
+# P27.3-log-rotation-fix -- real, standard logrotate config for
+# alert_engine_supervised.log, the ONE file this project's own sustained
+# dry run confirmed grows unbounded (31.8MB/165k lines with zero cap,
+# confirmed via direct grep: no rotation logic exists anywhere in
+# run_alert_engine_supervised.sh or alert_engine.py).
+#
+# copytruncate is REQUIRED, not a style choice: run_alert_engine_
+# supervised.sh writes via a plain shell `>> "$LOG"` redirect held open
+# for the ENTIRE lifetime of one supervised python3 invocation (hours to
+# days in real deployment) -- a plain rename-based rotation would leave
+# that already-open shell file descriptor writing forever into the
+# renamed (now-hidden) old file, since bash never reopens a `>>` target
+# on its own. copytruncate copies the current content out, then
+# truncates the ORIGINAL file in place (same inode, same fd) -- the
+# shell's already-open descriptor keeps writing to the same path
+# seamlessly, no coordination with the running process needed at all.
+#
+# size 50M: real reasoning, not an arbitrary default -- the sustained
+# dry run measured ~31.8MB of real growth over ~3 real hours under HEAVY
+# fault-injection/alert-volume conditions (far above normal operation,
+# where the documented PROBABLE/LOG-ONLY rate is ~22-25/hour). 50M sits
+# with real margin above that heavy-load measurement (rotating roughly
+# every ~5 real hours even under sustained heavy load) while staying
+# large enough that one rotated file still holds a genuinely useful,
+# multi-hour, correlatable block of real debugging context -- not so
+# small that related events get fragmented across many tiny files.
+#
+# rotate 10: bounds total worst-case retained disk to ~500MB (50M x 10)
+# before compression -- compress+delaycompress (below) shrinks that
+# substantially in practice for this kind of repetitive text log, while
+# still preserving real multi-day depth under normal (non-heavy-load)
+# operation, matching the "beta tester running this for days" scenario
+# this fix exists for.
+/root/P20c_alerting/alert_engine_supervised.log {
+    size 50M
+    rotate 10
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

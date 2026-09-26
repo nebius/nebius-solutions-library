@@ -1,20 +1,26 @@
-# GPU straggler detection for Soperator (MVP)
+# GPU straggler detection for Soperator
 
 This directory holds the deployable pieces of a GPU straggler/fail-slow
-detection pipeline built for Soperator (Slurm-on-Kubernetes) clusters. It
-is an **MVP for review**, not a final production artifact -- the
-implementation is expected to be optimized after initial review.
+detection pipeline built for Soperator (Slurm-on-Kubernetes) clusters.
 
 ## What's here
 
-- [`straggler-vmsingle/`](./straggler-vmsingle/README.md) -- a Helm chart
-  that deploys a dedicated, single-tenant VictoriaMetrics `VMSingle`
-  instance for this pipeline's own metrics. It exists because the
-  platform's shared VictoriaMetrics instance runs a `dedup.minScrapeInterval`
-  (30s) that was measured, live, to discard the large majority of this
-  pipeline's real aggregate samples -- see that chart's own README for the
-  full real evidence and the alternatives considered (pre-aggregation, and
-  changing the shared instance's setting) and why they were rejected.
+- [`detection-pipeline/`](./detection-pipeline/README.md) -- the actual
+  detection pipeline: the NCCL Inspector profiler plugin, the node-side
+  aggregator, the classifier/corroboration logic, the alert engine, the
+  Grafana dashboard, and all 15 validated fault-injection workload shapes
+  used to test it. This is a **structural packaging pass** -- an
+  exhaustive, code-verified inventory of every real dependency this system
+  has, organized into one portable tree (see its own `INVENTORY.md`). It
+  is not yet a one-command installer; `install.sh`/`run.sh` are a
+  following stage.
 
-Start with `straggler-vmsingle/README.md` for the install steps, the
-real validation performed, and the open items flagged for review.
+- [`straggler-vmsingle/`](./straggler-vmsingle/README.md) -- **deprecated,
+  kept for historical reference only** (see its own `DEPRECATED.md`). A
+  Kubernetes VMSingle Helm chart for this pipeline's metrics storage,
+  confirmed RBAC-blocked (zero in-pod Kubernetes permissions) on two
+  separate clusters in a row. Superseded by `detection-pipeline`'s
+  standalone-VictoriaMetrics-as-a-Slurm-job approach, which needs no
+  Kubernetes access at all.
+
+Start with `detection-pipeline/README.md`.

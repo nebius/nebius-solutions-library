@@ -1,0 +1,95 @@
+#!/usr/bin/env bpftrace
+/*
+ * P20j Step 2 -- minimal node-level per-process block-I/O-wait agent.
+ *
+ * Keys the block_rq_issue -> block_rq_complete pair by (dev, sector), not
+ * by pid, because block_rq_complete fires in interrupt/softirq context --
+ * its own pid/comm reflect whatever happens to be scheduled at completion
+ * time, not the process that issued the read (confirmed directly from
+ * this kernel's own tracepoint format: block_rq_complete carries no
+ * meaningful pid field for attribution). The issuing pid/comm are
+ * recorded once, at block_rq_issue time, using bpftrace's pid/comm
+ * builtins (which reflect the actually-executing task at that moment --
+ * correct for direct/sync reads, which is what a training dataloader's
+ * open()+read() call generates).
+ *
+ * This measures REAL WAIT TIME (issue-to-complete latency), not byte
+ * counts -- byte counts are exactly what a page-cache hit defeats: a
+ * cached read completes with real bytes transferred but with ~zero real
+ * disk wait, while a genuine disk-bound read of the same size shows real,
+ * elevated wait. Byte-count-only tools cannot distinguish these; this
+ * agent's whole point is that it can.
+ */
+
+BEGIN
+{
+    printf("iowait_agent started, kernel-side (%s)\n", "block_rq_issue/complete pair, keyed by dev+sector");
+}
+
+tracepoint:block:block_rq_issue
+{
+    @start[args.dev, args.sector] = nsecs;
+    /*
+     * P20c fix -- the `pid` builtin here is bpf_get_current_pid_tgid(),
+     * which the kernel documents as ALWAYS resolving in the root/init
+     * pid namespace, regardless of which namespace this bpftrace process
+     * itself runs in. When the issuing task lives inside a nested pid
+     * namespace (this project's per-job "jail", one level deep -- e.g.
+     * a real disk-bound read's own script sees pid=3976499 via
+     * os.getpid(), but this tracepoint's plain `pid` builtin reports an
+     * unrelated root-namespace number like 3765258 for the SAME task),
+     * every jail-side tool (the fault script itself, any aggregator,
+     * `ps`, any pid-based correlation) can only ever see the nested
+     * value -- so keying on the raw root-namespace pid here silently
+     * breaks all per-process attribution for jailed callers, even
+     * though the real block I/O and its wait time are captured
+     * correctly. curtask->thread_pid->numbers[<level>].nr resolves the
+     * SAME task's pid as seen from namespace level <level> (0 = root,
+     * confirmed live via a working disk-bound test: level 1 exactly
+     * matches this jail's own os.getpid()). Falls back to the plain
+     * root pid when there's no nesting (level 0), so this still behaves
+     * correctly if ever run directly against a true host with no jail.
+     */
+    $level = curtask->thread_pid->level;
+    if ($level >= 1) {
+        @startpid[args.dev, args.sector] = curtask->thread_pid->numbers[1].nr;
+    } else {
+        @startpid[args.dev, args.sector] = pid;
+    }
+    @startcomm[args.dev, args.sector] = comm;
+}
+
+tracepoint:block:block_rq_complete
+{
+    $ts = @start[args.dev, args.sector];
+    if ($ts != 0) {
+        $delta_us = (nsecs - $ts) / 1000;
+        $p = @startpid[args.dev, args.sector];
+        $c = @startcomm[args.dev, args.sector];
+        if ($p != 0) {
+            @iowait_us_by_pid[$p, $c] = sum($delta_us);
+            @iowait_count_by_pid[$p, $c] = count();
+        }
+        delete(@start[args.dev, args.sector]);
+        delete(@startpid[args.dev, args.sector]);
+        delete(@startcomm[args.dev, args.sector]);
+    }
+}
+
+interval:s:2
+{
+    time("[%H:%M:%S] ");
+    print(@iowait_us_by_pid);
+    print(@iowait_count_by_pid);
+    clear(@iowait_us_by_pid);
+    clear(@iowait_count_by_pid);
+}
+
+END
+{
+    clear(@start);
+    clear(@startpid);
+    clear(@startcomm);
+    clear(@iowait_us_by_pid);
+    clear(@iowait_count_by_pid);
+}
