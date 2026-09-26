@@ -45,6 +45,16 @@ storage-ebpf/       bpftrace-based per-PID io-wait sampler + the tracefs
                     bind-mount wrapper this jail environment needs, plus
                     the real disk-bound fault-injection scripts used to
                     validate it
+host-fault-injection/ Real host-CPU-contention fault mechanism (all-core
+                    burner + a fine-grained per-rank jitter injector) —
+                    what this project's own aggregator-CPU-under-
+                    contention validation actually reuses
+vm-standalone/      The real, working metrics backend: a plain
+                    VictoriaMetrics binary launched as an ordinary Slurm
+                    job (no Kubernetes access needed), with its real,
+                    load-bearing non-default config (0s dedup, 100y
+                    retention) documented explicitly, not just "install
+                    VictoriaMetrics"
 tools/              Standalone validation utilities (pre-flight test-
                     duration check, offline persistence replay, PromQL
                     cross-check) + a real captured fixture used by one of them
@@ -61,6 +71,11 @@ INVENTORY.md        The full Step-3 audit this layout is based on: every
                     hardcoded path/hostname, every external tool and
                     version constraint, NCCL Inspector plugin provenance,
                     and cross-reference against this project's fix history
+STAGE2_HANDOFF.md   Every hardcoded-cluster-shape assumption found across
+                    both the original inventory and a later adversarial
+                    completeness pass, consolidated into one explicit
+                    list with a proposed (not implemented) generic fix
+                    for each — the direct input for Stage 2
 ```
 
 ## Requirements (verified, not assumed)
@@ -69,14 +84,22 @@ INVENTORY.md        The full Step-3 audit this layout is based on: every
   classification pipeline — **zero third-party packages required**
   (verified by tracing every `import` in every file under `classifier/`,
   `aggregator/`, `alerting/`; see INVENTORY.md Category A). Workload
-  scripts under `workloads/` separately require PyTorch (+ torchvision for
-  the ResNet/ViT/VLM shapes) — a real GPU training dependency, unrelated
-  to the detection pipeline itself.
+  scripts under `workloads/` separately require **PyTorch, NumPy** (every
+  nanoGPT-family shape — `nanogpt/`, `tp2/`, `fsdp/`, `moe/`, `rl/` — uses
+  `numpy.memmap` to load its dataset; found missing from this list in this
+  session's adversarial completeness pass) **, and torchvision** for the
+  ResNet/ViT/VLM shapes — a real GPU training dependency, unrelated to the
+  detection pipeline itself.
 - **External tools**: `bpftrace` (confirmed working at 0.20.2-1ubuntu4.3),
   `nvidia-smi`, `dcgmi`, `ssh`, `logrotate`, Slurm (`squeue`/`srun`/
   `scontrol`), a C++ compiler + CUDA toolkit + a full NCCL source build to
-  build the Inspector plugin. See INVENTORY.md Category D for exact
-  version evidence and where it came from.
+  build the Inspector plugin, and a C compiler + **`libibverbs-dev`** (or
+  the equivalent RDMA development package) to build
+  `workloads/moe/qp_rate_limit_shim.c` — a real RDMA-layer fault-injection
+  mechanism found missing from the first inventory pass; see
+  `workloads/moe/README.md` for the reconstructed (not yet independently
+  verified) build command. See INVENTORY.md Category D for exact version
+  evidence and where it came from.
 - **NCCL — read this before assuming a version.** This cluster's real,
   currently-linked NCCL version is **2.30.1** (package `2.30.3-1`), not the
   container's own bundled 2.25.1 and not the 2.28.9 build tree the
@@ -95,7 +118,10 @@ This package is a direct copy of code validated on **one specific 2-node,
 cluster-shape-agnostic**. Every item below is real, found by tracing the
 actual code (not inferred), and is required work for the next stage
 (`install.sh`/`run.sh`), not fixed in this packaging pass per this
-session's own scope constraint:
+session's own scope constraint. **`STAGE2_HANDOFF.md` consolidates every
+hardcoded-cluster-shape assumption below (plus a couple more found in a
+later adversarial completeness pass) into one explicit, actionable list
+with a proposed generic fix for each — start there for Stage 2, not here.**
 
 1. **Every workload launch script hardcodes the 2-node/8-GPU topology
    literally** — `srun --nodes=2 --ntasks=2 --ntasks-per-node=1
@@ -121,7 +147,10 @@ session's own scope constraint:
    `DATA_DIR` is a second hardcoded absolute path into that same sibling
    directory (the only workload not using a relative/symlinked dataset
    reference — every other shape that needs the Shakespeare-char dataset
-   references it relatively). These will not resolve against this new
+   references it relatively); `host-fault-injection/train_node.sh` `cd`s
+   into a hardcoded `/root/P4b_jitter/nanogpt_inject` for the same reason,
+   even though the model it needs is byte-identical to the already-shared
+   `workloads/nanogpt-base/`. These will not resolve against this new
    tree's layout as-is; the entry-point/installer needs to either set
    `PYTHONPATH` correctly at launch or these need converting to
    relative/package-style imports.
@@ -130,10 +159,17 @@ session's own scope constraint:
    datasource URL for this cluster specifically (see `docs/` history: an
    earlier session found and fixed this pointing at a dead, pre-migration
    VictoriaMetrics instance). On a new cluster this must become the new
-   cluster's own standalone VictoriaMetrics host — see
+   cluster's own standalone VictoriaMetrics host — see `vm-standalone/README.md`
+   for the real config that host needs to run, and
    `../straggler-vmsingle/DEPRECATED.md` for why a Kubernetes-native
    datasource was tried and abandoned (RBAC-blocked on two clusters in a
-   row) in favor of a plain Slurm-launched binary.
+   row) in favor of a plain Slurm-launched binary. **Also found this
+   session**: `observability/dashboards/provisioning/dashboards/local.yaml`
+   hardcodes an absolute filesystem path (`path:
+   /root/P20g_pr_ready/dashboards_dropin`) for where Grafana's file-based
+   dashboard provisioner watches for the dashboard JSON — this must become
+   wherever the dashboard actually lands on a new cluster's Grafana host,
+   not assumed to be this exact path.
 4. **A dead/vestigial environment variable**: every launch script sets
    `NCCL_INSPECTOR_PROM_DUMP=0`, but this variable is never read anywhere
    in the current Inspector plugin source (grepped exhaustively — see
@@ -155,13 +191,31 @@ session's own scope constraint:
    inhomogeneity within the same fleet (a stale, pre-existing Inspector
    `.so` was found already sitting in one node's system library path in
    this project's own prior migration).
-6. **One item in the original task's own audit request could not be
-   substantiated against real evidence and is reported honestly rather
-   than invented**: an "LD_LIBRARY_PATH fix" was named as something to
-   verify, but a full grep of the launch scripts, the live code, and this
-   project's own accumulated docs found zero reference to it anywhere.
-   Either it was folded into a since-superseded fix, or it never existed
-   as a distinct item — flagging rather than fabricating a citation.
+6. **`workloads/long-context/run_longctx_node.sh` sets
+   `LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:...` explicitly** —
+   found in this session's adversarial completeness pass; an earlier pass
+   incorrectly reported this as "could not be substantiated" (a real miss,
+   corrected here). This is the *only* one of the 15 workload scripts that
+   forces linking against the Inspector-plugin build tree's own NCCL
+   2.28.9, rather than relying on the host-bind-mount-shadowing behavior
+   (item in the NCCL-version note above) that lands the other 14 shapes on
+   2.30.1 instead — a real, disclosed version inconsistency across shapes,
+   not something to silently standardize away without checking whether
+   each shape's own validation depended on its specific version.
+7. **cuDNN/cuBLASLt fix — the root cause was genuinely, honestly never
+   resolved, not just undocumented.** Traced this session to its real
+   originating session (an earlier ResNet debugging phase hit a 2-node
+   SIGABRT with cuDNN+NCCL under multi-process load; a later, dedicated
+   session tried to root-cause it properly instead of keeping the
+   workaround, and could not reproduce the crash at all under the exact
+   original conditions — 0/3 attempts, with the container-mount overlay,
+   an `LD_LIBRARY_PATH` override, and `CUDA_MODULE_LOADING=EAGER` each
+   individually ruled out as the cause). The disable-cudnn setting was
+   kept as a defensive default, not because the crash was ever proven to
+   require it. See INVENTORY.md's Category G table for the full backfilled
+   writeup, including that same session's separate, more load-bearing
+   finding: Inspector's own profiling overhead dominates ResNet's
+   iteration time regardless of cuDNN state.
 
 ## Explicitly excluded from this package (and why)
 
@@ -178,11 +232,17 @@ session's own scope constraint:
   and no reuse value beyond the single investigation they were written
   for: `_diag_hybrid.py`, `_diag_persist.py`/`_diag_persist2.py`/
   `_diag_persist3.py`, `run_ras_faultstop_test.py`.
-- `node_aggregator_with_shim.py` — a debug-only wrapper (adds local JSONL
-  logging as a redundant safety net) around `aggregator/node_aggregator_ref.py`;
+- `node_aggregator_with_shim.py` — a wrapper (adds local JSONL logging as
+  a redundant safety net) around `aggregator/node_aggregator_ref.py`;
   confirmed via every real launch command across this project's history
   that production always invokes `node_aggregator_ref.py` directly, never
-  the shim.
+  the shim. **Correction from this session's re-verification**: this was
+  not pure dead scratch — project docs describe it actually being used
+  during one specific validation session, for redundant full-resolution
+  local logging while debugging. Still correctly excluded from the
+  production package (never part of the standard launch path), but
+  reported accurately as "a real debugging aid used once," not "never
+  used."
 - Any `migration_package/` copy of this pipeline's own code — confirmed
   via direct diff to be **stale** relative to the live code (missing the
   storage-classifier wiring, the log-rotation fix, and several other

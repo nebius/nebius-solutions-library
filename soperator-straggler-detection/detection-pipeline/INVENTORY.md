@@ -189,6 +189,21 @@ not in the Python detection/alerting/classification core.
 - **`iowait_agent.bt`** does not assume a specific kernel version, but
   does hardcode a jail PID-namespace nesting depth
   (`thread_pid->numbers[1].nr`) — see Category E.
+- **`libibverbs-dev` (or equivalent RDMA dev package) + a C compiler** —
+  found in this session's adversarial completeness pass, not the first
+  inventory pass: `workloads/moe/qp_rate_limit_shim.c` `#include`s
+  `infiniband/verbs.h` and is `LD_PRELOAD`ed by
+  `workloads/moe/rank_fault_wrapper.sh` to real-RDMA-throttle exactly one
+  target rank's queue pairs (`ibv_modify_qp_rate_limit()`, applied the
+  instant that rank's QPs reach RTS) — a genuine RDMA-layer fault
+  mechanism distinct from every other GPU-clock/software-sleep fault in
+  this package. No build command for this file was found documented
+  anywhere in this project's history; see `workloads/moe/README.md` for a
+  reconstructed (not independently verified) one.
+- **NumPy** — found missing from the requirements list in the first
+  pass: every nanoGPT-family workload script (`nanogpt/`, `tp2/`, `fsdp/`,
+  `moe/`, `rl/`) uses `numpy.memmap` to load its dataset. A real,
+  load-bearing third-party dependency for those shapes, alongside PyTorch.
 
 ## Category E — Container/base-image audit
 
@@ -235,10 +250,27 @@ not in the Python detection/alerting/classification core.
   `apt-get -o Acquire::ForceIPv4=true install ...` due to a missing IPv6
   route; two other nodes in the same fleet needed no such flag — a
   conditional retry, not a blanket default.
-- **"LD_LIBRARY_PATH fix" — could not be substantiated.** Grepped the live
-  launch scripts, the live code, and every accumulated doc under `docs/`:
-  zero hits. Reported honestly as unconfirmed rather than inventing a
-  citation for it.
+- **"LD_LIBRARY_PATH fix" — CORRECTED in this session's adversarial pass;
+  the first inventory pass's "could not be substantiated" finding was
+  wrong, a real miss.** `workloads/long-context/run_longctx_node.sh:12`
+  contains `export LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:${LD_LIBRARY_PATH:-}`
+  — this explicitly forces the long-context workload to link against the
+  custom-built NCCL 2.28.9 tree (the same one the Inspector plugin is
+  built against) rather than whatever the container/host would otherwise
+  resolve to via the standard library search path. This is the *only* one
+  of the 15 workload launch scripts that does this — every other workload
+  relies implicitly on the host-bind-mount-shadowing behavior documented
+  in the Inspector-plugin-provenance section above (which lands on NCCL
+  2.30.1, not 2.28.9) instead. **A real, disclosed inconsistency**: the
+  long-context shape was validated against a different NCCL version than
+  the other 14 shapes, and this line is why. Confirmed genuinely
+  version-relevant, not vestigial: also confirmed absent from
+  `workloads/resnet/`'s current scripts, where an earlier, since-removed
+  copy once had it and a dedicated root-cause session (see the cuDNN/
+  cuBLASLt entry below) explicitly tested removing it with no observed
+  change for that specific workload — i.e. this override is workload-
+  specific, not a blanket requirement, and must be evaluated per shape
+  rather than assumed universal in Stage 2.
 
 ## Inspector plugin provenance and version (live-verified)
 
@@ -313,7 +345,7 @@ as the field `node_aggregator_ref.py` actually reads.
 | TP2 | `workloads/tp2/` | Shakespeare-char (shared) | |
 | TP4 | `workloads/tp4/` | Shakespeare-char (shared) | Shares `tp2/train.py` + `tp2/train_node_tp.sh`, launched with `TP_SIZE=4` |
 | FSDP | `workloads/fsdp/` | Shakespeare-char (shared, via symlink on the original host) | |
-| MoE | `workloads/moe/` | Shakespeare-char (shared, via symlink on the original host) | Own `model_moe.py` |
+| MoE | `workloads/moe/` | Shakespeare-char (shared, via symlink on the original host) | Own `model_moe.py`; also its own `configurator.py` (`exec(open(...))`-loaded, not importable), `rank_fault_wrapper.sh`, and `qp_rate_limit_shim.c` (a real RDMA-layer fault mechanism) — all 3 found missing from the first inventory pass, added in this session's adversarial completeness check, see `workloads/moe/README.md` |
 | ViT | `workloads/vit/` | Synthetic (`torch.randn`/`torch.randint`) | |
 | TP-inference | `workloads/tp-inference/` | Synthetic | Own `model.py` |
 | plain PP | `workloads/pp/` | Synthetic | |
@@ -351,7 +383,7 @@ confirmed present, not stale pre-fix copies)
 | Hybrid's fixes | Confirmed (as a set) | Multiple explicitly-tagged hotfix comments discussing hybrid TP+PP scenarios in `alert_engine.py` |
 | Inspector plugin crash fix | Confirmed, strong evidence | `inspector-plugin/inspector_plugin.cc`: detailed use-after-free root-cause writeup + the deferred-free retirement queue (same fix as the provenance section above) |
 | TP-inference cold-start fix | Confirmed | `aggregator/node_aggregator_ref.py`: explicit cold-start fallback comments for a workload signature with no cross-job history yet |
-| cuDNN/cuBLASLt fix | **Partially confirmed** | `torch.backends.cudnn.enabled = False` present in the diffusion/ViT/VLM workload scripts — but no inline comment or doc anywhere in the current source tree narrates the root cause; the fix's *presence* is real, its documented *rationale* is a genuine gap, reported as such |
+| cuDNN/cuBLASLt fix | **Confirmed present; root cause backfilled this session, and it is genuinely inconclusive — not a resolved mystery** | `torch.backends.cudnn.enabled = False` (diffusion/ViT/VLM) traces back to a 2-node SIGABRT (cuDNN+NCCL, multi-process) hit during an earlier ResNet debugging session (project phase P18i), worked around by disabling cuDNN. A dedicated later session (P18k, "fix the 2-node cuDNN crash properly") tried to root-cause it instead of just keeping the workaround, and could **not** reproduce the crash under the exact original conditions (0/3 clean runs — cuDNN enabled, `benchmark=True`, full Inspector, full container mounts, an `LD_LIBRARY_PATH` override, `CUDA_MODULE_LOADING=EAGER`). That session systematically ruled out the container-mount overlay, the `LD_LIBRARY_PATH` override, and `CUDA_MODULE_LOADING=EAGER` as causes (removing each: no change). **The real root cause was never conclusively identified** — best unverified guess: transient state from rapid back-to-back `srun` job reuse on the same allocation while actively debugging, not a deterministic property of the code+config. The disable-cudnn setting was kept as a defensive default and propagated to later conv/attention-heavy workloads out of caution, not because the crash was proven to require it. Separately, and more load-bearing for anyone tuning ResNet: that same P18k session found Inspector's own profiling overhead dominates ResNet's iteration time by ~4.5x (85ms with Inspector vs. 19ms without vs. 7.57ms bare single-GPU cuDNN-accelerated compute) regardless of cuDNN state — the crash workaround turned out to be irrelevant to ResNet's real performance story. |
 | SSH-parallelization/deadline fix | Confirmed | `alerting/alert_engine.py`: `ThreadPoolExecutor(max_workers=64)` |
 | Storage-classifier timing fix | Confirmed, both halves | `anomaly_ts` threaded through `build_finding_for_alert`/`_emit`/both check call sites in `alert_engine.py`; `pid = int(pid)` type-coercion fix present in `classifier/storage_evidence.py` |
 | Log rotation | Confirmed | `observability/iowait_logger.py`: `logging.handlers.RotatingFileHandler`; `observability/alert_engine_supervised.logrotate` present |
