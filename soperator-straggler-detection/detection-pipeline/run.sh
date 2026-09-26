@@ -215,9 +215,12 @@ else
     echo "    (${GRAFANA_ACCESS_HOST} is this cluster's own real, private-network address -- there is deliberately no public IP; reach it via whatever VPN/bastion path your organization already uses to reach this cluster's network. See install.sh's own WARNING output if this differs from a real externally-resolvable hostname.)"
   fi
   if [ "${GRAFANA_ANON_ENABLED:-unknown}" = "true" ]; then
-    warn "Real per-user auth is NOT enforced on this Grafana instance right now -- anonymous Admin access is enabled (confirmed live by install.sh's own unauthenticated /api/org check). This is a genuine, disclosed gap on the currently-running instance -- disable [auth.anonymous] in its own config to enforce real auth; this script does not manage that instance's config."
+    warn "Real per-user auth is NOT enforced on this Grafana instance right now -- anonymous Admin access is enabled (confirmed live by install.sh's own unauthenticated /api/org check). This is a genuine, disclosed gap on the CURRENTLY RUNNING instance specifically -- this script does not manage that instance's config. install.sh already generated a real, enforced-auth config + a real random admin password for a properly-configured instance -- see grafana-standalone/README.md to launch one, then retrieve its real login with:"
+    echo "  cat ${GRAFANA_ADMIN_CREDENTIALS_FILE:-\$PKG_ROOT/var/grafana_admin_credentials.txt}"
   elif [ "${GRAFANA_ANON_ENABLED:-unknown}" = "false" ]; then
-    info "Real per-user auth IS enforced on this instance (confirmed live by install.sh). Retrieve the real admin credentials from wherever this specific deployment stores them (its own secrets store / the person who deployed it) -- this script does not print credentials into logs."
+    info "Real per-user auth IS enforced on this instance (confirmed live by install.sh's own unauthenticated /api/org check -- it did NOT return real org data without credentials). Log in as admin_user=admin with the real, generated password -- retrieve it with:"
+    echo "  cat ${GRAFANA_ADMIN_CREDENTIALS_FILE:-\$PKG_ROOT/var/grafana_admin_credentials.txt}"
+    echo "  (never printed in plaintext here -- only this file's own path is)"
   else
     warn "Grafana's real auth posture was not checked (GRAFANA_URL was set after install.sh last ran, or install.sh predates this check) -- re-run install.sh to get a real answer instead of assuming."
   fi
