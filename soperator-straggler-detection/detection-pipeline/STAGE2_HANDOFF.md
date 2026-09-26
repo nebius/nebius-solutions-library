@@ -1,9 +1,9 @@
 # Stage 2 handoff — every hardcoded-cluster-shape assumption, in one list
 
-**STATUS: 10 of 11 items are now fully FIXED, 1 (item 11's
-`classifier.py:987` sub-finding) is deliberately, precisely left open**
-— using real, live discovery (`lib/cluster_topology.sh` +
-`install.sh`-generated `cluster.env`). See `README.md`'s new "Stage 2:
+**STATUS: 11 of 11 items are now fully FIXED** — using real, live
+discovery (`lib/cluster_topology.sh` + `install.sh`-generated
+`cluster.env`, and, for item 11's 5th finding, `classifier/detection.py`'s
+new `discover_rank_gpu_slots()`). See `README.md`'s new "Stage 2:
 install.sh" section for the real, live validation run (including 2
 genuine, live-caught bugs the validation run itself found and this
 session fixed: `scontrol` not being present inside the training
@@ -306,8 +306,10 @@ separate ones.
 ## 11. Exhaustive Python-core sweep (this session) — every hardcoded
 cluster-shape pattern, not just the one instance already found
 
-**PARTIALLY RESOLVED (this session) — 4 of 5 fixed, 1 deliberately left
-open, precisely, not silently:**
+**FULLY RESOLVED (5 of 5)** — the last of these (`classifier.py:987`'s
+`local_idx = rank % 8` fallback, below) was closed in a dedicated
+follow-up session; everything else was fixed in the session that wrote
+this item.
 - Fixed (same pattern as item 8 -- real `rank_hosts`-based discovery,
   required arguments instead of hardcoded defaults, paths resolved
   relative to each file's own real location): `detection.py:621/658`'s
@@ -320,17 +322,44 @@ open, precisely, not silently:**
   and its own independent rank-range split (now derived from the
   metric's own real `hostname` label instead of `int(rank) < 8`); the
   vestigial `N_RANKS = 16` constant was removed.
-- **NOT fixed, real and disclosed, not papered over**:
-  `classifier/classifier.py:987`'s `local_idx = rank % 8` fallback. This
-  needs the offline classifier's own `rolling_buffer.py` record-loading
-  model to extract and thread through the real `gpu_slot_index` field
-  (confirmed present in Inspector's raw dump JSON schema --
-  `inspector-plugin/inspector.cc:421` -- but never read/retained by this
-  package's own offline record-parsing code) -- a genuine, multi-file
-  data-model extension, not a mechanical path/discovery fix like every
-  other item on this list. Scoped out of this session per its own
-  explicit permission to report precisely rather than force an
-  incomplete fix. Real, remaining Stage-2-followup work.
+- **RESOLVED (follow-up session)**: `classifier/classifier.py:986`'s
+  `local_idx = rank % 8` fallback (line number shifted slightly since
+  this item was written; same line). Traced the real data flow first:
+  the live path (`alerting/alert_engine.py:_query_gpu_slot`, lines
+  601-620) reads a real, per-rank `gpu_slot_index` that `aggregator/
+  node_aggregator_ref.py` caches from `record["metadata"]["gpu_slot_index"]`
+  (written by `inspector-plugin/inspector.cc:421`) and republishes as a
+  VictoriaMetrics series; the offline classifier never queried this at
+  all -- `classifier/detection.py`'s `load_records()` yielded the full raw
+  record (including `metadata.gpu_slot_index`) but every caller
+  immediately discarded it down to bare per-rank scalars, and
+  `discover_rank_hosts()` read `metadata.hostname` from the exact same
+  dict without ever also reading its `gpu_slot_index` sibling.
+  Fixed by adding `detection.py`'s `discover_rank_gpu_slots(dump_dirs)`
+  (same loop shape as `discover_rank_hosts`, reads the identical
+  `record["metadata"]["gpu_slot_index"]` key path the live path already
+  reads -- not a second, parallel extraction mechanism), threaded through
+  `classify_incremental` into `build_single_rank_finding(..., 
+  rank_gpu_slots=...)`. `local_idx` now resolves ONLY from this real
+  discovered map; there is no longer any `rank % 8` (or other arithmetic)
+  fallback for it at all. When a rank's real `gpu_slot_index` genuinely
+  isn't available (older dump schema, or a capture gap), `local_idx`
+  stays honestly `None` -- the DCGM/rolling-buffer lookups below degrade
+  to an explicit `"this rank's real GPU slot is not known"` cause entry,
+  never a guess -- and the returned finding carries
+  `dcgm_gpu_slot_known`/`dcgm_gpu_slot_used`, the same provenance fields
+  the live path already exposes, so a consumer can tell "real slot" apart
+  from "unknown" on either path. Validated against real dump data: a
+  post-schema real dump (`gpu_slot_index` present, `/root/P22_fsdp/`)
+  resolves the true slot; a genuinely pre-schema real dump (`/root/
+  P20b_hardening/`, predates Inspector's v4.0 metadata addition) resolves
+  to the honest `None`/unknown case, not a guess; a synthetic
+  deliberately-non-`rank%8` slot map proved the real map is what's used,
+  not a coincidental match to the old arithmetic; `classify_incremental`
+  re-run end-to-end against real historical dump data with no exceptions
+  and no change to existing host-scoped/node-vs-node behavior;
+  `tools/test_persistence_offline.py` (this package's only existing
+  regression check) still passes identically.
 - The 2 confirmed-correct non-bugs (`_find_true_rank0_member`, the P27.2
   2-member fallback) were deliberately left untouched, per this
   session's own explicit instruction to confirm and leave alone rather
@@ -365,6 +394,18 @@ here):
   dump records don't uniformly carry `gpu_slot_index` the way the live
   path's do" — the real blocker is a data-completeness gap in the offline
   replay format, not a logic gap).
+
+  **RESOLVED (follow-up session)**: exactly the proposed fix, done —
+  `detection.py`'s new `discover_rank_gpu_slots()` reads the real
+  `metadata.gpu_slot_index` field directly from the offline package's own
+  dump records (the field IS there per-record when Inspector's v4.0+
+  schema wrote it; it was simply never read, not read-then-dropped),
+  threaded through into `build_single_rank_finding`'s `rank_gpu_slots=`.
+  `local_idx = rank % 8` is gone with no replacement arithmetic — a rank
+  with a genuinely uncaptured slot now resolves to `None`, reported
+  honestly (`dcgm_gpu_slot_known=False`, an explicit "GPU slot is not
+  known" cause entry) rather than guessed. See item 11's summary above
+  for the full real-data validation performed.
 - **`classifier/detection.py:621` (`score_node_vs_node`) and `:658`
   (`recheck_node_vs_node_excluding`) — `if len(real_hosts) != 2:`, real,
   live, classification (a), but fails safe.** Both gate their entire

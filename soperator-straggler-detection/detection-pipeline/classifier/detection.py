@@ -134,6 +134,44 @@ def discover_rank_hosts(dump_dirs):
     return hosts
 
 
+def discover_rank_gpu_slots(dump_dirs):
+    """Real, dynamic rank->physical-GPU-slot identity, read directly from
+    each record's own metadata.gpu_slot_index field -- the exact same raw
+    key path (record["metadata"]["gpu_slot_index"]) the live alerting
+    path's node_aggregator_ref.py/alert_engine.py already read for its own
+    real DCGM-slot targeting (Stage 2 closure: this offline package used
+    to have no equivalent at all, forcing classifier.py's
+    build_single_rank_finding to fall back to local_idx=rank%8). Reuses
+    discover_rank_hosts's own established loop shape (same dump_dirs walk,
+    same one-record-per-file identity read) rather than a second, parallel
+    file-scanning implementation.
+
+    Returns {rank: gpu_slot_index}. A rank whose own record(s) never carry
+    gpu_slot_index -- either an older dump predating Inspector's v4.0
+    schema addition of this field, or a genuinely-missing capture (the
+    live path's own -1 sentinel case, per node_aggregator_ref.py) -- is
+    simply absent from the returned map. Callers must treat a missing
+    rank as "genuinely unknown," never guess via rank arithmetic."""
+    slots = {}
+    for dd in dump_dirs:
+        for f in sorted(glob.glob(f"{dd}/*.log")):
+            with open(f) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rank = rec.get("header", {}).get("rank")
+                    slot = rec.get("metadata", {}).get("gpu_slot_index")
+                    if rank is not None and slot is not None and slot >= 0 and rank not in slots:
+                        slots[rank] = slot
+                    break  # one real record per file already identifies this rank's slot
+    return slots
+
+
 EXCLUDE_ALWAYS = {3}
 EXCLUDE_OUTLIER_EXTRA = {0}
 EXCLUDE_CV_EXTRA = {0}  # P18b finding: rank0's master-process overhead is a

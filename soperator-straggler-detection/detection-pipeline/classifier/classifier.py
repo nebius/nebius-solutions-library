@@ -18,7 +18,7 @@ Three tiers:
 from detection import (score_all, per_rank_series, per_rank_series_with_ts, stat_mean,
                        recheck_node_vs_node_excluding, EXCLUDE_ALWAYS,
                        STAT_WINDOW_SIZE, chunk_windows, windowed_scores_per_node, score_rank0_outlier_rate,
-                       select_primary_corroborating_buckets, discover_rank_hosts)
+                       select_primary_corroborating_buckets, discover_rank_hosts, discover_rank_gpu_slots)
 from cause_metrics import (query_dcgm_all_gpus, decode_throttle, query_ib_all_devices, query_host_cpu,
                             query_thermal_slowdown_all_gpus, query_matmul_tflops, query_network_snapshot,
                             query_nvlink_snapshot, check_nv_hostengine_alive)
@@ -543,6 +543,11 @@ def classify_incremental(dump_dirs, state=None, dcgm_host_map=None, ib_hosts=Non
     # hardcoded rank<8 split and recheck_node_vs_node_excluding/score_
     # rank0_outlier_rate's own old NODE_A/NODE_B dependency below.
     rank_hosts = discover_rank_hosts(dump_dirs)
+    # Stage 2 closure -- real, discovered rank->physical-GPU-slot identity
+    # (see discover_rank_gpu_slots), read from the exact same metadata dict
+    # rank_hosts already reads hostname from. Replaces build_single_rank_
+    # finding's old local_idx=rank%8 fallback below.
+    rank_gpu_slots = discover_rank_gpu_slots(dump_dirs)
 
     rank_ts_range = None
     if per_rank_ts:
@@ -694,7 +699,8 @@ def classify_incremental(dump_dirs, state=None, dcgm_host_map=None, ib_hosts=Non
         tight_ts_range = {rank: (fire_t0, fire_t1)}
         finding = build_single_rank_finding(rank, stat_hits, primary, scored["corroborating"],
                                              dcgm_host_map, ib_hosts, buffer=buffer,
-                                             rank_ts_range=tight_ts_range, rank_hosts=rank_hosts)
+                                             rank_ts_range=tight_ts_range, rank_hosts=rank_hosts,
+                                             rank_gpu_slots=rank_gpu_slots)
         findings.append(finding)
 
     # P18h Stage 2: when network detection fires, annotate rather than
@@ -927,7 +933,7 @@ def gather_path_c_storage(host, iowait_pid, iowait_log_dir, t_start=None, t_end=
 
 def build_single_rank_finding(rank, stat_hits, primary, corroborating, dcgm_host_map, ib_hosts,
                                buffer=None, rank_ts_range=None, iowait_pid=None, iowait_log_dir=None,
-                               host=None, local_idx=None, rank_hosts=None):
+                               host=None, local_idx=None, rank_hosts=None, rank_gpu_slots=None):
     # P18f Stage 4 fix: rank fired statistics by how many multiples of
     # EACH statistic's OWN healthy noise floor it cleared, not by raw
     # z-score -- raw z compared outlier_count's near-degenerate "inf"
@@ -955,36 +961,44 @@ def build_single_rank_finding(rank, stat_hits, primary, corroborating, dcgm_host
         if label not in seen:
             additional_signatures.append(label)
             seen.add(label)
-    # Cluster-topology-agnostic fix (this session): host/local_idx used
-    # to ALWAYS be derived from `rank` via worker_of(rank)/rank%8 --
-    # hardcoded to this cluster's own 2-node/8-GPU-per-node shape, and
-    # (via alert_engine.py's build_finding_for_alert, the LIVE production
-    # path) the ONLY thing standing between a real (hostname, real GPU
-    # slot) identity that adapter ALREADY has and a hardcoded arithmetic
-    # translation of it into a synthetic "rank" that could silently
-    # target the wrong node/slot on any cluster shaped differently than
-    # 2x8. A caller who already has the real host/slot (host=, local_idx=)
-    # now passes them straight through, no translation needed at all.
-    # rank%8/worker_of(rank) remain the fallback ONLY for callers that
-    # still only have a flat global rank and no direct identity (the
-    # offline/buffer-replay engine's own rank-based data model).
+    # Cluster-topology-agnostic fix: host/local_idx used to ALWAYS be
+    # derived from `rank` via worker_of(rank)/rank%8 -- hardcoded to this
+    # cluster's own 2-node/8-GPU-per-node shape, and (via alert_engine.py's
+    # build_finding_for_alert, the LIVE production path) the ONLY thing
+    # standing between a real (hostname, real GPU slot) identity that
+    # adapter ALREADY has and a hardcoded arithmetic translation of it into
+    # a synthetic "rank" that could silently target the wrong node/slot on
+    # any cluster shaped differently than 2x8. A caller who already has the
+    # real host/slot (host=, local_idx=) now passes them straight through,
+    # no translation needed at all. worker_of(rank) remains a fallback for
+    # callers that still only have a flat global rank and no direct host
+    # identity (the offline/buffer-replay engine's own rank-based data
+    # model) -- it resolves via this call's own real, discovered
+    # rank_hosts (classify_incremental's own top-level discover_rank_hosts
+    # call, threaded through), not a hardcoded range.
     #
-    # Codebase audit, third pass -- worker_of(rank) used to always fall
-    # back to the hardcoded rank<8 split here; now uses this call's own
-    # real, discovered rank_hosts (classify_incremental's own top-level
-    # discover_rank_hosts call, threaded through) when the caller has it,
-    # closing this specific gap the same way alert_engine.py's own
-    # build_finding_for_alert already closes it for the live path (by
-    # passing real host= directly rather than relying on this fallback at
-    # all). local_idx=rank%8 is intentionally NOT touched here -- a
-    # separate, narrower GPU-slot identity question this pass didn't
-    # scope in (this offline package's own dump records don't uniformly
-    # carry gpu_slot_index the way the live path's do; see this session's
-    # audit for why that's a distinct, separately-tracked gap).
+    # Stage 2 closure: local_idx used to fall back to rank%8 here, the
+    # last real hardcoded-topology gap in this package (STAGE2_HANDOFF.md
+    # item 11's 5th finding). gpu_slot_index is a real, per-rank identity
+    # (Inspector's own metadata field) that has NO general relationship to
+    # a flat global rank once a cluster isn't exactly 2 nodes x 8 GPUs --
+    # unlike host (which sensibly falls back to a rank-derived grouping
+    # when unknown), guessing a GPU slot from `rank` alone would silently
+    # target the wrong physical GPU's DCGM telemetry. So there is no
+    # arithmetic fallback for local_idx at all: it resolves ONLY from a
+    # real discovered rank_gpu_slots map (discover_rank_gpu_slots, reading
+    # the exact same metadata.gpu_slot_index field the live path's
+    # node_aggregator_ref.py/alert_engine.py already read), and stays
+    # honestly None -- not a guess -- when this rank's slot was never
+    # captured (older dump schema, or a genuinely missing capture). The
+    # DCGM lookup below already degrades cleanly on a None local_idx (dcgm.
+    # get(None, {}) is empty, same as any other "no data" case), and
+    # gpu_slot_known below records which case this finding is in.
     if host is None:
         host = worker_of(rank, rank_hosts) if rank_hosts else None
     if local_idx is None:
-        local_idx = rank % 8
+        local_idx = rank_gpu_slots.get(rank) if rank_gpu_slots else None
+    gpu_slot_known = local_idx is not None
     evidence = {
         "statistic": stat_name, "z": result["z_node"], "mm": result["maxmed_node"],
         "worst_val": result["worst_val"], "peer_mean": result["peer_mean"],
@@ -1032,6 +1046,11 @@ def build_single_rank_finding(rank, stat_hits, primary, corroborating, dcgm_host
     # with a None host argument.
     if host is None:
         cause["impossible"].append("DCGM: this rank's real host is not known (no discovered identity)")
+    elif not gpu_slot_known:
+        # Stage 2 closure: an honest, explicit "unknown" -- not a silent
+        # rank%8 guess -- for the case this rank's real gpu_slot_index was
+        # never captured (see build_single_rank_finding's docstring above).
+        cause["impossible"].append(f"DCGM on {host}: this rank's real GPU slot is not known (no discovered gpu_slot_index)")
     elif dcgm_host_map:
         dcgm, err = query_dcgm_all_gpus(host)
         # P27-hotfix -- query_dcgm_all_gpus can return dcgm=None with err
@@ -1075,7 +1094,14 @@ def build_single_rank_finding(rank, stat_hits, primary, corroborating, dcgm_host
     # within it, have ended) reliably misses a real fault. The buffer was
     # recorded continuously throughout the run, so it sees the fault
     # regardless of when classify() itself happens to run.
-    if buffer is not None and rank_ts_range and rank in rank_ts_range:
+    if buffer is not None and rank_ts_range and rank in rank_ts_range and not gpu_slot_known:
+        # Stage 2 closure: same honest "unknown" as the DCGM live-query
+        # branch above -- this rank's real gpu_slot_index was never
+        # captured, so there is no real per-GPU buffer window to look up
+        # (querying with a guessed index would silently read the wrong
+        # physical GPU's rolling-buffer history).
+        cause["impossible"].append(f"rolling buffer lookback on {host}: this rank's real GPU slot is not known (no discovered gpu_slot_index)")
+    elif buffer is not None and rank_ts_range and rank in rank_ts_range:
         gpu_buf, host_buf, _ib_buf = buffer
         t_start, t_end = rank_ts_range[rank]
         win = query_gpu_window(gpu_buf, host, local_idx, t_start, t_end)
@@ -1156,6 +1182,11 @@ def build_single_rank_finding(rank, stat_hits, primary, corroborating, dcgm_host
         "additional_signatures": additional_signatures,
         "evidence": evidence, "corroborating": corroborating_evidence, "cause": cause,
         "tier": determine_tier_single_rank(cause),
+        # Stage 2 closure -- same provenance fields alert_engine.py's live
+        # path already exposes (dcgm_gpu_slot_known/dcgm_gpu_slot_used),
+        # so a consumer of this finding can tell a real discovered slot
+        # apart from "genuinely unknown" the same way on either path.
+        "dcgm_gpu_slot_known": gpu_slot_known, "dcgm_gpu_slot_used": local_idx,
     }
 
 
