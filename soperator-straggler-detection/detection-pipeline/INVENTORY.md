@@ -253,17 +253,18 @@ not in the Python detection/alerting/classification core.
 - **"LD_LIBRARY_PATH fix" — CORRECTED in this session's adversarial pass;
   the first inventory pass's "could not be substantiated" finding was
   wrong, a real miss.** `workloads/long-context/run_longctx_node.sh:12`
-  contains `export LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:${LD_LIBRARY_PATH:-}`
-  — this explicitly forces the long-context workload to link against the
+  and (found in a second, later adversarial pass) `workloads/rl/train_node_rl.sh`
+  both contain `export LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:${LD_LIBRARY_PATH:-}`
+  — this explicitly forces those two workloads to link against the
   custom-built NCCL 2.28.9 tree (the same one the Inspector plugin is
   built against) rather than whatever the container/host would otherwise
-  resolve to via the standard library search path. This is the *only* one
-  of the 15 workload launch scripts that does this — every other workload
+  resolve to via the standard library search path. These are the *only 2
+  of 15* workload launch scripts that do this — every other workload
   relies implicitly on the host-bind-mount-shadowing behavior documented
   in the Inspector-plugin-provenance section above (which lands on NCCL
   2.30.1, not 2.28.9) instead. **A real, disclosed inconsistency**: the
-  long-context shape was validated against a different NCCL version than
-  the other 14 shapes, and this line is why. Confirmed genuinely
+  long-context and RL shapes were validated against a different NCCL
+  version than the other 13 shapes, and this line is why. Confirmed genuinely
   version-relevant, not vestigial: also confirmed absent from
   `workloads/resnet/`'s current scripts, where an earlier, since-removed
   copy once had it and a dedicated root-cause session (see the cuDNN/
@@ -340,29 +341,37 @@ as the field `node_aggregator_ref.py` actually reads.
 
 | Shape | Directory | Data dependency | Notes |
 |---|---|---|---|
-| nanoGPT | `workloads/nanogpt/` | Shakespeare-char (shared) | Base for tp2/tp4/fsdp/rl |
-| ResNet | `workloads/resnet/` | Synthetic (ResNet18, DDP) | |
-| TP2 | `workloads/tp2/` | Shakespeare-char (shared) | |
-| TP4 | `workloads/tp4/` | Shakespeare-char (shared) | Shares `tp2/train.py` + `tp2/train_node_tp.sh`, launched with `TP_SIZE=4` |
-| FSDP | `workloads/fsdp/` | Shakespeare-char (shared, via symlink on the original host) | |
+| nanoGPT | `workloads/nanogpt/` | Shakespeare-char (shared) | Its own local `model.py`/`configurator.py` (found missing, added — see Category A/workloads/README.md; the "shared via nanogpt-base/" claim from the first pass was wrong, a real gap). Also gained `run_shape1_nanogpt.sh`/`train_node_shape1.sh` + the `_nomonitor` A/B pair this session — the more current, GPT-2-124M-scale, `file_trigger`-capable launch convention, found missing entirely. |
+| ResNet | `workloads/resnet/` | Synthetic (ResNet18, DDP) | Confirmed byte-identical to live source; `INJECT_*` jitter fault fully self-contained inside `train_resnet.py`, nothing external needed |
+| TP2 | `workloads/tp2/` | Shakespeare-char (shared) | Its own local `model.py`/`configurator.py` (same gap/fix as nanoGPT above) |
+| TP4 | `workloads/tp4/` | Shakespeare-char (shared) | Confirmed genuinely shares `tp2/train.py` + `tp2/train_node_tp.sh` (verified by reading `run_tp4_nanogpt.sh` directly — just `TP_SIZE=4`), though that script itself hardcodes an absolute path to the original `tp2` location rather than this package's co-located one — see STAGE2_HANDOFF.md item 4 |
+| FSDP | `workloads/fsdp/` | Shakespeare-char (shared, via symlink on the original host) | Its own local `model.py`/`configurator.py` — found missing entirely (would have crashed on import), added this session |
 | MoE | `workloads/moe/` | Shakespeare-char (shared, via symlink on the original host) | Own `model_moe.py`; also its own `configurator.py` (`exec(open(...))`-loaded, not importable), `rank_fault_wrapper.sh`, and `qp_rate_limit_shim.c` (a real RDMA-layer fault mechanism) — all 3 found missing from the first inventory pass, added in this session's adversarial completeness check, see `workloads/moe/README.md` |
-| ViT | `workloads/vit/` | Synthetic (`torch.randn`/`torch.randint`) | |
-| TP-inference | `workloads/tp-inference/` | Synthetic | Own `model.py` |
-| plain PP | `workloads/pp/` | Synthetic | |
+| ViT | `workloads/vit/` | Synthetic (`torch.randn`/`torch.randint`) | Confirmed byte-identical to live source; model from `torchvision.models.vit_b_16`, no separate model file needed |
+| TP-inference | `workloads/tp-inference/` | Synthetic | Own `model.py`; confirmed byte-identical to live source |
+| plain PP | `workloads/pp/` | Synthetic | Confirmed byte-identical to live source, fully self-contained |
 | Hybrid (TP+PP) | `workloads/hybrid/` | Synthetic | |
-| long-context | `workloads/long-context/` | Synthetic | |
-| diffusion | `workloads/diffusion/` | Synthetic | |
-| DLRM | `workloads/dlrm/` | Synthetic sparse ids | Also has a `_noinspector` launch variant |
-| multi-modal (VLM) | `workloads/multi-modal/` | Synthetic | |
-| RL | `workloads/rl/` | Shakespeare-char, via a **hardcoded absolute path** into the original nanoGPT directory, not the shared copy — see Category C | Shares base `model.py`/`configurator.py` too, via the same hardcoded import |
+| long-context | `workloads/long-context/` | Synthetic | Confirmed byte-identical to live source, including its `LD_LIBRARY_PATH` override |
+| diffusion | `workloads/diffusion/` | Synthetic | Confirmed byte-identical to live source, fully self-contained (model defined inline) |
+| DLRM | `workloads/dlrm/` | Synthetic sparse ids | Also has a `_noinspector` launch variant; confirmed byte-identical to live source, fully self-contained |
+| multi-modal (VLM) | `workloads/multi-modal/` | Synthetic | Confirmed byte-identical to live source, shares the nanoGPT-family model via the same pattern as long-context |
+| RL | `workloads/rl/` | Shakespeare-char, via a **hardcoded absolute path** into the original nanoGPT directory, not the shared copy — see Category C | Shares base `model.py`/`configurator.py` too, via the same hardcoded import. `train_node_rl.sh` was found **completely missing** from the package (the launch path was broken without it) — added this session; it also sets its own `LD_LIBRARY_PATH` (now confirmed 2 of 15 shapes do this — see Category D's LD_LIBRARY_PATH entry) and `cd`s into the original `/root/P31_rl` directory. |
 
-nanogpt/tp2/fsdp share an identical, unmodified base `model.py` +
-`configurator.py` (confirmed via direct diff) — vendored once under
-`workloads/nanogpt-base/` rather than 3 duplicate copies. RL's own
-`train_rl.py` imports the same base model directly from the *original*
-project layout via a hardcoded absolute path (not a duplicate file, and
-not yet updated to use the shared copy in this package — flagged in the
-top README).
+nanogpt/tp2/fsdp all use an identical, unmodified base `model.py` +
+`configurator.py` (confirmed via direct diff) — the first packaging pass
+vendored this once under `workloads/nanogpt-base/`, on the assumption it
+would be shared via `sys.path`. **Corrected in this session's second
+adversarial pass**: it wasn't actually shared — each of the three does a
+bare, script-directory-relative `from model import ...`/`exec(open('configurator.py'))`,
+which only worked implicitly on the original host because the file sat
+right next to each `train.py` there. This is now genuinely 4 duplicate
+copies (`nanogpt-base/` plus one real, load-bearing copy each in
+`nanogpt/`, `tp2/`, `fsdp/`), not 1 shared one — a real Stage 2 cleanup
+item, see `STAGE2_HANDOFF.md` item 10. RL's own `train_rl.py` imports the
+same base model directly from the *original* project layout via a
+hardcoded absolute path (not a duplicate file, and not yet updated to use
+the shared copy in this package — flagged in the top README and
+`STAGE2_HANDOFF.md` item 6).
 
 The Shakespeare-char dataset's ultimate source is a live download in its
 own `prepare.py` (`raw.githubusercontent.com/karpathy/char-rnn`), but the

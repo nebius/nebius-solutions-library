@@ -57,7 +57,9 @@ vm-standalone/      The real, working metrics backend: a plain
                     VictoriaMetrics"
 tools/              Standalone validation utilities (pre-flight test-
                     duration check, offline persistence replay, PromQL
-                    cross-check) + a real captured fixture used by one of them
+                    cross-check, dashboard-JSON portability validation
+                    against the platform Helm chart's own contract) + a
+                    real captured fixture used by one of them
 workloads/          All 15 validated fault-injection workload shapes,
                     one directory each, plus a shared nanoGPT base
                     (model.py/configurator.py/LICENSE) and a shared,
@@ -135,10 +137,21 @@ with a proposed generic fix for each — start there for Stage 2, not here.**
    "drop onto a different cluster shape" goal, and it is concentrated
    entirely in the shell launch layer — the Python core underneath
    (`node_aggregator_ref.py`, `alert_engine.py`, `cause_metrics.py`) is
-   already largely node-count-agnostic (dynamic hostname discovery,
+   *mostly* node-count-agnostic (dynamic hostname discovery,
    `discover_gpu_count()` via live `nvidia-smi -L`, etc. — see
    INVENTORY.md Category C for the specific evidence separating what's
-   already dynamic from what isn't).
+   already dynamic from what isn't). **One confirmed, live exception,
+   found in a later adversarial pass**:
+   `classifier/detection.py`'s `score_node_scoped_per_node()` hardcodes
+   `NODE_A = range(0,8)`/`NODE_B = range(8,16)` mapped to the literal
+   strings `"worker-0"`/`"worker-1"`, and is called unconditionally on
+   every real per-communicator scoring pass — silently, not with a
+   crash, unlike the shell-script hardcoding. See `STAGE2_HANDOFF.md`
+   item 8 for the full detail and proposed fix. This was found by
+   tracing one specific historical fix session's real file dependencies,
+   not by an exhaustive line-by-line audit of the Python core — treat
+   "mostly" above as an honest hedge, not a guarantee nothing else like
+   it remains.
 2. **Hardcoded absolute `sys.path.insert(...)` imports** — `alert_engine.py`
    inserts `/root/P18k_classifier` and `/root/P20c_alerting` literally;
    `node_aggregator_ref.py` inserts `/root/P19a_metrics` and
@@ -191,17 +204,21 @@ with a proposed generic fix for each — start there for Stage 2, not here.**
    inhomogeneity within the same fleet (a stale, pre-existing Inspector
    `.so` was found already sitting in one node's system library path in
    this project's own prior migration).
-6. **`workloads/long-context/run_longctx_node.sh` sets
+6. **`workloads/long-context/run_longctx_node.sh` and
+   `workloads/rl/train_node_rl.sh` both set
    `LD_LIBRARY_PATH=/root/nccl-2.28-src/build/lib:...` explicitly** —
    found in this session's adversarial completeness pass; an earlier pass
    incorrectly reported this as "could not be substantiated" (a real miss,
-   corrected here). This is the *only* one of the 15 workload scripts that
-   forces linking against the Inspector-plugin build tree's own NCCL
-   2.28.9, rather than relying on the host-bind-mount-shadowing behavior
-   (item in the NCCL-version note above) that lands the other 14 shapes on
-   2.30.1 instead — a real, disclosed version inconsistency across shapes,
-   not something to silently standardize away without checking whether
-   each shape's own validation depended on its specific version.
+   corrected here), and a later pass found RL does it too (`train_node_rl.sh`
+   itself was found entirely missing from the package and added in that
+   same pass — see `STAGE2_HANDOFF.md` item 6). These are the *only 2 of
+   15* workload scripts that force linking against the Inspector-plugin
+   build tree's own NCCL 2.28.9, rather than relying on the
+   host-bind-mount-shadowing behavior (item in the NCCL-version note
+   above) that lands the other 13 shapes on 2.30.1 instead — a real,
+   disclosed version inconsistency across shapes (see `STAGE2_HANDOFF.md`
+   item 9), not something to silently standardize away without checking
+   whether each shape's own validation depended on its specific version.
 7. **cuDNN/cuBLASLt fix — the root cause was genuinely, honestly never
    resolved, not just undocumented.** Traced this session to its real
    originating session (an earlier ResNet debugging phase hit a 2-node
