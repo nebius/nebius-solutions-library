@@ -22,13 +22,12 @@ export NCCL_INSPECTOR_PROM_DUMP=0
 export MAX_ITERS=$STEPS
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # P28 -- 2 ranks per node (rank0,1=worker-0=PP stage0's TP pair;
-# rank2,3=worker-1=PP stage1's TP pair), each rank needs its OWN dump
-# dir (node_aggregator_ref.py's convention: one aggregator per node,
-# reading every rank co-located on that node from one shared dump dir --
-# unlike PP's earlier 1-rank-per-node script, here BOTH local ranks'
-# Inspector dumps land in the SAME per-node dir, exactly matching how
-# every 8-rank-per-node workload in this project already works).
-DUMPDIR="$DUMPBASE/dump_w$NODE_RANK"
+# rank2,3=worker-1=PP stage1's TP pair); BOTH local ranks' Inspector
+# dumps land in the SAME per-node dir (one aggregator per node), which
+# must be the real discovered hostname to match run.sh's own aggregator
+# watch path ($DUMP_DIR_BASE/$node) -- a dump_w$NODE_RANK convention is
+# never watched by anything and was a real routing bug.
+DUMPDIR="$DUMPBASE/$HN"
 mkdir -p "$DUMPDIR"
 export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
 torchrun --nnodes="$NUM_NODES" --nproc_per_node=2 --node_rank=$NODE_RANK \

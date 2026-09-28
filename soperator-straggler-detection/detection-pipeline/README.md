@@ -174,6 +174,10 @@ INVENTORY.md        The full Stage-1 audit: every Python dependency,
                     every external tool/version constraint
 STAGE2_HANDOFF.md   Every hardcoded-cluster-shape assumption found —
                     **now 11/11 resolved**, kept as the historical record
+VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
+                    the Inspector plugin's own build gaps, container
+                    image, VictoriaMetrics, Grafana, bpftrace) this
+                    package was actually validated against
 ```
 
 ## 3. Requirements (verified, not assumed)
@@ -331,6 +335,38 @@ the same way:
   the final backgrounded command, and redirect its stdin
   (`</dev/null`) — this is exactly what `run.sh`'s own aggregator-launch
   code does.
+- **Launching VictoriaMetrics via `srun` (as `vm-standalone/README.md`
+  literally documents) permanently blocks every subsequent workload test
+  for the same user, on a cluster with no spare non-GPU node** — real,
+  found live during a from-scratch V1 Beta Stage 5 re-run. VM's own `srun`
+  job occupies a real Slurm queue slot under the launching user
+  indefinitely (it's meant to run for the whole testing campaign), and
+  every workload launch script's own `squeue -u "$USER" -h` guard aborts
+  ("ABORT: existing job for $USER already queued/running") whenever
+  anything is already queued for that user — including VM's own job. On
+  this project's real 2-node development cluster (no dedicated non-GPU
+  node exists to isolate VM onto, contrary to that README's general
+  advice), this makes it impossible to ever run a workload test after
+  launching VM exactly as documented. Real fix used here: launch the same
+  official binary directly as a plain background process instead
+  (`ssh <node> "setsid nohup /path/to/victoria-metrics-prod <same flags> </dev/null &"`)
+  — bypasses Slurm's queue entirely, consistent with how this project's
+  own aggregator/alert_engine supervisors are already launched (also not
+  Slurm jobs), with zero change to VM's own data or flags.
+- **`run.sh`'s own Step 2 alert_engine.py liveness check can false-FATAL
+  immediately after a genuinely fresh install** — real, found live the
+  same session. The check samples `/proc/<pid>/stat`'s CPU ticks over a
+  fixed 6-second window and FATALs if they don't advance. On a freshly-
+  created, still-empty VictoriaMetrics instance, `alert_engine.py`'s own
+  per-poll-cycle work (nothing to calibrate yet) can cost under one tick
+  (10ms) — genuinely alive and correctly cycling (confirmed directly via
+  `strace`: real DNS + VM query traffic every `poll_interval`), but
+  invisible to a 6-second CPU-tick sample. Not a crash, not a hang —
+  simply resolves itself once any real workload traffic starts flowing
+  (confirmed live: a subsequent `run.sh` re-run passed cleanly once
+  `tools/self_test.sh` had generated real traffic). If you see this exact
+  FATAL right after a from-scratch install, re-run `run.sh` after
+  launching any real workload rather than assuming the pipeline is down.
 
 ## 5. Running it — `run.sh` + the self-test
 
@@ -528,14 +564,32 @@ duration, jitter, network-fabric, and data-pipeline stragglers are real,
 planned, but **not** production-hardened in this release — do not
 assume they're silently covered.
 
+**ResNet's jitter fault re-confirmed as real, silent non-detection (not
+misattribution)**: re-ran ResNet's own `INJECT_ENABLE=1` burst/jitter
+fault (rank 4, `INJECT_BURST_MS=10`/`INJECT_PERIOD_MS=100`, the script's
+own defaults) for a full 8000-iteration, ~7-minute run — well past the
+120s calibration grace period. Real fault confirmed injected (own
+`[inject] rank=4 ENABLED` log line); the target's own NCCL Inspector
+exec-time data showed **no measurable elevation at all** versus peers,
+and **no alert fired for it, of any tier or rank, for the whole run**.
+This is not a misattribution — it's a genuine, real absence of a
+collective-level signature for this specific burst/jitter mechanism, and
+it's exactly consistent with (real, direct evidence for) the V1 scope
+note directly above: jitter-class faults are not production-hardened in
+this release.
+
 **Overhead — the real, measured numbers, not a summary**:
 - The one direct throughput-overhead measurement in this project's own
   history found Inspector's profiling overhead **dominating ResNet's
   iteration time by ~4.5x** (85ms with Inspector vs. 19ms without vs.
   7.57ms bare single-GPU compute) — it is **not documented** whether
-  this was measured in the lean production launch config
-  (`NCCL_INSPECTOR_DUMP_VERBOSE=0`, the default every launch script
-  uses) or a more verbose debug mode. Treat per-workload overhead as a
+  this was measured with `NCCL_INSPECTOR_DUMP_VERBOSE=1`, the value
+  **14 of the 15 validated launch scripts actually use** (confirmed live
+  this session via `grep -r NCCL_INSPECTOR_DUMP_VERBOSE workloads/`;
+  fixed here — an earlier version of this section incorrectly claimed
+  `=0` was the default), or a more verbose debug mode still above that.
+  Only `workloads/nanogpt/train_node_shape1.sh` (the plain, non-fault-
+  injection nanoGPT baseline) uses `=0`. Treat per-workload overhead as a
   real open question to measure on your own workload, not as
   negligible-by-default. An A/B "monitoring-off" harness exists
   (`workloads/nanogpt/run_shape1_nomonitor.sh`) for exactly this
@@ -616,6 +670,309 @@ fallback (the P27.2 mechanism, for a pure software fault) — but the
 underlying statistical limit is permanent, not a bug to eventually
 patch away.
 
+**P27.2 timing-asymmetry fallback — false-positive risk on TP2 reproduced
+and root-caused, fix applied (pending one restart)**: a real, live Stage 5
+isolated-validation run found 5 real CONFIRMED/PAGE false positives on a
+genuinely healthy (unfaulted) TP2 baseline via this exact fallback. A
+same-session re-investigation suspected `peer_mad` computing to 0 or a
+degenerate value silently no-oping the MAD gate, but could **not**
+reproduce the false positives in a fresh 1250+-iteration healthy TP2
+re-run in the time available, and left this genuinely unresolved.
+
+A later V1 Beta closeout session tried a genuinely different method — a
+much longer healthy TP2 soak (10,000 iterations, ~15 real minutes, 16
+real ranks / 8 real pairs, zero `STRAGGLER_SLEEP_MS`) instead of another
+short run — and **reproduced the storm decisively**: 10 of 16 genuinely
+healthy members fired real CONFIRMED/PAGE alerts. This also corrected the
+earlier suspicion: live `peer_mad` values at the moment of firing were
+small but genuinely nonzero (3-13us, not degenerate/zero), and the real
+peer-median baseline (105-114us) matched this fallback's own historically
+validated real-fault case almost exactly — ruling out stale or
+mismatched baseline data. The real, root cause is that this cluster's
+own natural per-collective timing variance on individual healthy TP2
+members widens enough, given enough elapsed samples in a long enough
+run, to blow through the fixed `TIMING_FALLBACK_MAD_MULTIPLE=6` gate on
+many pairs at once (observed gap/mad ratios: 26.5-423.9) — a genuine
+**duration-dependent** false-positive risk that short validation runs
+(the original 5-run MAD-fix validation batch, and this project's own
+1250-iteration re-investigation attempt) were simply too short to ever
+encounter. TP-inference (the other real 2-member shape using this same
+fallback) has never shown this behavior.
+
+**Fix applied and validated**: `TIMING_FALLBACK_STOPGAP_ACTIVE`
+(`alerting/alert_engine.py`) has been re-activated (`True`) — the same
+downgrade-to-PROBABLE/LOG-ONLY stopgap this project already built and
+used for exactly this failure mode before the (now-shown-to-be-
+insufficient) MAD-based fix was live-validated and the stopgap reverted.
+This is deliberately the minimal, already-proven lever rather than a new
+statistical redesign (a larger, riskier change): it keeps every real
+detection visible (still emits, at PROBABLE/LOG-ONLY) while removing the
+false-PAGE risk, until a genuinely duration-robust statistical gate is
+designed separately. The supervised process was restarted via its own
+normal path (`SIGTERM` to the leaf process → the existing supervisor
+loop's own auto-restart, the same already-documented mechanism, not a
+bare `kill -9`) — clean exit (code 143) to relaunch completed in 3
+seconds, and the new process's start time was confirmed to postdate the
+source file's own mtime before any validation began.
+
+**Validation (n=5 healthy soak runs + 1 real-fault regression, all
+post-restart)**: five independent 10,000-iteration (~15-real-minute)
+healthy TP2 soak runs all showed **zero** `CONFIRMED/PAGE` alerts
+sourced from this fallback (one incidental `CONFIRMED/PAGE` did occur in
+run 2, traced directly to a real, independent, hardware-corroborated
+Path B/DCGM clock-suppression event — `sm_clock=510 vs peer_median_
+sm_clock=1980`, genuinely active power draw — a different detector
+entirely, unaffected by and out of scope for this stopgap, so it does
+not count against this fix). A real-fault regression run (rank 3,
+`STRAGGLER_SLEEP_MS=200`) confirmed detection is fully preserved, not
+lost or delayed: the real injected target was still correctly and
+exclusively named, firing at ~3:04 elapsed (consistent with this
+project's established fault-detection timing), now correctly capped at
+PROBABLE/LOG-ONLY instead of the old false CONFIRMED/PAGE. `CHECK-
+FAILED` stayed at 0 and the pipeline stayed healthy across every one of
+these 6 runs. **Part D is closed.**
+
+**Above-floor pure-software-delay faults cap at PROBABLE, never
+CONFIRMED/PAGE**: distinct from the below-floor P27.2 case above. A
+real, correctly-localized, high-confidence anomaly (Stage 5's own RL
+validation: z-score up to 510, arrival lag up to 692x peers) on a
+16-member (well above `SELF_DETECTION_FLOOR=3`) communicator stayed at
+PROBABLE/LOG-ONLY indefinitely and never escalated to CONFIRMED/PAGE,
+because the standard peer-relative CV path's CONFIRMED-tier escalation
+requires corroborating DCGM (Path B, clock/throttle) or Path C (storage
+I/O-wait) cause-evidence, and a pure Python-level `time.sleep()`
+straggler produces neither — both read genuinely nominal/ambiguous, not
+because detection failed but because there is no hardware signature to
+corroborate. This is real, expected behavior given the design, not a
+bug — but it means **no pure-software-only compute straggler, however
+large and well-localized, will ever page a human via the standard
+(above-floor) detection path** in this release. Previously undocumented;
+added here after Stage 5 found it live.
+
+**RL: an earlier "weak/inconsistent detection" finding in this section
+was itself wrong — the fault was never actually being injected**:
+Stage 5's own RL validation reached z=510, arrival lag 692x, correctly
+localized. A later investigation session re-ran RL's fault injection 3
+times and found the target's own z-score stayed weak (roughly 2-7) and
+once even saw a healthy neighbor rank misfire instead — and concluded,
+incorrectly, that this was a real signal/attribution gap. Root cause,
+found in a follow-up session: every one of those reruns (and an
+earlier same-session silent run) launched `run_rl.sh` with
+`STRAGGLER_PHASE=none` as the phase argument. `train_rl.py` only
+injects its `time.sleep()` when `STRAGGLER_PHASE` is `rollout`,
+`forward`, or `backward` — `none` matches none of the three conditions
+and is silently a full no-op. Every one of those "weak signal" test
+runs was, in reality, a completely healthy job; the weak z-scores and
+the one stray misfire were ordinary healthy-job noise, not a detection
+gap. Corrected re-runs with `STRAGGLER_PHASE=forward` (5 independent
+runs, same target rank each time) confirmed reliable, correctly-
+attributed detection in all 5: the injected target's own exec time
+read 294-350us against ~200,000-205,000us for every peer (~600-700x
+elevation, closely matching Stage 5's own 692x), z-scores in the
+hundreds, and a real `confidence=PROBABLE` alert naming the exact
+injected target rank every time, firing between ~3:41 and ~3:56
+elapsed in each run — fully consistent with the original Stage 5
+result. **RL's detection was never broken.** The lesson that mattered
+here was about this project's own validation harness, not the pipeline:
+`STRAGGLER_PHASE` must always be set to a real phase value when
+injecting an RL fault — leaving it unset/`none` silently disables the
+fault, and a silent no-op fault test is indistinguishable from a real
+detection gap unless the underlying signal is checked directly (which
+is what caught this).
+
+**Hybrid: the below-floor P27.2 fallback never fires, despite a very
+strong raw signal, because this topology has no live peer sibling to
+compare against**: a dedicated investigation (2 independent fault-
+injection reruns, same target rank both times) found a very strong,
+consistently-reproduced partner-elevation signature via direct
+`agg_mean_exec_time_us` inspection — the injected target read
+17-56us while its healthy TP partner read 5,600-28,200us (a 300-500x
+ratio, reproduced almost identically across both runs, and
+considerably stronger than PP's own successful 36x signal on the
+same mechanism) — yet zero alerts ever fired, over 5+ minutes each
+run. Root-caused directly against `_timing_asymmetry_fallback_
+evaluate`'s own docstring in `alerting/alert_engine.py`:
+`_cross_comm_peer_median` requires an EXTERNAL peer group from
+another below-floor comm with genuinely DIFFERENT physical members
+on the same host to establish its baseline (self-history was
+deliberately abandoned earlier in this project's history due to its
+own false-positive risk — see P27.2.3 above). Confirmed directly via
+VM query, in both reruns: every below-floor comm active on the
+target's host shares the exact same 2 physical members — Hybrid's
+2-ranks-per-node layout means the local TP pair IS the same physical
+pair that also forms the cross-node PP send/recv endpoint on this
+node, so there is no independent same-shape comm with different
+members to serve as a peer pool. This is precisely the gap the
+fallback's own docstring already discloses ("returns None, honestly,
+whenever no OTHER same-shape comm is currently active to serve as
+the peer group... a real, disclosable residual gap for a workload
+whose below-floor comm has no live sibling at all, not a bug") —
+confirmed here as the real, reproducible cause for this specific
+2-ranks-per-node topology, not a timing issue and not a weak signal
+(the signal is unusually strong; there is simply nothing live to
+compare it against). A real fix would mean either falling back to
+`_member_role_baseline` more aggressively when no live peer exists
+(risking reintroducing the cold-start/self-history problems P27.2.3
+already moved away from) or a genuinely new baseline mechanism for
+topologies where TP and PP ranks coincide on the same physical node —
+both are real design changes beyond this session's scope. Disclosed
+here rather than forced.
+
+**Hybrid follow-up (V1 Beta Stage 5 re-run): this gap is real but
+condition-dependent, not absolute** — a fresh Stage 5 validation session
+re-ran Hybrid's exact fault scenario (same target-rank convention) on a
+**genuinely fresh VictoriaMetrics instance** (no prior cross-job history
+at all) that had, by the time Hybrid ran, already accumulated real
+`agg_mean_exec_time_us` data from several earlier same-session shapes
+(TP2/TP4/FSDP/etc.) sharing the same physical GPU slots and message-size
+buckets on these same two nodes — and this time the fault **did** fire, a
+real `PROBABLE` alert correctly naming the injected target
+(`_cross_comm_peer_median`'s `baseline_source='cross_comm_peer'`/`'role'`
+paths both observed live in the surrounding trace). This does not
+contradict the root cause above — it confirms it precisely: Hybrid's
+detection works exactly when a genuinely external peer or cross-job role
+history happens to be available, and fails exactly when it isn't (a truly
+isolated Hybrid run, or the very first run of its kind against a cold VM,
+still has nothing to compare against). Treat this as "real but
+environment-dependent," not "fixed" — a testing session run in isolation
+(the original finding's own condition) will still very likely see it fail.
+**Long-context (also below-floor, same mechanism) hit the cold-start case
+directly in this same re-run**: a strong real signal (~100-300x elevation
+on the waiting partner, same inverse pattern) produced zero alerts,
+because it was long-context's own first-ever run this session and its
+message-size buckets are unique to it — no existing sibling or role
+history yet. Same mechanism, same root cause, opposite outcome, purely
+because of what else happened to have run earlier on this cluster.
+
+**PP (Shape 9): root-caused — a self-reinforcing cross-job history
+contamination, not a code regression and not the same mechanism as
+Hybrid's gap.** A dedicated follow-up session traced this precisely by
+directly invoking `_timing_asymmetry_fallback_evaluate` against a live
+PP run: `_comm_cross_node_members` correctly discovers both real members
+across both nodes (the P27-hotfix4 cross-node fix already in this file
+works exactly as documented) — the function does NOT return None at the
+member-discovery step. It returns None later, because `_member_role_
+baseline`'s cross-job history pool for BOTH of PP's roles is 100%
+contaminated: every single historical `agg_mean_exec_time_us` entry ever
+recorded for PP's role_rank=0 and role_rank=1 (confirmed directly, all
+of them, across every job in this cluster's history) reflects the
+identical target-rank/200ms fault convention this project's own testing
+has always used for PP — there is no genuinely healthy PP history
+anywhere. This project already built a real anti-poisoning safeguard for
+exactly this (`_excluded_role_pool_members`/`_push_role_baseline_
+exclusion`, dropping any (comm,member) a role pool has ever seen
+successfully flagged as anomalous) — but it only engages on a
+SUCCESSFUL fire, and PP's fallback has never once fired, so the
+safeguard has never had a chance to exclude anything. The result: the
+current run's fault looks statistically normal (ratio ~1.0 for both
+members) because the "healthy" baseline it's being compared against IS
+that same fault, repeated. This fully explains the "36x successful
+signal" this document previously cited: that measurement most likely
+predates this contamination (a clean or empty history at the time), and
+does not generalize once this project's own repeated, parameter-
+identical fault testing accumulates — a real, reproducible, self-
+inflicted regression, not a code change and not a discovery-path bug.
+**Scoped proposal (not fixed this session — genuine design work, per
+this project's own standing discipline against forcing incomplete
+fixes):** breaking the circular dependency needs either (a) an
+independent, fire-independent sanity check on role-pool consistency
+(flagging a pool as suspect if it has near-zero natural variance across
+jobs, which a real healthy PP `~2.2x` structural asymmetry would not
+produce, but a uniformly-repeated identical fault would), or (b) this
+project's own testing convention varying fault parameters (target rank,
+sleep duration) run to run so a genuinely healthy baseline has a chance
+to enter the pool. Both are real statistical/process design changes, not
+a small patch.
+
+**DLRM (Shape 13, with-Inspector variant): the wiring bug is found,
+fixed, and validated; full detection additionally needs a second,
+larger, unfixed issue.** Root-caused directly: `node_aggregator_ref.py`'s
+`_throughput_rate_ref` (the reference `agg_job_throughput_ratio_to_
+baseline` divides by) was a per-aggregator-**process**-lifetime value,
+established ONCE by whichever job first reached stabilization and never
+reset — confirmed live with real numbers: DLRM's own real raw event rate
+was ~2.0-2.3x an earlier, completely unrelated job's stale ~110/sec
+reference, and — the same bug's other face — a later diagnostic PP job's
+own real rate read as low as 0.13-0.47x that SAME stale reference,
+producing real false `CONFIRMED/PAGE` `uniform_slowdown` alerts on
+otherwise-unremarkable runs. One root cause, opposite symptoms, purely
+depending on which side of an irrelevant reference a given workload's
+real rate happens to fall. **Fixed and validated**: `node_aggregator_
+ref.py` now tracks which real `slurm_job_id` established the current
+throughput reference and resets it (and every supporting stabilization
+counter) the moment a genuinely new job is detected — validated live
+across 4 consecutive real jobs (DLRM x2, then DLRM-faulted, then
+nanoGPT), each establishing its own fresh, job-appropriate self-
+calibrated reference (4704/sec, 5048/sec, 240/sec, 110/sec respectively
+— correctly tracking each job's own real, wildly different natural
+rate) with zero cross-contamination, and a regression check (the same
+nanoGPT run) confirming per-rank fault detection is completely
+unaffected and no new false `uniform_slowdown` fired. **Still open,
+scoped as a follow-up (real, larger design work, not fixed here):** this
+session also found `comm_calib`/`comm_bucket_members` (the dicts
+`workload_signature()` reads to build each job's cross-job-matching
+"sig") are ALSO never reset per job in a long-lived aggregator —
+confirmed live: DLRM's own sig's `n_comms` climbed 53 -> 54 -> 55 -> 56
+across consecutive, unrelated jobs (DLRM, DLRM, DLRM-faulted, then
+nanoGPT), because these dicts accumulate every comm/bucket/collective
+type this aggregator process has EVER seen, across every job, not just
+the current one. This means two runs of the exact same workload will
+essentially never produce a matching sig in a long-lived aggregator,
+so `query_throughput_history`'s cross-job lookup (the ALREADY-BUILT fix
+for "self-calibration is blind to a fault present since job launch," the
+same disclosed gap MoE has) can never actually find a match — confirmed
+live: DLRM's faulted validation run found "0 historical run(s)" despite
+2 real prior DLRM runs already having pushed their own reference, and
+fell back to self-calibration, which is mathematically blind to this
+exact always-on fault, exactly as already documented for MoE. Fixing
+this properly means rescoping `comm_calib`/`comm_bucket_members` (or a
+derived per-job snapshot of them) to a real job boundary — used
+extensively throughout this file for calibration and bucket-discovery,
+so this is real, wider-reaching, riskier design work, not a small patch,
+and is left as a precisely scoped proposal rather than forced here.
+
+**PP vs. DLRM vs. Hybrid — a real, evidenced comparison, not three
+guesses**: all three sit in the same general family (peer-relative/
+cross-job detection failing when there's nothing genuinely appropriate
+to compare against) but are mechanistically distinct, not one bug with
+three faces:
+- **Hybrid** (original finding, above): cold-start **starvation** — no
+  live sibling comm AND no cross-job history exists yet at all. Nothing
+  to compare against because nothing has been recorded.
+- **PP**: the opposite of starvation — **abundant but 100% contaminated**
+  history. Every recorded comparison point already reflects the same
+  uncaught fault, because the one safeguard against this (excluding a
+  role pool's own past anomalies) depends on a successful detection that
+  has never happened. Self-reinforcing: the absence of detection is what
+  keeps the absence of detection permanent.
+- **DLRM**: an **infrastructure/wiring** problem — comparing against the
+  literally wrong job's data (now fixed), compounded by a second,
+  separate wiring bug (`comm_calib`/`comm_bucket_members` never
+  job-scoped) that prevents the cross-job comparison from ever being
+  attempted correctly in the first place (proposal, not fixed).
+
+No single generic fix addresses all three — each needs its own real
+remedy (a new/independent baseline mechanism for Hybrid's cold start; a
+fire-independent pool-sanity check or varied fault parameters for PP's
+contamination; job-scoped aggregator state for DLRM's wiring gap). Forcing
+one shared fix here, rather than three distinct ones, was considered and
+rejected: the failure conditions genuinely differ (no data vs. bad data
+vs. wrong data), and a fix aimed at one would not touch the others.
+
+**Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
+`node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
+restart-loop wrapper. Killing *only* the leaf `node_aggregator_ref.py`
+child directly (not the wrapper) causes the wrapper's own loop to
+auto-relaunch a fresh process within seconds — independent of, and
+faster than, any explicit `run.sh`-driven restart. Re-tested live this
+session (deliberate `kill -9` of the leaf PID on a real node): a new
+process was already running within ~3 seconds, pipeline remained healthy
+throughout (VM reachable, `CHECK-FAILED` count unchanged). Confirmed
+still present, same as previously documented — this is expected
+supervisor behavior, not a bug, but worth knowing if you ever need to
+stop the aggregator itself rather than just bounce it: killing the leaf
+alone will not stop it.
+
 **cuDNN/cuBLASLt disable workaround**: a real 2-node SIGABRT was hit
 under cuDNN+NCCL multi-process load; a dedicated later session tried to
 root-cause it properly and could not reproduce the crash at all under
@@ -627,6 +984,19 @@ unresolved, not just undocumented.
 **MoE RDMA fault shim's build command**: reconstructed from this
 project's own history, **not yet independently re-verified** — see
 `workloads/moe/README.md`.
+
+**TP-inference's own final `dist.barrier()` can time out (minor, script-
+level, not a detection issue)**: a V1 Beta Stage 5 re-run saw all 3000
+real training iterations complete successfully, fault injected and
+correctly detected throughout, and then one rank hit a 600000ms
+(10-minute) `TCPStore` wait timeout at the script's own final
+whole-world `dist.barrier()` call, producing a `ChildFailedError` and a
+nonzero exit code on both nodes. Real detection data is unaffected (fully
+streamed before this point) — this is a benign, real bug in
+`train_tp_inference.py`'s own end-of-run cleanup, not a pipeline issue.
+Not yet root-caused (possibly a group-scoping mismatch between TP-scoped
+collectives used throughout training and a bare default-group barrier at
+the end).
 
 **VMSingle Helm chart's "survives a restart, self-heals" claim**: only
 ever validated at the storage layer (data survives a process restart).
@@ -649,6 +1019,26 @@ free TCP port, and a real dump-file base directory (use `var/dump` — the
 same one `run.sh`'s own standing aggregator already watches — to see a
 shape's real detection results live, the same way `tools/self_test.sh`
 does).
+
+**Real, live-confirmed gap in this section's own example commands (V1
+Beta Stage 5 re-run): use an ABSOLUTE path for `DUMPDIR_BASE`, never the
+relative `var/dump` shown above.** A genuinely fresh-environment
+validation session found the relative form silently breaks dump-file
+output for the self-dispatching shapes (`NCCL_INSPECTOR_DUMP_DIR` gets
+exported with that same relative string, and by the time it's resolved,
+the training process has already `cd`'d into its own `workloads/<shape>/`
+subdirectory — so it resolves against the wrong directory, and no dump
+files ever appear where the aggregator is watching, no error, no crash,
+just silent non-detection). The per-node shapes (PP/Hybrid/long-context/
+diffusion/DLRM/multi-modal) have a related but distinct gap: their own
+README-documented example `srun` command uses a bare relative script path
+(`bash workloads/pp/run_pp_node.sh ...`) with no wrapping `cd` at all —
+confirmed live to fail outright (`exit code 127`, "No such file or
+directory") whenever the container's own working directory doesn't
+happen to match the submitting shell's cwd. Every successful validation
+run in this project's own history used an absolute path for both the
+script and `DUMPDIR_BASE` (e.g. `"$PWD/var/dump"`) — always do the same;
+do not follow the relative-path form literally.
 
 ### 8.1 The 15 validated workload shapes
 
@@ -780,6 +1170,63 @@ does).
   actually waiting) — the inverse of a naive "whichever member looks
   elevated is the straggler" rule. Confirmed live, independently, on
   both TP2 and TP-inference.
+
+## 9. Attaching this to your own real Slurm job (not one of the 15 bundled examples)
+
+**Real gap this section closes**: nothing above this point ever explained
+how to attach detection to a job you already have — every prior section
+covers running one of the 15 bundled workload shapes. This section does,
+and was validated live (Stage 5 batch-fix pass) against a genuinely new,
+non-bundled 4-rank DDP script with no relation to any of the 15 shapes.
+
+**Prerequisite**: `run.sh` must already be running — the standing
+aggregator per real node (watching `$VAR_DIR/dump/<hostname>`, i.e.
+`var/dump/<hostname>` under this package's install path) and the
+supervised `alert_engine.py`. See "Running it" above. Nothing else needs
+to be told about your job in advance: the aggregator discovers its real
+Slurm job ID live via `squeue` on its own refresh cycle, keyed only by
+whichever real job is currently running on that host — no job-id file
+to write, no workload name to declare, no config to edit anywhere.
+
+Two real things your own training script/launch command must do,
+identical to what every one of the 15 validated workload scripts
+already does (see e.g. `workloads/nanogpt/train_node_straggler.sh`):
+
+1. **Set these environment variables** before your training process
+   starts (same values for every rank on a node; per-process, not
+   per-job):
+   ```bash
+   export NCCL_PROFILER_PLUGIN=/root/nccl-2.28-src/ext-profiler/inspector/libnccl-profiler-inspector.so  # or wherever your own NCCL_HOME build produced it
+   export NCCL_INSPECTOR_ENABLE=1
+   export NCCL_INSPECTOR_DUMP_VERBOSE=1     # matches 14/15 validated shapes' own real default (see Known limitations' overhead note)
+   export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+   export NCCL_INSPECTOR_PROM_DUMP=0
+   export NCCL_INSPECTOR_DUMP_DIR="$PKG_ROOT/var/dump/$(hostname)"   # see point 2 -- this exact path is the one real integration point
+   mkdir -p "$NCCL_INSPECTOR_DUMP_DIR"
+   ```
+2. **Write Inspector dumps into exactly the same per-hostname directory**
+   `run.sh`'s own aggregator was launched to watch — `run.sh`'s own
+   printed `dump_dir=...` line at launch names the real, live value.
+   The aggregator is a directory watcher, agnostic to what wrote the
+   files inside it — any process dumping real Inspector records there
+   gets picked up.
+
+**Verifying it worked, without waiting for a fault**:
+```bash
+ls "$PKG_ROOT/var/dump/<hostname>/"                                   # new files shortly after your job starts
+curl -s "$VM_URL/api/v1/query?query=agg_samples_seen" | python3 -m json.tool   # new series tagged with your job's real slurm_job_id (cross-check via squeue)
+```
+
+**Validated live this session**: a genuinely new 4-rank DDP script (a
+plain `nn.Linear` + `DistributedDataParallel` loop, sharing no code with
+any of the 15 bundled shapes) was launched with exactly the steps above
+and nothing else. Real dump files (`worker-0-pid649953.log` etc.)
+appeared automatically in the aggregator-watched directory, and
+`agg_samples_seen{slurm_job_id="3274"}` (that job's own real, live
+Slurm job ID, picked up with zero manual registration) showed real,
+growing sample counts within one poll cycle — confirming this
+integration point is genuinely sufficient on its own, not just
+documentation that looks plausible.
 
 ## Appendix: explicitly excluded from this package (and why)
 

@@ -522,6 +522,31 @@ class NodeAggregator:
         self._throughput_last_live_denom = None  # P23 step 3 -- previous check's live bucket-count, for stability detection
         self._throughput_denom_stable_checks = 0  # P23 step 3 -- consecutive identical-live-denom checks so far
         self._throughput_total_checks = 0  # P27.5 -- total checks since throughput-checking began, for the bounded-ceiling backstop below
+        # V1 Beta Stage 5 follow-up -- real, confirmed live bug this closes:
+        # every one of the 6 attributes above used to persist for this
+        # aggregator PROCESS's entire lifetime, never reset on a job
+        # boundary. This aggregator (like every one in this project) is a
+        # long-lived process that watches the SAME dump directory across
+        # MANY independent, differently-shaped Slurm jobs run hours apart --
+        # confirmed directly this session, live: _throughput_rate_ref got
+        # permanently fixed by whichever job FIRST reached stabilization
+        # (self-calibrated ~110/sec, from an early AllReduce-only job), and
+        # every subsequent, completely different-shaped job (confirmed with
+        # real data: a DLRM job whose own real raw_rate was genuinely
+        # ~2-2.3x that stale, unrelated reference) got a meaningless
+        # agg_job_throughput_ratio_to_baseline computed against it for its
+        # entire run -- structurally unable to ever cross ABSOLUTE_RATE_
+        # FLOOR_FRAC regardless of any real fault, not because the fault
+        # was invisible to this check's own statistics, but because the
+        # reference it was being measured against had nothing to do with
+        # this job at all. _throughput_job_id (below) tracks which real
+        # job this reference (and its supporting stabilization state) was
+        # actually established for; maybe_check_job_throughput resets all
+        # of it the moment self.slurm_job_id genuinely changes, so each new
+        # job gets its own fresh calibration attempt exactly like a
+        # brand-new aggregator process would, instead of inheriting a
+        # stale, unrelated one.
+        self._throughput_job_id = self.slurm_job_id
         self.n_push_failures = 0
         self.consecutive_push_failures = 0
         self._last_heartbeat_wall = 0.0
@@ -893,7 +918,32 @@ class NodeAggregator:
         real, lower rate), but an aggregator-side processing lag no
         longer can manufacture a false one. The wall-clock check below
         is now purely a "don't recompute this too often" throttle, not
-        part of the rate's own math."""
+        part of the rate's own math.
+
+        V1 Beta Stage 5 follow-up -- real job-boundary reset, closing the
+        stale-reference bug documented at _throughput_job_id's own
+        __init__ comment: this aggregator's self.slurm_job_id is already
+        kept live by refresh_job_id() (called every poll_files() cycle,
+        before this method ever runs in the same cycle), so a real,
+        non-empty, non-"unknown" change in it is exactly the same "a new
+        job has started" signal every other per-job discovery in this
+        file already keys off. Every one of the throughput-tracking
+        attributes this resets is scoped to establishing/using ONE
+        reference value for ONE job; carrying any of them into a
+        DIFFERENT job is exactly the bug being fixed, not a simplification
+        of it."""
+        if (self.slurm_job_id and self.slurm_job_id != "unknown"
+                and self.slurm_job_id != self._throughput_job_id):
+            print(f"[{self.hostname}] throughput tracking reset: new job "
+                  f"{self.slurm_job_id} (previous reference was established "
+                  f"for {self._throughput_job_id!r})", flush=True)
+            self._throughput_job_id = self.slurm_job_id
+            self._throughput_rate_ref = None
+            self._throughput_last_records = self.n_records_seen
+            self._throughput_last_ts_us = None
+            self._throughput_last_live_denom = None
+            self._throughput_denom_stable_checks = 0
+            self._throughput_total_checks = 0
         now = time.time()
         if now - self._throughput_last_check_wall < THROUGHPUT_CHECK_INTERVAL_S:
             return

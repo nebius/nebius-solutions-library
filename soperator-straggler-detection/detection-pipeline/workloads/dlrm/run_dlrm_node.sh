@@ -12,7 +12,10 @@ cluster_topology_discover_rdzv_host
 cluster_topology_discover_gpu_count
 HN=$(hostname)
 RANK=$NODE_RANK
-DUMPDIR="$DUMPBASE/dump_w$RANK"
+# Real path convention: MUST match run.sh's own aggregator watch path
+# ($DUMP_DIR_BASE/$node, i.e. per-hostname), not a dump_w$RANK
+# convention the aggregator never watches.
+DUMPDIR="$DUMPBASE/$HN"
 mkdir -p "$DUMPDIR" "$OUTDIR"
 export LD_LIBRARY_PATH="${NCCL_LIB_PATH:-}:${LD_LIBRARY_PATH:-}"
 export NCCL_PROFILER_PLUGIN=/root/nccl-2.28-src/ext-profiler/inspector/libnccl-profiler-inspector.so

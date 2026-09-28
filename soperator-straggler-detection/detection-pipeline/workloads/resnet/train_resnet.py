@@ -7,8 +7,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torchvision.models as models
 
 def main():
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
+    # Defensive default, same reasoning/history as vit/train_vit.py and
+    # diffusion/train_diffusion.py -- see README's Known Limitations,
+    # "cuDNN/cuBLASLt disable workaround" (a real 2-node SIGABRT under
+    # cuDNN+NCCL multi-process load, never conclusively root-caused).
+    # This file previously hardcoded True/True with no comment and no
+    # evidence it was an intentional, tested override -- a real Stage 5
+    # regression fixed here to match the project's actual default.
+    torch.backends.cudnn.enabled = False
     torch.backends.cuda.matmul.allow_tf32 = True
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()

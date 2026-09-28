@@ -199,7 +199,28 @@ ROLE_BASELINE_MAX_RELATIVE_MAD = 0.5
 # evaluate's Path B half of this same fallback, or any other detector --
 # scoped to exactly the mechanism found unsafe.
 #
-# REVERTED to False -- Steps 2-4 all passed (P27.2.6 validation): 0/5 fresh
+# RE-ACTIVATED (V1 Beta closeout session) -- the "REVERTED to False" validation
+# below used only short healthy TP2 runs (~1250 iterations and less), which
+# never exercised this long enough to see the failure mode. A genuinely
+# different re-investigation this session ran a much longer healthy TP2 soak
+# (10,000 iterations, ~15 real minutes, job 3326, 16 real ranks/8 real pairs,
+# zero STRAGGLER_SLEEP_MS) and found the MAD-gated check still false-firing
+# CONFIRMED/PAGE on 10/16 genuinely healthy members -- not the previously-
+# suspected "peer_mad computes to 0/degenerate, gate no-ops" mechanism (real,
+# live peer_mad values were small but genuinely nonzero: 3-13us), but real,
+# large gap/mad ratios (26.5-423.9, all far past TIMING_FALLBACK_MAD_MULTIPLE
+# =6) driven by this cluster's own real per-collective timing variance on
+# individual healthy members widening enough, given enough elapsed samples,
+# to blow through a fixed 6x-MAD gate on many pairs at once -- a genuine
+# duration-dependent false-positive risk the short validation runs below
+# were too short to ever encounter. Re-activated rather than redesigning the
+# statistical gate itself (a larger, riskier change out of this session's
+# scope): this downgrades the SAME fallback's tier below PAGE-worthy again,
+# exactly as it did originally, while a proper duration-robust statistical
+# fix is designed separately. Preserves detection visibility (still emits,
+# at PROBABLE/LOG-ONLY) rather than suppressing the signal outright.
+#
+# Previously REVERTED to False -- Steps 2-4 all passed (P27.2.6 validation): 0/5 fresh
 # healthy TP2 runs false-fired under the MAD-gated check; the real injected
 # fault (TP2, target rank3) still fired with correct rank attribution at
 # gap/mad=1314.65, ~219x the required TIMING_FALLBACK_MAD_MULTIPLE=6; the
@@ -207,7 +228,7 @@ ROLE_BASELINE_MAX_RELATIVE_MAD = 0.5
 # the 16-1864x range under every realistic MAD bound available (no live
 # re-test possible this session -- that cluster's own real peer_mad was never
 # recorded, since this metric didn't exist yet when that validation ran).
-TIMING_FALLBACK_STOPGAP_ACTIVE = False
+TIMING_FALLBACK_STOPGAP_ACTIVE = True
 
 # P26.5-maintenance -- where iowait_logger.py (run separately, one process
 # per host, same convention as node_aggregator_ref.py) persists its real,

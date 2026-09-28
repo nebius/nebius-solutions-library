@@ -10,7 +10,12 @@ MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib6
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
 source "$_LIB"
 cluster_topology_available_nodes
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# TP4 is TP2's own train_node_tp.sh/train.py run with TP_SIZE=4 (read
+# directly by train.py via --export=ALL, see train_node_tp.sh's own
+# comment) -- workloads/tp4/ has never held its own copy of that
+# payload, so SCRIPT_DIR must point at the real, shared TP payload
+# location (workloads/tp2/), not this script's own directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tp2" && pwd)"
 
 echo "### tp-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT TP_SIZE=4"
 echo "--- queue check ---"
