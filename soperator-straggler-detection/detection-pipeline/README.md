@@ -844,6 +844,57 @@ message-size buckets are unique to it — no existing sibling or role
 history yet. Same mechanism, same root cause, opposite outcome, purely
 because of what else happened to have run earlier on this cluster.
 
+**Hybrid: FIXED and validated (P27.5) — the genuine cold-start case above
+is now resolved, not just condition-dependent.** Root cause of the fix
+direction: `_cross_comm_peer_median`'s live-peer pool (`alerting/
+alert_engine.py`, ~line 1820) was scoped to same-host-only, but Hybrid's
+own topology (2 ranks per node — a TP pair per PP stage) means each
+node's local below-floor comm has no OTHER same-shape comm on that SAME
+host to serve as a peer, by construction (the local TP pair IS the local
+PP endpoint) — this is exactly why the original "never fires" finding
+was genuine, and exactly why it "worked" only when unrelated leftover
+data from earlier same-session shapes happened to be lying around.
+**Real fix**: relaxed the live-peer pool from same-host to job-wide (any
+host in the same Slurm job), with explicit `slurm_job_id` scoping added
+to the primary live-peer branch (which previously had none at all,
+relying only on the hostname filter this change removes) to prevent a
+different job's stale below-floor comm from contaminating the pool —
+falls back to the original same-host-only scoping if the job id can't
+be determined, never searching job-wide unscoped. This means, for
+Hybrid specifically, worker-0's own TP pair now serves as a genuine,
+physically-different-member peer for worker-1's TP pair in the SAME
+job (and vice versa) — a real property of Hybrid's own topology (every
+real Hybrid deployment has at least 2 workers, each with its own local
+TP pair), not a test-only convenience, so this closes the cold-start gap
+for a genuine first-ever production Hybrid job on a fresh cluster too,
+not just this project's own test sequencing.
+**Considered and rejected**: deliberately seeding a compatible below-floor
+shape (e.g. a plain TP2 job) immediately before Hybrid's own test, as a
+test-setup convention rather than a code change — rejected as not a real
+fix for a real deployment (a customer running Hybrid as their first/only
+workload on a fresh cluster would still hit the cold start; Hybrid's own
+multi-worker topology already provides everything the job-wide code fix
+needs, without requiring an unrelated shape to run first).
+**Validated live, n=5 independent genuinely-isolated Hybrid runs** (no
+other shape run beforehand in the same job — the real cold-start
+condition, not the "something else happened to run first" condition the
+original finding depended on): 5/5 fired a correct `PROBABLE` alert with
+exact rank+host attribution; run 1 additionally cross-checked directly
+against VictoriaMetrics, confirming `baseline_source='cross_comm_peer'`
+sourced from the OTHER node's TP pair in the same job, exactly the new
+mechanism (before this fix, the same query would have found no peer at
+all for this exact scenario).
+**Regression-checked**: TP2 — fault-injection detection unchanged (exact
+rank/PID match preserved); a ~6-minute healthy soak produced zero new
+`CONFIRMED`/`PAGE` alerts (unchanged count), consistent with
+`TIMING_FALLBACK_STOPGAP_ACTIVE` already keeping this fallback's tier
+below PAGE-worthy. PP — unaffected either way: a plain 2-rank-per-node PP
+job has no other below-floor comm in the same job to serve as a job-wide
+peer regardless of this change, so `_cross_comm_peer_median`'s modified
+code path isn't reachable differently here; PP's own separately-diagnosed
+role-baseline contamination issue (see below) is unrelated to this fix
+and remains open.
+
 **PP (Shape 9): root-caused — a self-reinforcing cross-job history
 contamination, not a code regression and not the same mechanism as
 Hybrid's gap.** A dedicated follow-up session traced this precisely by
@@ -938,7 +989,11 @@ to compare against) but are mechanistically distinct, not one bug with
 three faces:
 - **Hybrid** (original finding, above): cold-start **starvation** — no
   live sibling comm AND no cross-job history exists yet at all. Nothing
-  to compare against because nothing has been recorded.
+  to compare against because nothing has been recorded. **FIXED (P27.5,
+  above)**: the live-peer pool now searches job-wide instead of
+  same-host-only, so Hybrid's own multi-worker topology supplies a real
+  peer where none existed before — validated n=5, TP2/PP regression
+  checked.
 - **PP**: the opposite of starvation — **abundant but 100% contaminated**
   history. Every recorded comparison point already reflects the same
   uncaught fault, because the one safeguard against this (excluding a
@@ -951,13 +1006,16 @@ three faces:
   job-scoped) that prevents the cross-job comparison from ever being
   attempted correctly in the first place (proposal, not fixed).
 
-No single generic fix addresses all three — each needs its own real
-remedy (a new/independent baseline mechanism for Hybrid's cold start; a
-fire-independent pool-sanity check or varied fault parameters for PP's
-contamination; job-scoped aggregator state for DLRM's wiring gap). Forcing
-one shared fix here, rather than three distinct ones, was considered and
-rejected: the failure conditions genuinely differ (no data vs. bad data
-vs. wrong data), and a fix aimed at one would not touch the others.
+No single generic fix addresses all three — each needed its own real
+remedy: Hybrid's turned out to be a real, scoped code fix (job-wide
+peer relaxation, P27.5, above — FIXED and validated); PP and DLRM still
+need their own separate remedies (a fire-independent pool-sanity check
+or varied fault parameters for PP's contamination; job-scoped aggregator
+state for DLRM's wiring gap). Forcing one shared fix across all three was
+considered and rejected: the failure conditions genuinely differ (no
+data vs. bad data vs. wrong data), and a fix aimed at one would not touch
+the others — confirmed directly: Hybrid's fix left PP and DLRM's own
+separately-diagnosed issues completely unaffected (regression-checked).
 
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
