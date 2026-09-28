@@ -155,7 +155,7 @@ locals {
   vm_agent_queue_count = 2 + floor(sum(var.node_count.worker) / 60)
 
   # Cap on the kube-state-metrics scrape response: an explicit var wins, otherwise the sizing
-  # tier decides (null below M keeps vmagent's global 32MiB guard).
+  # tier decides (null below M keeps vmagent's global guard).
   kube_state_metrics_max_scrape_size = (
     var.kube_state_metrics_max_scrape_size != null
     ? var.kube_state_metrics_max_scrape_size

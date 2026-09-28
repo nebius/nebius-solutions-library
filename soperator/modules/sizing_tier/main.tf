@@ -178,11 +178,8 @@ locals {
 
   # Cap (bytes) on the kube-state-metrics scrape response accepted by vmagent, per tier.
   # Fleet measurements: the response is ~4KB per pod on top of a ~1MB infra base
-  # Per-worker cost is therefore 4KB x pods-per-node: 55-75KB/worker observed,
-  # so vmagent's global 32MiB guard (-promscrape.maxScrapeSize) is reached around 450-580 workers and
-  # dense M-tier clusters get close to it too.
-  # Tiers M and up therefore set a per-job limit sized ~2-3x above the tier ceiling's worst-case legitimate response.
-  # null keeps the global guard, under which an oversized response fails its scrape loudly.
+  # Per-worker cost is therefore 4KB x pods-per-node: 55-75KB/worker observed.
+  # Tiers M and up set per-job limits sized ~2-3x above the tier ceiling's worst-case legitimate response.
   kube_state_metrics_max_scrape_size_presets = {
     XS = null
     S  = null

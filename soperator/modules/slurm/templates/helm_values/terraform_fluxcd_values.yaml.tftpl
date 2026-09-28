@@ -186,9 +186,8 @@ resources:
                 spec:
                   extraArgs:
                     # Default cap for scrape jobs without their own max_scrape_size.
-                    # kube-state-metrics overrides it per-job via kubeStateMetrics.maxScrapeSize
-                    # on large clusters, so this stays at 32MiB as a guard for everything else.
-                    promscrape.maxScrapeSize: "33554432"
+                    # kube-state-metrics can override it per-job via kubeStateMetrics.maxScrapeSize.
+                    promscrape.maxScrapeSize: "134217728"
                   externalLabels:
                     iam_tenant_id: ${iam_tenant_id}
                     iam_project_id: ${iam_project_id}
