@@ -685,7 +685,7 @@ module "slurm" {
     name                    = nodeset.name
     platform                = nodeset.resource.platform
     replicas                = nodeset.size
-    max_unavailable         = "20%"
+    max_unavailable         = "500"
     rolling_update_strategy = nodeset.rolling_update_strategy
     rack_number             = try(nodeset.rack_number, null)
     nvl_instance_group_id   = try(nebius_compute_v1_nvl_instance_group.worker[nodeset.name].id, null)
