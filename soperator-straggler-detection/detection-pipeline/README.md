@@ -895,6 +895,36 @@ code path isn't reachable differently here; PP's own separately-diagnosed
 role-baseline contamination issue (see below) is unrelated to this fix
 and remains open.
 
+**Hybrid: a second, different role-baseline gap found and FIXED (V1 Beta
+Stage 6) — baseline PROVENANCE, not attribution correctness.** A
+confirmation-pass re-test (3/3 runs, correct attribution every time)
+noticed the fired baseline for role_rank=1 was suspiciously small
+(39.22) against a well-populated, consistent 6-job majority cluster
+(role1 ~24k-28k) that should have been available. Root-caused precisely:
+Hybrid's own testing convention injects the fault on the SAME target
+rank every single run, so `_push_role_baseline_exclusion` (the existing
+anti-poisoning safeguard — working exactly as designed, not a bug in
+itself) correctly excludes role1's reading as anomalous on all 9 of
+Hybrid's own real runs, draining its non-excluded survivor pool down to
+a single outlier entry (job 3369, a different, unrelated historical
+run that happened to share this exact label combination). `_member_
+role_baseline` had no minimum-sample-size floor, so this single
+unrepresentative survivor was silently treated as a fully valid
+baseline instead of degrading to "not enough data." **Fix**:
+`ROLE_BASELINE_MIN_HISTORY = 3` (`alerting/alert_engine.py`, reusing
+this project's own established "3 independent data points" precedent —
+`THROUGHPUT_XJOB_MIN_HISTORY`, `PERSIST_REQUIRED`/`PERSIST_WINDOW`) —
+`_member_role_baseline` now degrades to `(None, None)` below this floor,
+routing the caller to the already-validated `_cross_comm_peer_median`
+fallback instead. Does not touch PP's own baseline (10 of 40 real
+historical entries survive un-excluded there, comfortably above the
+floor). Mechanically verified against real historical VM data (role1's
+real pool confirmed to have exactly 1 non-excluded survivor, well under
+the new floor) and confirmed live that a workload whose own testing
+convention has no live peer sibling AND has drained its role-baseline
+pool this way correctly falls through rather than firing on a
+mismatched, unrepresentative value.
+
 **PP (Shape 9): root-caused — a self-reinforcing cross-job history
 contamination, not a code regression and not the same mechanism as
 Hybrid's gap.** A dedicated follow-up session traced this precisely by
@@ -923,17 +953,31 @@ predates this contamination (a clean or empty history at the time), and
 does not generalize once this project's own repeated, parameter-
 identical fault testing accumulates — a real, reproducible, self-
 inflicted regression, not a code change and not a discovery-path bug.
-**Scoped proposal (not fixed this session — genuine design work, per
-this project's own standing discipline against forcing incomplete
-fixes):** breaking the circular dependency needs either (a) an
-independent, fire-independent sanity check on role-pool consistency
-(flagging a pool as suspect if it has near-zero natural variance across
-jobs, which a real healthy PP `~2.2x` structural asymmetry would not
-produce, but a uniformly-repeated identical fault would), or (b) this
-project's own testing convention varying fault parameters (target rank,
-sleep duration) run to run so a genuinely healthy baseline has a chance
-to enter the pool. Both are real statistical/process design changes, not
-a small patch.
+**FIXED (V1 Beta Stage 6) — the circular dependency above turned out not
+to need either of the two design changes originally proposed here.** A
+dedicated follow-up session found the REAL blocker one layer down:
+`node_aggregator_ref.py`'s `comm_calib`/`comm_bucket_members` (the state
+`workload_signature()` reads) were never reset per job in a long-lived
+aggregator process (the same root cause DLRM's own gap below shares) —
+every job that ever reached stabilization got a unique, never-repeating
+signature, so `_member_role_baseline`'s cross-job sig-matching (P27-
+hotfix7) could never find ANY historical match at all, for either role,
+regardless of contamination. Once that's fixed (`maybe_reset_workload_
+state()`, called on every real job-boundary transition), PP's role-
+baseline mechanism works correctly with **zero changes needed to
+`alerting/alert_engine.py`** — validated live, n=5 independent
+fault-injection runs across real job boundaries (jobs 3426-3430), every
+one firing `baseline_source='role'` against the same stable, correct,
+clean-magnitude baseline (~5359.93, ratio ~38x each time), with exact
+correct rank+host attribution every time. The original "100% contaminated,
+self-reinforcing" diagnosis above was real and correctly described VM's
+actual accumulated data at the time — what it missed was that, once
+signatures correctly and stably discriminate again, a NEW job's own
+correctly-scoped signature no longer coincidentally matches that old,
+uniquely-signed contaminated history at all, so genuinely healthy runs
+recorded going forward populate a fresh, uncontaminated pool without
+needing either of the fire-independent sanity check or varied-fault-
+parameter proposals originally floated here.
 
 **DLRM (Shape 13, with-Inspector variant): the wiring bug is found,
 fixed, and validated; full detection additionally needs a second,
@@ -958,29 +1002,33 @@ calibrated reference (4704/sec, 5048/sec, 240/sec, 110/sec respectively
 — correctly tracking each job's own real, wildly different natural
 rate) with zero cross-contamination, and a regression check (the same
 nanoGPT run) confirming per-rank fault detection is completely
-unaffected and no new false `uniform_slowdown` fired. **Still open,
-scoped as a follow-up (real, larger design work, not fixed here):** this
-session also found `comm_calib`/`comm_bucket_members` (the dicts
+unaffected and no new false `uniform_slowdown` fired. **The second issue
+disclosed here — `comm_calib`/`comm_bucket_members` (the dicts
 `workload_signature()` reads to build each job's cross-job-matching
-"sig") are ALSO never reset per job in a long-lived aggregator —
-confirmed live: DLRM's own sig's `n_comms` climbed 53 -> 54 -> 55 -> 56
-across consecutive, unrelated jobs (DLRM, DLRM, DLRM-faulted, then
-nanoGPT), because these dicts accumulate every comm/bucket/collective
-type this aggregator process has EVER seen, across every job, not just
-the current one. This means two runs of the exact same workload will
-essentially never produce a matching sig in a long-lived aggregator,
-so `query_throughput_history`'s cross-job lookup (the ALREADY-BUILT fix
-for "self-calibration is blind to a fault present since job launch," the
-same disclosed gap MoE has) can never actually find a match — confirmed
-live: DLRM's faulted validation run found "0 historical run(s)" despite
-2 real prior DLRM runs already having pushed their own reference, and
-fell back to self-calibration, which is mathematically blind to this
-exact always-on fault, exactly as already documented for MoE. Fixing
-this properly means rescoping `comm_calib`/`comm_bucket_members` (or a
-derived per-job snapshot of them) to a real job boundary — used
-extensively throughout this file for calibration and bucket-discovery,
-so this is real, wider-reaching, riskier design work, not a small patch,
-and is left as a precisely scoped proposal rather than forced here.
+"sig") never being reset per job in a long-lived aggregator — is now
+FIXED (V1 Beta Stage 6)**, confirmed live: DLRM's own sig's `n_comms` had
+climbed 53 -> 54 -> 55 -> 56 across consecutive, unrelated jobs before
+the fix (these dicts accumulate every comm/bucket/collective type this
+aggregator process has EVER seen, across every job, not just the
+current one), meaning two runs of the exact same workload essentially
+never produced a matching sig, so `query_throughput_history`'s cross-job
+lookup could never find a match (confirmed live pre-fix: DLRM's faulted
+validation run found "0 historical run(s)" despite 2 real prior DLRM
+runs already having pushed their own reference). **Real fix**:
+`maybe_reset_workload_state()` in `node_aggregator_ref.py`, called on
+every real job-boundary transition (same trigger, same call site
+pattern as this fix's own `_throughput_*` reset above) — resets exactly
+`comm_calib`+`comm_bucket_members`, deliberately narrow (does not touch
+`self.state`/`phys_comm_role`/`phys_gpu_slot`, already implicitly
+job-scoped by never-reused `comm_id` keys). **Validated live across 5
+real job-boundary crossings**: two same-shape PP jobs correctly produced
+the identical sig and correctly found each other as cross-job history
+("1 historical run(s) found," not "0"); a deliberately different shape
+(nanoGPT DDP) got its own distinct signature, not merged. As a side
+benefit this same fix also corrects `live_denom` (throughput-stability's
+own denominator), which was silently inflated by dead cross-job entries
+the whole time this bug existed — a second, related bug, same root
+cause, not separately disclosed before.
 
 **PP vs. DLRM vs. Hybrid — a real, evidenced comparison, not three
 guesses**: all three sit in the same general family (peer-relative/
@@ -994,28 +1042,100 @@ three faces:
   same-host-only, so Hybrid's own multi-worker topology supplies a real
   peer where none existed before — validated n=5, TP2/PP regression
   checked.
-- **PP**: the opposite of starvation — **abundant but 100% contaminated**
-  history. Every recorded comparison point already reflects the same
-  uncaught fault, because the one safeguard against this (excluding a
-  role pool's own past anomalies) depends on a successful detection that
-  has never happened. Self-reinforcing: the absence of detection is what
-  keeps the absence of detection permanent.
+- **PP**: looked like the opposite of starvation — **abundant but 100%
+  contaminated** history, self-reinforcing (the anti-poisoning safeguard
+  depends on a successful detection that had never happened). **FIXED
+  (V1 Beta Stage 6)**: the real blocker was one layer down (see above) —
+  `comm_calib`/`comm_bucket_members` never resetting per job meant the
+  cross-job sig-match could never succeed at all, contamination or not.
+  Fixing that alone resolved PP too, n=5 validated, zero changes needed
+  to `alert_engine.py`.
 - **DLRM**: an **infrastructure/wiring** problem — comparing against the
-  literally wrong job's data (now fixed), compounded by a second,
-  separate wiring bug (`comm_calib`/`comm_bucket_members` never
-  job-scoped) that prevents the cross-job comparison from ever being
-  attempted correctly in the first place (proposal, not fixed).
+  literally wrong job's data (fixed first), compounded by the same
+  `comm_calib`/`comm_bucket_members` job-scoping bug PP's gap turned out
+  to share. **Both pieces now FIXED (V1 Beta Stage 6)**, validated live
+  across 5 real job-boundary crossings.
 
-No single generic fix addresses all three — each needed its own real
-remedy: Hybrid's turned out to be a real, scoped code fix (job-wide
-peer relaxation, P27.5, above — FIXED and validated); PP and DLRM still
-need their own separate remedies (a fire-independent pool-sanity check
-or varied fault parameters for PP's contamination; job-scoped aggregator
-state for DLRM's wiring gap). Forcing one shared fix across all three was
-considered and rejected: the failure conditions genuinely differ (no
-data vs. bad data vs. wrong data), and a fix aimed at one would not touch
-the others — confirmed directly: Hybrid's fix left PP and DLRM's own
-separately-diagnosed issues completely unaffected (regression-checked).
+Three distinct-looking symptoms, but two of the three (PP, DLRM) turned
+out to share one real, single root cause underneath — the aggregator
+never job-scoping `comm_calib`/`comm_bucket_members`, silently breaking
+every consumer of `workload_signature()`'s cross-job matching (DLRM's
+own throughput-history lookup AND PP's/Hybrid's role-baseline pool
+separation) at once. Hybrid's own gap was genuinely different (a live
+peer-pool topology limitation, P27.5) and got its own separate, correctly-
+scoped fix. Confirmed directly that fixing the shared root cause left
+Hybrid's already-fixed P27.5 mechanism untouched, and vice versa
+(regression-checked both directions).
+
+**Below-floor coverage-achieved signal never fired for ANY 2-member
+comm, at any job duration — found and FIXED (V1 Beta Stage 6).**
+`agg_detection_coverage_achieved` (meant to answer "has this comm/bucket
+had a fair chance to be evaluated yet") was gated behind `score_mean_
+window`'s own `if len(members_here) < 3: return` in `node_aggregator_
+ref.py` — this check runs BEFORE the coverage push, so it fires and
+returns for ANY below-floor comm with exactly 2 physical members before
+the push line is ever reached, regardless of real job duration.
+Confirmed live for BOTH below-floor shapes this pipeline validates: a
+plain PP job (2-rank cross-node Send/Recv) and a TP2 job (2-rank
+intra-node AllReduce) both showed `agg_mean_exec_time_us` freshly
+pushing for 4+ real minutes — well past `BUCKET_MATURITY_GRACE_S`
+(120s) — while `agg_detection_coverage_achieved` stayed structurally
+absent the entire time, for both a short job and a long, genuinely-
+stabilized one. Practical effect before the fix: there was no honest way
+to distinguish "this short 2-member job never got a fair chance" from
+"this 2-member job ran forever and is healthy," because the signal
+meant to answer that was silently never emitted for either case on
+these shapes (it DOES fire correctly for 3+-member below-floor comms,
+e.g. Hybrid's own PP-boundary comm, which has TP-sharded activations
+crossing it rather than a single rank pair). **Fix**: reordered the
+already-computed `bucket_scored_at_ts_us`/grace-period check and the
+coverage push to run BEFORE the `< 3` early-return, reusing only
+already-tracked state (member count, `bucket_scored_at_ts_us`,
+`BUCKET_MATURITY_GRACE_S`) — no new mechanism. The 3+-member CV/z
+self-detection scoring itself is completely unchanged, still gated on
+real member count; only the coverage SIGNAL is now below-floor-
+inclusive. **Validated live, n>=3 independent runs on both shapes**: PP
+(short job -> correct real "0"; two normal-length jobs -> both correctly
+flipped to "1" at real elapsed ~3:36-3:40 from job start) and TP2 (short
+job, 500 steps -> correct "0" across every bucket; normal job, 20000
+steps -> correctly flipped to "1" across effectively every real
+(host,bucket,comm) combination).
+
+**Aggregator restart replays the entire dump-directory backlog from
+byte 0 — real, disclosed operational property, not a bug in any fix
+above.** `self.file_offsets` (each dump file's own read position) is
+purely in-memory — any aggregator process restart resets it to empty,
+so the aggregator re-reads every file under its `var/dump/<host>`
+directory from the beginning before it reaches current, live data.
+Confirmed directly on a cluster whose dump directory had accumulated
+57GB/341 files across a full day of testing: one single old comm alone
+had 235,000+ real records replayed, and workload-signature resets /
+fresh signatures took multiple minutes to resolve post-restart purely
+from this replay, not from anything wrong with the pipeline itself.
+This also means every aggregator restart pays a real, measurable
+heartbeat-staleness cost (`agg_aggregator_heartbeat` pushes are delayed
+by however long the backlog replay takes) — confirmed as the real
+explanation for every `[PIPELINE-DOWN]` episode this project has ever
+logged around a deliberate restart (see the health-check reference note
+below). Not fixed here — flagging for whoever next needs a
+faster-restart or backlog-pruning story; a fresh install with an empty
+`var/dump` never hits this.
+
+**`[CHECK-FAILED]` vs. `[PIPELINE-DOWN]` — two distinct real health
+signals, easy to conflate, don't**: `[CHECK-FAILED]` (`_run_check()`,
+`alerting/alert_engine.py`) is a per-check exception guard — an
+individual check function (`cv`/`mean`/`pipeline_health`/etc.) throwing
+an uncaught exception, logged so one bad check can't silently kill the
+whole poll loop. It has never fired once in this project's entire
+history — a real, meaningful 0, not a metric nobody's checked.
+`[PIPELINE-DOWN]`/`[PIPELINE-RECOVERED]` (`alerting/pipeline_health.py`)
+is a completely different, unrelated signal — a heartbeat dead-man's-
+switch (>90s stale) built to catch the historical "run3 vm_url incident"
+class of silent push failure. It DOES fire, routinely, around every
+deliberate aggregator/`alert_engine.py` restart (see the property directly
+above) — this is expected, not a failure, as long as every episode has a
+matching recovery. Both are genuinely useful signals; neither is a proxy
+for the other, and `tools/self_test.sh`/`run.sh` only check the former.
 
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
