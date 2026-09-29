@@ -979,9 +979,9 @@ recorded going forward populate a fresh, uncontaminated pool without
 needing either of the fire-independent sanity check or varied-fault-
 parameter proposals originally floated here.
 
-**DLRM (Shape 13, with-Inspector variant): the wiring bug is found,
-fixed, and validated; full detection additionally needs a second,
-larger, unfixed issue.** Root-caused directly: `node_aggregator_ref.py`'s
+**DLRM (Shape 13, with-Inspector variant): both the throughput-reference
+wiring bug and the workload-signature job-scoping bug are now FIXED and
+validated (V1 Beta Stage 6).** Root-caused directly: `node_aggregator_ref.py`'s
 `_throughput_rate_ref` (the reference `agg_job_throughput_ratio_to_
 baseline` divides by) was a per-aggregator-**process**-lifetime value,
 established ONCE by whichever job first reached stabilization and never
@@ -1029,6 +1029,20 @@ benefit this same fix also corrects `live_denom` (throughput-stability's
 own denominator), which was silently inflated by dead cross-job entries
 the whole time this bug existed — a second, related bug, same root
 cause, not separately disclosed before.
+
+**DLRM: a real, disclosed non-localization pattern found during the
+final Stage 5 sweep — same architectural boundary as MoE, not a
+regression.** A real fault-injection run (target rank on worker-1)
+produced a real, correctly-triggered compute alert on the right comm —
+but naming a different rank (on worker-0) than the one actually
+injected. This is the same class of gap already documented for MoE
+below (a real alert fires job-wide but the mechanism doesn't localize
+to the individual injected rank for this collective/topology shape) —
+newly confirmed for DLRM specifically, not previously disclosed here.
+Not fixed in this release; flagging as a known, disclosed limitation
+alongside MoE's own boundary, not a new bug introduced by the Stage 6
+fixes above (DLRM's own attribution/localization mechanism is
+unchanged by those fixes).
 
 **PP vs. DLRM vs. Hybrid — a real, evidenced comparison, not three
 guesses**: all three sit in the same general family (peer-relative/
@@ -1126,8 +1140,13 @@ signals, easy to conflate, don't**: `[CHECK-FAILED]` (`_run_check()`,
 `alerting/alert_engine.py`) is a per-check exception guard — an
 individual check function (`cv`/`mean`/`pipeline_health`/etc.) throwing
 an uncaught exception, logged so one bad check can't silently kill the
-whole poll loop. It has never fired once in this project's entire
-history — a real, meaningful 0, not a metric nobody's checked.
+whole poll loop. **Zero organic occurrences** across this project's
+entire history — a real, meaningful 0, not a metric nobody's checked.
+The only historical entries at all trace to deliberate test-session
+VictoriaMetrics restarts (each producing a burst of `URLError:
+Connection refused` while VM was briefly down), each individually
+explained and none reflecting a real check-function bug; no check has
+ever failed for any other reason.
 `[PIPELINE-DOWN]`/`[PIPELINE-RECOVERED]` (`alerting/pipeline_health.py`)
 is a completely different, unrelated signal — a heartbeat dead-man's-
 switch (>90s stale) built to catch the historical "run3 vm_url incident"
