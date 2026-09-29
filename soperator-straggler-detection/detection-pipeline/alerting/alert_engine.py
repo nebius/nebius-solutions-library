@@ -1889,11 +1889,12 @@ class AlertEngine:
         on ONE peer member can't move the whole baseline.
 
         Returns (peer_median, peer_mad), or (None, None) if no OTHER
-        same-shape comm is currently active on this host -- an honest,
-        disclosable "no external peer group available right now" (e.g. a
-        workload whose below-floor comm has no live same-shape sibling
-        at this exact moment), never a fabricated answer from an empty
-        set.
+        same-shape comm is currently active anywhere in the same Slurm
+        job (same-host-only if the job id itself can't be determined --
+        see P27.5 below) -- an honest, disclosable "no external peer
+        group available right now" (e.g. a workload whose below-floor
+        comm has no live same-shape sibling at this exact moment), never
+        a fabricated answer from an empty set.
 
         P27.2.6 -- peer_mad (median absolute deviation of peer_vals
         around peer_median) added alongside the median, from the SAME
@@ -1923,9 +1924,41 @@ class AlertEngine:
         contaminate this pool. Only engaged when the live pool is
         completely empty -- a sibling that's still live is always
         preferred unchanged, same discipline as every other honest-
-        degradation fallback in this file."""
-        selector = f'agg_mean_exec_time_us{{hostname="{hostname}",bucket="{bucket}",coll="{coll}"}}'
+        degradation fallback in this file.
+
+        P27.5 -- real, confirmed gap this closes: same-host-only scoping
+        starves any below-floor workload whose own comm has no OTHER
+        same-shape sibling on the SAME physical host -- Hybrid's
+        cold-start case (see HANDOFF_HYBRID_FIX.md), where a fresh
+        cluster's very first Hybrid run has no live/history peer at all
+        until something else happens to land on that exact host. The
+        real fix: relax the live-peer pool from same-host to job-wide
+        (e.g. Hybrid worker-0's TP pair is a genuine, physically-
+        different-member peer for worker-1's TP pair in the SAME job),
+        since nothing about this fallback's own peer-relative principle
+        actually requires the peer to share a host, only that it's a
+        different physical member reporting the same (bucket, coll).
+        Doing this safely requires real, explicit slurm_job_id scoping
+        -- job-wide with no job filter would let a different job's
+        stale/unrelated below-floor comm on some other host bleed into
+        this job's peer pool. job_id is now resolved once, up front, and
+        reused for both branches (previously only resolved lazily in the
+        historical branch): the live-peer branch had NO job scoping at
+        all before this fix (implicit-only, via the hostname filter this
+        commit removes), so it needs the same explicit slurm_job_id
+        filter the historical branch already had. If job_id can't be
+        determined (_comm_slurm_job_id's own honest "can't tell"), this
+        falls back to the original same-host-only scoping rather than
+        ever searching job-wide unscoped -- an honest degradation, same
+        discipline as every other fallback here, not a guess."""
+        job_id = _comm_slurm_job_id(self.vm_url, exclude_comm)
+        if job_id is not None:
+            selector = f'agg_mean_exec_time_us{{bucket="{bucket}",coll="{coll}"}}'
+        else:
+            selector = f'agg_mean_exec_time_us{{hostname="{hostname}",bucket="{bucket}",coll="{coll}"}}'
         fresh_rows = [r for r in _query_instant_real_ts(self.vm_url, selector) if self._fresh(r)]
+        if job_id is not None:
+            fresh_rows = [r for r in fresh_rows if r["metric"].get("slurm_job_id") == job_id]
         fresh_keys = {(r["metric"].get("comm"), r["metric"].get("member"))
                       for r in fresh_rows if r["metric"].get("comm") != exclude_comm}
         if fresh_keys:
@@ -1933,7 +1966,6 @@ class AlertEngine:
             peer_vals = [float(r["value"][1]) for r in smoothed_rows
                          if (r["metric"].get("comm"), r["metric"].get("member")) in fresh_keys]
         else:
-            job_id = _comm_slurm_job_id(self.vm_url, exclude_comm)
             if job_id is None:
                 return None, None
             hist_rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(PEER_SIBLING_LOOKBACK_S)}s])')
