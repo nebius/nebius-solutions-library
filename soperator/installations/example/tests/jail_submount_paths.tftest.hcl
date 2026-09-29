@@ -115,6 +115,16 @@ run "home_submount_is_prohibited_with_nfs_on_k8s" {
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
         threads         = 128
+        node_group = {
+          resource = {
+            platform = "cpu-d3"
+          }
+          boot_disk = {
+            type                 = "NETWORK_SSD"
+            size_gibibytes       = 128
+            block_size_kibibytes = 4
+          }
+        }
       }
     }
     filesystem_jail_submounts = [{

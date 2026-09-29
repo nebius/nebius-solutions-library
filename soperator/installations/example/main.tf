@@ -26,11 +26,15 @@ locals {
       preset = coalesce(var.slurm_nodeset_accounting.resource.preset, module.sizing.node_preset.accounting)
     })
   })
-  slurm_nodeset_nfs = var.slurm_nodeset_nfs == null ? null : merge(var.slurm_nodeset_nfs, {
-    resource = merge(var.slurm_nodeset_nfs.resource, {
-      preset = coalesce(var.slurm_nodeset_nfs.resource.preset, module.sizing.node_preset.nfs)
+  slurm_nodeset_nfs = (var.nfs_in_k8s.enabled && try(var.nfs_in_k8s.spec.node_group, null) != null
+    ? merge(var.nfs_in_k8s.spec.node_group, {
+      size = 1
+      resource = merge(var.nfs_in_k8s.spec.node_group.resource, {
+        preset = coalesce(var.nfs_in_k8s.spec.node_group.resource.preset, module.sizing.node_preset.nfs)
+      })
     })
-  })
+    : null
+  )
 
   # keep in sync with helm chart
   # https://github.com/nebius/soperator/blob/main/helm/storageclasses/templates/storageclasses.yaml#L4

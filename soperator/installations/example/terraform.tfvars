@@ -145,7 +145,18 @@ nfs_in_k8s = {
     size_gibibytes  = 3720
     disk_type       = "NETWORK_SSD_IO_M3"
     filesystem_type = "ext4"
-    threads         = 128 # to match preset in slurm_nodeset_nfs
+    threads         = 128
+    node_group = {
+      resource = {
+        platform = "cpu-d3"
+        # preset omitted -> driven by sizing_tier. Set a preset to override.
+      }
+      boot_disk = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 128
+        block_size_kibibytes = 4
+      }
+    }
   }
 }
 
@@ -480,21 +491,6 @@ slurm_nodeset_login = {
 # By default, null.
 # ---
 slurm_nodeset_accounting = {
-  resource = {
-    platform = "cpu-d3"
-    # preset omitted -> driven by sizing_tier. Set a preset to override.
-  }
-  boot_disk = {
-    type                 = "NETWORK_SSD"
-    size_gibibytes       = 128
-    block_size_kibibytes = 4
-  }
-}
-
-# Configuration of NFS node set.
-# ---
-slurm_nodeset_nfs = {
-  size = 1
   resource = {
     platform = "cpu-d3"
     # preset omitted -> driven by sizing_tier. Set a preset to override.

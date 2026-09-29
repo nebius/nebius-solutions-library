@@ -83,6 +83,16 @@ run "nfs_on_k8s_is_prohibited_for_cluster_size_l" {
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
         threads         = 32
+        node_group = {
+          resource = {
+            platform = "cpu-d3"
+          }
+          boot_disk = {
+            type                 = "NETWORK_SSD"
+            size_gibibytes       = 128
+            block_size_kibibytes = 4
+          }
+        }
       }
     }
   }
@@ -136,6 +146,16 @@ run "nfs_on_k8s_is_prohibited_for_cluster_size_xl" {
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
         threads         = 32
+        node_group = {
+          resource = {
+            platform = "cpu-d3"
+          }
+          boot_disk = {
+            type                 = "NETWORK_SSD"
+            size_gibibytes       = 128
+            block_size_kibibytes = 4
+          }
+        }
       }
     }
   }
