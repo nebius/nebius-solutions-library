@@ -670,8 +670,9 @@ fallback (the P27.2 mechanism, for a pure software fault) — but the
 underlying statistical limit is permanent, not a bug to eventually
 patch away.
 
-**P27.2 timing-asymmetry fallback — false-positive risk on TP2 reproduced
-and root-caused, fix applied (pending one restart)**: a real, live Stage 5
+**P27.2 timing-asymmetry fallback — false-positive risk on TP2 reproduced,
+root-caused, and fix applied and validated (Part D is closed, below)**:
+a real, live Stage 5
 isolated-validation run found 5 real CONFIRMED/PAGE false positives on a
 genuinely healthy (unfaulted) TP2 baseline via this exact fallback. A
 same-session re-investigation suspected `peer_mad` computing to 0 or a
