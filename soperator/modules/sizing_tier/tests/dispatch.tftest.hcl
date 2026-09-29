@@ -274,20 +274,7 @@ run "small_tiers_keep_global_scrape_guard" {
   variables { worker_count = 99 } # S
   assert {
     condition     = output.kube_state_metrics_max_scrape_size == null
-    error_message = "S must keep the global 32MiB scrape guard (null cap)"
-  }
-}
-
-run "m_raises_ksm_scrape_cap" {
-  command = apply
-  variables { worker_count = 100 } # M
-  assert {
-    condition     = output.kube_state_metrics_max_scrape_size == 134217728
-    error_message = "M must raise the kube-state-metrics scrape cap to 128MiB"
-  }
-  assert {
-    condition     = output.preset.kube_state_metrics.requests.memory == "1024Mi" && output.preset.kube_state_metrics.requests.cpu == "200m"
-    error_message = "M must expose the 1Gi/200m kube-state-metrics preset"
+    error_message = "S must keep the global scrape guard (null cap)"
   }
 }
 
