@@ -1139,20 +1139,32 @@ class NodeAggregator:
             self.push_buf.append((f'agg_mean_exec_time_us{{comm="{comm_id}",member="{p}",'
                                    f'role_rank="{role_rank}",role_n="{role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    mv, ts_us // 1000))
-        members_here = [p for p in window_vals if p not in EXCLUDE_ALWAYS]
-        if len(members_here) < 3:
-            return
         # P27-hotfix3 -- real, TIME-based grace period, see
         # bucket_scored_at_ts_us's own docstring at __init__ and
         # BUCKET_MATURITY_GRACE_S's own comment for the full finding
         # (an occurrence-count-based grace was tried first and confirmed
         # the mechanism -- real, monotonic 12->9->5 fires/run -- but never
         # cleanly separated real elapsed time from sample-count/window-
-        # size without more blind tuning). Only fired's OWN decision is
-        # gated here -- window computation and z/mm reporting still run
-        # and push below regardless, real numbers, never hidden, same
-        # "never suppress data" discipline this file already follows for
-        # DCGM-down/self-calibration-cold-start.
+        # size without more blind tuning).
+        #
+        # Followup-fix -- real, confirmed gap: this whole block used to
+        # sit AFTER the `len(members_here) < 3` early-return below, so
+        # agg_detection_coverage_achieved was only ever computed/pushed
+        # for the 3+-member self-detection path -- any below-floor
+        # 2-member comm (plain PP's real cross-node Send/Recv pair,
+        # confirmed live; TP2's real intra-node AllReduce pair, also
+        # confirmed live -- neither can EVER reach 3 physical members by
+        # construction) silently never got this signal at all, at ANY
+        # job duration, not a duration-dependent 0-then-1 case as
+        # originally assumed. bucket_scored_at_ts_us is set in
+        # handle_record for EVERY comm/bucket once calibrated, regardless
+        # of eventual member count -- nothing below actually needs 3+
+        # members, so this now runs unconditionally, before the below-
+        # floor early-return, reusing the exact same already-computed
+        # gate (no second timing mechanism, no new per-shape special
+        # case). The 3+-member CV/z self-detection scoring below this
+        # point is UNCHANGED, still gated on real member count -- only
+        # the coverage SIGNAL itself is now below-floor-inclusive.
         scored_at = self.bucket_scored_at_ts_us.get((comm_id, bucket))
         past_grace = scored_at is not None and (ts_us - scored_at) / 1e6 > BUCKET_MATURITY_GRACE_S
         # Coverage-floor follow-up (this session) -- past_grace is EXACTLY
@@ -1165,6 +1177,9 @@ class NodeAggregator:
         # one without re-deriving anything.
         self.push_buf.append((f'agg_detection_coverage_achieved{{comm="{comm_id}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                1 if past_grace else 0, ts_us // 1000))
+        members_here = [p for p in window_vals if p not in EXCLUDE_ALWAYS]
+        if len(members_here) < 3:
+            return
         means = {p: self.state[(comm_id, p, bucket)].mean_history for p in members_here}
         sorted_vals = sorted(means.values())
         n = len(sorted_vals)

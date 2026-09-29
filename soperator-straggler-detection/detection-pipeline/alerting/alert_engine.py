@@ -187,6 +187,30 @@ ROLE_XJOB_LOOKBACK_S = 30 * 86400
 # start already does -- generic, with no notion of "rank 0" needed at all.
 ROLE_BASELINE_MAX_RELATIVE_MAD = 0.5
 
+# Followup-fix -- real, confirmed gap: _excluded_role_pool_members already
+# drops any (comm,member) ever found elevated (see _push_role_baseline_
+# exclusion's own docstring) -- correct, working-as-designed behavior, not
+# a bug. But a role whose OWN convention always injects the fault on the
+# SAME target every real test run (confirmed live: Hybrid's role_rank=1,
+# the waiting-partner side of its own repeatedly-tested target=rank2) gets
+# EVERY "normal-looking" entry excluded this same way, every single time,
+# leaving whatever old/atypical entry happened to survive (here: a single
+# job whose own fault, if any, landed on the OPPOSITE role) as the ENTIRE
+# remaining pool -- confirmed live: 9 of 10 real historical entries for
+# this exact role excluded, 1 left, and that 1 is a real outlier (role0/
+# role1 inverted relative to the other 9), not a representative baseline.
+# median()/mad() on a single surviving point isn't a real median at all,
+# just that one point -- no amount of exclusion-mechanism correctness
+# fixes a pool this thin. ROLE_BASELINE_MIN_HISTORY reuses this project's
+# OWN already-established "3 independent data points" precedent
+# (node_aggregator_ref.py's THROUGHPUT_XJOB_MIN_HISTORY, this file's own
+# PERSIST_REQUIRED/PERSIST_WINDOW) rather than inventing a new number --
+# below this floor, _member_role_baseline degrades to (None, None), the
+# SAME honest cold-start path a genuinely fresh role already takes,
+# routing the caller to _cross_comm_peer_median (Hybrid's own P27.5 fix
+# path) instead of trusting a single unrepresentative survivor.
+ROLE_BASELINE_MIN_HISTORY = 3
+
 # P27.2.6 STOPGAP -- TEMPORARY, applied immediately and separately from the
 # TIMING_FALLBACK_MAD_MULTIPLE fix above, before that fix had been live-
 # validated. Real, live investigation on this cluster found the ratio-only
@@ -1782,6 +1806,13 @@ class AlertEngine:
         hist_keys = {(r["metric"].get("comm"), r["metric"].get("member"))
                      for r in hist_rows if r["metric"].get("comm") != exclude_comm} - excluded
         if not hist_keys:
+            return None, None
+        # Followup-fix -- see ROLE_BASELINE_MIN_HISTORY's own comment: a
+        # pool this thin (after real exclusions) isn't a trustworthy
+        # median regardless of what the exclusion mechanism correctly
+        # removed -- degrade the same way a genuine cold start already
+        # does, before ever computing a "median" of too few real points.
+        if len(hist_keys) < ROLE_BASELINE_MIN_HISTORY:
             return None, None
         vals = [float(r["value"][1]) for r in hist_rows
                 if (r["metric"].get("comm"), r["metric"].get("member")) in hist_keys]
