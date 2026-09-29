@@ -504,11 +504,12 @@ module "slurm" {
   }
 
   nfs_in_k8s = {
-    enabled        = var.nfs_in_k8s.enabled
-    version        = var.nfs_in_k8s.version
-    size_gibibytes = var.nfs_in_k8s.size_gibibytes
-    storage_class  = replace("compute-csi-${lower(var.nfs_in_k8s.disk_type)}-${lower(var.nfs_in_k8s.filesystem_type)}", "_", "-")
-    threads        = var.nfs_in_k8s.threads
+    enabled         = var.nfs_in_k8s.enabled
+    version         = var.nfs_in_k8s.version
+    use_stable_repo = var.nfs_in_k8s.use_stable_repo
+    size_gibibytes  = var.nfs_in_k8s.size_gibibytes
+    storage_class   = replace("compute-csi-${lower(var.nfs_in_k8s.disk_type)}-${lower(var.nfs_in_k8s.filesystem_type)}", "_", "-")
+    threads         = var.nfs_in_k8s.threads
   }
   nfs_node_group_enabled = var.slurm_nodeset_nfs != null
 
