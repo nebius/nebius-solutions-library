@@ -547,6 +547,20 @@ class NodeAggregator:
         # brand-new aggregator process would, instead of inheriting a
         # stale, unrelated one.
         self._throughput_job_id = self.slurm_job_id
+        # Sigfix -- real, confirmed gap this closes (see poll_files' own
+        # reset call, right after refresh_job_id(), for the full account):
+        # self.comm_calib/self.comm_bucket_members are exactly as
+        # process-lifetime as the six _throughput_* attributes above were
+        # before the V1 Beta Stage 5 fix -- workload_signature()'s own
+        # docstring says n_comms is "this job's" communicator count, but
+        # len(self.comm_calib) was never scoped to a job at all, only to
+        # this aggregator PROCESS's entire lifetime. Confirmed live,
+        # directly, this session: three real jobs on this exact long-lived
+        # aggregator produced sigs "71:...", "77:...", "95:..." -- n_comms
+        # climbing monotonically job over job, never repeating, even
+        # though at least two of those jobs were the same PP workload
+        # shape. Tracked the same way _throughput_job_id already is.
+        self._workload_state_job_id = self.slurm_job_id
         self.n_push_failures = 0
         self.consecutive_push_failures = 0
         self._last_heartbeat_wall = 0.0
@@ -668,6 +682,68 @@ class NodeAggregator:
             print(f"[{self.hostname}] squeue lookup failed: {e}", file=sys.stderr)
             self.slurm_job_id = "unknown"
 
+    def maybe_reset_workload_state(self):
+        """Sigfix -- real job-boundary reset for workload_signature()'s
+        own inputs, same reset TRIGGER and philosophy as
+        maybe_check_job_throughput's already-shipped fix (a real,
+        non-empty, non-"unknown" change in self.slurm_job_id, kept live
+        by refresh_job_id() just above this call in poll_files()), applied
+        to the state that fix's own list did NOT cover.
+
+        Real, confirmed gap (see this session's PARALLEL_WORK_LOG.md for
+        the live evidence two other, independent sessions -- PP's role-
+        baseline fix and Hybrid's cold-start fix -- separately hit): this
+        aggregator is long-lived, watching the same dump directory across
+        many, differently-shaped Slurm jobs run hours apart, exactly like
+        _throughput_rate_ref used to be. self.comm_calib and
+        self.comm_bucket_members are the SAME kind of process-lifetime
+        state, just never included in the earlier fix's reset list --
+        workload_signature() (called from maybe_check_job_throughput,
+        using len(self.comm_calib) for n_comms and comm_bucket_members/
+        comm_calib for coll_types/msg_size_bins) therefore keeps
+        accumulating every comm this process has EVER discovered, across
+        EVERY job, not just the current one. Confirmed live this session
+        (jobs 3400/3402/3409 on this exact aggregator): n_comms read 71,
+        77, 95 -- climbing monotonically, never repeating, even across
+        jobs sharing the same real workload shape -- so two runs of the
+        identical workload can never produce a matching sig, and
+        query_throughput_history's cross-job lookup (and, transitively,
+        alert_engine.py's _member_role_baseline / _job_workload_sig cross-
+        workload scoping, which reads this exact same agg_job_workload_
+        sig_info metric) silently finds "0 historical run(s)" forever.
+
+        Safe to reset entirely on a job boundary, not just quietly grow
+        stale: a NEW job's real NCCL communicators get fresh, never-
+        reused comm_id handles (confirmed by construction -- every
+        record's own comm_id comes from the training process's own
+        real, freshly-created communicator each job launch), so an OLD
+        job's entries in these two dicts are never looked up again once
+        a new job starts anyway -- they were already dead weight, not
+        live state a new job depends on. Resetting them here just makes
+        that true immediately (matching what a brand-new aggregator
+        process would see) instead of leaving them to bias the very
+        first workload_signature() computed for the new job.
+
+        Deliberately narrower than a full per-job aggregator restart:
+        does NOT touch self.state (per (comm_id, phys_id, bucket) live
+        windowed stats -- already naturally job-scoped for the same
+        "fresh comm_id" reason, see above) or self.phys_comm_role/
+        self.phys_gpu_slot (small, real per-physical-device identity
+        maps this project's own established convention already treats as
+        safe to carry forward -- see P21.7/P27-hotfix4's own comments).
+        Only resets the two structures workload_signature() itself
+        reads in aggregate, since those are the ones actually
+        confirmed broken."""
+        if (self.slurm_job_id and self.slurm_job_id != "unknown"
+                and self.slurm_job_id != self._workload_state_job_id):
+            print(f"[{self.hostname}] workload-signature tracking reset: new job "
+                  f"{self.slurm_job_id} (previous signature state was accumulated "
+                  f"for {self._workload_state_job_id!r}, {len(self.comm_calib)} comm(s) "
+                  f"discovered before reset)", flush=True)
+            self._workload_state_job_id = self.slurm_job_id
+            self.comm_calib = defaultdict(CommCalibration)
+            self.comm_bucket_members = defaultdict(set)
+
     # P22.5 (aggregator scalability fix) -- how many lines to process
     # between deadline checks. Checking time.time() every single line
     # would be wasteful; checking only once per poll_files() call (the
@@ -702,6 +778,7 @@ class NodeAggregator:
         the remainder is simply picked up on the NEXT poll_files() call,
         not lost and not reprocessed."""
         self.refresh_job_id()
+        self.maybe_reset_workload_state()
         for fp in sorted(glob.glob(f"{self.dump_dir}/*.log")):
             offset = self.file_offsets.get(fp, 0)
             try:
