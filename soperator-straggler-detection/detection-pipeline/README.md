@@ -778,18 +778,57 @@ this release.
   history found Inspector's profiling overhead **dominating ResNet's
   iteration time by ~4.5x** (85ms with Inspector vs. 19ms without vs.
   7.57ms bare single-GPU compute) — it is **not documented** whether
-  this was measured with `NCCL_INSPECTOR_DUMP_VERBOSE=1`, the value
-  **14 of the 15 validated launch scripts actually use** (confirmed live
-  this session via `grep -r NCCL_INSPECTOR_DUMP_VERBOSE workloads/`;
-  fixed here — an earlier version of this section incorrectly claimed
-  `=0` was the default), or a more verbose debug mode still above that.
-  Only `workloads/nanogpt/train_node_shape1.sh` (the plain, non-fault-
-  injection nanoGPT baseline) uses `=0`. Treat per-workload overhead as a
-  real open question to measure on your own workload, not as
+  this was measured with `NCCL_INSPECTOR_DUMP_VERBOSE=1` or `=0`, or a
+  more verbose debug mode still above that. Treat per-workload overhead
+  as a real open question to measure on your own workload, not as
   negligible-by-default. An A/B "monitoring-off" harness exists
   (`workloads/nanogpt/run_shape1_nomonitor.sh`) for exactly this
   comparison; no documented result from actually running it was found
   in this project's own history.
+- **`NCCL_INSPECTOR_DUMP_VERBOSE` now genuinely defaults to lean mode
+  (`=0`) across all 17 launch scripts that set it** — a real, previously
+  undocumented discrepancy existed here (this section used to correctly
+  flag that 14 of the 15 checked scripts actually ran `=1`, contradicting
+  `INVENTORY.md`'s claim that lean mode was already the default; that
+  discrepancy is now fixed at the source, not just in the docs). This
+  session's own real 48-GPU Megatron validation run hit the verbose-mode
+  cost directly: verbose dumps filled a 91GB shared volume and crashed
+  the pipeline. Traced field-by-field against the Inspector plugin's own
+  C++ source and empirically A/B-validated on this project's own
+  regression-reference shape (`workloads/nanogpt/run_straggler_nanogpt.sh`,
+  rank 3, 200ms injected sleep) before flipping anything:
+  - **Same detection, both modes**: identical `PROBABLE`/`LOG-ONLY` tier
+    and exact rank/host attribution under verbose and under lean — the
+    live pipeline (`node_aggregator_ref.py` → VM → `alert_engine.py`)
+    only ever reads `coll_exec_time_us`/`coll_msg_size_bytes`, emitted
+    identically in both modes; the verbose-only `event_trace_ts`/
+    `event_trace_sn` fields are read by zero code in the live path.
+  - **~8.2x smaller per record** (3,804 vs. 462 bytes/record, measured
+    across full dump files from the same fault scenario), and **~8.6x
+    less disk accumulated** for the same workload (87MB vs. 8.4MB/node
+    over a comparable window).
+  - **A real caveat, not just a win**: a genuinely healthy job (not
+    throughput-throttled by an injected fault) accumulates disk much
+    faster in wall-clock terms than a fault-injection test suggests —
+    measured **~28.5MB/min/node even under lean mode** on a healthy
+    16-rank run (the fault scenario's own injected sleep synchronously
+    throttles every rank's collective, so it under-represents real
+    production disk cost). Lean mode is a real, substantial reduction,
+    not a guarantee against filling disk on a long real run — see the
+    disk-usage guard noted elsewhere in this document.
+  - **A small number of offline, non-live tools still genuinely need
+    verbose mode**: `classifier.py`'s batch dump-replay path,
+    `calibration.py`, `transient_latency.py`, and the MoE two-stage
+    detector's `arrival_order.py` all read the verbose-only
+    `event_trace_ts.coll_start_ts` for microsecond-scale cross-rank
+    timing (arrival order, clock-offset calibration) — `coll_exec_time_us`
+    is explicitly documented in `arrival_order.py`'s own code as already
+    proven unreliable for that purpose, and lean mode's only timestamp
+    (`dump_timestamp_us`, recorded at write/flush time) carries the same
+    kind of imprecision for a different reason. Opt in explicitly by
+    setting `NCCL_INSPECTOR_DUMP_VERBOSE=1` in the shell that launches a
+    `run_*.sh` script (propagated into the container via the existing
+    `--export=ALL`) before using one of these tools.
 - **Real, escalating resource costs found during this project's own
   sustained/long-run testing — all now fixed by caps already shipped in
   this package, but the real historical numbers are worth knowing**:
@@ -1591,7 +1630,7 @@ already does (see e.g. `workloads/nanogpt/train_node_straggler.sh`):
    ```bash
    export NCCL_PROFILER_PLUGIN=/root/nccl-2.28-src/ext-profiler/inspector/libnccl-profiler-inspector.so  # or wherever your own NCCL_HOME build produced it
    export NCCL_INSPECTOR_ENABLE=1
-   export NCCL_INSPECTOR_DUMP_VERBOSE=1     # matches 14/15 validated shapes' own real default (see Known limitations' overhead note)
+   export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"   # lean mode by default, matching every validated shape's real default; set to 1 only if you need a verbose-only offline tool (see the overhead note above)
    export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
    export NCCL_INSPECTOR_PROM_DUMP=0
    export NCCL_INSPECTOR_DUMP_DIR="$PKG_ROOT/var/dump/$(hostname)"   # see point 2 -- this exact path is the one real integration point

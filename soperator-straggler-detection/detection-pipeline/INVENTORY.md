@@ -337,12 +337,27 @@ linking); the last-built `.so` artifact's timestamp is newer than every
 build-from-source workflow at the time of this audit — not a stale
 binary left over from an earlier source change.
 
-**5. Confirmed current production launch config is genuinely lean mode**:
-the currently-used V1 Beta launch scripts set `NCCL_INSPECTOR_DUMP_VERBOSE=0`
-(lean); several earlier-phase, no-longer-current per-workload scripts
-still set `=1` (verbose) and are not part of the current production
-configuration. Lean mode's core field, `coll_exec_time_us`, is confirmed
-as the field `node_aggregator_ref.py` actually reads.
+**5. Real, previously undocumented discrepancy, now fixed**: this entry
+used to claim lean mode was already the current production config. It
+wasn't — confirmed live via `grep -r NCCL_INSPECTOR_DUMP_VERBOSE
+workloads/`: 16 of the 17 real launch scripts that set this variable
+were hardcoded to `=1` (verbose), only `train_node_shape1.sh` used `=0`.
+A real 48-GPU Megatron validation run hit this directly: verbose dumps
+filled a 91GB shared volume and crashed the pipeline. Root-caused
+(traced the Inspector plugin's own C++ source, field by field) and
+empirically A/B-validated on this cluster (same injected fault, verbose
+vs. lean: identical tier/rank/host attribution; a lean-mode healthy
+baseline: zero false alerts) that the live detection pipeline never
+reads the verbose-only `event_trace_ts`/`event_trace_sn` fields at
+all — only `coll_exec_time_us`/`coll_msg_size_bytes`, emitted
+identically in both modes. Lean mode is now the real default across all
+17 scripts, each supporting an opt-in override
+(`NCCL_INSPECTOR_DUMP_VERBOSE=1` in the launching shell, propagated via
+the existing `--export=ALL`) for the handful of offline tools
+(`classifier.py`'s batch replay path, `calibration.py`,
+`transient_latency.py`, the MoE two-stage detector's `arrival_order.py`)
+that genuinely need the verbose-only per-collective start timestamp —
+this claim is no longer aspirational.
 
 ## Category F — Fault-injection workload shape audit (all 15 located)
 

@@ -122,7 +122,10 @@ project uses):
 - `NCCL_PROFILER_PLUGIN` — absolute path to the built
   `libnccl-profiler-inspector.so`.
 - `NCCL_INSPECTOR_ENABLE=1`
-- `NCCL_INSPECTOR_DUMP_VERBOSE=1`
+- `NCCL_INSPECTOR_DUMP_VERBOSE=0` (lean mode, the real default across
+  every validated shape as of this session's A/B-validated fix —
+  `=1` is an opt-in override, only needed by a small set of offline
+  tools; see README.md's overhead note for why)
 - `NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS` — dump-write cadence
   (this project has used 500 throughout).
 - `NCCL_INSPECTOR_DUMP_DIR` — per-rank dump directory,
