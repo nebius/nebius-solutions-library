@@ -20,7 +20,7 @@ workflow:
         NEBIUS_IAM_TOKEN: "NEBIUS_IAM_TOKEN"
         NGC_API_KEY: "nvapi-XXX"
         FILESYSTEM_ID: "computefilesystem-XXX"
-        NEBIUS_CLI_INSTALL_URL: "https://storage.eu-north1.nebius.cloud/cli/install.sh"
+        NEBIUS_CLI_INSTALL_URL: "https://storage.eu-west2.nebius.cloud/cli/install.sh"
         NEBIUS_API_ENDPOINT: "api.nebius.cloud:443"
         SERVERLESS_PLATFORM: "gpu-h100-sxm"
         SERVERLESS_PRESET: "1gpu-16vcpu-200gb"
