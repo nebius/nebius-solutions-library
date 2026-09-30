@@ -15,8 +15,19 @@ OSMO_NAMESPACE="${OSMO_NAMESPACE:-osmo}"
 STORAGE_REGION=$(get_tf_output "storage_bucket.region" "../001-iac" 2>/dev/null || echo "")
 STORAGE_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" 2>/dev/null || echo "")
 
-if [[ -z "$STORAGE_REGION" || -z "$STORAGE_ENDPOINT" ]]; then
-    log_error "Could not retrieve the Object Storage region and endpoint from Terraform"
+STORAGE_OUTPUT_MISSING=false
+
+if [[ -z "$STORAGE_REGION" ]]; then
+    log_error "Could not retrieve the Object Storage region from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ -z "$STORAGE_ENDPOINT" ]]; then
+    log_error "Could not retrieve the Object Storage endpoint from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ "$STORAGE_OUTPUT_MISSING" == true ]]; then
     exit 1
 fi
 
