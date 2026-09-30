@@ -130,6 +130,10 @@ vm-setup.sh          Optional, run BEFORE install.sh -- brings up a real
                     auto-restart-supervised background process on this
                     host, so install.sh's own VM auto-detection finds it
                     with zero extra config -- see "Installing" below
+grafana-setup.sh     Optional, run BEFORE install.sh -- brings up a real,
+                    auth-enforced Grafana instance automatically, same
+                    supervised-background-process approach as
+                    vm-setup.sh -- see "Installing" below
 install.sh          Brings a fresh cluster to a ready-to-run state using
                     only real, live discovery -- see "Installing" below
 run.sh               Launches the standing pipeline (aggregator per real
@@ -237,27 +241,30 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   something to silently standardize away without checking whether that
   shape's own validation depended on its specific version.
 
-## 4. Installing — `environment.sh` + `vm-setup.sh` (both optional) + `install.sh`
+## 4. Installing — `environment.sh` + `vm-setup.sh` + `grafana-setup.sh` (all optional) + `install.sh`
 
 Run from the Slurm control/login node. On a genuinely fresh cluster —
-no working compiler/CUDA/NCCL source build, and no VictoriaMetrics
-instance running yet — the full, real, start-to-finish sequence is:
+no working compiler/CUDA/NCCL source build, no VictoriaMetrics instance,
+no Grafana instance running yet — the full, real, start-to-finish
+sequence is:
 
 ```bash
 cd soperator-straggler-detection/detection-pipeline
-./environment.sh   # optional: compiler + CUDA + NCCL source (only what install.sh below does not cover)
-./vm-setup.sh       # optional: brings up VictoriaMetrics automatically (only what install.sh below does not cover)
+./environment.sh    # optional: compiler + CUDA + NCCL source (only what install.sh below does not cover)
+./vm-setup.sh        # optional: brings up VictoriaMetrics automatically (only what install.sh below does not cover)
+./grafana-setup.sh   # optional: brings up Grafana automatically (only what install.sh below does not cover)
 ./install.sh
 ```
 
-Both `environment.sh` and `vm-setup.sh` are independent of each other
-and of `install.sh` — run either, both, or neither depending on what
-this host already has; each is a fast no-op if its own target is
-already present/reachable, safe to re-run any time, not just on a
-first install. Both also auto-install their own apt dependencies via
-`sudo` when not already running as root (and refuse with a precise
-message, not a raw `apt` error, if neither root nor passwordless
-`sudo` is available).
+All three are independent of each other and of `install.sh` — run any
+subset depending on what this host already has; each is a fast no-op if
+its own target is already present/reachable, safe to re-run any time,
+not just on a first install. `environment.sh` and `vm-setup.sh` don't
+depend on `grafana-setup.sh` or vice versa — order among these three
+doesn't matter, only that they run before `install.sh`. All three also
+auto-install their own apt dependencies via `sudo` when not already
+running as root (and refuse with a precise message, not a raw `apt`
+error, if neither root nor passwordless `sudo` is available).
 
 **`environment.sh`** covers exactly the one prerequisite tier
 `install.sh` does not attempt itself — a real compiler toolchain
@@ -308,8 +315,37 @@ own detection, every workload's default `VM_URL`) already assumes it;
 override `VM_PORT`/`VM_HOST` if you have a real reason to change it,
 but every one of those other pieces would then need updating too.
 
-Once the environment and VM are ready (with or without either script —
-a host that already has everything needs neither), run:
+**`grafana-setup.sh`** brings up a real, auth-enforced Grafana instance
+automatically, the same way — a plain background process on this host,
+under its own auto-restart supervisor
+(`observability/run_grafana_supervised.sh`). It downloads the real,
+pinned release (`VERSIONS.md`'s confirmed `11.5.1`) directly from
+Grafana's own official release server, sha256-verified before
+extracting, and generates the exact same real, enforced-auth config
+`install.sh`'s own Step 4.7 does (a real random admin password —
+**never** anonymous access — written to `var/grafana_admin_credentials.txt`,
+`chmod 600`) using the identical idempotent "reuse an already-generated
+password" rule, so running `install.sh` afterward correctly detects and
+reuses it rather than generating a conflicting one. It also points
+Grafana's own `[paths] provisioning` directly at
+`var/grafana_provisioning_generated/` — closing a gap that otherwise
+needs a manual step — combined into place *before* Grafana's first
+start (a data directory's admin password only takes effect then).
+That directory won't have the real `VM_URL` filled in until `install.sh`
+runs afterward, but that's fine: the shipped dashboard-provisioning
+config has its own `updateIntervalSeconds`, so Grafana re-scans and
+picks up `install.sh`'s later, correct rewrite automatically — no
+restart needed, no need to run `install.sh` twice. Finally, it verifies
+real auth is genuinely enforced (`/api/org` must answer `401`/`302`,
+never `200`) before declaring success, exactly like `install.sh`'s own
+live check. Port `3000` is likewise Grafana's own upstream default, not
+Soperator-specific — override `GRAFANA_PORT` if needed, same caveat as
+`VM_PORT` above. See section 6 below for how to actually access it once
+it's up.
+
+Once the environment, VM, and Grafana are all ready (with or without
+any of the three scripts — a host that already has everything needs
+none of them), run:
 
 ```bash
 cd soperator-straggler-detection/detection-pipeline
@@ -370,8 +406,10 @@ does, in order:
 9. **Generates a real, enforced Grafana auth config** — anonymous access
    explicitly disabled, plus a real, randomly-generated admin password
    (never a hardcoded default), written to
-   `var/grafana_admin_credentials.txt` (`chmod 600`). See "Grafana
-   access" below for the full detail.
+   `var/grafana_admin_credentials.txt` (`chmod 600`) — idempotent: reuses
+   `grafana-setup.sh`'s own already-generated password here if you used
+   it, rather than generating a conflicting one. See "Grafana access"
+   below for the full detail.
 10. **Writes `cluster.env`** — the single source of real, discovered
     truth every launch script reads (via `lib/cluster_topology.sh`)
     instead of hardcoding.
@@ -552,13 +590,13 @@ monitoring.
 
 ## 6. Grafana access
 
-`install.sh` never launches or manages a Grafana instance's lifecycle —
-that's a real deployment decision left to the operator (same scope
-boundary as VictoriaMetrics; see `vm-standalone/README.md`). It detects
-whatever instance is reachable, generates real provisioning + auth
-config for it, and `run.sh` prints exactly how to reach it. See
-`grafana-standalone/README.md` for the full real launch recipe if you
-need to stand one up.
+`install.sh` itself never launches or manages a Grafana instance's
+lifecycle — it detects whatever instance is reachable, generates real
+provisioning + auth config for it, and `run.sh` prints exactly how to
+reach it. Two real, supported ways to actually bring one up:
+`grafana-setup.sh` (this control host, automatic — see "Installing"
+above) or `grafana-standalone/README.md` (the full manual launch
+recipe, e.g. if you want it on a different host).
 
 ### 6.1 Both real access paths
 

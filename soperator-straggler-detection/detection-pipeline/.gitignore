@@ -20,5 +20,13 @@ workloads/moe/qp_rate_limit_shim.so
 vm-standalone/victoria-metrics-prod
 vm-standalone/data/
 
+# grafana-setup.sh's own real, downloaded release + generated config +
+# live sqlite/data -- same convention as vm-standalone above (custom.ini
+# embeds a real generated admin password, never meant to be committed;
+# the version-numbered release dir is fetched fresh, not vendored).
+grafana-standalone/grafana-v*/
+grafana-standalone/custom.ini
+grafana-standalone/data/
+
 __pycache__/
 *.pyc

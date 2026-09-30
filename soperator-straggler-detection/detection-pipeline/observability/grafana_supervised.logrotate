@@ -1,0 +1,21 @@
+# V1 Beta Stage 6 -- real, standard logrotate config for
+# grafana_supervised.log, same reasoning and same copytruncate
+# requirement as alert_engine_supervised.logrotate/vm_supervised.logrotate
+# (see those files' own comments) -- run_grafana_supervised.sh writes
+# via a plain shell `>> "$LOG"` redirect held open for the entire
+# lifetime of one supervised grafana invocation, so copytruncate is
+# required for the same reason.
+#
+# Same conservative size/retention policy reused rather than
+# re-derived -- no separate measurement of Grafana's own real log
+# volume under this pipeline's normal operation exists yet, so this is
+# a safe starting point, not a precisely-measured value.
+/root/P20c_alerting/grafana_supervised.log {
+    size 50M
+    rotate 10
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

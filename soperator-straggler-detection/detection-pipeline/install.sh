@@ -329,7 +329,7 @@ sed "s|url: http://worker-0:8428|url: $VM_URL|" \
 sed "s|path: /root/P20g_pr_ready/dashboards_dropin|path: $PKG_ROOT/observability/dashboards|" \
   "$PKG_ROOT/observability/dashboards/provisioning/dashboards/local.yaml" \
   > "$GEN_PROV_DIR/dashboards/local.yaml"
-info "Wrote real, templated Grafana provisioning configs to $GEN_PROV_DIR (point your Grafana instance's own provisioning directory at these, or copy them into place -- this script does not assume where that is)."
+info "Wrote real, templated Grafana provisioning configs to $GEN_PROV_DIR (point your Grafana instance's own provisioning directory at these, or copy them into place -- this script does not assume where that is; grafana-setup.sh already does this automatically if you used it)."
 
 # =========================================================================
 # Step 4.6 -- real Grafana reachability + auth-posture discovery (Stage 3
@@ -366,7 +366,7 @@ if [ -z "$GRAFANA_URL" ] && curl -s -o /dev/null -w '%{http_code}' --max-time 5 
   info "Found a real, reachable Grafana instance directly on this host (health check passed live at http://localhost:3000)."
 fi
 if [ -z "$GRAFANA_URL" ] && [ -z "$GRAFANA_K8S_SVC" ]; then
-  warn "No real, reachable Grafana instance found (neither a Kubernetes Service named like 'grafana' nor a local process on port 3000 answered). This is not fatal -- this project's pipeline (aggregator/alert_engine/VM) works without Grafana -- but run.sh will not be able to print a real access command until one is running. This script does not launch Grafana itself (see Step 4.5's own comment on this scope boundary)."
+  warn "No real, reachable Grafana instance found (neither a Kubernetes Service named like 'grafana' nor a local process on port 3000 answered). This is not fatal -- this project's pipeline (aggregator/alert_engine/VM) works without Grafana -- but run.sh will not be able to print a real access command until one is running. This script does not launch Grafana itself -- see grafana-setup.sh (this control host, automatic) or grafana-standalone/README.md (manual) for the two real, supported ways to bring one up, then re-run install.sh."
 fi
 GRAFANA_ACCESS_HOST=""
 GRAFANA_ACCESS_USER=""
