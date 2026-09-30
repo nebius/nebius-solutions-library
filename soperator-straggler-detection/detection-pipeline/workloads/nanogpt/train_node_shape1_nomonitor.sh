@@ -21,11 +21,21 @@ mkdir -p "$OUTDIR"
 # batch/block config as the monitored Shape 1 run, same log_interval so
 # the two real per-iteration time samples are directly comparable.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Real bug found live (this session, a 6-node/48-GPU cluster):
+# --gradient_accumulation_steps below was hardcoded to 32, assuming
+# this project's own original 2-node/8-GPU (world_size=16) dev cluster
+# -- train.py's own assertion (gradient_accumulation_steps %
+# ddp_world_size == 0) fails on any real world size that doesn't
+# happen to divide it evenly (32 % 48 != 0 here). 32 was exactly 2x
+# the original world_size (16) -- preserved as the same real,
+# live-discovered multiple of the ACTUAL world size instead (using
+# NUM_NODES/GPUS_PER_NODE, already discovered above), so this holds
+# for any real cluster shape, not just the one it was hardcoded for.
 torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
   --rdzv_id=v1beta_shape1_nomon --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
   train.py "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../nanogpt-base/config/train_shakespeare_char.py" \
   --n_layer=12 --n_head=12 --n_embd=768 --block_size=512 --dropout=0.0 \
-  --batch_size=12 --gradient_accumulation_steps=32 \
+  --batch_size=12 --gradient_accumulation_steps=$((2 * NUM_NODES * GPUS_PER_NODE)) \
   --max_iters=$STEPS --lr_decay_iters=$STEPS --warmup_iters=200 \
   --eval_interval=2000 --eval_iters=50 --log_interval=20 \
   --always_save_checkpoint=False \
