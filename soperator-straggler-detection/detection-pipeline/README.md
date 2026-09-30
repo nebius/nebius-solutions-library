@@ -13,6 +13,18 @@ history found — not just the happy path.
   anonymous-access gap. This document (Stage 4) is the user-facing guide
   tying all of that together.
 
+**Getting the code**:
+
+```bash
+git clone https://github.com/nebius/nebius-solutions-library.git
+cd nebius-solutions-library/soperator-straggler-detection/detection-pipeline
+```
+
+(As of this writing, this package lives on the `add/straggler-detection-v1-beta`
+branch, pending merge into `main` — add `-b add/straggler-detection-v1-beta`
+to the `git clone` above if it hasn't merged yet. Once merged, plain `main`
+is correct and this parenthetical no longer applies.)
+
 ## 1. Architecture — what this system does and how the pieces fit
 
 ```
