@@ -15,7 +15,7 @@
 # ========================================
 NEBIUS_TENANT_ID="${NEBIUS_TENANT_ID:-}"        # e.g. tenant-abc123def456
 NEBIUS_PROJECT_ID="${NEBIUS_PROJECT_ID:-}"      # e.g. project-abc123def456
-NEBIUS_REGION="${NEBIUS_REGION:-eu-west2}"      # eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1
+NEBIUS_REGION="${NEBIUS_REGION:-eu-west2}"      # Project region; see https://docs.nebius.com/overview/regions
 NEBIUS_CLI_INSTALL_URL="${NEBIUS_CLI_INSTALL_URL:-https://storage.eu-west2.nebius.cloud/cli/install.sh}"
 
 OSMO_INGRESS_HOSTNAME="${OSMO_INGRESS_HOSTNAME:-}"  # e.g. myapp.eu-west2.osmo.nebius.cloud

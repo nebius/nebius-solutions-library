@@ -147,7 +147,7 @@ This interactive script:
 2. **Checks authentication** - If not authenticated, provides instructions to run `nebius profile create`
 3. **Lists tenants** - Auto-detects if you have only one tenant
 4. **Configures project** - Select existing project, create new one, or list available projects
-5. **Sets region** - Choose from `eu-north1`, `eu-north2`, `eu-west1`, `eu-west2`, `me-west1`, `uk-south1`, `us-central1`
+5. **Sets region** - Defaults to `eu-west2`; use the region of your Nebius project (see [Nebius AI Cloud regions](https://docs.nebius.com/overview/regions))
 6. **Exports environment variables** - Sets `NEBIUS_*` and `TF_VAR_*` variables for Terraform
 
 ### 3. Initialize Secrets (REQUIRED)

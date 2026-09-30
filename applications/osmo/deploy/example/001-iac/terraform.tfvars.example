@@ -15,7 +15,7 @@ parent_id = "your-project-id" # From NEBIUS_PROJECT_ID
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-west2"     # eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1
+region       = "eu-west2"     # Project region; see https://docs.nebius.com/overview/regions
 environment  = "dev"          # dev, staging, prod
 project_name = "osmo"         # Used for resource naming
 
