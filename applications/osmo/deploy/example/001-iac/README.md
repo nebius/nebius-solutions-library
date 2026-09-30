@@ -90,18 +90,12 @@ terraform apply
 
 ## GPU Options
 
-### Available Platforms (eu-west2)
+### Available Platforms and Presets
 
-| Platform | GPU | VRAM | ~Cost/hr | Best For |
-|----------|-----|------|----------|----------|
-| `gpu-b300-sxm` | B300 | 346GB | Region-specific | Training and large models |
-
-### Presets
-
-| Platform | Preset | GPUs | vCPUs | RAM |
-|----------|--------|------|-------|-----|
-| B300 | `1gpu-24vcpu-346gb` | 1 | 24 | 346GB |
-| B300 | `8gpu-192vcpu-2768gb` | 8 | 192 | 2768GB |
+GPU platform and preset availability changes by region. See
+[Availability of platforms per region](https://docs.nebius.com/overview/regions#availability-of-platforms-per-region)
+for the current list. Override `gpu_nodes_platform` and `gpu_nodes_preset` in
+your `terraform.tfvars` when the selected region requires different values.
 
 ## Security Options
 
@@ -235,7 +229,5 @@ source ../000-prerequisites/nebius-env-init.sh
 Check your Nebius quota in the console and request increases if needed.
 
 ### Invalid GPU Platform
-Verify the platform is available in your region:
-- `eu-north1`: H100
-- `eu-west1`: H200
-- `eu-west2`: B300
+Verify the platform and preset using
+[Availability of platforms per region](https://docs.nebius.com/overview/regions#availability-of-platforms-per-region).

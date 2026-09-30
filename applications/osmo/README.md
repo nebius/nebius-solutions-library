@@ -2,17 +2,11 @@
 
 Deploy [NVIDIA OSMO](https://nvidia.github.io/OSMO/main/user_guide/index.html) on [Nebius AI Cloud](https://nebius.com/ai-cloud) in minutes. Run simulation, training, and edge workflows on the wide variety of Nebius GPU instances—write once in YAML, run anywhere.
 
-## Supported Regions
+## Supported Regions and GPU Platforms
 
-| Region | Available GPU Platforms |
-|--------|----------------------|
-| `eu-north1` | gpu-h100-sxm, gpu-h200-sxm, gpu-l40s-a, gpu-l40s-d |
-| `eu-north2` | gpu-h200-sxm |
-| `eu-west1` | gpu-h200-sxm |
-| `eu-west2` | gpu-b300-sxm (NVIDIA B300) |
-| `me-west1` | gpu-b200-sxm-a (NVIDIA B200) |
-| `uk-south1` | gpu-b300-sxm (NVIDIA B300) |
-| `us-central1` | gpu-h200-sxm, gpu-b200-sxm (NVIDIA B200) |
+Region, service, and GPU platform availability changes over time. See
+[Nebius AI Cloud regions](https://docs.nebius.com/overview/regions) for the
+current service and platform availability by region.
 
 ## Known Gaps and TODOs
 
@@ -362,20 +356,9 @@ See `deploy/001-iac/terraform.tfvars.*.example` files for all configuration opti
 
 ## GPU Options
 
-| Platform | Preset | GPUs | vCPUs | RAM | InfiniBand | Regions |
-|----------|--------|------|-------|-----|------------|---------|
-| `gpu-l40s-a` | `1gpu-8vcpu-32gb` | 1 | 8 | 32GB | No | eu-north1 |
-| `gpu-l40s-d` | `1gpu-8vcpu-32gb` | 1 | 8 | 32GB | No | eu-north1 |
-| `gpu-h100-sxm` | `1gpu-16vcpu-200gb` | 1 | 16 | 200GB | No | eu-north1 |
-| `gpu-h100-sxm` | `8gpu-128vcpu-1600gb` | 8 | 128 | 1600GB | Yes | eu-north1 |
-| `gpu-h200-sxm` | `1gpu-16vcpu-200gb` | 1 | 16 | 200GB | No | eu-north1, eu-north2, eu-west1, us-central1 |
-| `gpu-h200-sxm` | `8gpu-128vcpu-1600gb` | 8 | 128 | 1600GB | Yes | eu-north1, eu-north2, eu-west1, us-central1 |
-| `gpu-b200-sxm` | `1gpu-20vcpu-224gb` | 1 | 20 | 224GB | No | us-central1 |
-| `gpu-b200-sxm` | `8gpu-160vcpu-1792gb` | 8 | 160 | 1792GB | Yes | us-central1 |
-| `gpu-b200-sxm-a` | `1gpu-20vcpu-224gb` | 1 | 20 | 224GB | No | me-west1 |
-| `gpu-b200-sxm-a` | `8gpu-160vcpu-1792gb` | 8 | 160 | 1792GB | Yes | me-west1 |
-| `gpu-b300-sxm` | `1gpu-24vcpu-346gb` | 1 | 24 | 346GB | No | eu-west2, uk-south1 |
-| `gpu-b300-sxm` | `8gpu-192vcpu-2768gb` | 8 | 192 | 2768GB | Yes | eu-west2, uk-south1 |
+See [Availability of platforms per region](https://docs.nebius.com/overview/regions#availability-of-platforms-per-region)
+for current GPU platform availability. Set `gpu_nodes_platform` and
+`gpu_nodes_preset` in the selected `terraform.tfvars` file.
 
 **Recommendation:** In eu-west2, use the single-GPU B300 preset for the smallest development configuration.
 
