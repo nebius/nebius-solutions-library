@@ -32,6 +32,25 @@ fail() { echo "FATAL: $*" >&2; FAIL=1; }
 warn() { echo "WARNING: $*" >&2; }
 info() { echo "[environment.sh] $*"; }
 
+# Real bug found live (this session, on a genuinely non-root cluster):
+# a bare `apt-get install` assumes root -- fails with "Permission
+# denied" on /var/lib/apt/lists/lock for any non-root user, even one
+# with passwordless sudo available, and the raw apt error output alone
+# doesn't tell you that's the real cause. Runs as-is if already root,
+# transparently prefixes `sudo` when passwordless sudo is available,
+# and gives one precise, actionable message (not a raw apt error dump)
+# if neither applies -- never silently retries as a different user.
+apt_install() {
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get update -qq && apt-get install -y "$@"
+  elif sudo -n true 2>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y "$@"
+  else
+    echo "FATAL: not running as root and no passwordless sudo available -- cannot install: $* -- either re-run this script as root/with sudo, or install these packages yourself first: $*" >&2
+    return 1
+  fi
+}
+
 # Real, confirmed-live values this package was validated against (see
 # VERSIONS.md) -- not arbitrary picks. NCCL_TAG independently confirmed
 # to exist on NVIDIA's real upstream repo this session:
@@ -62,7 +81,7 @@ for t in gcc g++ make git; do
 done
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   info "Missing: ${missing_tools[*]} -- installing build-essential + git via apt..."
-  apt-get update -qq && apt-get install -y build-essential git \
+  apt_install build-essential git \
     || fail "Compiler toolchain install failed -- cannot proceed to the CUDA/NCCL steps below."
 else
   info "gcc/g++/make/git already present."
@@ -104,8 +123,15 @@ else
     info "Real, live-detected distro tag: $distro_tag (from /etc/os-release: ID=$ID VERSION_ID=$VERSION_ID)"
     tmp_deb="$(mktemp --suffix=.deb)"
     if command -v curl >/dev/null 2>&1 && curl -fsSL "$keyring_url" -o "$tmp_deb"; then
-      dpkg -i "$tmp_deb" && apt-get update -qq && apt-get install -y "$CUDA_PKG" \
-        || fail "CUDA toolkit install failed after fetching the real keyring -- check $keyring_url is reachable and $CUDA_PKG exists for $distro_tag."
+      if [ "$(id -u)" -eq 0 ]; then
+        dpkg -i "$tmp_deb"
+      elif sudo -n true 2>/dev/null; then
+        sudo dpkg -i "$tmp_deb"
+      else
+        fail "Not running as root and no passwordless sudo available -- cannot install the CUDA apt-repo keyring ($tmp_deb). Either re-run as root/with sudo, or run 'dpkg -i $tmp_deb' yourself first."
+      fi
+      [ "$FAIL" -ne 1 ] && { apt_install "$CUDA_PKG" \
+        || fail "CUDA toolkit install failed after installing the real keyring -- check $keyring_url is reachable and $CUDA_PKG exists for $distro_tag."; }
       rm -f "$tmp_deb"
     else
       fail "Could not reach NVIDIA's own CUDA apt-repo keyring at $keyring_url for real, live-detected distro '$distro_tag' (or curl is missing) -- confirm this host's real distro/arch and NVIDIA's current repo layout at https://developer.download.nvidia.com/compute/cuda/repos/, then install $CUDA_PKG manually."

@@ -21,6 +21,27 @@ fail() { echo "FATAL: $*" >&2; FAIL=1; }
 warn() { echo "WARNING: $*" >&2; }
 info() { echo "[install.sh] $*"; }
 
+# Real bug found live (this session, on a genuinely non-root cluster):
+# every apt-get call below assumed root -- fails with "Permission
+# denied" on /var/lib/apt/lists/lock for any non-root user, even one
+# with passwordless sudo available, and the raw apt error alone doesn't
+# say that's the real cause. Runs as-is if already root, transparently
+# prefixes `sudo` when passwordless sudo is available, and gives one
+# precise, actionable message (not a raw apt error dump) if neither
+# applies. Exported via `declare -f` for the per-node ssh call sites
+# below, so the SAME logic runs (and is checked) on each remote node
+# individually, not assumed uniform from the control host.
+apt_install() {
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get update -qq && apt-get install -y "$@"
+  elif sudo -n true 2>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y "$@"
+  else
+    echo "FATAL: not root and no passwordless sudo available on $(hostname) -- cannot install: $* -- either re-run as root/with sudo, or install these packages yourself first: $*" >&2
+    return 1
+  fi
+}
+
 # =========================================================================
 # Step 1 -- real, live environment detection (no assumed values)
 # =========================================================================
@@ -126,7 +147,7 @@ info "Checking bpftrace/tracefs on every node (applying the established fix only
 for node in "${_NODES_ARR[@]}"; do
   if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "command -v bpftrace" >/dev/null 2>&1; then
     warn "  $node: bpftrace not installed. Installing (apt-get install -y bpftrace; confirmed working version elsewhere in this project's history: 0.20.2-1ubuntu4.3)."
-    ssh -o BatchMode=yes "$node" "apt-get update -qq && apt-get install -y bpftrace" || fail "  $node: bpftrace install failed."
+    ssh -o BatchMode=yes "$node" "$(declare -f apt_install); apt_install bpftrace" || fail "  $node: bpftrace install failed."
   fi
 
   tracefs_ok="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" \
@@ -171,7 +192,7 @@ info "Checking for libibverbs-dev (needed to build workloads/moe/qp_rate_limit_s
 for node in "${_NODES_ARR[@]}"; do
   if ! ssh -o BatchMode=yes "$node" "test -f /usr/include/infiniband/verbs.h" >/dev/null 2>&1; then
     info "  $node: libibverbs-dev not found -- installing..."
-    ssh -o BatchMode=yes "$node" "apt-get update -qq && apt-get install -y libibverbs-dev" \
+    ssh -o BatchMode=yes "$node" "$(declare -f apt_install); apt_install libibverbs-dev" \
       || fail "  $node: libibverbs-dev install failed -- MoE's RDMA fault shim will not build there."
   else
     info "  $node: libibverbs-dev already present."
@@ -184,7 +205,7 @@ done
 
 if ! command -v logrotate >/dev/null 2>&1; then
   info "logrotate not found on this control host -- installing..."
-  apt-get update -qq && apt-get install -y logrotate || warn "logrotate install failed -- alert_engine_supervised.log will grow unbounded (see observability/run_alert_engine_supervised.sh's own WARNING path, which already handles this gracefully at runtime)."
+  apt_install logrotate || warn "logrotate install failed -- alert_engine_supervised.log will grow unbounded (see observability/run_alert_engine_supervised.sh's own WARNING path, which already handles this gracefully at runtime)."
 else
   info "logrotate already present."
 fi
