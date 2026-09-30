@@ -200,10 +200,28 @@ fi
 # =========================================================================
 
 info "Building the Inspector plugin from source..."
-if [ ! -d "$PKG_ROOT/../../nccl-2.28-src" ] && [ ! -d "/root/nccl-2.28-src" ]; then
-  fail "No NCCL source tree with its own build/ found (expected e.g. /root/nccl-2.28-src/build/lib/libnccl.so) -- the Inspector plugin's Makefile needs NCCL_HOME pointing at one. This is a real prerequisite this script does not fetch itself (a full NCCL source checkout + build is a substantial, separate step) -- see inspector-plugin/README.md (shipped as UPSTREAM_README.md) for NVIDIA's own build instructions."
+# Real bug fixed here: this check considers TWO candidate NCCL source
+# locations (a PKG_ROOT-relative sibling -- writable by whoever can
+# already write to their own clone, no root needed -- or the absolute
+# /root/nccl-2.28-src, this project's own original dev-cluster
+# convention), but NCCL_HOME's own default used to unconditionally
+# resolve to the /root one regardless of which candidate actually
+# existed -- silently pointing at a nonexistent directory (and a
+# confusing header-not-found build failure, not a clear message) for
+# anyone using the PKG_ROOT-relative location on a non-root host. Now
+# resolves to whichever candidate was actually found, PKG_ROOT-relative
+# preferred first (same order as the check below).
+if [ -d "$PKG_ROOT/../../nccl-2.28-src" ]; then
+  _NCCL_SRC_FOUND="$PKG_ROOT/../../nccl-2.28-src"
+elif [ -d "/root/nccl-2.28-src" ]; then
+  _NCCL_SRC_FOUND="/root/nccl-2.28-src"
 else
-  NCCL_HOME="${NCCL_HOME:-/root/nccl-2.28-src/build}"
+  _NCCL_SRC_FOUND=""
+fi
+if [ -z "$_NCCL_SRC_FOUND" ]; then
+  fail "No NCCL source tree with its own build/ found (expected e.g. /root/nccl-2.28-src/build/lib/libnccl.so, or <repo-root>/nccl-2.28-src/build/lib/libnccl.so as a non-root-friendly alternative) -- the Inspector plugin's Makefile needs NCCL_HOME pointing at one. This is a real prerequisite this script does not fetch itself (a full NCCL source checkout + build is a substantial, separate step) -- see environment.sh, or inspector-plugin/README.md (shipped as UPSTREAM_README.md) for NVIDIA's own build instructions."
+else
+  NCCL_HOME="${NCCL_HOME:-$_NCCL_SRC_FOUND/build}"
   CUDA_HOME="${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)")")}"
   info "Using NCCL_HOME=$NCCL_HOME CUDA_HOME=$CUDA_HOME"
   # Real, confirmed live: the Makefile's own `NCCL_HOME := ../../build`

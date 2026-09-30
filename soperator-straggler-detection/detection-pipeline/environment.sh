@@ -25,6 +25,7 @@
 # would touch the driver) -- confirmed via NVIDIA's own repo layout,
 # not assumed.
 set -u
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FAIL=0
 fail() { echo "FATAL: $*" >&2; FAIL=1; }
@@ -37,7 +38,16 @@ info() { echo "[environment.sh] $*"; }
 #   git ls-remote --tags https://github.com/NVIDIA/nccl.git | grep 2.28.9
 #   -> refs/tags/v2.28.9-1
 NCCL_TAG="v2.28.9-1"
-NCCL_SRC_DIR="${NCCL_SRC_DIR:-/root/nccl-2.28-src}"
+# Default matches install.sh's own FIRST-checked, non-root-friendly
+# candidate (a sibling of the repo checkout itself -- writable by
+# whoever can already write to their own clone, no root needed), not
+# the absolute /root/nccl-2.28-src this project's own original dev
+# cluster happened to use. install.sh checks BOTH locations (this one
+# first) and now resolves NCCL_HOME/NCCL_LIB_PATH to whichever it
+# actually finds -- set NCCL_SRC_DIR=/root/nccl-2.28-src explicitly if
+# you specifically want the other one instead (e.g. to match an
+# existing tree already built there).
+NCCL_SRC_DIR="${NCCL_SRC_DIR:-$PKG_ROOT/../../nccl-2.28-src}"
 CUDA_PKG="cuda-toolkit-13-0"
 CUDA_VERSION_WANT="13.0"
 
@@ -123,9 +133,20 @@ if [ -f "$NCCL_SRC_DIR/build/lib/libnccl.so" ] && [ -d "$NCCL_SRC_DIR/build/incl
   info "Real NCCL build already present at $NCCL_SRC_DIR/build -- nothing to do."
 else
   if [ ! -d "$NCCL_SRC_DIR/.git" ]; then
-    info "Cloning real NVIDIA upstream NCCL source (https://github.com/NVIDIA/nccl.git) to $NCCL_SRC_DIR..."
-    git clone https://github.com/NVIDIA/nccl.git "$NCCL_SRC_DIR" \
-      || fail "NCCL clone failed -- confirm this host can reach github.com."
+    # Real, disclosed failure mode this project's own history has now
+    # hit live: a plain `git clone` failure here is very often a LOCAL
+    # permission problem (can't create $NCCL_SRC_DIR's parent, e.g. a
+    # non-root user against /root/nccl-2.28-src), not a network/DNS
+    # issue -- checked explicitly first so the real cause is reported,
+    # not a misleading "confirm this host can reach github.com" guess.
+    nccl_parent_dir="$(dirname "$NCCL_SRC_DIR")"
+    if [ ! -w "$nccl_parent_dir" ]; then
+      fail "Cannot write to $nccl_parent_dir (real permission check, not a guess) -- NCCL_SRC_DIR defaults to a sibling of this repo checkout, which needs write access to its parent directory. If you're not running as root/with sudo and this repo is checked out under /root, either re-run with sudo, or set NCCL_SRC_DIR to a location you can write to (e.g. NCCL_SRC_DIR=\$HOME/nccl-2.28-src ./environment.sh) -- install.sh checks the PKG_ROOT-relative sibling location first and falls back to /root/nccl-2.28-src, so anything else needs NCCL_HOME/NCCL_SRC_DIR set explicitly for both scripts to agree on where it is."
+    else
+      info "Cloning real NVIDIA upstream NCCL source (https://github.com/NVIDIA/nccl.git) to $NCCL_SRC_DIR..."
+      git clone https://github.com/NVIDIA/nccl.git "$NCCL_SRC_DIR" \
+        || fail "NCCL clone failed for a reason other than local write permission (already checked OK) -- confirm this host can reach github.com (git ls-remote https://github.com/NVIDIA/nccl.git) and see git's own error output above."
+    fi
   fi
 
   if [ "$FAIL" -ne 1 ]; then

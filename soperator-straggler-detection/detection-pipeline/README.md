@@ -255,9 +255,15 @@ never touched), and a real NCCL source tree cloned from NVIDIA's own
 upstream (`https://github.com/NVIDIA/nccl.git`), checked out at the
 exact tag this package was validated against (`v2.28.9-1` — confirmed
 to still exist on NVIDIA's real upstream repo, not assumed), and built
-at the exact path (`/root/nccl-2.28-src/build`) `install.sh`'s own Step
-2 already expects. It is a fast no-op if everything is already present
-— safe to run every time, not just on a first install. It deliberately
+at a path `install.sh`'s own Step 2 already checks for and prefers: a
+sibling of this repo checkout itself (`<repo-root>/nccl-2.28-src`,
+`environment.sh`'s own default — writable by whoever can already write
+to their own clone, no root needed), falling back to the absolute
+`/root/nccl-2.28-src` (this project's own original dev-cluster
+convention) only if that's what's actually there — set `NCCL_SRC_DIR`
+explicitly to override either script's default. It is a fast no-op if
+everything is already present — safe to run every time, not just on a
+first install. It deliberately
 does **not** duplicate anything `install.sh` already handles itself
 (`bpftrace`, `libibverbs-dev`, `logrotate`, Slurm/`ssh`/`python3`
 detection, per-node GPU/NCCL/`/tmp` discovery) — those stay in
