@@ -583,6 +583,29 @@ class NodeAggregator:
         slot = self.phys_gpu_slot.get(phys_id, -1)
         return slot if slot != -1 else "unknown"
 
+    def role_labels(self, comm_id, phys_id):
+        """Real bug found live (this session): the dashboard's "worst"
+        panels showed member (phys_id, e.g. R3771497) as if it were a
+        meaningful rank number. phys_id is a real OS PID -- module
+        docstring's own P21.5 finding is exactly why it's used as the
+        stable per-process key instead of "rank" (a bare rank is
+        communicator-LOCAL, not a stable global identity, the moment
+        more than one communicator exists) -- but a PID is not something
+        anyone can look at and recognize as "the rank I injected a fault
+        on." role_rank/role_n (this exact communicator's own real
+        rank/n_ranks for this phys_id, already captured in
+        phys_comm_role -- see P27-hotfix4's own comment at
+        agg_mean_exec_time_us) IS the real, meaningful number: for a
+        single-communicator DDP job (the common case) it equals the
+        real global torchrun rank (0..world_size-1) exactly, since NCCL's
+        default communicator rank matches torch.distributed's global
+        rank it was initialized with; for a multi-communicator job (TP/
+        PP) it's honestly that communicator's own local rank/size instead
+        of a fabricated "global" number that wouldn't mean anything
+        there. Returns ("na","na") if this phys_id's role in this
+        specific comm hasn't been captured yet."""
+        return self.phys_comm_role.get((comm_id, phys_id), ("na", "na"))
+
     def query_throughput_history(self, sig):
         """P23 (throughput-ratio self-calibration fix) -- reads (not just
         writes) VM: real historical agg_job_throughput_rate_ref samples
@@ -927,7 +950,9 @@ class NodeAggregator:
         self.comm_bucket_members[(comm_id, bucket)].add(phys_id)
         self.maybe_log_rate(comm_id, bucket, s)
 
-        self.push_buf.append((f'agg_samples_seen{{comm="{comm_id}",member="{phys_id}",gpu_slot="{self.gpu_slot_label(phys_id)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        _role_rank, _role_n = self.role_labels(comm_id, phys_id)
+        self.push_buf.append((f'agg_samples_seen{{comm="{comm_id}",member="{phys_id}",gpu_slot="{self.gpu_slot_label(phys_id)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                len(s.all_vals), ts_us // 1000))
 
         self.drain_windows(comm_id, bucket, ts_us)
@@ -1287,11 +1312,15 @@ class NodeAggregator:
         fired = past_grace and z > MEAN_Z_THRESH and mm > MEAN_MM_THRESH
         z_report = z if z != float("inf") else 1e6
         mm_report = mm if mm != float("inf") else 1e6
-        self.push_buf.append((f'agg_mean_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        _role_rank, _role_n = self.role_labels(comm_id, worst)
+        self.push_buf.append((f'agg_mean_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                1 if fired else 0, ts_us // 1000))
-        self.push_buf.append((f'agg_mean_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_mean_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                z_report, ts_us // 1000))
-        self.push_buf.append((f'agg_mean_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_mean_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                mm_report, ts_us // 1000))
 
     def score_cv_window(self, comm_id, bucket, window_vals, ts_us):
@@ -1299,7 +1328,9 @@ class NodeAggregator:
         for p, vals in window_vals.items():
             cv = verified_stat_cv(vals, TRIM)
             self.state[(comm_id, p, bucket)].cv_history.append(cv)
-            self.push_buf.append((f'agg_cv_exec_time{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            _role_rank, _role_n = self.role_labels(comm_id, p)
+            self.push_buf.append((f'agg_cv_exec_time{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",'
+                                   f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    cv, ts_us // 1000))
 
         members_here = [p for p in window_vals if p not in cv_exclude]
@@ -1339,10 +1370,13 @@ class NodeAggregator:
             whist = self.state[(comm_id, worst, bucket)].persist_hist
             whist.append(z > CV_Z_THRESH)
             fired = sum(whist) >= PERSIST_REQUIRED
-            self.push_buf.append((f'agg_persistence_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            _role_rank, _role_n = self.role_labels(comm_id, worst)
+            self.push_buf.append((f'agg_persistence_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                                   f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    1 if fired else 0, ts_us // 1000))
             z_report = z if z != float("inf") else 1e6
-            self.push_buf.append((f'agg_cv_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            self.push_buf.append((f'agg_cv_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                                   f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    z_report, ts_us // 1000))
 
         self.check_rank0(comm_id, bucket, ts_us)
@@ -1366,7 +1400,9 @@ class NodeAggregator:
             if len(vals) >= 20:
                 counts[p] = stat_outlier_count(vals)
         for p, c in counts.items():
-            self.push_buf.append((f'agg_outlier_count{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            _role_rank, _role_n = self.role_labels(comm_id, p)
+            self.push_buf.append((f'agg_outlier_count{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",'
+                                   f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    c, ts_us // 1000))
         if len(counts) < 2:
             return
@@ -1375,9 +1411,12 @@ class NodeAggregator:
         mm = maxmed(counts[worst], peers)
         fired = counts[worst] >= OUTLIER_COUNT_THRESH and mm > OUTLIER_COUNT_MM_THRESH
         mm_report = mm if mm != float("inf") else 1e6
-        self.push_buf.append((f'agg_outlier_count_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        _role_rank, _role_n = self.role_labels(comm_id, worst)
+        self.push_buf.append((f'agg_outlier_count_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                1 if fired else 0, ts_us // 1000))
-        self.push_buf.append((f'agg_outlier_count_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_outlier_count_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",'
+                               f'role_rank="{_role_rank}",role_n="{_role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                mm_report, ts_us // 1000))
 
     def maybe_heartbeat(self):
