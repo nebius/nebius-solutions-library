@@ -886,7 +886,7 @@ def format_alert(finding, coverage):
 class AlertEngine:
     def __init__(self, vm_url, hostnames=None,
                  dcgm_host_map=None, poll_interval=3.0,
-                 hostname_refresh_s=30.0):
+                 hostname_refresh_s=30.0, summary_log_path=None):
         """hostnames=None (the default) means dynamic: the engine discovers
         which nodes are actually live from VM itself and re-checks
         periodically, so a 100-node deployment doesn't require a
@@ -910,6 +910,7 @@ class AlertEngine:
         keeping one would just let a caller quietly re-hardcode the exact
         thing this fix removes."""
         self.vm_url = vm_url
+        self.summary_log_path = summary_log_path
         self._static_hostnames = tuple(hostnames) if hostnames else None
         self._explicit_dcgm_host_map = dcgm_host_map
         self.hostname_refresh_s = hostname_refresh_s
@@ -2404,6 +2405,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _emit_dcgm_fallback(self, hostname, comm, member, slot, per_member, trigger):
         """P21.6.1 -- dedicated formatter, same reasoning as _emit_host/
@@ -2461,6 +2463,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _maybe_launch_dcgm_fallback_check(self):
         """P21.6.1 standalone path -- periodic, anomaly-independent sweep
@@ -2570,6 +2573,31 @@ class AlertEngine:
 
         self._dcgm_fallback_thread = threading.Thread(target=_run, daemon=True)
         self._dcgm_fallback_thread.start()
+
+    def _append_alert_summary(self, header_line):
+        """V1-beta-dashboard-followup -- a distilled, one-line-per-alert
+        companion to the full evidence log (var/alert_engine_supervised.
+        log, which every real alert already prints a full multi-line
+        block to). header_line is the exact same structured "[ALERT]
+        rank=... node=... confidence=... severity=..." line every one of
+        this file's 7 print(text, ...) call sites already leads with --
+        the same line tools/self_test.sh itself greps for -- reused
+        as-is, not recomputed, so this can never drift out of sync with
+        what the full log actually says. Appended with a real wall-clock
+        timestamp so a human can `tail -f` just this file and see
+        exactly what's been flagged, when, without scrolling past full
+        cause-evidence blocks. No-op if summary_log_path wasn't
+        configured (e.g. ad-hoc/test invocations). Best-effort: a write
+        failure here must never block real detection, same discipline as
+        every other best-effort side channel in this file."""
+        if not self.summary_log_path:
+            return
+        try:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            with open(self.summary_log_path, "a") as f:
+                f.write(f"{ts} {header_line}\n")
+        except Exception as e:
+            print(f"[alert-summary-write-failed] {type(e).__name__}: {e}", file=sys.stderr)
 
     def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None,
               role_rank="na", role_n="na"):
@@ -2719,6 +2747,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _emit_network(self, net_check):
         """Separate from _emit()/format_alert() deliberately -- a network
@@ -2752,6 +2781,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _emit_nvlink(self, net_check):
         """P25 Part 1 -- NVLink counterpart to _emit_network, same
@@ -2783,6 +2813,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _emit_host(self, finding):
         """Same reasoning as _emit_network -- check_host_contention_direct's
@@ -2807,6 +2838,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _maybe_launch_network_check(self):
         now = time.time()
@@ -3286,6 +3318,7 @@ class AlertEngine:
             self.alerts.append(text)
             print(text, flush=True)
             print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
 
     def _check_rank0_outlier_rate(self, hostname):
         """P21.5 -- no-op. agg_rank0_outlier_rate depended on "rank 0"
@@ -3339,10 +3372,15 @@ if __name__ == "__main__":
                      help="Comma-separated list to pin explicitly (disables discovery). "
                           "Omit for dynamic VM-based node discovery (default).")
     ap.add_argument("--hostname-refresh-s", type=float, default=30.0)
+    ap.add_argument("--summary-log", default=None,
+                     help="Path to append one distilled line per alert to (the exact "
+                          "same [ALERT] header line the full log already leads with), "
+                          "for a quick human-readable feed alongside the full "
+                          "multi-line evidence log. Omit to disable.")
     args = ap.parse_args()
     hostnames = tuple(args.hostnames.split(",")) if args.hostnames else None
     eng = AlertEngine(args.vm_url, hostnames=hostnames, poll_interval=args.poll_interval,
-                       hostname_refresh_s=args.hostname_refresh_s)
+                       hostname_refresh_s=args.hostname_refresh_s, summary_log_path=args.summary_log)
     eng.run(args.duration, args.poll_interval)
     print(f"\ntotal alerts emitted: {len(eng.alerts)}")
     print(f"pipeline_down_cycles: {eng.n_pipeline_down_cycles} "

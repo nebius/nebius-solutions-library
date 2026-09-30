@@ -711,6 +711,40 @@ automatically:
   UI, once logged in as admin) — not something `install.sh` sets up for
   you.
 
+### 6.2 Where real findings actually show up
+
+Grafana's panels (section 1's "worst rank" metrics) show *what the
+aggregator measured*, continuously, whether or not anything was actually
+flagged. The detector's actual verdicts — a real straggler/fault getting
+confirmed and attributed — live somewhere else: `alert_engine.py`'s own
+output, captured by its supervisor.
+
+- **`var/alert_engine_supervised.log`** — the full, real output: every
+  alert prints a multi-line block (`[ALERT] rank=... node=... comm=...
+  type=... confidence=CONFIRMED/PROBABLE/UNCONFIRMED severity=PAGE/
+  LOG-ONLY`, followed by the real gathered cause-evidence — DCGM clock/
+  power, storage I/O-wait, whatever corroborated it). `run.sh` prints
+  this file's real path once it launches the pipeline. This is also
+  exactly what `tools/self_test.sh` itself `grep`s to prove detection
+  worked, and what every `[PIPELINE-DOWN]`/`[DCGM-HOSTENGINE-DOWN]`-style
+  dead-man's-switch signal appears in too.
+- **`var/alert_summary.log`** — a distilled, one-line-per-alert feed:
+  the same structured `[ALERT] ...` header line above, nothing else,
+  with a timestamp — so `tail -f var/alert_summary.log` gives a quick,
+  human-scannable "what's been flagged, when" without scrolling past
+  full evidence blocks. It's generated from the exact same header line
+  the full log already leads with (not recomputed), so it can never say
+  something different from what the full log says.
+
+There is currently no external paging (Slack/PagerDuty/email) wired up
+— `severity=PAGE` vs. `severity=LOG-ONLY` in the text above is this
+project's own internal confidence-based severity label (see section 7),
+not an actual page going out anywhere yet. Today, watching for a real
+finding means tailing one of these two files, or watching the
+corresponding `*_fired` metric (e.g. `agg_mean_fired`,
+`agg_persistence_fired`, `agg_outlier_count_fired`) flip to `1` on the
+Grafana dashboard.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 This section is **not softened**. It has two parts: which fault classes

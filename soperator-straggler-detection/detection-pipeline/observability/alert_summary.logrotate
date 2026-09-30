@@ -1,0 +1,22 @@
+# V1-beta-dashboard-followup -- log-rotation config for alert_summary.log,
+# the distilled one-line-per-alert companion to alert_engine_supervised.log
+# (see AlertEngine._append_alert_summary's own docstring). Much lighter than
+# the full evidence log (one short line per alert vs. a full multi-line
+# block), so a smaller size/rotate policy than alert_engine_supervised.
+# logrotate's is appropriate -- not copied wholesale from it.
+#
+# copytruncate: alert_engine.py writes via its own `open(path, "a")` per
+# alert (not a long-held shell fd the way alert_engine_supervised.log's
+# `>>` redirect is), so a plain rename-based rotation would actually work
+# here too -- copytruncate is used anyway for consistency with every other
+# supervised log in this project, and it's equally safe either way (each
+# write reopens the path fresh).
+/root/P20c_alerting/alert_summary.log {
+    size 10M
+    rotate 10
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

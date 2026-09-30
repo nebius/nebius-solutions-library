@@ -40,6 +40,13 @@ done
 IFS=',' read -ra NODES <<< "$NODE_LIST"
 DUMP_DIR_BASE="$VAR_DIR/dump"
 ALERT_LOG="$VAR_DIR/alert_engine_supervised.log"
+# V1-beta-dashboard-followup -- distilled, one-line-per-alert companion to
+# ALERT_LOG (see AlertEngine._append_alert_summary's own docstring).
+# Always this fixed path regardless of ALERT_LOG's own value (including
+# the "existing supervisor, possibly custom log path" branch below) --
+# run_alert_engine_supervised.sh derives it from its own PKG_ROOT, not
+# from whatever LOG path it was handed.
+SUMMARY_LOG="$VAR_DIR/alert_summary.log"
 
 # =========================================================================
 # Step 1 -- launch the pipeline using ONLY cluster.env's real values
@@ -262,4 +269,5 @@ else
 fi
 
 info "=== run.sh completed: pipeline is up and confirmed healthy on every real node ==="
+info "Watch for real findings: tail -f $SUMMARY_LOG for a distilled, one-line-per-alert feed (full evidence for each one is in $ALERT_LOG)."
 info "Self-test: run tools/self_test.sh for a one-command, real, injected-fault proof that detection+attribution actually work on THIS cluster."

@@ -30,6 +30,12 @@ _PKG_ROOT="$(cd "$_HERE/.." && pwd)"
 VM_URL="${1:-http://worker-0:8428}"
 LOG="${2:-$_PKG_ROOT/var/alert_engine_supervised.log}"
 mkdir -p "$(dirname "$LOG")"
+# V1-beta-dashboard-followup -- distilled, one-line-per-alert companion to
+# the full evidence log above, same directory convention. See AlertEngine.
+# _append_alert_summary's own docstring for why this exists: a human
+# shouldn't have to scroll past full multi-line evidence blocks just to
+# see what's actually been flagged.
+SUMMARY_LOG="$_PKG_ROOT/var/alert_summary.log"
 
 # P27.3-log-rotation-fix -- real, standard logrotate (see alert_engine_
 # supervised.logrotate's own comments for the size/retention/copytruncate
@@ -51,6 +57,8 @@ if command -v logrotate >/dev/null 2>&1; then
   _GENERATED_LOGROTATE="$_PKG_ROOT/var/alert_engine_supervised.logrotate.generated"
   sed "s|^/root/P20c_alerting/alert_engine_supervised.log {|$LOG {|" \
     "$_HERE/alert_engine_supervised.logrotate" > "$_GENERATED_LOGROTATE"
+  sed "s|^/root/P20c_alerting/alert_summary.log {|$SUMMARY_LOG {|" \
+    "$_HERE/alert_summary.logrotate" >> "$_GENERATED_LOGROTATE"
   (
     while true; do
       logrotate --state "$_PKG_ROOT/var/.logrotate_state" "$_GENERATED_LOGROTATE" 2>>"$_PKG_ROOT/var/logrotate_errors.log"
@@ -62,11 +70,11 @@ else
   echo "[supervisor] WARNING: logrotate not found -- alert_engine_supervised.log will grow unbounded" | tee -a "$LOG"
 fi
 
-echo "[supervisor] starting, vm_url=$VM_URL log=$LOG" | tee -a "$LOG"
+echo "[supervisor] starting, vm_url=$VM_URL log=$LOG summary_log=$SUMMARY_LOG" | tee -a "$LOG"
 while true; do
   START_TS=$(date -u +%FT%TZ)
   echo "[supervisor] launching alert_engine.py at $START_TS" | tee -a "$LOG"
-  python3 "$_PKG_ROOT/alerting/alert_engine.py" "$VM_URL" --duration 0 >> "$LOG" 2>&1
+  python3 "$_PKG_ROOT/alerting/alert_engine.py" "$VM_URL" --duration 0 --summary-log "$SUMMARY_LOG" >> "$LOG" 2>&1
   EC=$?
   END_TS=$(date -u +%FT%TZ)
   echo "[supervisor] alert_engine.py EXITED unexpectedly (--duration 0 means it should never return on its own) exit_code=$EC start=$START_TS end=$END_TS -- relaunching in 3s" | tee -a "$LOG"
