@@ -283,18 +283,26 @@ info "Building MoE's RDMA fault shim (qp_rate_limit_shim.c)..."
 info "Checking for a real, reachable, correctly-configured VictoriaMetrics instance..."
 VM_URL="${VM_URL:-}"
 if [ -z "$VM_URL" ]; then
-  # Try the conventional first-node:8428 this project's own history
-  # always used, but only as a live PROBE, not an assumption -- if it
-  # doesn't answer, we say so rather than silently defaulting to it.
+  # Two real, live-probed candidates, not assumptions -- either is a
+  # genuinely supported launch location for this pipeline: the
+  # conventional first-worker-node:8428 (the srun-on-a-worker-node
+  # approach vm-standalone/README.md documents), and this control
+  # host's OWN hostname:8428 (vm-setup.sh's own plain-background-
+  # process-on-the-login-node approach, matching this project's own
+  # established precedent for Grafana). Checked in this order for no
+  # particular reason other than matching this project's own history
+  # first; neither is preferred/assumed over the other.
   first_node="$(echo "$NODE_LIST" | tr ',' '\n' | sort | head -1)"
-  candidate="http://$first_node:8428"
-  if curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$candidate/health" 2>/dev/null | grep -q 200; then
-    VM_URL="$candidate"
-    info "Found a real, reachable VictoriaMetrics instance at $VM_URL (health check passed live)."
-  fi
+  for candidate in "http://$first_node:8428" "http://$(hostname):8428"; do
+    if curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$candidate/health" 2>/dev/null | grep -q 200; then
+      VM_URL="$candidate"
+      info "Found a real, reachable VictoriaMetrics instance at $VM_URL (health check passed live)."
+      break
+    fi
+  done
 fi
 if [ -z "$VM_URL" ]; then
-  fail "No VM_URL given and no reachable instance found at the conventional http://<first-node>:8428. This script does not launch VictoriaMetrics itself (it needs a real binary staged on a node and a real Slurm allocation to run it on -- see vm-standalone/README.md for the exact launch command, the 0s-dedup/100y-retention rationale, and why each flag is load-bearing). Launch one per that README, then re-run install.sh with VM_URL=http://<host>:8428 set."
+  fail "No VM_URL given and no reachable instance found at either http://<first-node>:8428 or http://$(hostname):8428. This script does not launch VictoriaMetrics itself -- see vm-setup.sh (this control host, plain background process) or vm-standalone/README.md (a worker node, via srun) for the two real, supported ways to bring one up, then re-run install.sh with VM_URL=http://<host>:8428 set explicitly if neither convention matches where you put it."
 else
   info "Using VM_URL=$VM_URL"
 fi

@@ -125,6 +125,11 @@ environment.sh      Optional, run BEFORE install.sh on a genuinely fresh
                     does not attempt itself (compiler toolchain, CUDA
                     toolkit, a real NCCL source build) -- see "Installing"
                     below
+vm-setup.sh          Optional, run BEFORE install.sh -- brings up a real
+                    VictoriaMetrics instance automatically, as a plain
+                    auto-restart-supervised background process on this
+                    host, so install.sh's own VM auto-detection finds it
+                    with zero extra config -- see "Installing" below
 install.sh          Brings a fresh cluster to a ready-to-run state using
                     only real, live discovery -- see "Installing" below
 run.sh               Launches the standing pipeline (aggregator per real
@@ -232,45 +237,79 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   something to silently standardize away without checking whether that
   shape's own validation depended on its specific version.
 
-## 4. Installing — `environment.sh` (optional) + `install.sh`
+## 4. Installing — `environment.sh` + `vm-setup.sh` (both optional) + `install.sh`
 
-Run from the Slurm control/login node. On a genuinely fresh host — one
-without a working C++ compiler toolchain, CUDA toolkit, or a real NCCL
-source build already sitting at `/root/nccl-2.28-src` — run
-`environment.sh` first:
+Run from the Slurm control/login node. On a genuinely fresh cluster —
+no working compiler/CUDA/NCCL source build, and no VictoriaMetrics
+instance running yet — the full, real, start-to-finish sequence is:
 
 ```bash
 cd soperator-straggler-detection/detection-pipeline
-./environment.sh   # optional: only covers what install.sh below does not
+./environment.sh   # optional: compiler + CUDA + NCCL source (only what install.sh below does not cover)
+./vm-setup.sh       # optional: brings up VictoriaMetrics automatically (only what install.sh below does not cover)
 ./install.sh
 ```
 
-`environment.sh` covers exactly the one prerequisite tier `install.sh`
-does not attempt itself — a real compiler toolchain (`build-essential`
-+ `git`, installed via apt if missing), a CUDA toolkit matching this
-package's own validated value (`VERSIONS.md`'s confirmed `13.0` —
-installs `cuda-toolkit-13-0` specifically via NVIDIA's own apt repo,
-**never** `cuda`/`cuda-drivers`, so an already-working GPU driver is
-never touched), and a real NCCL source tree cloned from NVIDIA's own
-upstream (`https://github.com/NVIDIA/nccl.git`), checked out at the
-exact tag this package was validated against (`v2.28.9-1` — confirmed
-to still exist on NVIDIA's real upstream repo, not assumed), and built
-at a path `install.sh`'s own Step 2 already checks for and prefers: a
-sibling of this repo checkout itself (`<repo-root>/nccl-2.28-src`,
+Both `environment.sh` and `vm-setup.sh` are independent of each other
+and of `install.sh` — run either, both, or neither depending on what
+this host already has; each is a fast no-op if its own target is
+already present/reachable, safe to re-run any time, not just on a
+first install. Both also auto-install their own apt dependencies via
+`sudo` when not already running as root (and refuse with a precise
+message, not a raw `apt` error, if neither root nor passwordless
+`sudo` is available).
+
+**`environment.sh`** covers exactly the one prerequisite tier
+`install.sh` does not attempt itself — a real compiler toolchain
+(`build-essential` + `git`), a CUDA toolkit matching this package's own
+validated value (`VERSIONS.md`'s confirmed `13.0` — installs
+`cuda-toolkit-13-0` specifically via NVIDIA's own apt repo, **never**
+`cuda`/`cuda-drivers`, so an already-working GPU driver is never
+touched), and a real NCCL source tree cloned from NVIDIA's own upstream
+(`https://github.com/NVIDIA/nccl.git`), checked out at the exact tag
+this package was validated against (`v2.28.9-1` — confirmed to still
+exist on NVIDIA's real upstream repo, not assumed), and built at a path
+`install.sh`'s own Step 2 already checks for and prefers: a sibling of
+this repo checkout itself (`<repo-root>/nccl-2.28-src`,
 `environment.sh`'s own default — writable by whoever can already write
 to their own clone, no root needed), falling back to the absolute
 `/root/nccl-2.28-src` (this project's own original dev-cluster
 convention) only if that's what's actually there — set `NCCL_SRC_DIR`
-explicitly to override either script's default. It is a fast no-op if
-everything is already present — safe to run every time, not just on a
-first install. It deliberately
-does **not** duplicate anything `install.sh` already handles itself
+explicitly to override either script's default. It deliberately does
+**not** duplicate anything `install.sh` already handles itself
 (`bpftrace`, `libibverbs-dev`, `logrotate`, Slurm/`ssh`/`python3`
 detection, per-node GPU/NCCL/`/tmp` discovery) — those stay in
 `install.sh`'s own Step 1, unchanged.
 
-Once the environment is ready (with or without `environment.sh` — a
-host that already has all of the above needs it not at all), run:
+**`vm-setup.sh`** brings up a real, working VictoriaMetrics instance
+automatically, as a **plain background process directly on this host**
+(the login node) — matching this project's own already-established
+precedent for Grafana (see `grafana-standalone/README.md`), not the
+`srun`-on-a-worker-node approach `vm-standalone/README.md` documents as
+the alternative (still valid; use that instead if you specifically
+want VM isolated to its own dedicated worker node rather than sharing
+the login node). It downloads the real, pinned binary
+(`VERSIONS.md`'s confirmed `v1.150.0`) directly from VictoriaMetrics'
+own GitHub release, sha256-verified against their own published
+checksum before extracting, launches it under a real auto-restart
+supervisor (`observability/run_vm_supervised.sh`, mirroring the exact
+same supervision/log-rotation pattern already used for the aggregator
+and `alert_engine.py`), and — critically — verifies it live from a real
+worker node (not just `localhost`) before declaring success, so a
+cluster whose login node happens to be firewalled off from its workers
+fails loudly and precisely here instead of leaving the aggregators
+silently unable to ever push data. `install.sh`'s own VM
+auto-detection now checks this host's own hostname in addition to the
+conventional first-worker-node, so no `VM_URL` needs passing either
+way. Port `8428` is VictoriaMetrics' own upstream default — not a
+Soperator-specific convention — reused here only because every other
+piece of this pipeline (the Grafana datasource config, `install.sh`'s
+own detection, every workload's default `VM_URL`) already assumes it;
+override `VM_PORT`/`VM_HOST` if you have a real reason to change it,
+but every one of those other pieces would then need updating too.
+
+Once the environment and VM are ready (with or without either script —
+a host that already has everything needs neither), run:
 
 ```bash
 cd soperator-straggler-detection/detection-pipeline
@@ -312,10 +351,12 @@ does, in order:
    real build. This step is the one that fails loudly (`FATAL: No NCCL
    source tree with its own build/ found...`) if `environment.sh` above
    was skipped and no real NCCL source build already exists.
-7. **Detects a real, reachable VictoriaMetrics instance** (probes the
-   conventional `http://<first-node>:8428/health` live) or reports
-   precisely that one needs to be launched per `vm-standalone/README.md`
-   — it does not launch one itself. **0s dedup
+7. **Detects a real, reachable VictoriaMetrics instance** (probes both
+   the conventional `http://<first-node>:8428/health` and this control
+   host's own `http://$(hostname):8428/health` live) or reports
+   precisely that one needs to be launched — either via `vm-setup.sh`
+   above (this host, automatic) or per `vm-standalone/README.md` (a
+   worker node, via `srun`) — it does not launch one itself. **0s dedup
    (`-dedup.minScrapeInterval=0s`) is the single most load-bearing
    non-default setting in this entire pipeline** — VictoriaMetrics's
    normal 30s-ish default dedup window silently drops the vast majority

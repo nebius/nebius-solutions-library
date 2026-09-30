@@ -1,0 +1,21 @@
+# V1 Beta Stage 6 -- real, standard logrotate config for
+# vm_supervised.log, same reasoning and same copytruncate requirement as
+# alert_engine_supervised.logrotate (see that file's own comments) --
+# run_vm_supervised.sh writes via a plain shell `>> "$LOG"` redirect
+# held open for the entire lifetime of one supervised victoria-metrics-
+# prod invocation, so copytruncate is required for the same reason.
+#
+# Same conservative size/retention policy reused rather than re-derived:
+# VictoriaMetrics's own real log volume under this pipeline's normal
+# operation has not been separately measured, but there is no reason to
+# expect it to be heavier than alert_engine_supervised.log's own
+# measured worst case, so the same bound is a safe starting point.
+/root/P20c_alerting/vm_supervised.log {
+    size 50M
+    rotate 10
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

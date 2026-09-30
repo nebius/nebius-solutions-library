@@ -12,5 +12,13 @@ inspector-plugin/libnccl-profiler-inspector.so
 inspector-plugin/version.cc
 workloads/moe/qp_rate_limit_shim.so
 
+# vm-setup.sh's own real, downloaded binary + live time-series data --
+# same "fetch/generate at setup time, never commit" convention as above
+# (see vm-standalone/README.md's own "do not copy an existing
+# storageDataPath to a new cluster" warning for why the data dir
+# specifically must never be committed/shared across clusters).
+vm-standalone/victoria-metrics-prod
+vm-standalone/data/
+
 __pycache__/
 *.pyc
