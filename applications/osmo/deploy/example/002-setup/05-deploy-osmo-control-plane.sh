@@ -127,11 +127,6 @@ if [[ -z "$TF_STORAGE_REGION" || -z "$TF_STORAGE_ENDPOINT" ]]; then
     exit 1
 fi
 
-if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$TF_STORAGE_REGION" ]]; then
-    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${TF_STORAGE_REGION}'"
-    exit 1
-fi
-
 NEBIUS_SELECTED_REGION="$TF_STORAGE_REGION"
 S3_NEBIUS_ENDPOINT_HTTPS=$(normalize_nebius_storage_endpoint "$TF_STORAGE_ENDPOINT")
 log_info "Using Object Storage region from Terraform: ${NEBIUS_SELECTED_REGION}"

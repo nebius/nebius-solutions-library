@@ -20,11 +20,6 @@ if [[ -z "$STORAGE_REGION" || -z "$STORAGE_ENDPOINT" ]]; then
     exit 1
 fi
 
-if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$STORAGE_REGION" ]]; then
-    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${STORAGE_REGION}'"
-    exit 1
-fi
-
 STORAGE_ENDPOINT=$(normalize_nebius_storage_endpoint "$STORAGE_ENDPOINT")
 
 # -----------------------------------------------------------------------------

@@ -42,11 +42,6 @@ if [[ -z "$S3_BUCKET" || -z "$S3_ENDPOINT" || -z "$REGION" ]]; then
     exit 1
 fi
 
-if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$REGION" ]]; then
-    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${REGION}'"
-    exit 1
-fi
-
 S3_REGION_FOR_BOTO="${REGION}"
 S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
 

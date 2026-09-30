@@ -30,16 +30,27 @@ S3_BUCKET=$(get_tf_output "storage_bucket.name" "../001-iac" 2>/dev/null || echo
 S3_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" 2>/dev/null || echo "")
 S3_REGION=$(get_tf_output "storage_bucket.region" "../001-iac" 2>/dev/null || echo "")
 
-if [[ -z "$S3_BUCKET" || -z "$S3_ENDPOINT" || -z "$S3_REGION" ]]; then
-    log_error "Could not retrieve the storage bucket name, endpoint, and region from Terraform"
+STORAGE_OUTPUT_MISSING=false
+
+if [[ -z "$S3_BUCKET" ]]; then
+    log_error "Could not retrieve the storage bucket name from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ -z "$S3_ENDPOINT" ]]; then
+    log_error "Could not retrieve the storage bucket endpoint from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ -z "$S3_REGION" ]]; then
+    log_error "Could not retrieve the storage bucket region from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ "$STORAGE_OUTPUT_MISSING" == true ]]; then
     echo ""
     echo "Make sure you have run 'terraform apply' in deploy/001-iac"
     echo "and that storage is enabled in your terraform.tfvars"
-    exit 1
-fi
-
-if [[ -n "${NEBIUS_REGION:-}" && "$NEBIUS_REGION" != "$S3_REGION" ]]; then
-    log_error "NEBIUS_REGION '${NEBIUS_REGION}' does not match the bucket region '${S3_REGION}'"
     exit 1
 fi
 
