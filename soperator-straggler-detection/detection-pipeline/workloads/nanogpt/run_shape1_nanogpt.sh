@@ -10,6 +10,32 @@ MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib6
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
 source "$_LIB"
 cluster_topology_available_nodes
+
+# Real bug found live (this session): MOUNTS above hardcodes /root:/root,
+# assuming this project's own original dev-cluster convention (this
+# package and its nccl-2.28-src sibling both live under /root). A real,
+# different clone location (e.g. under /home/<user>/...) is completely
+# invisible inside the container with only that mount -- every rank
+# fails immediately with "No such file or directory" trying to exec
+# this script's own train_node_*.sh path. Adds whichever of this
+# package's own real root (PKG_ROOT, same 2-levels-up convention
+# install.sh/environment.sh already use) and the real NCCL source dir
+# (derived from cluster.env's own NCCL_LIB_PATH, already loaded above)
+# aren't already covered by the existing /root:/root mount -- dynamic,
+# not assumed, and skips anything already redundant with /root:/root so
+# a cluster still using the original /root convention sees no behavior
+# change at all. Both fully resolved (cd+pwd, not string-only dirname)
+# so neither ends up as a literal, unresolved "../.." path segment in
+# the actual --container-mounts argument.
+_SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
+_NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+  case "$_p" in
+    /root|/root/*) ;;  # already covered by the existing /root:/root mount
+    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+  esac
+done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "### v1beta-shape1-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT"

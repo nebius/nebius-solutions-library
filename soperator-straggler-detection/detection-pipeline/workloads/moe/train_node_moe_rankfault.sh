@@ -16,7 +16,19 @@ NODE_RANK=$NODE_RANK
 
 mkdir -p "$DUMPDIR" "$OUTDIR"
 
-export NCCL_PROFILER_PLUGIN=/root/nccl-2.28-src/ext-profiler/inspector/libnccl-profiler-inspector.so
+# Real bug found live (this session): this hardcoded /root/nccl-2.28-src
+# path assumed this project's own original dev-cluster convention -- a
+# real, different clone location (e.g. under /home/<user>/...) never has
+# anything at that literal path, so NCCL_PROFILER_PLUGIN pointed at a
+# file that doesn't exist and no dump files were ever produced. Derived
+# from this script's own real location instead (same 2-levels-up
+# PKG_ROOT convention install.sh/environment.sh already use) -- this
+# always matches install.sh's own real build output
+# ($PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so, confirmed
+# live by install.sh's own "Inspector plugin built: ..." message),
+# regardless of where this package was actually cloned.
+_PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
 export NCCL_INSPECTOR_ENABLE=1
 export NCCL_INSPECTOR_DUMP_VERBOSE=1
 export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
