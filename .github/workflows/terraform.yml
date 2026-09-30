@@ -15,8 +15,9 @@ permissions:
   contents: write
 
 env:
-  TF_VAR_parent_id: project-e00pjzzrtk1fs3yavy
-  TF_VAR_tenant_id: tenant-e00f3wdfzwfjgbcyfv
+  TF_VAR_parent_id: project-e02s5a0dpr00nk11bgb0p9
+  TF_VAR_tenant_id: tenant-e00tem0x4n0edc3hv2
+  TF_VAR_region: eu-north2
 
 jobs:
   detect-changes:
@@ -44,17 +45,23 @@ jobs:
           pattern='^(k8s-training|wireguard|bastion|dsvm)$'
           matched=()
 
-          for file in ${ALL_CHANGED_FILES[@]}; do
-            solution=$(echo "$file" | cut -d "/" -f1)
-            if [[ $solution =~ $pattern ]]; then
-                matched+=("$solution")
-            elif [[ $solution == "modules" ]]; then
-              matched=("k8s-training wireguard bastion dsvm")
+          for file in $ALL_CHANGED_FILES; do
+            solution="${file%%/*}"
+            if [[ "$solution" == "modules" ]]; then
+              matched=("k8s-training" "wireguard" "bastion" "dsvm")
+              break
+            elif [[ "$solution" =~ $pattern ]]; then
+              matched+=("$solution")
             fi
           done
-          unique=$(echo "${matched[@]}" | tr ' ' '\n' | uniq);
-          json=$(printf '%s\n' "${unique[@]}" | jq -R . | jq -s -c .)
-          echo "solutions=$json" >> $GITHUB_OUTPUT
+
+          if ((${#matched[@]} == 0)); then
+            json='[]'
+          else
+            json=$(printf '%s\n' "${matched[@]}" | awk 'NF && !seen[$0]++' | jq -R . | jq -s -c .)
+          fi
+
+          echo "solutions=$json" >> "$GITHUB_OUTPUT"
     
   terraform-format:
     needs: detect-changes
@@ -78,9 +85,9 @@ jobs:
     needs: terraform-format
     name: 'Terraform ${{ matrix.solution }}'
     environment:
-      name: project-e00pjzzrtk1fs3yavy
+      name: project-e02s5a0dpr00nk11bgb0p9
     concurrency:
-      group: project-e00pjzzrtk1fs3yavy
+      group: project-e02s5a0dpr00nk11bgb0p9
     runs-on: ubuntu-latest
 
     steps:
@@ -92,7 +99,7 @@ jobs:
     needs: [approve_terraform, detect-changes]
     name: 'Terraform ${{ matrix.solution }}'
     environment:
-      name: project-e00pjzzrtk1fs3yavy
+      name: project-e02s5a0dpr00nk11bgb0p9
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -106,8 +113,8 @@ jobs:
         working-directory: ${{ matrix.solution }}
 
     env:
-      TF_VAR_subnet_id: vpcsubnet-e00dgdntmhgkeej1z3
-      TF_VAR_region: eu-north1
+      TF_VAR_subnet_id: vpcsubnet-e02xm3ng0e6e1yvvyk
+      TF_VAR_region: eu-north2
       TF_VAR_loki_access_key_id: ${{ secrets.SA_ACCESS_KEY_ID }}
       TF_VAR_loki_secret_key: ${{ secrets.SA_SECRET_KEY }}
 
@@ -124,15 +131,9 @@ jobs:
         echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
         ssh-add
 
-    - name: Setup s3cmd
+    - name: Setup s5cmd
       run: |
-        pip3 install s3cmd --no-cache --quiet
-        s3cmd --configure --dump-config \
-        --access_key="${{ secrets.SA_ACCESS_KEY_ID }}" \
-        --secret_key="${{ secrets.SA_SECRET_KEY }}" \
-        --host="storage.eu-north1.nebius.cloud:443" \
-        --host-bucket="%(bucket)s.storage.eu-north1.nebius.cloud" \
-        > ~/.s3cfg
+        pip3 install s5cmd --no-cache --quiet
         mkdir -p tests/reports
 
     - name: Install XMLStarlet
@@ -180,7 +181,78 @@ jobs:
 
     # Run Terraform Tests
     - name: Terraform Test
-      run: terraform test -junit-xml=tests/reports/TEST-result-${{ github.run_id }}.xml
+      timeout-minutes: 150
+      run: |
+        report_path="tests/reports/TEST-result-${{ github.run_id }}.xml"
+
+        if [ "${{ matrix.solution }}" != "k8s-training" ]; then
+          terraform test -junit-xml="${report_path}"
+          exit $?
+        fi
+
+        cluster_name="${TF_VAR_cluster_name:-k8s-training}"
+        gpu_node_group_name="${cluster_name}-ng-gpu-0"
+        poll_seconds=60
+
+        terraform test -junit-xml="${report_path}" &
+        test_pid=$!
+
+        stop_test() {
+          if kill -0 "${test_pid}" 2>/dev/null; then
+            kill "${test_pid}" || true
+            wait "${test_pid}" || true
+          fi
+        }
+
+        # Fail early when the GPU node group reaches a terminal provisioning state.
+        while kill -0 "${test_pid}" 2>/dev/null; do
+          cluster_id="$(
+            { nebius mk8s v1 cluster list --parent-id "${TF_VAR_parent_id}" --format json 2>/dev/null || true; } \
+              | jq -r --arg name "${cluster_name}" '
+                  [(.items // [])[] | select(.metadata.name == $name)]
+                  | sort_by(.metadata.created_at)
+                  | last
+                  | .metadata.id // empty
+                '
+          )"
+
+          if [ -n "${cluster_id}" ]; then
+            node_group_json="$(
+              { nebius mk8s v1 node-group list --parent-id "${cluster_id}" --format json 2>/dev/null || true; } \
+                | jq -c --arg name "${gpu_node_group_name}" '
+                    [(.items // [])[] | select(.metadata.name == $name)]
+                    | sort_by(.metadata.created_at)
+                    | last // empty
+                  '
+            )"
+
+            if [ -n "${node_group_json}" ] && printf '%s\n' "${node_group_json}" | jq -e '
+              (.status.events // [])
+              | map(.last_occurrence)
+              | any(
+                  (.code == "ComputeInstanceCreationFailed") or
+                  (.code == "NodeNotFound" and ((.message // "") | contains("STOPPED for longer than")))
+                )
+            ' >/dev/null; then
+              echo "Detected fatal GPU node provisioning event for ${gpu_node_group_name}"
+              printf '%s\n' "${node_group_json}" | jq -r '
+                (.status.events // [])
+                | map(.last_occurrence)
+                | map(select(
+                    (.code == "ComputeInstanceCreationFailed") or
+                    (.code == "NodeNotFound" and ((.message // "") | contains("STOPPED for longer than")))
+                  ))
+                | .[]
+              '
+              stop_test
+              exit 1
+            fi
+          fi
+
+          sleep "${poll_seconds}"
+        done
+
+        wait "${test_pid}"
 
     - name: Set date in report
       run: |
@@ -192,7 +264,13 @@ jobs:
         tests/reports/TEST-result-${{ github.run_id }}.xml
 
     - name: Upload test results
-      run: s3cmd sync tests/reports s3://terraform-test-reports/${{ matrix.solution.name }}/
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.SA_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.SA_SECRET_KEY }}
+        AWS_REGION: ${{ env.TF_VAR_region }}
+        AWS_DEFAULT_REGION: ${{ env.TF_VAR_region }}
+      continue-on-error: true
+      run: s5cmd --endpoint-url "https://storage.${TF_VAR_region}.nebius.cloud" sync tests/reports/ s3://terraform-test-reports/${{ matrix.solution }}/
       if: always()
 
     - name: Load test report history
@@ -204,7 +282,7 @@ jobs:
         path: gh-pages
 
     - name: Build test report
-      uses: simple-elf/allure-report-action@v1.13
+      uses: simple-elf/allure-report-action@v1.15
       if: always()
       with:
         gh_pages: gh-pages
@@ -224,9 +302,9 @@ jobs:
   cleanup-infra:
     name: 'Cleanup Infra'
     environment:
-      name: project-e00pjzzrtk1fs3yavy
+      name: project-e02s5a0dpr00nk11bgb0p9
     concurrency:
-      group: project-e00pjzzrtk1fs3yavy
+      group: project-e02s5a0dpr00nk11bgb0p9
     runs-on: ubuntu-latest
     needs: terraform
     if: always() && needs.terraform.result
@@ -250,27 +328,27 @@ jobs:
           --public-key-id ${{ secrets.TERRAFORM_SA_PUBLIC_KEY_ID }} \
           --parent-id ${{ env.TF_VAR_parent_id }} \
           --private-key-file /tmp/sa.pem
-    
-    - name: Setup s3cmd
+
+    - name: Setup s5cmd
       run: |
-        pip3 install s3cmd --no-cache --quiet
-        s3cmd --configure --dump-config \
-        --access_key="${{ secrets.SA_ACCESS_KEY_ID }}" \
-        --secret_key="${{ secrets.SA_SECRET_KEY }}" \
-        --host="storage.eu-north1.nebius.cloud:443" \
-        --host-bucket="%(bucket)s.storage.eu-north1.nebius.cloud" \
-        > ~/.s3cfg
-    
+        pip3 install s5cmd --no-cache --quiet
+
     - name: Cleanup buckets
       continue-on-error: true
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.SA_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.SA_SECRET_KEY }}
+        AWS_REGION: ${{ env.TF_VAR_region }}
+        AWS_DEFAULT_REGION: ${{ env.TF_VAR_region }}
       run: |
         for resource in \
           "storage bucket" \
         ; do
-        echo Cleaning up buckets $resource 
+        echo Cleaning up buckets $resource
         eval nebius --format json $resource list \
           | jq -r 'try .items[] | select(.metadata.name!="terraform-test-reports") | .metadata.name' \
-          | eval xargs -r -t -n 1 -I {} s3cmd del --force --recursive s3://{}
+          | xargs -r -t -n 1 -I {} \
+            s5cmd --endpoint-url "https://storage.${TF_VAR_region}.nebius.cloud" rm "s3://{}/*"
         done
 
     - name: Perform forced cleanup
@@ -282,10 +360,30 @@ jobs:
           "compute v1 disk" \
           "compute v1 gpu-cluster" \
           "vpc v1alpha1 allocation" \
-          "storage bucket" \
         ; do
           echo Deleting all $resource
           eval nebius --format json $resource list \
           | jq -r 'try .items[] | select(.metadata.name!="terraform-test-reports") | .metadata.id' \
           | eval xargs -r -n 1 nebius $resource delete --id
         done
+
+    - name: Force delete storage buckets (ttl=0)
+      run: |
+        nebius --format json storage bucket list --parent-id "${TF_VAR_parent_id}" \
+          | jq -r '(.items // [])[] | select(.metadata.name!="terraform-test-reports") | .metadata.id' \
+          | while read -r bucket_id; do
+              [ -z "${bucket_id}" ] && continue
+              echo "Deleting bucket ${bucket_id} with --ttl 0"
+              nebius storage bucket delete --id "${bucket_id}" --ttl 0 || true
+            done
+
+    - name: Purge scheduled storage buckets
+      continue-on-error: true
+      run: |
+        nebius --format json storage bucket list --parent-id "${TF_VAR_parent_id}" \
+          | jq -r '(.items // [])[] | select(.metadata.name!="terraform-test-reports") | select((.status.purge_at // null) != null) | .metadata.id' \
+          | while read -r bucket_id; do
+              [ -z "${bucket_id}" ] && continue
+              echo "Purging bucket ${bucket_id}"
+              nebius storage bucket purge --id "${bucket_id}" || true
+            done

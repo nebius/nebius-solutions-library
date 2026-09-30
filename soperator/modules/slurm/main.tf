@@ -78,37 +78,50 @@ resource "helm_release" "soperator_fluxcd_cm" {
     soperator_image_repo     = local.image.repository
     soperator_image_repo_nfs = var.nfs_in_k8s.use_stable_repo ? local.image.repository_stable : local.image.repository
 
-    dcgm_job_mapping_enabled = var.dcgm_job_mapping_enabled
+    dcgm_exporter_enabled          = var.dcgm_exporter_enabled
+    enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
+    # Cluster-wide toggle for the [program:dockerd] block in the shared jail
+    # supervisord config (customConfigmaps), which is one configmap for the whole
+    # cluster and cannot be made per-nodeset. It is NOT the per-nodeset Docker
+    # switch: each nodeset's Docker is gated separately by its own
+    # node_local_image_storage.enabled in the nodesets values (docker-proxy sidecar
+    # + masking docker/dockerd binaries in the jail). Here we only decide whether to
+    # keep dockerd in the shared supervisord at all: keep it if any nodeset has
+    # image-storage disks (Docker requires them for OCI data), drop it entirely only
+    # when no nodeset does, so disk-less clusters don't restart-loop a stub dockerd.
+    docker_enabled = anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
 
     tailscale_enabled       = var.tailscale_enabled
-    apparmor_enabled        = var.use_default_apparmor_profile
+    apparmor_profile        = local.apparmor_profile
     enable_soperator_checks = var.enable_soperator_checks
 
-    operator_version                   = var.operator_version
-    cert_manager_version               = var.cert_manager_version
-    k8up_version                       = var.k8up_version
-    mariadb_operator_version           = var.mariadb_operator_version
-    opentelemetry_collector_version    = var.opentelemetry_collector_version
-    prometheus_crds_version            = var.prometheus_crds_version
-    security_profiles_operator_version = var.security_profiles_operator_version
-    vmstack_version                    = var.vmstack_version
-    vmstack_crds_version               = var.vmstack_crds_version
-    vmlogs_version                     = var.vmlogs_version
-    dcgm_job_map_dir                   = var.dcgm_job_map_dir
-    notifier                           = var.soperator_notifier
+    operator_version                          = var.operator_version
+    cert_manager_version                      = var.cert_manager_version
+    k8up_version                              = var.k8up_version
+    mariadb_operator_version                  = var.mariadb_operator_version
+    opentelemetry_collector_version           = var.opentelemetry_collector_version
+    opentelemetry_batch                       = var.opentelemetry_batch
+    opentelemetry_batch_enabled               = local.opentelemetry_batch_enabled
+    opentelemetry_sending_queue               = var.opentelemetry_sending_queue
+    opentelemetry_sending_queue_enabled       = local.opentelemetry_sending_queue_enabled
+    opentelemetry_delete_jail_logs_after_read = var.opentelemetry_delete_jail_logs_after_read
+    opentelemetry_delete_jail_logs_min_age    = var.opentelemetry_delete_jail_logs_min_age
+    prometheus_crds_version                   = var.prometheus_crds_version
+    vmstack_version                           = var.vmstack_version
+    vmstack_crds_version                      = var.vmstack_crds_version
+    vmlogs_version                            = var.vmlogs_version
+    notifier                                  = var.soperator_notifier
+    nccl_inspector_profiling                  = var.nccl_inspector_profiling
 
     name                    = var.name
     cluster_name            = var.cluster_name
     region                  = var.region
     public_o11y_enabled     = var.public_o11y_enabled
     tsa_token_writer_source = local.public_o11y_tsa_token_writer_source
-    has_local_nvme          = anytrue([for nodeset in var.worker_nodesets : nodeset.local_nvme.enabled])
-    local_nvme_mount_path = one(distinct([
-      for nodeset in var.worker_nodesets : nodeset.local_nvme.mount_path
-      if nodeset.local_nvme.enabled
-    ]))
-    metrics_collector = local.metrics_collector
-    create_pvcs       = var.create_pvcs
+    has_local_nvme          = anytrue([for nodeset in var.worker_nodesets : try(nodeset.local_nvme.enabled, false)])
+    has_nccl_network_vars   = length(local.worker_nccl_network_vars) > 0
+    metrics_collector       = local.metrics_collector
+    create_pvcs             = var.create_pvcs
 
     slurm_cluster_storage = {
       scheduling = local.node_filters
@@ -144,7 +157,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
       }
 
       topology = {
-        block_size = var.topology.plugin == "topology/block" ? var.topology.block_size : null
+        topologies = var.topology.topologies
       }
 
       use_preinstalled_gpu_drivers = var.use_preinstalled_gpu_drivers
@@ -187,9 +200,9 @@ resource "helm_release" "soperator_fluxcd_cm" {
           slurmdbd_config = var.slurmdbd_config
           slurm_config    = var.slurm_accounting_config
           resources = var.accounting_enabled ? {
-            cpu               = var.resources.accounting.cpu_cores - local.resources.munge.cpu - local.resources.mariadb.cpu
-            memory            = var.resources.accounting.memory_gibibytes - local.resources.munge.memory - local.resources.mariadb.memory
-            ephemeral_storage = var.resources.accounting.ephemeral_storage_gibibytes - local.resources.munge.ephemeral_storage - local.resources.mariadb.ephemeral_storage
+            cpu               = var.node_capacity.accounting.cpu_cores - local.resources.munge.cpu - local.resources.mariadb.cpu
+            memory            = var.node_capacity.accounting.memory_gibibytes - local.resources.munge.memory - local.resources.mariadb.memory
+            ephemeral_storage = var.node_capacity.accounting.ephemeral_storage_gibibytes - local.resources.munge.ephemeral_storage - local.resources.mariadb.ephemeral_storage
           } : null
         }
 
@@ -197,19 +210,19 @@ resource "helm_release" "soperator_fluxcd_cm" {
           size = var.node_count.controller
           resources = {
             cpu = floor(
-              var.resources.controller.cpu_cores
+              var.node_capacity.controller.cpu_cores
               -local.resources.munge.cpu
               -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
               -local.resources.kruise_daemon.cpu
             )
             memory = floor(
-              var.resources.controller.memory_gibibytes
+              var.node_capacity.controller.memory_gibibytes
               -local.resources.munge.memory
               -(var.sssd_enabled ? local.resources.sssd.memory : 0)
               -local.resources.kruise_daemon.memory
             )
             ephemeral_storage = floor(
-              var.resources.controller.ephemeral_storage_gibibytes
+              var.node_capacity.controller.ephemeral_storage_gibibytes
               -local.resources.munge.ephemeral_storage
               -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
             )
@@ -220,21 +233,17 @@ resource "helm_release" "soperator_fluxcd_cm" {
           size = 0
           resources = {
             cpu = floor(
-              var.resources.worker[0].cpu_cores
+              var.node_capacity.worker[0].cpu_cores
               -local.resources.munge.cpu
               -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
             ) - local.resources.kruise_daemon.cpu
-            memory = floor(
-              var.resources.worker[0].memory_gibibytes
-              -local.resources.munge.memory
-              -(var.sssd_enabled ? local.resources.sssd.memory : 0)
-            ) - local.resources.kruise_daemon.memory
+            memory = local.worker_memory[0]
             ephemeral_storage = floor(
-              var.resources.worker[0].ephemeral_storage_gibibytes
+              var.node_capacity.worker[0].ephemeral_storage_gibibytes
               -local.resources.munge.ephemeral_storage
               -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
             )
-            gpus = var.resources.worker[0].gpus
+            gpus = var.node_capacity.worker[0].gpus
           }
           shared_memory            = var.shared_memory_size_gibibytes
           slurm_node_extra         = local.slurm_node_extra
@@ -243,6 +252,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
 
         login = {
           size                     = var.node_count.login
+          autoscaling              = var.login_autoscaling
           k8s_node_filter_name     = var.login_on_worker_nodes ? local.node_filters.worker.name : local.node_filters.login.name
           allocation_id            = var.login_allocation_id
           sshd_config_map_ref_name = var.login_sshd_config_map_ref_name
@@ -250,19 +260,19 @@ resource "helm_release" "soperator_fluxcd_cm" {
           public_ip                = var.login_public_ip
           resources = {
             cpu = floor(
-              var.resources.login.cpu_cores
+              var.node_capacity.login.cpu_cores
               -local.resources.munge.cpu
               -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
               -local.resources.kruise_daemon.cpu
             )
             memory = floor(
-              var.resources.login.memory_gibibytes
+              var.node_capacity.login.memory_gibibytes
               -local.resources.munge.memory
               -(var.sssd_enabled ? local.resources.sssd.memory : 0)
               -local.resources.kruise_daemon.memory
             )
             ephemeral_storage = floor(
-              var.resources.login.ephemeral_storage_gibibytes
+              var.node_capacity.login.ephemeral_storage_gibibytes
               -local.resources.munge.ephemeral_storage
               -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
             )
@@ -270,8 +280,9 @@ resource "helm_release" "soperator_fluxcd_cm" {
         }
 
         exporter = {
-          enabled   = var.exporter_enabled
-          resources = local.resources.exporter
+          enabled                = var.exporter_enabled
+          resources              = local.resources.exporter
+          max_collector_inflight = var.exporter_max_collector_inflight
         }
 
         munge = {
@@ -309,20 +320,25 @@ resource "helm_release" "soperator_fluxcd_cm" {
     }
 
     resources = {
-      vm_single           = var.resources_vm_single
-      vm_agent            = var.resources_vm_agent
-      vm_logs             = var.resources_vm_logs_server
-      logs_collector      = var.resources_logs_collector
-      jail_logs_collector = var.resources_jail_logs_collector
-      events_collector    = var.resources_events_collector
-      node_configurator   = local.resources.node_configurator
-      slurm_operator      = local.resources.slurm_operator
-      slurm_checks        = local.resources.slurm_checks
-      dcgm_exporter       = local.resources.dcgm_exporter
-      nfs_server          = local.resources.nfs_server
+      vm_single                   = local.selected_preset.vm_single
+      vm_agent                    = local.selected_preset.vm_agent
+      vm_logs                     = local.selected_preset.vm_logs
+      logs_collector              = local.selected_preset.logs_collector
+      jail_logs_collector         = local.selected_preset.jail_logs_collector
+      events_collector            = local.selected_preset.events_collector
+      nccl_profiles_collector     = local.selected_preset.nccl_profiles_collector
+      node_configurator           = local.resources.node_configurator
+      soperator_main_controller   = local.resources.soperator_main_controller
+      soperator_checks_controller = local.resources.soperator_checks_controller
+      dcgm_exporter               = local.resources.dcgm_exporter
+      nfs_server                  = local.resources.nfs_server
+      kruise_manager              = local.selected_preset.kruise_manager
+      kube_state_metrics          = local.selected_preset.kube_state_metrics
     }
 
     vm_agent_queue_count = local.vm_agent_queue_count
+
+    kube_state_metrics_max_scrape_size = local.kube_state_metrics_max_scrape_size
 
     slurm_nodesets_partitions = var.slurm_nodesets_partitions
     nodesets                  = var.worker_nodesets
