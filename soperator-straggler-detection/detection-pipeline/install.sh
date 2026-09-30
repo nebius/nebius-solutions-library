@@ -42,6 +42,45 @@ apt_install() {
   fi
 }
 
+# Real, live-confirmed gap (this session): DCGM hostengine (nv-hostengine,
+# the persistent daemon every DCGM-sourced cause-check -- clocks, power,
+# thermal, ECC, PCIe -- depends on) is not guaranteed to be running even
+# when the DCGM package itself is installed (not auto-started at boot on
+# every image, can be killed/reset independently of this project). Found
+# down on all 6 nodes of a real cluster with zero signal until alert_
+# engine.py's own runtime watchdog (_maybe_launch_dcgm_hostengine_check,
+# P27-hotfix2) happened to notice mid-job -- that watchdog is reactive-
+# only by design (detects + logs loudly, never starts anything itself).
+# This is the one place that actually brings it up. Tries the two real
+# systemd unit names DCGM ships under across different distros/images
+# before falling back to launching nv-hostengine directly (it daemonizes
+# itself by default -- forks to background and returns immediately, real
+# documented DCGM behavior, needed on any host where DCGM isn't wired
+# into systemd at all). Same root-or-passwordless-sudo discipline as
+# apt_install() above, not assumed -- exported via `declare -f` for the
+# per-node ssh call site below.
+start_dcgm_hostengine() {
+  if command -v systemctl >/dev/null 2>&1; then
+    for svc in nvidia-dcgm dcgm; do
+      if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
+        if [ "$(id -u)" -eq 0 ]; then
+          systemctl start "$svc" && return 0
+        elif sudo -n true 2>/dev/null; then
+          sudo systemctl start "$svc" && return 0
+        fi
+      fi
+    done
+  fi
+  if command -v nv-hostengine >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then
+      nv-hostengine >/dev/null 2>&1 && return 0
+    elif sudo -n true 2>/dev/null; then
+      sudo nv-hostengine >/dev/null 2>&1 && return 0
+    fi
+  fi
+  return 1
+}
+
 # =========================================================================
 # Step 1 -- real, live environment detection (no assumed values)
 # =========================================================================
@@ -196,6 +235,34 @@ for node in "${_NODES_ARR[@]}"; do
       || fail "  $node: libibverbs-dev install failed -- MoE's RDMA fault shim will not build there."
   else
     info "  $node: libibverbs-dev already present."
+  fi
+done
+
+# =========================================================================
+# DCGM hostengine liveness check + fix (per node) -- see start_dcgm_
+# hostengine's own comment above for why this needs to exist at all.
+# Uses the EXACT same liveness check alert_engine.py's own watchdog does
+# (classifier/cause_metrics.py's check_nv_hostengine_alive: `dcgmi
+# discovery -l`), so "fixed here" and "watched there" agree on what
+# "alive" means.
+# =========================================================================
+
+info "Checking DCGM hostengine liveness on every node (needed for Path B: DCGM clock/power/thermal/ECC/PCIe corroboration)..."
+for node in "${_NODES_ARR[@]}"; do
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "command -v dcgmi" >/dev/null 2>&1; then
+    warn "  $node: dcgmi not found -- DCGM-sourced corroboration (Path B) will be unavailable on this node. This project does not install the DCGM package itself (same reasoning as CUDA/NCCL in environment.sh -- a driver-adjacent install, deliberately out of scope here); install datacenter-gpu-manager yourself, then re-run install.sh."
+    continue
+  fi
+  if ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "dcgmi discovery -l" >/dev/null 2>&1; then
+    info "  $node: DCGM hostengine already alive."
+    continue
+  fi
+  warn "  $node: DCGM hostengine (nv-hostengine) is down -- attempting to start it..."
+  if ssh -o BatchMode=yes "$node" "$(declare -f start_dcgm_hostengine); start_dcgm_hostengine" >/dev/null 2>&1 \
+      && ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "dcgmi discovery -l" >/dev/null 2>&1; then
+    info "  $node: DCGM hostengine started and confirmed alive."
+  else
+    warn "  $node: could not start DCGM hostengine (not root, no passwordless sudo, no known systemd unit, and nv-hostengine either missing or failed to start). DCGM-sourced corroboration (Path B) will be unavailable on this node until it's started manually -- see alert_engine.py's own [DCGM-HOSTENGINE-DOWN] log line for the live symptom this causes."
   fi
 done
 

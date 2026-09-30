@@ -227,6 +227,17 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   script whose job is bringing up the *pipeline*, not the *host*). Run
   `./environment.sh` first on a genuinely fresh host to cover exactly
   that gap — see "Installing" below for how the two compose.
+  `dcgmi` is the one entry on this list where `install.sh` does not
+  install the package itself (same reasoning as CUDA/NCCL — a driver-
+  adjacent install) but **does** actively check and fix a real,
+  confirmed-live gap: the DCGM *hostengine* daemon (`nv-hostengine`)
+  every DCGM-sourced check (clocks, power, thermal, ECC, PCIe — see
+  "Path B" in section 4) depends on is not guaranteed to be running even
+  when the package is installed, with no loud signal that it's down
+  until `alert_engine.py`'s own runtime watchdog happens to notice
+  mid-job. `install.sh` now checks every node's DCGM hostengine liveness
+  and attempts to start it (systemd, then a direct `nv-hostengine`
+  fallback) before that ever becomes a live-job surprise.
 - **NCCL — read this before assuming a version.** A launch script's
   `MOUNTS` bind-mounts the host's own `/usr/lib/x86_64-linux-gnu` into
   the training container, which silently **shadows** the container's
