@@ -568,6 +568,21 @@ class NodeAggregator:
     def base_labels(self):
         return f'hostname="{self.hostname}",cluster="{self.cluster}",slurm_job_id="{self.slurm_job_id}"'
 
+    def gpu_slot_label(self, phys_id):
+        """Real, live local GPU index (Inspector's own gpu_slot_index
+        field, populated via cudaGetDevice() -- see phys_gpu_slot's own
+        comment) for this phys_id, rendered as a label alongside every
+        existing member="{phys_id}" label. A dashboard reading only the
+        bare member/phys_id number has no way to tell which physical GPU
+        on the node that was without also knowing GPUS_PER_NODE for that
+        specific cluster (8 on an H200 node, 4 on a GB300 node, etc.) --
+        this is the real value itself, not a modulo guess, so it reads
+        correctly on any cluster shape. "unknown" if this phys_id's own
+        records never carried gpu_slot_index (old Inspector build, or
+        capture failed)."""
+        slot = self.phys_gpu_slot.get(phys_id, -1)
+        return slot if slot != -1 else "unknown"
+
     def query_throughput_history(self, sig):
         """P23 (throughput-ratio self-calibration fix) -- reads (not just
         writes) VM: real historical agg_job_throughput_rate_ref samples
@@ -912,7 +927,7 @@ class NodeAggregator:
         self.comm_bucket_members[(comm_id, bucket)].add(phys_id)
         self.maybe_log_rate(comm_id, bucket, s)
 
-        self.push_buf.append((f'agg_samples_seen{{comm="{comm_id}",member="{phys_id}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_samples_seen{{comm="{comm_id}",member="{phys_id}",gpu_slot="{self.gpu_slot_label(phys_id)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                len(s.all_vals), ts_us // 1000))
 
         self.drain_windows(comm_id, bucket, ts_us)
@@ -1214,7 +1229,7 @@ class NodeAggregator:
             # baseline) already knows to skip.
             role_rank, role_n = self.phys_comm_role.get((comm_id, p), ("na", "na"))
             self.push_buf.append((f'agg_mean_exec_time_us{{comm="{comm_id}",member="{p}",'
-                                   f'role_rank="{role_rank}",role_n="{role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
+                                   f'gpu_slot="{self.gpu_slot_label(p)}",role_rank="{role_rank}",role_n="{role_n}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    mv, ts_us // 1000))
         # P27-hotfix3 -- real, TIME-based grace period, see
         # bucket_scored_at_ts_us's own docstring at __init__ and
@@ -1272,11 +1287,11 @@ class NodeAggregator:
         fired = past_grace and z > MEAN_Z_THRESH and mm > MEAN_MM_THRESH
         z_report = z if z != float("inf") else 1e6
         mm_report = mm if mm != float("inf") else 1e6
-        self.push_buf.append((f'agg_mean_fired{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_mean_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                1 if fired else 0, ts_us // 1000))
-        self.push_buf.append((f'agg_mean_z_worst{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_mean_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                z_report, ts_us // 1000))
-        self.push_buf.append((f'agg_mean_mm_worst{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_mean_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                mm_report, ts_us // 1000))
 
     def score_cv_window(self, comm_id, bucket, window_vals, ts_us):
@@ -1284,7 +1299,7 @@ class NodeAggregator:
         for p, vals in window_vals.items():
             cv = verified_stat_cv(vals, TRIM)
             self.state[(comm_id, p, bucket)].cv_history.append(cv)
-            self.push_buf.append((f'agg_cv_exec_time{{comm="{comm_id}",member="{p}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            self.push_buf.append((f'agg_cv_exec_time{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    cv, ts_us // 1000))
 
         members_here = [p for p in window_vals if p not in cv_exclude]
@@ -1324,10 +1339,10 @@ class NodeAggregator:
             whist = self.state[(comm_id, worst, bucket)].persist_hist
             whist.append(z > CV_Z_THRESH)
             fired = sum(whist) >= PERSIST_REQUIRED
-            self.push_buf.append((f'agg_persistence_fired{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            self.push_buf.append((f'agg_persistence_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    1 if fired else 0, ts_us // 1000))
             z_report = z if z != float("inf") else 1e6
-            self.push_buf.append((f'agg_cv_z_worst{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            self.push_buf.append((f'agg_cv_z_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    z_report, ts_us // 1000))
 
         self.check_rank0(comm_id, bucket, ts_us)
@@ -1351,7 +1366,7 @@ class NodeAggregator:
             if len(vals) >= 20:
                 counts[p] = stat_outlier_count(vals)
         for p, c in counts.items():
-            self.push_buf.append((f'agg_outlier_count{{comm="{comm_id}",member="{p}",{bucket_labels(bucket)},{self.base_labels()}}}',
+            self.push_buf.append((f'agg_outlier_count{{comm="{comm_id}",member="{p}",gpu_slot="{self.gpu_slot_label(p)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                    c, ts_us // 1000))
         if len(counts) < 2:
             return
@@ -1360,9 +1375,9 @@ class NodeAggregator:
         mm = maxmed(counts[worst], peers)
         fired = counts[worst] >= OUTLIER_COUNT_THRESH and mm > OUTLIER_COUNT_MM_THRESH
         mm_report = mm if mm != float("inf") else 1e6
-        self.push_buf.append((f'agg_outlier_count_fired{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_outlier_count_fired{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                1 if fired else 0, ts_us // 1000))
-        self.push_buf.append((f'agg_outlier_count_mm_worst{{comm="{comm_id}",member="{worst}",{bucket_labels(bucket)},{self.base_labels()}}}',
+        self.push_buf.append((f'agg_outlier_count_mm_worst{{comm="{comm_id}",member="{worst}",gpu_slot="{self.gpu_slot_label(worst)}",{bucket_labels(bucket)},{self.base_labels()}}}',
                                mm_report, ts_us // 1000))
 
     def maybe_heartbeat(self):
