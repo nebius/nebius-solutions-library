@@ -1282,7 +1282,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{hostname}} | member={{member}} | bucket={{bucket}}",
+          "legendFormat": "{{hostname}} gpu{{gpu_slot}} rank {{role_rank}}/{{role_n}} (pid {{member}}) | {{bucket}}",
           "range": true,
           "refId": "A",
           "useBackend": false,

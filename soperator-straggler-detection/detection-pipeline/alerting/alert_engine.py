@@ -2571,7 +2571,8 @@ class AlertEngine:
         self._dcgm_fallback_thread = threading.Thread(target=_run, daemon=True)
         self._dcgm_fallback_thread.start()
 
-    def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None):
+    def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None,
+              role_rank="na", role_n="na"):
         # P22.2 -- coverage_guard.py and build_finding_for_alert's own
         # `primary=` display field are both out of this session's scope
         # (see this session's own report: coverage_guard's own volume
@@ -2597,8 +2598,22 @@ class AlertEngine:
         pc = finding["cause"].get("path_c_storage")
         verdict = storage_evidence.determine_storage_path(pc) if pc else None
         verdict_num = 1 if verdict is True else (0 if verdict is False else -1)
+        # Real bug found live (this session): this metric's own dashboard
+        # panel showed a bare member (a PID) with no way to tell which
+        # physical GPU/rank that was -- same readability gap already
+        # fixed on node_aggregator_ref.py's "worst rank" metrics (see its
+        # gpu_slot_label/role_labels). gpu_slot reuses the SAME real
+        # gpu_slot_index this alert already queried above (via
+        # build_finding_for_alert -> _query_gpu_slot, finding["dcgm_gpu_
+        # slot_used"]/["dcgm_gpu_slot_known"]) -- no new query. role_rank/
+        # role_n are passed through from the VM row that triggered this
+        # alert (_check_cv/_check_mean already have them as of node_
+        # aggregator_ref.py's own role_rank/role_n label) -- "na" if this
+        # call path didn't have them (e.g. a future caller).
+        gpu_slot_disp = finding["dcgm_gpu_slot_used"] if finding.get("dcgm_gpu_slot_known") else "unknown"
         self._push_visibility_metric(
-            f'agg_path_c_verdict{{hostname="{hostname}",member="{member}",comm="{comm}",bucket="{bucket}"}} {verdict_num}')
+            f'agg_path_c_verdict{{hostname="{hostname}",member="{member}",comm="{comm}",bucket="{bucket}",'
+            f'gpu_slot="{gpu_slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}')
 
         # P21.6 -- cascade-mislocalization fix. An alert sourced from a
         # larger communicator has no way, by itself, to know whether the
@@ -3043,7 +3058,8 @@ class AlertEngine:
             key = (hostname, comm, member, bucket, coll)
             if self.cv_tracker.observe(key, z, ts):
                 mm, worst_val = self._cv_maxmed(hostname, comm, bucket, coll, member)
-                self._emit("cv", hostname, comm, member, bucket, coll, z, mm, worst_val, None, m.get("slurm_job_id"), anomaly_ts=ts)
+                self._emit("cv", hostname, comm, member, bucket, coll, z, mm, worst_val, None, m.get("slurm_job_id"), anomaly_ts=ts,
+                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"))
 
     def _check_mean(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added to both queries, same reasoning as
@@ -3161,7 +3177,8 @@ class AlertEngine:
                 age_s = (now_ts - z_row_ts) if z_row_ts is not None else None
                 print(f"[EMIT_TRACE] decision_time={now_ts:.3f} member={member} bucket={bucket} coll={row_coll} "
                       f"z_sample_real_ts={z_row_ts} age_s={age_s}", flush=True)
-                self._emit("mean", hostname, comm, member, bucket, coll, z, mm, None, None, m.get("slurm_job_id"), anomaly_ts=z_row_ts)
+                self._emit("mean", hostname, comm, member, bucket, coll, z, mm, None, None, m.get("slurm_job_id"), anomaly_ts=z_row_ts,
+                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"))
             self.was_firing[key] = fired
 
     def _check_outlier_count(self, hostname, comm, bucket, coll):
