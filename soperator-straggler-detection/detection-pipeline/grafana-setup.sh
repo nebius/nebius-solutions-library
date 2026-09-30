@@ -185,6 +185,43 @@ info "Wrote $GRAFANA_AUTH_CONFIG_FILE and $GRAFANA_ADMIN_CREDENTIALS_FILE (real,
 # =========================================================================
 
 mkdir -p "$GRAFANA_DATA_DIR" "$GEN_PROV_DIR/datasources" "$GEN_PROV_DIR/dashboards"
+
+# Real bug found live (this session): Grafana only discovers NEW
+# provisioning PROVIDER config files (the dashboards/local.yaml and
+# datasources/local.yaml files that tell it where to look at all) at
+# its own process startup -- updateIntervalSeconds only governs an
+# ALREADY-REGISTERED provider re-scanning its own configured path for
+# dashboard-JSON content changes, not Grafana noticing a brand-new
+# provider file that didn't exist yet when it booted. Previously this
+# script left both provider files for install.sh to write later,
+# meaning Grafana booted with ZERO registered providers and never
+# picked up install.sh's real config without a manual restart --
+# confirmed live: the dashboard never appeared until Grafana was
+# restarted after install.sh had already run.
+#
+# Real fix: generate both provider files HERE, before Grafana's first
+# start, using the same real sed substitutions install.sh's own Step
+# 4.5 already does (so the two stay byte-for-byte consistent):
+# - dashboards/local.yaml needs only $PKG_ROOT, which this script
+#   already has -- fully correct from the very first boot, no guessing.
+# - datasources/local.yaml needs the real VM_URL, which this script may
+#   not know yet (vm-setup.sh is independent/order-agnostic). Uses the
+#   same http://$(hostname):8428 convention vm-setup.sh itself
+#   establishes as a real, live best guess -- if VM isn't reachable
+#   there yet or install.sh later discovers a different real value, the
+#   FILE already exists and is already being watched, so Grafana's own
+#   periodic re-scan picks up install.sh's later correction with no
+#   restart needed (this part of the original reasoning was correct;
+#   only the "the file already exists at boot" precondition was missing).
+sed "s|path: /root/P20g_pr_ready/dashboards_dropin|path: $PKG_ROOT/observability/dashboards|" \
+  "$PKG_ROOT/observability/dashboards/provisioning/dashboards/local.yaml" \
+  > "$GEN_PROV_DIR/dashboards/local.yaml"
+_guess_vm_url="http://$(hostname):8428"
+sed "s|url: http://worker-0:8428|url: $_guess_vm_url|" \
+  "$PKG_ROOT/observability/dashboards/provisioning/datasources/local.yaml" \
+  > "$GEN_PROV_DIR/datasources/local.yaml"
+info "Wrote real dashboard + datasource provisioning config to $GEN_PROV_DIR before Grafana's first start (datasource VM_URL is a live best guess, $_guess_vm_url -- install.sh corrects this later if needed, picked up automatically since the file already exists)."
+
 CUSTOM_INI="$GRAFANA_DIR/custom.ini"
 cat > "$CUSTOM_INI" <<EOF
 [server]
@@ -194,7 +231,7 @@ data = $GRAFANA_DATA_DIR
 provisioning = $GEN_PROV_DIR
 EOF
 cat "$GRAFANA_AUTH_CONFIG_FILE" >> "$CUSTOM_INI"
-info "Wrote $CUSTOM_INI -- provisioning pointed directly at $GEN_PROV_DIR (install.sh's own later run keeps this directory's real VM_URL-correct contents up to date; Grafana's own updateIntervalSeconds re-scans it automatically, no restart needed)."
+info "Wrote $CUSTOM_INI -- provisioning pointed directly at $GEN_PROV_DIR, already populated above."
 
 # =========================================================================
 # Step 5 -- launch under the same auto-restart supervisor pattern this

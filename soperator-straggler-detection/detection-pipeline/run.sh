@@ -149,23 +149,58 @@ done
 # check only PRINTS when something is DOWN ([PIPELINE-DOWN]); once both
 # aggregators are genuinely healthy (as just confirmed above), a fully
 # healthy cycle produces NO new log output at all, so this check failed
-# even though the process was correctly, actively cycling. Real fix:
-# confirm actual CPU activity via /proc/<pid>/stat's own utime+stime
-# ticks advancing across the wait, which proves real work is happening
-# regardless of how quiet a healthy cycle's own log output is.
+# even though the process was correctly, actively cycling. Real fix at
+# the time: confirm actual CPU activity via /proc/<pid>/stat's own
+# utime+stime ticks advancing across the wait.
+#
+# Second real bug found live (a later session, a fast/idle 6-node
+# cluster): utime+stime is measured in USER_HZ ticks (typically 100Hz =
+# 10ms granularity). VictoriaMetrics answered in ~3ms there with no
+# active training job (so alert_engine.py's own per-communicator checks
+# are skipped entirely -- nothing discovered yet to check), and a
+# genuinely healthy poll cycle burned well under 10ms of real CPU
+# across MANY consecutive cycles -- confirmed live: ticks stayed
+# completely flat over both a 6s and a 15s window despite the process
+# being provably alive and cycling normally
+# (/proc/<pid>/wchan=hrtimer_nanosleep, State=S -- exactly what a
+# healthy time.sleep() between polls looks like, not a hang). A longer
+# window does not fix this if the real per-cycle cost is itself
+# sub-tick -- the fix is precision, not duration.
+# /proc/<pid>/schedstat's own first field is the same real
+# CPU-consumption signal (never fooled by "no new log output," same as
+# the original fix's own reasoning), but in real nanoseconds, not 10ms
+# ticks -- confirmed live this session it reliably advances from even a
+# single 10ms sleep, several orders of magnitude more sensitive than
+# utime+stime. Falls back to the original tick-based check if
+# schedstat isn't readable on this kernel -- a real, disclosed
+# degradation on such a kernel, not silently assumed to work everywhere.
 _pid="$(pgrep -f 'alert_engine\.py .*--duration' 2>/dev/null | head -1)"
-_ticks_before=""; _ticks_after=""
-if [ -n "$_pid" ] && [ -r "/proc/$_pid/stat" ]; then
-  _ticks_before="$(awk '{print $14+$15}' "/proc/$_pid/stat" 2>/dev/null)"
+_use_schedstat=0
+if [ -n "$_pid" ] && [ -r "/proc/$_pid/schedstat" ] && [ -n "$(awk '{print $1}' "/proc/$_pid/schedstat" 2>/dev/null)" ]; then
+  _use_schedstat=1
+fi
+_cpu_before=""; _cpu_after=""
+if [ -n "$_pid" ]; then
+  if [ "$_use_schedstat" -eq 1 ]; then
+    _cpu_before="$(awk '{print $1}' "/proc/$_pid/schedstat" 2>/dev/null)"
+  elif [ -r "/proc/$_pid/stat" ]; then
+    _cpu_before="$(awk '{print $14+$15}' "/proc/$_pid/stat" 2>/dev/null)"
+  fi
 fi
 sleep 6
-if [ -n "$_pid" ] && [ -r "/proc/$_pid/stat" ]; then
-  _ticks_after="$(awk '{print $14+$15}' "/proc/$_pid/stat" 2>/dev/null)"
+if [ -n "$_pid" ]; then
+  if [ "$_use_schedstat" -eq 1 ]; then
+    _cpu_after="$(awk '{print $1}' "/proc/$_pid/schedstat" 2>/dev/null)"
+  elif [ -r "/proc/$_pid/stat" ]; then
+    _cpu_after="$(awk '{print $14+$15}' "/proc/$_pid/stat" 2>/dev/null)"
+  fi
 fi
-if [ -n "$_pid" ] && [ -n "$_ticks_before" ] && [ -n "$_ticks_after" ] && [ "$_ticks_after" -gt "$_ticks_before" ]; then
-  info "  alert_engine.py: alive and CYCLING (pid $_pid, real CPU ticks advanced $((_ticks_after - _ticks_before)) over 6s)."
+_cpu_unit="ns (schedstat, real CPU time)"
+[ "$_use_schedstat" -eq 0 ] && _cpu_unit="ticks (utime+stime -- schedstat unavailable on this kernel, only 10ms granularity)"
+if [ -n "$_pid" ] && [ -n "$_cpu_before" ] && [ -n "$_cpu_after" ] && [ "$_cpu_after" -gt "$_cpu_before" ]; then
+  info "  alert_engine.py: alive and CYCLING (pid $_pid, real CPU consumption advanced $((_cpu_after - _cpu_before)) $_cpu_unit over 6s)."
 else
-  fail "  alert_engine.py: NOT confirmed alive/cycling (pid='${_pid:-none}', CPU ticks before=${_ticks_before:-n/a} after=${_ticks_after:-n/a}). Check $ALERT_LOG."
+  fail "  alert_engine.py: NOT confirmed alive/cycling (pid='${_pid:-none}', CPU before=${_cpu_before:-n/a} after=${_cpu_after:-n/a} [$_cpu_unit]). Check $ALERT_LOG."
   STEP2_FAIL=1
 fi
 

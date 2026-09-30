@@ -326,17 +326,27 @@ extracting, and generates the exact same real, enforced-auth config
 **never** anonymous access — written to `var/grafana_admin_credentials.txt`,
 `chmod 600`) using the identical idempotent "reuse an already-generated
 password" rule, so running `install.sh` afterward correctly detects and
-reuses it rather than generating a conflicting one. It also points
-Grafana's own `[paths] provisioning` directly at
-`var/grafana_provisioning_generated/` — closing a gap that otherwise
-needs a manual step — combined into place *before* Grafana's first
-start (a data directory's admin password only takes effect then).
-That directory won't have the real `VM_URL` filled in until `install.sh`
-runs afterward, but that's fine: the shipped dashboard-provisioning
-config has its own `updateIntervalSeconds`, so Grafana re-scans and
-picks up `install.sh`'s later, correct rewrite automatically — no
-restart needed, no need to run `install.sh` twice. Finally, it verifies
-real auth is genuinely enforced (`/api/org` must answer `401`/`302`,
+reuses it rather than generating a conflicting one. It also generates
+both real provisioning provider files itself (`dashboards/local.yaml`
+and `datasources/local.yaml`, the same real sed substitutions
+`install.sh`'s own Step 4.5 does) directly under
+`var/grafana_provisioning_generated/` — which its `custom.ini` points
+`[paths] provisioning` at — **before Grafana's first start**, not just
+an empty directory for `install.sh` to fill in later. This matters:
+Grafana only discovers *new* provisioning provider files at its own
+process startup — `updateIntervalSeconds` only governs an
+*already-registered* provider re-scanning its own configured path for
+dashboard-JSON content changes, not Grafana noticing a provider file
+that didn't exist yet when it booted (a real bug an earlier version of
+this script had — the dashboard silently never appeared until Grafana
+was manually restarted after `install.sh` ran). The datasource's real
+`VM_URL` is a live best guess here (`http://$(hostname):8428`, the same
+convention `vm-setup.sh` establishes) since this script may run before
+`vm-setup.sh`/`install.sh` know the real value — but because the *file*
+already exists and is already being watched, `install.sh`'s later
+correction (if the guess was wrong) **is** picked up automatically via
+the periodic re-scan, no restart needed for that part. Finally, it
+verifies real auth is genuinely enforced (`/api/org` must answer `401`/`302`,
 never `200`) before declaring success, exactly like `install.sh`'s own
 live check. Port `3000` is likewise Grafana's own upstream default, not
 Soperator-specific — override `GRAFANA_PORT` if needed, same caveat as
