@@ -185,7 +185,14 @@ not in the Python detection/alerting/classification core.
   requires a full NCCL source checkout with its own `build/` already
   built (`NCCL_HOME := ../../build` in the Makefile) and a real
   `$CUDA_HOME`. See the Inspector-plugin-provenance section below for the
-  exact, currently-confirmed version story.
+  exact, currently-confirmed version story. `install.sh` itself only
+  detects this and fails loudly if missing (a real, deliberate scope
+  boundary — provisioning it is a substantial, separate step); a real
+  `environment.sh` (top-level, next to `install.sh`) now covers exactly
+  this gap — compiler toolchain via `build-essential`, CUDA toolkit via
+  NVIDIA's own `cuda-toolkit-13-0` apt package (never touches the GPU
+  driver), and a real NCCL source clone pinned to the confirmed-real
+  upstream tag `v2.28.9-1`, built at the exact path `install.sh` expects.
 - **`iowait_agent.bt`** does not assume a specific kernel version, but
   does hardcode a jail PID-namespace nesting depth
   (`thread_pid->numbers[1].nr`) — see Category E.

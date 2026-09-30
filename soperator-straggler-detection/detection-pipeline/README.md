@@ -108,6 +108,11 @@ status, Path A's own real history).
 ## 2. Layout
 
 ```
+environment.sh      Optional, run BEFORE install.sh on a genuinely fresh
+                    host -- covers the one prerequisite tier install.sh
+                    does not attempt itself (compiler toolchain, CUDA
+                    toolkit, a real NCCL source build) -- see "Installing"
+                    below
 install.sh          Brings a fresh cluster to a ready-to-run state using
                     only real, live discovery -- see "Installing" below
 run.sh               Launches the standing pipeline (aggregator per real
@@ -193,8 +198,14 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   (`squeue`/`srun`/`scontrol`), a C++ compiler + CUDA toolkit + a full
   NCCL source build to build the Inspector plugin, and a C compiler +
   **`libibverbs-dev`** to build `workloads/moe/qp_rate_limit_shim.c`.
-  `install.sh` checks for and installs what it can automatically — see
-  "Installing" below.
+  `install.sh` checks for and installs what it can automatically (see
+  "Installing" below) — **except** the compiler toolchain, CUDA
+  toolkit, and NCCL source build, which it deliberately only detects
+  and fails loudly on rather than installs itself (a full NCCL source
+  checkout + build is a substantial, separate step, out of scope for a
+  script whose job is bringing up the *pipeline*, not the *host*). Run
+  `./environment.sh` first on a genuinely fresh host to cover exactly
+  that gap — see "Installing" below for how the two compose.
 - **NCCL — read this before assuming a version.** A launch script's
   `MOUNTS` bind-mounts the host's own `/usr/lib/x86_64-linux-gnu` into
   the training container, which silently **shadows** the container's
@@ -209,9 +220,39 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   something to silently standardize away without checking whether that
   shape's own validation depended on its specific version.
 
-## 4. Installing — `install.sh`
+## 4. Installing — `environment.sh` (optional) + `install.sh`
 
-Run from the Slurm control/login node:
+Run from the Slurm control/login node. On a genuinely fresh host — one
+without a working C++ compiler toolchain, CUDA toolkit, or a real NCCL
+source build already sitting at `/root/nccl-2.28-src` — run
+`environment.sh` first:
+
+```bash
+cd soperator-straggler-detection/detection-pipeline
+./environment.sh   # optional: only covers what install.sh below does not
+./install.sh
+```
+
+`environment.sh` covers exactly the one prerequisite tier `install.sh`
+does not attempt itself — a real compiler toolchain (`build-essential`
++ `git`, installed via apt if missing), a CUDA toolkit matching this
+package's own validated value (`VERSIONS.md`'s confirmed `13.0` —
+installs `cuda-toolkit-13-0` specifically via NVIDIA's own apt repo,
+**never** `cuda`/`cuda-drivers`, so an already-working GPU driver is
+never touched), and a real NCCL source tree cloned from NVIDIA's own
+upstream (`https://github.com/NVIDIA/nccl.git`), checked out at the
+exact tag this package was validated against (`v2.28.9-1` — confirmed
+to still exist on NVIDIA's real upstream repo, not assumed), and built
+at the exact path (`/root/nccl-2.28-src/build`) `install.sh`'s own Step
+2 already expects. It is a fast no-op if everything is already present
+— safe to run every time, not just on a first install. It deliberately
+does **not** duplicate anything `install.sh` already handles itself
+(`bpftrace`, `libibverbs-dev`, `logrotate`, Slurm/`ssh`/`python3`
+detection, per-node GPU/NCCL/`/tmp` discovery) — those stay in
+`install.sh`'s own Step 1, unchanged.
+
+Once the environment is ready (with or without `environment.sh` — a
+host that already has all of the above needs it not at all), run:
 
 ```bash
 cd soperator-straggler-detection/detection-pipeline
@@ -250,7 +291,9 @@ does, in order:
    tree, confirmed patches already applied) and **MoE's RDMA fault
    shim** from source — never ships a precompiled binary, so the plugin
    and whatever NCCL it links against always come from the exact same
-   real build.
+   real build. This step is the one that fails loudly (`FATAL: No NCCL
+   source tree with its own build/ found...`) if `environment.sh` above
+   was skipped and no real NCCL source build already exists.
 7. **Detects a real, reachable VictoriaMetrics instance** (probes the
    conventional `http://<first-node>:8428/health` live) or reports
    precisely that one needs to be launched per `vm-standalone/README.md`
