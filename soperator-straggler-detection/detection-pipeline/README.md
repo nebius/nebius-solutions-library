@@ -1391,6 +1391,28 @@ above) — this is expected, not a failure, as long as every episode has a
 matching recovery. Both are genuinely useful signals; neither is a proxy
 for the other, and `tools/self_test.sh`/`run.sh` only check the former.
 
+**`[DUMP-DISK-WARN]`/`[DUMP-DISK-CRITICAL]`/`[DUMP-DISK-RECOVERED]`** — a
+third, independent dead-man's-switch, added after a real 48-GPU Megatron
+validation run filled a 91GB shared volume with Inspector dumps and
+crashed the whole pipeline with zero warning beforehand.
+`node_aggregator_ref.py` pushes each host's own real `dump_dir` usage
+(`agg_dump_disk_usage_pct{hostname=...}`, via `shutil.disk_usage` —
+correct whether that path is node-local scratch or a shared mount, since
+it checks the real path directly rather than assuming) every real
+heartbeat cycle; `alert_engine.py` reads it back every 60s
+(`DUMP_DISK_CHECK_INTERVAL_S`) and logs loudly into the same central
+`var/alert_engine_supervised.log` a human is already watching. Default
+thresholds are 80% (`WARN`) and 95% (`CRITICAL`), both overridable via
+`DUMP_DISK_WARN_PCT`/`DUMP_DISK_CRITICAL_PCT` env vars on `alert_engine.py`'s
+own process. Tested end-to-end against a real, genuinely-filled tmpfs
+(not mocked) before shipping — confirmed `WARN` at 85%, escalation to
+`CRITICAL` at ~97%, and `RECOVERED` once usage dropped back down, each a
+real log line from the real code path, not inferred from reading it.
+This does not stop a job or delete anything itself — it's a loud warning
+you act on (clear old dumps, or stop the job), the same "detect and
+report, never silently take invasive action" discipline as every other
+signal in this project.
+
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
 restart-loop wrapper. Killing *only* the leaf `node_aggregator_ref.py`

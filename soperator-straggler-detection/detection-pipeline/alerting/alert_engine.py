@@ -91,6 +91,24 @@ NVLINK_CHECK_INTERVAL_S = 60.0
 # checks, so it reuses that cadence rather than the slower one.
 DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 
+# V1-beta P0 fix -- real bug found live: a real 48-GPU Megatron validation
+# run filled a 91GB shared volume with Inspector dumps and crashed the
+# whole pipeline, with zero warning beforehand -- every other real
+# resource-exhaustion risk this project found (aggregator memory, log
+# growth, iowait log growth) already got a loud, dedicated fix; this was
+# the one still missing. 60s: disk fills gradually (unlike DCGM hostengine
+# going down, which is a binary flip worth checking on the faster 20s
+# cadence) -- a real VM query per host every 60s is cheap and still gives
+# ample warning before a real multi-GB/minute accumulation (measured this
+# session: a healthy lean-mode job alone can hit ~28.5MB/min/node) reaches
+# either threshold. 80%/95%: real, configurable margins, not arbitrary --
+# 80% is early enough to act (stop the job, clear old dumps) before things
+# get urgent; 95% is the point actual disk-full is imminent within
+# minutes, not hours, at any real accumulation rate seen so far.
+DUMP_DISK_CHECK_INTERVAL_S = 60.0
+DUMP_DISK_WARN_PCT = float(os.environ.get("DUMP_DISK_WARN_PCT", "80.0"))
+DUMP_DISK_CRITICAL_PCT = float(os.environ.get("DUMP_DISK_CRITICAL_PCT", "95.0"))
+
 # P27.2.7 -- real, confirmed gap this closes (regression-sweep investigation,
 # TP-inference): _cross_comm_peer_median's peer pool requires every sibling
 # comm to be reporting a currently-FRESH row, which real, direct live-trace
@@ -996,6 +1014,15 @@ class AlertEngine:
         self.n_dcgm_hostengine_down_cycles = 0
         self._last_dcgm_hostengine_check_at = 0.0
         self._dcgm_hostengine_thread = None
+        # V1-beta P0 fix -- dump-directory disk-usage dead-man's-switch,
+        # same discipline as dcgm_hostengine_down above. State per host is
+        # "ok"/"warn"/"critical" (not a bare bool) so a warn->critical
+        # escalation (or the reverse) is itself a loud, visible transition,
+        # not silently absorbed into one "still not ok" bucket.
+        self.dump_disk_state = {}
+        self.n_dump_disk_critical_cycles = 0
+        self._last_dump_disk_check_at = 0.0
+        self._dump_disk_thread = None
         # P20d-closeout Part C -- measured live against this exact engine
         # (2 real hosts + synthetic hostnames to simulate scale): at 0ms
         # added query latency the old sequential poll_once() already took
@@ -1116,6 +1143,7 @@ class AlertEngine:
         self._run_check("host_check", self._maybe_launch_host_check)
         self._run_check("dcgm_fallback_check", self._maybe_launch_dcgm_fallback_check)
         self._run_check("dcgm_hostengine_check", self._maybe_launch_dcgm_hostengine_check)
+        self._run_check("dump_disk_check", self._maybe_launch_dump_disk_check)
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
@@ -2994,6 +3022,73 @@ class AlertEngine:
         self._dcgm_hostengine_thread = threading.Thread(target=_run, daemon=True)
         self._dcgm_hostengine_thread.start()
 
+    def _maybe_launch_dump_disk_check(self):
+        """V1-beta P0 fix -- dump-directory disk-usage dead-man's-switch,
+        same dead-man's-switch discipline as _maybe_launch_dcgm_hostengine_
+        check above: a real 48-GPU Megatron validation run filled a 91GB
+        shared volume with Inspector dumps and crashed the whole pipeline,
+        with zero loud signal anywhere beforehand. node_aggregator_ref.py
+        now pushes agg_dump_disk_usage_pct{hostname=...} every real
+        heartbeat cycle (see its own maybe_heartbeat comment) -- this
+        reads that back from VM (no new SSH round trip needed, unlike the
+        DCGM check above) and makes crossing WARN/CRITICAL loud and
+        visible in the SAME central log a human is already watching for
+        [PIPELINE-DOWN]/[DCGM-HOSTENGINE-DOWN], well before disk-full
+        actually crashes anything.
+
+        Threaded and interval-gated (DUMP_DISK_CHECK_INTERVAL_S), same
+        reasoning as the other periodic checks -- a VM query per host
+        must not run on the 3s poll budget. Fully generic -- iterates
+        self.hostnames exactly as discovered from live data."""
+        now = time.time()
+        if now - self._last_dump_disk_check_at < DUMP_DISK_CHECK_INTERVAL_S:
+            return
+        if self._dump_disk_thread is not None and self._dump_disk_thread.is_alive():
+            return
+        self._last_dump_disk_check_at = now
+        hosts = list(self.hostnames)
+
+        def _run():
+            for host in hosts:
+                try:
+                    rows = _query_instant_real_ts(self.vm_url, f'agg_dump_disk_usage_pct{{hostname="{host}"}}')
+                except Exception as e:
+                    print(f"[DUMP-DISK-CHECK-DEGRADED] hostname={host} :: query failed: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    continue
+                if not rows or not self._fresh(rows[0]):
+                    # Honest silence, not a guess -- matches this file's
+                    # own "couldn't check" convention elsewhere (e.g. DCGM
+                    # hostengine down) rather than assuming healthy.
+                    continue
+                pct = float(rows[0]["value"][1])
+                if pct < 0:
+                    continue  # aggregator's own honest "-1 = couldn't check" sentinel
+                prev_state = self.dump_disk_state.get(host, "ok")
+                if pct >= DUMP_DISK_CRITICAL_PCT:
+                    new_state = "critical"
+                    self.n_dump_disk_critical_cycles += 1
+                    print(f"[DUMP-DISK-CRITICAL] hostname={host} dump_dir_usage={pct:.1f}% "
+                          f"(>= {DUMP_DISK_CRITICAL_PCT:.0f}% threshold) -- disk-full is imminent, "
+                          f"NOT a silent degrade: this will crash the aggregator/training job on this "
+                          f"host if not addressed now (stop the job, or clear old dump files).",
+                          file=sys.stderr, flush=True)
+                elif pct >= DUMP_DISK_WARN_PCT:
+                    new_state = "warn"
+                    print(f"[DUMP-DISK-WARN] hostname={host} dump_dir_usage={pct:.1f}% "
+                          f"(>= {DUMP_DISK_WARN_PCT:.0f}% threshold) -- approaching disk-full on this "
+                          f"host's dump directory; consider clearing old dumps before this escalates.",
+                          file=sys.stderr, flush=True)
+                else:
+                    new_state = "ok"
+                    if prev_state != "ok":
+                        print(f"[DUMP-DISK-RECOVERED] hostname={host} dump_dir_usage={pct:.1f}%",
+                              file=sys.stderr, flush=True)
+                self.dump_disk_state[host] = new_state
+
+        self._dump_disk_thread = threading.Thread(target=_run, daemon=True)
+        self._dump_disk_thread.start()
+
     def _fresh(self, result_row):
         """agg_*_worst metrics are labeled rank="{worst}" -- the rank that
         was worst AT THAT WINDOW. Over a job's life this accumulates one
@@ -3387,3 +3482,5 @@ if __name__ == "__main__":
           f"({'PIPELINE WAS DOWN AT SOME POINT -- alert count above is NOT trustworthy for the down period(s)' if eng.n_pipeline_down_cycles else 'pipeline healthy for the entire run -- 0 alerts above is a genuine result'})")
     print(f"dcgm_hostengine_down_cycles: {eng.n_dcgm_hostengine_down_cycles} "
           f"({'nv-hostengine WAS DOWN on at least one host at some point -- DCGM-sourced cause-evidence for that period is degraded, not a genuine ambiguous read' if eng.n_dcgm_hostengine_down_cycles else 'nv-hostengine reachable on every host for the entire run'})")
+    print(f"dump_disk_critical_cycles: {eng.n_dump_disk_critical_cycles} "
+          f"({'a dump directory WAS at or above the critical disk-usage threshold at some point -- see [DUMP-DISK-CRITICAL] lines above' if eng.n_dump_disk_critical_cycles else 'every host stayed below the critical disk-usage threshold for the entire run'})")

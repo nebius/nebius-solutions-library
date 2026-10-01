@@ -68,6 +68,7 @@ import glob
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -1437,6 +1438,29 @@ class NodeAggregator:
         for phys_id, slot in self.phys_gpu_slot.items():
             self.push_buf.append((f'agg_member_gpu_slot_index{{member="{phys_id}",{self.base_labels()}}}',
                                    slot, now_ms))
+        # V1-beta P0 fix -- real bug found live: a real 48-GPU Megatron
+        # validation run filled a 91GB shared volume with Inspector dumps
+        # and crashed the whole pipeline, with zero warning beforehand.
+        # This is the ONE place that can check cheaply and accurately --
+        # this process already runs locally on the exact node/filesystem
+        # dump_dir lives on, so a plain shutil.disk_usage() call here is
+        # both free (no SSH round trip) and correct regardless of whether
+        # that filesystem happens to be node-local scratch or a shared
+        # mount (checked by real path, never assumed either way). Pushed
+        # as its own metric (same hostname-only label convention as
+        # agg_nvhostengine_alive -- this is a host-level fact, not
+        # job-scoped) so alert_engine.py's own dead-man's-switch
+        # (_maybe_launch_dump_disk_check) can read it centrally and log
+        # loudly, the same discipline as PIPELINE-DOWN/DCGM-HOSTENGINE-
+        # DOWN. -1.0 is an honest "couldn't check" sentinel (e.g. dump_dir
+        # doesn't exist yet) -- never a guessed value.
+        try:
+            du = shutil.disk_usage(self.dump_dir)
+            disk_pct_used = (100.0 * du.used / du.total) if du.total else -1.0
+        except Exception:
+            disk_pct_used = -1.0
+        self.push_buf.append((f'agg_dump_disk_usage_pct{{hostname="{self.hostname}"}}',
+                               disk_pct_used, now_ms))
 
     def flush(self):
         if not self.push_buf:
