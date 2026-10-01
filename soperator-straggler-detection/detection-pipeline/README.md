@@ -930,6 +930,75 @@ in, filtering two new panels:
 No new metrics collection for either panel — both read series that were
 already being pushed.
 
+### 6.7 Worst-selection sign fix, and the direct-impact lost-compute-time estimate
+
+**Real bug fixed**: `node_aggregator_ref.py`'s mean-path "worst" selection
+used `abs(means[p] - median)` — flagging whoever deviates most from the
+median in *either* direction, never checking whether that deviation means
+genuinely slower (a real straggler) or simply faster (not a straggler at
+all). Confirmed directly against a real, healthy 4-stage Megatron
+TP4/PP4/DP3 baseline: a specific comm-local role position was consistently
+the *fastest* member of its own TP group in every one of the 4 pipeline
+stages, yet got selected as "worst" 40-86% of the time in genuinely healthy
+windows purely for being a large, consistent outlier in the wrong
+direction. Fixed by switching to signed deviation (`means[p] - median`) —
+a straggler detector must never flag a rank for being faster than its
+peers. Validated both directions against real data: the false-positive
+rate for that role position dropped from the 40-86% range down to under
+7% (consistent with ordinary noise, not a structural bias), while the
+genuine fault's own relative visibility *increased* once it was no longer
+competing against a spurious fast-outlier for the "worst" slot.
+
+**`straggler_incident_detected`'s direct-impact estimate** (Cyril item-4
+Part B, root-only scope): for a CONFIRMED finding that is the *only*
+CONFIRMED finding for its job within a recent window (reusing the
+already-computed tier as the root-cause signal — no new detection
+mechanism), computes a real **GPU-seconds** figure for that root's own
+direct peer group: the sum, over every real sample in the incident's own
+measured window (`duration_s`), of each peer's real exec time above *its
+own* cross-job healthy baseline (`_member_role_baseline`, already
+existing). This is deliberately the corrected version of the natural
+"straggler's own exec time vs. peers" idea — real data showed a
+late-arriving straggler's own reading looks *short*, not elevated (it
+arrives late; the collective completes quickly once it finally joins) —
+the real signal is in the *waiting peers'* elevation, not the root's own
+number.
+
+**Explicitly root-only, by design**: this does not trace or attribute
+impact to any downstream rank/stage that doesn't share a physical member
+with the root's own communicator. A real cascade may still fire its own
+separate `PROBABLE` alerts, exactly as it does today — those are never
+folded into this number. Reliably separating "root" from "cascade" across
+non-shared-member stages was investigated and found infeasible with
+what's currently available; this is intentionally the honest, simpler
+fallback, not a shortcut.
+
+**Reported in GPU-seconds, not dollars.** Converting to a dollar/GPU-hour
+figure needs the job's own expected total runtime/iteration count, which
+isn't captured anywhere today — left as an open, undocumented-elsewhere
+gap, not estimated here.
+
+**Permanent caveat — this travels with the number everywhere it's shown
+(log text, this README, any future dashboard panel), not just here:**
+> This estimate can significantly **undercount** real impact for faults
+> that are compute-bound but not collective-timing-bound. Demonstrated
+> live, real data: a genuine 5.7x GPU clock suppression on one TP shard
+> produced **~0.75 GPU-seconds** of measured impact by this method, over
+> a real ~5-minute fault window — because that specific collective was
+> network-latency-bound at this scale, not compute-bound, so a slower
+> GPU clock didn't translate into slower collective timing. **A
+> near-zero or small number here does not mean the fault had no real
+> impact — only that this specific collective's timing didn't show it.**
+> By contrast, the same method against a real storage I/O-wait fault
+> (where every downstream collective genuinely had to wait) correctly
+> produced ~23.6 GPU-seconds over its own real incident window.
+
+Exposed as `agg_direct_impact_gpu_seconds` (pushed via the same
+`push_buf`/VM-ingest path every other metric already uses — no new
+collection) and a `[DIRECT-IMPACT-ESTIMATE]` line in both log files,
+carrying the caveat text inline every time it fires, not as a one-time
+footnote.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive

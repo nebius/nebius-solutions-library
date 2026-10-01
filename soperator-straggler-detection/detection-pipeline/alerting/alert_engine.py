@@ -747,6 +747,33 @@ def _comm_local_member_count(vm_url, hostname, comm):
 
 
 SELF_DETECTION_FLOOR = 3  # P21.6 -- matches node_aggregator_ref.py's own mean/CV member-count guard exactly (not a new number)
+# Direct-impact lost-compute-time estimate (Cyril item-4 Part B) -- how
+# far back/forward _emit() looks, per job, to decide "is this CONFIRMED
+# finding the only one for this job right now" (root identification) and
+# to prune the small in-memory tier-tracking list. 300s is a deliberate,
+# generous multiple of FRESH_THRESH_S (90s) -- wide enough to comfortably
+# span a real incident's own duration_s plus processing lag, without
+# being unboundedly large. Not claimed to be exhaustively tuned the way
+# FRESH_THRESH_S/lookback_s were (those were measured against real VM
+# query-visibility behavior); this just needs to be "clearly wider than
+# one incident," not a precisely-measured floor.
+DIRECT_IMPACT_ROOT_WINDOW_S = 300.0
+# Permanent caveat (Cyril item-4 Part B, explicit requirement: this must
+# travel with the number everywhere it's shown, not live only in a
+# changelog). Demonstrated live, real data, this session: a real 5.7x
+# GPU clock suppression on one TP shard (job 3570) produced ~0 measurable
+# impact by this method, because that collective was network-latency-
+# bound at this scale, not compute-bound -- a near-zero number here does
+# NOT mean the fault had no real impact, only that THIS specific
+# collective's timing didn't show it.
+DIRECT_IMPACT_CAVEAT = (
+    "CAVEAT: this estimate can significantly UNDERCOUNT real impact for faults that are "
+    "compute-bound but not collective-timing-bound (confirmed live: a real 5.7x GPU clock "
+    "suppression on one TP shard produced ~0 measurable impact by this method, since that "
+    "collective was network-latency-bound at this scale, not compute-bound) -- a near-zero "
+    "or small number here does NOT mean the fault had no real impact, only that THIS "
+    "specific collective's timing didn't show it."
+)
 
 
 def _query_gpu_slot(vm_url, hostname, member):
@@ -1114,6 +1141,16 @@ class AlertEngine:
         self._recent_timing_fires = []
         self.was_firing = defaultdict(bool)
         self.alerts = []  # list of rendered alert strings, in order
+        # Direct-impact lost-compute-time estimate (Cyril item-4 Part B,
+        # root-only scope, approved design) -- root identification reuses
+        # the ALREADY-COMPUTED CONFIRMED/PROBABLE tier, no new detection
+        # mechanism: a small, in-memory, per-job record of (ts, tier,
+        # hostname, comm, member, bucket, coll), pruned by age, so _emit()
+        # can check "is THIS the only CONFIRMED finding for this job
+        # recently" the same lightweight way self.was_firing/self.alerts
+        # already track state across calls -- no new queries, no new
+        # process, no new metric collection to populate it.
+        self._recent_tier_by_job = defaultdict(list)
         # P20d-closeout dead-man's-switch state -- tracked separately from
         # self.alerts on purpose. "0 alerts emitted" must never be readable
         # as "healthy" without also checking this: it's exactly as true
@@ -2519,6 +2556,23 @@ class AlertEngine:
         read side by side."""
         tier = "PROBABLE" if TIMING_FALLBACK_STOPGAP_ACTIVE else "CONFIRMED"
         severity, severity_reason = severity_for_tier(tier)
+        # Direct-impact root-identification (Cyril item-4 Part B) -- this
+        # path has no real duration_s to anchor a direct-impact window on
+        # (a below-floor fallback resolves from a single current-vs-
+        # historical comparison, not a persistence sequence), so it never
+        # computes a direct-impact number itself. It still MUST record its
+        # own tier here so a DIFFERENT, later CONFIRMED finding in the
+        # same job correctly sees "there's already a CONFIRMED here" and
+        # doesn't wrongly treat itself as the only root -- same tracking
+        # list _maybe_emit_direct_impact_estimate's main-path callers
+        # already append to, just without attempting the computation.
+        _tf_job_id = _comm_slurm_job_id(self.vm_url, comm)
+        if _tf_job_id:
+            _now_ts = time.time()
+            self._recent_tier_by_job[_tf_job_id].append((_now_ts, tier))
+            self._recent_tier_by_job[_tf_job_id] = [
+                (t, tr) for t, tr in self._recent_tier_by_job[_tf_job_id] if _now_ts - t <= DIRECT_IMPACT_ROOT_WINDOW_S
+            ]
         d = per_member[member]
         # P27-hotfix4 -- each member's OWN real host (per_member[...]["hostname"],
         # set per-member in _timing_asymmetry_fallback_evaluate), not the single
@@ -2639,6 +2693,23 @@ class AlertEngine:
         periodic sweep, with no anomaly to ride along with)."""
         tier = "CONFIRMED"
         severity, severity_reason = severity_for_tier(tier)
+        # Direct-impact root-identification (Cyril item-4 Part B) -- same
+        # reasoning as _emit_timing_fallback's own tracking call: this
+        # below-floor DCGM finding has no real duration_s (a single-
+        # snapshot comparison, not a persistence sequence), so it never
+        # computes its own direct-impact number -- but it IS always
+        # CONFIRMED, and recording that here is required for correctness:
+        # without it, a genuinely real root (this one) could be invisible
+        # to a DIFFERENT, later CONFIRMED finding's own "am I the only
+        # one" check in the same job, wrongly letting that other finding
+        # claim root status too.
+        _df_job_id = _comm_slurm_job_id(self.vm_url, comm)
+        if _df_job_id:
+            _now_ts = time.time()
+            self._recent_tier_by_job[_df_job_id].append((_now_ts, tier))
+            self._recent_tier_by_job[_df_job_id] = [
+                (t, tr) for t, tr in self._recent_tier_by_job[_df_job_id] if _now_ts - t <= DIRECT_IMPACT_ROOT_WINDOW_S
+            ]
         pb = per_member[member]["path_b_clock"] or {}
         other_lines = []
         for m, d in sorted(per_member.items()):
@@ -2814,6 +2885,113 @@ class AlertEngine:
                 f.write(f"{ts} {header_line}\n")
         except Exception as e:
             print(f"[alert-summary-write-failed] {type(e).__name__}: {e}", file=sys.stderr)
+
+    def _maybe_emit_direct_impact_estimate(self, tier, hostname, comm, member, bucket, coll,
+                                            anomaly_ts, duration_s, slurm_job_id, role_rank, role_n):
+        """Cyril item-4 Part B (approved design, root-only scope) --
+        direct-impact lost-compute-time estimate in real GPU-seconds.
+
+        Root identification: reuses the ALREADY-COMPUTED CONFIRMED/
+        PROBABLE tier as the root-cause signal, exactly as approved --
+        no new detection mechanism. self._recent_tier_by_job is a small,
+        in-memory, per-job record of recent (ts, tier) pairs, the same
+        kind of lightweight bookkeeping self.was_firing/self.alerts
+        already do across _emit() calls. If this finding's tier is
+        CONFIRMED and it is the ONLY CONFIRMED entry for this job within
+        DIRECT_IMPACT_ROOT_WINDOW_S, it's treated as the root; otherwise
+        this is a no-op (ambiguous or non-root -- report nothing rather
+        than guess, same discipline as every other "don't know" case in
+        this file).
+
+        Direct impact, corrected per the investigation's own real-data
+        finding: a late-arriving straggler's OWN exec-time reading reads
+        SHORT (it arrives late, the collective completes fast once it
+        finally joins) -- confirmed live, twice (job 3570's rank3, job
+        3574's rank10). The real signal is the WAITING PEERS' own
+        elevation above THEIR OWN healthy baseline (_member_role_
+        baseline, already-existing cross-job role history -- no new
+        baseline-tracking mechanism), summed over every real sample in
+        the incident's own real window [anomaly_ts - duration_s, now] --
+        not an assumed call count, the actual real values node_
+        aggregator_ref.py already pushed, via the same /api/v1/export
+        path the z/mm staleness fix already uses.
+
+        Explicitly root-only, by design (approved scope): does NOT
+        attempt to trace or attribute impact to any downstream rank/
+        stage that doesn't share a physical member with the root's own
+        comm -- a real cascade may still fire its own separate PROBABLE
+        alerts, as it already does today; those are never folded into
+        this number. If reliably separating root from cascade ever
+        becomes feasible, that's a separate, future decision.
+
+        Returns nothing -- prints/pushes/logs directly, best-effort,
+        same discipline as every other side channel here (a failure to
+        compute this must never block the real alert it's attached to)."""
+        now_ts = time.time()
+        self._recent_tier_by_job[slurm_job_id].append((now_ts, tier))
+        self._recent_tier_by_job[slurm_job_id] = [
+            (t, tr) for t, tr in self._recent_tier_by_job[slurm_job_id]
+            if now_ts - t <= DIRECT_IMPACT_ROOT_WINDOW_S
+        ]
+        if tier != "CONFIRMED":
+            return
+        confirmed_count = sum(1 for _, tr in self._recent_tier_by_job[slurm_job_id] if tr == "CONFIRMED")
+        if confirmed_count != 1:
+            return  # more than one CONFIRMED in this window -- which is root is ambiguous, don't guess
+        if duration_s is None or anomaly_ts is None:
+            return  # no real measured incident window to work from
+        try:
+            incident_start = anomaly_ts - duration_s
+            cross_members = _comm_cross_node_members(self.vm_url, comm)
+            peers = [(h, m) for (h, m) in cross_members if m != member]
+            if not peers:
+                return
+            total_excess_us = 0.0
+            n_peers_with_data = 0
+            for peer_host, peer_member in peers:
+                # Real double-counting bug caught during validation: an
+                # unscoped match can return TWO distinct series for the
+                # SAME real peer -- one correctly carrying slurm_job_id,
+                # one missing it entirely (confirmed live: comm=
+                # 0x6fceaba48e5b0f member=151473 had both, with
+                # overlapping/near-duplicate timestamps) -- summing both
+                # would double-count that peer's real contribution.
+                # Scoping to the exact same job as the root incident
+                # (already known, no new query) excludes the mislabeled
+                # series.
+                rows = _query_export(self.vm_url,
+                                      f'agg_mean_exec_time_us{{hostname="{peer_host}",comm="{comm}",'
+                                      f'member="{peer_member}",slurm_job_id="{slurm_job_id}"}}',
+                                      incident_start, now_ts)
+                for row in rows:
+                    if not row["timestamps"]:
+                        continue
+                    peer_role_rank = row["metric"].get("role_rank", "na")
+                    peer_role_n = row["metric"].get("role_n", "na")
+                    baseline_median, _mad = self._member_role_baseline(
+                        peer_host, bucket, coll, peer_role_rank, peer_role_n, exclude_comm=comm, any_host=True)
+                    if baseline_median is None:
+                        continue  # no cross-job history yet for this role shape -- honest skip, not a guessed 0
+                    n_peers_with_data += 1
+                    for v in row["values"]:
+                        total_excess_us += max(0.0, v - baseline_median)  # never count a peer running FASTER than its own baseline as "impact"
+            if n_peers_with_data == 0:
+                return  # genuinely can't compute this yet -- no fabricated 0
+            gpu_seconds = total_excess_us / 1e6
+            slot = _query_gpu_slot(self.vm_url, hostname, member)
+            slot_disp = slot if slot is not None and slot >= 0 else "unknown"
+            header = (f"[DIRECT-IMPACT-ESTIMATE] root_host={hostname} root_comm={comm} root_member={member} "
+                      f"root_gpu_slot={slot_disp} role_rank={role_rank} role_n={role_n} peer_group_size={len(peers)} "
+                      f"peers_with_baseline={n_peers_with_data} incident_window_s={now_ts - incident_start:.1f} "
+                      f"gpu_seconds={gpu_seconds:.3f} {DIRECT_IMPACT_CAVEAT}")
+            print(header, flush=True)
+            self._append_alert_summary(header)
+            self._push_visibility_metric(
+                f'agg_direct_impact_gpu_seconds{{hostname="{hostname}",comm="{comm}",member="{member}",'
+                f'gpu_slot="{slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {gpu_seconds}')
+        except Exception as e:
+            print(f"[direct-impact-estimate-failed] host={hostname} comm={comm} member={member}: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
 
     def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None,
               role_rank="na", role_n="na", persist_duration_s=None):
@@ -3022,6 +3200,9 @@ class AlertEngine:
                     f"another):\n{evidence_lines}"
                 )
             finding["cascade_note"] = note
+
+        self._maybe_emit_direct_impact_estimate(finding["tier"], hostname, comm, member, bucket, coll,
+                                                 anomaly_ts, persist_duration_s, slurm_job_id, role_rank, role_n)
 
         text = format_alert(finding, coverage)
         with self._alerts_lock:
