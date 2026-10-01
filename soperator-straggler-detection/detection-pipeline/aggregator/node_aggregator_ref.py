@@ -1332,7 +1332,24 @@ class NodeAggregator:
         sorted_vals = sorted(means.values())
         n = len(sorted_vals)
         median = sorted_vals[n // 2] if n % 2 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
-        worst = max(means, key=lambda p: abs(means[p] - median))
+        # Real bug found live (Cyril item-4 investigation): abs() here
+        # flagged whoever deviates MOST from the median in EITHER
+        # direction, never checking whether that deviation means
+        # "slower" (a real straggler signature) or "faster" (not a
+        # straggler at all). Confirmed directly against a genuinely
+        # healthy 4-stage Megatron TP4/PP4/DP3 baseline (job 3590, real
+        # ground-truth rank mapping, not inferred): role_rank=0 is
+        # consistently the FASTEST member of its own TP group in EVERY
+        # one of the 4 pipeline stages (e.g. stage 3: role0=42.3us vs
+        # role1=826.5us) -- the opposite of a straggler pattern -- yet
+        # abs() repeatedly selected it as "worst" purely for being a
+        # large, consistent outlier in the wrong direction (13 real
+        # fires vs 0/0/1 for its 3 TP-peers in an earlier real fault
+        # run, traced to exactly this). A straggler detector must never
+        # flag a rank for being FASTER than its peers -- signed
+        # deviation (positive = slower) is the only direction "worst"
+        # should ever mean here.
+        worst = max(means, key=lambda p: means[p] - median)
         peers = [means[p] for p in means if p != worst]
         mu = st.mean(peers)
         sd = st.stdev(peers) if len(peers) > 1 else 0
