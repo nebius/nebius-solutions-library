@@ -59,24 +59,40 @@ for node in "${NODES[@]}"; do
   log="$VAR_DIR/aggregator_logs/$node.log"
   if ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "pgrep -f 'node_aggregator_ref.py .*$dd'" >/dev/null 2>&1; then
     info "  $node: aggregator already running against $dd -- leaving it alone."
-    continue
+  else
+    # Real bugs found live (this session), both needed together:
+    # 1) `-n`/stdin redirection alone was NOT enough -- ssh still never
+    #    returned. `setsid` fully detaches the launched process into its
+    #    own session, independent of the ssh session.
+    # 2) Even with setsid, `cmd1 && cmd2 &` still hung for cmd2's entire
+    #    real runtime -- confirmed live via a minimal `sleep 8` reproduction.
+    #    `&` binds to the WHOLE `&&`-list (bash backgrounds "cmd1 && cmd2"
+    #    as one implicit-subshell job), not just cmd2, so cmd2's own
+    #    redirects don't fully detach the group from the ssh channel until
+    #    cmd2 itself finishes. Using `;` instead of `&&` so `&` binds to
+    #    only the final simple command fixed it (confirmed: 8.5s -> 0.5s in
+    #    the same minimal reproduction).
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$node" \
+      "mkdir -p '$dd' || exit 1; setsid nohup bash '$PKG_ROOT/observability/run_aggregator_supervised.sh' '$dd' '$node' '$VM_URL' '$log' >/dev/null 2>&1 </dev/null &" \
+      && info "  $node: aggregator supervisor launched (dump_dir=$dd, log=$log)." \
+      || fail "  $node: failed to launch aggregator supervisor via ssh."
   fi
-  # Real bugs found live (this session), both needed together:
-  # 1) `-n`/stdin redirection alone was NOT enough -- ssh still never
-  #    returned. `setsid` fully detaches the launched process into its
-  #    own session, independent of the ssh session.
-  # 2) Even with setsid, `cmd1 && cmd2 &` still hung for cmd2's entire
-  #    real runtime -- confirmed live via a minimal `sleep 8` reproduction.
-  #    `&` binds to the WHOLE `&&`-list (bash backgrounds "cmd1 && cmd2"
-  #    as one implicit-subshell job), not just cmd2, so cmd2's own
-  #    redirects don't fully detach the group from the ssh channel until
-  #    cmd2 itself finishes. Using `;` instead of `&&` so `&` binds to
-  #    only the final simple command fixed it (confirmed: 8.5s -> 0.5s in
-  #    the same minimal reproduction).
-  ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$node" \
-    "mkdir -p '$dd' || exit 1; setsid nohup bash '$PKG_ROOT/observability/run_aggregator_supervised.sh' '$dd' '$node' '$VM_URL' '$log' >/dev/null 2>&1 </dev/null &" \
-    && info "  $node: aggregator supervisor launched (dump_dir=$dd, log=$log)." \
-    || fail "  $node: failed to launch aggregator supervisor via ssh."
+
+  # V1-beta P0 fix -- iowait_logger.py (Path C storage-fault detection's
+  # real data producer) had no launcher anywhere in this project before
+  # now -- see run_iowait_logger_supervised.sh's own comment for the full
+  # gap this closes. Same launch convention as the aggregator above,
+  # default IOWAIT_LOG_DIR (matches alert_engine.py's own default
+  # exactly, no explicit wiring needed between the two).
+  iowait_log="$VAR_DIR/iowait_logger_logs/$node.log"
+  if ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "pgrep -f 'run_iowait_logger_supervised\.sh $node'" >/dev/null 2>&1; then
+    info "  $node: iowait_logger supervisor already running -- leaving it alone."
+  else
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$node" \
+      "mkdir -p '$(dirname "$iowait_log")' || exit 1; setsid nohup bash '$PKG_ROOT/observability/run_iowait_logger_supervised.sh' '$node' '' '$iowait_log' >/dev/null 2>&1 </dev/null &" \
+      && info "  $node: iowait_logger supervisor launched (log=$iowait_log)." \
+      || fail "  $node: failed to launch iowait_logger supervisor via ssh."
+  fi
 done
 
 _existing_supervisor="$(pgrep -af 'run_alert_engine_supervised\.sh' 2>/dev/null | head -1)"

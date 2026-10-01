@@ -1413,6 +1413,45 @@ you act on (clear old dumps, or stop the job), the same "detect and
 report, never silently take invasive action" discipline as every other
 signal in this project.
 
+**`[PATH-C-DOWN]`/`[PATH-C-RECOVERED]`** — a fourth dead-man's-switch,
+closing a real, confirmed gap: `iowait_logger.py` (the real eBPF io-wait
+data producer Path C/storage-fault detection depends on) had no launcher
+anywhere in this project — unlike the aggregator, `alert_engine.py`
+itself, VictoriaMetrics, and Grafana, nothing ever started it, on any
+deployment, regardless of whether bpftrace/tracefs itself worked. This
+is the full, root-caused explanation for a real customer cluster
+reporting Path C silently returning "not checked" (`io_ev=None`) on
+every query. `run.sh` now launches it per node
+(`observability/run_iowait_logger_supervised.sh`, same auto-restart
+convention as every other supervised process here), and `install.sh`'s
+bpftrace/tracefs check now re-verifies the tracefs bind-mount wrapper
+actually works after installing it (previously assumed, never
+confirmed) — if the wrapper's own `unshare -m` call fails with a real
+permission error (a jail/container lacking `CAP_SYS_ADMIN`, or a seccomp
+policy blocking `unshare()`), both `install.sh` and the new runtime
+watchdog now report that exact, actionable cause instead of silently
+leaving Path C dead. A plain file-mtime staleness check is NOT a safe
+liveness signal for this one (unlike DCGM hostengine): a genuinely
+healthy, compute-bound job can go minutes with zero real disk I/O,
+producing a legitimate gap in the data indistinguishable from a dead
+agent by mtime alone — so `alert_engine.py` instead reads the
+supervisor's own wrapper log for a real crash-loop signature (2+ exits
+within a 120s window), which can't be confused with genuine healthy
+silence. Also fixed a real bug found while testing this: `iowait_logger.py`
+silently discarded any bpftrace output it didn't recognize, including
+bpftrace's own real error text — so the exact diagnosis above was
+reachable in the code but invisible in any log. Fixed to forward
+unrecognized lines to its own stderr instead.
+
+Tested end-to-end on a real cluster, not mocked: a genuine disk-bound
+fault (`storage-ebpf/real_disk_fault.py`, cold read after
+`drop_caches`) produced real `io_ev` evidence (12.46s aggregated
+iowait, 487 real block-I/O events) and a correct `CONFIRMED`
+`determine_storage_path` verdict; the watchdog itself was verified by
+deliberately breaking the tracefs wrapper (`[PATH-C-DOWN]` fired with
+the exact `unshare`-permission diagnosis) and restoring it
+(`[PATH-C-RECOVERED]` fired once the crash-loop window aged out).
+
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
 restart-loop wrapper. Killing *only* the leaf `node_aggregator_ref.py`

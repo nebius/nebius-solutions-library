@@ -33,6 +33,8 @@ import os
 import sys
 import time
 import json
+import re
+import calendar
 import statistics
 import subprocess
 import threading
@@ -108,6 +110,32 @@ DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 DUMP_DISK_CHECK_INTERVAL_S = 60.0
 DUMP_DISK_WARN_PCT = float(os.environ.get("DUMP_DISK_WARN_PCT", "80.0"))
 DUMP_DISK_CRITICAL_PCT = float(os.environ.get("DUMP_DISK_CRITICAL_PCT", "95.0"))
+
+# V1-beta P0 fix (Item A) -- Path C (storage-fault detection) dead-man's-
+# switch. Real, confirmed-live gap: iowait_logger.py (the real eBPF
+# io-wait data producer) had no launcher anywhere in this project before
+# this session (see run_iowait_logger_supervised.sh's own comment) --
+# Path C silently returned "not checked" on every real deployment,
+# indistinguishable from a genuinely ambiguous read. A plain file-mtime
+# staleness check is NOT a safe liveness signal here (unlike DCGM
+# hostengine): iowait_agent.bt only writes a line when at least one PID
+# had real io-wait in that 2s interval (interval:s:2) -- a genuinely
+# healthy, compute-bound job with zero disk activity for minutes produces
+# a real, legitimate gap in the data that looks identical to a dead
+# agent. The real, unambiguous signal is the SUPERVISOR's own wrapper log
+# (run_iowait_logger_supervised.sh's "EXITED ... relaunching" lines,
+# read directly -- same shared-filesystem assumption storage_evidence.
+# py's own _load_log_rows already relies on, not a new one): a healthy
+# agent stays attached indefinitely (zero EXITED lines in any recent
+# window); an agent crash-looping (e.g. the wrapper's own `unshare -m`
+# failing with "Operation not permitted" on a cluster whose jail lacks
+# CAP_SYS_ADMIN) re-exits and relaunches every ~3s, producing many
+# EXITED lines in a short window -- a count-based threshold distinguishes
+# "one transient crash, now stable" from "persistently broken" cleanly.
+PATH_C_CHECK_INTERVAL_S = 60.0
+PATH_C_CRASH_LOOP_WINDOW_S = 120.0
+PATH_C_CRASH_LOOP_MIN_EXITS = 2
+IOWAIT_SUPERVISOR_LOG_DIR = os.path.join(_PKG_ROOT, "var", "iowait_logger_logs")
 
 # P27.2.7 -- real, confirmed gap this closes (regression-sweep investigation,
 # TP-inference): _cross_comm_peer_median's peer pool requires every sibling
@@ -1023,6 +1051,11 @@ class AlertEngine:
         self.n_dump_disk_critical_cycles = 0
         self._last_dump_disk_check_at = 0.0
         self._dump_disk_thread = None
+        # V1-beta P0 fix (Item A) -- Path C dead-man's-switch state.
+        self.path_c_down = {}
+        self.n_path_c_down_cycles = 0
+        self._last_path_c_check_at = 0.0
+        self._path_c_thread = None
         # P20d-closeout Part C -- measured live against this exact engine
         # (2 real hosts + synthetic hostnames to simulate scale): at 0ms
         # added query latency the old sequential poll_once() already took
@@ -1144,6 +1177,7 @@ class AlertEngine:
         self._run_check("dcgm_fallback_check", self._maybe_launch_dcgm_fallback_check)
         self._run_check("dcgm_hostengine_check", self._maybe_launch_dcgm_hostengine_check)
         self._run_check("dump_disk_check", self._maybe_launch_dump_disk_check)
+        self._run_check("path_c_check", self._maybe_launch_path_c_check)
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
@@ -3089,6 +3123,92 @@ class AlertEngine:
         self._dump_disk_thread = threading.Thread(target=_run, daemon=True)
         self._dump_disk_thread.start()
 
+    def _maybe_launch_path_c_check(self):
+        """V1-beta P0 fix (Item A) -- Path C (storage-fault detection)
+        dead-man's-switch. See PATH_C_CHECK_INTERVAL_S's own module-level
+        comment for why this reads the supervisor's own wrapper log
+        (crash-loop detection) rather than the real iowait data log's
+        mtime (not a safe liveness signal -- a genuinely healthy,
+        compute-bound job can go minutes with zero real io-wait rows,
+        indistinguishable from a dead agent by mtime alone).
+
+        No SSH needed -- same shared-filesystem assumption storage_
+        evidence.py's own _load_log_rows already relies on to read Path
+        C's real data directly (not a new one introduced here)."""
+        now = time.time()
+        if now - self._last_path_c_check_at < PATH_C_CHECK_INTERVAL_S:
+            return
+        if self._path_c_thread is not None and self._path_c_thread.is_alive():
+            return
+        self._last_path_c_check_at = now
+        hosts = list(self.hostnames)
+
+        def _run():
+            for host in hosts:
+                log_path = os.path.join(IOWAIT_SUPERVISOR_LOG_DIR, f"{host}.log")
+                if not os.path.isfile(log_path):
+                    was_down = self.path_c_down.get(host, False)
+                    self.n_path_c_down_cycles += 1
+                    self.path_c_down[host] = True
+                    if not was_down:
+                        print(f"[PATH-C-DOWN] hostname={host} :: no iowait_logger supervisor log found at "
+                              f"{log_path} -- the real eBPF io-wait data producer for storage-fault "
+                              f"detection (Path C) has never been launched on this host (see run.sh's "
+                              f"own Step 1 -- re-run it if this host is genuinely part of this cluster). "
+                              f"Every Path C check on this host will read as 'not checked' until this is "
+                              f"fixed, not as a genuine ambiguous result.",
+                              file=sys.stderr, flush=True)
+                    continue
+                try:
+                    with open(log_path) as f:
+                        lines = f.readlines()[-200:]
+                except Exception as e:
+                    print(f"[PATH-C-CHECK-DEGRADED] hostname={host} :: could not read {log_path}: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    continue
+                recent_exits = []
+                for line in lines:
+                    m = re.search(r"EXITED exit_code=(\S+) start=\S+ end=(\S+)", line)
+                    if not m:
+                        continue
+                    exit_code, end_str = m.groups()
+                    try:
+                        end_ts = calendar.timegm(time.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ"))
+                    except ValueError:
+                        continue
+                    if now - end_ts <= PATH_C_CRASH_LOOP_WINDOW_S:
+                        recent_exits.append((end_ts, exit_code))
+                was_down = self.path_c_down.get(host, False)
+                if len(recent_exits) >= PATH_C_CRASH_LOOP_MIN_EXITS:
+                    self.n_path_c_down_cycles += 1
+                    self.path_c_down[host] = True
+                    last_code = recent_exits[-1][1]
+                    # Real, actionable diagnosis straight from the wrapper's
+                    # own real stderr (merged into this same log by
+                    # run_iowait_logger_supervised.sh's `>> "$LOG" 2>&1`) --
+                    # not guessed.
+                    tail_text = "".join(lines[-15:])
+                    hint = ""
+                    if re.search(r"unshare.*not permitted|operation not permitted", tail_text, re.I):
+                        hint = (" Real cause found in the log: the tracefs bind-mount wrapper's own "
+                                "`unshare -m` call is failing with a permission error -- this host's "
+                                "SSH/jail environment lacks CAP_SYS_ADMIN (or has a seccomp policy "
+                                "blocking unshare()). See install.sh's own bpftrace/tracefs check "
+                                "output for the same diagnosis.")
+                    print(f"[PATH-C-DOWN] hostname={host} :: iowait_logger.py is crash-looping "
+                          f"({len(recent_exits)} exits in the last {PATH_C_CRASH_LOOP_WINDOW_S:.0f}s, "
+                          f"last exit_code={last_code}) -- storage-fault detection is NOT producing "
+                          f"real data on this host.{hint}",
+                          file=sys.stderr, flush=True)
+                elif was_down:
+                    self.path_c_down[host] = False
+                    print(f"[PATH-C-RECOVERED] hostname={host}", file=sys.stderr, flush=True)
+                # else: stable and wasn't down -- no signal, matching this
+                # file's own "a genuinely healthy read stays silent" style.
+
+        self._path_c_thread = threading.Thread(target=_run, daemon=True)
+        self._path_c_thread.start()
+
     def _fresh(self, result_row):
         """agg_*_worst metrics are labeled rank="{worst}" -- the rank that
         was worst AT THAT WINDOW. Over a job's life this accumulates one
@@ -3484,3 +3604,5 @@ if __name__ == "__main__":
           f"({'nv-hostengine WAS DOWN on at least one host at some point -- DCGM-sourced cause-evidence for that period is degraded, not a genuine ambiguous read' if eng.n_dcgm_hostengine_down_cycles else 'nv-hostengine reachable on every host for the entire run'})")
     print(f"dump_disk_critical_cycles: {eng.n_dump_disk_critical_cycles} "
           f"({'a dump directory WAS at or above the critical disk-usage threshold at some point -- see [DUMP-DISK-CRITICAL] lines above' if eng.n_dump_disk_critical_cycles else 'every host stayed below the critical disk-usage threshold for the entire run'})")
+    print(f"path_c_down_cycles: {eng.n_path_c_down_cycles} "
+          f"({'Path C (storage-fault detection) WAS down on at least one host at some point -- see [PATH-C-DOWN] lines above; storage-sourced cause-evidence for that period is degraded, not a genuine ambiguous read' if eng.n_path_c_down_cycles else 'Path C reachable and stable on every host for the entire run'})")

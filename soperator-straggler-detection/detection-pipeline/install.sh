@@ -209,6 +209,32 @@ for node in "${_NODES_ARR[@]}"; do
     else
       info "  $node: wrapper already installed."
     fi
+    # Real, previously-missing verification (this session): installing
+    # the wrapper file was never actually re-tested -- on a cluster
+    # whose SSH/jail environment itself lacks CAP_SYS_ADMIN (or has a
+    # seccomp policy blocking unshare()), the wrapper's own `unshare -m`
+    # call fails with "Operation not permitted" and storage-fault
+    # detection (Path C) silently stays dead, with install.sh reporting
+    # nothing wrong (confirmed real, live: this exact failure mode on a
+    # real customer cluster, found only via manual investigation well
+    # after install). Re-run the SAME tracepoint test now, through
+    # whatever is actually on PATH as `bpftrace` (the wrapper, having
+    # just been installed/confirmed) -- capture its real stderr on
+    # failure so the actual cause (unshare permission vs. something
+    # else) is reported honestly, not guessed.
+    tracefs_ok2="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" \
+      "bpftrace -e 'tracepoint:syscalls:sys_enter_openat { exit(); }' >/dev/null 2>&1 && echo OK || echo FAIL")"
+    if [ "$tracefs_ok2" != "OK" ]; then
+      wrapper_err="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" \
+        "bpftrace -e 'tracepoint:syscalls:sys_enter_openat { exit(); }' 2>&1 >/dev/null | head -3 | tr '\n' ' '")"
+      if echo "$wrapper_err" | grep -qi "unshare.*not permitted\|operation not permitted"; then
+        warn "  $node: storage-fault detection (Path C) is NOT functional -- the tracefs bind-mount wrapper's own \`unshare -m\` call failed with a real permission error: \"$wrapper_err\". This SSH/jail environment lacks CAP_SYS_ADMIN (or has a seccomp policy blocking unshare()) -- this is a real infrastructure/container-privilege gap this script cannot fix itself; either grant this capability to the environment this SSH session lands in, or arrange a persistent, host-level tracefs bind-mount outside this project's own scope. alert_engine.py's own [PATH-C-DOWN] watchdog will keep reporting this loudly at runtime rather than silently returning 'not checked' forever."
+      else
+        warn "  $node: storage-fault detection (Path C) is NOT functional -- the tracefs bind-mount wrapper is installed but bpftrace still cannot attach a real tracepoint through it: \"$wrapper_err\". This needs manual investigation on this specific node (not a known unshare-permission case) before storage-classifier faults will produce real evidence there."
+      fi
+    else
+      info "  $node: tracefs bind-mount wrapper confirmed WORKING (re-tested after install, not assumed)."
+    fi
   else
     info "  $node: bpftrace can already attach real tracepoints directly -- no wrapper needed."
   fi

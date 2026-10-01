@@ -1,0 +1,21 @@
+# V1-beta P0 fix -- log-rotation config for iowait_logger_supervised.log,
+# the supervisor wrapper's own start/restart/crash log -- NOT the real
+# iowait data (<hostname>.jsonl in IOWAIT_LOG_DIR), which already has its
+# own internal Python RotatingFileHandler (see observability/iowait_
+# logger.py's own IOWAIT_LOG_MAX_BYTES/BACKUP_COUNT comment) and needs no
+# shell-level rotation at all. This wrapper log is low-volume (one line
+# per launch/restart, not per real data record), so a smaller size policy
+# than alert_engine_supervised.log's is appropriate.
+#
+# copytruncate: same reasoning as every other supervised log in this
+# project -- the supervisor holds this file open via a plain shell `>>`
+# redirect for its entire lifetime.
+/root/P20c_alerting/iowait_logger_supervised.log {
+    size 10M
+    rotate 5
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

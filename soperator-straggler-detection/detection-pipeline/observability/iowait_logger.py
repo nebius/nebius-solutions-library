@@ -151,6 +151,20 @@ def run(hostname, log_dir, duration=None):
                 iowait_us[key] = int(val)
             else:
                 iowait_count[key] = int(val)
+        elif line.strip():
+            # V1-beta P0 fix (Item A) -- real bug found live: every line
+            # that matched neither known pattern was silently discarded,
+            # including bpftrace's own real startup/error text (e.g. the
+            # tracefs wrapper's "unshare: Operation not permitted" when
+            # this host's jail lacks CAP_SYS_ADMIN). That text never
+            # reached ANY log a human or alert_engine.py's own [PATH-C-
+            # DOWN] watchdog could read, making a real, diagnosable
+            # failure look like silent, unexplained data absence instead.
+            # Forwarded to stderr (captured by run_iowait_logger_
+            # supervised.sh's own `>> "$LOG" 2>&1`) so the real cause is
+            # always visible in the one place someone would already be
+            # looking.
+            print(line, file=sys.stderr, flush=True)
     # END block / process exit -- flush whatever's left.
     if have_block:
         _flush_block(logger, hostname, time.time(), iowait_us, iowait_count)
