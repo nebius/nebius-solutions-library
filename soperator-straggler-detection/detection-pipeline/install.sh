@@ -42,6 +42,27 @@ apt_install() {
   fi
 }
 
+# Real bug found live (a real customer cluster, this session): the
+# bpftrace/tracefs wrapper install step below (mv/cp into /usr/bin and
+# /usr/local/bin, both root:root) assumed root exactly like apt_install
+# used to -- on a non-root cluster with passwordless sudo, the plain `cp`
+# failed with Permission denied BEFORE ever deploying the new wrapper,
+# so the subsequent re-verification step re-tested the stale OLD wrapper
+# and reported the same old failure, making a real fix look like it
+# hadn't worked at all. Same root-or-passwordless-sudo-or-fail pattern
+# as apt_install, generalized to any command (not apt-specific) --
+# exported via `declare -f` for the same per-node ssh call sites.
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif sudo -n true 2>/dev/null; then
+    sudo "$@"
+  else
+    echo "FATAL: not root and no passwordless sudo available on $(hostname) -- cannot run: $* -- either re-run as root/with sudo, or do this yourself first: $*" >&2
+    return 1
+  fi
+}
+
 # Real, live-confirmed gap (this session): DCGM hostengine (nv-hostengine,
 # the persistent daemon every DCGM-sourced cause-check -- clocks, power,
 # thermal, ECC, PCIe -- depends on) is not guaranteed to be running even
@@ -204,14 +225,14 @@ for node in "${_NODES_ARR[@]}"; do
     # "always run current code" discipline as every supervised process
     # restart elsewhere in this project.
     scp -o BatchMode=yes "$PKG_ROOT/storage-ebpf/bpftrace-tracefs-wrapper.sh" "$node:/tmp/_bpftrace_wrapper.sh" >/dev/null
-    ssh -o BatchMode=yes "$node" '
+    ssh -o BatchMode=yes "$node" "$(declare -f run_privileged)"'
       set -e
       if [ ! -f /usr/bin/bpftrace.real ]; then
         real_path="$(command -v bpftrace)"
-        mv "$real_path" /usr/bin/bpftrace.real
+        run_privileged mv "$real_path" /usr/bin/bpftrace.real
       fi
-      cp /tmp/_bpftrace_wrapper.sh /usr/local/bin/bpftrace
-      chmod +x /usr/local/bin/bpftrace
+      run_privileged cp /tmp/_bpftrace_wrapper.sh /usr/local/bin/bpftrace
+      run_privileged chmod +x /usr/local/bin/bpftrace
     ' || fail "  $node: failed to install the tracefs bind-mount wrapper."
     # Real, previously-missing verification (this session): installing
     # the wrapper file was never actually re-tested -- on a cluster
