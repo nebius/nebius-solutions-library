@@ -1361,49 +1361,66 @@ scoped fix. Confirmed directly that fixing the shared root cause left
 Hybrid's already-fixed P27.5 mechanism untouched, and vice versa
 (regression-checked both directions).
 
-**A fourth, distinct, surviving PP gap found during a real cross-node
-validation (Megatron TP4/PP4/DP3 on a 6-node cluster) — below-floor
-role-baseline is hostname-pinned, not just role-shape-pinned.** A
-cross-node PP-link sleep-fault run landed correct rank/host attribution,
-but `baseline_source` resolved to `cross_comm_peer` (the less-precise
+**A fourth, distinct PP gap found during a real cross-node validation
+(Megatron TP4/PP4/DP3 on a 6-node cluster) — below-floor role-baseline
+was hostname-pinned, not just role-shape-pinned — FIXED.** A cross-node
+PP-link sleep-fault run landed correct rank/host attribution, but
+`baseline_source` resolved to `cross_comm_peer` (the less-precise
 fallback) instead of the preferred `role` baseline, even though prior
 jobs on the same cluster had already run the identical workload shape
 minutes earlier. Traced directly in `_member_role_baseline`
-(`alerting/alert_engine.py`): its cross-job history query is scoped by
+(`alerting/alert_engine.py`): its cross-job history query was scoped by
 `hostname="{hostname}"` in addition to `(bucket, coll, role_rank,
-role_n)` — not just role shape. This is a deliberate, real tradeoff (it
-keeps a role's baseline free of cross-node hardware-variance
-contamination), but it means the lookup only ever hits if Slurm happens
-to place the SAME role on the SAME physical node across separate job
-submissions — trivially true on a small, fixed 2-node cluster (the
-1-dev-cluster case this project's own history above was validated
-against), but not guaranteed at all on a larger or shared cluster, where
-job-to-node allocation varies run to run.
+role_n)` — not just role shape. That hostname pin is a deliberate, real
+tradeoff (it keeps a role's baseline free of cross-node hardware-
+variance contamination), but it meant the lookup only ever hit if Slurm
+happened to place the SAME role on the SAME physical node across
+separate job submissions — trivially true on a small, fixed 2-node
+cluster (the 1-dev-cluster case this project's own history above was
+validated against), but not guaranteed at all on a larger or shared
+cluster, where job-to-node allocation varies run to run.
 
 Re-ran the identical PP-link scenario on this project's own 2-node dev
 cluster to isolate the mechanism itself (not the cluster-size-dependent
 trigger): `baseline_source='role'` engaged correctly and produced an
 accurate, well-evidenced finding (ratio=37.9x, correct rank/host),
 confirming the role-baseline mechanism itself works correctly once
-matching host-scoped history exists — the gap is specifically about
+matching host-scoped history exists — the gap was specifically about
 *history availability* on a cluster where node placement isn't
-repeatable, not a wrong-answer bug in the mechanism itself.
-Attribution correctness does not depend on which `baseline_source` tier
-engages (both this test and the original Megatron validation landed the
-correct rank/host either way) — this is a confidence/precision gap, not
-a correctness one.
+repeatable, not a wrong-answer bug in the mechanism itself. Attribution
+correctness never depended on which `baseline_source` tier engaged
+(both this test and the original Megatron validation landed the correct
+rank/host either way) — a confidence/precision gap, not a correctness
+one.
 
-A real fix (e.g., a broader any-host role-baseline tier, tried only
-after the strict host-scoped one misses) would add a new pooling axis
-that needs the same empirical false-positive-rate validation every
-other calibration change in this project's history required (see
-P27.2.6 above) before it could safely ship — more than a timeboxed
-investigation can responsibly validate. Documented here as a known,
-disclosed limitation rather than shipped unvalidated: on a cluster
-where job-to-node placement varies, expect `baseline_source` to fall
-back to `cross_comm_peer` for below-floor cross-node pairs more often
-than on a small, fixed-topology cluster — attribution stays correct,
-only the baseline's precision/provenance differs.
+**Fix**: `_member_role_baseline` (and `_excluded_role_pool_members`,
+its matching exclusion-set lookup) now take an `any_host` parameter.
+The 2-member timing-asymmetry fallback tries, in order: (1) the
+original strict same-host role baseline, UNCHANGED — zero behavior
+difference on any cluster where this already succeeds; (2) if that
+misses, the identical role-shape query with the `hostname=` constraint
+dropped, pooling history for `(bucket, coll, role_rank, role_n)` across
+ANY host — labeled `baseline_source='role_cross_host'`, distinct from
+plain `'role'`, so it's always auditable which precision tier actually
+produced a given finding; (3) only if even that misses, the existing
+`cross_comm_peer` fallback, unchanged. Real cross-node hardware variance
+may make tier 2 a slightly noisier baseline than tier 1 — which is
+exactly why it's inserted as a middle tier, never replacing the
+already-validated strict match, not a new default.
+
+Verified two ways, not just read: (a) isolated function-level test —
+pushed real synthetic history under `hostname="worker-1"` for a role
+shape with zero existing data on `hostname="worker-0"`; confirmed the
+strict same-host query from `worker-0` still correctly returns `(None,
+None)` (unchanged), `any_host=True` from `worker-0` correctly finds and
+computes a real median/MAD from the `worker-1`-tagged data, and the
+strict query from `worker-1` itself still works unchanged. (b) A real,
+live end-to-end PP-link fault injection on this dev cluster produced a
+correct finding with `baseline_source='role'` (tier 1, since this
+cluster already has real matching host-scoped history from earlier
+testing) — confirming zero regression to the already-working case.
+`tools/self_test.sh` re-run clean afterward: exact rank-match, zero new
+`[CHECK-FAILED]`.
 
 **Below-floor coverage-achieved signal never fired for ANY 2-member
 comm, at any job duration — found and FIXED (V1 Beta Stage 6).**

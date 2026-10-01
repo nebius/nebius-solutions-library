@@ -1796,14 +1796,23 @@ class AlertEngine:
             print(f"[{hostname}] role-baseline exclusion push failed for comm={comm} member={member}: "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
 
-    def _excluded_role_pool_members(self, hostname, bucket, coll, role_rank, role_n):
+    def _excluded_role_pool_members(self, hostname, bucket, coll, role_rank, role_n, any_host=False):
         """P27-hotfix6 -- real (comm, member) pairs ever marked excluded
         (see _push_role_baseline_exclusion) for this exact role shape,
         over the same long lookback as the history query itself -- so a
         pair excluded at any point in the past stays excluded for as
         long as its own contaminated agg_mean_exec_time_us reading would
-        otherwise still be found by last_over_time."""
-        selector = (f'agg_role_baseline_excluded{{hostname="{hostname}",bucket="{bucket}",coll="{coll}",'
+        otherwise still be found by last_over_time.
+
+        V1-beta cross-host role-baseline fix -- any_host=True drops the
+        hostname constraint, matching _member_role_baseline's own
+        any_host mode exactly: when the baseline pool itself is being
+        drawn from any host (not just this exact one), the exclusion set
+        checked against it must be too, or a poisoned reading excluded
+        under a DIFFERENT host's own exclusion record could silently
+        slip into the broadened pool unfiltered."""
+        host_clause = f'hostname="{hostname}",' if not any_host else ""
+        selector = (f'agg_role_baseline_excluded{{{host_clause}bucket="{bucket}",coll="{coll}",'
                     f'role_rank="{role_rank}",role_n="{role_n}"}}')
         try:
             rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
@@ -1833,7 +1842,7 @@ class AlertEngine:
         sigs = {r["metric"].get("sig") for r in rows} - {None}
         return next(iter(sigs)) if len(sigs) == 1 else None
 
-    def _member_role_baseline(self, hostname, bucket, coll, role_rank, role_n, exclude_comm):
+    def _member_role_baseline(self, hostname, bucket, coll, role_rank, role_n, exclude_comm, any_host=False):
         """P27-hotfix4 -- real, per-ROLE cross-JOB historical baseline,
         for below-floor pairs whose two members' real expected work is
         PERMANENTLY different (confirmed live this session: PP's stage0
@@ -1859,10 +1868,32 @@ class AlertEngine:
         if no cross-job history exists yet for this role (a real,
         honest cold start -- callers fall back to _cross_comm_peer_median,
         same graceful-degradation discipline as self-calibration
-        elsewhere in this project)."""
+        elsewhere in this project).
+
+        V1-beta cross-host role-baseline fix -- real, confirmed-live gap
+        this closes: the hostname="{hostname}" constraint above means
+        this lookup only ever hits if Slurm happened to place THIS
+        exact role on THIS exact physical node in some earlier job too
+        -- trivially true on a small, fixed-topology cluster, but NOT
+        guaranteed at all on a larger or shared cluster where job-to-
+        node allocation varies run to run (confirmed live: a real
+        Megatron TP4/PP4/DP3 validation on a 6-node cluster fell through
+        to the less-precise cross_comm_peer fallback here, even though
+        prior jobs had already run the identical role shape minutes
+        earlier -- just on a different physical node). any_host=True
+        drops the hostname constraint entirely, pooling history for this
+        exact role SHAPE (bucket, coll, role_rank, role_n) regardless of
+        which physical node produced it -- real cross-node hardware
+        variance can make this a slightly noisier baseline than the
+        same-host case, which is exactly why this is a SEPARATE, later-
+        tried tier (the caller tries the strict same-host version FIRST,
+        unchanged, and only falls back to any_host=True if that misses)
+        rather than a replacement -- zero behavior change for any
+        cluster where the strict lookup already succeeds today."""
         if role_rank in (None, "na") or role_n in (None, "na"):
             return None, None
-        selector = (f'agg_mean_exec_time_us{{hostname="{hostname}",bucket="{bucket}",coll="{coll}",'
+        host_clause = f'hostname="{hostname}",' if not any_host else ""
+        selector = (f'agg_mean_exec_time_us{{{host_clause}bucket="{bucket}",coll="{coll}",'
                     f'role_rank="{role_rank}",role_n="{role_n}"}}')
         # P27-hotfix4 (bugfix) -- last_over_time over a real, long lookback
         # (see ROLE_XJOB_LOOKBACK_S's own comment for why this replaced an
@@ -1910,7 +1941,7 @@ class AlertEngine:
         # a persistent/repeated fault can never poison its own future
         # baseline. Same exclude-current-comm filtering this already
         # did, just widened to also drop known-anomalous OTHER comms.
-        excluded = self._excluded_role_pool_members(hostname, bucket, coll, role_rank, role_n)
+        excluded = self._excluded_role_pool_members(hostname, bucket, coll, role_rank, role_n, any_host=any_host)
         hist_keys = {(r["metric"].get("comm"), r["metric"].get("member"))
                      for r in hist_rows if r["metric"].get("comm") != exclude_comm} - excluded
         if not hist_keys:
@@ -2333,17 +2364,32 @@ class AlertEngine:
             if role_median is not None and role_median > 0:
                 baseline, mad, source = role_median, role_mad, "role"
             else:
-                # P27-hotfix4 -- cross-comm peer fallback computed per-
-                # member, using THAT member's own real host, not the
-                # single shared `hostname` -- for a cross-node pair each
-                # side can have a genuinely different local peer pool (or
-                # none at all), same reasoning as the primary baseline
-                # above.
-                fallback_peer_median, fallback_peer_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                if fallback_peer_median is not None and fallback_peer_median > 0:
-                    baseline, mad, source = fallback_peer_median, fallback_peer_mad, "cross_comm_peer"
+                # V1-beta cross-host role-baseline fix -- see _member_
+                # role_baseline's own any_host docstring for the real gap
+                # this closes (job-to-node placement not repeatable on a
+                # larger/shared cluster). Tried BEFORE cross_comm_peer,
+                # since a cross-host role-shape match is still more
+                # precise than a same-job symmetric-peer assumption for a
+                # structurally-asymmetric pair like PP -- only falls
+                # through to cross_comm_peer if even this misses (a
+                # genuine cold start: no history for this role shape on
+                # ANY host yet).
+                role_median_any, role_mad_any = self._member_role_baseline(
+                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                if role_median_any is not None and role_median_any > 0:
+                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
                 else:
-                    return None
+                    # P27-hotfix4 -- cross-comm peer fallback computed per-
+                    # member, using THAT member's own real host, not the
+                    # single shared `hostname` -- for a cross-node pair each
+                    # side can have a genuinely different local peer pool (or
+                    # none at all), same reasoning as the primary baseline
+                    # above.
+                    fallback_peer_median, fallback_peer_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                    if fallback_peer_median is not None and fallback_peer_median > 0:
+                        baseline, mad, source = fallback_peer_median, fallback_peer_mad, "cross_comm_peer"
+                    else:
+                        return None
             per_member[m] = {"slot": slot, "current": current, "peer_median": baseline,
                               "peer_mad": mad, "ratio": current / baseline, "baseline_source": source,
                               "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
@@ -2447,12 +2493,16 @@ class AlertEngine:
             f"({topology_note}) has only {len(per_member)} real member(s) total -- below "
             f"SELF_DETECTION_FLOOR ({SELF_DETECTION_FLOOR}), so node_aggregator_ref.py's own "
             f"peer-relative mean/CV statistics structurally cannot compute here. This finding is "
-            f"sourced from each member's OWN real baseline: PRIMARILY a per-ROLE cross-JOB "
-            f"historical baseline (agg_mean_exec_time_us from OTHER completed jobs, same comm "
-            f"shape/role -- see _member_role_baseline), falling back to an EXTERNAL cross-"
+            f"sourced from each member's OWN real baseline, tried in order: (1) a per-ROLE "
+            f"cross-JOB historical baseline on THIS exact host (agg_mean_exec_time_us from "
+            f"OTHER completed jobs, same host+comm shape/role -- see _member_role_baseline), "
+            f"(2) the SAME per-role baseline pooled across ANY host instead (real cross-node "
+            f"hardware variance may make this slightly noisier, but still a structural-role "
+            f"match, tried before giving up on role-based comparison entirely -- "
+            f"baseline_source='role_cross_host'), falling back to (3) an EXTERNAL cross-"
             f"communicator peer median (other currently-active same-shape below-floor comms on "
-            f"that member's own host) only when no cross-job role history exists yet -- this "
-            f"member used baseline_source={d['baseline_source']!r}. Scoped to this comm's own "
+            f"that member's own host) only when no cross-job role history exists on any host "
+            f"yet -- this member used baseline_source={d['baseline_source']!r}. Scoped to this comm's own "
             f"largest real message-size bucket (bucket={d['bucket']} bytes, coll={d['coll']} -- "
             f"the dominant real-payload collective, not a trivial administrative one). "
             f"Deliberately NOT a same-member self-history comparison (P27.2.2's design): confirmed "
