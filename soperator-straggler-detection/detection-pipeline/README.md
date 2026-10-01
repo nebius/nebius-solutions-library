@@ -843,6 +843,93 @@ second, possibly-disagreeing number bottom-up from individual
 collectives' excess exec time (which would double-count overlapping
 communicators and miss non-collective-bound slowdown).
 
+### 6.6 Trusting what an alert shows you — the z/mm staleness fix, cross-reference IDs, and evidence panels
+
+Investigating Cyril's item 2 (making flag evidence inspectable) found a
+real, separate bug: **the z/mm value displayed in an alert's own text
+could be stale** — a real number, but from a different, later moment
+than the one that actually satisfied the firing condition. Root cause:
+the mean-path check read the firing decision from `agg_mean_fired` (a
+widened lookback query, so a transient window isn't missed between
+polls) but read the displayed z/mm from a separate, unwidened "whatever
+is currently latest" query — and node_aggregator_ref.py keeps closing
+new windows continuously, so by the time this engine polled, the two
+could legitimately disagree. Confirmed live: one alert displayed
+`z=2.7`; the real window that actually fired showed `z=34.1, mm=3.54`.
+
+**Fixed for both cv and mean, both ultimately via VictoriaMetrics'
+`/api/v1/export`** (not `query_range`, which grid-resamples onto fixed
+step points and can silently skip a real sample at this project's own
+window-close cadence):
+- **CV**: `_cv_maxmed`'s own exec-time query now reads the real sample
+  closest to the exact real firing timestamp via `/api/v1/export`. A
+  PromQL `@`-pinned plain instant query was tried first and rejected —
+  caught live, before shipping: it suffers the identical ~30s
+  visibility floor described below, and since the firing timestamp is
+  by construction always very recent, it would have returned no data
+  (blank mm/worst_val) on nearly every real CV-triggered alert.
+- **Mean**: the firing decision no longer reads `agg_mean_fired` at
+  all. It reads every real raw `agg_mean_z_worst`/`agg_mean_mm_worst`/
+  `agg_detection_coverage_achieved` sample in the lookback window via
+  `/api/v1/export`, and correlates all three by their exact shared real
+  timestamp (all three are pushed together, in the same
+  `score_mean_window()` call) to reconstruct precisely the same
+  `past_grace and z>30 and mm>2.0` decision node_aggregator_ref.py's own
+  code already computes — a pure refactor of *where* the decision is
+  read from, never a change to the decision itself.
+
+**Latency, precisely quantified — not just "may fire slightly
+earlier."** Verified side by side against the old `agg_mean_fired`-based
+decision across two real fault-injection validation runs: every
+mismatch (45 total) was the same direction — the new logic qualifying
+when the old logic hadn't yet, never the reverse — and in every traced
+case the underlying data was real and already genuinely qualifying.
+Root cause, measured directly (5 independent controlled trials against
+this exact VictoriaMetrics instance): a consistent **~30.2–30.4s delay**
+before any freshly-written sample becomes visible via a plain instant
+query (`/api/v1/query`) — confirmed to apply to every write, not just
+first-ever label combinations (a repeat write to an already-visible
+series showed the identical delay) — consistent with this project's own
+prior, independently-measured "~30-39s baseline visibility floor" for
+this same instance. `/api/v1/export` is not subject to this floor.
+
+**Alerts may fire up to ~30 seconds earlier than the previous
+implementation**, in cases where a label combination's visibility on
+the old instant-query path was still inside VictoriaMetrics' own ~30s
+query-visibility floor. This is strictly a latency improvement — the
+new logic never fires on incorrect or less-true data, and never fires
+later than the old logic would have. The ~30s bound does not compound
+across the 3 required persistence windows: it is a floor on how
+recently-written data becomes visible to a query issued "now," not a
+per-window penalty — by the time the third (gating) window closes, the
+first two are, in every real case observed, already past that floor.
+
+**Cross-reference ID**: when `straggler_incident_detected` also fires
+for the same event, both its `[STRAGGLER-INCIDENT]` line and the
+corresponding `[ALERT]` line now carry a shared `incident_id=host:comm:
+member:bucket:coll` field, so you (or a script) can confirm they refer
+to the same real event without inferring it from log adjacency.
+
+**Evidence panels** (push identifiers, pull trajectory — the design
+decision: bundling the full trajectory into the alert text itself would
+mean re-deriving data already in VictoriaMetrics and needing to parse it
+back out of log text; leaving it purely in VM with no guided path would
+mean hand-writing PromQL every time): the alert text and
+`[STRAGGLER-INCIDENT]` line already push the identifiers (`comm`,
+`member`, `bucket`, `coll`, `incident_id`) you need. Two new dashboard
+variables, **Comm** and **Member (PID)**, let you paste those straight
+in, filtering two new panels:
+- **"Flag evidence trajectory"** — the real `agg_mean_z_worst`/
+  `agg_mean_mm_worst` history around the event, not just the single
+  value the alert text shows.
+- **"Peer timing comparison"** — every member of the same communicator's
+  own real exec time at the same moment, the same data this project's
+  own cascade/"LOCATION UNCERTAIN" investigations already rely on by
+  hand, one filter away instead of hand-written PromQL.
+
+No new metrics collection for either panel — both read series that were
+already being pushed.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
@@ -862,6 +949,24 @@ requires that same condition to recur for 3 consecutive windows before
 `_emit()` is even called.** If your own alerting/dashboards depend on
 a mean-path finding firing the instant a single window crosses
 threshold, this is a real behavior change to account for.
+
+**KNOWN, NOT YET FIXED: a specific comm-local role position gets
+persistently misattributed as "worst," independent of any real fault.**
+Found live during the Cyril item-2 cascade investigation (a real
+Megatron TP4/PP4/DP3 GPU-clock-fault run, job 3570): rank 12
+(role_rank=0 within its own 4-member TP group, the last pipeline stage)
+fired 13 times during the run, versus 0-1 times each for its three
+TP-peers in the identical comm — a persistent, structural skew, not the
+noisy/rotating "different member each time" pattern every other
+downstream stage showed. This closely resembles this project's own
+already-documented "rank 0's already-known, un-excludable overhead
+bias" (see `_rank_dependents_by_deviation`'s own docstring), recurring
+here as a TP-group-local role_rank=0 bias rather than a global-rank-0
+one. Real, measured (not a false positive), but likely a workload-
+structural artifact rather than a genuine fault signature — worth its
+own dedicated fix, independent of and not blocking the evidence-
+inspectability work above. Not fixed as part of this work; tracked here
+as an open item.
 
 This section is **not softened**. It has two parts: which fault classes
 this pipeline is validated for at all (repeated from Step 1 above, since

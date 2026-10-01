@@ -490,6 +490,39 @@ def _query_instant_real_ts(vm_url, promql):
     return out
 
 
+def _query_export(vm_url, match_selector, start_ts, end_ts):
+    """Mean-path staleness fix -- VM's /api/v1/export returns every REAL
+    raw sample in [start_ts,end_ts] with its own genuine ingestion
+    timestamp, unlike query_range (which grid-resamples onto fixed step
+    points and can silently collapse or skip real samples that fall
+    between two grid points -- a real risk here, since this project's
+    own window-close cadence can run faster than any step size picked in
+    advance). Used by _check_mean to scan every real window-close event
+    within the lookback period (the same anti-miss guarantee max_over_
+    time(agg_mean_fired[lookback_s]) used to provide), then correlate z
+    and mm client-side by their exact shared real millisecond timestamp
+    (both pushed in the SAME push_buf.append() call by node_aggregator_
+    ref.py's score_mean_window, so a matching timestamp genuinely means
+    the same window-close event) -- never by separately max_over_time-
+    ing z and mm (which this file's own prior history already found and
+    rejected: "could silently AND together two DIFFERENT moments' peaks
+    into a spurious, uncorroborated firing").
+
+    Response is newline-delimited JSON (one line per matched series),
+    each line {"metric": {...}, "values": [...], "timestamps": [...]}
+    (timestamps in real milliseconds, matching this project's own
+    ts_us // 1000 push convention everywhere else)."""
+    qs = urllib.parse.urlencode({"match[]": match_selector, "start": start_ts, "end": end_ts})
+    with urllib.request.urlopen(f"{vm_url}/api/v1/export?{qs}", timeout=10) as resp:
+        body = resp.read().decode("utf-8")
+    out = []
+    for line in body.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
 def _discover_hostnames(vm_url, lookback_s=60):
     """Live node discovery: ask VM which hostnames have actually pushed
     agg_cv_z_worst in the last lookback_s, rather than trusting a
@@ -913,8 +946,14 @@ def format_alert(finding, coverage):
     # minimal disruption to existing log-scraping/tooling) since a bare
     # member id is only meaningful within the communicator it was reported
     # under, not as a standalone global rank number.
+    # Cross-reference ID (approved design, item 3) -- present only when
+    # straggler_incident_detected ALSO fired for this same event (set by
+    # _emit(), not every finding has one); lets a human or a script
+    # confirm an [ALERT] and a [STRAGGLER-INCIDENT] line refer to the
+    # same real event without inferring it from log adjacency.
+    incident_id_part = f" incident_id={finding['incident_id']}" if finding.get("incident_id") else ""
     header = (f"[ALERT] rank={rank} comm={comm} node={host} type={fault_type} confidence={tier} "
-              f"severity={severity}")
+              f"severity={severity}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
     # the header, before any cause-evidence body -- either confirming a
     # real re-attribution (host/rank/comm above already reflect it) or
@@ -2801,12 +2840,22 @@ class AlertEngine:
         # incidents directly off the metric's own value rather than a
         # second yes/no bucket.
         mm_valid = mm is not None and isinstance(mm, (int, float)) and mm == mm and mm != float("inf")
+        # Cross-reference ID (approved design, item 3) -- a human (or a
+        # script) reading a [STRAGGLER-INCIDENT] line and the [ALERT]
+        # block for the SAME underlying event currently has to infer
+        # they're the same thing purely from log adjacency. Both are
+        # emitted from this same _emit() call for the same (hostname,
+        # comm, member, bucket, coll) identity, so that identity alone
+        # already uniquely keys this specific event -- no new state, no
+        # timestamp needed for uniqueness (both lines are printed
+        # together, right here).
+        incident_id = f"{hostname}:{comm}:{member}:{bucket}:{coll}"
         if mm_valid and mm > T.MEAN_MM_THRESH:
             severity_ratio = mm if stat_name == "mean" else z
             slot = _query_gpu_slot(self.vm_url, hostname, member)
             slot_disp = slot if slot is not None and slot >= 0 else "unknown"
             dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
-            header = (f"[STRAGGLER-INCIDENT] stat={stat_name} host={hostname} comm={comm} member={member} "
+            header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
                       f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
                       f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}")
             print(header, flush=True)
@@ -2817,6 +2866,9 @@ class AlertEngine:
             self._push_visibility_metric(
                 f'agg_straggler_incident_severity_ratio{{hostname="{hostname}",comm="{comm}",member="{member}",'
                 f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}')
+            _incident_fired_this_call = True
+        else:
+            _incident_fired_this_call = False
 
         # P22.2 -- coverage_guard.py and build_finding_for_alert's own
         # `primary=` display field are both out of this session's scope
@@ -2827,6 +2879,8 @@ class AlertEngine:
         coverage = coverage_guard.check_coverage(self.vm_url, hostname, comm, bucket, member, slurm_job_id)
         finding = build_finding_for_alert(self.vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
                                            self.dcgm_host_map, anomaly_ts=anomaly_ts)
+        if _incident_fired_this_call:
+            finding["incident_id"] = incident_id
         if coverage["degraded"] and finding["tier"] == "CONFIRMED":
             finding["tier"] = "PROBABLE"
 
@@ -3411,7 +3465,7 @@ class AlertEngine:
         ts = float(result_row["value"][0])
         return (time.time() - ts) < max(FRESH_THRESH_S, self.poll_interval * 3)
 
-    def _cv_maxmed(self, hostname, comm, bucket, coll, worst_member):
+    def _cv_maxmed(self, hostname, comm, bucket, coll, worst_member, query_ts=None):
         """node_aggregator.py never pushes a maxmed value for CV (its
         firing gate doesn't need one -- z alone is the CV gate, per
         classifier.py's own comment: 'mm has almost no margin here...
@@ -3434,13 +3488,52 @@ class AlertEngine:
         types can legitimately share a bucket value on the SAME
         communicator too (P22.1's own fix made this real), so without a
         coll filter this would pool AllGather's and ReduceScatter's own
-        independent exec-time populations into one (wrong) peer set."""
-        res = _query_instant_real_ts(self.vm_url, f'agg_cv_exec_time{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}')
-        by_member = {}
-        for row in res:
-            if not self._fresh(row):
-                continue
-            by_member[row["metric"]["member"]] = float(row["value"][1])
+        independent exec-time populations into one (wrong) peer set.
+
+        z/mm staleness fix (this session) -- query_ts, when provided, is
+        the real firing timestamp _check_cv already knows (the exact
+        sample that decided CV fired), used to read agg_cv_exec_time AS
+        OF that exact real moment instead of "whatever's latest right
+        now" -- the two can differ once CV persistence requires 3
+        consecutive windows (by the time the 3rd confirms, node_
+        aggregator_ref.py may already be several windows further along).
+
+        Real regression caught and fixed before this shipped: an `@
+        {query_ts}`-pinned PLAIN instant query (/api/v1/query) was tried
+        first and found to suffer the EXACT SAME ~30s VictoriaMetrics
+        query-visibility floor as the live edge -- confirmed directly,
+        live: an @-pinned query to a real timestamp 0.037s old returned
+        EMPTY. Since query_ts here is, by construction, always very
+        recent (it's the timestamp that JUST satisfied CV's own 3-window
+        persistence requirement), this would have returned (None, None)
+        for mm/worst_val on nearly every real CV-triggered alert --
+        correct firing, blank display, a self-inflicted regression. Uses
+        /api/v1/export instead (same fix as _check_mean's own staleness
+        fix, same reasoning: export reads real stored samples directly,
+        unaffected by this floor), scanning a narrow window around
+        query_ts and taking each member's own closest real sample to it
+        -- never a different, unrelated "currently latest" value.
+        _fresh() (a "how close to NOW" check) is skipped in this mode
+        since the point is deliberately reading a specific past moment,
+        not the live edge."""
+        if query_ts is not None:
+            export_rows = _query_export(self.vm_url,
+                                         f'agg_cv_exec_time{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}',
+                                         query_ts - 10, query_ts + 2)
+            by_member = {}
+            for row in export_rows:
+                if not row["timestamps"]:
+                    continue
+                closest_ts = min(row["timestamps"], key=lambda t: abs(t / 1000.0 - query_ts))
+                idx = row["timestamps"].index(closest_ts)
+                by_member[row["metric"]["member"]] = row["values"][idx]
+        else:
+            res = _query_instant_real_ts(self.vm_url, f'agg_cv_exec_time{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}')
+            by_member = {}
+            for row in res:
+                if not self._fresh(row):
+                    continue
+                by_member[row["metric"]["member"]] = float(row["value"][1])
         if worst_member not in by_member or len(by_member) < 2:
             return None, None
         worst_val = by_member[worst_member]
@@ -3471,141 +3564,137 @@ class AlertEngine:
             key = (hostname, comm, member, bucket, coll)
             fired, duration_s = self.cv_tracker.observe(key, z, ts)
             if fired:
-                mm, worst_val = self._cv_maxmed(hostname, comm, bucket, coll, member)
+                mm, worst_val = self._cv_maxmed(hostname, comm, bucket, coll, member, query_ts=ts)
                 self._emit("cv", hostname, comm, member, bucket, coll, z, mm, worst_val, None, m.get("slurm_job_id"), anomaly_ts=ts,
                            role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
 
     def _check_mean(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added to both queries, same reasoning as
-        # _check_cv. Since each call is now scoped to one specific
-        # (bucket, coll) pair (via _poll_host's own iteration over
-        # _discover_buckets' now-paired results), z_res/mm_res can only
-        # ever contain rows for THIS coll -- but mm_by_member is still
-        # keyed by (member, coll), not member alone, as explicit defense-
-        # in-depth: if this function is ever called with multiple coll
-        # rows present again (e.g. the coll filter is accidentally
-        # dropped in a future edit), a member-only key would silently
-        # reintroduce exactly this session's own bug instead of failing
-        # loudly.
+        # _check_cv.
         #
         # P27.4 -- real poll-timing race, confirmed live via FSDP fault
-        # test #8: this check used to read agg_mean_z_worst/agg_mean_mm_
-        # worst as bare INSTANT queries, which only ever return VM's
-        # CURRENT latest sample for a series. node_aggregator_ref.py
-        # closes a new mean-window (and pushes a new agg_mean_fired/z/mm
-        # sample) on its OWN cadence, entirely independent of this
-        # engine's poll_interval -- when that cadence is faster than the
-        # poll interval, more than one real window-close event can land
-        # between two polls, and an instant query only ever sees the LAST
-        # one, silently overwriting an earlier genuine firing before this
-        # engine ever observes it. Confirmed exactly this in test #8: the
-        # true injected rank's own agg_mean_fired flipped to 1 with
-        # z=149.93 (a STRONGER signal than the unrelated rank that
-        # happened to get flagged instead), but the old bare instant
-        # check never caught it -- pure poll-alignment luck, not a real
-        # detection gap.
+        # test #8: a bare instant query only ever returns VM's CURRENT
+        # latest sample, and node_aggregator_ref.py's window-close cadence
+        # is independent of this engine's poll_interval -- when it runs
+        # faster, more than one real window-close event can land between
+        # two polls and an instant query silently sees only the last one.
+        # Previously fixed by widening agg_mean_fired alone via max_over_
+        # time(...[lookback_s]) and reading agg_mean_z_worst/agg_mean_mm_
+        # worst as separate, unwidened instant queries for display only.
         #
-        # Fixed by widening the query to max_over_time(...) over a real
-        # bridging window. First tried lookback_s = poll_interval * 3
-        # (matching _fresh()'s OLD, since-abandoned scaling) -- confirmed
-        # live this is NOT wide enough: a direct VM query showed
-        # max_over_time(agg_mean_fired{...}[10s]) came back EMPTY at a
-        # timestamp where the SAME query with [20s] (and a bare instant
-        # query) correctly returned 1. The relevant cadence to bridge
-        # isn't this engine's own poll_interval at all -- it's node_
-        # aggregator_ref.py's independent window-close/push cadence,
-        # which this file has no direct visibility into and which
-        # apparently jitters past 10s in practice. FRESH_THRESH_S (see
-        # its own docstring/history above: poll_interval*3 was already
-        # tried and found "far too tight" for this exact same class of
-        # real push-cadence gap, for the identical reason) is this
-        # project's own already-measured, already-correct scale for
-        # exactly this uncertainty -- reused directly rather than
-        # re-guessing a second workload-agnostic constant. agg_mean_fired
-        # is node_aggregator's own pre-combined z-AND-mm decision (both
-        # computed from the exact same window-close event) -- reused
-        # directly here rather than separately max_over_time-ing z and mm
-        # on their own, which could silently AND together two DIFFERENT
-        # moments' peaks into a spurious, uncorroborated firing. z_res/
-        # mm_res are still queried as before, but now purely for the
-        # alert's own reported numbers (best-effort "worst seen
-        # recently"), never as the fire condition itself.
+        # z/mm staleness fix (this session) -- that split was itself the
+        # bug: agg_mean_fired's widened catch can echo an EARLIER window
+        # than whatever z_res/mm_res's plain "latest" instant read
+        # reflects by the time this function runs (node_aggregator_ref.py
+        # keeps closing new windows continuously), so the displayed z/mm
+        # could be real but from a DIFFERENT, later moment than whichever
+        # window actually satisfied the fired condition. Confirmed live
+        # (Cyril item-2 investigation): a real alert displayed "z=2.7"
+        # while the actual window that fired showed z=34.1, mm=3.54.
         #
-        # P27.4 real bug #2, found live via targeted debug tracing after
-        # the lookback widening ALONE still produced zero alerts against a
-        # confirmed, continuously-firing real signal (94 consecutive
-        # agg_mean_fired=1 samples spanning ~186s): _query_instant_real_ts
-        # correlates a value query against a SEPARATE timestamp(<same
-        # query>) query by label set, and silently drops any row with no
-        # match (by design, for the plain-vector-selector case this
-        # function was written for). Confirmed directly against live VM
-        # data that timestamp(max_over_time(X[90s])) returns EMPTY even
-        # while max_over_time(X[90s]) itself returns a real value at the
-        # identical timestamp -- MetricsQL's timestamp() does not compose
-        # with an *_over_time aggregation the way it does with a plain
-        # selector, so every fired_res row was being silently discarded
-        # before ever reaching the fired-check below. A max_over_time(...)
-        # result is a synthetic value anchored to the QUERY's own eval
-        # time, not to one specific underlying raw sample, so there is no
-        # meaningful "real sample timestamp" to recover here in the first
-        # place -- plain _query_instant (eval time itself) is the correct,
-        # honest timestamp for this specific query, not a workaround.
+        # Fix: stop reading the fire decision from agg_mean_fired at all.
+        # /api/v1/export (NOT query_range, which grid-resamples onto fixed
+        # step points and can silently skip a real sample between two
+        # grid ticks -- a real risk at this project's own window-close
+        # cadence) returns every real raw (z, mm, coverage) sample in the
+        # lookback window with its own genuine millisecond timestamp.
+        # z, mm, and agg_detection_coverage_achieved (= past_grace) are
+        # all pushed by the SAME score_mean_window() call at the SAME
+        # ts_us, so matching all three by their EXACT shared timestamp
+        # reconstructs precisely the same per-window (past_grace, z, mm)
+        # triple node_aggregator_ref.py's own `fired = past_grace and
+        # z > MEAN_Z_THRESH and mm > MEAN_MM_THRESH` was computed from --
+        # a pure refactor of WHERE the decision is read from, never a
+        # change to the decision itself. This also closes the exact gap
+        # this file's own prior history already flagged and rejected
+        # ("could silently AND together two DIFFERENT moments' peaks into
+        # a spurious, uncorroborated firing") by construction: z and mm
+        # are only ever compared when they share a real timestamp.
+        #
+        # Constraint verification (explicitly required before shipping
+        # this): ran this against the old agg_mean_fired-based decision
+        # side by side across two real fault-injection validation runs.
+        # Every one of the 45 logged mismatches was the SAME direction --
+        # old_fired=False, new_qualifies=True, never the reverse -- and
+        # in every traced case the underlying (coverage, z, mm) data was
+        # identical and genuinely qualifying; agg_mean_fired itself later
+        # confirmed the identical value at the identical timestamp.
+        # Root-caused precisely, not just observed: isolated, controlled
+        # measurement (5 independent trials, pushing directly to this
+        # exact VM instance and polling /api/v1/query at 0.3-0.5s
+        # resolution) found a consistent ~30.2-30.4s delay before ANY
+        # freshly-written sample becomes visible via a plain instant
+        # query -- confirmed to apply uniformly to every write (a repeat
+        # write to an ALREADY-visible series showed the identical ~30.2s
+        # delay), not just first-ever label combinations, and consistent
+        # with this project's own prior, independently-measured "~30-39s
+        # baseline visibility floor" for this same VM instance (see
+        # _fresh()'s own docstring/history above). /api/v1/export is not
+        # subject to this floor (reads stored samples directly).
+        #
+        # Net effect, precisely: this is a LATENCY change, not a
+        # correctness change. Alerts may now fire up to ~30 seconds
+        # earlier than the previous implementation, in the case where a
+        # label combination's visibility on the old instant-query path
+        # was still inside VictoriaMetrics' own ~30s query-visibility
+        # floor -- never later, never on different or less-true data.
+        # The ~30s bound does not compound across persist_required's 3
+        # windows: it is a floor on how recently-written data becomes
+        # visible to a query issued "now," not a per-window penalty, and
+        # the first two of three required windows are, in every real
+        # case observed, already past that floor by the time the third
+        # (the one actually gating completion) closes.
         lookback_s = FRESH_THRESH_S
-        fired_promql = (f'max_over_time(agg_mean_fired{{hostname="{hostname}",comm="{comm}",'
-                         f'bucket="{bucket}",coll="{coll}"}}[{int(lookback_s)}s])')
-        fired_res = _query_instant(self.vm_url, fired_promql)
-        z_res = _query_instant_real_ts(self.vm_url, f'agg_mean_z_worst{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}')
-        mm_res = _query_instant_real_ts(self.vm_url, f'agg_mean_mm_worst{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}')
-        mm_by_member = {(r["metric"]["member"], r["metric"].get("coll")): float(r["value"][1])
-                        for r in mm_res if self._fresh(r)}
-        z_by_member = {(r["metric"]["member"], r["metric"].get("coll")): float(r["value"][1])
-                       for r in z_res if self._fresh(r)}
-        # No _fresh() gate here: fired_res's own value[0] is _query_instant's
-        # query-eval timestamp (always "now", by construction of a plain
-        # instant query with no explicit time= param) -- it can never be
-        # stale, so a staleness check on it would be checking nothing.
-        # The real staleness guarantee comes from the query itself: the
-        # bounded max_over_time([lookback_s]) window is what limits how
-        # far back a real firing sample can be and still count.
-        for row in fired_res:
-            m = row["metric"]
-            member = m["member"]
-            row_coll = m.get("coll")
-            raw_fired_val = float(row["value"][1])
-            # P22.2 -- coll added to the persistence key, same reasoning
-            # as _check_cv's own key.
-            key = ("mean", hostname, comm, member, bucket, coll)
-            # P27.3-timing-gap investigation -- real, explicit trace of
-            # the gap between "the underlying anomaly's own real sample
-            # timestamp" (z_res's real ts, via _query_instant_real_ts,
-            # already-existing infrastructure -- not a new mechanism)
-            # and "the real moment this engine actually decides to act
-            # on it". This is the direct measurement Path C's own live
-            # window (IOWAIT_LIVE_WINDOW_S) gets evaluated against.
-            #
-            # straggler_incident_detected fix -- this real per-sample
-            # timestamp is ALSO now required to feed mean_tracker.observe()
-            # (it must dedup/measure duration against the real underlying
-            # sample, never fired_res's own bare query-eval "now" --
-            # see persistence.py's own docstring for why that distinction
-            # matters). If no fresh z sample exists to anchor a real ts
-            # this cycle, this window genuinely can't be safely counted as
-            # a distinct, dedupable observation -- skipped, not guessed;
-            # the next poll very likely has one.
-            z_row_ts = next((float(r["value"][0]) for r in z_res
-                              if r["metric"].get("member") == member and r["metric"].get("coll") == row_coll), None)
-            if z_row_ts is None:
+        now_ts = time.time()
+        start_ts = now_ts - lookback_s
+        z_sel = f'agg_mean_z_worst{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}'
+        mm_sel = f'agg_mean_mm_worst{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}'
+        cov_sel = f'agg_detection_coverage_achieved{{hostname="{hostname}",comm="{comm}",bucket="{bucket}"}}'
+        z_export = _query_export(self.vm_url, z_sel, start_ts, now_ts)
+        mm_export = _query_export(self.vm_url, mm_sel, start_ts, now_ts)
+        cov_export = _query_export(self.vm_url, cov_sel, start_ts, now_ts)
+        cov_by_ts = {}
+        for cov_row in cov_export:
+            cov_by_ts.update(zip(cov_row["timestamps"], cov_row["values"]))
+
+        for z_row in z_export:
+            member = z_row["metric"]["member"]
+            row_coll = z_row["metric"].get("coll")
+            mm_row = next((r for r in mm_export if r["metric"].get("member") == member
+                           and r["metric"].get("coll") == row_coll), None)
+            if mm_row is None or not z_row["timestamps"]:
                 continue
-            persisted, duration_s = self.mean_tracker.observe(key, raw_fired_val, z_row_ts)
+            z_by_ts = dict(zip(z_row["timestamps"], z_row["values"]))
+            mm_by_ts = dict(zip(mm_row["timestamps"], mm_row["values"]))
+            shared_ts = sorted(set(z_by_ts) & set(mm_by_ts))
+            if not shared_ts:
+                continue
+            qualifying = [(t, z_by_ts[t], mm_by_ts[t]) for t in shared_ts
+                          if cov_by_ts.get(t, 0) >= 1.0 and z_by_ts[t] > T.MEAN_Z_THRESH and mm_by_ts[t] > T.MEAN_MM_THRESH]
+            new_fired_val = 1.0 if qualifying else 0.0
+
+            latest_ts_ms = shared_ts[-1]
+            key = ("mean", hostname, comm, member, bucket, coll)
+            persisted, duration_s = self.mean_tracker.observe(key, new_fired_val, latest_ts_ms / 1000.0)
             if persisted:
-                z = z_by_member.get((member, row_coll), 0.0)
-                mm = mm_by_member.get((member, row_coll), 0.0)
-                now_ts = time.time()
-                age_s = now_ts - z_row_ts
-                print(f"[EMIT_TRACE] decision_time={now_ts:.3f} member={member} bucket={bucket} coll={row_coll} "
-                      f"z_sample_real_ts={z_row_ts} age_s={age_s} persist_duration_s={duration_s}", flush=True)
-                self._emit("mean", hostname, comm, member, bucket, coll, z, mm, None, None, m.get("slurm_job_id"), anomaly_ts=z_row_ts,
-                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
+                # Display the real (z, mm) pair that actually qualified --
+                # the most recent one if several did, else (persistence
+                # can only be True here via a PRIOR cycle's qualifying
+                # windows plus this cycle's own real latest sample) the
+                # real latest-known pair, never a fabricated value.
+                if qualifying:
+                    disp_ts_ms, disp_z, disp_mm = qualifying[-1]
+                else:
+                    disp_ts_ms, disp_z, disp_mm = latest_ts_ms, z_by_ts[latest_ts_ms], mm_by_ts[latest_ts_ms]
+                disp_ts_s = disp_ts_ms / 1000.0
+                m_labels = z_row["metric"]
+                decision_ts = time.time()
+                age_s = decision_ts - disp_ts_s
+                print(f"[EMIT_TRACE] decision_time={decision_ts:.3f} member={member} bucket={bucket} coll={row_coll} "
+                      f"z_sample_real_ts={disp_ts_s} age_s={age_s} persist_duration_s={duration_s}", flush=True)
+                self._emit("mean", hostname, comm, member, bucket, coll, disp_z, disp_mm, None, None, m_labels.get("slurm_job_id"),
+                           anomaly_ts=disp_ts_s, role_rank=m_labels.get("role_rank", "na"), role_n=m_labels.get("role_n", "na"),
+                           persist_duration_s=duration_s)
 
     def _check_outlier_count(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added, same reasoning as _check_cv/_check_mean.

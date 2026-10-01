@@ -1662,6 +1662,255 @@
       "title": "Straggler incident detected (cause-agnostic -- sustained + impactful timing anomaly, independent of CONFIRMED/PROBABLE/UNCONFIRMED cause-tier; see README \u00a7 straggler_incident_detected)",
       "description": "Fires once per real, T.PERSIST_REQUIRED(3)-consecutive-window-sustained, >MEAN_MM_THRESH(2.0)x-impactful timing anomaly, regardless of whether DCGM/storage ever corroborates a hardware cause. Pair with agg_straggler_incident_severity_ratio for the measured severity value (mm for a mean-sourced finding, z for a cv-sourced one).",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_mean_z_worst{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "time_series",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "z: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "range": true,
+          "refId": "A",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_mean_mm_worst{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "time_series",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "mm: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "range": true,
+          "refId": "B",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_cv_z_worst{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "time_series",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "cv-z: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "range": true,
+          "refId": "C",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        }
+      ],
+      "title": "Flag evidence trajectory (z-score + arrival-lag ratio over time, for a specific comm/member)",
+      "description": "Pull the comm/member/incident_id straight from an [ALERT] or [STRAGGLER-INCIDENT] log line into the Comm/Member variables above to see the real z/mm (mean path) or z (cv path) trajectory around that event -- whichever stat actually fired, not just the single value the alert text shows. Same series the staleness fix now reads the real firing value from.",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 21,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_mean_exec_time_us{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\"}",
+          "format": "table",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_cv_exec_time{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\"}",
+          "format": "table",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "B",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        }
+      ],
+      "title": "Peer timing comparison (every member of the same comm, at the same moment)",
+      "description": "Set the Comm variable from an [ALERT]/[STRAGGLER-INCIDENT] line's comm= field to see every member's own real exec time side by side (mean-path agg_mean_exec_time_us and cv-path agg_cv_exec_time, whichever the triggering stat used) -- the same data this project's own cascade/\"LOCATION UNCERTAIN\" investigation already relies on, now one filter away instead of hand-written PromQL.",
+      "type": "table"
     }
   ],
   "preload": false,
@@ -1809,6 +2058,62 @@
         "query": {
           "qryType": 5,
           "query": "label_values({cluster=~\"$cluster\", __name__=~\"agg.*\", bucket!=\"\"}, bucket)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values({cluster=~\"$cluster\", __name__=~\"agg.*\", comm!=\"\"}, comm)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Comm",
+        "multi": false,
+        "name": "comm",
+        "options": [],
+        "query": {
+          "qryType": 5,
+          "query": "label_values({cluster=~\"$cluster\", __name__=~\"agg.*\", comm!=\"\"}, comm)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values({cluster=~\"$cluster\", __name__=~\"agg.*\", member!=\"\"}, member)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Member (PID)",
+        "multi": false,
+        "name": "member",
+        "options": [],
+        "query": {
+          "qryType": 5,
+          "query": "label_values({cluster=~\"$cluster\", __name__=~\"agg.*\", member!=\"\"}, member)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
