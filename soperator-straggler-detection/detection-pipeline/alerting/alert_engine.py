@@ -1043,6 +1043,26 @@ class AlertEngine:
         # genuine reuse of CVPersistenceTracker, same 3-of-3 persistence
         # convention as every other detector here, not a one-off mechanism.
         self.timing_fallback_tracker = CVPersistenceTracker(0.0, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        # straggler_incident_detected design (item 2/3) -- real, deliberate
+        # tightening of EXISTING alerting behavior, not a side effect of
+        # adding the new signal: before this, _check_mean/_check_outlier_
+        # count fired _emit() on a SINGLE qualifying window (node_
+        # aggregator_ref.py's own agg_mean_fired/agg_outlier_count_fired,
+        # each a one-window z+mm decision), with only plain was_firing
+        # edge-triggered dedup -- unlike CV, which already required
+        # T.PERSIST_REQUIRED(3) consecutive windows via cv_tracker above.
+        # z_thresh=0.5 here is deliberate: these two trackers are fed the
+        # ALREADY-COMPUTED single-window fired boolean (0.0/1.0) as their
+        # "z" input, not a raw z-score -- this preserves the EXACT
+        # existing single-window qualification logic (whatever z/mm
+        # combination node_aggregator_ref.py already uses) unchanged, and
+        # ONLY adds the new requirement that it hold for PERSIST_REQUIRED
+        # consecutive windows before firing, exactly mirroring what CV
+        # already does, closing the asymmetry found in the straggler_
+        # incident_detected investigation. See README.md's own new
+        # section on this for the concrete before/after.
+        self.mean_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        self.outlier_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         # P27-hotfix9 -- rolling pool of recently-fired timing-fallback
         # alerts, for _correlate_firing_timing_alerts. NOT scoped to a
         # single poll cycle: confirmed this session that two real,
@@ -2443,7 +2463,7 @@ class AlertEngine:
         # straggler's actual physical location, the real identity this
         # persistence key is meant to track.
         key = ("timing_fallback", per_member[m]["hostname"], comm, m, bucket, coll)
-        fired = self.timing_fallback_tracker.observe(key, surplus, per_member[waiting_partner]["ts"])
+        fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[waiting_partner]["ts"])
         if not fired:
             return None
         return (m, per_member[m]["slot"], per_member)
@@ -2757,7 +2777,47 @@ class AlertEngine:
             print(f"[alert-summary-write-failed] {type(e).__name__}: {e}", file=sys.stderr)
 
     def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None,
-              role_rank="na", role_n="na"):
+              role_rank="na", role_n="na", persist_duration_s=None):
+        # --- straggler_incident_detected (approved design, cause-agnostic
+        # signal) -- fires BEFORE and entirely independent of build_
+        # finding_for_alert/cause-gathering below: cause-tier (CONFIRMED/
+        # PROBABLE/UNCONFIRMED) is looked up AFTER this as a secondary
+        # annotation, never a prerequisite for this signal. By
+        # construction _emit() is only ever called once per onset (the
+        # caller's own tracker -- cv_tracker/mean_tracker, both now
+        # T.PERSIST_REQUIRED-gated -- only returns fired=True on the tick
+        # persistence is newly satisfied, not on every tick it continues
+        # to hold), so persistence IS the "sustained, not brief/
+        # intermittent" gate Cyril asked for -- reused directly, not
+        # reinvented, and no separate edge-trigger dedup is needed here.
+        # Impact floor: T.MEAN_MM_THRESH (2.0), this project's own
+        # already-calibrated "2x slower is real, not noise" bar, applied
+        # uniformly to cv AND mean (mean's own upstream agg_mean_fired
+        # already includes this gate; cv's upstream z-only qualification
+        # does not, so this is the one place both paths get it
+        # consistently). severity_ratio carries the real measured value
+        # (mm for a mean-sourced finding, z for a cv-sourced one, per the
+        # approved design) so downstream consumers can rank/prioritize
+        # incidents directly off the metric's own value rather than a
+        # second yes/no bucket.
+        mm_valid = mm is not None and isinstance(mm, (int, float)) and mm == mm and mm != float("inf")
+        if mm_valid and mm > T.MEAN_MM_THRESH:
+            severity_ratio = mm if stat_name == "mean" else z
+            slot = _query_gpu_slot(self.vm_url, hostname, member)
+            slot_disp = slot if slot is not None and slot >= 0 else "unknown"
+            dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
+            header = (f"[STRAGGLER-INCIDENT] stat={stat_name} host={hostname} comm={comm} member={member} "
+                      f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
+                      f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}")
+            print(header, flush=True)
+            self._append_alert_summary(header)
+            self._push_visibility_metric(
+                f'agg_straggler_incident_detected{{hostname="{hostname}",comm="{comm}",member="{member}",'
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} 1')
+            self._push_visibility_metric(
+                f'agg_straggler_incident_severity_ratio{{hostname="{hostname}",comm="{comm}",member="{member}",'
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}')
+
         # P22.2 -- coverage_guard.py and build_finding_for_alert's own
         # `primary=` display field are both out of this session's scope
         # (see this session's own report: coverage_guard's own volume
@@ -3092,7 +3152,8 @@ class AlertEngine:
                 # is the SAME already-computed number, not a new check.
                 self._push_visibility_metric(
                     f'agg_host_load_ratio{{hostname="{node}"}} {r["ratio"]}')
-                if self.host_tracker.observe(node, r["ratio"], now_ts):
+                _fired, _duration_s = self.host_tracker.observe(node, r["ratio"], now_ts)
+                if _fired:
                     finding = {
                         "host": node, "type_candidate": "host", "timescale": "sustained/whole-node",
                         "evidence": {"affected_load_per_core": r["load"],
@@ -3408,10 +3469,11 @@ class AlertEngine:
             # to member/bucket -- two collective types on the same
             # member/bucket are two independent series, not one.
             key = (hostname, comm, member, bucket, coll)
-            if self.cv_tracker.observe(key, z, ts):
+            fired, duration_s = self.cv_tracker.observe(key, z, ts)
+            if fired:
                 mm, worst_val = self._cv_maxmed(hostname, comm, bucket, coll, member)
                 self._emit("cv", hostname, comm, member, bucket, coll, z, mm, worst_val, None, m.get("slurm_job_id"), anomaly_ts=ts,
-                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"))
+                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
 
     def _check_mean(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added to both queries, same reasoning as
@@ -3509,29 +3571,41 @@ class AlertEngine:
             m = row["metric"]
             member = m["member"]
             row_coll = m.get("coll")
-            fired = float(row["value"][1]) >= 1.0
+            raw_fired_val = float(row["value"][1])
             # P22.2 -- coll added to the persistence key, same reasoning
             # as _check_cv's own key.
             key = ("mean", hostname, comm, member, bucket, coll)
-            if fired and not self.was_firing[key]:
+            # P27.3-timing-gap investigation -- real, explicit trace of
+            # the gap between "the underlying anomaly's own real sample
+            # timestamp" (z_res's real ts, via _query_instant_real_ts,
+            # already-existing infrastructure -- not a new mechanism)
+            # and "the real moment this engine actually decides to act
+            # on it". This is the direct measurement Path C's own live
+            # window (IOWAIT_LIVE_WINDOW_S) gets evaluated against.
+            #
+            # straggler_incident_detected fix -- this real per-sample
+            # timestamp is ALSO now required to feed mean_tracker.observe()
+            # (it must dedup/measure duration against the real underlying
+            # sample, never fired_res's own bare query-eval "now" --
+            # see persistence.py's own docstring for why that distinction
+            # matters). If no fresh z sample exists to anchor a real ts
+            # this cycle, this window genuinely can't be safely counted as
+            # a distinct, dedupable observation -- skipped, not guessed;
+            # the next poll very likely has one.
+            z_row_ts = next((float(r["value"][0]) for r in z_res
+                              if r["metric"].get("member") == member and r["metric"].get("coll") == row_coll), None)
+            if z_row_ts is None:
+                continue
+            persisted, duration_s = self.mean_tracker.observe(key, raw_fired_val, z_row_ts)
+            if persisted:
                 z = z_by_member.get((member, row_coll), 0.0)
                 mm = mm_by_member.get((member, row_coll), 0.0)
-                # P27.3-timing-gap investigation -- real, explicit trace of
-                # the gap between "the underlying anomaly's own real sample
-                # timestamp" (z_res's real ts, via _query_instant_real_ts,
-                # already-existing infrastructure -- not a new mechanism)
-                # and "the real moment this engine actually decides to act
-                # on it". This is the direct measurement Path C's own live
-                # window (IOWAIT_LIVE_WINDOW_S) gets evaluated against.
-                z_row_ts = next((float(r["value"][0]) for r in z_res
-                                  if r["metric"].get("member") == member and r["metric"].get("coll") == row_coll), None)
                 now_ts = time.time()
-                age_s = (now_ts - z_row_ts) if z_row_ts is not None else None
+                age_s = now_ts - z_row_ts
                 print(f"[EMIT_TRACE] decision_time={now_ts:.3f} member={member} bucket={bucket} coll={row_coll} "
-                      f"z_sample_real_ts={z_row_ts} age_s={age_s}", flush=True)
+                      f"z_sample_real_ts={z_row_ts} age_s={age_s} persist_duration_s={duration_s}", flush=True)
                 self._emit("mean", hostname, comm, member, bucket, coll, z, mm, None, None, m.get("slurm_job_id"), anomaly_ts=z_row_ts,
-                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"))
-            self.was_firing[key] = fired
+                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
 
     def _check_outlier_count(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added, same reasoning as _check_cv/_check_mean.
@@ -3554,8 +3628,15 @@ class AlertEngine:
             # rate, thresholds.py) -- never emitted as its own top-level
             # alert, only ever attached as additional_signatures when it
             # co-fires alongside cv/mean inside build_single_rank_finding.
-            # State tracked here for visibility/audit, not dispatched alone.
-            self.was_firing[key] = fired_flag
+            # State tracked here for visibility/audit, not dispatched alone
+            # -- unchanged by this fix. row (from mm_res) already carries a
+            # real per-sample ts via _query_instant_real_ts, same as CV/
+            # mean, so this tracked state now reflects genuine
+            # T.PERSIST_REQUIRED-consecutive persistence too, same
+            # convention, even though nothing here calls _emit() itself.
+            ts = float(row["value"][0])
+            persisted, _duration_s = self.outlier_tracker.observe(key, float(fired_flag), ts)
+            self.was_firing[key] = persisted
 
     def _check_job_throughput(self, hostname):
         """P20k-closeout Part B -- the one absolute, non-peer-relative
@@ -3603,7 +3684,8 @@ class AlertEngine:
             rate = float(row["value"][1])
             ts = float(row["value"][0])
             deficit = floor - rate
-            if self.throughput_tracker.observe(hostname, deficit, ts):
+            fired, _duration_s = self.throughput_tracker.observe(hostname, deficit, ts)
+            if fired:
                 self._emit_uniform_slowdown(hostname, rate, floor)
 
     def _emit_uniform_slowdown(self, hostname, rate, floor):

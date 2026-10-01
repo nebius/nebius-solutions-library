@@ -38,6 +38,25 @@ class CVPersistenceTracker:
         self.persist_window = persist_window
         self.persist_required = persist_required
         self.hist = defaultdict(lambda: deque(maxlen=persist_window))
+        # straggler_incident_detected duration field -- real bug found
+        # live (pre-implementation check, this session): the design doc
+        # assumed the existing anomaly_ts/_query_instant_real_ts
+        # infrastructure already gave a usable "elapsed between first and
+        # third fired sample" number for free. It does NOT: `hist` above
+        # only ever stored booleans, and `last_ts` (below) only ever kept
+        # the SINGLE most recent sample's timestamp, overwritten every
+        # call -- the real timestamp of the window that STARTED a firing
+        # streak was already discarded by the time persistence was
+        # satisfied. The underlying per-sample timestamps themselves ARE
+        # real, correct wall-clock values (confirmed empirically, not
+        # just from reading _query_instant_real_ts's own docstring -- see
+        # this session's own live test) -- this tracker just wasn't
+        # retaining a WINDOW of them. ts_hist fixes that with the same
+        # shape/lifetime as hist (one real timestamp per observed sample,
+        # same maxlen, same per-key dict) -- no new mechanism, just the
+        # one additional parallel deque needed to expose "when did the
+        # qualifying streak actually start" at the moment it completes.
+        self.ts_hist = defaultdict(lambda: deque(maxlen=persist_window))
         self.was_firing = defaultdict(bool)
         self.last_ts = {}
 
@@ -49,16 +68,26 @@ class CVPersistenceTracker:
         for this key is a no-op (same underlying sample re-polled, not a
         new window) and does not touch history or firing state.
 
-        Returns True exactly on the tick this key's condition transitions
-        into 'fired' (not on every tick while it holds), same
-        distinct-event semantics as tune_persistence.py's simulate()."""
+        Returns (is_new_event, duration_s): is_new_event is True exactly
+        on the tick this key's condition transitions into 'fired' (not on
+        every tick while it holds), same distinct-event semantics as
+        tune_persistence.py's simulate(). duration_s is the real elapsed
+        wall-clock seconds between the first and last of the
+        persist_required qualifying samples when is_new_event is True,
+        else None (not yet meaningful -- no completed streak this call)."""
         prev_ts = self.last_ts.get(key)
         if prev_ts is not None and ts <= prev_ts:
-            return False
+            return False, None
         self.last_ts[key] = ts
         h = self.hist[key]
         h.append(z > self.z_thresh)
+        th = self.ts_hist[key]
+        th.append(ts)
         fired = len(h) >= self.persist_required and all(list(h)[-self.persist_required:])
         is_new_event = fired and not self.was_firing[key]
         self.was_firing[key] = fired
-        return is_new_event
+        duration_s = None
+        if is_new_event:
+            window_ts = list(th)[-self.persist_required:]
+            duration_s = window_ts[-1] - window_ts[0]
+        return is_new_event, duration_s
