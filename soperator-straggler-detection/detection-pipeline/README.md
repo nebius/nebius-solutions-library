@@ -1465,6 +1465,29 @@ above) — this is expected, not a failure, as long as every episode has a
 matching recovery. Both are genuinely useful signals; neither is a proxy
 for the other, and `tools/self_test.sh`/`run.sh` only check the former.
 
+**Killing a supervised process's own Python child does NOT pick up a
+change to its SHELL supervisor script — a real, confirmed-live gotcha
+that cost real debugging time on an actual cluster.** Every
+`run_*_supervised.sh` (`alert_engine`, aggregator, VM, Grafana,
+`iowait_logger`) is a long-running `while true; do ...; done` shell
+loop — bash parses that loop body once when the supervisor process
+starts, so an already-running supervisor keeps relaunching its child
+with whatever command line was on disk *when the supervisor itself
+started*, no matter how many times you `git pull` or kill the child
+process. Confirmed live: adding `--summary-log` to
+`run_alert_engine_supervised.sh` had zero effect on an already-running
+deployment — `pkill -f alert_engine.py` + the supervisor relaunching it
+still produced a child with no `--summary-log` flag, because the
+*supervisor* predated the change. **The fix is to kill the supervisor
+process itself** (`pkill -f run_alert_engine_supervised.sh`, or the
+equivalent for whichever supervisor's script you changed), then
+re-launch via `run.sh` (which only skips re-launching a supervisor it
+finds already running — killing it first forces a real, fresh one).
+Killing only the Python child is enough to pick up a change to *that
+child's own `.py` file* (Python always re-reads its own source fresh on
+each new process) — it is never enough to pick up a change to the
+supervisor shell script that launches it.
+
 **`[DUMP-DISK-WARN]`/`[DUMP-DISK-CRITICAL]`/`[DUMP-DISK-RECOVERED]`** — a
 third, independent dead-man's-switch, added after a real 48-GPU Megatron
 validation run filled a 91GB shared volume with Inspector dumps and
