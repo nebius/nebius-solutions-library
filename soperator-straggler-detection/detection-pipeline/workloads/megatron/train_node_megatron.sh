@@ -32,9 +32,10 @@ export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
 export NCCL_INSPECTOR_DUMP_DIR="$DUMPDIR"
 export NCCL_INSPECTOR_PROM_DUMP=0
 
-# STRAGGLER_SLEEP_MS / STRAGGLER_TARGET_RANKS read directly by
-# pretrain_gpt_straggler.py (own copy of upstream pretrain_gpt.py, same
-# convention as workloads/nanogpt/train.py) -- passed through via
+# STRAGGLER_SLEEP_MS / STRAGGLER_TARGET_RANKS / STORAGE_FAULT_FILE_MB /
+# STORAGE_FAULT_TARGET_RANKS read directly by pretrain_gpt_straggler.py
+# (own copy of upstream pretrain_gpt.py, same convention as
+# workloads/nanogpt/train.py) -- passed through via
 # --export=ALL from the launching srun command.
 
 # Pre-Blackwell (H200/Hopper) with TP>1, non-FSDP: mcore-run-on-slurm

@@ -225,9 +225,21 @@ def check_coverage(vm_url, hostname, comm, bucket, member, slurm_job_id=None):
         t0, t1 = float(r0[0]["value"][0]), float(r1[0]["value"][0])
         dt = t1 - t0
         if dt <= 0:
-            reasons.append(f"real elapsed time between the two agg_records_seen_total snapshots for "
-                            f"hostname={hostname} was {dt:.3f}s (non-positive) -- cannot compute a real rate "
-                            f"this cycle")
+            # Real bug found live (this session): this used to reasons.append()
+            # here, which -- via `"degraded": bool(reasons)` below -- treated
+            # "couldn't measure a rate this cycle" (two snapshots 2.0s apart
+            # landing on the exact same underlying sample, e.g. because this
+            # metric's own push cadence is slower than the 2.0s probe gap)
+            # as equivalent to "measured, and it's bad". That's genuinely
+            # indeterminate, not degraded -- the exact same "report nothing
+            # rather than guess" philosophy already applied a few lines below
+            # for `expected is None` was NOT applied here. Confirmed live:
+            # a real, overwhelming Path C storage fault (io_ev ratio 3.0x
+            # over its own CONFIRMED floor) got its CONFIRMED tier silently
+            # capped to PROBABLE by this exact branch, which also suppresses
+            # path_c_storage from the rendered text entirely (PROBABLE/
+            # UNCONFIRMED formatting never shows it) -- a real false negative
+            # on a textbook-clear fault, not a cautious downgrade.
             rate = None
         else:
             rate = (v1 - v0) / dt

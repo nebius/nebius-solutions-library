@@ -13,6 +13,8 @@ PORT=$3
 DUMPDIR_BASE=$4
 SLEEP_MS=${5:-0}
 TARGET_RANKS=${6:-}
+STORAGE_FAULT_FILE_MB=${7:-0}
+STORAGE_FAULT_TARGET_RANKS=${8:-}
 IMAGE="nvcr.io#nvidia/pytorch:25.01-py3"
 MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib64,/root:/root,/tmp:/tmp"
 
@@ -37,7 +39,7 @@ for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "### megatron-tp4pp4dp3 train_iters=$TRAIN_ITERS outdir=$OUTDIR port=$PORT sleep_ms=$SLEEP_MS target_ranks=$TARGET_RANKS"
+echo "### megatron-tp4pp4dp3 train_iters=$TRAIN_ITERS outdir=$OUTDIR port=$PORT sleep_ms=$SLEEP_MS target_ranks=$TARGET_RANKS storage_fault_mb=$STORAGE_FAULT_FILE_MB storage_fault_ranks=$STORAGE_FAULT_TARGET_RANKS"
 echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then echo "ABORT: soperatorchecks job active"; exit 1; fi
 if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER already queued/running"; exit 1; fi
@@ -92,7 +94,7 @@ echo "--- megatron pre-build confirmed (helpers_cpp + bytecode cache, or already
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
-  --export=ALL,STRAGGLER_SLEEP_MS="$SLEEP_MS",STRAGGLER_TARGET_RANKS="$TARGET_RANKS" \
+  --export=ALL,STRAGGLER_SLEEP_MS="$SLEEP_MS",STRAGGLER_TARGET_RANKS="$TARGET_RANKS",STORAGE_FAULT_FILE_MB="$STORAGE_FAULT_FILE_MB",STORAGE_FAULT_TARGET_RANKS="$STORAGE_FAULT_TARGET_RANKS" \
   bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_megatron.sh" '"$TRAIN_ITERS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"

@@ -79,6 +79,46 @@ _straggler_sleep_s = float(os.environ.get('STRAGGLER_SLEEP_MS', '0')) / 1000.0
 _straggler_targets_env = os.environ.get('STRAGGLER_TARGET_RANKS', '')
 _straggler_target_ranks = {int(r) for r in _straggler_targets_env.split(',') if r.strip() != ''}
 
+# Real storage I/O-wait fault injection (Path C validation): unlike
+# STRAGGLER_SLEEP_MS above (a synthetic time.sleep()), this does a real
+# blocking read() of a real file on /tmp (confirmed real-disk-backed,
+# see storage-ebpf/real_disk_fault.py's own comment -- /scratch here is
+# virtiofs, no real block-device I/O), INSIDE the target rank's own PID
+# -- Path C's query_iowait_window filters strictly by exact PID match,
+# so a standalone fault-injection script with its own unrelated PID can
+# never show up in this rank's own alert evidence. posix_fadvise(...,
+# POSIX_FADV_DONTNEED) evicts the file from page cache before every
+# read, so every iteration produces a genuinely cold read (real
+# block-device I/O-wait), not a page-cache hit after the first pass.
+_storage_fault_targets_env = os.environ.get('STORAGE_FAULT_TARGET_RANKS', '')
+_storage_fault_target_ranks = {int(r) for r in _storage_fault_targets_env.split(',') if r.strip() != ''}
+_storage_fault_file_mb = int(os.environ.get('STORAGE_FAULT_FILE_MB', '0'))
+_storage_fault_file_path = None
+_storage_fault_chunk = 4 * 1024 * 1024  # 4MB, same shard-read-sized chunk as real_disk_fault.py
+
+
+def _storage_fault_ensure_file(path, size_mb):
+    need_bytes = size_mb * 1024 * 1024
+    if os.path.exists(path) and os.path.getsize(path) == need_bytes:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        written = 0
+        while written < need_bytes:
+            n = min(_storage_fault_chunk, need_bytes - written)
+            f.write(os.urandom(n))  # real random bytes -- forces real block
+            written += n            # allocation, not a sparse all-zero hole
+
+
+def _storage_fault_cold_read(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        while os.read(fd, _storage_fault_chunk):
+            pass
+    finally:
+        os.close(fd)
+
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
 
@@ -269,6 +309,13 @@ def forward_step(data_iterator, model: GPTModel):
 
     if _straggler_sleep_s > 0 and int(os.environ.get('RANK', '-1')) in _straggler_target_ranks:
         time.sleep(_straggler_sleep_s)
+
+    if _storage_fault_file_mb > 0 and int(os.environ.get('RANK', '-1')) in _storage_fault_target_ranks:
+        global _storage_fault_file_path
+        if _storage_fault_file_path is None:
+            _storage_fault_file_path = f"/tmp/storage_fault_rank{os.environ.get('RANK', '0')}.bin"
+            _storage_fault_ensure_file(_storage_fault_file_path, _storage_fault_file_mb)
+        _storage_fault_cold_read(_storage_fault_file_path)
 
     return output_tensor, partial(loss_func, loss_mask)
 
