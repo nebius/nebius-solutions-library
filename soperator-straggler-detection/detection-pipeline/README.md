@@ -718,7 +718,7 @@ automatically:
   UI, once logged in as admin) — not something `install.sh` sets up for
   you.
 
-### 6.2 Where real findings actually show up
+### 6.4 Where real findings actually show up
 
 Grafana's panels (section 1's "worst rank" metrics) show *what the
 aggregator measured*, continuously, whether or not anything was actually
@@ -751,6 +751,37 @@ finding means tailing one of these two files, or watching the
 corresponding `*_fired` metric (e.g. `agg_mean_fired`,
 `agg_persistence_fired`, `agg_outlier_count_fired`) flip to `1` on the
 Grafana dashboard.
+
+**Nothing shows up in "the terminal" automatically — you have to go
+look.** `alert_engine.py` is a background process (launched via
+`nohup`/`setsid` by its supervisor); its output is redirected straight
+into the two log files above, not printed to whatever terminal session
+you happen to have open. There's no popup, no notification, nothing
+proactive. Concretely:
+
+- **To watch live, while a job is running**, open a terminal and leave
+  this running:
+  ```bash
+  tail -f var/alert_summary.log
+  ```
+  The moment a straggler is caught, a new line appears right there —
+  e.g. `2026-10-01T00:19:04Z [ALERT] rank=3982741 comm=0x1a924b2167360c
+  node=worker-1 type=compute confidence=PROBABLE severity=LOG-ONLY`. For
+  the full evidence behind any one line (DCGM readings, storage I/O-wait,
+  the actual reasoning), look up the same `[ALERT] ...` text in
+  `var/alert_engine_supervised.log`.
+- **To check after your run has already finished** (no live terminal was
+  open at the time), the alerts are still there — these are real files,
+  append-only, not a transient in-memory stream:
+  ```bash
+  grep "\[ALERT\]" var/alert_summary.log            # every alert, whole history
+  tail -50 var/alert_summary.log                     # just the most recent ones
+  ```
+  If you need to scope this to one specific job, filter by its real
+  Slurm job id or time window — every full-detail block in
+  `var/alert_engine_supervised.log` includes `comm=`/`node=`/rank
+  identity you can cross-reference against `squeue`/your own job's known
+  start/end time.
 
 ## 7. Known limitations (read this before relying on any alert)
 
