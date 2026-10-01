@@ -250,7 +250,14 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   version regardless of the host — a real, disclosed version
   inconsistency across shapes (see `STAGE2_HANDOFF.md` item 9), not
   something to silently standardize away without checking whether that
-  shape's own validation depended on its specific version.
+  shape's own validation depended on its specific version. **A concrete,
+  confirmed consequence of this same mount convention**: a real Megatron
+  TP4/PP4/DP3 validation run found `--transformer-impl=transformer_engine`
+  crashing with a `cublasLtGetVersion` symbol error, because the same
+  `/usr/lib/x86_64-linux-gnu` bind-mount shadows the container's own
+  CUBLAS library too, not just NCCL — worked around with
+  `--transformer-impl=local`. Worth knowing before running any future
+  Transformer-Engine-based workload on this repo's own mount convention.
 
 ## 4. Installing — `environment.sh` + `vm-setup.sh` + `grafana-setup.sh` (all optional) + `install.sh`
 
@@ -785,6 +792,13 @@ this release.
   (`workloads/nanogpt/run_shape1_nomonitor.sh`) for exactly this
   comparison; no documented result from actually running it was found
   in this project's own history.
+- **A second, independent real measurement, different topology/scale —
+  added alongside the ResNet number above, not replacing it**: a real
+  48-GPU Megatron TP4/PP4/DP3 validation run measured **94.7ms/iter with
+  Inspector on vs. 89.0ms/iter off — ~6.5% relative overhead** at full
+  48-rank, multi-communicator scale. Both numbers are real and both are
+  on record; which one is representative of *your* workload depends on
+  model/parallelism shape, same "measure your own" guidance as above.
 - **`NCCL_INSPECTOR_DUMP_VERBOSE` now genuinely defaults to lean mode
   (`=0`) across all 17 launch scripts that set it** — a real, previously
   undocumented discrepancy existed here (this section used to correctly
@@ -1393,6 +1407,22 @@ flipped to "1" at real elapsed ~3:36-3:40 from job start) and TP2 (short
 job, 500 steps -> correct "0" across every bucket; normal job, 20000
 steps -> correctly flipped to "1" across effectively every real
 (host,bucket,comm) combination).
+
+**A short test/validation run will not show `agg_detection_coverage_
+achieved=1` — this is expected, not a failure, for any comm shape, not
+just the below-floor case above.** `BUCKET_MATURITY_GRACE_S` (120.0,
+`aggregator/node_aggregator_ref.py`) requires 120 real wall-clock
+seconds to have passed since a bucket was FIRST calibrated before
+coverage can flip to `1`, regardless of member count or how many
+iterations ran. A real Megatron TP4/PP4/DP3 validation run hit this
+directly: several-minute test runs never crossed that floor, so
+coverage was never actually confirmed in that exercise — not a bug,
+just a real run shorter than the grace period. `tools/self_test.sh`
+(which stops a job the moment detection fires, often well under 120s
+total) will routinely finish without ever reaching `coverage=1` for the
+same reason. Don't read a short run's `coverage=0` as evidence
+anything is broken — check it on a job that's run for several real
+minutes past its own first calibration instead.
 
 **Aggregator restart replays the entire dump-directory backlog from
 byte 0 — real, disclosed operational property, not a bug in any fix

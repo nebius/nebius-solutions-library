@@ -184,5 +184,15 @@ POST_CF="$(grep -c "CHECK-FAILED" "$ALERT_LOG" 2>/dev/null)"; POST_CF="${POST_CF
 NEW_CF=$((POST_CF - PRE_CF))
 info "[CHECK-FAILED] count: $NEW_CF new since test start (pre=$PRE_CF, post=$POST_CF)."
 
+# V1-beta P2 fix -- this test stops the job the moment detection fires,
+# usually well under 120s total -- not enough real wall-clock time for
+# agg_detection_coverage_achieved to flip to 1 (BUCKET_MATURITY_GRACE_S,
+# node_aggregator_ref.py), regardless of comm shape. A real Megatron
+# validation run hit exactly this and (correctly) read it as "coverage
+# wasn't confirmed in this short exercise," not a failure -- said here
+# explicitly so nobody re-discovers that confusion by checking Grafana
+# right after a self_test.sh PASS.
+info "Note: agg_detection_coverage_achieved will likely still read 0 on the dashboard for this run -- it needs 120s real wall-clock time since first calibration regardless of comm shape, and this test stops the job as soon as detection is confirmed. That is expected, not a failure; check coverage on a job that has run several real minutes past its own first calibration instead."
+
 echo "[self_test] === RESULT: $RESULT ==="
 [ "$RESULT" = "PASS" ]
