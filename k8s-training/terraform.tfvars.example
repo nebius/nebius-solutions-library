@@ -71,6 +71,7 @@ gpu_enable_local_disks = false # Only B300 supports local disks.
 gpu_nodes_driverfull_image = true
 enable_k8s_node_group_sa   = true
 enable_egress_gateway      = false
+enable_nat_gateway         = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
 

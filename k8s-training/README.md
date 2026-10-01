@@ -122,6 +122,20 @@ gpu_nodes_reservation_policy = {
 
 This policy is part of the GPU node template, so changing it can trigger node recreation. Review the Terraform plan and the existing [`node_group_strategy` configuration](./variables.tf) before applying it, especially when reserved capacity leaves no room for surge nodes.
 
+### Kubernetes NAT gateway
+
+Create NAT gateway nodes with a reserved public-IP pool for private workers.
+
+```hcl
+enable_egress_gateway = false
+enable_nat_gateway    = true
+cpu_nodes_public_ips  = false
+gpu_nodes_public_ips  = false
+```
+
+See the [NAT gateway module](../modules/k8s-nat-gateway/README.md) for
+requirements, configuration options, and routing cutover.
+
 ### GB300 production racks
 
 GB300 uses a separate rack-aware deployment path. Setting `gb300.rack_count` to

@@ -1,0 +1,77 @@
+#cloud-config
+# Install the gate before kubeadm joins the node. It also applies on later boots.
+bootcmd:
+  - |
+    set -eu
+    mkdir -p /etc/systemd/system/kubelet.service.d
+    cat > /etc/systemd/system/kubelet.service.d/20-nat-gateway.conf <<'UNIT'
+    [Service]
+    ExecStartPre=/usr/local/lib/nebius-nat-gateway/setup.sh
+    UNIT
+    systemctl daemon-reload
+
+# Host setup must succeed before kubelet starts; no container image is required.
+write_files:
+  - path: /usr/local/lib/nebius-nat-gateway/setup.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      . /etc/default/nebius-nat-gateway
+      mkdir -p /run/nebius-nat-gateway
+      iface=$(ip -4 route show default | awk 'NR==1 {print $5}')
+      [ -n "$iface" ]
+      [ -n "$WORKER_CIDRS" ]
+      sysctl -w net.ipv4.ip_forward=1
+      sysctl -w net.ipv4.conf.$iface.forwarding=1
+      sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.$iface.rp_filter=0
+      sysctl -w net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.$iface.send_redirects=0
+      # Replace only our chains when source CIDRs change.
+      # --noflush preserves all other chains, including Cilium's rules.
+      {
+        printf '*nat\n:NEBIUS_NAT_GATEWAY - [0:0]\n'
+        for cidr in $WORKER_CIDRS; do
+          printf -- '-A NEBIUS_NAT_GATEWAY -s %s -o %s -j MASQUERADE\n' "$cidr" "$iface"
+        done
+        printf 'COMMIT\n*filter\n:NEBIUS_NAT_GATEWAY - [0:0]\n'
+        for cidr in $WORKER_CIDRS; do
+          printf -- '-A NEBIUS_NAT_GATEWAY -i %s -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT\n' "$iface" "$iface" "$cidr"
+          printf -- '-A NEBIUS_NAT_GATEWAY -i %s -o %s -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n' "$iface" "$iface" "$cidr"
+        done
+        printf 'COMMIT\n'
+      } | iptables-restore --noflush -w 5
+      iptables -w 5 -t nat -C POSTROUTING -j NEBIUS_NAT_GATEWAY 2>/dev/null || iptables -w 5 -t nat -I POSTROUTING 1 -j NEBIUS_NAT_GATEWAY
+      iptables -w 5 -t filter -C FORWARD -j NEBIUS_NAT_GATEWAY 2>/dev/null || iptables -w 5 -t filter -I FORWARD 1 -j NEBIUS_NAT_GATEWAY
+      printf '%s\n' "$iface" > /run/nebius-nat-gateway/interface
+      /usr/local/lib/nebius-nat-gateway/verify.sh
+      echo "NAT gateway setup complete; kubelet may start"
+
+  - path: /usr/local/lib/nebius-nat-gateway/verify.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      . /etc/default/nebius-nat-gateway
+      [ -n "$WORKER_CIDRS" ]
+      [ "$(sysctl -n net.ipv4.ip_forward)" = 1 ]
+      iface=$(cat /run/nebius-nat-gateway/interface)
+      [ "$(sysctl -n net.ipv4.conf.$iface.forwarding)" = 1 ]
+      [ "$(sysctl -n net.ipv4.conf.all.rp_filter)" = 0 ]
+      [ "$(sysctl -n net.ipv4.conf.$iface.rp_filter)" = 0 ]
+      [ "$(sysctl -n net.ipv4.conf.all.send_redirects)" = 0 ]
+      [ "$(sysctl -n net.ipv4.conf.$iface.send_redirects)" = 0 ]
+      iptables -w 2 -t nat -C POSTROUTING -j NEBIUS_NAT_GATEWAY
+      iptables -w 2 -t filter -C FORWARD -j NEBIUS_NAT_GATEWAY
+      for cidr in $WORKER_CIDRS; do
+        iptables -w 2 -t nat -C NEBIUS_NAT_GATEWAY -s "$cidr" -o "$iface" -j MASQUERADE
+        iptables -w 2 -t filter -C NEBIUS_NAT_GATEWAY -i "$iface" -o "$iface" -s "$cidr" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+        iptables -w 2 -t filter -C NEBIUS_NAT_GATEWAY -i "$iface" -o "$iface" -d "$cidr" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+      done
+
+  - path: /etc/default/nebius-nat-gateway
+    owner: root:root
+    permissions: '0644'
+    content: |
+      WORKER_CIDRS='${join(" ", worker_cidrs)}'
