@@ -11,6 +11,7 @@ var/
 inspector-plugin/libnccl-profiler-inspector.so
 inspector-plugin/version.cc
 workloads/moe/qp_rate_limit_shim.so
+workloads/megatron/Megatron-LM/megatron/core/datasets/helpers_cpp*.so
 
 # vm-setup.sh's own real, downloaded binary + live time-series data --
 # same "fetch/generate at setup time, never commit" convention as above
