@@ -523,6 +523,24 @@ class NodeAggregator:
         self._throughput_last_live_denom = None  # P23 step 3 -- previous check's live bucket-count, for stability detection
         self._throughput_denom_stable_checks = 0  # P23 step 3 -- consecutive identical-live-denom checks so far
         self._throughput_total_checks = 0  # P27.5 -- total checks since throughput-checking began, for the bounded-ceiling backstop below
+        # V1-beta coverage-floor fix -- same real gap class as agg_
+        # detection_coverage_achieved (compute detection's own below-
+        # floor/short-run coverage signal): alert_engine.py's uniform_
+        # slowdown check requires PERSIST_REQUIRED (3) consecutive real
+        # below-floor ratio samples, each only pushed every THROUGHPUT_
+        # CHECK_INTERVAL_S (10s), AFTER a real baseline has already been
+        # established -- confirmed live this session: a real fault-
+        # injection run that landed correct rank/host attribution via
+        # compute detection did NOT trigger uniform_slowdown, while a
+        # materially-identical run (same injected fault) did, with no
+        # bug in the threshold itself -- the first run simply didn't run
+        # long enough post-baseline for 3 distinct samples to land before
+        # the job ended. Without this signal, "uniform_slowdown never
+        # fired" was indistinguishable from "this job never ran long
+        # enough for the check to have a fair chance" -- exactly the
+        # ambiguity agg_detection_coverage_achieved already closed for
+        # compute detection, now closed here too.
+        self._throughput_checks_since_ref = 0
         # V1 Beta Stage 5 follow-up -- real, confirmed live bug this closes:
         # every one of the 6 attributes above used to persist for this
         # aggregator PROCESS's entire lifetime, never reset on a job
@@ -1062,6 +1080,7 @@ class NodeAggregator:
             self._throughput_last_live_denom = None
             self._throughput_denom_stable_checks = 0
             self._throughput_total_checks = 0
+            self._throughput_checks_since_ref = 0
         now = time.time()
         if now - self._throughput_last_check_wall < THROUGHPUT_CHECK_INTERVAL_S:
             return
@@ -1239,6 +1258,17 @@ class NodeAggregator:
         ratio = raw_rate / self._throughput_rate_ref if self._throughput_rate_ref else 0.0
         self.push_buf.append((f'agg_job_throughput_ratio_to_baseline{{{self.base_labels()}}}',
                                ratio, ts_us // 1000))
+        # V1-beta coverage-floor fix -- see this counter's own __init__
+        # comment. Only increments once a real baseline is already
+        # established (this line is unreachable otherwise -- the `return`
+        # above exits first), so this measures real post-baseline check
+        # cycles, the same thing alert_engine.py's own persistence
+        # requirement (PERSIST_REQUIRED consecutive ratio samples) needs
+        # a fair chance at -- not wall-clock job duration in general.
+        self._throughput_checks_since_ref += 1
+        self.push_buf.append(
+            (f'agg_job_throughput_coverage_achieved{{{self.base_labels()}}}',
+             1 if self._throughput_checks_since_ref >= PERSIST_REQUIRED else 0, ts_us // 1000))
 
     def score_mean_window(self, comm_id, bucket, window_vals, ts_us):
         for p, vals in window_vals.items():

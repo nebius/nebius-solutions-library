@@ -407,6 +407,33 @@ def _hosts_have_active_job(hostnames, timeout=5):
         return False
 
 
+def _job_still_running(job_id, timeout=5):
+    """V1-beta shutdown-boundary fix -- same real squeue-based job-
+    presence technique as _hosts_have_active_job above, scoped by job id
+    instead of host. Used to catch a real, confirmed-live false-positive
+    class: as a job winds down, individual ranks reach their last real
+    collective (final gradient sync, teardown barrier, a checkpoint write
+    some ranks do and others don't) at slightly different real moments --
+    a genuine timing asymmetry that looks exactly like a live straggler
+    to CV/mean scoring, but isn't something anyone can act on once the
+    job has already finished. Confirmed live: a real Megatron validation
+    run saw 4 CONFIRMED/PAGE compute alerts fire 4-5s after TORCHRUN_EXIT.
+
+    Fails closed on purpose: a query failure or unknown job id is treated
+    the SAME as "not confirmed still running" (not the opposite) --
+    this only ever adds caution before a PAGE-worthy alert, never removes
+    it, so "can't tell" must never be read as license to keep full
+    confidence."""
+    if not job_id or job_id in ("", "unknown"):
+        return False
+    try:
+        out = subprocess.run(["squeue", "-j", str(job_id), "-h", "-o", "%i", "--states=R"],
+                              capture_output=True, text=True, timeout=timeout)
+        return out.returncode == 0 and bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
 def _query_instant(vm_url, promql):
     qs = urllib.parse.urlencode({"query": promql})
     with urllib.request.urlopen(f"{vm_url}/api/v1/query?{qs}", timeout=10) as resp:
@@ -907,6 +934,24 @@ def format_alert(finding, coverage):
             f"against slot 0 as a fallback, which may not be this member's actual "
             f"GPU. Treat sm_clock/throttle_reasons/etc. below as unverified for "
             f"this specific alert."
+        )
+    # V1-beta shutdown-boundary fix -- see _job_still_running's own
+    # docstring for the real false-positive class this catches (ranks
+    # idling down asynchronously as a job exits). Disclosed, never
+    # silently hidden -- same discipline as every other uncertainty note
+    # here -- even though the tier above may already have been capped at
+    # PROBABLE for this exact reason, so the reader knows WHY.
+    if finding.get("job_already_completed"):
+        cascade_line += (
+            f"\n\nJOB NOT CONFIRMED STILL RUNNING AT ALERT TIME: this job's own "
+            f"Slurm state could not be confirmed as actively running (RUNNING) "
+            f"at the moment this alert fired -- most likely because it already "
+            f"completed. A real, common cause at exactly this boundary: "
+            f"individual ranks reach their own last real collective at slightly "
+            f"different moments as a job exits (one rank writes a checkpoint "
+            f"first, another doesn't), producing a genuine timing asymmetry that "
+            f"looks like a live straggler but isn't something anyone can act on "
+            f"for a job that has already finished. Treat with reduced confidence."
         )
 
     if tier == "UNCONFIRMED":
@@ -2673,6 +2718,16 @@ class AlertEngine:
         finding = build_finding_for_alert(self.vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
                                            self.dcgm_host_map, anomaly_ts=anomaly_ts)
         if coverage["degraded"] and finding["tier"] == "CONFIRMED":
+            finding["tier"] = "PROBABLE"
+
+        # V1-beta shutdown-boundary fix -- see _job_still_running's own
+        # docstring. Checked AFTER coverage (both can independently cap
+        # CONFIRMED->PROBABLE; this one on top if coverage didn't already
+        # trigger it) and only queried once per alert (a live squeue call,
+        # not free, same discipline as every other live-query gate in
+        # this file -- never run inside a hot loop).
+        finding["job_already_completed"] = not _job_still_running(slurm_job_id)
+        if finding["job_already_completed"] and finding["tier"] == "CONFIRMED":
             finding["tier"] = "PROBABLE"
 
         # V1-beta-dashboard-followup -- real visibility only: the SAME
