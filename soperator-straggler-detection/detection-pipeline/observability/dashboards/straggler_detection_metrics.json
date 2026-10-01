@@ -1549,6 +1549,119 @@
       ],
       "title": "Host CPU load ratio (contention) and nv-hostengine liveness, per node",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_straggler_incident_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", bucket=~\"$bucket\"}",
+          "format": "time_series",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "{{hostname}} gpu{{gpu_slot}} rank {{role_rank}}/{{role_n}} (pid {{member}}) | comm={{comm}} {{coll}}@{{bucket}}",
+          "range": true,
+          "refId": "A",
+          "useBackend": false,
+          "useCustomValues": false,
+          "useDashValues": false
+        }
+      ],
+      "title": "Straggler incident detected (cause-agnostic -- sustained + impactful timing anomaly, independent of CONFIRMED/PROBABLE/UNCONFIRMED cause-tier; see README \u00a7 straggler_incident_detected)",
+      "description": "Fires once per real, T.PERSIST_REQUIRED(3)-consecutive-window-sustained, >MEAN_MM_THRESH(2.0)x-impactful timing anomaly, regardless of whether DCGM/storage ever corroborates a hardware cause. Pair with agg_straggler_incident_severity_ratio for the measured severity value (mm for a mean-sourced finding, z for a cv-sourced one).",
+      "type": "timeseries"
     }
   ],
   "preload": false,

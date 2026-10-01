@@ -783,7 +783,85 @@ proactive. Concretely:
   identity you can cross-reference against `squeue`/your own job's known
   start/end time.
 
+### 6.5 `straggler_incident_detected` — counting stragglers without needing a cause confirmed
+
+Everything in section 6.4 above (`[ALERT] ... confidence=CONFIRMED/
+PROBABLE/UNCONFIRMED`) answers "what caused this, and how confident are
+we in the cause?" — a **separate** question from "did a real, persistent,
+impactful straggler just happen, regardless of whether we ever find
+out why?" Before this signal existed, those two questions were
+conflated: a genuinely sustained, high-impact software-only straggler
+(no DCGM/storage signature to corroborate it — e.g. a pure scheduling
+delay) could never rise above `PROBABLE`, a tier this project's own
+measured data says **carries the run's entire false-positive rate
+(22-25/hour)** — making it useless for reliably counting real incidents
+or estimating lost compute time, even though the underlying timing
+anomaly was completely real and sustained.
+
+`straggler_incident_detected` decouples the two. It fires on:
+- **Persistence**: the SAME `T.PERSIST_REQUIRED=3`-consecutive-window
+  rule CV detection already used (now applied uniformly to mean and
+  outlier_count too — see the known-limitations note in section 7 on
+  the resulting tightening of mean-path alerting).
+- **Impact**: `mm > T.MEAN_MM_THRESH` (2.0x) — this project's own
+  already-calibrated "2x slower than peers is real, not noise" floor,
+  applied the same way regardless of which statistic (cv/mean)
+  triggered it.
+
+— **entirely independent of cause-tier**. Whether DCGM/storage ever
+corroborates a hardware cause is looked up and attached *afterward*, as
+a secondary annotation on the finding, never a gate on whether this
+signal fires at all.
+
+**Where it shows up** — additive to, never replacing, the existing
+`[ALERT]` output:
+- A `[STRAGGLER-INCIDENT] stat=... host=... member=... gpu_slot=...
+  severity_ratio=... persisted_s=...` line in both
+  `var/alert_engine_supervised.log` and `var/alert_summary.log`,
+  alongside (not instead of) the finding's own `[ALERT]` block.
+- Two new VictoriaMetrics metrics: `agg_straggler_incident_detected`
+  (1, pushed once per onset, same convention as `agg_mean_fired`) and
+  `agg_straggler_incident_severity_ratio` (the real measured ratio —
+  `mm` for a mean-sourced finding, `z` for a cv-sourced one — so
+  incidents can be ranked by severity directly off the metric's own
+  value, rather than binned into another tier).
+- A new Grafana panel ("Straggler incident detected") on the
+  straggler-detection-metrics dashboard.
+
+`persisted_s` is the real, measured elapsed wall-clock seconds between
+the first and last of the 3 qualifying windows (not a sample-count
+proxy) — empirically validated against raw NCCL Inspector dump
+timestamps during this feature's own implementation.
+
+**Lost compute-time estimation is deliberately NOT built here.** The
+already-existing `agg_job_throughput_ratio_to_baseline`/
+`agg_job_throughput_rate_ref` (a job's own measured throughput vs. its
+own historical baseline) is the right signal for that — treat a
+`straggler_incident_detected` event as a likely contributing cause to
+whatever shortfall that signal already shows, rather than deriving a
+second, possibly-disagreeing number bottom-up from individual
+collectives' excess exec time (which would double-count overlapping
+communicators and miss non-collective-bound slowdown).
+
 ## 7. Known limitations (read this before relying on any alert)
+
+**Behavior change: the mean-path check now requires 3 consecutive
+windows, same as CV already did — it no longer pages on a single
+window.** This is a deliberate tightening of existing alerting
+behavior (not a side effect of adding `straggler_incident_detected`
+above), closing an asymmetry: CV detection already required
+`T.PERSIST_REQUIRED=3` consecutive windows above threshold before
+firing at all; the mean-path check (`_check_mean`) and the
+corroborating-only outlier_count check did not — either could
+previously fire `_emit()` (and, for mean, a CONFIRMED/PAGE alert, if
+DCGM/storage also corroborated a cause) off a single qualifying
+~100-sample window. Concretely: **a straggler that previously paged
+after `rank 151479 · compute straggler · sustained · PROBABLE /
+Arrival lag 60.49x node peers (mean, z=84.8)` fired on ONE window now
+requires that same condition to recur for 3 consecutive windows before
+`_emit()` is even called.** If your own alerting/dashboards depend on
+a mean-path finding firing the instant a single window crosses
+threshold, this is a real behavior change to account for.
 
 This section is **not softened**. It has two parts: which fault classes
 this pipeline is validated for at all (repeated from Step 1 above, since
