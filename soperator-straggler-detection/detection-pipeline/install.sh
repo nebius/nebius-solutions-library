@@ -192,23 +192,27 @@ for node in "${_NODES_ARR[@]}"; do
   tracefs_ok="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" \
     "bpftrace -e 'tracepoint:syscalls:sys_enter_openat { exit(); }' >/dev/null 2>&1 && echo OK || echo FAIL")"
   if [ "$tracefs_ok" != "OK" ]; then
-    info "  $node: bpftrace cannot attach a real tracepoint directly -- checking for the already-established tracefs bind-mount wrapper fix..."
-    has_wrapper="$(ssh -o BatchMode=yes "$node" "test -f /usr/local/bin/bpftrace && grep -q sys-host /usr/local/bin/bpftrace 2>/dev/null && echo YES || echo NO")"
-    if [ "$has_wrapper" = "NO" ]; then
-      info "  $node: installing the tracefs bind-mount wrapper (storage-ebpf/bpftrace-tracefs-wrapper.sh)..."
-      scp -o BatchMode=yes "$PKG_ROOT/storage-ebpf/bpftrace-tracefs-wrapper.sh" "$node:/tmp/_bpftrace_wrapper.sh" >/dev/null
-      ssh -o BatchMode=yes "$node" '
-        set -e
-        if [ ! -f /usr/bin/bpftrace.real ]; then
-          real_path="$(command -v bpftrace)"
-          mv "$real_path" /usr/bin/bpftrace.real
-        fi
-        cp /tmp/_bpftrace_wrapper.sh /usr/local/bin/bpftrace
-        chmod +x /usr/local/bin/bpftrace
-      ' || fail "  $node: failed to install the tracefs bind-mount wrapper."
-    else
-      info "  $node: wrapper already installed."
-    fi
+    info "  $node: bpftrace cannot attach a real tracepoint directly -- (re-)installing the tracefs bind-mount wrapper fix..."
+    # Real bug found live (this session): this used to skip reinstalling
+    # the wrapper whenever ANY file already existed at /usr/local/bin/
+    # bpftrace containing "sys-host" -- meaning a cluster running an
+    # OLDER packaged wrapper (e.g. one missing the sudo-escalation
+    # fallback added after a real customer cluster's unshare-permission
+    # failure) would never pick up a fix to the wrapper itself on a
+    # later install.sh re-run. Always deploys the CURRENT packaged
+    # version instead -- cheap (a small script copy), idempotent, same
+    # "always run current code" discipline as every supervised process
+    # restart elsewhere in this project.
+    scp -o BatchMode=yes "$PKG_ROOT/storage-ebpf/bpftrace-tracefs-wrapper.sh" "$node:/tmp/_bpftrace_wrapper.sh" >/dev/null
+    ssh -o BatchMode=yes "$node" '
+      set -e
+      if [ ! -f /usr/bin/bpftrace.real ]; then
+        real_path="$(command -v bpftrace)"
+        mv "$real_path" /usr/bin/bpftrace.real
+      fi
+      cp /tmp/_bpftrace_wrapper.sh /usr/local/bin/bpftrace
+      chmod +x /usr/local/bin/bpftrace
+    ' || fail "  $node: failed to install the tracefs bind-mount wrapper."
     # Real, previously-missing verification (this session): installing
     # the wrapper file was never actually re-tested -- on a cluster
     # whose SSH/jail environment itself lacks CAP_SYS_ADMIN (or has a
