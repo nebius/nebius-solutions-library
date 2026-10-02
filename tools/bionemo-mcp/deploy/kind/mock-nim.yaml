@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boltz2
+  namespace: nims
+  labels:
+    app: boltz2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: boltz2
+  template:
+    metadata:
+      labels:
+        app: boltz2
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: mock-nim
+          image: nebius-bionemo-mcp:archvteams-2370-local
+          imagePullPolicy: Never
+          command:
+            - python
+            - -c
+          args:
+            - |
+              import json
+              from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+              class Handler(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path == "/v1/health/ready":
+                          self.send_response(200)
+                          self.end_headers()
+                          self.wfile.write(b"ready")
+                      else:
+                          self.send_error(404)
+
+                  def do_POST(self):
+                      length = int(self.headers.get("content-length", "0"))
+                      self.rfile.read(length)
+                      body = json.dumps({"structure": "data_mock", "confidence_scores": [0.9]}).encode()
+                      self.send_response(200)
+                      self.send_header("content-type", "application/json")
+                      self.send_header("content-length", str(len(body)))
+                      self.end_headers()
+                      self.wfile.write(body)
+
+                  def log_message(self, format, *args):
+                      return
+
+              ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /v1/health/ready
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: boltz2-svc
+  namespace: nims
+spec:
+  selector:
+    app: boltz2
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

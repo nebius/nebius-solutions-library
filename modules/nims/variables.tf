@@ -15,6 +15,17 @@ variable "namespace" {
   default     = "nims"
 }
 
+variable "proxy_service_type" {
+  description = "Kubernetes Service type for the catalog-derived NIM proxy groups. Use ClusterIP when an in-cluster gateway such as nebius-bionemo-mcp is the only caller."
+  type        = string
+  default     = "LoadBalancer"
+
+  validation {
+    condition     = contains(["ClusterIP", "LoadBalancer"], var.proxy_service_type)
+    error_message = "proxy_service_type must be ClusterIP or LoadBalancer."
+  }
+}
+
 variable "model_catalog" {
   description = <<-EOT
     Per-model catalog overrides. Keys can override entries from the built-in

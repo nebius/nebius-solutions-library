@@ -100,6 +100,24 @@ run "enabled_llm_gets_custom_metric_hpa" {
   }
 }
 
+run "cluster_internal_proxy_services" {
+  command = plan
+
+  variables {
+    proxy_service_type = "ClusterIP"
+  }
+
+  assert {
+    condition     = alltrue([for service in kubernetes_service_v1.model_lbs : service.spec[0].type == "ClusterIP"])
+    error_message = "The shared proxy mechanism must support a cluster-internal fleet without public NIM LoadBalancers."
+  }
+
+  assert {
+    condition     = output.nims_lb_ip == null && output.cosmos_lb_ip == null
+    error_message = "LoadBalancer IP outputs must be null when proxy Services are cluster-internal."
+  }
+}
+
 run "new_catalog_entry_derives_all_resources_and_port" {
   command = plan
 
@@ -149,5 +167,10 @@ run "new_catalog_entry_derives_all_resources_and_port" {
   assert {
     condition     = output.nim_catalog["catalog_test"].service_url == "http://catalog-test-svc.nims.svc.cluster.local:8000"
     error_message = "The exported catalog must provide the in-cluster model endpoint."
+  }
+
+  assert {
+    condition     = output.nim_catalog["catalog_test"].pod_selector_labels == { app = "catalog-test" }
+    error_message = "The exported catalog must provide the actual model pod selector for in-cluster policy consumers."
   }
 }

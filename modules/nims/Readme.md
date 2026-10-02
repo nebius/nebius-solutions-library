@@ -13,9 +13,13 @@ services, proxy upstreams, LoadBalancer ports, ServiceMonitors, and optional HPA
 resources are derived from that entry.
 
 The resolved catalog is exported as `nim_catalog`. Each entry includes its enabled
-state, image/version, internal service URL, load-balancer group, derived proxy
-port, and scaling metadata. In-cluster clients can consume this output instead of
-maintaining a second model-to-port table.
+state, image/version, pod selector, internal service URL, load-balancer group,
+derived proxy port, and scaling metadata. In-cluster clients can consume this
+output instead of maintaining a second model-to-port table.
+
+Set `proxy_service_type = "ClusterIP"` when an in-cluster gateway is the only
+supported model caller. The default remains `LoadBalancer` for compatibility;
+`nims_lb_ip` and `cosmos_lb_ip` return `null` for a cluster-internal deployment.
 
 Each catalog entry carries:
 

@@ -1,0 +1,125 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nebius-bionemo-mcp.fullname" . }}
+  labels:
+    {{- include "nebius-bionemo-mcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nebius-bionemo-mcp.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- if .Values.ingress.enabled }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.namespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.podLabels | nindent 14 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: test
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        {{- range $key, $model := .Values.nimCatalog }}
+        {{- if $model.enabled }}
+        - {{- with $.Values.networkPolicy.nimIsolation.namespaceLabels }}
+          namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+          podSelector:
+            matchLabels:
+              {{- toYaml (default (dict "app" $model.deployment_name) $model.pod_selector_labels) | nindent 14 }}
+        {{- end }}
+        {{- end }}
+      ports:
+        {{- range $key, $model := .Values.nimCatalog }}
+        {{- if $model.enabled }}
+        - port: {{ $model.service_port }}
+          protocol: TCP
+        {{- end }}
+        {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+---
+{{- $enabledApps := list }}
+{{- range $key, $model := .Values.nimCatalog }}
+{{- if $model.enabled }}
+{{- $enabledApps = append $enabledApps (get (default (dict "app" $model.deployment_name) $model.pod_selector_labels) "app") }}
+{{- end }}
+{{- end }}
+{{- if and .Values.networkPolicy.nimIsolation.enabled (gt (len $enabledApps) 0) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nebius-bionemo-mcp.fullname" . }}-nim-ingress
+  {{- with .Values.networkPolicy.nimIsolation.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "nebius-bionemo-mcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          {{- toYaml ($enabledApps | uniq | sortAlpha) | nindent 10 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - {{- with .Values.networkPolicy.nimIsolation.namespace }}
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Release.Namespace }}
+          {{- end }}
+          podSelector:
+            matchLabels:
+              {{- include "nebius-bionemo-mcp.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+        {{- range .Values.networkPolicy.nimIsolation.additionalClients }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .namespaceLabels | nindent 14 }}
+          {{- with .podLabels }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+        {{- end }}
+      ports:
+        {{- range $key, $model := .Values.nimCatalog }}
+        {{- if $model.enabled }}
+        - port: {{ $model.service_port }}
+          protocol: TCP
+        {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

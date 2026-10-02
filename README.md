@@ -36,6 +36,11 @@ Deploys a Bastion instance that serves as a secure jump host for your infrastruc
 
 ### Integration
 
+[BioNeMo MCP gateway](./tools/bionemo-mcp/README.md)
+
+Expose a customer-owned BioNeMo NIM fleet to MCP clients through a typed,
+authenticated gateway with Kubernetes and artifact-storage integration.
+
 [Anyscale](./anyscale/README.md)
 
 Installs the Anyscale operator on Nebius AI Cloud and offers integration with Anyscale. 
