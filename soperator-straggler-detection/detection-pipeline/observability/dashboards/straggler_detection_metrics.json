@@ -12,6 +12,32 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "expr": "agg_job_start_time_seconds{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\"}",
+        "iconColor": "rgba(0, 200, 0, 1)",
+        "name": "Job start (real sacct Start time, Cyril item-6)",
+        "titleFormat": "Job {{slurm_job_id}} started",
+        "textFormat": "host={{hostname}}",
+        "step": "10s"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "expr": "agg_job_end_time_seconds{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\"}",
+        "iconColor": "rgba(200, 0, 0, 1)",
+        "name": "Job end (real sacct End time, Cyril item-6)",
+        "titleFormat": "Job {{slurm_job_id}} ended",
+        "textFormat": "host={{hostname}}",
+        "step": "10s"
       }
     ]
   },
