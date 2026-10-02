@@ -103,6 +103,53 @@ if ! kubectl get crd pytorchjobs.kubeflow.org &>/dev/null; then
   exit 1
 fi
 
+# --- GPU allocation mode: device-plugin (x86) vs DRA (Grace/GB300) [additive] ---
+# x86 GPU clusters advertise the nvidia.com/gpu device-plugin resource. DRA-native
+# clusters (Grace/GB300) advertise GPUs via Dynamic Resource Allocation and report
+# no nvidia.com/gpu. Auto-detect so the x86 device-plugin path — including its
+# allocatable-based GPUs/node detection below — stays unchanged, and GB300/DRA is
+# handled additively. Runs after the CRD check so a broken kubeconfig surfaces
+# there first, not as a bogus "no GPUs" error. Fails loudly if neither is present.
+GPU_MODE="device-plugin"
+# Count nodes advertising a POSITIVE nvidia.com/gpu count. `$1+0>0` (not NF) so a
+# node reporting the literal "0" isn't miscounted as device-plugin — DRA nodes
+# report 0/absent, and we must fall through to the DRA branch for them.
+DEVPLUGIN_NODES=$(kubectl get nodes \
+  -o jsonpath='{range .items[*]}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null \
+  | awk '$1+0>0{c++} END{print c+0}')
+if [ "${DEVPLUGIN_NODES:-0}" -eq 0 ]; then
+  if kubectl get deviceclass gpu.nvidia.com >/dev/null 2>&1; then
+    GPU_MODE="dra"
+    # On DRA, GPUs/node comes from the resourceslices, not nvidia.com/gpu. Portable
+    # awk (no python / no grep -P): count device names in the first gpu.nvidia.com
+    # slice. Do NOT `exit` early in awk — closing the pipe would SIGPIPE kubectl and,
+    # under set -o pipefail, abort the script. Process all lines, print first match.
+    DETECTED_DRA_SLOTS=$(kubectl get resourceslices \
+      -o jsonpath='{range .items[*]}{.spec.driver}{"\t"}{range .spec.devices[*]}{.name}{","}{end}{"\n"}{end}' 2>/dev/null \
+      | awk -F'\t' '$1=="gpu.nvidia.com" && !seen {n=gsub(/,/,",",$2); if(n>0){print n; seen=1}}')
+    if [ -n "$DETECTED_DRA_SLOTS" ] && [ "$DETECTED_DRA_SLOTS" -gt 0 ] 2>/dev/null; then
+      SLOTS="${SLOTS:-$DETECTED_DRA_SLOTS}"
+    else
+      # Don't silently assume 8 on a 4-GPU GB300 — warn now; the allocatable-based
+      # fallback below will also warn and default if SLOTS is still unset.
+      echo -e "${YELLOW}WARNING: GPU_MODE=dra but could not read GPUs/node from resourceslices (RBAC? driver not ready?).${NC}"
+    fi
+  else
+    echo -e "${RED}ERROR: no GPUs found — neither the nvidia.com/gpu device plugin nor the gpu.nvidia.com DRA DeviceClass is present${NC}" >&2
+    exit 1
+  fi
+fi
+echo "GPU mode:     $GPU_MODE"
+
+# Cross-node NCCL transport (DRA/GB300 only). On GB300 the two nodes fuse into one
+# MNNVL (multi-node NVLink) domain, so by default NCCL runs collectives over NVLink
+# and the IB fabric stays idle. Set SOAK_TRANSPORT=ib to disable MNNVL/NVLS so NCCL
+# falls back to InfiniBand cross-node. No effect on x86 (its template has no vars).
+SOAK_TRANSPORT="${SOAK_TRANSPORT:-auto}"
+if [ "$GPU_MODE" = "dra" ] && [ "$NODE_COUNT" -gt 1 ]; then
+  echo "Transport:    ${SOAK_TRANSPORT} ($([ "$SOAK_TRANSPORT" = "ib" ] && echo "InfiniBand cross-node" || echo "MNNVL/NVLink cross-node"))"
+fi
+
 # =============================================================================
 # DYNAMIC GPU NODE DETECTION
 # =============================================================================
@@ -229,14 +276,65 @@ kubectl delete ds/soak-prepull -n "$NAMESPACE" --ignore-not-found=true --wait=fa
 # Patch the PyTorchJob template. Worker replicas = total nodes - 1 (master is
 # rank 0 and also runs GPUs), so total pods == NODE_COUNT.
 WORKER_REPLICAS=$(( NODE_COUNT - 1 ))
+
+# Map the transport choice to the NCCL env the DRA template carries (no-op on x86).
+if [ "$SOAK_TRANSPORT" = "ib" ]; then
+  NCCL_MNNVL_ENABLE=0; NCCL_NVLS_ENABLE=0
+  if [ "$GPU_MODE" != "dra" ]; then
+    echo -e "${YELLOW}NOTE: SOAK_TRANSPORT=ib only affects DRA/GB300; ignored on device-plugin (x86 already soaks IB cross-node).${NC}"
+  fi
+else
+  NCCL_MNNVL_ENABLE=1; NCCL_NVLS_ENABLE=1
+fi
+
+# Select the GPU-allocation variant. x86 -> device-plugin template (unchanged).
+# DRA -> apply the GPU ResourceClaimTemplate + a ComputeDomain (for cross-node
+# MNNVL NCCL), then use the DRA PyTorchJob template. Both live in $NAMESPACE, so
+# they're torn down with it.
+if [ "$GPU_MODE" = "dra" ]; then
+  echo "Applying DRA GPU ResourceClaimTemplate (count=$SLOTS)..."
+  sed -e "s/__SLOTS__/${SLOTS}/g" "$SCRIPT_DIR/dra/gpu-resourceclaim-template.yaml" \
+    | kubectl apply -n "$NAMESPACE" -f -
+  # Cross-node NCCL on GB300 needs an MNNVL ComputeDomain (without it NVLS setup
+  # fails with "Cuda failure 801 operation not supported"). The NVIDIA controller
+  # auto-creates the channel claim template (soak-channel); wait for it (bounded).
+  echo "Applying DRA ComputeDomain (numNodes=$NODE_COUNT) for cross-node NCCL..."
+  sed -e "s/__NODE_COUNT__/${NODE_COUNT}/g" "$SCRIPT_DIR/dra/compute-domain.yaml" \
+    | kubectl apply -n "$NAMESPACE" -f -
+  echo "Waiting for the ComputeDomain channel claim template (soak-channel)..."
+  CHANNEL_READY=0
+  for _ in $(seq 1 30); do
+    if kubectl get resourceclaimtemplate soak-channel -n "$NAMESPACE" --request-timeout=10s >/dev/null 2>&1; then
+      CHANNEL_READY=1; break
+    fi
+    sleep 2
+  done
+  if [ "$CHANNEL_READY" != "1" ]; then
+    echo -e "${RED}ERROR: ComputeDomain channel template 'soak-channel' did not appear — is the NVIDIA DRA/ComputeDomain controller running?${NC}" >&2
+    exit 1
+  fi
+  PYTORCHJOB_TEMPLATE="$SCRIPT_DIR/templates/pytorchjob-dra.yaml"
+else
+  PYTORCHJOB_TEMPLATE="$SCRIPT_DIR/templates/pytorchjob.yaml"
+fi
+
 MANIFEST=$(sed \
   -e "s/__GPU_INSTANCE_TYPE__/${GPU_INSTANCE_TYPE}/g" \
   -e "s/__WORKER_REPLICAS__/${WORKER_REPLICAS}/g" \
   -e "s/__DURATION__/${DURATION}/g" \
   -e "s/__FILL_FRACTION__/${HBM_FILL_FRACTION}/g" \
   -e "s/__SLOTS__/${SLOTS}/g" \
+  -e "s/__NCCL_MNNVL_ENABLE__/${NCCL_MNNVL_ENABLE}/g" \
+  -e "s/__NCCL_NVLS_ENABLE__/${NCCL_NVLS_ENABLE}/g" \
   -e "s|__SOAK_IMAGE__|${SOAK_IMAGE}|g" \
-  "$SCRIPT_DIR/templates/pytorchjob.yaml")
+  "$PYTORCHJOB_TEMPLATE")
+
+# Single-node run (NODE_COUNT=1) has no workers. The Training Operator rejects
+# Worker.replicas=0, so render a master-only PyTorchJob by dropping the Worker
+# replica spec — it is the last block in the template, so cut from its line to EOF.
+if [ "$WORKER_REPLICAS" -lt 1 ]; then
+  MANIFEST=$(printf '%s\n' "$MANIFEST" | awk '/^    Worker:/{exit} {print}')
+fi
 
 echo "$MANIFEST" | kubectl apply -f -
 
