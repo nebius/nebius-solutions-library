@@ -69,6 +69,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -143,6 +144,23 @@ SACCT_TERMINAL_STATES = frozenset({
     "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY",
 })
 DEFAULT_CLUSTER = "soperator"  # soperator-fluxcd values.yaml's own default clusterName
+
+# Restart-backlog-replay fix -- real gap confirmed live this session:
+# self.file_offsets was a pure in-memory dict, so any restart of this
+# long-lived process re-read every dump file in dump_dir from byte 0.
+# At realistic multi-day uptime (~11GB/host observed) that meant 9-12
+# minutes of "blind" catch-up per restart -- confirmed to have directly
+# caused one real tools/self_test.sh failure (the aggregator was still
+# replaying history, not watching the live test job, when the test's
+# own alert-wait window expired). 10s: frequent enough that a crash
+# mid-session loses at most ~10s worth of already-processed offset
+# progress (a small, bounded amount of safe re-processing on the next
+# resume -- see maybe_checkpoint_offsets()'s own docstring for why
+# that's an acceptable, disclosed tradeoff, not silently hidden),
+# without adding meaningful overhead to the hot path (one small JSON
+# write of ~200 small int/str entries, not per-record).
+OFFSET_CHECKPOINT_INTERVAL_S = 10.0
+OFFSET_CHECKPOINT_FILENAME = ".aggregator_offsets_checkpoint.json"
 
 # P21.5 -- per-communicator bucket calibration. Generic tuning parameters
 # (how much evidence before trusting the answer), not workload-specific
@@ -545,7 +563,9 @@ class NodeAggregator:
         # identity" finding -- used only as a same-comm-shape role label.
         self.phys_comm_role = {}
         self.phys_gpu_slot = {}  # P21.7 -- phys_id -> gpu_slot_index, re-pushed on the heartbeat cadence (see maybe_heartbeat)
-        self.file_offsets = {}
+        self.file_offsets = self._load_offset_checkpoint()
+        self.file_inodes = {}
+        self._offset_checkpointed_at = 0.0
         self.rate_logged = set()
         self.push_buf = []
         self.n_records_seen = 0
@@ -989,6 +1009,95 @@ class NodeAggregator:
     # records) regardless of total backlog size.
     DEADLINE_CHECK_EVERY = 2000
 
+    def _offset_checkpoint_path(self):
+        return os.path.join(self.dump_dir, OFFSET_CHECKPOINT_FILENAME)
+
+    def _load_offset_checkpoint(self):
+        """Restart-backlog-replay fix -- loads a prior run's checkpointed
+        file_offsets so a restart can resume near where it left off
+        instead of re-reading every dump file from byte 0. Fails safe,
+        always: ANY problem (file missing -- the normal first-ever-
+        startup case, corrupt JSON, a crash mid-write, an unexpected
+        schema) falls back to {} -- the exact pre-fix behavior
+        (re-read everything from 0), never a silent skip of real data.
+        A stale-but-parseable checkpoint (e.g. one of its files has
+        since been truncated -- see poll_files()'s own shrink-guard) is
+        NOT specially validated here; that single, already-necessary
+        guard in poll_files() (which must run on every cycle regardless,
+        to also catch truncation happening during normal live
+        operation, not just across a restart) is what actually makes
+        trusting a stale offset here safe -- duplicating that check here
+        too would just be the same logic twice."""
+        path = self._offset_checkpoint_path()
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            offsets = data.get("offsets")
+            if not isinstance(offsets, dict):
+                raise ValueError("checkpoint missing/invalid 'offsets' key")
+            result = {}
+            for fp, off in offsets.items():
+                if isinstance(fp, str) and isinstance(off, int) and off >= 0:
+                    result[fp] = off
+            print(f"[{self.hostname}] [OFFSET-CHECKPOINT] loaded {len(result)} file offset(s) "
+                  f"from {path} (written {data.get('written_at', 'unknown')}) -- resuming "
+                  f"near last position instead of byte 0", flush=True)
+            return result
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"[{self.hostname}] [OFFSET-CHECKPOINT] could not load {path} "
+                  f"({type(e).__name__}: {e}) -- falling back to re-reading from byte 0, "
+                  f"same as if no checkpoint existed", file=sys.stderr)
+            return {}
+
+    def maybe_checkpoint_offsets(self, force=False):
+        """Restart-backlog-replay fix -- periodically persists
+        self.file_offsets so the NEXT restart can resume near here
+        instead of from byte 0. Atomic write (temp file in the same
+        directory, then os.replace()) -- os.replace() is a single
+        rename syscall on POSIX, so a reader (the next process's own
+        _load_offset_checkpoint()) can never observe a partially-
+        written file; a crash mid-write leaves the OLD checkpoint (or
+        none) in place, never a corrupt one.
+
+        Real, disclosed tradeoff (confirmed acceptable, not assumed):
+        a crash between two checkpoints loses at most
+        OFFSET_CHECKPOINT_INTERVAL_S worth of offset progress, so the
+        next resume re-reads and re-processes that small window of
+        already-seen records once more. This is bounded, safe-direction
+        duplication (re-processing, never skipping), and the consumers
+        of handle_record()'s own output -- comm_calib's running stats,
+        and VictoriaMetrics ingestion of this aggregator's own derived
+        metrics (which re-sends on its own independent heartbeat/window
+        cadence regardless, not keyed to raw record count) -- are
+        already built to tolerate the normal jitter of a live,
+        continuously-running stream; a few seconds of possible
+        reprocessing after a crash is well within that same tolerance,
+        not a new class of risk."""
+        now = time.time()
+        if not force and now - self._offset_checkpointed_at < OFFSET_CHECKPOINT_INTERVAL_S:
+            return
+        self._offset_checkpointed_at = now
+        path = self._offset_checkpoint_path()
+        tmp_path = f"{path}.tmp.{os.getpid()}"
+        payload = {
+            "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "offsets": dict(self.file_offsets),
+        }
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            print(f"[{self.hostname}] [OFFSET-CHECKPOINT] write failed ({type(e).__name__}: {e}) "
+                  f"-- next restart will re-read from byte 0 for any file not previously "
+                  f"checkpointed; not fatal, cleaning up", file=sys.stderr)
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
     def poll_files(self, deadline=None):
         """P22.5 -- now accepts an optional wall-clock deadline and can
         return WITHOUT having drained every already-read byte, if that
@@ -1018,6 +1127,41 @@ class NodeAggregator:
         for fp in sorted(glob.glob(f"{self.dump_dir}/*.log")):
             offset = self.file_offsets.get(fp, 0)
             try:
+                st = os.stat(fp)
+            except FileNotFoundError:
+                continue
+            # Restart-backlog-replay fix's own safety guard -- a dump
+            # file can genuinely become a DIFFERENT logical stream
+            # underneath an already-known offset: the inspector
+            # plugin's own writer opens each dump path with
+            # fopen(path, "w") (confirmed: inspector-plugin/json.cc),
+            # which truncates in place if the OS ever reuses this PID
+            # for a later process. Trusting a stale offset bigger than
+            # the file's real current size would seek past EOF and
+            # silently read nothing -- not a crash, but a silent,
+            # indefinite loss of every real record the new process
+            # writes until it happens to regrow past the old offset.
+            # Caught here by the one unambiguous size signal (current
+            # size < last-known offset can only mean a real shrink,
+            # never normal growth), plus an inode check for the rarer
+            # delete+recreate-at-the-same-path case that a same-or-
+            # larger size alone wouldn't reveal. Both checks fail in
+            # the SAFE direction only: reset to 0, at most reprocessing
+            # already-seen content once more, never skipping real new
+            # data. This same guard protects BOTH a restart resuming
+            # from a checkpointed offset AND plain continuous live
+            # operation if a PID happens to be reused while this
+            # process never restarts at all.
+            prev_inode = self.file_inodes.get(fp)
+            if st.st_size < offset or (prev_inode is not None and prev_inode != st.st_ino):
+                print(f"[{self.hostname}] [DUMP-FILE-TRUNCATED] {fp}: "
+                      f"size={st.st_size} known_offset={offset} "
+                      f"inode_changed={prev_inode is not None and prev_inode != st.st_ino} "
+                      f"-- resetting offset to 0 (re-reading this path's new content from "
+                      f"its start; likely PID reuse)", flush=True)
+                offset = 0
+            self.file_inodes[fp] = st.st_ino
+            try:
                 with open(fp, "rb") as f:
                     f.seek(offset)
                     new_data = f.read()
@@ -1041,6 +1185,20 @@ class NodeAggregator:
                     if time.time() >= deadline:
                         break
             self.file_offsets[fp] = offset + consumed
+            # Restart-backlog-replay fix -- a single poll_files() call
+            # facing a large, not-yet-checkpointed backlog (e.g. the
+            # one-time replay needed to SEED a checkpoint for the first
+            # time after deploying this fix, or any still-uncaught-up
+            # backlog) does not return to run()'s own loop -- where the
+            # normal per-cycle maybe_checkpoint_offsets() call lives --
+            # until every file in this glob is fully drained, which can
+            # take minutes. Checkpointing here too, once per FILE
+            # (still gated by the same OFFSET_CHECKPOINT_INTERVAL_S, so
+            # this adds no real cost when files process faster than
+            # that), means even a crash or deliberate interruption
+            # DURING a long first-time replay loses only the interval's
+            # own small window, not the whole in-progress replay.
+            self.maybe_checkpoint_offsets()
 
     def handle_record(self, d):
         h = d["header"]
@@ -1717,12 +1875,21 @@ class NodeAggregator:
         while time.time() < t_end:
             self.poll_files(deadline=t_end)
             self.maybe_heartbeat()
+            self.maybe_checkpoint_offsets()
             self.flush()
             if time.time() >= t_end:
                 break
             time.sleep(poll_interval)
         self.poll_files(deadline=t_end)
         self.maybe_heartbeat()
+        # Restart-backlog-replay fix -- force=True on the final,
+        # shutdown-path checkpoint (bypassing the normal 10s interval
+        # gate): a clean exit (the normal SIGTERM-to-leaf-process
+        # restart path this pipeline already uses to deploy code
+        # changes) should always save the freshest possible offsets,
+        # not whatever was last written up to 10s ago, so a deliberate
+        # restart resumes as close to byte-exact as this design allows.
+        self.maybe_checkpoint_offsets(force=True)
         self.flush()
         n_comms = len(self.comm_calib)
         print(f"[{self.hostname}] done. records_seen={self.n_records_seen} pushes={self.n_pushes} "
@@ -1747,4 +1914,30 @@ if __name__ == "__main__":
     args = ap.parse_args()
     agg = NodeAggregator(args.dump_dir, args.hostname, args.vm_url,
                          cluster=args.cluster, slurm_job_id=args.slurm_job_id)
+
+    # Restart-backlog-replay fix -- the real restart mechanism this
+    # pipeline already uses (a clean SIGTERM to this leaf process, the
+    # supervisor shell script relaunches it) uses Python's DEFAULT
+    # SIGTERM disposition, which terminates the process immediately
+    # with no code of ours running at all -- meaning run()'s own final,
+    # force=True checkpoint call at the end of its loop would never
+    # actually execute via this real path, only if --duration itself
+    # ever elapsed naturally (it practically never does: production
+    # launches pass a ~10-year duration). Installing a real handler
+    # here is what makes a deliberate restart resume near byte-exact
+    # (checkpointing right up to the moment of the signal) instead of
+    # relying solely on the periodic OFFSET_CHECKPOINT_INTERVAL_S
+    # write's own, already-bounded, up-to-10s-stale checkpoint. Safe to
+    # do real work (file I/O) here: Python delivers signals to the main
+    # thread between bytecode instructions, not as a true OS-level
+    # async interrupt, so this runs exactly like any other Python code,
+    # never mid-corrupting self.file_offsets (plain dict key
+    # assignment is already atomic per key under the GIL).
+    def _checkpoint_and_exit(signum, frame):
+        print(f"[{agg.hostname}] received signal {signum} -- checkpointing offsets "
+              f"before exit", flush=True)
+        agg.maybe_checkpoint_offsets(force=True)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _checkpoint_and_exit)
+
     agg.run(args.duration)
