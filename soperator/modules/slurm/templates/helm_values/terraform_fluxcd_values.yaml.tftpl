@@ -963,7 +963,7 @@ resources:
             values:
               checks:
                 manager:
-                  enabledNodeReplacement: ${soperator_checks_node_replacement_enabled}
+                  enableNodeReplacement: ${soperator_checks_node_replacement_enabled}
                   env:
                     maintenanceIgnoreNodeLabels: "${join(",", slurm_cluster.maintenance_ignore_node_labels)}"
                   resources:
