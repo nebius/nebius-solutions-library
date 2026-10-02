@@ -479,12 +479,40 @@ if command -v kubectl >/dev/null 2>&1; then
 else
   info "kubectl not found -- skipping the Kubernetes Grafana path entirely (not printed as an option unless it's real; see vm-standalone/README.md for why this project's own real deployments don't depend on Kubernetes access anyway)."
 fi
-if [ -z "$GRAFANA_URL" ] && curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:3000/api/health" 2>/dev/null | grep -q 200; then
-  GRAFANA_URL="http://localhost:3000"
-  info "Found a real, reachable Grafana instance directly on this host (health check passed live at http://localhost:3000)."
+# Real bug found and fixed (Cyril item: [GRAFANA-DOWN] watchdog
+# follow-up): this used to hardcode "http://localhost:3000" unconditionally,
+# ignoring GRAFANA_PORT entirely -- confirmed live, this exact collision
+# happened on a real cluster, a different, unrelated Grafana instance
+# was already running on port 3000 (grafana-setup.sh's own default
+# port, unrelated to this package), so this check found IT instead of
+# this package's own real instance (on a different port), writing the
+# WRONG URL into cluster.env with no indication anything was wrong.
+# GRAFANA_PORT now mirrors grafana-setup.sh's own variable exactly
+# (same default, same override), and a found instance's IDENTITY is now
+# verified, not just its presence -- see the dashboard-by-UID check
+# below for why presence alone (a bare /api/health 200, which every
+# Grafana instance answers, ours or not) was never a safe signal.
+GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+GRAFANA_DASHBOARD_UID="straggler-detection-metrics"
+GRAFANA_ADMIN_CREDENTIALS_FILE="$VAR_DIR/grafana_admin_credentials.txt"
+if [ -z "$GRAFANA_URL" ] && curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:$GRAFANA_PORT/api/health" 2>/dev/null | grep -q 200; then
+  _candidate_url="http://localhost:$GRAFANA_PORT"
+  if [ -f "$GRAFANA_ADMIN_CREDENTIALS_FILE" ]; then
+    _probe_pw="$(grep -oP '(?<=^admin_password: ).*' "$GRAFANA_ADMIN_CREDENTIALS_FILE" 2>/dev/null)"
+    _identity_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -u "admin:$_probe_pw" \
+      "$_candidate_url/api/dashboards/uid/$GRAFANA_DASHBOARD_UID" 2>/dev/null)"
+    if [ "$_identity_code" = "200" ]; then
+      GRAFANA_URL="$_candidate_url"
+      info "Found a real, reachable Grafana instance directly on this host, confirmed as this package's own (health check passed AND this package's own stored credentials + dashboard '$GRAFANA_DASHBOARD_UID' both confirmed live at $GRAFANA_URL)."
+    else
+      warn "A Grafana instance is running at $_candidate_url (health check passed) but isn't this package's own -- this package's own stored credentials did not confirm it (dashboard-by-UID check returned HTTP $_identity_code, expected 200). NOT recording this as GRAFANA_URL (a presence-only match previously caused this exact real bug). Set GRAFANA_PORT to this package's own instance's real port if you have one running elsewhere, or confirm this is intentional and leave GRAFANA_URL unset."
+    fi
+  else
+    warn "A Grafana instance is running at $_candidate_url (health check passed) but this is a fresh install with no stored credentials yet ($GRAFANA_ADMIN_CREDENTIALS_FILE does not exist) -- cannot verify whether this is this package's own instance or a different, unrelated one already using this port. NOT recording this as GRAFANA_URL (a presence-only match previously caused this exact real bug) -- run grafana-setup.sh (or bring up your own instance and set GRAFANA_PORT to its real port) first, then re-run this script."
+  fi
 fi
 if [ -z "$GRAFANA_URL" ] && [ -z "$GRAFANA_K8S_SVC" ]; then
-  warn "No real, reachable Grafana instance found (neither a Kubernetes Service named like 'grafana' nor a local process on port 3000 answered). This is not fatal -- this project's pipeline (aggregator/alert_engine/VM) works without Grafana -- but run.sh will not be able to print a real access command until one is running. This script does not launch Grafana itself -- see grafana-setup.sh (this control host, automatic) or grafana-standalone/README.md (manual) for the two real, supported ways to bring one up, then re-run install.sh."
+  warn "No real, reachable, CONFIRMED-ours Grafana instance found (neither a Kubernetes Service named like 'grafana' nor a verified local process on port $GRAFANA_PORT). This is not fatal -- this project's pipeline (aggregator/alert_engine/VM) works without Grafana -- but run.sh will not be able to print a real access command until one is running and confirmed. This script does not launch Grafana itself -- see grafana-setup.sh (this control host, automatic) or grafana-standalone/README.md (manual) for the two real, supported ways to bring one up, then re-run install.sh."
 fi
 GRAFANA_ACCESS_HOST=""
 GRAFANA_ACCESS_USER=""

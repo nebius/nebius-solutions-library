@@ -75,17 +75,63 @@ GRAFANA_AUTH_CONFIG_FILE="$VAR_DIR/grafana_auth_generated.ini"
 
 # =========================================================================
 # Step 1 -- idempotent check: already up with real auth enforced?
-# =========================================================================
+#
+# Real bug found and fixed (Cyril item: [GRAFANA-DOWN] watchdog
+# follow-up): this used to treat ANY auth-enforced instance answering at
+# GRAFANA_URL as "already up, nothing to do" -- a presence check, not an
+# identity check. Confirmed live, this exact collision happened on a
+# real cluster: a different, unrelated Grafana instance was already
+# running on this host's port 3000 (GRAFANA_PORT's own default), so
+# this check silently declared success against the WRONG instance,
+# while this package's own real instance (on a different port) sat
+# broken for two days with nothing noticing. GRAFANA_PORT itself was
+# already correctly respected here (not the bug) -- the real gap was
+# never verifying the thing found is genuinely THIS package's own.
+#
+# Fixed by a real identity check, not just presence: if this package's
+# own credentials file already exists, authenticate against the found
+# instance's real dashboard-by-UID endpoint for the real, fixed UID
+# this package's own dashboard JSON ships with (GRAFANA_DASHBOARD_UID
+# below -- a committed, stable value, not generated per-install). A
+# real HTTP 200 there means the found instance both accepts OUR stored
+# credentials AND has OUR dashboard provisioned -- the strongest
+# ownership signal available without a dedicated identity endpoint
+# (Grafana has none). Anything else (401/403 -- wrong credentials, a
+# genuinely different instance; 404 -- right credentials but our
+# dashboard isn't there, also not confirmed as ours) means this is NOT
+# verifiably our instance.
+#
+# Honest limitation, not hidden: if no credentials file exists yet
+# (e.g. a fresh clone of this repo on a host where something else
+# already occupies the configured port, before this script has ever
+# run here), there is nothing to authenticate with, so identity
+# genuinely cannot be verified either way. Rather than silently
+# trusting a presence-only match (today's original bug) or silently
+# assuming the opposite, this is treated as unverifiable and reported
+# as such -- the operator decides, not a guess either way.
+GRAFANA_DASHBOARD_UID="straggler-detection-metrics"
 
 info "Checking for a real, already-reachable Grafana instance at $GRAFANA_URL..."
 _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GRAFANA_URL/api/org" 2>/dev/null)"
 if [ "$_code" = "401" ] || [ "$_code" = "302" ]; then
-  info "Already up with real auth enforced at $GRAFANA_URL (HTTP $_code) -- nothing to do."
-  exit 0
+  if [ ! -f "$GRAFANA_ADMIN_CREDENTIALS_FILE" ]; then
+    fail "A Grafana instance is already running at $GRAFANA_URL (HTTP $_code, auth enforced) but this is a fresh setup with no stored credentials yet ($GRAFANA_ADMIN_CREDENTIALS_FILE does not exist) -- cannot verify whether this is this package's own instance or a different, unrelated one already using this port. Set GRAFANA_PORT to a free port for this package's own instance, or if you know this IS this package's own instance from an earlier setup whose var/ directory was removed, restore $GRAFANA_ADMIN_CREDENTIALS_FILE first."
+  else
+    _probe_pw="$(grep -oP '(?<=^admin_password: ).*' "$GRAFANA_ADMIN_CREDENTIALS_FILE" 2>/dev/null)"
+    _identity_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -u "admin:$_probe_pw" \
+      "$GRAFANA_URL/api/dashboards/uid/$GRAFANA_DASHBOARD_UID" 2>/dev/null)"
+    if [ "$_identity_code" = "200" ]; then
+      info "Already up with real auth enforced AND confirmed as this package's own instance at $GRAFANA_URL (HTTP $_code; this package's own stored credentials + dashboard '$GRAFANA_DASHBOARD_UID' both confirmed live) -- nothing to do."
+      exit 0
+    else
+      fail "A Grafana instance is running at $GRAFANA_URL (HTTP $_code, auth enforced) but isn't this package's own -- this package's own stored credentials did not confirm it (dashboard-by-UID check returned HTTP $_identity_code, expected 200). Set GRAFANA_PORT to use a different port for this package's own instance, or confirm this is intentional (e.g. a stale instance you want to replace -- stop it first, then re-run this script)."
+    fi
+  fi
 elif [ "$_code" = "200" ]; then
   warn "Something is already answering at $GRAFANA_URL, but WITHOUT requiring credentials (HTTP 200 -- anonymous access enabled). Not managed by this script -- see README.md section 6.2 for why this matters and how to check/fix an existing instance's own config."
   exit 0
 fi
+[ "$FAIL" -eq 1 ] && { echo "[grafana-setup.sh] Aborting -- a Grafana instance occupies $GRAFANA_URL that isn't confirmed as this package's own -- see FATAL line(s) above." >&2; exit 1; }
 
 # =========================================================================
 # Step 2 -- fetch the real, pinned Grafana binary if not already present
