@@ -1209,14 +1209,49 @@ real improvement, **not a dramatic one, and reported honestly as such**:
 the measured run-to-run spread (9.2-14.8%) is itself larger than the
 ~1 percentage-point apparent gain, so this should be read as "roughly
 consistent with 13.1%, with a modest improvement more likely than not"
-rather than a precisely-quantified win. One MoE sanity run with the
-patched plugin showed a notably higher drop count (319,434, across all
-16 ranks) than any sample gathered during the capacity investigation
-above — given that investigation's own finding of a highly variable,
-possibly-unbounded burst tail even without any code change, this is
-**not** attributed to the Part B fixes (which don't touch the ring-buffer
-mechanism at all) with any confidence either way; reported as a single,
-inconclusive data point, not a claim of regression or of no regression.
+rather than a precisely-quantified win.
+
+**Follow-up — the 319,434-drop MoE outlier, resolved, not left
+inconclusive**: one MoE sanity run with the patched plugin showed a
+notably higher drop count than any sample gathered during the capacity
+investigation above. Investigated directly rather than assumed either
+way:
+- **Config confirmed identical** to the capacity investigation's own 4
+  samples (same unmodified `run_moe_rankfault.sh`, same 300 steps, same
+  default fault-target rank, same 2 nodes) — the only real difference
+  at the time was which Inspector build was loaded.
+- **Re-ran 4 more times, controlling each suspect variable in turn**:
+  Part-B-patched code (248,405 drops), the exact pre-Part-B
+  ring-buffer-only code re-extracted from its own commit (308,959) —
+  ruling out Part B's fixes as the cause — and a completely fresh,
+  empty dump directory (324,629) — ruling out accumulated dump-file
+  count. All 5 samples (319,434/248,405/253,099/308,959/324,629) landed
+  in the same **248K-325K range, with all 16 ranks affected every
+  time** — a tight, repeatable cluster, not noise, and categorically
+  different from the capacity investigation's own 4 samples
+  (2/592/875/2,212, each affecting only 1-2 ranks). **This does not
+  belong to the same distribution as the capacity investigation's
+  samples.**
+- **Found a real, plausible contributing factor, external to this
+  plugin and to this package entirely**: `dmesg` shows this host
+  receiving frequent, external `echo 3 > /proc/sys/vm/drop_caches`
+  calls (full page-cache drops) throughout the session — present
+  during the capacity investigation's own window too, so not a clean
+  on/off switch, but measurably **increasing in frequency** over time
+  (roughly every 5-10 minutes early on, tightening to every 2-4 minutes
+  by the time of the high-drop re-checks). This is triggered from
+  outside this environment's own visibility (confirmed: this package
+  runs inside a chroot/jail with no access to whatever schedules it) —
+  not something this investigation can disable to test in isolation,
+  and not something a code change in this repo can fix.
+- **Plain conclusion**: the 319,434 figure (and its 4 reproductions) is
+  real evidence of a separate, host/platform-level condition — not a
+  ring-buffer or Part-B regression (both directly ruled out), not
+  "just another point" on the capacity investigation's own distribution
+  (ruled out by the 100x+ gap and the all-ranks-vs-1-2-ranks pattern
+  difference). It needs its own, separate investigation by whoever owns
+  this host's platform-level cache-management behavior -- out of this
+  package's own scope to fix.
 
 ## 7. Known limitations (read this before relying on any alert)
 
