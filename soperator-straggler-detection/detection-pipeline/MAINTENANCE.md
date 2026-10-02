@@ -8,9 +8,10 @@ It is the maintenance *lens* on top of `README.md` — where a topic is already
 fully documented there (architecture, install steps, troubleshooting), this
 file summarizes and points at the section rather than repeating it. Every
 claim below was verified directly against the current code/README at the time
-this file was written (2026-10-02, HEAD `d684a6d8` on
-`add/straggler-detection-v1-beta`) — if it's been a while, re-grep the cited
-file:line before trusting it.
+this file was written (2026-10-02, originally against HEAD `d684a6d8`,
+updated against `add/straggler-detection-v1-beta` after the `[VM-DOWN]`
+watchdog and the two constant/doc corrections below landed) — if it's been a
+while, re-grep the cited file:line before trusting it.
 
 ## If you only read one section
 
@@ -22,27 +23,31 @@ this project's own history of things that actually broke:
    processes is a bash `while true` loop parsed once at supervisor start
    (§1). Killing the leaf Python/binary just relaunches the *same already-
    parsed* script. This has already cost real debugging time this session.
-2. **VictoriaMetrics has no watchdog verifying it answers *correct* queries
-   — only that it's up.** This is structurally the same blind spot that let
-   Grafana serve 503s for 2+ days undetected before `[GRAFANA-DOWN]` was
-   built (§2). If VM silently returns stale/wrong data while "up," nothing
-   today catches it.
-3. **Calibration constants are duplicated across files and already caught
-   drifting.** `aggregator/promql_cv_verify.py` carries its own
-   `PERSIST_REQUIRED=2`/`CV_Z_THRESH=20.0`, while the live pipeline
-   (`alerting/thresholds.py`, `aggregator/node_aggregator_ref.py`) uses
-   `PERSIST_REQUIRED=3`/`CV_Z_THRESH=60.0` (§6). A manual verification run
-   using that tool's own persistence check will NOT reproduce the live
-   pipeline's fire/no-fire decisions for the same data.
-4. **Relative `DUMPDIR_BASE` silently breaks dump output** — no crash, no
+2. **Calibration constants are duplicated across files and can drift
+   silently** — confirmed real: `aggregator/promql_cv_verify.py` was found
+   carrying stale `PERSIST_REQUIRED=2`/`CV_Z_THRESH=20.0` against the live
+   pipeline's real `PERSIST_REQUIRED=3`/`CV_Z_THRESH=60.0` (§6, now fixed).
+   Whenever you change a threshold in `thresholds.py` or
+   `node_aggregator_ref.py`, grep for other copies of the same constant name
+   before assuming it's the only place that needed the change.
+3. **Relative `DUMPDIR_BASE` silently breaks dump output** — no crash, no
    error, just silent non-detection, because self-dispatching workload
    launchers `cd` before the relative path resolves (§7, README:2772-2790).
    Always pass an absolute path.
-5. **Overhead is not one number.** Five different measurements exist
+4. **Overhead is not one number.** Five different measurements exist
    (4.5x / ~6.5% / ~12.3% / ~13.1% / ~12.0%) across different workload
    shapes, scales, and pipeline states (§8). Never quote one of these as
    "the" overhead figure, and re-measure after any workload/scale/plugin
    change rather than reusing an old number.
+5. **VictoriaMetrics' own two real "up but wrong" failure modes are now
+   watched (`[VM-DOWN]`/`[VM-RECOVERED]`, §2) — but know their actual
+   shapes if you're ever debugging around them.** A destroyed data
+   directory does NOT leave VM in a long-lived degraded state like
+   Grafana's SQLite quirk did — VM's own free-disk-space watcher panics the
+   whole process within under a minute. The slower, more realistic failure
+   is low free disk space: VM stays alive indefinitely, `/health` still
+   returns 200, but every write gets a real HTTP 503 ("read-only mode").
+   Both are confirmed live, not assumed from docs — see §2.
 
 ---
 
@@ -75,8 +80,8 @@ run_.*_supervised`) before assuming the new behavior is live.
 
 ## 2. Watchdogs / dead-man's-switches
 
-Six distinct dead-man's-switches exist today, all in `alerting/alert_engine.py`
-unless noted:
+Seven distinct dead-man's-switches exist today, all in
+`alerting/alert_engine.py` unless noted:
 
 | Switch | Detects | Threshold/interval | Source |
 |---|---|---|---|
@@ -85,6 +90,7 @@ unless noted:
 | `[DUMP-DISK-WARN]`/`[CRITICAL]`/`-RECOVERED` | dump-directory disk usage | `DUMP_DISK_WARN_PCT=80.0` / `DUMP_DISK_CRITICAL_PCT=95.0` (env-overridable, alert_engine.py:114-115), 60s interval | alert_engine.py:3757/3753/3766 |
 | `[PATH-C-DOWN]`/`-RECOVERED` | missing supervisor log / crash-looping iowait_logger | `PATH_C_CHECK_INTERVAL_S=60.0` (alert_engine.py:138) | alert_engine.py:3801/3845/3852 |
 | `[GRAFANA-DOWN]`/`-RECOVERED` | Grafana up-but-serving-errors (concurrent probe, not just port-open) | `GRAFANA_CHECK_INTERVAL_S=60.0` (alert_engine.py:161); no-op if `GRAFANA_URL` unset | alert_engine.py:3979/3988 |
+| `[VM-DOWN]`/`-RECOVERED` | VM unreachable, OR reachable but ALL supervised hosts' heartbeats stale at once (e.g. VM's own low-disk-space read-only mode) | `VM_CHECK_INTERVAL_S=60.0` | added this pass — see below |
 | `[CHECK-FAILED]` | an exception inside one named check function | — | alert_engine.py:1440-1455 |
 
 **What `[CHECK-FAILED]` does NOT cover:** a crash in `poll_once()`'s own
@@ -92,14 +98,27 @@ surrounding code, or the process dying from a signal — that class is covered
 instead by the supervisor restart loop in §1, and by `[PIPELINE-DOWN]` for
 the aggregator side specifically.
 
-**Real, still-open gap:** nothing verifies VictoriaMetrics itself answers
-*correct* queries — only `run.sh`'s one-time startup `/health` check, plus
-the fact that every other watchdog happens to depend on VM answering at all.
-If VM were up and authenticating fine but silently serving stale/wrong data,
-nothing would catch it. This is structurally the exact class of bug
-`[GRAFANA-DOWN]` was built to catch (README §7/known-limitations area; see
-the Grafana-outage incident that motivated it) — just not yet built for VM.
-**If you're adding a new watchdog, this is the next one.**
+**`[VM-DOWN]`/`[VM-RECOVERED]` (closed — this was the previous edition's
+single biggest flagged gap).** Real investigation (two isolated scratch VM
+instances, deliberately broken) found VM's own failure modes differ from
+Grafana's: destroying its data directory while running does **not** produce
+a long-lived degraded state — VM's own free-disk-space watcher panics the
+whole process within under a minute (confirmed live, ~10-43s across runs).
+The real, slow-onset "up but wrong" analogue is **low free disk space**:
+confirmed live via `-storage.minFreeDiskSpaceBytes` — VM stays alive
+indefinitely, `/health` still returns 200, but every write gets a real HTTP
+503 ("the storage is in read-only mode"), silently starving every
+supervised host's heartbeat at once. The new check combines a direct
+`/health` reachability probe (catches the crash case) with an
+all-hosts-stale-at-once check reusing the already-computed
+`self.pipeline_down` state (catches the read-only-mode case) — no new
+metric, no new cardinality. Validated end to end with a standalone harness
+against the real `AlertEngine` class and a real, deliberately-broken
+scratch instance (160s clean healthy baseline, a real crash→`[VM-DOWN]`
+within ~10s, a real restart→`[VM-RECOVERED]` once the new heartbeat cleared
+VM's own new-series visibility lag), then deployed to the real production
+`alert_engine.py` supervisor and re-validated against the real VM:
+`tools/self_test.sh` clean PASS, zero false positives.
 
 ## 3. Disk/resource growth
 
@@ -121,14 +140,19 @@ the Grafana-outage incident that motivated it) — just not yet built for VM.
   (iowait_logger.py:77-78,99).
 - **Disk watchdog:** `DUMP_DISK_WARN_PCT=80.0` / `DUMP_DISK_CRITICAL_PCT=95.0`
   (alert_engine.py:114-115, env-overridable) — see §2.
-- **`classifier/rolling_buffer.py` is NOT dormant** — despite README:2731
-  describing it as "not currently deployed," it is in fact actively imported
-  and used: `classifier/classifier.py:25` imports `query_gpu_window`/
-  `query_host_window`/`query_ib_window` from it, and `source ==
-  "rolling_buffer"` is a live code path at classifier.py:466,1112,1138,1398,1433,1532.
-  **The README's "not deployed" framing is stale — flag for a README
-  correction**, and don't assume it's a pending decision when reasoning
-  about current memory/behavior.
+- **`classifier/rolling_buffer.py` precision correction (fixed in README,
+  this pass)**: its query functions are NOT dead code — `classifier.py:25`
+  imports and calls `query_gpu_window`/`query_host_window`/`query_ib_window`
+  as a real, reachable branch (`source == "rolling_buffer"` vs.
+  `"live_query"`, classifier.py:466 etc.). What's actually inert is
+  narrower: the one live call site (`alert_engine.py`'s
+  `build_global_drift_finding` call) hardcodes `buffer=None`, and
+  `rolling_buffer.run_sampler` (the continuous per-second sampler that
+  would need to populate a real buffer) is never launched by any
+  supervisor or by `run.sh` — confirmed via `grep -rn "run_sampler"
+  --include=*.sh .` returning nothing. So it always takes the
+  `live_query` branch today, by that one explicit `buffer=None`, not
+  because the code is unwired. README now states this precisely.
 - **Backlog-replay RSS spike:** one from-scratch checkpoint-seeding replay
   during validation drove aggregator RSS to ~**60GB** before settling —
   pre-existing, unrelated to the checkpoint fix itself, flagged not fixed
@@ -169,15 +193,16 @@ against its current text, not memory:
 |---|---|---|
 | NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README:1773-1782) |
 | ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README:1784-1789) |
-| `rolling_buffer.py` "not deployed" | **README CLAIM IS STALE** | It's actively imported/used — see §3 |
+| `rolling_buffer.py` sampler "not deployed" | **FIXED (precision correction in README)** | The sampler genuinely isn't launched, but the query functions ARE live, reachable code gated behind one `buffer=None` call site — see §3 |
 | "Rank-12-style" structural role-position bias | **GENUINELY STILL OPEN** | TP-group-local role_rank=0 fired 13x vs 0-1x for peers in one real run; tracked, not fixed (README:1570-1586) |
 | MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README:1203-1219) |
 | Cross-node PP-link `baseline_source` gap | **ACCEPTED, permanent topology limitation** | Hybrid's 2-ranks/node layout has no independent same-shape peer comm for the below-floor fallback to use (README §Hybrid section, ~1937-1959) |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (README:2438-2452) |
 
-**Action for whoever owns this next:** the rolling_buffer status line in
-README §7/§8 needs correcting — it currently reads as a pending deployment
-decision when it's actually live code.
+**Resolved this pass:** README §7's rolling_buffer paragraph now states
+precisely which part is deployed (the query functions, reachable code) vs.
+not (the sampler process and the one `buffer=None` call site) instead of
+a blanket "not deployed."
 
 ## 6. Calibration constants needing re-validation on change
 
@@ -199,18 +224,19 @@ project's dev cluster/workload mix — not universal constants.
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
 
-**Known drift, confirmed live — fix or document intentionally:**
-`aggregator/promql_cv_verify.py` (a standalone manual verification CLI, not
-part of the live detection path — confirmed `node_aggregator_ref.py` only
-imports its `stat_cv()` function, which uses `TRIM` only, not the thresholds
-below) carries its **own**, now-stale copies:
-`PERSIST_WINDOW=3` (matches), but `PERSIST_REQUIRED=2` (live pipeline: 3) and
-`CV_Z_THRESH=20.0` (live pipeline: 60.0) — promql_cv_verify.py:21-23. **If you
-use this tool to manually cross-check a live incident, its own
-`cv_persistence_check()` will reach a different fire/no-fire conclusion than
-the live pipeline for identical data.** Either sync these constants when the
-live ones change, or add a comment there explicitly marking them as
-intentionally independent.
+**Drift found and fixed this pass:** `aggregator/promql_cv_verify.py` (a
+standalone manual verification CLI, not part of the live detection path —
+confirmed `node_aggregator_ref.py` only imports its `stat_cv()` function,
+which uses `TRIM` only, not the thresholds below) was carrying stale
+`PERSIST_REQUIRED=2`/`CV_Z_THRESH=20.0` against the live pipeline's real
+`PERSIST_REQUIRED=3`/`CV_Z_THRESH=60.0` — directly contradicting its own
+module docstring's claim of "matching detection.py/classifier.py exactly."
+Corrected to `3`/`60.0` (promql_cv_verify.py:21-28); a manual run of this
+tool now reaches the same fire/no-fire decision the live pipeline would.
+**The general risk remains** — these are separate constants in a separate
+file with no shared source of truth, so this can drift again. Whenever you
+change a threshold in `thresholds.py` or `node_aggregator_ref.py`, grep for
+other copies of the same constant name across the repo.
 
 **Re-validate all of the above whenever:** the workload mix changes
 meaningfully, cluster scale changes (more nodes/GPUs per node), or new

@@ -179,6 +179,50 @@ GRAFANA_ADMIN_CREDENTIALS_FILE = os.environ.get(
     "GRAFANA_ADMIN_CREDENTIALS_FILE",
     os.path.join(_PKG_ROOT, "var", "grafana_admin_credentials.txt"))
 
+# VictoriaMetrics dead-man's-switch -- same underlying lesson as the
+# Grafana one above (MAINTENANCE.md's own repo-wide scan flagged this as
+# the single biggest remaining blind spot: nothing watched VM for
+# "technically up, serving wrong/stale data," the same failure CLASS that
+# let Grafana run broken for 2+ days undetected), but NOT a blind copy of
+# Grafana's own fix -- real, deliberate live reproduction (two isolated
+# scratch instances, same real victoria-metrics-prod binary this cluster
+# runs, not guessed from docs) found VM's own failure modes are
+# genuinely different from Grafana's SQLite-connection-pool quirk:
+#   1. Data directory deleted out from under a running instance: /health
+#      keeps returning 200, an already-visible query keeps returning its
+#      last cached value, and a NEW push is even silently accepted (204)
+#      -- for a bounded window. VM's own background free-disk-space
+#      watcher then PANICS the entire process the next time it polls
+#      (confirmed live: ~43s after deletion in one real run) -- unlike
+#      Grafana, this does not stay in a degraded-but-alive state
+#      indefinitely; it hard-crashes. Once crashed, this is already
+#      caught: either as [PIPELINE-DOWN] once the per-host heartbeat
+#      goes stale, or (right at the moment of death) a connection
+#      failure on the next VM query.
+#   2. Low free disk space (the realistic, slow-onset production version
+#      of #1 -- disk filling up gradually, not an operator deleting the
+#      directory): confirmed live via -storage.minFreeDiskSpaceBytes --
+#      VM stays alive indefinitely, /health still returns 200, but every
+#      new push is explicitly rejected with HTTP 503 "the storage is in
+#      read-only mode." This is the real, reproducible "up but broken"
+#      VM analogue of the Grafana outage, and it is NOT caught by a bare
+#      /health check -- exactly the same lesson as Grafana's
+#      /api/health never touching its DB.
+# Because read-only mode rejects writes from EVERY node's aggregator
+# simultaneously (it's a storage-wide state, not per-connection), the
+# per-host-only [PIPELINE-DOWN] signal (pipeline_health.py) would
+# technically still fire for each host individually here -- but as N
+# separate, individually-labeled messages that don't themselves say
+# "this is VM, not N independent aggregator crashes." This check makes
+# that explicit: query the same already-pushed agg_aggregator_heartbeat
+# series this pipeline already relies on (no new metric, no new
+# cardinality), but ask the VM-wide question directly -- are ALL
+# currently-supervised hosts stale AT ONCE -- and pair it with a direct
+# VM /health reachability probe to also catch outright-unreachable VM
+# (scenario #1 above, post-crash) without waiting for heartbeat-staleness
+# interpretation. Same 60s cadence as the other periodic infra checks.
+VM_CHECK_INTERVAL_S = 60.0
+
 # P27.2.7 -- real, confirmed gap this closes (regression-sweep investigation,
 # TP-inference): _cross_comm_peer_median's peer pool requires every sibling
 # comm to be reporting a currently-FRESH row, which real, direct live-trace
@@ -1355,6 +1399,16 @@ class AlertEngine:
         self.n_grafana_down_cycles = 0
         self._last_grafana_check_at = 0.0
         self._grafana_thread = None
+        # VictoriaMetrics dead-man's-switch state -- see
+        # VM_CHECK_INTERVAL_S's own module-level comment. A single bool,
+        # not a per-host dict -- this check is deliberately about VM
+        # itself (one shared instance), complementary to (not a
+        # replacement for) pipeline_health.py's own per-host
+        # self.pipeline_down above.
+        self.vm_down = False
+        self.n_vm_down_cycles = 0
+        self._last_vm_check_at = 0.0
+        self._vm_thread = None
         # P20d-closeout Part C -- measured live against this exact engine
         # (2 real hosts + synthetic hostnames to simulate scale): at 0ms
         # added query latency the old sequential poll_once() already took
@@ -1470,6 +1524,7 @@ class AlertEngine:
         # them would kill run()'s loop just as directly as the per-check
         # crash this fix targets. Same defense-in-depth net.
         self._run_check("pipeline_health", self._check_pipeline_health)
+        self._run_check("vm_check", self._maybe_launch_vm_check)
         self._run_check("network_check", self._maybe_launch_network_check)
         self._run_check("nvlink_check", self._maybe_launch_nvlink_check)
         self._run_check("host_check", self._maybe_launch_host_check)
@@ -3993,6 +4048,92 @@ class AlertEngine:
 
         self._grafana_thread = threading.Thread(target=_run, daemon=True)
         self._grafana_thread.start()
+
+    def _maybe_launch_vm_check(self):
+        """VictoriaMetrics dead-man's-switch -- see VM_CHECK_INTERVAL_S's
+        own module-level comment for the real investigation (two isolated
+        scratch VM instances, deliberately broken the same real binary
+        this cluster runs) that shaped this design and why it's NOT a
+        copy of _maybe_launch_grafana_check above.
+
+        Two independent sub-checks, either one alone is sufficient to
+        declare DOWN:
+
+        1. Direct /health reachability. Catches VM outright unreachable
+           (process dead/crashed, confirmed live to be VM's actual
+           response to a destroyed data directory -- it hard-panics
+           within roughly a minute, it does not limp along) immediately,
+           without waiting on heartbeat-staleness interpretation.
+
+        2. All-hosts-stale-at-once. Only evaluated once #1 already
+           confirms VM itself is reachable -- reuses self.pipeline_down,
+           already freshly computed this same poll cycle by
+           _check_pipeline_health (which runs immediately before this in
+           poll_once, see that ordering) rather than re-querying VM a
+           second time for the same per-host staleness fact. Confirmed
+           live this is the real signature of VM's low-disk-space
+           read-only mode: every node's push gets rejected simultaneously
+           (a storage-wide state, not per-connection), so every
+           supervised host's heartbeat goes stale together -- distinct
+           from one node's aggregator crashing alone, which
+           [PIPELINE-DOWN] already reports correctly on its own and
+           which this check deliberately does NOT also flag as VM-DOWN
+           (requires ALL, not any, hosts down). Requires at least one
+           known hostname -- an empty self.hostnames (nothing discovered
+           yet) must not vacuously satisfy all().
+
+        Threaded and interval-gated (VM_CHECK_INTERVAL_S), same reasoning
+        as every other periodic check here."""
+        now = time.time()
+        if now - self._last_vm_check_at < VM_CHECK_INTERVAL_S:
+            return
+        if self._vm_thread is not None and self._vm_thread.is_alive():
+            return
+        self._last_vm_check_at = now
+        vm_url = self.vm_url
+        known_hosts = list(self.hostnames)
+
+        def _run():
+            reason = None
+            try:
+                resp = urllib.request.urlopen(f"{vm_url}/health", timeout=10)
+                code = resp.getcode()
+                if code != 200:
+                    reason = f"real HTTP {code} from {vm_url}/health (expected 200)"
+            except Exception as e:
+                reason = f"{type(e).__name__}: {e} querying {vm_url}/health"
+
+            if reason is None and known_hosts:
+                if all(self.pipeline_down.get(h, False) for h in known_hosts):
+                    reason = (
+                        f"VM is reachable (health OK) but all {len(known_hosts)} "
+                        f"currently-supervised host(s) ({', '.join(sorted(known_hosts))}) "
+                        f"show stale/missing heartbeats simultaneously -- likely VM "
+                        f"not ingesting new data (e.g. read-only mode from low free "
+                        f"disk space; see [PIPELINE-DOWN] above for per-host detail), "
+                        f"not independent per-node failures"
+                    )
+
+            was_down = self.vm_down
+            if reason:
+                self.n_vm_down_cycles += 1
+                self.vm_down = True
+                if not was_down:
+                    print(f"[VM-DOWN] :: {reason} -- detection is blind across the "
+                          f"whole pipeline while this persists (every check here "
+                          f"ultimately reads from VM). Check this host's own "
+                          f"var/vm_supervised.log for the real underlying error.",
+                          file=sys.stderr, flush=True)
+            elif was_down:
+                self.vm_down = False
+                print(f"[VM-RECOVERED] :: {vm_url}/health answering real HTTP 200 "
+                      f"again, and at least one supervised host has a fresh "
+                      f"heartbeat", file=sys.stderr, flush=True)
+            # else: healthy and wasn't down -- no signal, matching this
+            # file's own "a genuinely healthy read stays silent" style.
+
+        self._vm_thread = threading.Thread(target=_run, daemon=True)
+        self._vm_thread.start()
 
     def _fresh(self, result_row):
         """agg_*_worst metrics are labeled rank="{worst}" -- the rank that

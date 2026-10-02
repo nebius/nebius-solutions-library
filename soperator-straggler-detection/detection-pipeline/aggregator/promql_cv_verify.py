@@ -19,8 +19,15 @@ import statistics as st
 WINDOW = 125
 TRIM = 4
 PERSIST_WINDOW = 3
-PERSIST_REQUIRED = 2
-CV_Z_THRESH = 20.0
+# PERSIST_REQUIRED/CV_Z_THRESH found drifted from the live pipeline's own
+# real values (alerting/thresholds.py, aggregator/node_aggregator_ref.py:
+# PERSIST_REQUIRED=3, CV_Z_THRESH=60.0) during the MAINTENANCE.md repo
+# scan -- stale leftovers from an earlier calibration round, contradicting
+# this file's own module docstring ("matching detection.py/classifier.py
+# exactly"). Corrected to match; a manual run of this tool against real
+# data now reaches the same fire/no-fire decision the live pipeline would.
+PERSIST_REQUIRED = 3
+CV_Z_THRESH = 60.0
 EXCLUDE_ALWAYS = {"3"}
 EXCLUDE_CV_EXTRA = {"0"}
 RANK0_CV_PEERS = {"1", "2", "4", "5", "6", "7"}

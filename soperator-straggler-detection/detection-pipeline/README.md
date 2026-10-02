@@ -2672,6 +2672,71 @@ edit needed, the real tool doing its own job correctly. `tools/
 self_test.sh`: clean PASS after re-running the full `install.sh`,
 confirming no regression to the rest of the pipeline.
 
+**`[VM-DOWN]`/`[VM-RECOVERED]`** — a sixth dead-man's-switch, closing the
+gap `MAINTENANCE.md`'s own repo-wide scan flagged as the single biggest
+remaining blind spot: nothing watched VictoriaMetrics itself for
+"technically up, serving wrong/stale data" — the same failure *class*
+that let Grafana run broken for 2+ days before `[GRAFANA-DOWN]` existed.
+**Deliberately not a copy of that fix** — a real investigation (two
+isolated scratch VictoriaMetrics instances, the same real
+`victoria-metrics-prod` binary this cluster runs, deliberately broken two
+different ways) found VM's own failure modes are genuinely different from
+Grafana's SQLite-connection-pool quirk:
+
+- **Data directory destroyed while running**: `/health` keeps returning
+  200, an already-visible query keeps its last cached value, and a new
+  push is even silently accepted (`204`) — for a bounded window. VM's own
+  background free-disk-space watcher then **panics the entire process**
+  the next time it polls (confirmed live: as fast as ~10s, up to ~43s
+  across two real runs) — unlike Grafana, this does **not** stay
+  degraded-but-alive indefinitely; it hard-crashes.
+- **Low free disk space** (the realistic, slow-onset production version
+  of the above): confirmed live via `-storage.minFreeDiskSpaceBytes` —
+  VM stays alive indefinitely, `/health` still returns 200, but every new
+  push is explicitly rejected with a real HTTP `503` ("the storage is in
+  read-only mode"). This is the genuine, reproducible "up but broken" VM
+  analogue of the Grafana outage, and a bare `/health` check does not
+  catch it — the same lesson Grafana's own `/api/health` already taught
+  (it never touches its database either).
+
+Because read-only mode rejects writes from **every** node's aggregator
+simultaneously (a storage-wide state, not per-connection), the existing
+per-host `[PIPELINE-DOWN]` watchdog would technically still fire for each
+host individually here — but as N separate, individually-labeled
+messages that don't themselves say "this is VM, not N independent
+aggregator crashes." `[VM-DOWN]` makes that explicit: it reuses the
+already-pushed `agg_aggregator_heartbeat` series this pipeline already
+relies on (no new metric, no new cardinality) and asks the VM-wide
+question directly — are **all** currently-supervised hosts stale **at
+once** — reusing `self.pipeline_down`'s own freshly-computed state from
+the same poll cycle rather than re-querying VM a second time. It's paired
+with a direct `VM_URL/health` reachability probe, which independently
+catches VM outright unreachable (the post-crash case above) without
+waiting on heartbeat-staleness interpretation. Same 60s cadence
+(`VM_CHECK_INTERVAL_S`) as the other periodic infra checks.
+
+**Validated end to end against the real, reproduced failure, not assumed
+from the design** — a standalone harness constructing the real
+`AlertEngine` class (not a reimplementation) against a real, deliberately
+broken scratch VM instance: a 160s healthy-baseline run produced zero
+false `[VM-DOWN]`/`[PIPELINE-DOWN]` signals against the real 90s
+heartbeat-staleness threshold; deliberately destroying the scratch
+instance's data directory while running produced exactly one
+`[VM-DOWN] :: URLError: ... Connection refused querying .../health`
+within ~10s of the real crash, holding steady (no flapping) for the rest
+of the outage; restarting the instance and reseeding a fresh heartbeat
+produced exactly one `[VM-RECOVERED] :: .../health answering real HTTP
+200 again, and at least one supervised host has a fresh heartbeat` once
+the new heartbeat cleared VM's own ~30-40s new-series visibility lag.
+Deployed to the real, production-supervised `alert_engine.py`
+(restarted `run_alert_engine_supervised.sh`'s own supervisor process
+itself, not just the leaf `alert_engine.py` child — the same
+"killing only the leaf doesn't pick up a code change" gotcha the
+aggregator-supervisor note just below reconfirms for a different
+process) and re-validated against the real, healthy production VM: zero
+false `[VM-DOWN]` over the full run, zero new `[CHECK-FAILED]`.
+`tools/self_test.sh`: clean PASS.
+
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
 restart-loop wrapper. Killing *only* the leaf `node_aggregator_ref.py`
@@ -2730,17 +2795,28 @@ incident" — the same honest caveat this project already gives ECC/PCIe
 below, now stated for the whole path, not just those two counters.
 `classifier/rolling_buffer.py` already exists, fully built, with exactly
 the window-matched query functions needed to close this
-(`query_gpu_window`/`query_host_window`/`query_ib_window`) — but **is not
-currently deployed anywhere in the live pipeline**. This is a deliberate,
-scoped deferral, not a bug or an oversight: deploying it means running a
-new continuous per-second sampler, as a new supervised process on every
-node, for the life of every job — real, standing resource and maintenance
-overhead, mirroring `iowait_logger.py`'s own existing
-`install.sh`/`run.sh` supervised-process pattern were it to happen. What
-it would buy: genuine window-matched correlation for Path B/fabric (this
-entry's own gap), AND a real fix for the ECC/PCIe gap immediately below
-(which needs the same two-time-separated-sample capability). This
-tradeoff is intentionally left as an open decision, not resolved here.
+(`query_gpu_window`/`query_host_window`/`query_ib_window`) — **precision
+correction found during the MAINTENANCE.md repo scan**: these functions
+are not dead/unwired code — `classifier.py` genuinely imports and calls
+them (`check_network_contention_direct`'s `buffer`-vs-live-query branch,
+feeding the real `source: "rolling_buffer"` vs `"live_query"` field).
+What's actually not deployed is narrower and more specific than "the
+module": the one live call site that reaches this code
+(`alert_engine.py`'s `build_global_drift_finding` call) hardcodes
+`buffer=None`, and the continuous per-second sampler that would need to
+populate a real buffer (`rolling_buffer.run_sampler`) is never launched
+by any supervisor script or by `run.sh` — so in production this always
+takes the `live_query` branch today, by that one explicit `buffer=None`,
+not because the code isn't reachable. This remains a deliberate, scoped
+deferral, not a bug: deploying the sampler means a new continuous
+per-second process on every node, for the life of every job — real,
+standing resource and maintenance overhead, mirroring `iowait_logger.py`'s
+own existing `install.sh`/`run.sh` supervised-process pattern were it to
+happen. What it would buy: genuine window-matched correlation for
+Path B/fabric (this entry's own gap), AND a real fix for the ECC/PCIe gap
+immediately below (which needs the same two-time-separated-sample
+capability). This tradeoff is intentionally left as an open decision, not
+resolved here.
 
 **ECC/PCIe's cumulative-counter gap is structurally distinct from the
 Path B timing-window gap above** — fixing Path B's window-matching alone
