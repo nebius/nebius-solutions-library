@@ -103,7 +103,7 @@ deploy/
 │   ├── main.tf                   # Root module
 │   ├── variables.tf              # Input variables
 │   ├── outputs.tf                # Output values
-│   ├── versions.tf               # Provider versions
+│   ├── provider.tf               # Provider versions and configuration
 │   ├── terraform.tfvars.*.example
 │   └── README.md
 └── 002-setup/
