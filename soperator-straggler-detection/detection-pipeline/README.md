@@ -2557,6 +2557,75 @@ deliberately breaking the tracefs wrapper (`[PATH-C-DOWN]` fired with
 the exact `unshare`-permission diagnosis) and restoring it
 (`[PATH-C-RECOVERED]` fired once the crash-loop window aged out).
 
+**`[GRAFANA-DOWN]`/`[GRAFANA-RECOVERED]`** — a fifth dead-man's-switch,
+closing a real gap found entirely by accident during unrelated work:
+this project's own `grafana-standalone` instance had been running for
+**over two days** serving real HTTP 503s (its SQLite data directory,
+`/tmp`-based, no longer existed) with zero loud signal anywhere — every
+other silent-failure class this pipeline watches for already had one;
+Grafana itself had none. `alert_engine.py` now probes a real,
+authenticated endpoint (`/api/org`, the same one `install.sh`'s own
+Grafana-reachability check already uses) every 60s
+(`GRAFANA_CHECK_INTERVAL_S`), reusing the same generated admin
+credentials every other part of this project already relies on
+(`GRAFANA_ADMIN_CREDENTIALS_FILE`). `run.sh` exports `GRAFANA_URL`/
+`GRAFANA_ADMIN_CREDENTIALS_FILE` from `cluster.env`'s own real,
+already-discovered values into `alert_engine.py`'s environment before
+launching it — the same env-var handoff pattern `IOWAIT_LOG_DIR_OVERRIDE`
+already establishes, no new config-loading mechanism. A no-op, not a
+`DOWN` alarm, when `GRAFANA_URL` isn't configured at all — Grafana is
+documented elsewhere (§4) as optional; the rest of this pipeline works
+without it. This only fires once Grafana was configured/expected and
+then stops answering correctly.
+
+**A real, non-obvious design refinement, found only by deliberately
+reproducing the actual outage, not by reading Grafana's own docs**:
+the real failure is NOT "every request fails." Grafana's own SQLite
+connection pool keeps already-open connections usable, so individual
+requests fail *probabilistically* depending on whether they happen to
+need a fresh one. Confirmed live, twice, while deliberately breaking a
+real instance the same way the real outage happened (removing its data
+directory out from under an already-running process, not a bare
+startup failure): an unauthenticated `/api/health` ping **never**
+failed under this condition (confirmed useless for this specific
+failure mode — it apparently never touches the database at all), and
+even *sequential* `/api/org` probes, a full second apart, kept reusing
+the same still-valid pooled connection and returned a clean
+`200/200/200` against a confirmed-broken instance. Only **concurrent**
+requests reliably force the pool to open genuinely new connections,
+which is what actually fails — a 5-way concurrent burst against the
+same broken instance reliably returned a real mix of `401`/`500`
+failures every time it was tried, while the identical burst against a
+genuinely healthy instance returned `200` on every probe, every time.
+The watchdog fires `[GRAFANA-DOWN]` on any single failure among
+`GRAFANA_CHECK_CONCURRENT_PROBES` (5) concurrent probes, not a bare
+single request.
+
+Validated end to end against this exact real failure, not assumed from
+the design alone: stopped the real instance, removed its real data
+directory, relaunched it pointed at the now-missing path (reproducing
+a healthy-looking, port-bound process serving real errors, not a crash)
+— `[GRAFANA-DOWN] :: 4/5 concurrent probes to .../api/org failed (e.g.
+real HTTP 401 ...)` fired correctly. Restored the real data directory
+and confirmed a genuine 10/10 concurrent-burst recovery independently
+first, then `[GRAFANA-RECOVERED] :: .../api/org answering real HTTP
+200 on all 5 concurrent probes again` fired on the watchdog's own next
+cycle. `tools/self_test.sh`: clean PASS throughout, confirming this new
+watchdog adds no regression to the rest of the pipeline.
+
+**Separately found and fixed along the way (not the watchdog itself,
+but needed to validate it for real on this cluster)**: `cluster.env`'s
+own `GRAFANA_URL` was wrong (`http://localhost:3000` — a different,
+unrelated, pre-existing Grafana instance on this host, not this
+project's own) — both `install.sh` and `grafana-setup.sh` default their
+own "is Grafana already running" probe to port 3000 unconditionally,
+which silently matches *any* Grafana instance already on that port, not
+specifically this project's own. Corrected to the real value
+(`http://localhost:3098`, matching this cluster's own real
+`custom.ini`) directly; the deeper port-3000-default assumption in both
+scripts is a separate, pre-existing issue, flagged here, not fixed in
+this change.
+
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
 restart-loop wrapper. Killing *only* the leaf `node_aggregator_ref.py`
