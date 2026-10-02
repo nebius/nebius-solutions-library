@@ -1,0 +1,13 @@
+# Minimal hello workflow for default pool.
+# If you see "Value 1 too high for CPU", the pool's allocatable CPU is < 1 (e.g. GPU nodes).
+# This version requests cpu: 0 (use pool minimum); API requires cpu as integer.
+workflow:
+  name: hello-osmo
+  tasks:
+  - name: hello
+    image: ubuntu:22.04
+    resources:
+      cpu: 0
+      memory: 128Mi
+    command: ["bash"]
+    args: ["-c", "echo 'Hello from OSMO!'"]

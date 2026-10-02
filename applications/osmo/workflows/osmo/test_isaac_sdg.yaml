@@ -1,0 +1,82 @@
+# based on https://nvidia.github.io/OSMO/main/user_guide/how_to/isaac_sim_sdg.html
+workflow:
+  name: isaac-sim-sdg
+  resources:
+    default:
+      platform: H100 # Set this to the OSMO GPU platform for your cluster, for example L40S or H100.
+      cpu: 4
+      gpu: 1
+      memory: 26Gi # Keep this below the current OSMO-advertised L40S platform limit; 28Gi is too high on the 1gpu-8vcpu-32gb preset.
+      storage: 10Gi
+  tasks:
+  - name: isaac-sim-sdg
+    image: nvcr.io/nvidia/isaac-sim:5.1.0
+    command: ["bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      ACCEPT_EULA: Y
+      NO_NUCLEUS: Y
+      PYTHONUNBUFFERED: "1"
+    files:
+    - contents: |
+        {
+            "launch_config": {
+                "headless": true
+            },
+            "num_frames": 20,
+            "close_app_after_run": true
+        }
+      path: /tmp/config.json
+    - contents: |
+        set -euo pipefail
+
+        OUTPUT_DIR="/isaac-sim/_out_scene_based_sdg"
+        TIMEOUT_DURATION="${ISAAC_SIM_TIMEOUT:-45m}"
+
+        echo "=== Isaac Sim SDG Smoke Test ==="
+        echo "Config: /tmp/config.json"
+        echo "Output dir: ${OUTPUT_DIR}"
+        echo "Timeout: ${TIMEOUT_DURATION}"
+
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+          timeout --signal=TERM --kill-after=30s "${TIMEOUT_DURATION}" \
+            /isaac-sim/python.sh /isaac-sim/standalone_examples/replicator/scene_based_sdg/scene_based_sdg.py \
+            --config /tmp/config.json
+        else
+          /isaac-sim/python.sh /isaac-sim/standalone_examples/replicator/scene_based_sdg/scene_based_sdg.py \
+            --config /tmp/config.json
+        fi
+        status=$?
+        set -e
+
+        echo "--- Output summary ---"
+        if [ -d "${OUTPUT_DIR}" ]; then
+          find "${OUTPUT_DIR}" -maxdepth 2 -type f | head -20 || true
+          file_count="$(find "${OUTPUT_DIR}" -maxdepth 2 -type f | wc -l | tr -d '[:space:]')"
+          du -sh "${OUTPUT_DIR}" || true
+        else
+          file_count=0
+          echo "Output directory is missing"
+        fi
+
+        if [ "${status}" -eq 124 ]; then
+          echo "FAIL: Isaac Sim SDG timed out after ${TIMEOUT_DURATION}"
+          exit 124
+        fi
+
+        if [ "${status}" -ne 0 ]; then
+          echo "FAIL: Isaac Sim SDG exited with status ${status}"
+          exit "${status}"
+        fi
+
+        if [ "${file_count}" -lt 1 ]; then
+          echo "FAIL: Isaac Sim SDG completed without generating any output files"
+          exit 1
+        fi
+
+        cp -r "${OUTPUT_DIR}"/. "{{output}}"
+      path: /tmp/entry.sh
+    outputs:
+    - dataset:
+        name: isaac-sim-sdg-sample

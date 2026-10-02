@@ -1,0 +1,13 @@
+*.env
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+terraform.tfvars
+generated/
+
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.*
+infra/terraform.tfvars
+
+.DS_Store

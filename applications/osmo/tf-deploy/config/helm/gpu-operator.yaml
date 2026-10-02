@@ -1,0 +1,47 @@
+# GPU Operator Helm Values
+
+operator:
+  defaultRuntime: containerd
+
+driver:
+  enabled: true
+  upgradePolicy:
+    autoUpgrade: false
+
+toolkit:
+  enabled: true
+
+devicePlugin:
+  enabled: true
+  config:
+    default: any
+
+dcgm:
+  enabled: true
+
+dcgmExporter:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+gfd:
+  enabled: true
+
+migManager:
+  enabled: false
+
+nodeStatusExporter:
+  enabled: true
+
+node-feature-discovery:
+  worker:
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+daemonsets:
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
