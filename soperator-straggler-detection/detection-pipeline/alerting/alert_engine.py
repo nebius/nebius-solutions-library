@@ -799,7 +799,7 @@ def _query_gpu_slot(vm_url, hostname, member):
 
 
 def build_finding_for_alert(vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
-                             dcgm_host_map, anomaly_ts=None):
+                             dcgm_host_map, anomaly_ts=None, duration_s=None):
     """Adapter: shapes a single live reading into the exact `stat_hits`
     input P18k_classifier.build_single_rank_finding expects, then calls
     the REAL cause-gathering + tier-decision logic (not reimplemented
@@ -868,14 +868,28 @@ def build_finding_for_alert(vm_url, hostname, comm, member, bucket, stat_name, z
     # timing mechanism -- anchored on anomaly_ts, the SAME real sample
     # timestamp _check_mean/_check_cv already compute via
     # _query_instant_real_ts (existing infrastructure, not new) to know
-    # this alert should fire at all. Padded backward by
-    # IOWAIT_LIVE_WINDOW_S (catches a fault that started slightly
-    # before the window that detected it closed) and extended forward
-    # to real "now" (still catches a fault that's still ongoing) --
-    # strictly a superset of the old bare-"now" window, never narrower.
+    # this alert should fire at all.
+    #
+    # Approved followup fix (Cyril item-4 Part C) -- the window START was
+    # still wrong even after the anomaly_ts anchoring above: padding back
+    # by the fixed IOWAIT_LIVE_WINDOW_S (10s) assumes the incident is 10s
+    # old, when _emit()'s own caller already knows its REAL measured
+    # duration (persist_duration_s, the same persistence-gate value
+    # [STRAGGLER-INCIDENT]'s own persisted_s= already reports) -- an
+    # incident sustained for e.g. 45s needs a 45s-wide lookback, not 10s,
+    # or Path C would miss real io-wait evidence from the first 35s of a
+    # real, already-ongoing fault. incident_start = anomaly_ts -
+    # duration_s is the real, measured incident start; falls back to the
+    # old fixed-10s behavior only when duration_s itself isn't known (a
+    # caller that doesn't have it yet) -- strictly a refinement of the
+    # window's start, same end (real "now", still catches a fault that's
+    # still ongoing -- no real resolved end exists at this point in the
+    # call chain to use instead).
     rank_ts_range = None
     if anomaly_ts is not None:
-        rank_ts_range = {member: (anomaly_ts - p18k.IOWAIT_LIVE_WINDOW_S, time.time())}
+        incident_start = (anomaly_ts - duration_s) if duration_s is not None \
+            else (anomaly_ts - p18k.IOWAIT_LIVE_WINDOW_S)
+        rank_ts_range = {member: (incident_start, time.time())}
     finding = p18k.build_single_rank_finding(
         member, stat_hits, primary=bucket, corroborating={},
         dcgm_host_map=dcgm_host_map, ib_hosts=None,
@@ -2665,6 +2679,15 @@ class AlertEngine:
                               f"{path_c_storage.get('t_end', 0):.1f}] -- below the real threshold for a "
                               f"genuine storage stall. Data-pipeline (uneven shard sizes, a slow non-disk "
                               f"data source) remains the candidate this check cannot rule in or out.")
+            # Approved item 2 -- same informational-only window-overlap
+            # figure as the main report.py renderer, shown here too since
+            # this fallback has its own separate Path C text block.
+            if "coverage_seconds_present" in path_c_storage:
+                lines.append(f"  window-overlap strength (informational only, does NOT affect "
+                              f"confidence tier): iowait evidence present for "
+                              f"{path_c_storage['coverage_seconds_present']:.1f} of "
+                              f"{path_c_storage['coverage_seconds_total']:.1f} real seconds in this "
+                              f"incident's actual duration")
         else:
             lines.append("Cause (Path C, storage): not checked -- no persisted iowait log for this host "
                           "(agent not deployed/running there, or IOWAIT_LOG_DIR not configured).")
@@ -3056,7 +3079,7 @@ class AlertEngine:
         # passed through unchanged, coll is not threaded into either.
         coverage = coverage_guard.check_coverage(self.vm_url, hostname, comm, bucket, member, slurm_job_id)
         finding = build_finding_for_alert(self.vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
-                                           self.dcgm_host_map, anomaly_ts=anomaly_ts)
+                                           self.dcgm_host_map, anomaly_ts=anomaly_ts, duration_s=persist_duration_s)
         if _incident_fired_this_call:
             finding["incident_id"] = incident_id
         if coverage["degraded"] and finding["tier"] == "CONFIRMED":

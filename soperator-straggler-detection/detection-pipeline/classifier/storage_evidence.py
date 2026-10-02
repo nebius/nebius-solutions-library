@@ -67,6 +67,12 @@ IOWAIT_WINDOW_PAD_S = 2.5  # the agent's own print cadence is a fixed 2s;
                             # counted -- mirrors the same kind of edge
                             # inclusion already used elsewhere in this
                             # project's own window-boundary handling.
+IOWAIT_PRINT_CADENCE_S = 2.0  # real agent cadence (storage-ebpf's bpftrace
+                                # script: `interval:s:2`), used ONLY to turn
+                                # a count of distinct real print-ticks into
+                                # an approximate real-seconds figure for the
+                                # window-overlap-strength display below --
+                                # informational only (see its own comment).
 
 
 def _load_log_rows(log_dir, host):
@@ -99,10 +105,26 @@ def query_iowait_window(log_dir, host, pid, t_start, t_end):
     even when the target pid has zero matching rows (a real, meaningful
     "checked and found nothing" result, not absence of an answer):
     {"target_iowait_us": int, "target_count": int, "window_s": float,
-     "n_rows_all_pids": int} -- n_rows_all_pids lets a caller notice a
-    genuinely empty/dead log (agent process not actually running) versus
-    a real log with real data where this specific pid simply wasn't
-    io-bound.
+     "n_rows_all_pids": int, "coverage_seconds_present": float,
+     "coverage_seconds_total": float} -- n_rows_all_pids lets a caller
+    notice a genuinely empty/dead log (agent process not actually
+    running) versus a real log with real data where this specific pid
+    simply wasn't io-bound. coverage_seconds_present/_total (approved
+    item 2, Cyril item-4 Part C followup) are a SEPARATE, purely
+    informational window-overlap-strength figure: how many of the
+    incident's own real [t_start, t_end] seconds this host's agent log
+    actually has a real print-tick for, regardless of which pid it
+    belongs to -- answers "did we have log coverage for this window at
+    all", not "was this pid io-bound" (that remains target_iowait_us's
+    job, unchanged). HARD CONSTRAINT: these two keys are never read by
+    determine_storage_path below, or by anything in classifier.py's
+    determine_confirmed_path -- display/log text only. Deliberately
+    computed over ALL rows (any pid) in the EXACT, unpadded [t_start,
+    t_end] window, not the IOWAIT_WINDOW_PAD_S-padded one target_iowait_us
+    itself uses -- a looser padded match is right for "was real evidence
+    present near this window" (target_iowait_us's job), but wrong for "how
+    much of the window itself has log coverage" (this one's job); padding
+    would silently inflate the reported coverage beyond the real window.
 
     P27.3-timing-gap fix -- real, confirmed root cause (not the leading
     "narrow live window" hypothesis this investigation started with):
@@ -127,18 +149,27 @@ def query_iowait_window(log_dir, host, pid, t_start, t_end):
     rows = _load_log_rows(log_dir, host)
     if not rows:
         return None
+    window_s = max(t_end - t_start, 1e-6)
+    # Item 2 -- see this function's own docstring above for the real
+    # reasoning (exact window, all pids, informational-only).
+    exact_window_rows = [r for r in rows if t_start <= r.get("ts", -1) <= t_end]
+    distinct_ticks = len({r["ts"] for r in exact_window_rows if "ts" in r})
+    coverage_seconds_present = min(distinct_ticks * IOWAIT_PRINT_CADENCE_S, window_s)
     try:
         pid = int(pid)
     except (TypeError, ValueError):
-        return {"target_iowait_us": 0, "target_count": 0, "window_s": max(t_end - t_start, 1e-6), "n_rows_all_pids": 0}
+        return {"target_iowait_us": 0, "target_count": 0, "window_s": window_s, "n_rows_all_pids": 0,
+                "coverage_seconds_present": coverage_seconds_present, "coverage_seconds_total": window_s}
     lo, hi = t_start - IOWAIT_WINDOW_PAD_S, t_end + IOWAIT_WINDOW_PAD_S
     in_window = [r for r in rows if lo <= r.get("ts", -1) <= hi]
     target = [r for r in in_window if r.get("pid") == pid]
     return {
         "target_iowait_us": sum(r.get("iowait_us", 0) for r in target),
         "target_count": sum(r.get("count", 0) for r in target),
-        "window_s": max(t_end - t_start, 1e-6),
+        "window_s": window_s,
         "n_rows_all_pids": len(in_window),
+        "coverage_seconds_present": coverage_seconds_present,
+        "coverage_seconds_total": window_s,
     }
 
 

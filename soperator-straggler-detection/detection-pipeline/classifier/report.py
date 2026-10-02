@@ -36,6 +36,17 @@ def _format_confirmed(f, subject):
                       f"{pc.get('target_iowait_us', 0)}us aggregated over "
                       f"[{pc.get('t_start', 0):.1f},{pc.get('t_end', 0):.1f}] "
                       f"({pc.get('target_count', 0)} block requests)")
+        # Approved item 2 (Cyril item-4 Part C followup) -- informational
+        # ONLY, never read by determine_storage_path/determine_confirmed_path
+        # (see storage_evidence.query_iowait_window's own docstring for the
+        # trace). Path C only: the only cause-path with a real, queryable
+        # incident window right now (Path A/B are single-instant snapshots --
+        # see README's known-limitations section).
+        if "coverage_seconds_present" in pc:
+            lines.append(f"  window-overlap strength (informational only, does NOT affect "
+                         f"confidence tier): iowait evidence present for "
+                         f"{pc['coverage_seconds_present']:.1f} of {pc['coverage_seconds_total']:.1f} "
+                         f"real seconds in this incident's actual duration")
     return "\n".join(lines)
 
 

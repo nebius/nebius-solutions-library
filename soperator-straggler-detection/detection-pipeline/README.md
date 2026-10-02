@@ -999,6 +999,45 @@ collection) and a `[DIRECT-IMPACT-ESTIMATE]` line in both log files,
 carrying the caveat text inline every time it fires, not as a one-time
 footnote.
 
+### 6.8 Path C's real incident window, and its window-overlap-strength display
+
+Two real, narrow fixes to Path C (storage, eBPF block-I/O-wait), scoped
+deliberately to this one cause-path — the only one with a real, queryable
+incident window right now (see 7's new Path B/fabric entry below for why
+the other DCGM-sourced paths don't yet have this).
+
+**Real incident window, not a fixed 10s guess.** The live alert path
+(`alert_engine.py`'s `_emit()` → `build_finding_for_alert`) used to query
+Path C over `[anomaly_ts - IOWAIT_LIVE_WINDOW_S, now]` — a fixed 10s
+lookback regardless of how long the incident had actually been running.
+For a brief fault this was a reasonable guess; for a longer, genuinely
+sustained one it could miss real io-wait evidence from everything before
+the last 10 seconds. `_emit()` already computes the incident's own real,
+measured duration (`persist_duration_s` — the same value
+`[STRAGGLER-INCIDENT]`'s own `persisted_s=` reports) via its persistence
+gate, so this is now threaded through: `incident_start = anomaly_ts -
+persist_duration_s`, strictly a widening of the old window (never
+narrower), falling back to the old fixed-10s behavior only on a call path
+that genuinely doesn't have `persist_duration_s` yet.
+
+**Window-overlap-strength, informational only.** Every Path C reading now
+also reports how much of the incident's own real duration the eBPF
+agent's log actually has coverage for — e.g. "iowait evidence present for
+27.4 of 31.2 real seconds in this incident's actual duration" — distinct
+from whether the target process's own io-wait crossed the fault
+threshold (that verdict is unchanged). This answers "did we have log
+coverage for this window at all", separate from "was this rank
+io-bound". **This number is purely informational and is never read by
+any tier-decision logic** — confirmed by direct trace, not assumption:
+`storage_evidence.determine_storage_path()` (the only function that
+decides Path C's True/False/None verdict) reads exactly two keys,
+`target_iowait_us` and `window_s`, both unchanged; `determine_confirmed_
+path()` only ever calls that function and never touches the evidence
+dict's fields itself. A grep-verified full list of every place this
+project reads a Path C evidence dict's fields turns up exactly: the two
+decision reads just named, and five display-text reads (this section's
+new line included) — nothing else, anywhere in the codebase.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
@@ -1894,6 +1933,42 @@ The live-cluster mechanism (Kubernetes actually noticing and recreating
 a dead pod) has **never been exercised** — needs a real cluster with
 real kubeconfig access to confirm, which this project has not had on any
 cluster tested so far (see `../straggler-vmsingle/DEPRECATED.md`).
+
+**Path B (DCGM) and fabric/IB checks are single-instant snapshots, not
+window-matched to the real incident duration** — the same class of gap
+6.8 above just closed for Path C, still genuinely open here. Every DCGM
+query (clocks, power, thermal, ECC, PCIe) and every IB/fabric query reads
+one live value at the moment the check runs; none of them query a real
+`[t_start, t_end]` window the way Path C's `gather_path_c_storage` now
+does. Concretely: a corroborating DCGM reading only ever shows "this was
+true at one moment near the alert," never "this was true throughout the
+incident" — the same honest caveat this project already gives ECC/PCIe
+below, now stated for the whole path, not just those two counters.
+`classifier/rolling_buffer.py` already exists, fully built, with exactly
+the window-matched query functions needed to close this
+(`query_gpu_window`/`query_host_window`/`query_ib_window`) — but **is not
+currently deployed anywhere in the live pipeline**. This is a deliberate,
+scoped deferral, not a bug or an oversight: deploying it means running a
+new continuous per-second sampler, as a new supervised process on every
+node, for the life of every job — real, standing resource and maintenance
+overhead, mirroring `iowait_logger.py`'s own existing
+`install.sh`/`run.sh` supervised-process pattern were it to happen. What
+it would buy: genuine window-matched correlation for Path B/fabric (this
+entry's own gap), AND a real fix for the ECC/PCIe gap immediately below
+(which needs the same two-time-separated-sample capability). This
+tradeoff is intentionally left as an open decision, not resolved here.
+
+**ECC/PCIe's cumulative-counter gap is structurally distinct from the
+Path B timing-window gap above** — fixing Path B's window-matching alone
+would **not** fix this one. ECC and PCIe-replay counters are monotonic,
+cumulative values; a single live snapshot (even a window-matched one)
+can't tell you how much accumulated between two points in time — that
+needs two time-separated samples bracketing the incident (a real
+before/after delta: count-at-incident-end minus count-at-incident-start).
+Closing this specific gap needs either the rolling buffer above (which
+would hold exactly such samples) or two dedicated live DCGM queries taken
+at incident start and end — a structurally different fix from anything
+window-matching alone provides, and not attempted here.
 
 ## 8. Testing/validation reference — every workload shape, by name
 
