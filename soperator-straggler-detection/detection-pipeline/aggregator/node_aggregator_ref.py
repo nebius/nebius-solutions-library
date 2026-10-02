@@ -118,6 +118,30 @@ EXCLUDE_CV_EXTRA = frozenset()
 EXCLUDE_OUTLIER_EXTRA = frozenset()
 
 JOB_ID_REFRESH_S = 60
+# Cyril item-6 (Soperator job-context integration) -- sacct supplements,
+# never replaces, the squeue-based presence polling above: a real,
+# authoritative job-lifecycle record (covers BOTH running and completed
+# jobs, unlike squeue's live-only presence check), queried at the same
+# cadence since real latency was measured directly on this cluster
+# before picking an interval (sacct --json: ~185ms/call, both from the
+# login node and from worker-0 where this process actually runs -- safe
+# margin at 60s, no need for a different cadence than squeue already
+# uses). Kept as a second, cross-checked source alongside the existing
+# mechanism, not a replacement -- squeue's own pattern has already been
+# hardened through several real job-boundary bugs (PP's role-baseline
+# contamination, DLRM's stale throughput reference, Hybrid's cold-start
+# gap), and sacct's own behavior under this pipeline's specific live
+# polling load was unverified before this session.
+SACCT_REFRESH_S = 60
+# Real Slurm terminal job states (sacct's own state.current values) --
+# anything in this set means the job is definitively done and will
+# never run again; anything NOT in this set (RUNNING, PENDING,
+# CONFIGURING, COMPLETING, SUSPENDED, etc.) is treated as "still
+# active" for the disagreement check below.
+SACCT_TERMINAL_STATES = frozenset({
+    "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL",
+    "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY",
+})
 DEFAULT_CLUSTER = "soperator"  # soperator-fluxcd values.yaml's own default clusterName
 
 # P21.5 -- per-communicator bucket calibration. Generic tuning parameters
@@ -464,6 +488,18 @@ class NodeAggregator:
         self._explicit_job_id = slurm_job_id
         self.slurm_job_id = slurm_job_id or ""
         self._job_id_checked_at = 0
+        # Cyril item-6 -- sacct-sourced job-lifecycle fields, see
+        # refresh_job_sacct_info()'s own docstring. All None until a
+        # successful sacct query actually populates them for the
+        # CURRENT self.slurm_job_id -- an honest "not yet known", never
+        # a guessed default.
+        self._sacct_checked_at = 0.0
+        self._sacct_job_id = None
+        self._sacct_state = None
+        self._sacct_start_epoch = None
+        self._sacct_end_epoch = None
+        self._sacct_nnodes = None
+        self._sacct_nranks = None
         # P21.5 -- state keyed by (comm_id, phys_id, bucket) instead of
         # (rank, bucket). comm_id = header["id"], phys_id = metadata["pid"]
         # (see module docstring for why pid, not rank).
@@ -739,6 +775,147 @@ class NodeAggregator:
             print(f"[{self.hostname}] squeue lookup failed: {e}", file=sys.stderr)
             self.slurm_job_id = "unknown"
 
+    def refresh_job_sacct_info(self):
+        """Cyril item-6 -- supplements refresh_job_id()'s squeue-based
+        presence polling with a periodic sacct query: a real,
+        authoritative job-lifecycle record for the job this aggregator
+        is currently attributed to (self.slurm_job_id, kept live by
+        refresh_job_id() just above). Unlike squeue's live-only presence
+        check, sacct reports on completed jobs too -- real Start/End
+        epoch timestamps, real node count, and the real allocated GPU/
+        rank count (via TRES), all sourced from Slurm's own accounting
+        database, not inferred from polling absence.
+
+        Uses --json specifically, not the plain --format table output:
+        confirmed live, this session, a real formatting discrepancy
+        between this cluster's login node (`2026-10-02 03:47:03.UTC`)
+        and worker-0 (`2026-10-02T03:47:03`) for the exact same job's
+        Start field via --format -- --json's own time.start/time.end
+        are plain integer epoch seconds, sidestepping that string-
+        parsing ambiguity entirely rather than guessing a locale/
+        SLURM_TIME_FORMAT-dependent format to parse.
+
+        Deliberately does NOT replace refresh_job_id()'s own squeue
+        mechanism -- see SACCT_REFRESH_S's own comment for why. This
+        method only caches real sacct data for display/cross-check use
+        (see maybe_reset_workload_state()'s own disagreement check,
+        and alert_engine.py's parallel use for job-elapsed alert
+        context); it never itself decides whether a job has ended.
+
+        Real gap found and fixed during this feature's own validation
+        (job 3658, a real ~3.5min self_test run): refresh_job_id()'s own
+        squeue poll and this method's sacct poll are two INDEPENDENT
+        60s-gated checks with no shared phase -- once squeue stops
+        reporting ANY running job for this host, self.slurm_job_id goes
+        empty immediately, and the original version of this method
+        early-returned unconditionally on that, so a job whose squeue
+        presence disappeared before this method's own next 60s sacct
+        check landed would never get ONE MORE sacct query to observe
+        its real End time -- the end-time push (and so the Grafana
+        "job end" annotation) could silently never fire at all, for
+        jobs of any length, not just very short ones (confirmed: it
+        missed a real 3.5-minute job outright). Fix: when
+        self.slurm_job_id has gone empty/unknown but a previously-
+        tracked job (self._sacct_job_id) was never confirmed ended
+        (self._sacct_end_epoch still None), this method targets THAT
+        cached job id for one more check instead of giving up -- once
+        an End is found (or a new real job starts, overwriting the
+        cache), the normal early-return resumes. The job-START push is
+        unaffected by this gap (it only ever needs self.slurm_job_id to
+        be live, which refresh_job_id() guarantees promptly)."""
+        target_job_id = self.slurm_job_id
+        if not target_job_id or target_job_id == "unknown":
+            if self._sacct_job_id and self._sacct_end_epoch is None:
+                target_job_id = self._sacct_job_id
+            else:
+                return
+        now = time.time()
+        if now - self._sacct_checked_at < SACCT_REFRESH_S:
+            return
+        self._sacct_checked_at = now
+        try:
+            out = subprocess.run(
+                ["sacct", "-j", str(target_job_id), "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode != 0:
+                print(f"[{self.hostname}] sacct exited {out.returncode}: {out.stderr.strip()}", file=sys.stderr)
+                return
+            data = json.loads(out.stdout)
+            jobs = data.get("jobs", [])
+            if not jobs:
+                return
+            job = jobs[0]
+            job_time = job.get("time", {})
+            start = job_time.get("start")
+            end = job_time.get("end")
+            state_list = job.get("state", {}).get("current", [])
+            nnodes = job.get("allocation_nodes")
+            nranks = None
+            for t in job.get("tres", {}).get("allocated", []):
+                if t.get("type") == "gres" and t.get("name") == "gpu":
+                    nranks = t.get("count")
+                    break
+            self._sacct_job_id = target_job_id
+            self._sacct_state = state_list[0] if state_list else None
+            self._sacct_start_epoch = start if start else None
+            self._sacct_end_epoch = end if end else None
+            self._sacct_nnodes = nnodes
+            self._sacct_nranks = nranks
+            # Cyril item-6, Grafana job-boundary annotations -- same
+            # established push_buf/flush() pipeline every other metric
+            # here already uses, but pushed with the REAL historical
+            # start/end time as the sample's own timestamp (not "now").
+            # This is deliberate, confirmed safe directly rather than
+            # assumed: Grafana's native Prometheus-datasource annotation
+            # query places each marker at the DATA POINT's own
+            # timestamp (not at a value reinterpreted as a time), so a
+            # same-moment, now-stamped sample would draw the marker at
+            # "when this was pushed," not at the real job boundary.
+            # Verified live this session that VictoriaMetrics genuinely
+            # accepts and correctly stores a backdated sample timestamp
+            # via this same import endpoint (a real push + export
+            # round-trip, not assumed from the API docs) -- this is a
+            # different concern from the query-VISIBILITY floor this
+            # project found earlier (that was about how soon a
+            # just-written sample becomes visible to a query issued
+            # "now," not about whether a backdated timestamp is stored
+            # correctly, which it is).
+            if self._sacct_start_epoch is not None:
+                self.push_buf.append((
+                    f'agg_job_start_time_seconds{{hostname="{self.hostname}",cluster="{self.cluster}",slurm_job_id="{target_job_id}"}}',
+                    1, int(self._sacct_start_epoch * 1000)))
+            if self._sacct_end_epoch is not None:
+                self.push_buf.append((
+                    f'agg_job_end_time_seconds{{hostname="{self.hostname}",cluster="{self.cluster}",slurm_job_id="{target_job_id}"}}',
+                    1, int(self._sacct_end_epoch * 1000)))
+        except Exception as e:
+            print(f"[{self.hostname}] sacct lookup failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+    def check_sacct_squeue_disagreement(self):
+        """Cyril item-6 -- cross-checks the two job-presence signals
+        rather than silently trusting either. The one disagreement that
+        actually matters: squeue's own polling (refresh_job_id, above)
+        still attributes live activity to self.slurm_job_id (it hasn't
+        changed/gone empty), while sacct's own authoritative record for
+        that SAME job id says it already reached a terminal state. This
+        is exactly the race this project's own _job_still_running
+        docstring (alerting/alert_engine.py) already describes squeue
+        as vulnerable to -- logged here as a real, visible signal
+        (never silently acted on by this aggregator itself; see that
+        file for where sacct's own authoritative signal is actually
+        used to make a decision). Only meaningful when the cached sacct
+        data is actually for the CURRENT job (not stale from a job that
+        has since rotated out via refresh_job_id's own mechanism)."""
+        if (self._sacct_job_id == self.slurm_job_id
+                and self.slurm_job_id and self.slurm_job_id != "unknown"
+                and self._sacct_state in SACCT_TERMINAL_STATES):
+            print(f"[{self.hostname}] [SACCT-SQUEUE-DISAGREEMENT] job {self.slurm_job_id}: "
+                  f"squeue still attributes live activity to this job, but sacct reports "
+                  f"it already reached a terminal state ({self._sacct_state}) -- sacct is "
+                  f"the more authoritative signal here (see refresh_job_sacct_info's own "
+                  f"docstring); squeue's own presence read may be stale.", flush=True)
+
     def maybe_reset_workload_state(self):
         """Sigfix -- real job-boundary reset for workload_signature()'s
         own inputs, same reset TRIGGER and philosophy as
@@ -835,6 +1012,8 @@ class NodeAggregator:
         the remainder is simply picked up on the NEXT poll_files() call,
         not lost and not reprocessed."""
         self.refresh_job_id()
+        self.refresh_job_sacct_info()
+        self.check_sacct_squeue_disagreement()
         self.maybe_reset_workload_state()
         for fp in sorted(glob.glob(f"{self.dump_dir}/*.log")):
             offset = self.file_offsets.get(fp, 0)
