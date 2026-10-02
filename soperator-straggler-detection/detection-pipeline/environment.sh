@@ -57,16 +57,23 @@ apt_install() {
 #   git ls-remote --tags https://github.com/NVIDIA/nccl.git | grep 2.28.9
 #   -> refs/tags/v2.28.9-1
 NCCL_TAG="v2.28.9-1"
-# Default matches install.sh's own FIRST-checked, non-root-friendly
-# candidate (a sibling of the repo checkout itself -- writable by
-# whoever can already write to their own clone, no root needed), not
-# the absolute /root/nccl-2.28-src this project's own original dev
-# cluster happened to use. install.sh checks BOTH locations (this one
-# first) and now resolves NCCL_HOME/NCCL_LIB_PATH to whichever it
-# actually finds -- set NCCL_SRC_DIR=/root/nccl-2.28-src explicitly if
-# you specifically want the other one instead (e.g. to match an
-# existing tree already built there).
-NCCL_SRC_DIR="${NCCL_SRC_DIR:-$PKG_ROOT/../../nccl-2.28-src}"
+NCCL_VERSION_DOTS="2.28.9"  # same pin, dotted form -- matches nccl.h's own NCCL_MAJOR/MINOR/PATCH, used for the apt-extracted (no .git) validity check below.
+NCCL_APT_VERSION="2.28.9-1+cuda13.0"  # exact apt version string confirmed present in NVIDIA's own configured repo this session.
+# Real, confirmed-live bug this project's own history hit (Cyril
+# environment.sh-recompilation investigation): a BARE default here only
+# ever checked ONE of the two candidate locations install.sh itself
+# accepts, so a perfectly valid, already-built tree sitting at the
+# OTHER candidate was invisible to this script -- triggering a real,
+# reproduced ~16-minute unnecessary rebuild at the wrong path while a
+# complete build sat untouched two directories away. Fixed: when the
+# caller hasn't set NCCL_SRC_DIR explicitly, BOTH of install.sh's own
+# candidates are searched, same preference order install.sh itself
+# uses (see nccl_tree_is_valid below) -- not just the first one.
+# Setting NCCL_SRC_DIR explicitly still means exactly that one location
+# and nothing else, same as before.
+_NCCL_SRC_DIR_EXPLICIT="${NCCL_SRC_DIR:-}"
+_NCCL_SRC_DIR_PKGROOT_SIBLING="$PKG_ROOT/../../nccl-2.28-src"
+_NCCL_SRC_DIR_ROOT_FALLBACK="/root/nccl-2.28-src"
 CUDA_PKG="cuda-toolkit-13-0"
 CUDA_VERSION_WANT="13.0"
 
@@ -152,39 +159,170 @@ fi
 # linked at runtime for real training is a SEPARATE, host-shadowed
 # concern install.sh's own NCCL note already documents (see README.md's
 # Requirements section) and this script does not touch.
+#
+# Real investigation finding (confirmed, not assumed): the Inspector
+# plugin's own Makefile never actually includes anything from
+# NCCL_HOME/include at build time (zero #include of nccl.h/nccl_device*
+# anywhere in inspector-plugin/ -- confirmed by grep AND by a real build
+# that succeeded with NCCL_HOME pointed at a nonexistent path; its own
+# profiler-API headers are a permanently vendored copy under
+# inspector-plugin/nccl/, not read from NCCL_HOME). What DOES genuinely
+# need a real, exact-version, COMPILED libnccl.so is the separate
+# NCCL_LIB_PATH/LD_LIBRARY_PATH runtime-pinning mechanism several
+# workload launch scripts use (see their own NCCL_LIB_PATH comments) --
+# that's the real reason this step still produces a full build, not a
+# headers-only tree.
 # =========================================================================
 
-info "Checking for a real NCCL $NCCL_TAG source build at $NCCL_SRC_DIR..."
-if [ -f "$NCCL_SRC_DIR/build/lib/libnccl.so" ] && [ -d "$NCCL_SRC_DIR/build/include" ]; then
-  info "Real NCCL build already present at $NCCL_SRC_DIR/build -- nothing to do."
-else
-  if [ ! -d "$NCCL_SRC_DIR/.git" ]; then
-    # Real, disclosed failure mode this project's own history has now
-    # hit live: a plain `git clone` failure here is very often a LOCAL
-    # permission problem (can't create $NCCL_SRC_DIR's parent, e.g. a
-    # non-root user against /root/nccl-2.28-src), not a network/DNS
-    # issue -- checked explicitly first so the real cause is reported,
-    # not a misleading "confirm this host can reach github.com" guess.
-    nccl_parent_dir="$(dirname "$NCCL_SRC_DIR")"
-    if [ ! -w "$nccl_parent_dir" ]; then
-      fail "Cannot write to $nccl_parent_dir (real permission check, not a guess) -- NCCL_SRC_DIR defaults to a sibling of this repo checkout, which needs write access to its parent directory. If you're not running as root/with sudo and this repo is checked out under /root, either re-run with sudo, or set NCCL_SRC_DIR to a location you can write to (e.g. NCCL_SRC_DIR=\$HOME/nccl-2.28-src ./environment.sh) -- install.sh checks the PKG_ROOT-relative sibling location first and falls back to /root/nccl-2.28-src, so anything else needs NCCL_HOME/NCCL_SRC_DIR set explicitly for both scripts to agree on where it is."
-    else
-      info "Cloning real NVIDIA upstream NCCL source (https://github.com/NVIDIA/nccl.git) to $NCCL_SRC_DIR..."
-      git clone https://github.com/NVIDIA/nccl.git "$NCCL_SRC_DIR" \
-        || fail "NCCL clone failed for a reason other than local write permission (already checked OK) -- confirm this host can reach github.com (git ls-remote https://github.com/NVIDIA/nccl.git) and see git's own error output above."
+# Real, disclosed failure mode this project's own history has hit live:
+# a plain `git clone` failure is very often a LOCAL permission problem
+# (can't create the target's parent, e.g. a non-root user against
+# /root/nccl-2.28-src), not a network/DNS issue -- checked explicitly so
+# the real cause is reported, not a misleading "confirm this host can
+# reach github.com" guess.
+_nccl_check_writable_parent() {
+  local parent_dir
+  parent_dir="$(dirname "$1")"
+  if [ ! -w "$parent_dir" ]; then
+    fail "Cannot write to $parent_dir (real permission check, not a guess) -- needs write access to its parent directory. If you're not running as root/with sudo and this repo is checked out under /root, either re-run with sudo, or set NCCL_SRC_DIR to a location you can write to (e.g. NCCL_SRC_DIR=\$HOME/nccl-2.28-src ./environment.sh) -- install.sh checks the PKG_ROOT-relative sibling location first and falls back to /root/nccl-2.28-src, so anything else needs NCCL_HOME/NCCL_SRC_DIR set explicitly for both scripts to agree on where it is."
+    return 1
+  fi
+  return 0
+}
+
+# "Compatible" means more than "the directory exists" -- a partial clone
+# (confirmed real: this project's own investigation produced exactly
+# this kind of debris, a .git present with no build/ yet) must NOT be
+# mistaken for a valid build.
+#
+# Real refinement found DURING this fix's own validation, not assumed
+# correct from the design alone: an earlier version of this check chose
+# between a git-tag check and a header-version check based on whether
+# $dir/.git existed, on the assumption that was a reliable proxy for
+# "how did this candidate's build/ get here." It isn't -- confirmed
+# live by deliberately reproducing a directory that had BOTH a stale
+# .git (checked out at the WRONG tag, left over from an earlier failed
+# attempt) AND a freshly apt-extracted, genuinely-correct build/: the
+# .git-presence branch incorrectly trusted the stale tag over the real
+# build output and rejected a valid result (safe-direction only --  it
+# fell through to a slower rebuild, never to silently trusting
+# something invalid -- but still real, avoidable waste). Fixed by
+# checking the one signal that's authoritative either way: a real git-
+# clone+build run and the apt-extracted package both produce a real
+# build/include/nccl.h with the same NCCL_MAJOR/MINOR/PATCH #defines
+# (confirmed directly against both this cluster's own git-built tree
+# and the extracted apt package) -- so this is checked unconditionally,
+# with no branching on .git at all.
+nccl_tree_is_valid() {
+  local dir="$1"
+  [ -f "$dir/build/lib/libnccl.so" ] || return 1
+  [ -d "$dir/build/include" ] || return 1
+  [ -f "$dir/build/include/nccl.h" ] || return 1
+  local maj min pat
+  maj="$(grep -oP '^#define NCCL_MAJOR \K[0-9]+' "$dir/build/include/nccl.h" 2>/dev/null)"
+  min="$(grep -oP '^#define NCCL_MINOR \K[0-9]+' "$dir/build/include/nccl.h" 2>/dev/null)"
+  pat="$(grep -oP '^#define NCCL_PATCH \K[0-9]+' "$dir/build/include/nccl.h" 2>/dev/null)"
+  [ "$maj.$min.$pat" = "$NCCL_VERSION_DOTS" ]
+}
+
+# Faster alternative to a full git-clone+compile (confirmed live this
+# session: ~37s download+extract vs. ~16 minutes for a real from-scratch
+# `make -j src.build`): downloads NVIDIA's own prebuilt packages at the
+# exact pinned version and extracts them directly -- NEVER `apt install`,
+# so the host's own currently-installed libnccl2 (whatever version that
+# is) is never touched or downgraded, and nothing is registered in
+# dpkg's own database (confirmed live: `apt-get download` + `dpkg -x`
+# left zero dpkg-database entries, checked both on a clean extraction
+# and deliberately after a PARTIAL one). Any failure at any step --
+# package not found, download failure, a corrupt/partial .deb, or the
+# extracted version somehow not matching -- cleans up fully and returns
+# non-zero so the caller falls through to the existing git-clone+build
+# path; this function never leaves partial state behind for a later
+# validity check to mistake as real (nccl_tree_is_valid would reject a
+# truly partial extraction anyway, since both branches below are kept
+# together or not written into target_dir/build/ at all).
+try_nccl_apt_extraction() {
+  local target_dir="$1"
+  local tmp_dl
+  tmp_dl="$(mktemp -d)"
+  info "Trying apt-extraction of NCCL $NCCL_TAG (libnccl2/libnccl-dev=$NCCL_APT_VERSION) -- download+extract only, never apt install, never touches this host's own installed NCCL package..."
+  if ! ( cd "$tmp_dl" && apt-get download "libnccl2=$NCCL_APT_VERSION" "libnccl-dev=$NCCL_APT_VERSION" >/dev/null 2>&1 ); then
+    warn "apt-extraction: download failed (package unavailable at this exact version, or a network/repo issue) -- falling back to git-clone+build."
+    rm -rf "$tmp_dl"
+    return 1
+  fi
+  local deb
+  for deb in "$tmp_dl"/*.deb; do
+    if [ ! -f "$deb" ] || ! dpkg -x "$deb" "$tmp_dl/extracted" >/dev/null 2>&1; then
+      warn "apt-extraction: extracting $deb failed (corrupt/partial download, or an unexpected package layout) -- cleaning up and falling back to git-clone+build."
+      rm -rf "$tmp_dl"
+      return 1
     fi
+  done
+  if [ ! -f "$tmp_dl/extracted/usr/include/nccl.h" ] || \
+     [ ! -f "$tmp_dl/extracted/usr/lib/x86_64-linux-gnu/libnccl.so" ]; then
+    warn "apt-extraction: extracted package is missing expected files (unexpected layout for this version) -- cleaning up and falling back to git-clone+build."
+    rm -rf "$tmp_dl"
+    return 1
   fi
-
-  if [ "$FAIL" -ne 1 ]; then
-    ( cd "$NCCL_SRC_DIR" && git fetch --tags && git checkout "$NCCL_TAG" ) \
-      || fail "Could not check out real upstream tag $NCCL_TAG in $NCCL_SRC_DIR -- confirm this tag still exists (git ls-remote --tags https://github.com/NVIDIA/nccl.git)."
+  mkdir -p "$target_dir/build/include" "$target_dir/build/lib"
+  cp -a "$tmp_dl/extracted/usr/include/." "$target_dir/build/include/"
+  cp -a "$tmp_dl/extracted/usr/lib/x86_64-linux-gnu/." "$target_dir/build/lib/"
+  rm -rf "$tmp_dl"
+  if nccl_tree_is_valid "$target_dir"; then
+    return 0
   fi
+  warn "apt-extraction: post-extraction validity check failed unexpectedly (extracted version did not match $NCCL_VERSION_DOTS) -- cleaning up and falling back to git-clone+build."
+  rm -rf "$target_dir/build"
+  return 1
+}
 
-  if [ "$FAIL" -ne 1 ]; then
-    real_cuda_home="${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)")")}"
-    info "Building real NCCL $NCCL_TAG (make src.build, CUDA_HOME=$real_cuda_home -- NCCL's own standard documented build target, not invented here) -- this takes several real minutes..."
-    ( cd "$NCCL_SRC_DIR" && make -j"$(nproc)" src.build CUDA_HOME="$real_cuda_home" ) \
-      || fail "NCCL build failed -- see make's own output above for the real error."
+if [ -n "$_NCCL_SRC_DIR_EXPLICIT" ]; then
+  _nccl_candidates=("$_NCCL_SRC_DIR_EXPLICIT")
+else
+  # Same two candidates, same preference order, install.sh itself
+  # already checks -- this is the actual fix for the real, reproduced
+  # bug (a valid build at the second candidate being invisible to this
+  # script because it only ever checked the first).
+  _nccl_candidates=("$_NCCL_SRC_DIR_PKGROOT_SIBLING" "$_NCCL_SRC_DIR_ROOT_FALLBACK")
+fi
+
+info "Checking for a real, valid NCCL $NCCL_TAG build among: ${_nccl_candidates[*]}..."
+NCCL_SRC_DIR=""
+for _c in "${_nccl_candidates[@]}"; do
+  if nccl_tree_is_valid "$_c"; then
+    NCCL_SRC_DIR="$_c"
+    info "Real, valid NCCL $NCCL_TAG build already present at $_c/build -- nothing to do."
+    break
+  fi
+done
+
+if [ -z "$NCCL_SRC_DIR" ]; then
+  NCCL_SRC_DIR="${_nccl_candidates[0]}"
+  info "No valid NCCL $NCCL_TAG build found -- will obtain one at $NCCL_SRC_DIR (same first-candidate preference install.sh itself uses)."
+
+  if try_nccl_apt_extraction "$NCCL_SRC_DIR"; then
+    info "NCCL $NCCL_TAG installed via apt-extraction at $NCCL_SRC_DIR/build -- skipped the slower git-clone+compile path."
+  else
+    if [ ! -d "$NCCL_SRC_DIR/.git" ]; then
+      if _nccl_check_writable_parent "$NCCL_SRC_DIR"; then
+        info "Cloning real NVIDIA upstream NCCL source (https://github.com/NVIDIA/nccl.git) to $NCCL_SRC_DIR..."
+        git clone https://github.com/NVIDIA/nccl.git "$NCCL_SRC_DIR" \
+          || fail "NCCL clone failed for a reason other than local write permission (already checked OK) -- confirm this host can reach github.com (git ls-remote https://github.com/NVIDIA/nccl.git) and see git's own error output above."
+      fi
+    fi
+
+    if [ "$FAIL" -ne 1 ]; then
+      ( cd "$NCCL_SRC_DIR" && git fetch --tags && git checkout "$NCCL_TAG" ) \
+        || fail "Could not check out real upstream tag $NCCL_TAG in $NCCL_SRC_DIR -- confirm this tag still exists (git ls-remote --tags https://github.com/NVIDIA/nccl.git)."
+    fi
+
+    if [ "$FAIL" -ne 1 ]; then
+      real_cuda_home="${CUDA_HOME:-$(dirname "$(dirname "$(command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)")")}"
+      info "Building real NCCL $NCCL_TAG (make src.build, CUDA_HOME=$real_cuda_home -- NCCL's own standard documented build target, not invented here) -- this takes several real minutes (confirmed live: ~16 minutes on a 16-core host)..."
+      ( cd "$NCCL_SRC_DIR" && make -j"$(nproc)" src.build CUDA_HOME="$real_cuda_home" ) \
+        || fail "NCCL build failed -- see make's own output above for the real error."
+    fi
   fi
 fi
 
