@@ -32,11 +32,12 @@
 # Optional Environment Variables:
 #   TEST_NAMESPACE     Namespace for test pods. Defaults to 'default'
 #   CHECKPOINT_SIZE_GB Size of checkpoint in GB. Defaults to 4
-#   GPU_NODE_LABEL     Node label to identify GPU nodes.
-#                      Defaults to auto-detect from cluster.
+#   GPU_NODE_LABEL     Restrict the run to nodes matching this label selector
+#                      (e.g. a node-group label) and scope the summary to it.
+#                      Default: ALL GPU nodes (every non-CPU instance type).
 #
 # Created By: Adam Sabry (Nebius MSA)
-# Version: 2.1.0
+# Version: 2.2.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -117,36 +118,48 @@ log_pass "Required local commands are available"
 # =============================================================================
 log_step "Detecting GPU nodes in cluster"
 
-# Auto-detect GPU instance type from node labels
-GPU_INSTANCE_TYPE=$(kubectl get nodes --request-timeout=30s \
-  -o jsonpath='{.items[*].metadata.labels.node\.kubernetes\.io/instance-type}' \
-  2>/dev/null | tr ' ' '\n' | grep -v "cpu" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}' || echo "")
-
-if [ -z "$GPU_INSTANCE_TYPE" ]; then
-  log_fail "No GPU nodes found in cluster. Ensure GPU nodes are Ready with node.kubernetes.io/instance-type label."
-  exit 1
-fi
-
-log_info "Detected GPU instance type: ${GPU_INSTANCE_TYPE}"
-
-# Get all GPU node names that can actually take work: Ready AND schedulable.
-# kubectl -l returns nodes regardless of status, so we filter here — otherwise a
-# NotReady node (pod sits Pending until timeout) or a Cordoned node
-# (spec.unschedulable=true) would be selected and waste the full wait.
+# Selection: by default test EVERY Ready+schedulable GPU node (any node whose
+# node.kubernetes.io/instance-type is not a CPU type), so a filesystem issue on
+# ANY node is caught. A mixed cluster (e.g. H200 + B300) must NOT silently skip
+# the minority type while the summary claims full coverage. Set GPU_NODE_LABEL to
+# scope the run to one explicit group instead; the summary reflects that scope.
+# Only Ready AND schedulable nodes are kept — a NotReady/Cordoned node would
+# otherwise leave a pod Pending until the wait times out.
 GPU_NODES=()
-while IFS= read -r node; do
-  [[ -n "$node" ]] && GPU_NODES+=("$node")
-done < <(kubectl get nodes -l "node.kubernetes.io/instance-type=${GPU_INSTANCE_TYPE}" \
-  --no-headers --request-timeout=30s \
-  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,SCHED:.spec.unschedulable' \
-  2>/dev/null | awk '$2=="True" && $3!="true" {print $1}')
+if [ -n "${GPU_NODE_LABEL:-}" ]; then
+  SELECTION_DESC="nodes matching label '${GPU_NODE_LABEL}'"
+  log_info "Selecting GPU nodes by GPU_NODE_LABEL: ${GPU_NODE_LABEL}"
+  while read -r name ready sched; do
+    [[ -n "$name" ]] || continue
+    [[ "$ready" == "True" ]] || continue
+    [[ "$sched" == "true" ]] && continue
+    GPU_NODES+=("$name")
+  done < <(kubectl get nodes -l "${GPU_NODE_LABEL}" \
+    --no-headers --request-timeout=30s \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,SCHED:.spec.unschedulable' \
+    2>/dev/null)
+else
+  SELECTION_DESC="all GPU nodes (every non-CPU instance type)"
+  log_info "Auto-selecting all GPU nodes (set GPU_NODE_LABEL to scope to one group)"
+  while read -r name itype ready sched; do
+    [[ -n "$name" ]] || continue
+    [[ -z "$itype" || "$itype" == "<none>" ]] && continue   # unlabeled — can't classify as GPU
+    [[ "$itype" == *cpu* ]] && continue                     # skip CPU nodes
+    [[ "$ready" == "True" ]] || continue
+    [[ "$sched" == "true" ]] && continue
+    GPU_NODES+=("$name")
+  done < <(kubectl get nodes --no-headers --request-timeout=30s \
+    -o custom-columns='NAME:.metadata.name,ITYPE:.metadata.labels.node\.kubernetes\.io/instance-type,READY:.status.conditions[?(@.type=="Ready")].status,SCHED:.spec.unschedulable' \
+    2>/dev/null)
+fi
 
 if [ "${#GPU_NODES[@]}" -eq 0 ]; then
-  log_fail "No Ready GPU nodes found for instance type: ${GPU_INSTANCE_TYPE}"
+  log_fail "No Ready, schedulable GPU nodes found (${SELECTION_DESC})."
+  log_fail "Ensure GPU nodes are Ready and carry node.kubernetes.io/instance-type, or set GPU_NODE_LABEL."
   exit 1
 fi
 
-log_pass "Found ${#GPU_NODES[@]} GPU node(s): ${GPU_NODES[*]}"
+log_pass "Found ${#GPU_NODES[@]} GPU node(s) — ${SELECTION_DESC}: ${GPU_NODES[*]}"
 
 # =============================================================================
 # STEP 1 — Create PVC
@@ -245,7 +258,10 @@ EOF
 log_info "Waiting for writer pod to complete..."
 wait_for_pod "${WRITER_POD}" 600 || true
 
-WRITER_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${WRITER_POD}" 2>/dev/null)
+# `|| true`: under set -e a failed `kubectl logs` (e.g. the pod never started due
+# to a mount or image-pull failure) would otherwise abort here, before the
+# diagnostics below — hiding the actual reason. Capture best-effort and diagnose.
+WRITER_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${WRITER_POD}" 2>/dev/null || true)
 echo "$WRITER_LOGS"
 
 if echo "$WRITER_LOGS" | grep -q "WRITE_COMPLETE"; then
@@ -253,8 +269,12 @@ if echo "$WRITER_LOGS" | grep -q "WRITE_COMPLETE"; then
   WRITE_CHECKSUM=$(echo "$WRITER_LOGS" | grep "CHECKSUM:" | awk -F'CHECKSUM:' '{print $2}' | tr -d ' ')
   log_info "Original checksum: ${WRITE_CHECKSUM}"
 else
-  log_fail "Checkpoint write failed"
+  log_fail "Checkpoint write failed (or pod never started) — see diagnostics below"
   FAILED=1
+  echo "--- Pod status ---"
+  kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${WRITER_POD}" 2>/dev/null || true
+  echo "--- Pod events ---"
+  kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${WRITER_POD}" 2>/dev/null | grep -A 20 "Events:" || true
   exit 1
 fi
 
@@ -328,7 +348,7 @@ EOF
 
 wait_for_pod "${SAME_NODE_READER_POD}" 600 || true
 
-SAME_NODE_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null)
+SAME_NODE_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null || true)
 echo "$SAME_NODE_LOGS"
 
 if echo "$SAME_NODE_LOGS" | grep -q "CHECKSUM_MATCH"; then
@@ -336,13 +356,13 @@ if echo "$SAME_NODE_LOGS" | grep -q "CHECKSUM_MATCH"; then
   NODES_TESTED=$(( NODES_TESTED + 1 ))
   NODES_PASSED=$(( NODES_PASSED + 1 ))
 else
-  log_fail "Same-node restore: checksum mismatch or restore failed"
+  log_fail "Same-node restore: checksum mismatch, restore failed, or pod never started"
   FAILED=1
   NODES_TESTED=$(( NODES_TESTED + 1 ))
   echo "--- Pod status ---"
-  kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null
+  kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null || true
   echo "--- Pod events ---"
-  kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null | grep -A 20 "Events:"
+  kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${SAME_NODE_READER_POD}" 2>/dev/null | grep -A 20 "Events:" || true
 fi
 
 # =============================================================================
@@ -433,7 +453,7 @@ EOF
 
     wait_for_pod "${READER_POD}" 600 || true
 
-    CROSS_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null)
+    CROSS_LOGS=$(kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null || true)
     echo "$CROSS_LOGS"
     NODES_TESTED=$(( NODES_TESTED + 1 ))
 
@@ -441,12 +461,12 @@ EOF
       log_pass "Node ${NODE_INDEX} (${CROSS_NODE}): checksum verified"
       NODES_PASSED=$(( NODES_PASSED + 1 ))
     else
-      log_fail "Node ${NODE_INDEX} (${CROSS_NODE}): checksum mismatch or restore failed"
+      log_fail "Node ${NODE_INDEX} (${CROSS_NODE}): checksum mismatch, restore failed, or pod never started"
       FAILED=1
       echo "--- Pod status ---"
-      kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null
+      kubectl get pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null || true
       echo "--- Pod events ---"
-      kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null | grep -A 20 "Events:"
+      kubectl describe pod --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null | grep -A 20 "Events:" || true
       echo "--- Full pod logs ---"
       kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${READER_POD}" 2>/dev/null || echo "No logs available"
     fi
@@ -466,15 +486,15 @@ log_step "Checkpoint Write and Restore Summary"
 log_info "GPU nodes tested:  ${NODES_TESTED}"
 log_info "GPU nodes passed:  ${NODES_PASSED}"
 log_info "GPU nodes failed:  $(( NODES_TESTED - NODES_PASSED ))"
-log_info "GPU instance type: ${GPU_INSTANCE_TYPE}"
+log_info "Selection scope:   ${SELECTION_DESC}"
 log_info "Checkpoint size:   ${CHECKPOINT_SIZE_GB}GB"
 log_info "Writer node:       ${WRITER_NODE}"
 echo ""
 
 if [ "${FAILED}" -eq 0 ]; then
   log_step "Checkpoint write and restore validation completed successfully"
-  log_pass "Checkpoint written and restored with correct data integrity on all ${NODES_TESTED} GPU node(s)"
-  log_pass "Shared filesystem is consistent across all GPU nodes in the cluster"
+  log_pass "Checkpoint written and restored with correct data integrity on all ${NODES_TESTED} tested GPU node(s)"
+  log_pass "Shared filesystem is consistent across the ${NODES_TESTED} selected GPU node(s) — ${SELECTION_DESC}"
 else
   log_step "Checkpoint write and restore validation completed with failures"
   log_fail "${NODES_PASSED}/${NODES_TESTED} nodes passed — review output above for details"
