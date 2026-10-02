@@ -893,7 +893,7 @@ variable "backups_config" {
 variable "region" {
   description = "Region where the Slurm cluster is deployed."
   type        = string
-  default     = "eu-north1"
+  default     = "eu-west2"
 }
 
 variable "use_preinstalled_gpu_drivers" {

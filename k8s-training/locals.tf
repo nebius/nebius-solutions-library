@@ -56,6 +56,7 @@ locals {
       cpu_nodes_preset   = "16vcpu-64gb"
       gpu_nodes_platform = "gpu-b300-sxm"
       gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
+      infiniband_fabric  = "eu-west2-a"
     }
     us-north1 = {
       cpu_nodes_platform = "cpu-d3"
@@ -71,7 +72,7 @@ locals {
   cpu_nodes_platform   = coalesce(var.cpu_nodes_platform, local.current_region_defaults.cpu_nodes_platform)
   gpu_nodes_platform   = coalesce(var.gpu_nodes_platform, local.current_region_defaults.gpu_nodes_platform)
   gpu_nodes_preset     = coalesce(var.gpu_nodes_preset, local.current_region_defaults.gpu_nodes_preset)
-  infiniband_fabric    = var.infiniband_fabric
+  infiniband_fabric    = var.infiniband_fabric != null ? var.infiniband_fabric : try(local.current_region_defaults.infiniband_fabric, null)
   enable_gpu_cluster   = local.infiniband_fabric != null ? trimspace(local.infiniband_fabric) != "" : false
   device_preset        = "cuda13.0"
   gb300_nodes_per_rack = 18

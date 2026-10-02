@@ -243,8 +243,8 @@ slurm_nodeset_workers = [{
   size                    = <TOTAL_NODES_NUMBER> # Recommended value for soperator development is 2.
   max_unavailable_percent = 50
   resource = {
-    platform = "gpu-h100-sxm" # For a CPU-only cluster, see https://docs.nebius.com/compute/virtual-machines/types.
-    preset   = "8gpu-128vcpu-1600gb"
+    platform = "gpu-b300-sxm" # For a CPU-only cluster, see https://docs.nebius.com/compute/virtual-machines/types.
+    preset   = "8gpu-192vcpu-2768gb"
   }
   boot_disk = {
     type                 = "NETWORK_SSD"
@@ -252,7 +252,7 @@ slurm_nodeset_workers = [{
     block_size_kibibytes = 4
   }
   gpu_cluster = {
-    infiniband_fabric = "" # Contact support for the correct value.
+    infiniband_fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2.
   }
 }]
 

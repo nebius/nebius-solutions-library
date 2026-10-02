@@ -41,7 +41,7 @@ ssh target
 
 1. Install [Nebius CLI](https://docs.nebius.dev/en/cli/#installation):
    ```bash
-   curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+   curl -sSL https://storage.eu-west2.nebius.cloud/cli/install.sh | bash
    ```
 
 2. Reload your shell session:
@@ -100,6 +100,8 @@ To deploy the solution, follow these steps:
 Update the following variables in the `terraform.tfvars` file with your own values:
 
 - `ssh_user_name`
+- `nebius_cli_install_url`: CLI installer URL used by cloud-init.
+- `nebius_api_endpoint`: API endpoint used by the bastion CLI profile.
 - `ssh_public_key`
 - `bastion_allowed_ssh_cidrs` if you want the managed security group to allow SSH access
 

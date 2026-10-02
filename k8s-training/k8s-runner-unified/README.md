@@ -47,13 +47,14 @@ it fails to start.
 kubectl apply --server-side -k \
   "github.com/kubeflow/mpi-operator/manifests/overlays/standalone?ref=v0.6.0"
 
-# 2. Set NODE_GROUP_ID (and review IMAGE) at the top of nccl_runner_unified.sh.
-#    Find the node group ID with:
+# 2. Find the node group ID with:
 kubectl get nodes -o custom-columns=\
 'NAME:.metadata.name,GROUP:.metadata.labels.nebius\.com/node-group-id,GPU:.status.capacity.nvidia\.com/gpu'
 
-# 3. Run:
-./nccl_runner_unified.sh
+# 3. Run. IMAGE is optional and defaults to the configured Nebius CUDA 13
+#    NCCL image:
+NODE_GROUP_ID=mk8snodegroup-xxxxxxxxxxxxxxxxxx \
+  ./nccl_runner_unified.sh
 #    -> results/nccl-<timestamp>/<test>-<hosts>.log  (raw NCCL output)
 #    -> results/nccl-<timestamp>/report.md           (auto-generated summary)
 ```
@@ -74,8 +75,8 @@ Regenerate a report from existing logs at any time:
 | Var | Default | Meaning |
 |---|---|---|
 | `NAMESPACE` | `nccl-tests` | Namespace to run in |
-| `IMAGE` | Nebius `nccl-tests` image | Must be pullable on the cluster |
-| `NODE_GROUP_ID` | — | **Set per cluster** |
+| `IMAGE` | Nebius CUDA 13 `nccl-tests` image | Override with any compatible image pullable by the cluster |
+| `NODE_GROUP_ID` | — | **Required; set per cluster** |
 | `RESERVE_CPU_CORES` / `RESERVE_MEM_GI` | `4` / `50` | Headroom left for kubelet/daemonsets |
 | `MAX_LAUNCH_ATTEMPTS` | `6` | Retry budget for the transient launcher glitch |
 | `HOSTS` | `(1 2 3 4)` | Host counts to sweep. Auto-capped **down** to available Ready nodes, but never scales **up** past the values listed — on clusters larger than 4 nodes, edit this to test at full scale (e.g. `(1 2 4 8 16)` for a 16-node group). |

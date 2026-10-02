@@ -352,10 +352,11 @@ log_info "--- Check 5: WORKFLOW config ---"
 WORKFLOW_CONFIG=$(osmo_curl GET "${OSMO_URL}/api/configs/workflow" 2>/dev/null || echo "")
 if [[ -n "$WORKFLOW_CONFIG" && "$WORKFLOW_CONFIG" != "null" ]]; then
     WORKFLOW_CFG=$(echo "$WORKFLOW_CONFIG" | jq '.configs_dict // .' 2>/dev/null || echo "")
-    EXPECTED_STORAGE_OVERRIDE=""
+    EXPECTED_STORAGE_OVERRIDE=$(get_tf_output "storage_bucket.endpoint" "${SCRIPT_DIR}/../001-iac" 2>/dev/null || echo "")
+    EXPECTED_STORAGE_REGION=$(get_tf_output "storage_bucket.region" "${SCRIPT_DIR}/../001-iac" 2>/dev/null || echo "")
 
-    if [[ -n "${NEBIUS_REGION:-}" ]]; then
-        EXPECTED_STORAGE_OVERRIDE=$(normalize_nebius_storage_endpoint "https://storage.${NEBIUS_REGION}.nebius.cloud")
+    if [[ -n "$EXPECTED_STORAGE_OVERRIDE" ]]; then
+        EXPECTED_STORAGE_OVERRIDE=$(normalize_nebius_storage_endpoint "$EXPECTED_STORAGE_OVERRIDE")
     fi
 
     MAX_NUM_TASKS=$(echo "$WORKFLOW_CFG" | jq -r '.max_num_tasks // empty' 2>/dev/null || echo "")
@@ -390,8 +391,8 @@ if [[ -n "$WORKFLOW_CONFIG" && "$WORKFLOW_CONFIG" != "null" ]]; then
 
         if [[ -z "$STORAGE_REGION" ]]; then
             check_fail "${STORAGE_KEY}: credential.region missing (workflow uploads will fail with Invalid region)"
-        elif [[ -n "${NEBIUS_REGION:-}" && "$STORAGE_REGION" != "$NEBIUS_REGION" ]]; then
-            check_fail "${STORAGE_KEY}: credential.region=${STORAGE_REGION} (expected ${NEBIUS_REGION})"
+        elif [[ -n "$EXPECTED_STORAGE_REGION" && "$STORAGE_REGION" != "$EXPECTED_STORAGE_REGION" ]]; then
+            check_fail "${STORAGE_KEY}: credential.region=${STORAGE_REGION} (expected ${EXPECTED_STORAGE_REGION})"
         else
             check_pass "${STORAGE_KEY}: credential.region=${STORAGE_REGION}"
         fi
@@ -430,16 +431,14 @@ if [[ -n "$WORKFLOW_CONFIG" && "$WORKFLOW_CONFIG" != "null" ]]; then
 
     VERIFY_BUCKET=$(get_tf_output "storage_bucket.name" "${SCRIPT_DIR}/../001-iac" 2>/dev/null || echo "")
     VERIFY_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "${SCRIPT_DIR}/../001-iac" 2>/dev/null || echo "")
-    if [[ -z "$VERIFY_ENDPOINT" && -n "${NEBIUS_REGION:-}" ]]; then
-        VERIFY_ENDPOINT="https://storage.${NEBIUS_REGION}.nebius.cloud"
-    fi
+    VERIFY_REGION=$(get_tf_output "storage_bucket.region" "${SCRIPT_DIR}/../001-iac" 2>/dev/null || echo "")
     if [[ -n "$VERIFY_ENDPOINT" ]]; then
         VERIFY_ENDPOINT=$(normalize_nebius_storage_endpoint "$VERIFY_ENDPOINT")
     fi
 
-    if [[ -z "$VERIFY_BUCKET" || -z "$VERIFY_ENDPOINT" || -z "${NEBIUS_REGION:-}" ]]; then
-        check_warn "Skipping live bucket probe (bucket / endpoint / NEBIUS_REGION missing)"
-    elif probe_nebius_bucket_rw "${OSMO_NAMESPACE}" "${VERIFY_BUCKET}" "${VERIFY_ENDPOINT}" "${NEBIUS_REGION}"; then
+    if [[ -z "$VERIFY_BUCKET" || -z "$VERIFY_ENDPOINT" || -z "$VERIFY_REGION" ]]; then
+        check_warn "Skipping live bucket probe (Terraform bucket name / endpoint / region missing)"
+    elif probe_nebius_bucket_rw "${OSMO_NAMESPACE}" "${VERIFY_BUCKET}" "${VERIFY_ENDPOINT}" "${VERIFY_REGION}"; then
         check_pass "osmo-storage secret can read/write ${VERIFY_BUCKET}"
     else
         check_fail "osmo-storage secret cannot read/write ${VERIFY_BUCKET}"

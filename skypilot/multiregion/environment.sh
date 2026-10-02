@@ -5,7 +5,7 @@ NEBIUS_TENANT_ID='tenant-xxxxxxxxxxxxxxxxxxxx'
 NEBIUS_PROJECT_ID_REGION1='project-xxxxxxxxxxxxxxxxxxxx'
 NEBIUS_PROJECT_ID_REGION2='project-yyyyyyyyyyyyyyyyyyyy'
 
-NEBIUS_REGION1='eu-north1'
+NEBIUS_REGION1='eu-west2'
 NEBIUS_REGION2='eu-west1'
 
 if [ -z "${NEBIUS_TENANT_ID}" ]; then
