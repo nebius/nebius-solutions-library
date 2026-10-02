@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: proteinmpnn-native-f7-holder-hf93
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: proteinmpnn
+    app.kubernetes.io/component: artifact-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  nodeSelector:
+    kubernetes.io/hostname: gpu-node-a.example.invalid
+  containers:
+    - name: holder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          find /checkpoints/proteinmpnn-native-f7-v3-buffered/versions/1 -type f -exec cat '{}' + >/dev/null
+          touch /tmp/prewarm-complete
+          exec sleep 2147483647
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "2"
+          memory: 1Gi
+      readinessProbe:
+        exec:
+          command:
+            - /bin/test
+            - -f
+            - /tmp/prewarm-complete
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: false
+      volumeMounts:
+        - name: checkpoints
+          mountPath: /checkpoints
+          readOnly: true
+        - name: nim-cache
+          mountPath: /nim-cache
+          readOnly: true
+  volumes:
+    - name: checkpoints
+      persistentVolumeClaim:
+        claimName: proteinmpnn-native-f7-artifacts
+        readOnly: true
+    - name: nim-cache
+      persistentVolumeClaim:
+        claimName: proteinmpnn-native-f7-cache
+        readOnly: true

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_N3_LOG:?}"
+run_id=""
+evidence_root=""
+checkpoint_id=""
+image_io_mode=""
+while (($# > 0)); do
+  case "$1" in
+    --run-id) run_id=$2; shift 2 ;;
+    --evidence-root) evidence_root=$2; shift 2 ;;
+    --checkpoint-id) checkpoint_id=$2; shift 2 ;;
+    --image-io-mode) image_io_mode=$2; shift 2 ;;
+    --cleanup|--allow-performance-validation-worker) shift ;;
+    *) shift 2 ;;
+  esac
+done
+printf '%s %s %s\n' "$run_id" "$checkpoint_id" "$image_io_mode" >> "$FAKE_N3_LOG"
+case "$run_id" in
+  *-r1) demand=20.0; http_ready=15.0; k8s_ready=16.0; call_1=3.0; call_2=2.0; restore=4.0; response_received=2026-08-18T00:00:20.500000Z; validation_finished=2026-08-18T00:00:20.600000Z ;;
+  *-r2) demand=18.0; http_ready=14.0; k8s_ready=15.0; call_1=2.5; call_2=1.5; restore=3.0; response_received=2026-08-18T00:00:18.500000Z; validation_finished=2026-08-18T00:00:18.600000Z ;;
+  *-r3) demand=22.0; http_ready=16.0; k8s_ready=17.0; call_1=3.5; call_2=2.5; restore=5.0; response_received=2026-08-18T00:00:22.500000Z; validation_finished=2026-08-18T00:00:22.600000Z ;;
+  *) exit 91 ;;
+esac
+if [[ ${FAKE_N3_STALE_TOTAL:-0} == 1 && $run_id == *-r2 ]]; then
+  demand=99.0
+fi
+mkdir -m 0700 -- "$evidence_root/runs/$run_id"
+jq -n --arg run "$run_id" --arg checkpoint "$checkpoint_id" --arg mode "$image_io_mode" \
+  --arg response_received "$response_received" --arg validation_finished "$validation_finished" \
+  --argjson demand "$demand" --argjson http_ready "$http_ready" \
+  --argjson k8s_ready "$k8s_ready" \
+  --argjson call_1 "$call_1" --argjson call_2 "$call_2" \
+  --argjson restore "$restore" '{
+    status:"PASS",run_id:$run,request_count:2,semantic_pass_count:2,
+    response_timing_contract:"request-dispatch-to-complete-http-body/v1",
+    demand_at:"2026-08-18T00:00:00.500000Z",t0_at:"2026-08-18T00:00:00.500000Z",t0_source:"target-submit-at.txt",
+    artifact:{checkpoint_id:$checkpoint,image_io_mode:$mode},
+    evidence:{second_response_received_at:$response_received,validation_finished_at:$validation_finished},
+    timings_seconds:{
+      demand_to_two_semantic_responses:$demand,
+      demand_to_http_ready:$http_ready,
+      demand_to_kubernetes_ready:$k8s_ready,
+      semantic_request_1:$call_1,
+      semantic_request_2:$call_2,
+      worker_restore:$restore
+    }
+  }' > "$evidence_root/runs/$run_id/canary-evidence.json"

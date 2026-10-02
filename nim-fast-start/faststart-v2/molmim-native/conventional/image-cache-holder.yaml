@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: molmim-native-f7-image-holder-t12
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: image-cache-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeName: gpu-node-b.example.invalid
+  imagePullSecrets:
+    - name: nvcrio-cred
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: holder
+      image: nvcr.io/nim/nvidia/molmim@sha256:7700c5556935a93055bee5367d36acb6d3e55d22fd1ba28503f5447656fa63fa
+      imagePullPolicy: IfNotPresent
+      command:
+        - /usr/bin/python3
+        - -c
+      args:
+        - |
+          from rdkit import Chem
+          from rdkit.Chem import QED
+          molecule = Chem.MolFromSmiles("CCO")
+          assert molecule is not None and 0.0 <= QED.qed(molecule) <= 1.0
+          open("/state/rdkit-ready", "x", encoding="utf-8").close()
+          while True:
+              import time
+              time.sleep(3600)
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/rdkit-ready
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      volumeMounts:
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi

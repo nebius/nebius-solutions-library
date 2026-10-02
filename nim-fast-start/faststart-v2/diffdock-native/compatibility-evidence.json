@@ -1,0 +1,49 @@
+{
+  "schema": "archvteams.nebius.ai/diffdock-restore-compatibility-review/v1",
+  "reviewed_at": "2026-08-18T05:34:00Z",
+  "diffdock_target": {
+    "image": "nvcr.io/nim/mit/diffdock@sha256:300696eb8331d78face40f84d835cc1e278c7d3c391c5aabbbee5884366da480",
+    "glibc_version": "2.35",
+    "status": "measured-live-donor-r2",
+    "capture_receipt_schema": "archvteams.nebius.ai/target-runtime/v1",
+    "capture_receipt_sha256": "5b0803c115d87fc3ccd57ce70447499fb0f831a93a31f7854f21a7cd652959b8"
+  },
+  "superseded_worker": {
+    "image": "registry.example.invalid/faststart/snapshot-agent@sha256:31e1dacd18b99aec1ab7e8ec8c933f260c9dcec687938b40c44c61274f930d86",
+    "rootfs_extractor_required_glibc": "2.38",
+    "source": "cross-model retained ProteinMPNN restore failure",
+    "source_log_sha256": "bd0b8c1d143ca2cf65fb3076e91b97f890b65bf0afcba671214434c6b453bdaa",
+    "source_target_glibc": "2.35",
+    "source_target_glibc_receipt_sha256": "c7c5ac41b6a6746372adee0f7dd78c0f9049db6000d33e25274d336cb8ea57b6"
+  },
+  "portable_worker": {
+    "image": "registry.example.invalid/faststart/snapshot-agent@sha256:063286a3a1354d1c5969fa80f445bb5fbd2a96bc0999c7b6897495f0b4c2fd4d",
+    "tool_bundle_manifest_sha256": "fc22c423deca17b4175ab42c23a66310c8e2c4d8c4b63a24c33894300020943b",
+    "restore_worker_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+    "rootfs_extractor": "target-/bin/tar-without-inherited-LD_LIBRARY_PATH",
+    "worker_imposed_target_glibc_floor": null,
+    "local_verification_receipt_sha256": "95590f7e36d0f4dc35042738109892680cbe5533c51858af21bf30cac8db8c72",
+    "remote_digest_receipt_sha256": "4e1a1b21ad53330f180bcc2b074ff15c5791422fb814ab08bedc79de87393bb0",
+    "live_bundle_verification": {
+      "node": "gpu-node-a.example.invalid",
+      "pod_uid": "00000000-0000-4000-8000-000000000003",
+      "image_id_matches_requested_digest": true,
+      "log_sha256": "671996f7fda20d1b12f4ce07d553d99ba7f7c425b7f6426fa015d9defa160b58",
+      "pod_receipt_sha256": "c24a3188841f0667ee7128fef9c555c1d9b30b73787916ac66e54f3d2e87ee55"
+    },
+    "qualification": "exact live bundle verified; DiffDock source/direct canary and buffered n=3 all passed strict two-call semantics",
+    "source_direct_canary": {
+      "status": "PASS",
+      "demand_to_two_semantic_responses_seconds": 74.601431,
+      "worker_restore_seconds": 65.016
+    },
+    "buffered_n3_receipt_sha256": "e84bbc45b27f1b2b575d510c16c170df8f5577e6408947f334d4e73d3f68dd27"
+  },
+  "rootfsless_policy": {
+    "cross_model_member_inventory_sha256": "ef5d55be503bb310c0730f1d05254cb3fddd20c98daee177b065dc54be72175f",
+    "candidate_only": true,
+    "promotion_gate": "strict two-call ClusterIP semantic canary",
+    "warning": "Cross-model rootfsless restore reached CRIU but did not pass semantics; omission alone is not assumed sufficient."
+  },
+  "live_mutations_performed": true
+}

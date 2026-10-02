@@ -1,0 +1,214 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: boltz2-native-f7-donor-r5
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: boltz2
+    app.kubernetes.io/component: checkpoint-donor
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+    nvidia.com/snapshot-checkpoint-id: boltz2-native-f7-v1
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: boltz2
+        app.kubernetes.io/component: checkpoint-donor
+        app.kubernetes.io/part-of: archvteams-2407-faststart
+        nvidia.com/snapshot-is-checkpoint-source: "true"
+        nvidia.com/snapshot-checkpoint-id: boltz2-native-f7-v1
+      annotations:
+        nvidia.com/snapshot-artifact-version: "1"
+        nvidia.com/snapshot-target-containers: boltz2
+        nvidia.com/snapshot-storage-type: pvc
+        nvidia.com/snapshot-storage-base-path: /checkpoints
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - gpu-node-b.example.invalid
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      imagePullSecrets:
+        - name: nvcrio-cred
+      containers:
+        - name: boltz2
+          image: nvcr.io/nim/mit/boltz2@sha256:0788c95c8b5b6c1a73a62c656b298ecc353a8187dc22b794f496ae40672c4c98
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -Eeuo pipefail
+              bash /opt/nim/start_server.sh &
+              server_pid=$!
+              trap 'kill "$server_pid" 2>/dev/null || true' TERM INT EXIT
+
+              for _ in $(seq 1 1800); do
+                if ! kill -0 "$server_pid" 2>/dev/null; then
+                  wait "$server_pid"
+                  exit 1
+                fi
+                if [[ "$(curl -fsS http://127.0.0.1:8000/v1/health/ready 2>/dev/null || true)" == "true" ]]; then
+                  break
+                fi
+                sleep 1
+              done
+              [[ "$(curl -fsS http://127.0.0.1:8000/v1/health/ready)" == "true" ]]
+
+              python3 - <<'PY'
+              import json
+              import math
+              import urllib.request
+
+              endpoint = "http://127.0.0.1:8000/biology/mit/boltz2/predict"
+              sequences = ("ACDEFGHIKLMNPQRSTVWY", "YWVTSRQPNMLKIHGFEDCA")
+              for index, sequence in enumerate(sequences, 1):
+                  request_id = f"boltz2-native-f7-donor-{index}"
+                  payload = {
+                      "polymers": [{
+                          "molecule_type": "protein",
+                          "sequence": sequence,
+                          "id": "A" if index == 1 else "B",
+                          "msa": {"msa_search": {"a3m": {
+                              "alignment": f">query\n{sequence}",
+                              "format": "a3m",
+                              "rank": 0,
+                          }}},
+                      }],
+                      "recycling_steps": 1,
+                      "sampling_steps": 10,
+                      "diffusion_samples": 1,
+                      "output_format": "mmcif",
+                  }
+                  body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+                  request = urllib.request.Request(
+                      endpoint,
+                      data=body,
+                      headers={"Content-Type": "application/json", "X-Request-ID": request_id},
+                      method="POST",
+                  )
+                  with urllib.request.urlopen(request, timeout=600) as response:
+                      if response.status != 200:
+                          raise RuntimeError(f"warmup {index} returned HTTP {response.status}")
+                      decoded = json.loads(response.read(16 * 1024 * 1024))
+                  if not isinstance(decoded, dict):
+                      raise RuntimeError(f"warmup {index} did not return an object")
+                  structures = decoded.get("structures")
+                  if not isinstance(structures, list) or len(structures) != 1:
+                      raise RuntimeError(f"warmup {index} returned the wrong structure count")
+                  structure = structures[0]
+                  if (
+                      not isinstance(structure, dict)
+                      or structure.get("format") != "mmcif"
+                      or not isinstance(structure.get("structure"), str)
+                      or "_atom_site" not in structure["structure"]
+                  ):
+                      raise RuntimeError(f"warmup {index} returned no valid mmCIF structure")
+                  for field in ("confidence_scores", "ptm_scores"):
+                      values = decoded.get(field)
+                      if (
+                          not isinstance(values, list)
+                          or len(values) != 1
+                          or isinstance(values[0], bool)
+                          or not isinstance(values[0], (int, float))
+                          or not math.isfinite(float(values[0]))
+                      ):
+                          raise RuntimeError(f"warmup {index} returned invalid {field}")
+              PY
+
+              touch /snapshot-control/ready-for-snapshot
+              wait "$server_pid"
+          env:
+            - name: DYN_SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: NIM_CACHE_PATH
+              value: /opt/nim/.cache
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-api-key
+                  key: NGC_API_KEY
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "12"
+              memory: 128Gi
+              ephemeral-storage: 20Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "15"
+              memory: 150Gi
+              ephemeral-storage: 200Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsUser: 0
+            runAsGroup: 0
+          readinessProbe:
+            exec:
+              command:
+                - /bin/cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 3600
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: nim-cache
+              mountPath: /opt/nim/.cache
+            - name: workspace
+              mountPath: /opt/nim/workspace
+            - name: output
+              mountPath: /output
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: boltz2
+            - name: checkpoints
+              mountPath: /checkpoints
+              readOnly: true
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: nim-cache
+          persistentVolumeClaim:
+            claimName: boltz2-nim-cache-native-f7-r3
+        - name: workspace
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: output
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: snapshot-control
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: mlspec-archvteams-2407-ckpt-m3
+            readOnly: true

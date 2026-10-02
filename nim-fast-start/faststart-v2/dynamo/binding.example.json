@@ -1,0 +1,15 @@
+{
+  "schema": "archvteams.nebius.ai/openfold2-target-binding/v1",
+  "collected_at": "REPLACE_WITH_RFC3339_TIMESTAMP",
+  "run_id": "REPLACE_WITH_SAME_RUN_ID",
+  "namespace": "nim-fast-start",
+  "pod_name": "of2-target-REPLACE_WITH_SAME_RUN_ID",
+  "pod_uid": "REPLACE_WITH_POD_UUID",
+  "container_name": "openfold2",
+  "container_id": "containerd://REPLACE_WITH_64_HEX_CONTAINER_ID",
+  "cgroup": "/REPLACE_WITH_EXACT_HOST_VISIBLE_KUBEPODS_CGROUP",
+  "pod_ip": "REPLACE_WITH_POD_IP",
+  "node": "REPLACE_WITH_SAME_VERIFIED_H100_HOSTNAME",
+  "image_id": "registry.example.invalid/faststart/openfold2@sha256:fc64916731fee39e124225829dca78e80ec24fe1891be47057d0d69209b93ab4",
+  "pod_spec_sha256": "REPLACE_WITH_CANONICAL_LIVE_POD_SPEC_SHA256"
+}

@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: diffdock-native-f7-artifacts
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: diffdock
+    app.kubernetes.io/component: native-artifact
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 93Gi
+  storageClassName: mlspec-archvteams-2407-io-m3
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: diffdock-native-f7-cache
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: diffdock
+    app.kubernetes.io/component: nim-cache
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: compute-csi-default-sc

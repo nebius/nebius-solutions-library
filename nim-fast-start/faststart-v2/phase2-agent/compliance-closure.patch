@@ -1,0 +1,353 @@
+--- a/deploy/snapshot/Dockerfile
++++ b/deploy/snapshot/Dockerfile
+@@ -23,6 +23,7 @@
+ ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+ ARG CRIU_REF=91d552257809d0e5c7148190e9aa0372f13b76a0
+ ARG CUDA_BUILD_IMAGE=nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:7d56ebe2b7cd864a60dca3c8b2d0a39f8fc110417e8253e32505c3387f59119c
++ARG CRIU_BUILD_IMAGE=ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+ ARG AGENT_BASE_IMAGE=nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1
+ ARG CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+ 
+@@ -54,11 +55,6 @@
+ RUN go mod download
+ 
+ COPY . .
+-RUN go get \
+-      github.com/containerd/containerd@v1.7.34 \
+-      golang.org/x/net@v0.56.0 \
+-      golang.org/x/text@v0.39.0 \
+-      google.golang.org/grpc@v1.82.1 && go mod tidy
+ 
+ # =============================================================================
+ # Stage: Linter - Run golangci-lint
+@@ -87,18 +83,19 @@
+ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
+ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /restore-worker ./cmd/restore-worker
+ 
+-# Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
+-# deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
+-# sufficient. The git-init dance satisfies cyclonedx-gomod's main-module
+-# version probe (Docker build context doesn't carry .git). Pinned to
+-# keep the SBOM tool itself reproducible.
++# Emit CycloneDX SBOMs for both independent shipped Go dependency closures.
++# nsrestore's dependencies are a subset of snapshot-agent's; restore-worker is
++# explicit so a future split cannot silently escape the inventory. The
++# git-init dance satisfies the main-module probe (the context has no .git).
++# The generator version remains pinned.
+ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+     --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+     GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+     git init -q && \
+     git -c user.email=build@dynamo -c user.name=build add -A && \
+     git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
+-    cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
++    cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json . && \
++    cyclonedx-gomod app -licenses -json -main ./cmd/restore-worker -output /sbom-restore-worker-go.cdx.json .
+ 
+ # Compliance: harvest each Go module's real LICENSE files from the module cache
+ # so the go NOTICES generator inlines upstream license text instead of canonical
+@@ -151,7 +148,7 @@
+ # =============================================================================
+ # Stage: CRIU Builder - Build CRIU with CUDA plugin
+ # =============================================================================
+-FROM ubuntu:24.04 AS criu-builder
++FROM ${CRIU_BUILD_IMAGE} AS criu-builder
+ 
+ ARG CRIU_REPO
+ ARG CRIU_REF
+@@ -329,9 +326,9 @@
+ # Stage: Compliance: licenses
+ # =============================================================================
+ # Runs in agent_pre's actual filesystem so dpkg-query enumerates the real
+-# runtime package set (cuda-dl-base + everything we apt-get installed in
+-# agent_pre). cyclonedx-gomod produced /sbom-go.cdx.json upstream in the
+-# Go builder; we COPY it in here for the go generator.
++# runtime package set (CUDA base + everything we apt-get installed in
++# agent_pre). cyclonedx-gomod produced one SBOM for snapshot-agent and one for
++# restore-worker upstream; both are inputs to the deduplicating Go generator.
+ #
+ # `compliance` build context is plumbed by .github/actions/build-deploy-component/action.yml
+ # as `--build-context compliance=../../container/compliance`.
+@@ -353,6 +350,7 @@
+ COPY --from=compliance . /opt/compliance
+ ENV PYTHONPATH=/opt
+ COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
++COPY --from=builder /sbom-restore-worker-go.cdx.json /tmp/sbom-restore-worker-go.cdx.json
+ COPY --from=builder /sbom-go-licenses /tmp/go-licenses
+ 
+ # go + dpkg cover the runtime image's apt + Go module set. native
+@@ -368,6 +366,7 @@
+ RUN python3 -m compliance.generators \
+     --ecosystem go,dpkg,native \
+     --go-sbom /tmp/sbom-go.cdx.json \
++    --go-sbom /tmp/sbom-restore-worker-go.cdx.json \
+     --go-licenses-dir /tmp/go-licenses \
+     --native-yaml /opt/compliance/native_packages.yaml \
+     --native-image snapshot-agent \
+@@ -445,6 +444,10 @@
+ # =============================================================================
+ FROM agent_pre AS agent
+ COPY --from=licenses /legal /legal
++LABEL org.opencontainers.image.source="https://github.com/ai-dynamo/dynamo" \
++      org.opencontainers.image.revision="f7f37be174d252590c4b56e25ff4262dd82466fd" \
++      org.opencontainers.image.criu.revision="91d552257809d0e5c7148190e9aa0372f13b76a0" \
++      org.opencontainers.image.cuda-checkpoint.revision="00d5cce84c628088d6caa203fc4af40c1538b6f7"
+ 
+ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+ 
+--- a/deploy/snapshot/go.mod
++++ b/deploy/snapshot/go.mod
+@@ -5,7 +5,7 @@
+ require (
+ 	github.com/ai-dynamo/dynamo/deploy/operator v0.0.0
+ 	github.com/checkpoint-restore/go-criu/v8 v8.4.0
+-	github.com/containerd/containerd v1.7.33
++	github.com/containerd/containerd v1.7.34
+ 	github.com/cyphar/filepath-securejoin v0.6.1
+ 	github.com/go-logr/logr v1.4.3
+ 	github.com/go-logr/zapr v1.3.0
+@@ -16,7 +16,7 @@
+ 	github.com/stretchr/testify v1.11.1
+ 	go.uber.org/zap v1.27.1
+ 	golang.org/x/sys v0.46.0
+-	google.golang.org/grpc v1.79.3
++	google.golang.org/grpc v1.82.1
+ 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
+ 	gopkg.in/yaml.v3 v3.0.1
+ 	k8s.io/api v0.36.2
+@@ -104,15 +104,15 @@
+ 	go.uber.org/multierr v1.11.0 // indirect
+ 	go.yaml.in/yaml/v2 v2.4.3 // indirect
+ 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+-	golang.org/x/net v0.54.0 // indirect
+-	golang.org/x/oauth2 v0.34.0 // indirect
+-	golang.org/x/sync v0.20.0 // indirect
+-	golang.org/x/term v0.43.0 // indirect
+-	golang.org/x/text v0.37.0 // indirect
++	golang.org/x/net v0.56.0 // indirect
++	golang.org/x/oauth2 v0.36.0 // indirect
++	golang.org/x/sync v0.21.0 // indirect
++	golang.org/x/term v0.44.0 // indirect
++	golang.org/x/text v0.39.0 // indirect
+ 	golang.org/x/time v0.14.0 // indirect
+ 	google.golang.org/genproto v0.0.0-20231211222908-989df2bf70f3 // indirect
+-	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect
+-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect
++	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
++	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+ 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
+ 	gopkg.in/inf.v0 v0.9.1 // indirect
+ 	k8s.io/apiextensions-apiserver v0.36.2 // indirect
+--- a/deploy/snapshot/go.sum
++++ b/deploy/snapshot/go.sum
+@@ -30,8 +30,8 @@
+ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
+ github.com/containerd/cgroups v1.1.0 h1:v8rEWFl6EoqHB+swVNjVoCJE8o3jX7e8nqBGPLaDFBM=
+ github.com/containerd/cgroups v1.1.0/go.mod h1:6ppBcbh/NOOUU+dMKrykgaBnK9lCIBxHqJDGwsa1mIw=
+-github.com/containerd/containerd v1.7.33 h1:iAkYGC/ifR/V+0eR4iXWHNGYUF0DF2PmGV5iz4Irj5M=
+-github.com/containerd/containerd v1.7.33/go.mod h1:gSbSCVjPCdkfJCjyrzz7aRC+xFlqVbatNpfHfVCYGUM=
++github.com/containerd/containerd v1.7.34 h1:Q35B4FUECxcoaMz9QrOlqp+0s72w8/0NWawVMhVdf5g=
++github.com/containerd/containerd v1.7.34/go.mod h1:ozI//0TomTCLPhQREnx0IXDIQMg+Fk7yTtg9fNvU8EQ=
+ github.com/containerd/containerd/api v1.8.0 h1:hVTNJKR8fMc/2Tiw60ZRijntNMd1U+JVMyTRdsD2bS0=
+ github.com/containerd/containerd/api v1.8.0/go.mod h1:dFv4lt6S20wTu/hMcP4350RL87qPWLVa/OHOwmmdnYc=
+ github.com/containerd/continuity v0.4.4 h1:/fNVfTJ7wIl/YPMHjf+5H32uFhl63JucB34PlCpMKII=
+@@ -252,8 +252,8 @@
+ golang.org/x/lint v0.0.0-20190313153728-d0100b6bd8b3/go.mod h1:6SW0HCj/g11FgYtHlgUYUwCkIfeOF89ocIRzGO/8vkc=
+ golang.org/x/mod v0.2.0/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
+ golang.org/x/mod v0.3.0/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
+-golang.org/x/mod v0.35.0 h1:Ww1D637e6Pg+Zb2KrWfHQUnH2dQRLBQyAtpr/haaJeM=
+-golang.org/x/mod v0.35.0/go.mod h1:+GwiRhIInF8wPm+4AoT6L0FA1QWAad3OMdTRx4tFYlU=
++golang.org/x/mod v0.37.0 h1:vF1DjpVEshcIqoEaauuHebaLk1O1forxjxBaVn884JQ=
++golang.org/x/mod v0.37.0/go.mod h1:m8S8VeM9r4dzDwjrKO0a1sZP3YjeMamRRlD+fmR2Q/0=
+ golang.org/x/net v0.0.0-20180724234803-3673e40ba225/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+ golang.org/x/net v0.0.0-20180826012351-8a410e7b638d/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+ golang.org/x/net v0.0.0-20190213061140-3a22650c66bd/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+@@ -263,18 +263,18 @@
+ golang.org/x/net v0.0.0-20200226121028-0de0cce0169b/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
+ golang.org/x/net v0.0.0-20201021035429-f5854403a974/go.mod h1:sp8m0HH+o8qH0wwXwYZr8TS3Oi6o0r6Gce1SSxlDquU=
+ golang.org/x/net v0.0.0-20201110031124-69a78807bb2b/go.mod h1:sp8m0HH+o8qH0wwXwYZr8TS3Oi6o0r6Gce1SSxlDquU=
+-golang.org/x/net v0.54.0 h1:2zJIZAxAHV/OHCDTCOHAYehQzLfSXuf/5SoL/Dv6w/w=
+-golang.org/x/net v0.54.0/go.mod h1:Sj4oj8jK6XmHpBZU/zWHw3BV3abl4Kvi+Ut7cQcY+cQ=
++golang.org/x/net v0.56.0 h1:Rw8j/hFzGvJUZwNBXnAtf5sVDVt+65SK2C7IxCxZt5o=
++golang.org/x/net v0.56.0/go.mod h1:D3Ku6r+V6JROoZK144D2XfMHFcMq/0zSfLelVTCFKec=
+ golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be/go.mod h1:N/0e6XlmueqKjAGxoOufVs8QHGRruUQn6yWY3a++T0U=
+-golang.org/x/oauth2 v0.34.0 h1:hqK/t4AKgbqWkdkcAeI8XLmbK+4m4G5YeQRrmiotGlw=
+-golang.org/x/oauth2 v0.34.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
++golang.org/x/oauth2 v0.36.0 h1:peZ/1z27fi9hUOFCAZaHyrpWG5lwe0RJEEEeH0ThlIs=
++golang.org/x/oauth2 v0.36.0/go.mod h1:YDBUJMTkDnJS+A4BP4eZBjCqtokkg1hODuPjwiGPO7Q=
+ golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20181108010431-42b317875d0f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+-golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sync v0.21.0 h1:HLII4xRRTtCRkxYp4HNFF0Js/Og6q2i++KXbg0gHCwM=
++golang.org/x/sync v0.21.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -284,12 +284,12 @@
+ golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
+ golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+-golang.org/x/term v0.43.0 h1:S4RLU2sB31O/NCl+zFN9Aru9A/Cq2aqKpTZJ6B+DwT4=
+-golang.org/x/term v0.43.0/go.mod h1:lrhlHNdQJHO+1qVYiHfFKVuVioJIheAc3fBSMFYEIsk=
++golang.org/x/term v0.44.0 h1:0rLvDRCtNj0gZkyIXhCyOb2OAzEhLVqc4B+hrsBhrmc=
++golang.org/x/term v0.44.0/go.mod h1:7ze4MdzUzLXpSAoFP1H0bOI9aXDqveSvatT5vKcFh2Y=
+ golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+ golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
+-golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
+-golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
++golang.org/x/text v0.39.0 h1:UbZz4pLOvn600D6Oh6GGEI6VAmndrEBLv8/6BEXzyus=
++golang.org/x/text v0.39.0/go.mod h1:3UwRclnC2g0TU9x8PZiyfOajCd1zaUNHF9cvqcQZ+ZM=
+ golang.org/x/time v0.14.0 h1:MRx4UaLrDotUKUdCIqzPC48t1Y9hANFKIRpNx+Te8PI=
+ golang.org/x/time v0.14.0/go.mod h1:eL/Oa2bBBK0TkX57Fyni+NgnyQQN4LitPmob2Hjnqw4=
+ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+@@ -300,14 +300,14 @@
+ golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
+ golang.org/x/tools v0.0.0-20200619180055-7c47624df98f/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20210106214847-113979e3529a/go.mod h1:emZCQorbCU4vsT4fOWvOPXz4eW1wZW4PmDk9uLelYpA=
+-golang.org/x/tools v0.44.0 h1:UP4ajHPIcuMjT1GqzDWRlalUEoY+uzoZKnhOjbIPD2c=
+-golang.org/x/tools v0.44.0/go.mod h1:KA0AfVErSdxRZIsOVipbv3rQhVXTnlU6UhKxHd1seDI=
++golang.org/x/tools v0.47.0 h1:7Kn5x/d1svx/PzryTsqeoZN4TZwqeH5pGWjefhLi/1Q=
++golang.org/x/tools v0.47.0/go.mod h1:dFHnyTvFWY212G+h7ZY4Vsp/K3U4/7W9TyVaAul8uCA=
+ golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+-gonum.org/v1/gonum v0.16.0 h1:5+ul4Swaf3ESvrOnidPp4GZbzf0mxVQpDCYUQE7OJfk=
+-gonum.org/v1/gonum v0.16.0/go.mod h1:fef3am4MQ93R2HHpKnLk4/Tbh/s0+wqD5nfa6Pnwy4E=
++gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
++gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
+ google.golang.org/appengine v1.1.0/go.mod h1:EbEs0AVv82hx2wNQdGPgUI5lhzA/G0D9YwlJXL52JkM=
+ google.golang.org/appengine v1.4.0/go.mod h1:xpcJRLb0r/rnEns0DIKYYv+WjYCduHsrkT7/EB5XEv4=
+ google.golang.org/genproto v0.0.0-20180817151627-c66870c02cf8/go.mod h1:JiN7NxoALGmiZfu7CAH4rXhgtRTLTxftemlI0sWmxmc=
+@@ -315,17 +315,17 @@
+ google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013/go.mod h1:NbSheEEYHJ7i3ixzK3sjbqSGDJWnxyFXZblF3eUsNvo=
+ google.golang.org/genproto v0.0.0-20231211222908-989df2bf70f3 h1:1hfbdAfFbkmpg41000wDVqr7jUpK/Yo+LPnIxxGzmkg=
+ google.golang.org/genproto v0.0.0-20231211222908-989df2bf70f3/go.mod h1:5RBcpGRxr25RbDzY5w+dmaqpSEvl8Gwl1x2CICf60ic=
+-google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 h1:merA0rdPeUV3YIIfHHcH4qBkiQAc1nfCKSI7lB4cV2M=
+-google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409/go.mod h1:fl8J1IvUjCilwZzQowmw2b7HQB2eAuYBabMXzWurF+I=
+-google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 h1:H86B94AW+VfJWDqFeEbBPhEtHzJwJfTbgE2lZa54ZAQ=
+-google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409/go.mod h1:j9x/tPzZkyxcgEFkiKEEGxfvyumM01BEtsW8xzOahRQ=
++google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 h1:yQugLulqltosq0B/f8l4w9VryjV+N/5gcW0jQ3N8Qec=
++google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478/go.mod h1:C6ADNqOxbgdUUeRTU+LCHDPB9ttAMCTff6auwCVa4uc=
++google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 h1:RmoJA1ujG+/lRGNfUnOMfhCy5EipVMyvUE+KNbPbTlw=
++google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478/go.mod h1:4Hqkh8ycfw05ld/3BWL7rJOSfebL2Q+DVDeRgYgxUU8=
+ google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZiDr8c=
+ google.golang.org/grpc v1.23.0/go.mod h1:Y5yQAOtifL1yxbo5wqy6BxZv8vAUGQwXBOALyacEbxg=
+ google.golang.org/grpc v1.25.1/go.mod h1:c3i+UQWmh7LiEpx4sFZnkU36qjEYZ0imhYfXVyQciAY=
+ google.golang.org/grpc v1.27.0/go.mod h1:qbnxyOmOxrQa7FizSgH+ReBfzJrCY1pSN7KXBS8abTk=
+ google.golang.org/grpc v1.33.2/go.mod h1:JMHMWHQWaTccqQQlmk3MJZS+GWXOdAesneDmEnv2fbc=
+-google.golang.org/grpc v1.79.3 h1:sybAEdRIEtvcD68Gx7dmnwjZKlyfuc61Dyo9pGXXkKE=
+-google.golang.org/grpc v1.79.3/go.mod h1:KmT0Kjez+0dde/v2j9vzwoAScgEPx/Bw1CYChhHLrHQ=
++google.golang.org/grpc v1.82.1 h1:NnAxzGRA0677vCa4BUkOAnO5+FfQqVl9iUXeD0IqcGE=
++google.golang.org/grpc v1.82.1/go.mod h1:yzTZ1TB1Z3SG+LIYaI+WiE8D5+PZ3ArnrSp8zF3+/ZA=
+ google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
+ google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
+ google.golang.org/protobuf v0.0.0-20200228230310-ab0ca4ff8a60/go.mod h1:cfTl7dwQJ+fmap5saPgwCLgHXTUD7jkjRqWcaiX5VyM=
+--- a/deploy/snapshot/cmd/cuda-checkpoint-helper/main.c
++++ b/deploy/snapshot/cmd/cuda-checkpoint-helper/main.c
+@@ -1,3 +1,8 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
+ #include <ctype.h>
+ #include <cuda.h>
+ #include <limits.h>
+--- a/container/compliance/native_packages.yaml
++++ b/container/compliance/native_packages.yaml
+@@ -156,12 +156,13 @@
+     images:
+       - dynamo-planner
+ 
+-  # CRIU, cuda-checkpoint, cuda-checkpoint-helper — from-source binaries the
+-  # snapshot-agent builds/clones and copies into the distroful cuda-dl-base
+-  # image. dpkg doesn't see them (not apt-installed); their license text is
+-  # staged at /legal/<name>/... in agent_pre so the native generator inlines it.
++  # CRIU, cuda-checkpoint, and Dynamo's first-party native helpers/plugins are
++  # built from source and copied into snapshot-agent. dpkg doesn't see them
++  # (not apt-installed); third-party license text is staged at /legal/<name>/...
++  # in agent_pre so the native generator inlines it. Full immutable revisions
++  # are used so the inventory binds the exact source used by this image.
+   - name: CRIU
+-    version: criu-dev
++    version: 91d552257809d0e5c7148190e9aa0372f13b76a0
+     license: GPL-2.0-only
+     source: https://github.com/checkpoint-restore/criu
+     license_text_path: /legal/CRIU/COPYING
+@@ -169,7 +170,7 @@
+       - snapshot-agent
+ 
+   - name: cuda-checkpoint
+-    version: main
++    version: 00d5cce84c628088d6caa203fc4af40c1538b6f7
+     license: LicenseRef-NVIDIA-Proprietary
+     source: https://github.com/NVIDIA/cuda-checkpoint
+     license_text_path: /legal/cuda-checkpoint/LICENSE
+@@ -180,7 +181,25 @@
+     # First-party: small C wrapper that calls cuLink/cuMemcpyAsync etc.
+     # to assist with cuda-checkpoint coordination. Source lives in
+     # deploy/snapshot/cmd/cuda-checkpoint-helper/main.c.
+-    version: 1.0
++    version: f7f37be174d252590c4b56e25ff4262dd82466fd
++    license: Apache-2.0
++    source: https://github.com/ai-dynamo/dynamo
++    images:
++      - snapshot-agent
++
++  - name: ns-bind-mount
++    # First-party namespace helper built from
++    # deploy/snapshot/cmd/ns-bind-mount/main.c.
++    version: f7f37be174d252590c4b56e25ff4262dd82466fd
++    license: Apache-2.0
++    source: https://github.com/ai-dynamo/dynamo
++    images:
++      - snapshot-agent
++
++  - name: snapshot-inet-remap
++    # First-party CRIU plugin built from
++    # deploy/snapshot/plugins/inet-remap/snapshot_inet_remap.c.
++    version: f7f37be174d252590c4b56e25ff4262dd82466fd
+     license: Apache-2.0
+     source: https://github.com/ai-dynamo/dynamo
+     images:
+--- a/container/compliance/collect_sources.py
++++ b/container/compliance/collect_sources.py
+@@ -440,7 +440,11 @@
+ # because we're the upstream author, not redistributing someone else's
+ # OSS. Match against the leading filename token (everything before the
+ # first hyphen + version).
+-_FIRST_PARTY_NATIVE_NAMES = {"cuda-checkpoint-helper"}
++_FIRST_PARTY_NATIVE_NAMES = {
++    "cuda-checkpoint-helper",
++    "ns-bind-mount",
++    "snapshot-inet-remap",
++}
+ 
+ 
+ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
+@@ -452,8 +456,9 @@
+     stage `COPY --from=<builder> /tmp/native-sources/ /opt/native-sources/`
+     puts them where this script can find them.
+ 
+-    First-party components (cuda-checkpoint-helper) are filtered out:
+-    NVIDIA-authored, source on GitHub, not OSS redistribution.
++    First-party components (cuda-checkpoint-helper, ns-bind-mount, and
++    snapshot-inet-remap) are filtered out: NVIDIA-authored, source on GitHub,
++    not OSS redistribution.
+     """
+     output_dir.mkdir(parents=True, exist_ok=True)
+     if not workspace_native_dir.is_dir():
+@@ -508,7 +513,7 @@
+ | `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
+ | `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
+ | `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
+-| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
++| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers/plugins (`cuda-checkpoint-helper`, `ns-bind-mount`, `snapshot-inet-remap`). |
+ 
+ ## Python sources are not in this archive
+ 

@@ -1,0 +1,19 @@
+{
+  "schema": "archvteams.nebius.ai/restore-worker-gate/v1",
+  "worker_image": "registry.example.invalid/faststart/snapshot-agent@sha256:d5ce1eaad55378a93a9bf53b35effcbc378ed15ab7e5b7f6b41df6689cefdf28",
+  "restore_worker_sha256": "941157dd1815acf6f3e26cbe9dea65ee1c9a398c719881d474e5d7c5c7e28651",
+  "tool_bundle_manifest_sha256": "c0d638100c03fa35973e82859d15b9c8dd1bcbf0fe9cb185b58cc21fae7ead1e",
+  "glibc_compatibility_receipt_sha256": "f7af5b214cb963c4cf64910dfafe16987f0c5ec886af5d0e5d7aab5b634f6950",
+  "maximum_required_glibc": "2.35",
+  "supported_image_io_modes": [
+    "direct",
+    "writeback",
+    "buffered"
+  ],
+  "source_materialized_tree_sha256": "76838bc28fa641ba3d3165c1deb1f019c4f63ed9fce9571b38194ff65ef7b816",
+  "provenance_path": "../phase2-agent/provenance.json",
+  "provenance_sha256": "744997f5b7ed28749c86906cc7f909631e2cf79531750b831ebedb5d02d239a9",
+  "performance_validation_ready": true,
+  "release_ready": false,
+  "release_blocker": "The full agent compliance build is blocked until the exact Jammy CUDA runtime base has a captured baseline SBOM in the pinned compliance corpus."
+}

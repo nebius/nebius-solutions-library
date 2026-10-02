@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: proteinmpnn-buffered-worker-prepull-r2-hf93
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: proteinmpnn
+    app.kubernetes.io/component: restore-worker-prepull
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  imagePullSecrets:
+    - name: archvteams-2407-registry-pull
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: gpu-node-a.example.invalid
+  containers:
+    - name: prepull
+      image: registry.example.invalid/faststart/snapshot-agent@sha256:063286a3a1354d1c5969fa80f445bb5fbd2a96bc0999c7b6897495f0b4c2fd4d
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        runAsUser: 0
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

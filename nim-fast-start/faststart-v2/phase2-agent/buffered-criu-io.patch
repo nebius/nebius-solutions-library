@@ -1,0 +1,57 @@
+--- a/deploy/snapshot/internal/criu/util.go
++++ b/deploy/snapshot/internal/criu/util.go
+@@ -36,2 +36,4 @@
+-// Empty defaults to DIRECT (O_DIRECT), matching the Helm default.
+-func parseImageIoMode(raw string) (criurpc.CriuImageIoMode, error) {
++// Empty defaults to DIRECT (O_DIRECT), matching the Helm default. BUFFERED is
++// represented by an absent protobuf field so CRIU uses its legacy buffered I/O
++// path rather than IMAGE_IO_WRITEBACK.
++func parseImageIoMode(raw string) (*criurpc.CriuImageIoMode, error) {
+@@ -40 +42 @@
+-		return criurpc.CriuImageIoMode_IMAGE_IO_DIRECT, nil
++		return criurpc.CriuImageIoMode_IMAGE_IO_DIRECT.Enum(), nil
+@@ -42 +44,3 @@
+-		return criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK, nil
++		return criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK.Enum(), nil
++	case "buffered":
++		return nil, nil
+@@ -44 +48 @@
+-		return criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK, fmt.Errorf("invalid imageIoMode %q", raw)
++		return nil, fmt.Errorf("invalid imageIoMode %q", raw)
+@@ -82 +86 @@
+-	opts.ImageIoMode = ioMode.Enum()
++	opts.ImageIoMode = ioMode
+--- a/deploy/snapshot/internal/criu/util_test.go
++++ b/deploy/snapshot/internal/criu/util_test.go
+@@ -159,0 +160,11 @@
++	t.Run("imageIoMode buffered leaves protobuf field unset", func(t *testing.T) {
++		opts := &criurpc.CriuOpts{}
++		settings := &types.CRIUSettings{ImageIoMode: "buffered"}
++		if err := applyCommonSettings(opts, settings); err != nil {
++			t.Fatalf("applyCommonSettings: %v", err)
++		}
++		if opts.ImageIoMode != nil {
++			t.Errorf("ImageIoMode = %v, want nil for legacy buffered I/O", opts.ImageIoMode)
++		}
++	})
++
+--- a/deploy/snapshot/internal/types/config.go
++++ b/deploy/snapshot/internal/types/config.go
+@@ -76 +76 @@
+-	case "", "writeback", "direct":
++	case "", "writeback", "direct", "buffered":
+@@ -80 +80 @@
+-			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
++			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct", "buffered"),
+--- a/deploy/snapshot/internal/types/config_test.go
++++ b/deploy/snapshot/internal/types/config_test.go
+@@ -52,0 +53,9 @@
++
++func TestAgentConfigValidateAcceptsBufferedImageIOMode(t *testing.T) {
++	cfg := validAgentConfig()
++	cfg.CRIU.ImageIoMode = " buffered "
++
++	if err := cfg.Validate(); err != nil {
++		t.Fatalf("Validate() error = %v", err)
++	}
++}

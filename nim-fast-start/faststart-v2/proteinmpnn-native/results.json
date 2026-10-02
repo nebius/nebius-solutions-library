@@ -1,0 +1,182 @@
+{
+  "schema": "archvteams.nebius.ai/proteinmpnn-native-live-results/v2",
+  "status": "PASS",
+  "measured_at": "2026-08-18",
+  "model": "ProteinMPNN",
+  "image": "nvcr.io/nim/ipd/proteinmpnn@sha256:b55a0aa6733e267e6e6fe06434e98aea61eff14bc5545127555607fef6f38aa5",
+  "worker_image": "registry.example.invalid/faststart/snapshot-agent@sha256:063286a3a1354d1c5969fa80f445bb5fbd2a96bc0999c7b6897495f0b4c2fd4d",
+  "probe_image": "docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e",
+  "cluster": {
+    "id": "mk8scluster-example",
+    "context": "archvteams-2407-example",
+    "namespace": "nim-fast-start",
+    "node": "gpu-node-a.example.invalid",
+    "gpu_topology": "1x NVIDIA H100, full GPU, non-MIG"
+  },
+  "metric_contract": {
+    "warm_instance": true,
+    "storage_attached_before_t0": true,
+    "exact_images_resident_before_t0": true,
+    "t0": "timestamp persisted immediately before target Pod creation",
+    "http_ready": "first successful independent application HTTP readiness response",
+    "kubernetes_ready": "Pod Ready condition transition, reported separately",
+    "call_latency": "request dispatch through completion of the HTTP response body",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "calls_per_trial": 2,
+    "calls_are_distinct": true,
+    "call_1": "first strict 1UBQ inference after readiness, including any deferred model loading",
+    "call_2": "immediate strict 1UBQ warm inference with a distinct seed",
+    "t0_through_call_2": "T0 through call 2 response_received_at",
+    "validation_completion_is_separate": true
+  },
+  "artifact": {
+    "checkpoint_id": "proteinmpnn-native-f7-v3-buffered",
+    "version": "1",
+    "image_io_mode": "buffered",
+    "manifest_sha256": "6a298ceefc93b259e5ec7e6c1e74ae3ab43cdd9a757bee1934923dbfcdc06c07",
+    "regular_file_count": 57,
+    "regular_bytes": 1867046505,
+    "tree_sha256": "b2ce82dfbef1cbeb9c3ac35b94f5a2f97fccc19a98419e213d8c0d42a5c2c0e0"
+  },
+  "setup_outside_t0": {
+    "storage_state": "artifact and cache PVCs attached; every artifact byte freshly read through buffered I/O immediately before the cohort",
+    "artifact_full_read_seconds": 3.586695,
+    "artifact_full_read_started_at": "2026-08-18T11:42:32.791854148Z",
+    "artifact_full_read_completed_at": "2026-08-18T11:42:37.513367125Z",
+    "artifact_holder_uid": "00000000-0000-4000-8000-000000000001",
+    "artifact_prewarms_during_cohort": 0,
+    "target_worker_and_probe_images_resident": true,
+    "setup_preloader_absent_before_t0": true,
+    "post_t0_pulling_event_count": 0,
+    "baseline_cpu_request_mcpu": 4830,
+    "worker_cpu_request_mcpu": 500,
+    "worker_cpu_limit_mcpu": 4000,
+    "candidate_scheduled_headroom_mcpu": 470,
+    "minimum_required_headroom_mcpu": 400
+  },
+  "selected_n3": {
+    "status": "PASS",
+    "batch_id": "pmp-rb-1142",
+    "run_ids": [
+      "pmp-rb-1142-r1",
+      "pmp-rb-1142-r2",
+      "pmp-rb-1142-r3"
+    ],
+    "trial_count": 3,
+    "semantic_pass_count": 6,
+    "request_seeds": [2370, 2371],
+    "response_sha256": [
+      "7fdaec16e144acc4e9547348a4ebf898c3d9c2838086c8f67256b6f0319a392e",
+      "e418b42ce8e13c34e65b97a83b7196895f7b2ac84274b6ef4b53966f54bfb4f2"
+    ],
+    "demand_to_http_ready_seconds": {
+      "values": [9.401879, 9.494261, 9.460347],
+      "median": 9.460347,
+      "minimum": 9.401879,
+      "maximum": 9.494261
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [9.996060, 9.872222, 9.784322],
+      "median": 9.872222,
+      "minimum": 9.784322,
+      "maximum": 9.996060
+    },
+    "semantic_request_1_seconds": {
+      "values": [0.589204, 0.597313, 0.390123],
+      "median": 0.589204,
+      "minimum": 0.390123,
+      "maximum": 0.597313
+    },
+    "semantic_request_2_seconds": {
+      "values": [0.255925, 0.248845, 0.244145],
+      "median": 0.248845,
+      "minimum": 0.244145,
+      "maximum": 0.255925
+    },
+    "demand_to_two_semantic_responses_seconds": {
+      "values": [10.249097, 10.342388, 10.096532],
+      "median": 10.249097,
+      "minimum": 10.096532,
+      "maximum": 10.342388
+    },
+    "worker_restore_seconds": {
+      "values": [1.346, 1.344, 1.310],
+      "median": 1.344,
+      "minimum": 1.310,
+      "maximum": 1.346
+    },
+    "t0_at": [
+      "2026-08-18T11:42:40.003940614Z",
+      "2026-08-18T11:45:58.127778100Z",
+      "2026-08-18T11:47:38.215678398Z"
+    ],
+    "second_response_received_at": [
+      "2026-08-18T11:42:50.253037Z",
+      "2026-08-18T11:46:08.470166Z",
+      "2026-08-18T11:47:48.312210Z"
+    ],
+    "validation_finished_at": [
+      "2026-08-18T11:42:50.254489Z",
+      "2026-08-18T11:46:08.471616Z",
+      "2026-08-18T11:47:48.313641Z"
+    ]
+  },
+  "legacy_comparators": {
+    "status": "NOT_SELECTED",
+    "reason": "retained cohorts lack absolute call-2 response timestamps; their terminal totals end at validation completion",
+    "direct": {
+      "trial_count": 3,
+      "demand_to_http_ready_seconds": [23.555962, 24.012981, 23.763006],
+      "median_demand_to_http_ready_seconds": 23.763006,
+      "median_worker_restore_seconds": 15.727
+    },
+    "buffered": {
+      "trial_count": 3,
+      "demand_to_http_ready_seconds": [15.038357, 9.344406, 9.399878],
+      "median_demand_to_http_ready_seconds": 9.399878,
+      "median_legacy_demand_to_validation_complete_seconds": 10.265944
+    }
+  },
+  "excluded_setup": {
+    "run_id": "pmp-rb-1131-r1",
+    "reason": "the original 1000m worker request could not schedule with the 4830m baseline; no target inference was counted",
+    "exclusion_sha256": "7fa195ab7ecc8bed2cf022663b79b4925bb44512d4a3960505040d9510a5c8d7",
+    "cleanup_sha256": "a4bd1f9a4fd42247ccf5e35afdb58f154f7d3265d28c7d3afa3a4eaf17e562d1",
+    "cpu_audit_sha256": "f224b4db00f3e32c791b9023f05fd3c4cabb89a1f2a7a8041242e59852706430"
+  },
+  "collector_recovery": {
+    "status": "PASS_RECOVERED_FROM_IMMUTABLE_RAW_INPUTS",
+    "reason": "Kubernetes recorded the r1 probe container finish at whole-second precision, 0.254489 seconds before the precise validator completion timestamp",
+    "rule": "normalize only an inversion below one second; reject an inversion of one second or more",
+    "raw_trial_mutated": false,
+    "initial_marker_sha256": "975138dc8b569dbacc974973e9aad6ae7242955a3668c2d24e3c81ded403ea9f",
+    "recovery_receipt_sha256": "818e6f30d211141ee4ef51241d51cc2cfac3a2c445169b98aed3ca966a836b80"
+  },
+  "evidence_root": "<private-evidence-root>/proteinmpnn-native-f7-response-20260818T114151Z",
+  "evidence_sha256": {
+    "aggregate": "a19a7b8c618b771623c2f6df45267d125961d28a05b0e87eb8a40023ea5f88df",
+    "artifact_prewarm": "f611a9457b7991a63cbbac40849398ebcd826b86186d7ddfc3742199ac210ee5",
+    "image_residency": "885ca3ed7f042575d32b7eac06dffc1f956dd74a1cbd68ce8e37ab1497a95b4c",
+    "cohort_preflight": "69c21aa3c14b6da028f9f611512e1d939aff8da891c26ffbbef149a0278a9f28",
+    "owner_state": "67ed830e756e0c68c0a20b7b83b01367676538f97a720ea3afc3da78a4d545c0",
+    "r1_evidence": "150b11fdd1d88f26c80284a77e3df36902493c3c7a0148d10268eb75f67b51a2",
+    "r2_evidence": "c44b0b2ad79e9d7d7dacaad07da189881edf5480bc5cd7a3cc0e8443e2f0e15c",
+    "r3_evidence": "5b0396a64bf3c296619fc0952f30caaa82a383abb0e0b21d91ba926fa3bc2557",
+    "r1_semantic": "cd1c1f88562e5e22283909fff5294ec5f46c9b3496f5c5631606b61e8fbc495a",
+    "r2_semantic": "bf438d58bc680ab3bb78bd488085e8f3e28e4020c45602ea617b228d6c86dcbf",
+    "r3_semantic": "2b832e3528b251d0ef7b1df744efd42c5be027fe9ba4b1f987e3b0affc4108ba",
+    "r1_cleanup": "ed0aa1c87525a2bcbe82dc756e8f91058808faa84b8e1941ac68bbf2ae9a2f0e",
+    "r2_cleanup": "18c6c470fce3a5d2eb2edd4686f2b22ffca0925fa804efe776f1b99c46591320",
+    "r3_cleanup": "5979906850ab37358f4aa391cdbab16e1c63dda1e11240970a41cc107048374b",
+    "final_state": "7823e7c864eb8b62e14abd871dd3ed91dd3087a01ab0fd8e1308b99480cb6c0a"
+  },
+  "cleanup": {
+    "run_id_scoped_exact_manifest_cleanup_succeeded_after_each_trial": true,
+    "active_gpu_requests_after_each_trial": [0, 0, 0],
+    "counted_run_resources_remaining": 0,
+    "excluded_run_resources_remaining": 0,
+    "artifact_holder_ready": true,
+    "artifact_and_cache_pvcs_bound": true,
+    "unrelated_holders_preserved": true
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "archvteams.nebius.ai/rfdiffusion-prior-evidence/v1",
+  "status": "PASS",
+  "evidence_class": "retained-legacy-host-restore",
+  "production_native_qualified": false,
+  "image": "nvcr.io/nim/ipd/rfdiffusion:2.2.0@sha256:15e40e466d8ebe9a53f1feea599373720428c9de65da750bf4271c96ec35ceb4",
+  "hardware": "1x NVIDIA H100, full GPU, non-MIG",
+  "semantic_request_count_per_trial": 2,
+  "counted_trials_per_condition": 3,
+  "strict_semantic_passes": 12,
+  "direct_cold_prefetch": {
+    "through_second_semantic_median_seconds": 189.969,
+    "criu_median_seconds": 174.269,
+    "cuda_recovery_median_seconds": 2.99
+  },
+  "retained_page_cache": {
+    "through_second_semantic_median_seconds": 24.593,
+    "criu_median_seconds": 9.824,
+    "cuda_recovery_median_seconds": 2.892
+  },
+  "fixture_sha256": "d4a6812d8951cf6594e6a0763f089e35f5a80b62acb3c117b2c5565228a7b161",
+  "request_body_sha256": [
+    "da696caf8aba3511e63df5a293622e91b4c063f1593c60038bedca16d4865b2d",
+    "8fa20730e48a66c62fc5d095b4d26afac00cf7c4768e59300b95e447bc200c3c"
+  ],
+  "durable_artifacts": {
+    "root": "/sfs/archvteams-2407/rfdiffusion/h100-faststart-20260817T234500Z",
+    "checkpoint": {
+      "tree_sha256": "b929134e9d59e7f0df011b36f0830f7e030a02d457c930b8c62853be5a92b3f5",
+      "regular_file_bytes": 23364237452,
+      "file_count": 92,
+      "eligible_as_native_artifact": false
+    },
+    "cache": {
+      "tree_sha256": "18f827dcb8c2f8ffbd27f2b4f396fcb9d5df07b492965764a5ecd5f1d57a9e4e",
+      "regular_file_bytes": 2590172418,
+      "file_count": 675,
+      "eligible_as_pinned_cache_source": true
+    },
+    "jit_tar_sha256": "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652"
+  },
+  "source_root": "<private-evidence-root>/rfdiffusion-h100-perf-20260817T231936Z"
+}

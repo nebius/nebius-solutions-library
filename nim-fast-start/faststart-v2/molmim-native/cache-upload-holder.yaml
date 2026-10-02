@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: molmim-native-f7-cache-upload-t12
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: cache-upload
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: gpu-node-b.example.invalid
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: upload
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - touch /state/ready; exec sleep 86400
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: "2"
+          memory: 1Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/ready
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 300
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: cache
+      persistentVolumeClaim:
+        claimName: molmim-native-f7-cache
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi

@@ -1,0 +1,187 @@
+{
+  "schema": "archvteams.nebius.ai/msa-search-faststart-results/v3",
+  "status": "PASS",
+  "measured_at": "2026-08-18",
+  "cluster": "mk8scluster-example",
+  "node": "gpu-node-a.example.invalid",
+  "gpu": "NVIDIA H100",
+  "nim_image": "nvcr.io/nim/colabfold/msa-search@sha256:944f3cf845761be8e42b33147ae08b68c61eca7cad67bf5251e1708d03c0165c",
+  "selected_route": "conventional-cache-attached-prewarmed",
+  "measurement_contract": {
+    "t0": "timestamp written on the line immediately before target creation on an already provisioned H100 with the exact image resident and storage attached",
+    "readiness": "first successful application HTTP readiness response",
+    "call_1": "first strict PDB70 inference after application readiness, including deferred loading",
+    "call_2": "immediate second strict, distinct PDB70 inference",
+    "exact_total": "T0 through receipt of the complete second HTTP response body",
+    "validation_complete": "separate later boundary after response persistence and strict semantic validation",
+    "kubernetes_ready": "separate diagnostic; never substituted for application HTTP readiness"
+  },
+  "response_boundary_requalification": {
+    "status": "PASS",
+    "selected_batch_id": "msa-rb-1114",
+    "response_timing_contract": "request-dispatch-to-complete-http-body/v1",
+    "exact_total_semantics": "T0 to the second call's absolute response_received_at",
+    "validation_completion_retained_separately": true,
+    "required_validator_sha256": "20e8951ceaaa1b81e8129d86b787c6bb009cf2e207d55829cf13f4fa9489188b"
+  },
+  "conventional_cached_n3": {
+    "batch_id": "msa-rb-1114",
+    "status": "PASS",
+    "trial_count": 3,
+    "semantic_call_count": 6,
+    "strict_semantic_calls_per_trial": 2,
+    "distinct_pdb70_queries_per_trial": true,
+    "mmseqs_pipe_pass_count": 3,
+    "target_image_residency": {
+      "preloaded_outside_t0": true,
+      "setup_preloader_gpu_request": 0,
+      "setup_preloader_absent_before_t0": true,
+      "target_event_already_present_count": 3,
+      "target_event_pulling_count": 0
+    },
+    "storage": {
+      "pvc": "msa-search-cache-example",
+      "state_at_t0": "Bound, attached on the target node, and held by a CPU-only Pod",
+      "prewarm_outside_t0": true,
+      "prewarm_started_at": "2026-08-18T11:14:26.672921Z",
+      "prewarm_completed_at": "2026-08-18T11:14:26.777911Z",
+      "prewarm_elapsed_seconds": 0.104987,
+      "unique_regular_file_count": 13,
+      "unique_prewarm_bytes": 112682799,
+      "pdb70_index_bytes": 69500928,
+      "content_stream_sha256": "416efa6571423414a0fb46e8739bfa1202b5885122ce2e6cb280a00607bd4062"
+    },
+    "demand_to_http_ready_seconds": {
+      "values": [4.830585, 4.962104, 4.8724],
+      "min": 4.830585,
+      "median": 4.8724,
+      "max": 4.962104
+    },
+    "semantic_request_1_seconds": {
+      "values": [0.040644, 0.041808, 0.039441],
+      "min": 0.039441,
+      "median": 0.040644,
+      "max": 0.041808
+    },
+    "semantic_request_2_seconds": {
+      "values": [0.028986, 0.030188, 0.02992],
+      "min": 0.028986,
+      "median": 0.02992,
+      "max": 0.030188
+    },
+    "demand_to_call2_response_seconds": {
+      "values": [4.901161, 5.035089, 4.942788],
+      "min": 4.901161,
+      "median": 4.942788,
+      "max": 5.035089
+    },
+    "demand_to_validation_complete_seconds": {
+      "values": [4.901863, 5.035818, 4.943544],
+      "min": 4.901863,
+      "median": 4.943544,
+      "max": 5.035818
+    },
+    "response_to_validation_seconds": {
+      "values": [0.000702, 0.000729, 0.000756],
+      "min": 0.000702,
+      "median": 0.000729,
+      "max": 0.000756
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [4.98236, 4.545373, 4.687717],
+      "min": 4.545373,
+      "median": 4.687717,
+      "max": 4.98236
+    }
+  },
+  "legacy_conventional_cached_n3": {
+    "batch_id": "msa-conv-f7c",
+    "status": "PASS_LEGACY_VALIDATION_TERMINAL",
+    "reason_not_selected": "The absolute call-2 response timestamp was not retained, so its T0 terminal remains validation completion and cannot be relabeled as an exact response total.",
+    "demand_to_http_ready_seconds": {
+      "values": [5.128253, 5.000388, 5.071461],
+      "min": 5.000388,
+      "median": 5.071461,
+      "max": 5.128253
+    },
+    "semantic_request_1_seconds": {
+      "values": [0.04084, 0.04072, 0.0407],
+      "min": 0.0407,
+      "median": 0.04072,
+      "max": 0.04084
+    },
+    "semantic_request_2_seconds": {
+      "values": [0.031083, 0.030818, 0.031058],
+      "min": 0.030818,
+      "median": 0.031058,
+      "max": 0.031083
+    },
+    "demand_to_validation_complete_seconds": {
+      "values": [5.201905, 5.073655, 5.144951],
+      "min": 5.073655,
+      "median": 5.144951,
+      "max": 5.201905
+    },
+    "demand_to_kubernetes_ready_seconds": {
+      "values": [4.831026, 4.687398, 4.704828],
+      "min": 4.687398,
+      "median": 4.704828,
+      "max": 4.831026
+    },
+    "aggregate_sha256": "2695626bd973b1a2dd7a55055a90bbba6e58593d09fdd5ea808af104805b2f7e"
+  },
+  "native_checkpoint": {
+    "status": "EXCLUDED_NON_PROMOTABLE",
+    "checkpoint_id": "msa-search-native-f7-v1",
+    "artifact_version": "1",
+    "manifest_sha256": "e2d2b9f44e5f3c75c5504b45b2872ff6e04f0edb84839eb64eeedff5116d280e",
+    "regular_file_count": 70,
+    "regular_file_bytes": 1720415425,
+    "restore_worker_seconds_observed": [14.472, 14.429, 14.422],
+    "counted_trials": 0,
+    "reason": "The donor captured /opt/nim/workspace as emptyDir, while the qualified target used the final cache PVC. MMseqs shared-memory identity is derived from the canonical database path; a compatibility symlink changed the token and caused ungappedprefilter to wait on a different server. No native attempt passed strict inference semantics.",
+    "required_fix": "Capture a fresh checkpoint with the final cache PVC mounted identically at /opt/nim/.cache and /opt/nim/workspace, then qualify with identical target mounts."
+  },
+  "setup_exclusions": [
+    "14-CPU donor and target requests were unschedulable; requests were aligned to the tested 10 CPUs",
+    "initial non-root holders could not traverse the root-owned 0700 capture tree",
+    "an initial conventional ConfigMap fixture was a projected symlink and was replaced by a regular-file staging copy",
+    "native missing-path, symlink-token, and CPU-capacity attempts produced no counted timing"
+  ],
+  "cleanup": {
+    "audited_at": "2026-08-18T11:16:04Z",
+    "counted_run_jobs_remaining": 0,
+    "counted_run_pods_remaining": 0,
+    "setup_image_preloader_remaining": 0,
+    "cohort_input_configmaps_remaining": 0,
+    "active_gpu_request_total_on_node": 0,
+    "per_trial_cleanup_receipt_count": 3,
+    "retained": [
+      "PodSnapshotContent/msa-checkpoint-example Ready",
+      "Pod/msa-artifact-holder-example Running CPU-only",
+      "Pod/msa-search-cache-holder-example Running CPU-only",
+      "PersistentVolumeClaim/msa-artifacts-example Bound",
+      "PersistentVolumeClaim/msa-search-cache-example Bound"
+    ]
+  },
+  "evidence": {
+    "raw_root": "<private-evidence-root>/msa-search-response-requal-20260818T111418Z",
+    "aggregate_path": "<private-evidence-root>/msa-search-response-requal-20260818T111418Z/aggregate.json",
+    "aggregate_sha256": "8b2e6a126d49ce49ed333d6e8b446d873856f66e9b9c3bf89e3b15eb94bbdb75",
+    "cache_holder_receipt_sha256": "6aea481f44cd7d4ca05505c6bfd427a4353563ba2a3fb0c5c1fd09a92a98b98e",
+    "image_residency_receipt_sha256": "16c3083b4aca488d2ce9319d20519c24c1631c701e65e1a2f15beb7c65962b0e",
+    "trial_result_sha256": {
+      "msa-rb-1114-r1": "3006079c27ab8a6690d84dfd5da6bfa8aeee567f22db53ef584b54d10cf62a26",
+      "msa-rb-1114-r2": "7273b3e88cff0163088e204924f928bb98e10aa8e33479193dea7dd005a2cd52",
+      "msa-rb-1114-r3": "cc16a2d592b3a438742ca3321a23ecbddbd3caefb65676854823f0e11979e1e4"
+    },
+    "cleanup_receipt_sha256": {
+      "msa-rb-1114-r1": "de48bbe0ff2822ede0ce2f3a712cee07ad29644a77da56ccbe074ed0759e7ed0",
+      "msa-rb-1114-r2": "8cb574e1cee0020cae988c3148ea78f6802720a264aefe0b23196317a8a999f7",
+      "msa-rb-1114-r3": "72bfca44b6f90ff19468301f1cc68338e3d7db18d9aac4054e6d0a1f5cf999ab"
+    },
+    "legacy_aggregate_path": "<private-evidence-root>/msa-search-native-f7-20260818T065544Z/conventional-n3-final-v2/aggregate.json",
+    "legacy_aggregate_sha256": "2695626bd973b1a2dd7a55055a90bbba6e58593d09fdd5ea808af104805b2f7e",
+    "native_artifact_receipt_sha256": "d59eb0d962d49a8584b249340b8dc4e357db38b8fe5fdae62d1190c5f1050b06"
+  }
+}

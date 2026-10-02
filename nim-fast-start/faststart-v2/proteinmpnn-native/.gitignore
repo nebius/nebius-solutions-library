@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+worker-src/
+
+# Retained task-local failure diagnostics, not production inputs.
+artifact-rootfsless-variant.yaml
+p5-criu-direct.yaml
+worker-env-diagnostic.yaml
+worker-prepull.yaml

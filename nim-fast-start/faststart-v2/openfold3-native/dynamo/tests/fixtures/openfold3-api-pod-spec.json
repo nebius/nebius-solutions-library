@@ -1,0 +1,183 @@
+{
+  "affinity": {
+    "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+        "nodeSelectorTerms": [
+          {
+            "matchExpressions": [
+              {
+                "key": "kubernetes.io/hostname",
+                "operator": "In",
+                "values": [
+                  "gpu-node-a.example.invalid"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "automountServiceAccountToken": false,
+  "containers": [
+    {
+      "args": [
+        "2147483647"
+      ],
+      "command": [
+        "/bin/sleep"
+      ],
+      "env": [
+        {
+          "name": "DYN_SNAPSHOT_RESTORE_STANDBY",
+          "value": "1"
+        },
+        {
+          "name": "DYN_SNAPSHOT_CONTROL_DIR",
+          "value": "/snapshot-control"
+        },
+        {
+          "name": "NIM_CACHE_PATH",
+          "value": "/opt/nim/.cache"
+        }
+      ],
+      "image": "nvcr.io/nim/openfold/openfold3@sha256:6286cc7c02247ed3efe42f0f1af6c2f6f6a680b1e5cae669512c44b636aa42d2",
+      "imagePullPolicy": "IfNotPresent",
+      "name": "openfold3",
+      "ports": [
+        {
+          "containerPort": 8000,
+          "name": "http",
+          "protocol": "TCP"
+        }
+      ],
+      "readinessProbe": {
+        "failureThreshold": 3,
+        "httpGet": {
+          "path": "/v1/health/ready",
+          "port": "http"
+        },
+        "periodSeconds": 1,
+        "timeoutSeconds": 1
+      },
+      "resources": {
+        "limits": {
+          "cpu": "11",
+          "memory": "180Gi",
+          "nvidia.com/gpu": "1"
+        },
+        "requests": {
+          "cpu": "10",
+          "memory": "120Gi",
+          "nvidia.com/gpu": "1"
+        }
+      },
+      "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+          "drop": [
+            "ALL"
+          ]
+        },
+        "privileged": false,
+        "runAsGroup": 0,
+        "runAsUser": 0
+      },
+      "startupProbe": {
+        "exec": {
+          "command": [
+            "/bin/test",
+            "-f",
+            "/snapshot-control/restore-complete"
+          ]
+        },
+        "failureThreshold": 1800,
+        "periodSeconds": 1,
+        "timeoutSeconds": 1
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/dev/shm",
+          "name": "dshm"
+        },
+        {
+          "mountPath": "/opt/nim/.cache",
+          "name": "nim-cache",
+          "readOnly": true
+        },
+        {
+          "mountPath": "/opt/nim/workspace",
+          "name": "workspace"
+        },
+        {
+          "mountPath": "/opt/nim/output",
+          "name": "output"
+        },
+        {
+          "mountPath": "/snapshot-control",
+          "name": "snapshot-control",
+          "subPath": "openfold3"
+        },
+        {
+          "mountPath": "/checkpoints",
+          "name": "checkpoints",
+          "readOnly": true
+        }
+      ]
+    }
+  ],
+  "dnsPolicy": "ClusterFirst",
+  "enableServiceLinks": false,
+  "nodeName": "gpu-node-a.example.invalid",
+  "restartPolicy": "Never",
+  "runtimeClassName": "nvidia",
+  "schedulerName": "default-scheduler",
+  "securityContext": {
+    "seccompProfile": {
+      "localhostProfile": "profiles/block-iouring.json",
+      "type": "Localhost"
+    }
+  },
+  "serviceAccountName": "default",
+  "volumes": [
+    {
+      "emptyDir": {
+        "medium": "Memory",
+        "sizeLimit": "64Gi"
+      },
+      "name": "dshm"
+    },
+    {
+      "name": "nim-cache",
+      "persistentVolumeClaim": {
+        "claimName": "openfold3-nim-cache",
+        "readOnly": true
+      }
+    },
+    {
+      "emptyDir": {
+        "sizeLimit": "8Gi"
+      },
+      "name": "workspace"
+    },
+    {
+      "emptyDir": {
+        "sizeLimit": "1Gi"
+      },
+      "name": "output"
+    },
+    {
+      "emptyDir": {
+        "sizeLimit": "16Mi"
+      },
+      "name": "snapshot-control"
+    },
+    {
+      "name": "checkpoints",
+      "persistentVolumeClaim": {
+        "claimName": "openfold3-native-artifacts",
+        "readOnly": true
+      }
+    }
+  ]
+}

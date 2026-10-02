@@ -1,0 +1,68 @@
+{
+  "schema": "archvteams.nebius.ai/genmol-retained-baseline/v1",
+  "status": "PASS",
+  "sources": [
+    {
+      "path": "<private-evidence-root>/direct-io-criu-91d552-20260818T0014Z/results.json",
+      "sha256": "879c359f555273654426eb6530ab5d9203ff40fbb486333061dafd2b1093dfbf"
+    },
+    {
+      "path": "<private-evidence-root>/genmol-molmim-prep/RUNBOOK.md",
+      "sha256": "78a117a6d9cd87fde26c4b6fc0158f524a1ffd57092320b7ae4fbdbdcc3f5f5d"
+    },
+    {
+      "path": "<private-evidence-root>/direct-io-criu-91d552-20260818T0014Z/genmol/repro/two_call_oracle.py",
+      "sha256": "ae045cf25e85e7eb3868a2cb8b8bfe7b84c4497d962bf796096813310d58f4c0"
+    }
+  ],
+  "execution_identity": {
+    "node": "gpu-node-b.example.invalid",
+    "gpu": "NVIDIA H100",
+    "gpu_count": 1,
+    "image": "nvcr.io/nim/nvidia/genmol@sha256:139b909a450fe1fb81198214784a15f67e172e766a93a1569827ba5aa05b4541",
+    "image_bytes": 10138856116,
+    "model_profile": "GenMol 2.0.0"
+  },
+  "cache": {
+    "mount_path": "/opt/nim/.cache",
+    "retained_host_path": "/snapshots/nim-caches/genmol-h100-v1",
+    "historical_b300_cache_bytes": 1397606384,
+    "note": "The retained source proves the H100 path and separately records the historical B300 byte count; it does not assert an H100 cache byte count."
+  },
+  "semantic_contract": {
+    "endpoint": "/generate",
+    "calls_per_trial": 2,
+    "fixture_path": "fixtures/requests-qed-logp.json",
+    "fixture_bytes": 514,
+    "fixture_sha256": "3065261de604f495a2fbae1e7fd92488546ee51f2729e5d40e9be5ee2c22f444",
+    "qed_request_sha256": "050d9d440d6f09573d68b35a0fc26d3119407a6be22896293062752d822cfc3b",
+    "logp_request_sha256": "c2ee9474d485d56430bdf3b6885c9bb0dfef4130eb080be9559e7eb372a462e1",
+    "oracle": "exactly one parseable molecule; finite reported score; QED within 0.02 and LogP within 0.05 of RDKit",
+    "prior_runs_passed": 3,
+    "prior_semantic_calls_passed": 6
+  },
+  "legacy_h100_checkpoint": {
+    "path": "/snapshots/genmol/criu42-h100-warm-v3",
+    "bytes_at_setup": 4744161151,
+    "classification": "manual hostPID restore artifact; not a native production-shaped artifact"
+  },
+  "retained_page_cache_n3_medians_seconds": {
+    "criu_restore": 2.478,
+    "http_ready": 3.732,
+    "first_semantic_response": 0.545,
+    "second_semantic_response": 0.56,
+    "restore_through_two_semantic_responses": 4.831
+  },
+  "direct_io_disk_cold_n3_medians_seconds": {
+    "criu_restore": 35.006,
+    "http_ready": 36.508,
+    "first_semantic_response": 1.060432,
+    "second_semantic_response": 0.564039,
+    "restore_through_two_semantic_responses": 38.132471
+  },
+  "cached_conventional_n3_medians_seconds": {
+    "http_ready": 14.317,
+    "ready_through_two_semantic_responses": 15.769
+  },
+  "qualification_note": "All timings above are retained manual/page-cache or conventional baselines. None is a demand-to-two-semantics result from the UID-bound scheduler-created native lane prepared here."
+}

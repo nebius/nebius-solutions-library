@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: molmim-native-f7-cache-holder-t12
+  namespace: nim-fast-start
+  labels:
+    app.kubernetes.io/name: molmim
+    app.kubernetes.io/component: cache-holder
+    app.kubernetes.io/part-of: archvteams-2407-faststart
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  nodeName: gpu-node-b.example.invalid
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: holder
+      image: docker.io/library/python@sha256:356b0d18f9385f4bdcc673af60e1e64c9d1504952e4ec36ee32044c722a6bc4e
+      imagePullPolicy: IfNotPresent
+      command:
+        - /usr/local/bin/python3
+        - -c
+      args:
+        - |
+          import hashlib
+          import json
+          import os
+          import stat
+          import time
+          from pathlib import Path
+
+          root = Path("/cache")
+          receipt_path = root / ".molmim-cache-receipt.json"
+          receipt = json.loads(receipt_path.read_bytes())
+          if (
+              receipt.get("schema") != "archvteams.nebius.ai/molmim-cache-receipt/v1"
+              or receipt.get("source_host_path") != "/snapshots/nim-caches/molmim"
+              or receipt.get("checkpoint_file_bytes") != 281589760
+              or receipt.get("regular_file_bytes") != 284497920
+              or receipt.get("prewarm_bytes") != 284497920
+              or receipt.get("status") != "PASS"
+          ):
+              raise SystemExit("MolMIM cache receipt identity mismatch")
+          files = []
+          total = 0
+          checkpoint_count = 0
+          full_read_started = time.monotonic()
+          for directory, names, entries in os.walk(root, followlinks=False):
+              for name in names:
+                  path = Path(directory) / name
+                  if path.is_symlink():
+                      raise SystemExit("MolMIM cache contains a symlinked directory")
+              for name in entries:
+                  path = Path(directory) / name
+                  if path == receipt_path:
+                      continue
+                  info = path.lstat()
+                  if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+                      raise SystemExit("MolMIM cache contains a non-regular file")
+                  relative = path.relative_to(root).as_posix()
+                  digest = hashlib.sha256()
+                  with path.open("rb", buffering=0) as input_file:
+                      while block := input_file.read(8 * 1024 * 1024):
+                          digest.update(block)
+                  files.append((relative, info.st_size, digest.hexdigest()))
+                  total += info.st_size
+                  if info.st_size == 281589760:
+                      checkpoint_count += 1
+          tree = hashlib.sha256()
+          for relative, size, digest in sorted(files):
+              tree.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+          if (
+              total != receipt.get("regular_file_bytes")
+              or len(files) != receipt.get("regular_file_count")
+              or tree.hexdigest() != receipt.get("tree_sha256")
+              or checkpoint_count != 1
+              or receipt.get("prewarm_bytes") != total
+          ):
+              raise SystemExit("MolMIM cache content does not match its write-once receipt")
+          holder_receipt = {
+              "schema": "archvteams.nebius.ai/molmim-cache-holder-receipt/v1",
+              "status": "PASS",
+              "mode": "cache-full-read",
+              "source_receipt_schema": receipt["schema"],
+              "regular_file_count": len(files),
+              "regular_file_bytes": total,
+              "unique_bytes": total,
+              "prewarm_bytes": total,
+              "tree_sha256": tree.hexdigest(),
+              "full_read_elapsed_seconds": round(time.monotonic() - full_read_started, 6),
+          }
+          print(json.dumps(holder_receipt, sort_keys=True, separators=(",", ":")), flush=True)
+          Path("/state/cache-verified").touch()
+          while True:
+              import time
+              time.sleep(3600)
+      resources:
+        requests:
+          cpu: 100m
+          memory: 32Mi
+        limits:
+          cpu: "2"
+          memory: 1Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      readinessProbe:
+        exec:
+          command:
+            - /usr/bin/test
+            - -f
+            - /state/cache-verified
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 900
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+          readOnly: true
+        - name: state
+          mountPath: /state
+  volumes:
+    - name: cache
+      persistentVolumeClaim:
+        claimName: molmim-native-f7-cache
+        readOnly: true
+    - name: state
+      emptyDir:
+        sizeLimit: 1Mi
