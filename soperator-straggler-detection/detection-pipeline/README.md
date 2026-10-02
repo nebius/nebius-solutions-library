@@ -1418,6 +1418,135 @@ task's own scope to chase an edge case with no real reproduction.
 **Explicitly excluded from this change, per scope**: "Storm API" is
 unresolved and untouched -- nothing here guesses at or builds toward it.
 
+### 6.11 Cyril items 8/9: worker/GPU/rank identity, and a composed incident summary in Grafana
+
+**Gap-check against Cyril's own wording, done first, before proposing
+anything** (full investigation reported separately): "timings" and
+"detection evidence" were already covered (the trajectory panel, the
+peer-timing table, the z/mm staleness fix). "Without overstating an
+unconfirmed cause" was already satisfied by the existing
+CONFIRMED/PROBABLE/UNCONFIRMED tiering. Two real gaps, confirmed by
+direct inspection, not assumed: (1) `gpu_slot`/`role_rank`/`role_n` were
+already computed and already pushed as labels on most metrics, but
+**missing from exactly the places a human looks first** -- the main
+`[ALERT]` header (`format_alert()`) and both below-floor fallback
+headers only ever showed a bare PID; the trajectory panel's own legend
+never surfaced them either, even though they were right there in the
+same metric's labels. (2) Confirmed via this Grafana instance's own
+datasource provisioning (`observability/dashboards/provisioning/
+datasources/*.yaml`): there is exactly **one** datasource here, a
+Prometheus/VictoriaMetrics one -- no Loki, no log-shaped source at all
+-- so the actual human-readable alert/incident text has never been
+visible anywhere in Grafana, only in `var/alert_summary.log`/
+`var/alert_engine_supervised.log`.
+
+**Item 8 -- worker/GPU/rank identity, PID kept exactly as-is.** The
+`[ALERT]` header (all three emission paths -- the main one and both
+2-member fallbacks) now shows `gpu_slot=`/`role_rank=`/`role_n=`
+alongside `rank=` (the real PID, unchanged), matching the format
+`[STRAGGLER-INCIDENT]`'s own header already used. The two fallback
+paths' own internal data (`per_member`) never tracked comm-local role at
+all -- confirmed directly, not assumed -- so they show `role_rank=na
+role_n=na`, the same honest "not yet/never discovered" convention
+`node_aggregator_ref.py`'s own `phys_comm_role` dict already uses
+elsewhere, never a guess. The trajectory panel's legend now leads with
+identity: `"z: {{hostname}} GPU{{gpu_slot}} rank={{role_rank}}/
+{{role_n}} (pid={{member}}) (...)"`. The peer-timing table gained an
+"Organize fields" transformation renaming/reordering `hostname`/
+`gpu_slot`/`role_rank`/`role_n`/`member` into `Worker`/`GPU`/`Rank`/
+`OfN`/`PID`, left to right, ahead of every other column.
+
+**Item 9 -- a composed incident summary, with zero new cardinality.**
+Rejected pushing free-text alert content as a label outright: every
+existing label in this pipeline is low-cardinality by design (a handful
+of real values each); a label carrying literal alert text would be
+unique per incident, creating a new, permanently-retained time series
+for every alert ever emitted -- a real, unbounded storage-growth risk,
+not a cosmetic choice. Instead, a new table panel ("Composed incident
+summary") joins four already-structured, already-low-cardinality
+signals via Grafana's own `merge`/`organize` transformations: real
+`tier` (added as a label -- exactly 3 possible values, the same bounded-
+cardinality discipline every other label here already follows,
+categorically different from free text), `persisted_s` and
+`severity_ratio` (new value metrics, reusing the exact label set
+`agg_straggler_incident_detected` already established), and the
+already-existing `agg_path_c_verdict`. Zero new free text, zero new
+unbounded cardinality.
+
+**"Don't overstate" is a real visual constraint, not just a label.**
+The Tier column has an explicit value mapping: `CONFIRMED` is colored
+red; `PROBABLE` and `UNCONFIRMED` are colored the same (blue) as each
+other and never as `CONFIRMED` -- confirmed directly in the dashboard
+JSON Grafana itself loaded (`fieldConfig.overrides` on the `tier`
+field), not just intended. The tier label remains the only certainty
+signal; the table's own color design cannot imply more confidence than
+it states.
+
+**Real validation, actually rendered, not just "the JSON is correct"**:
+no image-renderer plugin is installed in this environment (confirmed
+directly, not assumed -- checked `/api/plugins` and
+`rendererAvailable`), so no literal screenshot was possible. Found and
+fixed a real, unrelated, pre-existing problem blocking even trying:
+this project's own `grafana-standalone` instance had been running for
+over two days against a `/tmp`-based data directory that no longer
+existed (`/tmp/grafana_fresh_data`, likely cleared by something outside
+this environment's own visibility), serving HTTP 503 the whole time
+with its own SQLite errors flooding its log -- confirmed unrelated to
+this session's own work. Fixed by re-running `grafana-setup.sh` (its
+own documented, idempotent installer), which also surfaced and fixed a
+second real issue: its own "already running" check defaults to port
+3000, which on this host is a different, unrelated, pre-existing
+Grafana instance (`/root/stage5_grafana_standalone/`) -- re-run with
+`GRAFANA_PORT=3098` (matching this project's own real `custom.ini`) to
+install correctly; also found and fixed the freshly-reprovisioned
+datasource's own "live best guess" URL (`http://login-0:8428`, where
+nothing listens) via Grafana's own datasource API, pointing it at the
+real VictoriaMetrics host. With a genuinely working instance, every
+change was verified through **Grafana's own backend** -- its dashboard
+API (confirming the exact JSON it parsed and loaded, not just what was
+written to disk) and its datasource-proxy query API (confirming real
+data resolves through the identical path a rendered panel would use) --
+against a real fault-injection event: the trajectory legend's real
+inputs (`hostname=worker-1, gpu_slot=0, role_rank=8, role_n=16,
+member=1062855`) confirm it renders as `"cv-z: worker-1 GPU0 rank=8/16
+(pid=1062855) (AllReduce@2286960)"`; the peer-timing table's real,
+organized-and-renamed columns correctly show the injected rank's own
+elevated exec-time values (e.g. `0.1466` vs. peers' `~0.07-0.08`)
+labeled `Worker=worker-1 GPU=0 Rank=8 OfN=16 PID=1062855`; the composed-
+summary panel's four queries each resolved correctly for this same
+event (`Tier=PROBABLE, PersistedS=54.30, SeverityRatio=1484.50,
+PathCVerdict=0`) and share identical join labels, confirming they
+combine into one row. The one honest, disclosed limit: the literal
+pixel result of a client-side transformation and template substitution
+could not be screenshotted in this environment -- every input to that
+rendering was independently confirmed real and correct through
+Grafana's own query engine instead, the closest equivalent available
+here.
+
+**Found and fixed a real regression in `tools/self_test.sh` itself**:
+its own rank-extraction regex, `grep -oP '(?<=rank=)\S+'`, also matched
+inside the new `role_rank=` field (a real substring collision --
+"role_**rank=**8" contains the literal text the lookbehind searched
+for), corrupting the extracted value and failing a genuinely correct
+alert on the first post-change run. Fixed by anchoring on the header's
+own unique `"[ALERT] rank="` prefix instead of a bare `"rank="`.
+Re-validated immediately after: real injected rank exact-match PASS,
+`[ALERT] rank=1072867 gpu_slot=0 role_rank=8 role_n=16 comm=... node=
+worker-1 ...` -- the real, new header text, against a live event.
+
+**Separately noted, not fixed here (out of this task's own scope)**: a
+real, recurring Slurm scheduler quirk hit three times during this
+session's own validation runs -- a just-cancelled self-test job lingers
+in `COMPLETING` state for several minutes afterward (`State=IDLE+CLOUD+
+COMPLETING` at the node level, `AllocTRES=` empty, nothing real left
+running on the node), at least once long enough to block a subsequent
+`self_test.sh` run's own clean-queue precheck. `scontrol update
+NodeName=... State=RESUME` (the standard remedy for a stuck node state)
+was rejected as an invalid transition from this specific state
+combination; waiting it out (a few minutes) was what actually worked
+each time. Flagging for whoever next hits this, not investigated
+further here.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
