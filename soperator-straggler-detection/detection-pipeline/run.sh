@@ -108,6 +108,16 @@ if [ -n "$_existing_supervisor" ]; then
   fi
   info "  alert_engine.py supervisor already running -- leaving it alone (real log: $ALERT_LOG)."
 else
+  # Grafana dead-man's-switch -- exported (cluster.env's own assignments
+  # are plain shell vars, not exported, so a bare `source` above does NOT
+  # propagate them to this background process on its own) so
+  # alert_engine.py's own GRAFANA_URL/GRAFANA_ADMIN_CREDENTIALS_FILE
+  # os.environ.get() defaults pick up cluster.env's real, already-
+  # discovered values automatically -- same env-var handoff pattern
+  # IOWAIT_LOG_DIR_OVERRIDE already uses, not a new mechanism. Exporting
+  # empty values when cluster.env has none is harmless -- alert_engine.py's
+  # own check is a no-op when GRAFANA_URL is empty (Grafana is optional).
+  export GRAFANA_URL GRAFANA_ADMIN_CREDENTIALS_FILE
   nohup bash "$PKG_ROOT/observability/run_alert_engine_supervised.sh" "$VM_URL" "$ALERT_LOG" >/dev/null 2>&1 &
   disown
   info "  alert_engine.py supervisor launched (log=$ALERT_LOG)."

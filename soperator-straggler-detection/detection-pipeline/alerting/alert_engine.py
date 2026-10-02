@@ -42,6 +42,8 @@ import threading
 import concurrent.futures
 import urllib.request
 import urllib.parse
+import urllib.error
+import base64
 from collections import deque, defaultdict
 
 # Stage 2 cluster-topology-agnostic fix: these used to be hardcoded
@@ -137,6 +139,45 @@ PATH_C_CHECK_INTERVAL_S = 60.0
 PATH_C_CRASH_LOOP_WINDOW_S = 120.0
 PATH_C_CRASH_LOOP_MIN_EXITS = 2
 IOWAIT_SUPERVISOR_LOG_DIR = os.path.join(_PKG_ROOT, "var", "iowait_logger_logs")
+
+# Grafana dead-man's-switch -- real gap confirmed live this session:
+# this project's own grafana-standalone instance ran for 2+ days serving
+# real HTTP 503s (a broken /tmp-based SQLite data directory that no
+# longer existed) with ZERO loud signal anywhere -- every other silent-
+# failure class this pipeline watches for already has one
+# ([PIPELINE-DOWN], [DUMP-DISK-WARN]/[CRITICAL], [PATH-C-DOWN],
+# [DCGM-HOSTENGINE-DOWN]); Grafana itself had none. Same 60s cadence as
+# DUMP_DISK_CHECK_INTERVAL_S/PATH_C_CHECK_INTERVAL_S above -- an HTTP
+# round trip must not run on the 3s poll budget, same reasoning as
+# those checks. GRAFANA_URL deliberately mirrors cluster.env's own
+# variable name exactly (empty default, same as that file's own
+# documented "Grafana is optional, not every cluster has one" design --
+# see run.sh's own Step 1 comment) -- run.sh exports it (and
+# GRAFANA_ADMIN_CREDENTIALS_FILE) into alert_engine.py's own environment
+# from cluster.env's real, already-discovered value before launching the
+# supervisor, the same env-var-handoff pattern IOWAIT_LOG_DIR_OVERRIDE
+# above already establishes -- no new config-loading mechanism invented
+# here.
+GRAFANA_CHECK_INTERVAL_S = 60.0
+# Real finding from this watchdog's own deliberate-break validation (see
+# _maybe_launch_grafana_check's own docstring for the full story): under
+# the exact real failure mode this targets, individual requests fail
+# PROBABILISTICALLY, not uniformly -- Grafana's own SQLite connection
+# pool keeps already-open connections usable, so a single probe (or
+# several SEQUENTIAL, spaced-out ones) can keep getting lucky, reusing
+# the same still-valid pooled connection, and never see a failure at
+# all -- confirmed live: 3 sequential probes, 1s apart, against a
+# confirmed-broken instance returned 200/200/200. Only CONCURRENT
+# requests reliably force the pool to open NEW connections, which is
+# what actually fails -- confirmed live, repeatedly: a 5-way concurrent
+# burst against the same broken instance reliably returned a real mix
+# of failures (401/500) every time, while the same burst against a
+# genuinely healthy instance returned 200 every time, every attempt.
+GRAFANA_CHECK_CONCURRENT_PROBES = 5
+GRAFANA_URL = os.environ.get("GRAFANA_URL", "")
+GRAFANA_ADMIN_CREDENTIALS_FILE = os.environ.get(
+    "GRAFANA_ADMIN_CREDENTIALS_FILE",
+    os.path.join(_PKG_ROOT, "var", "grafana_admin_credentials.txt"))
 
 # P27.2.7 -- real, confirmed gap this closes (regression-sweep investigation,
 # TP-inference): _cross_comm_peer_median's peer pool requires every sibling
@@ -1306,6 +1347,14 @@ class AlertEngine:
         self.n_path_c_down_cycles = 0
         self._last_path_c_check_at = 0.0
         self._path_c_thread = None
+        # Grafana dead-man's-switch state -- see GRAFANA_CHECK_INTERVAL_S's
+        # own module-level comment. A single bool, not a per-host dict like
+        # the checks above -- Grafana is one shared instance, not one per
+        # node.
+        self.grafana_down = False
+        self.n_grafana_down_cycles = 0
+        self._last_grafana_check_at = 0.0
+        self._grafana_thread = None
         # P20d-closeout Part C -- measured live against this exact engine
         # (2 real hosts + synthetic hostnames to simulate scale): at 0ms
         # added query latency the old sequential poll_once() already took
@@ -1428,6 +1477,7 @@ class AlertEngine:
         self._run_check("dcgm_hostengine_check", self._maybe_launch_dcgm_hostengine_check)
         self._run_check("dump_disk_check", self._maybe_launch_dump_disk_check)
         self._run_check("path_c_check", self._maybe_launch_path_c_check)
+        self._run_check("grafana_check", self._maybe_launch_grafana_check)
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
@@ -3805,6 +3855,144 @@ class AlertEngine:
 
         self._path_c_thread = threading.Thread(target=_run, daemon=True)
         self._path_c_thread.start()
+
+    def _maybe_launch_grafana_check(self):
+        """Grafana dead-man's-switch -- see GRAFANA_CHECK_INTERVAL_S's own
+        module-level comment for the real outage this closes. Deliberately
+        checks a real, authenticated endpoint (/api/org, the same one
+        install.sh's own Grafana-reachability probe already uses) rather
+        than a bare TCP connect or an unauthenticated /api/health ping --
+        the real outage this is modeled on was a healthy-LOOKING process
+        (port open, accepting connections) serving real HTTP 503s against
+        a broken SQLite data directory; only an actual HTTP round trip
+        through Grafana's own real request-handling path reveals that, not
+        a liveness check that stops at "is something listening."
+
+        Real refinement found DURING this watchdog's own deliberate-break
+        validation, not assumed from reading Grafana's docs: reproducing
+        the real failure live (removing the data directory out from under
+        an already-running instance, the exact way the real outage
+        happened, not a bare startup failure) showed it is NOT a clean
+        "every request fails" state -- Grafana's own SQLite connection
+        pool keeps already-open connections usable, so individual
+        requests fail PROBABILISTICALLY depending on whether they happen
+        to need a fresh connection. Confirmed directly, twice: /api/health
+        never failed at all under this condition (confirmed useless for
+        this specific failure mode -- it apparently never touches the
+        DB); and SEQUENTIAL /api/org probes, even 1s apart, kept reusing
+        the same still-valid pooled connection and returned a clean
+        200/200/200 against a confirmed-broken instance -- sequential
+        retries do NOT fix this. Only CONCURRENT requests reliably force
+        the pool to open genuinely new connections, which is what
+        actually fails: a GRAFANA_CHECK_CONCURRENT_PROBES-way concurrent
+        burst against the same broken instance reliably returned a real
+        mix of 401/500 failures every time it was tried, while the same
+        burst against a genuinely healthy instance returned 200 on every
+        probe, every time. ANY single failure among the concurrent
+        probes is treated as DOWN.
+
+        Deliberately a no-op, not a DOWN alarm, when GRAFANA_URL isn't
+        configured at all -- Grafana is documented elsewhere (run.sh's own
+        Step 1) as optional; the rest of this pipeline works without it.
+        This only fires once Grafana was configured/expected and then
+        stops answering correctly, never for a cluster that genuinely
+        never deployed it -- a deliberate difference from
+        [PATH-C-DOWN]'s own missing-supervisor-log case (Path C is NOT
+        optional there), not an inconsistency.
+
+        Threaded and interval-gated (GRAFANA_CHECK_INTERVAL_S), same
+        reasoning as every other periodic check here -- a real HTTP round
+        trip must not run on the 3s poll budget."""
+        if not GRAFANA_URL:
+            return
+        now = time.time()
+        if now - self._last_grafana_check_at < GRAFANA_CHECK_INTERVAL_S:
+            return
+        if self._grafana_thread is not None and self._grafana_thread.is_alive():
+            return
+        self._last_grafana_check_at = now
+
+        def _probe_once(user, password, results, idx):
+            """Writes None (success) or a real, specific reason string
+            (failure) into results[idx] -- never raises, so one probe's
+            own exception can't take down the others running alongside
+            it."""
+            try:
+                req = urllib.request.Request(f"{GRAFANA_URL}/api/org")
+                auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+                req.add_header("Authorization", f"Basic {auth}")
+                resp = urllib.request.urlopen(req, timeout=10)
+                code = resp.getcode()
+                if code != 200:
+                    results[idx] = (f"real HTTP {code} from {GRAFANA_URL}/api/org "
+                                     f"(expected 200 with valid credentials)")
+                else:
+                    results[idx] = None
+            except urllib.error.HTTPError as e:
+                results[idx] = f"real HTTP {e.code} from {GRAFANA_URL}/api/org: {e.reason}"
+            except Exception as e:
+                results[idx] = f"{type(e).__name__}: {e} querying {GRAFANA_URL}/api/org"
+
+        def _run():
+            user, password = None, None
+            try:
+                with open(GRAFANA_ADMIN_CREDENTIALS_FILE) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("admin_user:"):
+                            user = line.split(":", 1)[1].strip()
+                        elif line.startswith("admin_password:"):
+                            password = line.split(":", 1)[1].strip()
+            except Exception as e:
+                print(f"[GRAFANA-CHECK-DEGRADED] :: could not read credentials file "
+                      f"{GRAFANA_ADMIN_CREDENTIALS_FILE}: {type(e).__name__}: {e} -- "
+                      f"cannot confirm Grafana's real health this cycle (not the same "
+                      f"as confirmed down -- an honest 'couldn't check', matching this "
+                      f"file's own convention elsewhere).",
+                      file=sys.stderr, flush=True)
+                return
+            reason = None
+            if not user or not password:
+                reason = (f"credentials file {GRAFANA_ADMIN_CREDENTIALS_FILE} is missing "
+                          f"admin_user/admin_password")
+            else:
+                n = GRAFANA_CHECK_CONCURRENT_PROBES
+                results = [None] * n
+                probe_threads = [
+                    threading.Thread(target=_probe_once, args=(user, password, results, i))
+                    for i in range(n)
+                ]
+                for t in probe_threads:
+                    t.start()
+                for t in probe_threads:
+                    t.join()
+                failures = [r for r in results if r]
+                if failures:
+                    reason = (f"{len(failures)}/{n} concurrent probes to "
+                              f"{GRAFANA_URL}/api/org failed (e.g. {failures[0]})")
+
+            was_down = self.grafana_down
+            if reason:
+                self.n_grafana_down_cycles += 1
+                self.grafana_down = True
+                if not was_down:
+                    print(f"[GRAFANA-DOWN] :: {reason} -- Grafana dashboards are not "
+                          f"reachable/functional. The rest of this pipeline (aggregator, "
+                          f"alert_engine, VictoriaMetrics) is unaffected -- this is "
+                          f"visibility-only, but real -- check this instance's own "
+                          f"supervised log (var/grafana_supervised.log) for the real "
+                          f"underlying error.",
+                          file=sys.stderr, flush=True)
+            elif was_down:
+                self.grafana_down = False
+                print(f"[GRAFANA-RECOVERED] :: {GRAFANA_URL}/api/org answering real "
+                      f"HTTP 200 on all {GRAFANA_CHECK_CONCURRENT_PROBES} concurrent "
+                      f"probes again", file=sys.stderr, flush=True)
+            # else: healthy and wasn't down -- no signal, matching this
+            # file's own "a genuinely healthy read stays silent" style.
+
+        self._grafana_thread = threading.Thread(target=_run, daemon=True)
+        self._grafana_thread.start()
 
     def _fresh(self, result_row):
         """agg_*_worst metrics are labeled rank="{worst}" -- the rank that
