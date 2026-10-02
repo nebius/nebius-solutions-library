@@ -50,25 +50,39 @@ variable "slurm_partition_raw_config" {
 }
 
 variable "topology" {
-  description = "Slurm topology configuration. topology/tree leaves the chart default unset; topology/block renders BlockAsNodeRank and requires block_size."
+  description = "Named Slurm topologies rendered in topology.yaml."
   type = object({
-    plugin     = string
-    block_size = optional(number)
+    topologies = list(object({
+      name            = string
+      cluster_default = optional(bool)
+      type            = string
+      block_sizes     = optional(list(number), [])
+      nodeset_refs    = optional(list(string), [])
+    }))
   })
   default = {
-    plugin = "topology/tree"
+    topologies = [{
+      name            = "flat"
+      cluster_default = true
+      type            = "flat"
+      block_sizes     = []
+      nodeset_refs    = ["ALL"]
+    }]
   }
   nullable = false
 
   validation {
-    condition     = contains(["topology/tree", "topology/block"], var.topology.plugin)
-    error_message = "topology.plugin must be one of 'topology/tree' or 'topology/block'."
+    condition = alltrue([
+      for topology in var.topology.topologies : contains(["flat", "tree", "block"], topology.type)
+    ])
+    error_message = "topology.topologies[].type must be one of 'flat', 'tree', or 'block'."
   }
 
   validation {
-    condition     = var.topology.plugin == "topology/block" ? try(var.topology.block_size > 0, false) : true
-    error_message = "topology.block_size must be a positive number when topology.plugin is 'topology/block'."
+    condition     = length(distinct([for topology in var.topology.topologies : topology.name])) == length(var.topology.topologies)
+    error_message = "topology.topologies[].name values must be unique."
   }
+
 }
 
 # endregion PartitionConfiguration
@@ -104,6 +118,18 @@ variable "node_count" {
     condition     = var.node_count.controller == 1
     error_message = "Only a single Slurm controller node is supported."
   }
+}
+
+variable "login_autoscaling" {
+  description = "CPU-based login pod autoscaling. Its bounds override node_count.login when enabled."
+  type = object({
+    enabled                           = bool
+    min_size                          = optional(number, 1)
+    max_size                          = optional(number, 4)
+    target_cpu_utilization_percentage = optional(number, 70)
+  })
+  default  = null
+  nullable = true
 }
 
 # endregion Nodes
@@ -142,8 +168,6 @@ variable "component_overrides" {
     dcgm_exporter               = optional(object({ cpu = number, memory = number }))
     kruise_daemon               = optional(object({ cpu = number, memory = number }))
     nfs_server                  = optional(object({ cpu = number, memory = number }))
-    spo_controller              = optional(object({ cpu = string, memory = string }))
-    spo_daemon                  = optional(object({ cpu = string, memory = string }))
     kruise_manager              = optional(object({ cpu = string, memory = string }))
     kube_state_metrics          = optional(object({ requests = object({ cpu = string, memory = string }), limits = object({ memory = string }) }))
     vm_single                   = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
@@ -209,6 +233,27 @@ resource "terraform_data" "check_worker_nodesets" {
     precondition {
       condition     = length(var.node_count.worker) == length(var.node_capacity.worker)
       error_message = "Worker node set resources must accord to the worker node count."
+    }
+
+    precondition {
+      condition     = alltrue([for memory in local.worker_memory : memory > 0])
+      error_message = "Worker capacity must leave positive Slurmd memory after sidecar and agent reservations."
+    }
+
+    precondition {
+      condition = alltrue([
+        for i, nodeset in var.worker_nodesets :
+        !try(nodeset.local_nvme.enabled, false) ||
+        try(nodeset.local_nvme.size_limit_gibibytes, null) == null ||
+        try(
+          nodeset.local_nvme.size_limit_gibibytes
+          + local.resources.munge.ephemeral_storage
+          + (var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+          <= var.node_capacity.worker[i].ephemeral_storage_gibibytes,
+          false,
+        )
+      ])
+      error_message = "Local NVMe size_limit_gibibytes plus worker sidecar reservations cannot exceed the usable ephemeral-storage capacity."
     }
   }
 }
@@ -444,6 +489,13 @@ variable "nfs_in_k8s" {
 
 # region Config
 
+variable "wait_for_nvidia_persistenced" {
+  description = "Whether GPU workers with preinstalled drivers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "shared_memory_size_gibibytes" {
   description = "Shared memory size for Slurm controller and worker nodes in GiB."
   type        = number
@@ -460,8 +512,8 @@ variable "telemetry_enabled" {
   default     = true
 }
 
-variable "dcgm_job_mapping_enabled" {
-  description = "Whether to enable HPC job mapping by installing a separate dcgm-exporter"
+variable "dcgm_exporter_enabled" {
+  description = "Whether to install soperator's dcgm-exporter chart. When false, the NVIDIA gpu-operator's stock dcgm-exporter is used instead."
   type        = bool
   default     = true
 }
@@ -479,7 +531,7 @@ variable "kube_state_metrics_max_scrape_size" {
 }
 
 variable "opentelemetry_batch" {
-  description = "OpenTelemetry sending_queue batch overrides for logs, jail logs, events, and nccl-profiles collectors. Leave null to use chart defaults."
+  description = "OpenTelemetry sending_queue batch overrides for the in-cluster (VictoriaLogs/VictoriaMetrics) exporters of the logs, jail logs, events, and nccl-profiles collectors. Does not affect the public Cloud Logging exporter, whose batching is managed by the chart (publicBatch, capped at 1000 records per request). Leave null to use chart defaults."
   type = object({
     timeout             = optional(string)
     send_batch_size     = optional(number)
@@ -571,12 +623,6 @@ variable "opentelemetry_delete_jail_logs_min_age" {
   }
 }
 
-variable "dcgm_job_map_dir" {
-  description = "Directory where HPC job mapping files are located"
-  type        = string
-  default     = "/var/run/nebius/slurm"
-}
-
 # endregion Telemetry
 
 # region Accounting
@@ -609,7 +655,7 @@ variable "slurm_accounting_config" {
 
 # region Apparmor
 variable "use_default_apparmor_profile" {
-  description = "Whether to use default AppArmor profile."
+  description = "Use the soperator-default AppArmor profile, which must be loaded on nodes by provisioning."
   type        = bool
   default     = true
 }
@@ -796,11 +842,6 @@ variable "prometheus_crds_version" {
   type        = string
   default     = ""
 }
-variable "security_profiles_operator_version" {
-  description = "The version of the security profiles operator."
-  type        = string
-  default     = ""
-}
 
 variable "vmstack_version" {
   description = "The version of the vmstack."
@@ -881,11 +922,16 @@ variable "worker_nodesets" {
     platform                       = string
     replicas                       = number
     max_unavailable                = string
+    rolling_update_strategy        = optional(string, "slurmAwareRollingUpdate")
+    rack_number                    = optional(number)
+    nvl_instance_group_id          = optional(string)
     features                       = list(string)
     cpu_topology                   = map(number)
     gres_name                      = optional(string)
     gres_config                    = list(string)
+    auto_resume                    = optional(bool, false)
     create_partition               = bool
+    partition_topology             = string
     ephemeral_nodes                = optional(bool, false)
     initial_number_ephemeral_nodes = optional(number, 0)
     persistent_volume_claim_retention_policy = optional(object({
@@ -893,9 +939,11 @@ variable "worker_nodesets" {
       when_scaled  = string
     }))
     local_nvme = optional(object({
-      enabled         = optional(bool, false)
-      mount_path      = optional(string, "/mnt/local-nvme")
-      filesystem_type = optional(string, "ext4")
+      enabled                   = optional(bool, false)
+      device_count              = optional(number)
+      device_capacity_gigabytes = optional(number)
+      mount_path                = optional(string, "/mnt/local-nvme")
+      size_limit_gibibytes      = optional(number)
     }), {})
     node_local_image_storage = object({
       enabled = bool
@@ -922,12 +970,28 @@ variable "worker_nodesets" {
   validation {
     condition = alltrue([
       for worker in var.worker_nodesets :
+      contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
+    ])
+    error_message = "worker_nodesets.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
       worker.persistent_volume_claim_retention_policy == null || (
         contains(["Retain", "Delete"], worker.persistent_volume_claim_retention_policy.when_deleted) &&
         contains(["Retain", "Delete"], worker.persistent_volume_claim_retention_policy.when_scaled)
       )
     ])
     error_message = "When worker persistent_volume_claim_retention_policy is set, when_deleted and when_scaled must be `Retain` or `Delete`."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
+      contains([for topology in var.topology.topologies : topology.name], worker.partition_topology)
+    ])
+    error_message = "Each worker partition_topology must reference a topology created by Terraform."
   }
 }
 
@@ -941,6 +1005,7 @@ variable "slurm_nodesets_partitions" {
     name         = string
     is_all       = optional(bool, false)
     nodeset_refs = optional(list(string), [])
+    topology     = string
     config       = string
   }))
   default = []
@@ -983,6 +1048,14 @@ variable "slurm_nodesets_partitions" {
     )
     error_message = "All partition names in slurm_nodesets_partitions must be unique."
   }
+
+  validation {
+    condition = alltrue([
+      for partition in var.slurm_nodesets_partitions :
+      contains([for topology in var.topology.topologies : topology.name], partition.topology)
+    ])
+    error_message = "Each partition topology must reference a topology created by Terraform."
+  }
 }
 
 # endregion Nodesets
@@ -990,5 +1063,5 @@ variable "slurm_nodesets_partitions" {
 variable "cuda_version" {
   description = "CUDA version used for populate-jail image selection and active checks."
   type        = string
-  default     = "13.0.2"
+  default     = "13.0.3"
 }

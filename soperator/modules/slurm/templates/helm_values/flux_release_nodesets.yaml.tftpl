@@ -17,6 +17,7 @@ nodesets:
 
         replicas: ${nodeset.replicas}
         maxUnavailable: ${nodeset.max_unavailable}
+        updateStrategy: ${nodeset.rolling_update_strategy}
         %{~ if nodeset.ephemeral_nodes ~}
         ephemeralNodes: true
         initialNumberEphemeralNodes: ${nodeset.initial_number_ephemeral_nodes}
@@ -37,6 +38,7 @@ nodesets:
         %{~ endif ~}
 
         nodeConfig:
+          autoResume: ${nodeset.auto_resume}
           %{~ if length(nodeset.features) > 0 ~}
           features:
             %{~ for feature in nodeset.features ~}
@@ -51,7 +53,7 @@ nodesets:
             format("ThreadsPerCore=%d", nodeset.cpu_topology.threads_per_core),
             resources[i].gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, resources[i].gpus) : "",
           ]))}"
-          dynamic: "${extra}"
+          dynamic: ${jsonencode(nodeset.slurm_node_extra)}
           %{~ if nodeset.gres_config != null && length(nodeset.gres_config) > 0 ~}
           gresConfig:
             %{~ for gres_line in nodeset.gres_config ~}
@@ -126,9 +128,8 @@ nodesets:
               - name: local-nvme
                 mountPath: ${try(nodeset.local_nvme.mount_path, "/mnt/local-nvme")}
                 volumeSource:
-                  hostPath:
-                    path: ${try(nodeset.local_nvme.mount_path, "/mnt/local-nvme")}
-                    type: Directory
+                  emptyDir:
+                    sizeLimit: ${resources[i].ephemeral_storage_gibibytes}Gi
               %{~ endif ~}
 
               %{~ if nodeset.node_local_image_storage.enabled ~}
@@ -203,15 +204,6 @@ nodesets:
                     defaultMode: 500
               %{~ endif ~}
 
-              %{~ if gpu.dcgm_job_mapping.enabled ~}
-              - name: hpc-jobs-dir
-                mountPath: ${gpu.dcgm_job_mapping.dir}
-                volumeSource:
-                  hostPath:
-                    path: ${gpu.dcgm_job_mapping.dir}
-                    type: DirectoryOrCreate
-              %{~ endif ~}
-
               %{~ if gpu.use_preinstalled_drivers~}
               - name: nvidia-driver-root
                 mountPath: /run/nvidia/driver
@@ -225,7 +217,7 @@ nodesets:
             sharedMemorySize: ${resources[i].shared_memory}Gi
 
           security:
-            appArmorProfile: unconfined
+            appArmorProfile: ${jsonencode(apparmor_profile)}
 
         munge:
           resources:
@@ -246,7 +238,6 @@ nodesets:
         sssdConfSecretRefName: ${jsonencode(sssd.conf_secret_ref_name)}
         sssdLdapCAConfigMapRefName: ${jsonencode(sssd.ldap_ca_config_map_ref_name)}
 
-        configMapRefSupervisord: custom-supervisord-config
         configMapRefSshd: ${sshd.config_map_ref}
 
         enableHostUserNamespace: true
@@ -262,40 +253,60 @@ nodesets:
         %{~ endif ~}
 
         customInitContainers:
+          %{~ if gpu.wait_for_persistenced && gpu.use_preinstalled_drivers && resources[i].gpus > 0 ~}
+          # SCHED-1418: wait before worker-init/slurmd creation so the NVIDIA runtime can inject the host socket.
+          # Reuse the driver volume's host /run directory to observe newly created sockets in the waiter.
+          - name: wait-for-nvidia-persistenced
+            image: cr.nebius.cloud/soperator/busybox
+            volumeMounts:
+              - name: nvidia-driver-root
+                subPath: run
+                mountPath: /host-run
+                readOnly: true
+            command: ["/bin/sh", "-ec"]
+            args:
+              - |
+                until [ -S /host-run/nvidia-persistenced/socket ]; do
+                    echo "Waiting for the NVIDIA persistenced socket on the host..."
+                    sleep 5
+                done
+                echo "NVIDIA persistenced socket is ready"
+          %{~ endif ~}
+
           - name: ensure-jail-virtiofs
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: jail, mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
 
           %{~ for sub_mount in jail_submounts.shared ~}
           - name: ensure-jail-submount-${sub_mount.name}-virtiofs
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
           %{~ endfor ~}
 
           %{~ for sub_mount in nodeset.node_local_jail_submounts ~}
           - name: ensure-node-local-jail-submount-${sub_mount.name}-${sub_mount.filesystem_type}
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
-            command: ["grep", ' /volume-mount ${sub_mount.filesystem_type} ', "/proc/mounts"]
+            command: ["sh", "-c", "grep ' /volume-mount ${sub_mount.filesystem_type} ' /proc/mounts && chmod 777 /volume-mount"]
           %{~ endfor ~}
 
           %{~ if try(nodeset.local_nvme.enabled, false) ~}
-          - name: ensure-node-local-jail-submount-local-nvme-${try(nodeset.local_nvme.filesystem_type, "ext4")}
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+          - name: prepare-local-nvme-permissions
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: 'local-nvme', mountPath: /volume-mount }]
-            command: ["grep", ' /volume-mount ${try(nodeset.local_nvme.filesystem_type, "ext4")} ', "/proc/mounts"]
+            command: ["chmod", "777", "/volume-mount"]
           %{~ endif ~}
 
           %{~ if nodeset.node_local_image_storage.enabled ~}
           - name: ensure-node-local-image-storage-${nodeset.node_local_image_storage.spec.filesystem_type}
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command: ["grep", ' /volume-mount ${nodeset.node_local_image_storage.spec.filesystem_type} ', "/proc/mounts"]
 
           - name: prepare-node-local-image-storage
-            image: cr.eu-north1.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator/busybox
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command:
             - "sh"

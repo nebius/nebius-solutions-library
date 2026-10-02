@@ -1,15 +1,16 @@
 locals {
+  apparmor_profile = var.use_default_apparmor_profile ? "soperator-default" : "unconfined"
+
   kube_rbac_proxy = {
     image = "gcr.io/kubebuilder/kube-rbac-proxy"
     tag   = "v0.15.0"
   }
   helm = {
     repository = {
-      slurm        = "oci://cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-      slurm_stable = "oci://cr.eu-north1.nebius.cloud/soperator"
+      slurm        = "oci://cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+      slurm_stable = "oci://cr.nebius.cloud/soperator"
       mariadb      = "https://helm.mariadb.com/mariadb-operator"
       raw          = "https://bedag.github.io/helm-charts/"
-      spo          = "oci://cr.eu-north1.nebius.cloud/e00xdc03sb7gpqfd0a"
     }
 
     chart = {
@@ -18,7 +19,6 @@ locals {
       slurm_operator_crds   = "soperator-crds"
       nodeconfigurator      = "nodeconfigurator"
       raw                   = "raw"
-      spo                   = "security-profiles-operator"
 
       operator = {
         slurm       = "soperator"
@@ -31,13 +31,12 @@ locals {
       slurm   = var.operator_version
       mariadb = "25.10.2"
       raw     = "2.0.0"
-      spo     = "0.8.4-soperator"
     }
   }
 
   image = {
-    repository        = "cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-    repository_stable = "cr.eu-north1.nebius.cloud/soperator"
+    repository        = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+    repository_stable = "cr.nebius.cloud/soperator"
     tag               = var.operator_version
   }
 
@@ -126,10 +125,6 @@ locals {
     soperator_checks_controller = local.selected_preset.soperator_checks_controller
     kruise_daemon               = local.selected_preset.kruise_daemon
     dcgm_exporter               = local.selected_preset.dcgm_exporter
-    spo = {
-      daemon     = local.selected_preset.spo_daemon
-      controller = local.selected_preset.spo_controller
-    }
     # The NFS server pod fills its dedicated node, so when an NFS nodeset exists
     # its node capacity (var.node_capacity.nfs) wins over the tier value.
     nfs_server = {
@@ -143,14 +138,24 @@ locals {
     }
   }
 
-  slurm_node_extra = "\\\"{ \\\\\\\"ib_pod\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER2\\\\\\\", \\\\\\\"ib_su\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER1\\\\\\\" }\\\""
+  slurm_node_extra = chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
+    rack_number           = null
+    nvl_instance_group_id = ""
+  }))
+
+  slurm_node_extra_by_nodeset = {
+    for nodeset in var.worker_nodesets : nodeset.name => chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
+      rack_number           = try(nodeset.rack_number, null)
+      nvl_instance_group_id = try(trimspace(nodeset.nvl_instance_group_id), "")
+    }))
+  }
 
   # Calculate vmagent remote write queue count based on cluster size
   # This sets metrics ingestion capacity for larger clusters properly
   vm_agent_queue_count = 2 + floor(sum(var.node_count.worker) / 60)
 
   # Cap on the kube-state-metrics scrape response: an explicit var wins, otherwise the sizing
-  # tier decides (null below M keeps vmagent's global 32MiB guard).
+  # tier decides (null below M keeps vmagent's global guard).
   kube_state_metrics_max_scrape_size = (
     var.kube_state_metrics_max_scrape_size != null
     ? var.kube_state_metrics_max_scrape_size

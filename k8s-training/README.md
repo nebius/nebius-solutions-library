@@ -94,6 +94,86 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### GB300 production racks
+
+GB300 uses a separate rack-aware deployment path. Setting `gb300.rack_count` to
+a positive whole number replaces the generic GPU node groups with one fixed MK8s
+node group and one NVLink instance group per rack. A production rack contains 18
+`gpu-gb300` nodes using the `4gpu-112vcpu-800gb` preset, for 72 GPUs per rack.
+
+The GB300 resources require Nebius Terraform provider `0.5.232` or newer and an
+explicit zero-surge rollout strategy. Replacing nodes one at a time avoids
+requesting capacity above the physical 18-node rack. An InfiniBand fabric is
+optional for one rack and required for deployments with two or more racks:
+
+GB300 boot disks default to 1 TiB (1024 GiB). Set `local_nvme = true` to
+request the host NVMe devices and combine them into kubelet ephemeral storage.
+Local NVMe data is erased when a node is restarted or replaced.
+
+```hcl
+node_group_strategy = {
+  max_unavailable = { count = 1 }
+  max_surge       = { count = 0 }
+}
+```
+
+#### One rack
+
+One rack creates one 18-node MK8s node group and one 18-node NVLink instance
+group. Leave `infiniband_fabric` empty when the rack does not require an
+InfiniBand GPU cluster:
+
+```hcl
+infiniband_fabric = ""
+
+gb300 = {
+  rack_count = 1
+}
+```
+
+#### Two racks
+
+Two racks create 36 MK8s nodes and two separate NVLink instance groups. Both
+racks use the single XDR fabric selected by `infiniband_fabric`:
+
+```hcl
+infiniband_fabric = "fabric-4"
+
+gb300 = {
+  rack_count                = 2
+  boot_disk_size_gibibytes = 1024
+  local_nvme                = true
+}
+```
+
+Use the same syntax for larger deployments; for example, `rack_count = 6`
+creates six 18-node groups and six NVLink instance groups. Terraform generates
+stable sequential rack keys (`rack-001`, `rack-002`, and so on), so increasing
+the count adds racks without changing the addresses of existing racks. Reducing
+the count removes the highest-numbered racks.
+
+When configured, all racks attach to the same XDR InfiniBand fabric, while each
+rack receives its own NVLink instance group. A fabricless single rack remains
+inside its 72-GPU NVLink domain and has no cross-rack InfiniBand connectivity.
+The node groups use Ubuntu 24.04 driverfull images with the `cuda13.0` driver
+preset. Set `rack_count = 0` or omit `gb300` to disable this path.
+
+Capacity policies such as 17+1 or 16+2 are scheduling and operational policies
+over a complete 18-node rack. They do not reduce the MK8s node-group or NVLink
+instance-group size. Spare nodes should remain part of the rack and be excluded
+from normal workloads through Kubernetes scheduling policy.
+
+IMEX configuration is owned by MK8s Node Infrastructure for driverfull GB300
+node groups. Before deploying, confirm the selected Node Infrastructure version
+includes managed GB300 IMEX support. MK8s writes `/etc/nvidia-imex/nodes_config.cfg` and manages
+`nvidia-imex.service`. DRA mode is intentionally not exposed by this template
+until MK8s provides a supported public selection path.
+
+The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
+MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
+bundled KubeRay profiles. These guardrails keep the initial production path
+within the components validated for Grace ARM rack deployments.
+
 ### Nvidia Multi Instance GPU (MIG) configuration
 
 ```hcl
@@ -126,6 +206,20 @@ filestore_block_size = 4096 # Set the Filestore block size in bytes
 You can use Filestore to add external storage to K8s clusters, this allows you to create a Read-Write-Many HostPath PVCs in a K8s cluster. Use the following paths: `/mnt/filestore` for Filestore.
 
 For more information on how to access storage in K8s, refer [here](#accessing-storage).
+
+### Local NVMe ephemeral storage
+
+For the supported B300 platform (`gpu-b300-sxm`, preset `8gpu-192vcpu-2768gb`), enable local disks with:
+
+```hcl
+gpu_enable_local_disks = true
+```
+
+The GPU node template sets `local_disks.config.kubelet_ephemeral = true` and requests local disk passthrough. This corresponds to the CLI flags `--template-local-disks-config-kubelet-ephemeral` and `--template-local-disks-passthrough-group-requested` in the [Nebius node-group reference](https://docs.nebius.com/cli/reference/mk8s/node-group/create).
+
+MK8S combines the local disks into a volume for kubelet ephemeral storage. The shared Kubernetes cloud-init template contains no custom RAID creation, formatting, or mounting commands. The former `/scratch` mount is not created. The obsolete `local_nvme_drives_path` variable has been removed; remove it from existing tfvars files if present.
+
+Workloads can use disk-backed `emptyDir` volumes and specify `ephemeral-storage` requests and limits. This storage is temporary, not persistent application storage. Existing workloads using `/scratch` must be updated before rolling out this change. Review `terraform plan` for node replacement or rollout before applying; changing the template does not migrate existing data.
 
 ### Shared filesystem CSI automation
 

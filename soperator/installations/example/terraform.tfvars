@@ -55,11 +55,13 @@ filestore_controller_spool = {
 # }
 
 # Shared filesystem to be used on controller, worker, and login nodes.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # Notice that auto-backups are enabled for filesystems with size less than 12 TiB.
 # If you need backups for jail larger than 12 TiB, set 'backups_enabled' to 'force_enable' down below.
 # ---
-# filestore_jail = {
+# filesystem_jail = {
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -67,21 +69,23 @@ filestore_controller_spool = {
 # }
 # Or use existing filestore.
 # ---
-filestore_jail = {
+filesystem_jail = {
   existing = {
     id = "computefilesystem-<YOUR-FILESTORE-ID>"
   }
 }
 
 # Additional shared filesystems to be mounted inside jail.
+# Choose type `WEKA` for WEKA-backed filesystem, otherwise `NETWORK_SSD` for Filestore.
 # If a big filesystem is needed it's better to deploy this additional storage because jails bigger than 12 TiB
 # ARE NOT BACKED UP by default.
 # Do not use "/home" here. That path is reserved for the home-directory NFS mount.
 # ---
-# filestore_jail_submounts = [{
+# filesystem_jail_submounts = [{
 #   name       = "data"
 #   mount_path = "/data"
 #   spec = {
+#     type                 = "NETWORK_SSD"
 #     size_gibibytes       = 2048
 #     block_size_kibibytes = 4
 #     forbid_deletion      = false
@@ -89,7 +93,7 @@ filestore_jail = {
 # }]
 # Or use existing filestores.
 # ---
-filestore_jail_submounts = [{
+filesystem_jail_submounts = [{
   name       = "data"
   mount_path = "/data"
   existing = {
@@ -121,24 +125,39 @@ filestore_accounting = {
 # region nfs-server
 
 # nfs = {
-#   enabled        = false
-#   size_gibibytes = 3720
-#   mount_path     = "/home"
-#   resource = {
-#     platform = "cpu-d3"
-#     preset   = "32vcpu-128gb"
+#   enabled = false
+#   spec = {
+#     size_gibibytes = 3720
+#     mount_path     = "/home"
+#     resource = {
+#       platform = "cpu-d3"
+#       preset   = "32vcpu-128gb"
+#     }
+#     public_ip = false
 #   }
-#   public_ip = false
 # }
 
 nfs_in_k8s = {
-  enabled         = true
-  version         = "1.2.0"
-  use_stable_repo = true
-  size_gibibytes  = 3720
-  disk_type       = "NETWORK_SSD_IO_M3"
-  filesystem_type = "ext4"
-  threads         = 128 # to match preset in slurm_nodeset_nfs
+  enabled = true
+  spec = {
+    version         = "1.2.0"
+    use_stable_repo = true
+    size_gibibytes  = 3720
+    disk_type       = "NETWORK_SSD_IO_M3"
+    filesystem_type = "ext4"
+    threads         = 128
+    node_group = {
+      resource = {
+        platform = "cpu-d3"
+        # preset omitted -> driven by sizing_tier. Set a preset to override.
+      }
+      boot_disk = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 128
+        block_size_kibibytes = 4
+      }
+    }
+  }
 }
 
 # endregion nfs-server
@@ -154,7 +173,7 @@ nfs_in_k8s = {
 
 # Version of soperator.
 # ---
-slurm_operator_version = "4.1.6"
+slurm_operator_version = "4.1.12"
 
 # Is the version of soperator stable or not.
 # ---
@@ -162,6 +181,11 @@ slurm_operator_stable = true
 
 # Each partition must have either is_all = true (includes all generated Slurm NodeSets)
 # or slurm_nodeset_refs (list of specific generated Slurm NodeSet names).
+# topology is required. Terraform creates these topologies based on NodeSets:
+# - flat: always;
+# - tree-ib: when at least one GPU NodeSet is configured;
+# - block-nvl72: when at least one GB300 NodeSet is configured.
+# Custom topologies can only be supplied through Helm values overrides.
 # For GB300, one Terraform worker nodeset can produce multiple Slurm NodeSets:
 # Terraform worker `primtrain` with size 36 generates `primtrain-rack0`
 # and `primtrain-rack1`.
@@ -174,14 +198,24 @@ slurm_nodesets_partitions = [
     is_all = true
     # e.g. ["worker"] or ["primtrain-rack0"]; set is_all = false when using refs.
     slurm_nodeset_refs = []
+    topology           = "flat"
     config             = "Default=YES PriorityTier=10 PreemptMode=OFF MaxTime=INFINITE State=UP OverSubscribe=YES"
   },
   {
     name               = "hidden"
     is_all             = true
     slurm_nodeset_refs = []
+    topology           = "flat"
     config             = "Default=NO PriorityTier=10 PreemptMode=OFF Hidden=YES MaxTime=INFINITE State=UP OverSubscribe=YES"
   },
+  # Example of selecting the InfiniBand topology for a GPU partition:
+  # {
+  #   name               = "gpu"
+  #   is_all             = false
+  #   slurm_nodeset_refs = ["worker"]
+  #   topology           = "tree-ib"
+  #   config             = "Default=NO State=UP"
+  # },
 ]
 
 # Type of the Slurm partition config. Could be either `default` or `custom`.
@@ -266,7 +300,7 @@ sizing_tier_override = null
 # as the component_presets table referenced above. Example:
 # component_overrides = {
 #   rest      = { cpu = 20, memory = 120, ephemeral_storage = 5 }
-#   vm_single = { cpu = "25000m", memory = "24Gi", size = "2046Gi", gomaxprocs = 25 }
+#   vm_single = { cpu = "25000m", memory = "96Gi", size = "2046Gi", gomaxprocs = 25 }
 # }
 
 # Configuration of Slurm Controller node set.
@@ -302,6 +336,12 @@ slurm_nodeset_workers = [
   {
     name = "worker"
     size = 128
+    # Worker pod update strategy for this nodeset: slurmAwareRollingUpdate (default) or rollingUpdate.
+    # slurmAwareRollingUpdate requires a Soperator version whose chart and CRD support it.
+    rolling_update_strategy = "slurmAwareRollingUpdate"
+    # Graceful drain timeout for every Kubernetes worker node group generated from this nodeset.
+    # 0s means unlimited waiting (default); use e.g. 30m or 2h for a finite timeout.
+    drain_timeout = "0s"
     # Autoscaling configuration. Set enabled = false to use fixed node count instead.
     autoscaling = {
       enabled = true
@@ -341,10 +381,15 @@ slurm_nodeset_workers = [
     #   enabled = true
     #   type    = "GB300"
     # }
+    # Additional labels applied to every mk8s node in this worker nodeset.
+    # Built-in Soperator labels take precedence when keys overlap.
+    # extra_labels = {}
     # Optional mk8s placement policy node list for this nodeset. Non-production only.
     # placement_policy_nodes = []
     # Provide a list of strings to set Slurm Node features
     features = null
+    # Overrides slurm_nodeset_auto_resume for this worker. false renders AutoResume=Off.
+    # auto_resume = false
     # Set to `true` to create partition for the NodeSet by default
     create_partition = null
     # Whether to enable ephemeral nodes behavior for this worker nodeset.
@@ -360,13 +405,22 @@ slurm_nodeset_workers = [
     }
     # Maximum number of pods per worker node. Default is 32 to reduce per-node Pod CIDR usage.
     max_pods = 32
-    # Optional local NVMe passthrough for this nodeset only.
-    # Uses local instance disks, creates a RAID0 array and mounts it on the host via cloud-init.
-    # mount_path: path used for both host RAID mount and jail submount.
+    # Local NVMe-backed kubelet ephemeral storage for this nodeset only.
+    # MK8s combines the local instance disks and uses them for kubelet and containerd storage.
+    # Defaults to enabled for gpu-gb300 and disabled for other platforms.
+    # Set enabled explicitly to override the platform default.
+    # For example, enabled = false disables local NVMe on gpu-gb300.
+    # mount_path: path where the local-NVMe-backed emptyDir is mounted inside the jail.
+    # size_limit_gibibytes: optional emptyDir and slurmd ephemeral-storage limit;
+    # when omitted, it is derived from the configured total local NVMe capacity.
     # local_nvme = {
-    #   enabled         = true
-    #   mount_path      = "/mnt/local-nvme"
-    #   filesystem_type = "ext4"
+    #   enabled = true
+    #   # Local NVMe layout may differ by region, platform, preset, and fabric.
+    #   # Check the actual hardware availability before setting these values.
+    #   device_count              = 8
+    #   device_capacity_gigabytes = 3840 # Decimal GB per device (1 GB = 10^9 bytes).
+    #   mount_path                = "/mnt/local-nvme"
+    #   size_limit_gibibytes      = 20000
     # }
     # Additional (Optional) node-local Network-SSD disks to be mounted inside jail on worker nodes.
     # It will create compute disks with provided spec for each node via CSI.
@@ -401,7 +455,7 @@ slurm_nodeset_workers = [
   },
 ]
 
-# Per-platform CUDA versions consumed by Slurm/operator (e.g., 12.9.0). Keys are platform IDs (e.g., gpu-h100-sxm).
+# Per-platform CUDA versions consumed by Slurm/operator (e.g., 13.0.3). Keys are platform IDs (e.g., gpu-h100-sxm).
 #platform_cuda_versions = {}
 
 # Per-platform GPU driver presets. Keys are platform IDs (e.g., gpu-h100-sxm); values are driver presets (e.g., cuda13.0).
@@ -414,6 +468,8 @@ use_preinstalled_gpu_drivers = true
 # Keep size as the desired login pod replica count. For GB300, Terraform uses
 # this value for Soperator login pods, then skips only the dedicated mk8s login
 # node group so login pods run on worker nodes instead.
+# Login pod autoscaling is disabled by default. The dedicated mk8s login node
+# group uses its independent, always-enabled infrastructure scaling limits.
 # ---
 slurm_nodeset_login = {
   size = 2
@@ -435,21 +491,6 @@ slurm_nodeset_login = {
 # By default, null.
 # ---
 slurm_nodeset_accounting = {
-  resource = {
-    platform = "cpu-d3"
-    # preset omitted -> driven by sizing_tier. Set a preset to override.
-  }
-  boot_disk = {
-    type                 = "NETWORK_SSD"
-    size_gibibytes       = 128
-    block_size_kibibytes = 4
-  }
-}
-
-# Configuration of NFS node set.
-# ---
-slurm_nodeset_nfs = {
-  size = 1
   resource = {
     platform = "cpu-d3"
     # preset omitted -> driven by sizing_tier. Set a preset to override.
@@ -545,6 +586,14 @@ active_checks_scope = ""
 #----------------------------------------------------------------------------------------------------------------------#
 # region Config
 
+# Wait for the host NVIDIA persistence socket before starting GPU workers so the NVIDIA runtime can inject it.
+# Mitigates the suspected startup race behind intermittent persistence health-check failures (SCHED-1418).
+# Only applies to GPU nodesets when use_preinstalled_gpu_drivers is true.
+# GPU workers stay in init until /run/nvidia-persistenced/socket exists; CPU workers are unaffected.
+# By default, true.
+# ---
+slurm_wait_for_nvidia_persistenced = true
+
 # Shared memory size for Slurm controller and worker nodes in GiB.
 # By default, 64.
 # ---
@@ -584,17 +633,21 @@ maintenance_ignore_node_groups = ["controller", "nfs"]
 # ---
 telemetry_enabled = true
 
-# Whether to enable dcgm job mapping (adds hpc_job label on DCGM_ metrics).
+# Whether to install soperator's dcgm-exporter chart.
+# When false, the NVIDIA gpu-operator's stock dcgm-exporter is used instead.
 # By default, true.
 # ---
-dcgm_job_mapping_enabled = true
+dcgm_exporter_enabled = true
 
 # Optional kube-state-metrics scrape size override in bytes.
 # By default, it is raised automatically for large clusters.
 # ---
 # kube_state_metrics_max_scrape_size = 268435456
 
-# Optional OpenTelemetry sending_queue batch overrides for logs, jail logs, events, and nccl-profiles collectors.
+# Optional OpenTelemetry sending_queue batch overrides for the in-cluster (VictoriaLogs/VictoriaMetrics)
+# exporters of the logs, jail logs, events, and nccl-profiles collectors.
+# The public Cloud Logging exporter is not affected: its batching is managed by the chart
+# (observability.opentelemetry.publicBatch) and capped at 1000 records per request.
 # By default, chart values are used.
 # ---
 # opentelemetry_batch = {
@@ -720,11 +773,12 @@ cleanup_bucket_on_destroy = false
 
 # Version of the k8s to be used.
 # ---
-k8s_version = 1.33
+k8s_version = "1.36"
 
 # Version of the node group to be used.
+# NodeInfraVersion 75 includes Kubernetes 1.36.3 images and is marked untested.
 # ---
-node_group_version = 67
+node_group_version = "75"
 
 # SSH user credentials for accessing k8s nodes.
 # By default, empty list.

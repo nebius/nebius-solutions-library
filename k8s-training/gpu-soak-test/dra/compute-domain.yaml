@@ -9,7 +9,10 @@
 #
 # The NVIDIA controller AUTO-CREATES the channel ResourceClaimTemplate named
 # below (soak-channel) — do not hand-write it. Pods claim it via pytorchjob-dra.yaml.
-# Applied ONLY on DRA clusters (single-node runs skip it — no cross-node fabric).
+# Applied on every DRA run (run-soak-test.sh applies it whenever GPU_MODE=dra). A
+# single-node DRA run therefore also applies it (numNodes=1) and the Master still
+# claims the channel — single-node DRA is not a validated configuration; use 2+
+# GB300 nodes for the cross-node soak this variant targets.
 #
 # Placeholder patched by run-soak-test.sh:
 #   __NODE_COUNT__   number of GPU nodes in the run (= ComputeDomain size)

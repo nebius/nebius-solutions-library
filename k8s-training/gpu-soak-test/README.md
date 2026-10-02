@@ -136,6 +136,11 @@ SOAK_TRANSPORT=ib SOAK_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3 MAX_TEMP=90 ./run-
 ```
 
 Requires the Training Operator ≥ v1.8.0 (older CRDs reject DRA `resourceClaims`).
+**Also requires Kubernetes ≥ 1.34**: the DRA manifests under `dra/` use the GA
+`resource.k8s.io/v1` API, which only reached GA in 1.34. On 1.31–1.33 DRA is served
+as `v1beta1`/`v1beta2`, so `kubectl apply` of the `ResourceClaimTemplate` fails with
+`no matches for kind "ResourceClaimTemplate" in version "resource.k8s.io/v1"` — run
+the DRA path on a 1.34+ MK8s cluster (the x86 device-plugin path has no such floor).
 The x86 device-plugin path is unchanged — none of this runs there.
 
 ## GPU type detection — automatic

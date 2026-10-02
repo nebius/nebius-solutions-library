@@ -55,6 +55,7 @@ resource "helm_release" "filesystem_csi" {
   depends_on = [
     nebius_mk8s_v1_node_group.cpu-only,
     nebius_mk8s_v1_node_group.gpu,
+    nebius_mk8s_v1_node_group.gb300,
   ]
 }
 

@@ -109,6 +109,32 @@ variable "ssh_public_key" {
   }
 }
 
+variable "node_group_strategy" {
+  description = "Node-group rollout strategy on template changes. Set max_surge and max_unavailable using count or percent. GB300 requires max_surge to be zero."
+  type = object({
+    max_surge = optional(object({
+      count   = optional(number)
+      percent = optional(number)
+    }))
+    max_unavailable = optional(object({
+      count   = optional(number)
+      percent = optional(number)
+    }))
+  })
+  default = null
+
+  validation {
+    condition = var.node_group_strategy == null || alltrue([
+      for setting in [
+        try(var.node_group_strategy.max_surge, null),
+        try(var.node_group_strategy.max_unavailable, null),
+      ] :
+      setting == null || !(try(setting.count, null) != null && try(setting.percent, null) != null)
+    ])
+    error_message = "Set either count or percent for each node-group strategy setting, not both."
+  }
+}
+
 # K8s CPU node group
 variable "cpu_nodes_fixed_count" {
   description = "Number of nodes in the CPU-only node group."
@@ -187,6 +213,33 @@ variable "gpu_nodes_preset" {
   description = "Configuration for GPU amount, CPU, and RAM for nodes in the GPU node group."
   type        = string
   default     = null
+}
+
+variable "gb300" {
+  description = <<-EOT
+    Number of production GB300 racks. Each rack creates one fixed 18-node MK8s
+    node group and one 18-node NVLink instance group (72 GPUs per rack).
+    boot_disk_size_gibibytes controls the network-backed boot disk size.
+    Set local_nvme to true to pass through the host NVMe devices and combine
+    them into kubelet ephemeral storage on each GB300 node.
+    Set rack_count to zero to disable the GB300 path.
+  EOT
+  type = object({
+    rack_count               = optional(number, 0)
+    boot_disk_size_gibibytes = optional(number, 1024)
+    local_nvme               = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.gb300.rack_count >= 0 && var.gb300.rack_count == floor(var.gb300.rack_count)
+    error_message = "gb300.rack_count must be a non-negative whole number. Each rack always contains 18 nodes (72 GPUs)."
+  }
+
+  validation {
+    condition     = var.gb300.boot_disk_size_gibibytes > 0 && var.gb300.boot_disk_size_gibibytes == floor(var.gb300.boot_disk_size_gibibytes)
+    error_message = "gb300.boot_disk_size_gibibytes must be a positive whole number."
+  }
 }
 
 variable "gpu_disk_type" {
@@ -276,6 +329,24 @@ variable "mig_parted_config" {
     error_message = length(lookup(local.valid_mig_parted_configs, local.gpu_nodes_platform, [])) > 0 ? "Invalid MIG config '${coalesce(var.mig_parted_config, "null")}' for the selected GPU platform '${local.gpu_nodes_platform}'. Must be one of ${join(", ", lookup(local.valid_mig_parted_configs, local.gpu_nodes_platform, []))} or left unset." : "GPU platform '${local.gpu_nodes_platform}' does not support MIG partitioning. Leave 'mig_parted_config' unset."
   }
 }
+
+variable "gpu_enable_local_disks" {
+  description = "Whether to request local NVMe passthrough disks and use them as managed kubelet ephemeral storage"
+  type        = bool
+  default     = false
+
+  validation {
+    condition = (
+      !var.gpu_enable_local_disks ||
+      (
+        local.gpu_nodes_platform == "gpu-b300-sxm" &&
+        local.gpu_nodes_preset == "8gpu-192vcpu-2768gb"
+      )
+    )
+    error_message = "Local disks are supported only on B300 platform with preset 8gpu-192vcpu-2768gb."
+  }
+}
+
 
 # Observability
 

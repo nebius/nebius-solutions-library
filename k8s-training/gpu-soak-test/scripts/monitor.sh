@@ -46,15 +46,20 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $*" | tee -a "$LOG_FILE"; }
 # Echoes an integer count, or "__FAILED__" if it could not run.
 check_xid_on_node() {
   local node="$1" dbg="" waited=0 phase="" out="" since_epoch="${SOAK_START_EPOCH:-0}"
+  # Scope the XID scan to this run. dmesg holds the entire kernel ring buffer, so an
+  # unscoped grep would count XID lines from before the soak even started (a prior
+  # workload, a days-old event) against this run. --since restricts it to the run
+  # window; the date is computed on the host so it matches dmesg's host-local clock.
+  # (Requires a modern util-linux dmesg — standard on Nebius Ubuntu hosts. If the
+  # run start is unknown, since_epoch=0 falls back to the whole buffer.)
   # `grep -c` exits 1 when the count is zero, which would mark the debugger pod
   # Failed on a HEALTHY node — so append `|| true` to keep the container clean.
   # Count only genuine HARDWARE Xids: match the "NVRM: Xid (...): <code>," format
-  # and exclude app/process-caused codes (13/31/43/45/68). Xid 45 in particular
-  # (channel/process kill) accumulates in a shared node's dmesg from ordinary pod
-  # churn by other workloads — counting it would fail an otherwise-clean soak.
-  # dmesg --since scopes the scan to THIS run so a pre-existing hardware Xid from
-  # before the soak isn't attributed to it (date computed host-side to match
-  # dmesg's host-local clock; since_epoch=0 falls back to the whole buffer).
+  # and exclude application/process-caused codes 13/31/43/45/68. Xid 45 in
+  # particular (channel/process kill) accumulates on a shared node's dmesg from
+  # ordinary pod churn by other workloads and would fail an otherwise-clean soak.
+  # (68 — a video/NVDEC exception — is included here as commonly app-triggered on
+  # these soak workloads; revisit if a hardware-caused 68 is ever observed.)
   kubectl debug node/"$node" --image=ubuntu --profile=sysadmin -q \
     -- chroot /host sh -c "dmesg --since \"\$(date -d @${since_epoch} '+%Y-%m-%d %H:%M:%S' 2>/dev/null)\" 2>/dev/null | grep 'NVRM: Xid' | grep -vcE '\): (13|31|43|45|68),' || true" >/dev/null 2>&1 || true
   while [ "$waited" -lt 30 ]; do

@@ -57,19 +57,38 @@ locals {
       gpu_nodes_platform = "gpu-b300-sxm"
       gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
     }
+    us-north1 = {
+      cpu_nodes_platform = "cpu-d3"
+      cpu_nodes_preset   = "16vcpu-64gb"
+      gpu_nodes_platform = "gpu-b300-sxm"
+      gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
+    }
   }
 
   current_region_defaults = local.regions_default[var.region]
 
-  cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, local.current_region_defaults.cpu_nodes_preset)
-  cpu_nodes_platform = coalesce(var.cpu_nodes_platform, local.current_region_defaults.cpu_nodes_platform)
-  gpu_nodes_platform = coalesce(var.gpu_nodes_platform, local.current_region_defaults.gpu_nodes_platform)
-  gpu_nodes_preset   = coalesce(var.gpu_nodes_preset, local.current_region_defaults.gpu_nodes_preset)
-  infiniband_fabric  = var.infiniband_fabric
-  enable_gpu_cluster = local.infiniband_fabric != null ? trimspace(local.infiniband_fabric) != "" : false
-  device_preset      = "cuda13.0"
+  cpu_nodes_preset     = coalesce(var.cpu_nodes_preset, local.current_region_defaults.cpu_nodes_preset)
+  cpu_nodes_platform   = coalesce(var.cpu_nodes_platform, local.current_region_defaults.cpu_nodes_platform)
+  gpu_nodes_platform   = coalesce(var.gpu_nodes_platform, local.current_region_defaults.gpu_nodes_platform)
+  gpu_nodes_preset     = coalesce(var.gpu_nodes_preset, local.current_region_defaults.gpu_nodes_preset)
+  infiniband_fabric    = var.infiniband_fabric
+  enable_gpu_cluster   = local.infiniband_fabric != null ? trimspace(local.infiniband_fabric) != "" : false
+  device_preset        = "cuda13.0"
+  gb300_nodes_per_rack = 18
+  gb300_gpus_per_node  = 4
+  gb300_rack_count     = floor(max(0, var.gb300.rack_count))
+  gb300_enabled        = local.gb300_rack_count > 0
+  gb300_platform       = "gpu-gb300"
+  gb300_preset         = "4gpu-112vcpu-800gb"
+  gb300_racks = {
+    for index in range(local.gb300_rack_count) :
+    format("rack-%03d", index + 1) => {
+      node_count = local.gb300_nodes_per_rack
+    }
+  }
+  use_driverfull_gpu = var.gpu_nodes_driverfull_image || local.gb300_enabled
   gpu_operator_cdi_enabled = (
-    !var.gpu_nodes_driverfull_image &&
+    !local.use_driverfull_gpu &&
     var.mig_strategy != null &&
     var.mig_strategy != "none"
   ) ? true : null

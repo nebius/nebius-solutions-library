@@ -62,7 +62,8 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
   labels = {
     "library-solution" : "k8s-training",
   }
-  version = var.k8s_version
+  version  = var.k8s_version
+  strategy = var.node_group_strategy
   template = {
     boot_disk = {
       size_gibibytes = var.cpu_disk_size
@@ -81,10 +82,6 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
       platform = local.cpu_nodes_platform
       preset   = local.cpu_nodes_preset
     }
-    preemptible = var.cpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 1
-    } : null
     filesystems = var.enable_filestore ? [
       {
         attach_mode = "READ_WRITE"
@@ -115,7 +112,7 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 resource "nebius_mk8s_v1_node_group" "gpu" {
-  count = var.gpu_node_groups
+  count = local.gb300_enabled ? 0 : var.gpu_node_groups
 
   lifecycle {
     precondition {
@@ -136,7 +133,8 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
   labels = {
     "library-solution" : "k8s-training",
   }
-  version = var.k8s_version
+  version  = var.k8s_version
+  strategy = var.node_group_strategy
   template = {
     metadata = {
       labels = var.mig_parted_config != null ? {
@@ -161,10 +159,6 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       platform = local.gpu_nodes_platform
       preset   = local.gpu_nodes_preset
     }
-    preemptible = var.gpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 1
-    } : null
     filesystems = var.enable_filestore ? [
       {
         attach_mode = "READ_WRITE"
@@ -179,6 +173,15 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     preemptible = var.gpu_nodes_preemptible ? {
       on_preemption = "STOP"
       priority      = 3
+    } : null
+
+    local_disks = var.gpu_enable_local_disks ? {
+      config = {
+        kubelet_ephemeral = true
+      }
+      passthrough_group = {
+        requested = true
+      }
     } : null
 
     underlay_required = false

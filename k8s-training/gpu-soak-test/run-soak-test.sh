@@ -36,7 +36,10 @@ DURATION="${1:-3600}"
 export SOAK_DURATION_SECONDS="$DURATION"
 NODE_COUNT="${2:-2}"
 NAMESPACE="gpu-soak"
-SLOTS="${SLOTS:-8}"   # device-plugin default; auto-detected from DRA on GB300 (see GPU-mode detection below)
+# GPUs per node (nproc_per_node + GPU resource request). Auto-detected from node
+# allocatable below once the GPU node type is known — hardcoding 8 breaks any
+# non-8-GPU node (e.g. GB200/GB300). Set SLOTS=<n> to override detection.
+SLOTS="${SLOTS:-}"
 HBM_FILL_FRACTION="${HBM_FILL_FRACTION:-0.75}"
 # Overtemp threshold °C. Exported so monitor.sh and the report agree on one value
 # (raise for Blackwell, e.g. MAX_TEMP=90). Default matches monitor.sh's default.
@@ -52,8 +55,8 @@ REPORT_FILE="soak-report-$(date +%Y%m%d_%H%M%S).txt"
 START_TIME=$(date -u)
 START_EPOCH=$(date +%s)
 # Anchor the monitor log to this script's dir (not the caller's CWD) so the report
-# generator reliably finds it regardless of invocation directory. Also export the
-# run start so monitor.sh can scope its dmesg XID check to this run.
+# generator below reliably finds it no matter where the script was invoked from.
+# Also export the run start so monitor.sh can scope its dmesg XID check to this run.
 export SOAK_LOG_DIR="$SCRIPT_DIR"
 export SOAK_START_EPOCH="$START_EPOCH"
 
@@ -82,50 +85,9 @@ trap 'cleanup_ns; exit 130' INT TERM
 REACHED_END=0
 trap '[ "$REACHED_END" = "1" ] || cleanup_ns' EXIT
 
-# --- GPU allocation mode: device-plugin (x86) vs DRA (Grace/GB300) [additive] ---
-# x86 GPU clusters advertise the nvidia.com/gpu device-plugin resource. DRA-native
-# clusters (Grace/GB300) advertise GPUs via Dynamic Resource Allocation and report
-# 0 nvidia.com/gpu. Auto-detect so the x86 device-plugin path stays unchanged and
-# GB300/DRA is handled additively. Fails loudly if neither is present.
-GPU_MODE="device-plugin"
-DEVPLUGIN_NODES=$(kubectl get nodes \
-  -o jsonpath='{range .items[*]}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null \
-  | awk 'NF{c++} END{print c+0}')
-if [ "${DEVPLUGIN_NODES:-0}" -eq 0 ]; then
-  if kubectl get deviceclass gpu.nvidia.com >/dev/null 2>&1; then
-    GPU_MODE="dra"
-    # On DRA, GPUs/node comes from the resourceslices, not a hardcoded value.
-    # Portable awk (no python / no grep -P): count device names in the first
-    # gpu.nvidia.com slice. Note: do NOT `exit` early in awk — closing the pipe
-    # would SIGPIPE the upstream kubectl and, under `set -o pipefail`, abort the
-    # script. Process all lines and print only the first match instead.
-    DETECTED_SLOTS=$(kubectl get resourceslices \
-      -o jsonpath='{range .items[*]}{.spec.driver}{"\t"}{range .spec.devices[*]}{.name}{","}{end}{"\n"}{end}' 2>/dev/null \
-      | awk -F'\t' '$1=="gpu.nvidia.com" && !seen {n=gsub(/,/,",",$2); if(n>0){print n; seen=1}}')
-    if [ -n "$DETECTED_SLOTS" ] && [ "$DETECTED_SLOTS" -gt 0 ] 2>/dev/null; then
-      SLOTS="$DETECTED_SLOTS"
-    fi
-  else
-    echo -e "${RED}ERROR: no GPUs found — neither the nvidia.com/gpu device plugin nor the gpu.nvidia.com DRA DeviceClass is present${NC}" >&2
-    exit 1
-  fi
-fi
-
-# Cross-node NCCL transport (DRA/GB300 only). On GB300 the two nodes fuse into one
-# MNNVL (multi-node NVLink) domain, so by default NCCL runs collectives over NVLink
-# and the IB fabric stays idle. Set SOAK_TRANSPORT=ib to disable MNNVL/NVLS so NCCL
-# falls back to InfiniBand cross-node — to soak the IB fabric itself (as the x86
-# soak does). No effect on x86 (its template has no such vars).
-SOAK_TRANSPORT="${SOAK_TRANSPORT:-auto}"
-
 echo "=== GPU Soak Test (PyTorchJob / torch.distributed) ==="
 echo "Duration:     ${DURATION}s ($(( DURATION / 60 )) minutes)"
 echo "GPU nodes:    $NODE_COUNT"
-echo "GPUs/node:    $SLOTS"
-echo "GPU mode:     $GPU_MODE"
-if [ "$GPU_MODE" = "dra" ] && [ "$NODE_COUNT" -gt 1 ]; then
-  echo "Transport:    ${SOAK_TRANSPORT} ($([ "$SOAK_TRANSPORT" = "ib" ] && echo "InfiniBand cross-node" || echo "MNNVL/NVLink cross-node"))"
-fi
 echo "HBM fill:     $(awk "BEGIN{printf \"%.0f\", ${HBM_FILL_FRACTION}*100}")%"
 echo "Max temp:     ${MAX_TEMP}°C"
 echo "Image:        $SOAK_IMAGE"
@@ -139,6 +101,53 @@ if ! kubectl get crd pytorchjobs.kubeflow.org &>/dev/null; then
   echo "Install it with:"
   echo "  kubectl apply -k 'github.com/kubeflow/training-operator/manifests/overlays/standalone?ref=v1.7.0'"
   exit 1
+fi
+
+# --- GPU allocation mode: device-plugin (x86) vs DRA (Grace/GB300) [additive] ---
+# x86 GPU clusters advertise the nvidia.com/gpu device-plugin resource. DRA-native
+# clusters (Grace/GB300) advertise GPUs via Dynamic Resource Allocation and report
+# no nvidia.com/gpu. Auto-detect so the x86 device-plugin path — including its
+# allocatable-based GPUs/node detection below — stays unchanged, and GB300/DRA is
+# handled additively. Runs after the CRD check so a broken kubeconfig surfaces
+# there first, not as a bogus "no GPUs" error. Fails loudly if neither is present.
+GPU_MODE="device-plugin"
+# Count nodes advertising a POSITIVE nvidia.com/gpu count. `$1+0>0` (not NF) so a
+# node reporting the literal "0" isn't miscounted as device-plugin — DRA nodes
+# report 0/absent, and we must fall through to the DRA branch for them.
+DEVPLUGIN_NODES=$(kubectl get nodes \
+  -o jsonpath='{range .items[*]}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null \
+  | awk '$1+0>0{c++} END{print c+0}')
+if [ "${DEVPLUGIN_NODES:-0}" -eq 0 ]; then
+  if kubectl get deviceclass gpu.nvidia.com >/dev/null 2>&1; then
+    GPU_MODE="dra"
+    # On DRA, GPUs/node comes from the resourceslices, not nvidia.com/gpu. Portable
+    # awk (no python / no grep -P): count device names in the first gpu.nvidia.com
+    # slice. Do NOT `exit` early in awk — closing the pipe would SIGPIPE kubectl and,
+    # under set -o pipefail, abort the script. Process all lines, print first match.
+    DETECTED_DRA_SLOTS=$(kubectl get resourceslices \
+      -o jsonpath='{range .items[*]}{.spec.driver}{"\t"}{range .spec.devices[*]}{.name}{","}{end}{"\n"}{end}' 2>/dev/null \
+      | awk -F'\t' '$1=="gpu.nvidia.com" && !seen {n=gsub(/,/,",",$2); if(n>0){print n; seen=1}}')
+    if [ -n "$DETECTED_DRA_SLOTS" ] && [ "$DETECTED_DRA_SLOTS" -gt 0 ] 2>/dev/null; then
+      SLOTS="${SLOTS:-$DETECTED_DRA_SLOTS}"
+    else
+      # Don't silently assume 8 on a 4-GPU GB300 — warn now; the allocatable-based
+      # fallback below will also warn and default if SLOTS is still unset.
+      echo -e "${YELLOW}WARNING: GPU_MODE=dra but could not read GPUs/node from resourceslices (RBAC? driver not ready?).${NC}"
+    fi
+  else
+    echo -e "${RED}ERROR: no GPUs found — neither the nvidia.com/gpu device plugin nor the gpu.nvidia.com DRA DeviceClass is present${NC}" >&2
+    exit 1
+  fi
+fi
+echo "GPU mode:     $GPU_MODE"
+
+# Cross-node NCCL transport (DRA/GB300 only). On GB300 the two nodes fuse into one
+# MNNVL (multi-node NVLink) domain, so by default NCCL runs collectives over NVLink
+# and the IB fabric stays idle. Set SOAK_TRANSPORT=ib to disable MNNVL/NVLS so NCCL
+# falls back to InfiniBand cross-node. No effect on x86 (its template has no vars).
+SOAK_TRANSPORT="${SOAK_TRANSPORT:-auto}"
+if [ "$GPU_MODE" = "dra" ] && [ "$NODE_COUNT" -gt 1 ]; then
+  echo "Transport:    ${SOAK_TRANSPORT} ($([ "$SOAK_TRANSPORT" = "ib" ] && echo "InfiniBand cross-node" || echo "MNNVL/NVLink cross-node"))"
 fi
 
 # =============================================================================
@@ -180,6 +189,19 @@ if [ "$AVAILABLE_GPU_NODES" -lt "$NODE_COUNT" ]; then
 fi
 
 echo "GPU nodes available: $AVAILABLE_GPU_NODES ✓"
+
+# Detect GPUs per node from a Ready node's allocatable, so the job is sized to the
+# actual hardware (GB200/GB300 are not 8-GPU). Falls back to 8 only if unreadable.
+FIRST_GPU_NODE=$(kubectl get nodes -l "node.kubernetes.io/instance-type=${GPU_INSTANCE_TYPE}" \
+  --no-headers 2>/dev/null | awk '$2=="Ready"{print $1; exit}')
+DETECTED_SLOTS=$(kubectl get node "$FIRST_GPU_NODE" \
+  -o jsonpath='{.status.allocatable.nvidia\.com/gpu}' 2>/dev/null)
+SLOTS="${SLOTS:-$DETECTED_SLOTS}"
+if ! [ "${SLOTS:-0}" -gt 0 ] 2>/dev/null; then
+  echo -e "${YELLOW}WARNING: could not detect GPUs/node from allocatable — defaulting to 8${NC}"
+  SLOTS=8
+fi
+echo "GPUs/node:           $SLOTS"
 echo ""
 
 # Single-tenant by design: a soak saturates every GPU on the cluster, so only one
@@ -266,8 +288,9 @@ else
 fi
 
 # Select the GPU-allocation variant. x86 -> device-plugin template (unchanged).
-# DRA -> apply the GPU ResourceClaimTemplate + a ComputeDomain first, then use the
-# DRA PyTorchJob template. Both live in $NAMESPACE, so they're torn down with it.
+# DRA -> apply the GPU ResourceClaimTemplate + a ComputeDomain (for cross-node
+# MNNVL NCCL), then use the DRA PyTorchJob template. Both live in $NAMESPACE, so
+# they're torn down with it.
 if [ "$GPU_MODE" = "dra" ]; then
   echo "Applying DRA GPU ResourceClaimTemplate (count=$SLOTS)..."
   sed -e "s/__SLOTS__/${SLOTS}/g" "$SCRIPT_DIR/dra/gpu-resourceclaim-template.yaml" \

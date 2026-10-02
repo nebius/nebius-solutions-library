@@ -40,8 +40,6 @@ variable "component_overrides" {
     dcgm_exporter               = optional(object({ cpu = number, memory = number }))
     kruise_daemon               = optional(object({ cpu = number, memory = number }))
     nfs_server                  = optional(object({ cpu = number, memory = number }))
-    spo_controller              = optional(object({ cpu = string, memory = string }))
-    spo_daemon                  = optional(object({ cpu = string, memory = string }))
     kruise_manager              = optional(object({ cpu = string, memory = string }))
     kube_state_metrics          = optional(object({ requests = object({ cpu = string, memory = string }), limits = object({ memory = string }) }))
     vm_single                   = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))

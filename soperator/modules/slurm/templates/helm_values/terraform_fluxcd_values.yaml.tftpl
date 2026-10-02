@@ -72,7 +72,16 @@ resources:
           enabled: ${telemetry_enabled}
           clusterName: ${cluster_name}
           publicEndpointEnabled: ${public_o11y_enabled}
+          publicEndpointTokenKind: secret
           region: ${region}
+          tsaToken:
+            secretName: o11y-writer-sa-token
+            secretKey: accessToken
+            writer:
+              enabled: true
+              source: imds
+              namespaces:
+                - monitoring-system
           opentelemetry:
             enabled: ${telemetry_enabled}
 
@@ -177,9 +186,8 @@ resources:
                 spec:
                   extraArgs:
                     # Default cap for scrape jobs without their own max_scrape_size.
-                    # kube-state-metrics overrides it per-job via kubeStateMetrics.maxScrapeSize
-                    # on large clusters, so this stays at 32MiB as a guard for everything else.
-                    promscrape.maxScrapeSize: "33554432"
+                    # kube-state-metrics can override it per-job via kubeStateMetrics.maxScrapeSize.
+                    promscrape.maxScrapeSize: "134217728"
                   externalLabels:
                     iam_tenant_id: ${iam_tenant_id}
                     iam_project_id: ${iam_project_id}
@@ -254,10 +262,9 @@ resources:
                   memory: ${resources.vm_logs.memory}
 
           dcgmExporter:
-            enabled: ${dcgm_job_mapping_enabled}
+            enabled: ${dcgm_exporter_enabled}
             version: ${operator_version}
             values:
-              hpcJobMapDir: ${dcgm_job_map_dir}
               # waits for nvidia toolkit when not running on preinstalled gpu drivers, so opposite of use_preinstalled_gpu_drivers
               validateToolkit: ${slurm_cluster.use_preinstalled_gpu_drivers ? "false" : "true"}
               resources:
@@ -307,30 +314,6 @@ resources:
                 limits:
                   memory: ${resources.nccl_profiles_collector.memory}
 
-        securityProfilesOperator:
-          enabled: ${apparmor_enabled}
-          interval: 5m
-          timeout: 5m
-          %{~ if security_profiles_operator_version != "" ~}
-          version: ${security_profiles_operator_version}
-          %{~ endif ~}
-          values:
-            # SecurityProfilesOperator resources scale with cluster size; it OOM-ed on big clusters.
-            # Driven by local.resources.spo.
-            daemon:
-              resources:
-                limits:
-                  memory: ${resources.spo.daemon.memory}
-                requests:
-                  cpu: ${resources.spo.daemon.cpu}
-                  memory: ${resources.spo.daemon.memory}
-            resources:
-              limits:
-                cpu: ${resources.spo.controller.cpu}
-                memory: ${resources.spo.controller.memory}
-              requests:
-                cpu: ${resources.spo.controller.cpu}
-                memory: ${resources.spo.controller.memory}
         slurmCluster:
           enabled: true
           interval: 5m
@@ -340,8 +323,8 @@ resources:
           releaseName: soperator
           overrideValues:
             clusterName: ${name}
+            podNamePrefix: disabled
             cudaVersion: ${slurm_cluster.cuda_version}
-            useDefaultAppArmorProfile: ${apparmor_enabled}
             maintenance: ${slurm_cluster.maintenance}
             plugStackConfig:
               pyxis:
@@ -351,14 +334,8 @@ resources:
                 dumpDir: "${nccl_inspector_profiling.dump_dir}/%j/%s"
                 dumpVerbose: ${nccl_inspector_profiling.verbose}
 
-            %{~ if has_local_nvme || has_nccl_network_vars ~}
+            %{~ if has_nccl_network_vars ~}
             slurmScripts:
-              %{ if has_local_nvme }
-              builtIn:
-                nvme_raid_health.sh:
-                  enabled: true
-              %{ endif }
-              %{ if has_nccl_network_vars }
               extra:
                 nccl-network-vars.sh:
                   content: |-
@@ -378,11 +355,10 @@ resources:
                       "on_ok": "none",
                       "reason_base": "",
                       "reason_append_details": false,
-                      "run_in_jail": false,
+                      "run_in_jail": true,
                       "log": "slurm_scripts/$worker.$name.$context.out",
                       "need_env": []
                     }
-              %{ endif }
             %{~ endif ~}
 
             partitionConfiguration:
@@ -393,6 +369,7 @@ resources:
                 - name: ${nodeset.name}
                   nodeSetRefs:
                     - "${nodeset.name}"
+                  topologyRef: "${nodeset.partition_topology}"
                   config: "Default=NO PriorityTier=2 MaxTime=INFINITE State=UP OverSubscribe=YES"
                 %{~ endif ~}
                 %{~ endfor ~}
@@ -406,6 +383,7 @@ resources:
                     - "${nodeset_ref}"
                   %{~ endfor ~}
                   %{~ endif ~}
+                  topologyRef: "${partition.topology}"
                   config: "${partition.config}"
                 %{~ endfor ~}
 
@@ -560,24 +538,31 @@ resources:
                 name: nvidia-driver-root
               %{~ endif ~}
 
-              %{~ if dcgm_job_mapping_enabled ~}
-              - name: hpc-jobs-dir
-                hostPath:
-                  path: ${dcgm_job_map_dir}
-                  type: DirectoryOrCreate
-              %{~ endif ~}
-
             populateJail:
               k8sNodeFilterName: ${slurm_cluster.populate_jail.k8s_node_filter_name}
 
-            %{~ if slurm_cluster.topology.block_size != null ~}
-            slurmConfig:
-              topologyPlugin: "topology/block"
-              topologyParam: "BlockAsNodeRank"
-
             topology:
-              blockSize: ${slurm_cluster.topology.block_size}
-            %{~ endif ~}
+              topologies:
+                %{~ for topology in slurm_cluster.topology.topologies ~}
+                - name: "${topology.name}"
+                  %{~ if topology.cluster_default != null ~}
+                  clusterDefault: ${topology.cluster_default}
+                  %{~ endif ~}
+                  topo:
+                    type: "${topology.type}"
+                    %{~ if topology.type == "block" && length(topology.block_sizes) > 0 ~}
+                    blockSizes:
+                      %{~ for block_size in topology.block_sizes ~}
+                      - ${block_size}
+                      %{~ endfor ~}
+                    %{~ endif ~}
+                  %{~ if length(topology.nodeset_refs) > 0 ~}
+                  nodeSetRefs:
+                    %{~ for nodeset_ref in topology.nodeset_refs ~}
+                    - "${nodeset_ref}"
+                    %{~ endfor ~}
+                  %{~ endif ~}
+                %{~ endfor ~}
 
             periodicChecks:
               ncclBenchmark:
@@ -641,7 +626,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
+                    image: cr.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                 %{~ endif ~}
@@ -661,7 +646,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
+                    image: cr.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                 volumes:
@@ -680,6 +665,13 @@ resources:
                     %{~ endif ~}
               login:
                 size: ${slurm_cluster.nodes.login.size}
+                %{~ if slurm_cluster.nodes.login.autoscaling != null ~}
+                autoscaling:
+                  enabled: ${slurm_cluster.nodes.login.autoscaling.enabled}
+                  minReplicas: ${slurm_cluster.nodes.login.autoscaling.min_size}
+                  maxReplicas: ${slurm_cluster.nodes.login.autoscaling.max_size}
+                  targetCPUUtilizationPercentage: ${slurm_cluster.nodes.login.autoscaling.target_cpu_utilization_percentage}
+                %{~ endif ~}
                 k8sNodeFilterName: ${slurm_cluster.nodes.login.k8s_node_filter_name}
                 sshdServiceType: "LoadBalancer"
                 %{~ if slurm_cluster.nodes.login.allocation_id != null ~}
@@ -697,6 +689,7 @@ resources:
                   %{~ endfor ~}
                 %{~ endif ~}
                 sshd:
+                  appArmorProfile: ${jsonencode(apparmor_profile)}
                   resources:
                     cpu: ${slurm_cluster.nodes.login.resources.cpu * 1000}m
                     memory: ${slurm_cluster.nodes.login.resources.memory}Gi
@@ -708,12 +701,12 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.munge.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
+                    image: cr.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ if tailscale_enabled ~}
                   - name: tailscale
-                    image: cr.eu-north1.nebius.cloud/soperator/tailscale:latest # v1.88.4
+                    image: cr.nebius.cloud/soperator/tailscale:latest # v1.88.4
                     imagePullPolicy: Always
                     restartPolicy: Always
                     securityContext:
@@ -738,7 +731,7 @@ resources:
                   %{~ endif ~}
                   %{~ for sub_mount in slurm_cluster.jail_submounts ~}
                   - name: ensure-jail-submount-${sub_mount.name}-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
+                    image: cr.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ endfor ~}
@@ -793,7 +786,7 @@ resources:
                     ephemeralStorage: ${slurm_cluster.nodes.rest.resources.ephemeral_storage}Gi
                 customInitContainers:
                   - name: ensure-jail-virtiofs
-                    image: cr.eu-north1.nebius.cloud/soperator/busybox
+                    image: cr.nebius.cloud/soperator/busybox
                     volumeMounts: [{ name: jail, mountPath: /volume-mount }]
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
 
@@ -932,6 +925,8 @@ resources:
           version: ${operator_version}
           values:
             manager:
+              env:
+                enableMultiTopology: "true"
               resources:
                 requests:
                   memory: ${resources.soperator_main_controller.requests.memory}Gi
@@ -945,7 +940,7 @@ resources:
             overrideValues:
               manager:
                 image:
-                  repository: cr.eu-north1.nebius.cloud/soperator/kruise-manager
+                  repository: cr.nebius.cloud/soperator/kruise-manager
                   tag: v1.8.3
                 # Scales with the sizing tier; the kruise manager OOM-ed on big
                 # clusters with the chart-default 1 cpu / 2Gi.
@@ -958,7 +953,7 @@ resources:
                     memory: ${resources.kruise_manager.memory}
               helmHooks:
                 image:
-                  repository: cr.eu-north1.nebius.cloud/soperator/kruise-helm-hook
+                  repository: cr.nebius.cloud/soperator/kruise-helm-hook
                   tag: v0.1.0
           soperatorChecks:
             enabled: true
@@ -981,12 +976,13 @@ resources:
             interval: 5m
             timeout: 5m
             values:
-              resources:
-                requests:
-                  memory: ${resources.node_configurator.requests.memory}Gi
-                  cpu: ${resources.node_configurator.requests.cpu * 1000}m
-                limits:
-                  memory: ${resources.node_configurator.limits.memory}Gi
+              rebooter:
+                resources:
+                  requests:
+                    memory: ${resources.node_configurator.requests.memory}Gi
+                    cpu: ${resources.node_configurator.requests.cpu * 1000}m
+                  limits:
+                    memory: ${resources.node_configurator.limits.memory}Gi
 
         notifier:
           enabled: ${notifier.enabled}

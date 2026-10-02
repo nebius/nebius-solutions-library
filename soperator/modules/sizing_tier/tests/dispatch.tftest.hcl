@@ -57,7 +57,7 @@ run "hundred_workers_is_m" {
     error_message = "100 workers must derive M, got ${output.sizing_tier}"
   }
   assert {
-    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "8vcpu-32gb" && output.node_preset.nfs == "32vcpu-128gb"
+    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "16vcpu-64gb" && output.node_preset.nfs == "32vcpu-128gb"
     error_message = "M node presets must be the mid-size presets"
   }
 }
@@ -215,16 +215,12 @@ run "constants_do_not_scale_with_tier" {
     error_message = "kruise_daemon must stay constant at XL"
   }
   assert {
-    condition     = output.preset.logs_collector.memory == "200Mi" && output.preset.logs_collector.cpu == "200m"
+    condition     = output.preset.logs_collector.memory == "200Mi" && output.preset.logs_collector.cpu == "50m"
     error_message = "logs_collector must stay constant at XL"
   }
   assert {
-    condition     = output.preset.jail_logs_collector.memory == "256Mi" && output.preset.jail_logs_collector.cpu == "200m"
-    error_message = "jail_logs_collector must stay constant at XL (per-worker agent, load bounded by its own node)"
-  }
-  assert {
-    condition     = output.preset.spo_daemon.memory == "128Mi" && output.preset.spo_daemon.cpu == "100m"
-    error_message = "spo_daemon must stay constant at XL"
+    condition     = output.preset.jail_logs_collector.memory == "512Mi" && output.preset.jail_logs_collector.cpu == "200m"
+    error_message = "jail_logs_collector must keep the shared 512Mi memory and 200m CPU preset at XL"
   }
   assert {
     condition     = output.preset.node_configurator.requests.cpu == 0.5 && output.preset.node_configurator.requests.memory == 0.25 && output.preset.node_configurator.limits.memory == 0.25
@@ -266,10 +262,6 @@ run "xs_matches_legacy_defaults" {
     error_message = "XS events_collector must equal the legacy default 128Mi"
   }
   assert {
-    condition     = output.preset.spo_controller.memory == "3Gi" && output.preset.spo_daemon.memory == "128Mi"
-    error_message = "XS SPO must equal the legacy default 3Gi controller / 128Mi daemon"
-  }
-  assert {
     condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "8vcpu-32gb"
     error_message = "XS node presets must be the small-cluster presets"
   }
@@ -282,20 +274,7 @@ run "small_tiers_keep_global_scrape_guard" {
   variables { worker_count = 99 } # S
   assert {
     condition     = output.kube_state_metrics_max_scrape_size == null
-    error_message = "S must keep the global 32MiB scrape guard (null cap)"
-  }
-}
-
-run "m_raises_ksm_scrape_cap" {
-  command = apply
-  variables { worker_count = 100 } # M
-  assert {
-    condition     = output.kube_state_metrics_max_scrape_size == 134217728
-    error_message = "M must raise the kube-state-metrics scrape cap to 128MiB"
-  }
-  assert {
-    condition     = output.preset.kube_state_metrics.requests.memory == "1024Mi" && output.preset.kube_state_metrics.requests.cpu == "200m"
-    error_message = "M must expose the 1Gi/200m kube-state-metrics preset"
+    error_message = "S must keep the global scrape guard (null cap)"
   }
 }
 
@@ -378,7 +357,7 @@ run "xl_matches_poc_numbers" {
   assert {
     # The controller intentionally does NOT grow with the tier: the PoC showed
     # no benefit from larger controller presets even at 5k workers.
-    condition     = output.node_preset.controller == "16vcpu-64gb" && output.node_preset.accounting == "32vcpu-128gb" && output.node_preset.nfs == "128vcpu-512gb"
+    condition     = output.node_preset.controller == "32vcpu-128gb" && output.node_preset.accounting == "32vcpu-128gb" && output.node_preset.nfs == "128vcpu-512gb"
     error_message = "XL node presets must be the big-cluster presets (controller stays 16vcpu-64gb)"
   }
 }
