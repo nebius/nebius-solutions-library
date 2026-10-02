@@ -170,7 +170,16 @@ info "Real alert found: $FOUND_LINE"
 # standard -- never just "an alert fired")
 # =========================================================================
 
-ALERTED_PID="$(echo "$FOUND_LINE" | grep -oP '(?<=rank=)\S+')"
+# Cyril item-8 -- real bug found live by this exact script, this
+# session: a bare `(?<=rank=)` lookbehind also matches inside the new
+# role_rank= field the [ALERT] header now carries (role_rank=8 contains
+# the literal substring "rank=" too), so grep -oP returned BOTH matches
+# on one line (the real PID, then "8" from role_rank=8), corrupting
+# ALERTED_PID into a two-line value and failing a genuinely correct
+# alert. Anchored on the header's own literal, unique "[ALERT] rank="
+# prefix instead -- that exact string appears exactly once per line, at
+# the very start, unaffected by whatever fields come after it.
+ALERTED_PID="$(echo "$FOUND_LINE" | grep -oP '(?<=\[ALERT\] rank=)\S+')"
 ALERTED_HOST="$(echo "$FOUND_LINE" | grep -oP '(?<=node=)\S+')"
 if [ "$ALERTED_PID" = "$TARGET_PID" ] && [ "$ALERTED_HOST" = "$TARGET_HOST" ]; then
   info "RANK-MATCH CONFIRMED: injected rank=$TARGET_RANK (real pid=$TARGET_PID, host=$TARGET_HOST) == alerted rank=$ALERTED_PID host=$ALERTED_HOST. EXACT MATCH."
