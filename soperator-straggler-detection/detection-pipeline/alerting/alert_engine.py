@@ -1051,7 +1051,25 @@ def format_alert(finding, coverage):
     # confirm an [ALERT] and a [STRAGGLER-INCIDENT] line refer to the
     # same real event without inferring it from log adjacency.
     incident_id_part = f" incident_id={finding['incident_id']}" if finding.get("incident_id") else ""
-    header = (f"[ALERT] rank={rank} comm={comm} node={host} type={fault_type} confidence={tier} "
+    # Cyril item-8 -- real worker/GPU/rank identity alongside the PID
+    # (rank= above IS the real PID, kept exactly as-is per explicit
+    # instruction), same gpu_slot=/role_rank=/role_n= convention
+    # [STRAGGLER-INCIDENT]'s own header already uses. "unknown"/"na" are
+    # honest, real fallbacks (not guesses) for the two real gaps this
+    # project's own history already found and disclosed: dcgm_gpu_slot_
+    # used defaults to slot 0 when Inspector's own gpu_slot_index capture
+    # failed (dcgm_gpu_slot_known=False -- see the DCGM TARGETING
+    # UNCERTAIN note below, same root cause), and role_rank/role_n
+    # default to "na" when this member's role hasn't been discovered yet
+    # (a comm's first window, before node_aggregator_ref.py's own
+    # phys_comm_role dict has seen this phys_id) -- both already-
+    # established, pre-existing "honest unknown" conventions elsewhere in
+    # this file, not new ones invented here.
+    gpu_slot_disp = finding.get("dcgm_gpu_slot_used") if finding.get("dcgm_gpu_slot_known") else "unknown"
+    role_rank_disp = finding.get("role_rank", "na")
+    role_n_disp = finding.get("role_n", "na")
+    header = (f"[ALERT] rank={rank} gpu_slot={gpu_slot_disp} role_rank={role_rank_disp} role_n={role_n_disp} "
+              f"comm={comm} node={host} type={fault_type} confidence={tier} "
               f"severity={severity}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
     # the header, before any cause-evidence body -- either confirming a
@@ -2689,8 +2707,16 @@ class AlertEngine:
         hosts = sorted({od["hostname"] for od in per_member.values()})
         topology_note = ("both members co-located on this host" if len(hosts) == 1
                           else f"members span {len(hosts)} hosts ({', '.join(hosts)}) -- a cross-node comm")
+        # Cyril item-8 -- real gpu_slot alongside the PID, same convention
+        # as the main _emit() path's header. role_rank/role_n are
+        # honestly "na" here, not guessed: this below-floor fallback's
+        # own per_member structure (see this function's own docstring)
+        # never threads comm-local role through -- the same "na" default
+        # node_aggregator_ref.py's own phys_comm_role dict already uses
+        # for "role not yet/never discovered," not a new convention.
         lines = [
-            f"[ALERT] rank={member} comm={comm} node={member_host} type=compute "
+            f"[ALERT] rank={member} gpu_slot={slot} role_rank=na role_n=na "
+            f"comm={comm} node={member_host} type=compute "
             f"confidence={tier} severity={severity}",
             "",
             f"P27.2 2-MEMBER TIMING-ASYMMETRY FALLBACK ({trigger}-triggered): comm={comm} "
@@ -2821,8 +2847,12 @@ class AlertEngine:
                 f"sm_clock={opb.get('target_sm_clock')} power={opb.get('target_power')} "
                 f"(peer_median_sm={opb.get('peer_median_sm_clock')}, peer_median_power={opb.get('peer_median_power')})"
             )
+        # Cyril item-8 -- same real gpu_slot + honest "na" role_rank/
+        # role_n convention as _emit_timing_fallback's own header (see
+        # that function's comment for why "na" here, not a guess).
         lines = [
-            f"[ALERT] rank={member} comm={comm} node={hostname} type=compute "
+            f"[ALERT] rank={member} gpu_slot={slot} role_rank=na role_n=na "
+            f"comm={comm} node={hostname} type=compute "
             f"confidence={tier} severity={severity}",
             "",
             f"P21.6.1 2-MEMBER DCGM FALLBACK ({trigger}-triggered): comm={comm} on {hostname} "
@@ -3163,6 +3193,17 @@ class AlertEngine:
             self._push_visibility_metric(
                 f'agg_straggler_incident_severity_ratio{{hostname="{hostname}",comm="{comm}",member="{member}",'
                 f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}')
+            # Cyril item-9 -- real persisted_s alongside the already-
+            # pushed severity_ratio, same label set, so Grafana can show
+            # both without reading raw log text. persist_duration_s is
+            # already computed above (used for dur_disp in the header);
+            # -1 is an honest "not known" sentinel (persist_duration_s
+            # can genuinely be None -- see dur_disp's own "unknown"
+            # fallback just above), never a guessed duration.
+            persisted_s_val = persist_duration_s if persist_duration_s is not None else -1
+            self._push_visibility_metric(
+                f'agg_straggler_incident_persisted_s{{hostname="{hostname}",comm="{comm}",member="{member}",'
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {persisted_s_val}')
             _incident_fired_this_call = True
         else:
             _incident_fired_this_call = False
@@ -3176,6 +3217,13 @@ class AlertEngine:
         coverage = coverage_guard.check_coverage(self.vm_url, hostname, comm, bucket, member, slurm_job_id)
         finding = build_finding_for_alert(self.vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
                                            self.dcgm_host_map, anomaly_ts=anomaly_ts, duration_s=persist_duration_s)
+        # Cyril item-8 -- real worker/GPU/rank identity for the [ALERT]
+        # header (format_alert reads these off finding), same role_rank/
+        # role_n this method already received as its own parameters --
+        # no new query, just threading already-available identity
+        # through to display.
+        finding["role_rank"] = role_rank
+        finding["role_n"] = role_n
         if _incident_fired_this_call:
             finding["incident_id"] = incident_id
         if coverage["degraded"] and finding["tier"] == "CONFIRMED":
@@ -3226,6 +3274,29 @@ class AlertEngine:
         self._push_visibility_metric(
             f'agg_path_c_verdict{{hostname="{hostname}",member="{member}",comm="{comm}",bucket="{bucket}",'
             f'gpu_slot="{gpu_slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}')
+
+        # Cyril item-9 -- real tier, correlated to this SAME event's
+        # identity (hostname/comm/member/gpu_slot/bucket/role_rank/
+        # role_n -- the same label set agg_straggler_incident_detected/
+        # severity_ratio/persisted_s and agg_path_c_verdict already use),
+        # so a Grafana table can join all of these into one readable,
+        # composed row -- entirely from already-pushed, bounded-
+        # cardinality fields, no free text. tier is a label, not a
+        # value, because it's categorical (CONFIRMED/PROBABLE/
+        # UNCONFIRMED -- exactly 3 real values, the same bounded-
+        # cardinality discipline every other label here already follows,
+        # categorically different from an unbounded free-text label).
+        # finding["tier"] is read here, AFTER both tier-capping checks
+        # above (coverage degradation, job-already-completed) have
+        # already run, so this reports the real FINAL tier for this
+        # event, never a pre-capped one. Gated on _incident_fired_this_
+        # call: this correlates to a specific straggler_incident_
+        # detected event, not pushed on every ordinary alert cycle.
+        if _incident_fired_this_call:
+            self._push_visibility_metric(
+                f'agg_straggler_incident_tier{{hostname="{hostname}",comm="{comm}",member="{member}",'
+                f'gpu_slot="{gpu_slot_disp}",bucket="{bucket}",role_rank="{role_rank}",role_n="{role_n}",'
+                f'tier="{finding["tier"]}"}} 1')
 
         # P21.6 -- cascade-mislocalization fix. An alert sourced from a
         # larger communicator has no way, by itself, to know whether the
