@@ -35,6 +35,7 @@ import time
 import json
 import re
 import calendar
+import datetime
 import statistics
 import subprocess
 import threading
@@ -432,6 +433,63 @@ def _job_still_running(job_id, timeout=5):
         return out.returncode == 0 and bool(out.stdout.strip())
     except Exception:
         return False
+
+
+def _query_job_sacct_info(job_id, timeout=10):
+    """Cyril item-6 -- real job-lifecycle context for alert/incident
+    text, sourced from sacct (an authoritative record covering both
+    running and completed jobs), NOT a tier/decision input. Returns a
+    dict {state, start_epoch, end_epoch, nnodes, nranks} or None on any
+    failure/missing data -- a caller must treat None as "genuinely not
+    available," never a guessed default.
+
+    Uses --json for the same reason node_aggregator_ref.py's own
+    refresh_job_sacct_info() does: a real, confirmed-live formatting
+    discrepancy between this cluster's login node and its worker nodes
+    for sacct's plain --format Start/End strings -- --json's own
+    time.start/time.end are plain integer epoch seconds, sidestepping
+    that ambiguity entirely.
+
+    This is a SEPARATE query from node_aggregator_ref.py's own
+    refresh_job_sacct_info() (a different process, no shared state) --
+    called fresh per alert here, same discipline _job_still_running
+    above already uses (a live query, not free, never run in a hot
+    loop; this file's own single call site is once per alert emission).
+
+    HARD CONSTRAINT (approved design): the dict this returns is used
+    ONLY for display text (format_alert/report.py). It is never passed
+    to determine_confirmed_path, which by construction only ever
+    receives finding["cause"] -- this result is stored under a
+    different, top-level finding key, structurally unreachable from
+    that function's own signature, not just by convention."""
+    if not job_id or job_id in ("", "unknown"):
+        return None
+    try:
+        out = subprocess.run(["sacct", "-j", str(job_id), "--json"],
+                              capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        jobs = data.get("jobs", [])
+        if not jobs:
+            return None
+        job = jobs[0]
+        job_time = job.get("time", {})
+        state_list = job.get("state", {}).get("current", [])
+        nranks = None
+        for t in job.get("tres", {}).get("allocated", []):
+            if t.get("type") == "gres" and t.get("name") == "gpu":
+                nranks = t.get("count")
+                break
+        return {
+            "state": state_list[0] if state_list else None,
+            "start_epoch": job_time.get("start") or None,
+            "end_epoch": job_time.get("end") or None,
+            "nnodes": job.get("allocation_nodes"),
+            "nranks": nranks,
+        }
+    except Exception:
+        return None
 
 
 def _query_instant(vm_url, promql):
@@ -1032,6 +1090,25 @@ def format_alert(finding, coverage):
             f"first, another doesn't), producing a genuine timing asymmetry that "
             f"looks like a live straggler but isn't something anyone can act on "
             f"for a job that has already finished. Treat with reduced confidence."
+        )
+
+    # Cyril item-6 -- real job context, informational only (never read
+    # by determine_confirmed_path or any tier-affecting logic -- see
+    # _query_job_sacct_info's own docstring for the full trace). Shown
+    # whenever sacct successfully resolved it; silently omitted (not a
+    # placeholder) when sacct couldn't answer, same "honest unknown,
+    # never a guess" convention as dcgm_gpu_slot_known above.
+    sacct_info = finding.get("sacct_info")
+    if sacct_info is not None and sacct_info.get("elapsed_into_job_s") is not None:
+        elapsed_min = sacct_info["elapsed_into_job_s"] / 60.0
+        start_iso = datetime.datetime.fromtimestamp(
+            sacct_info["start_epoch"], tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        nnodes_disp = sacct_info.get("nnodes") if sacct_info.get("nnodes") is not None else "unknown"
+        nranks_disp = sacct_info.get("nranks") if sacct_info.get("nranks") is not None else "unknown"
+        cascade_line += (
+            f"\n\nJob context (informational only, from sacct -- does not affect "
+            f"confidence tier): {elapsed_min:.1f} min into a job running since "
+            f"{start_iso}, out of {nnodes_disp} node(s)/{nranks_disp} rank(s) allocated."
         )
 
     if tier == "UNCONFIRMED":
@@ -3051,6 +3128,25 @@ class AlertEngine:
         # timestamp needed for uniqueness (both lines are printed
         # together, right here).
         incident_id = f"{hostname}:{comm}:{member}:{bucket}:{coll}"
+        # Cyril item-6 -- real job-context for display, informational
+        # only, computed once here (before either real line below is
+        # built) so both can show the same real data. Stored for reuse
+        # on `finding` further down; structurally unreachable from
+        # determine_confirmed_path, which only ever receives
+        # finding["cause"] by its own signature -- see
+        # _query_job_sacct_info's own docstring for the full trace.
+        sacct_info = _query_job_sacct_info(slurm_job_id)
+        if sacct_info is not None and sacct_info.get("start_epoch") and anomaly_ts is not None:
+            sacct_info["elapsed_into_job_s"] = anomaly_ts - sacct_info["start_epoch"]
+        job_ctx_disp = ""
+        if sacct_info is not None and sacct_info.get("elapsed_into_job_s") is not None:
+            elapsed_min = sacct_info["elapsed_into_job_s"] / 60.0
+            start_iso = datetime.datetime.fromtimestamp(
+                sacct_info["start_epoch"], tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            nnodes_disp = sacct_info.get("nnodes") if sacct_info.get("nnodes") is not None else "unknown"
+            nranks_disp = sacct_info.get("nranks") if sacct_info.get("nranks") is not None else "unknown"
+            job_ctx_disp = (f" job_elapsed_min={elapsed_min:.1f} job_start={start_iso} "
+                             f"job_nnodes={nnodes_disp} job_nranks={nranks_disp}")
         if mm_valid and mm > T.MEAN_MM_THRESH:
             severity_ratio = mm if stat_name == "mean" else z
             slot = _query_gpu_slot(self.vm_url, hostname, member)
@@ -3058,7 +3154,7 @@ class AlertEngine:
             dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
             header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
                       f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
-                      f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}")
+                      f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{job_ctx_disp}")
             print(header, flush=True)
             self._append_alert_summary(header)
             self._push_visibility_metric(
@@ -3094,6 +3190,12 @@ class AlertEngine:
         finding["job_already_completed"] = not _job_still_running(slurm_job_id)
         if finding["job_already_completed"] and finding["tier"] == "CONFIRMED":
             finding["tier"] = "PROBABLE"
+
+        # Cyril item-6 -- reuses the SAME sacct_info computed above
+        # (before the [STRAGGLER-INCIDENT] line) rather than querying
+        # again; see that computation's own comment for the full
+        # determine_confirmed_path-unreachability trace.
+        finding["sacct_info"] = sacct_info
 
         # V1-beta-dashboard-followup -- real visibility only: the SAME
         # already-computed Path C evidence/verdict this finding's own
