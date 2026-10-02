@@ -2613,18 +2613,64 @@ first, then `[GRAFANA-RECOVERED] :: .../api/org answering real HTTP
 cycle. `tools/self_test.sh`: clean PASS throughout, confirming this new
 watchdog adds no regression to the rest of the pipeline.
 
-**Separately found and fixed along the way (not the watchdog itself,
-but needed to validate it for real on this cluster)**: `cluster.env`'s
-own `GRAFANA_URL` was wrong (`http://localhost:3000` — a different,
+**Follow-up — the port-3000-default collision found while validating
+this watchdog is now FIXED, not just flagged.** `cluster.env`'s own
+`GRAFANA_URL` had been wrong (`http://localhost:3000` — a different,
 unrelated, pre-existing Grafana instance on this host, not this
-project's own) — both `install.sh` and `grafana-setup.sh` default their
-own "is Grafana already running" probe to port 3000 unconditionally,
-which silently matches *any* Grafana instance already on that port, not
-specifically this project's own. Corrected to the real value
-(`http://localhost:3098`, matching this cluster's own real
-`custom.ini`) directly; the deeper port-3000-default assumption in both
-scripts is a separate, pre-existing issue, flagged here, not fixed in
-this change.
+project's own) because `install.sh`'s own "is Grafana already running"
+probe hardcoded `http://localhost:3000` unconditionally — no
+`GRAFANA_PORT` respected at all — and, more fundamentally, neither
+`install.sh` nor `grafana-setup.sh` ever verified the thing found was
+genuinely *this package's own* instance, just that *something* answered
+on that port. Both are now fixed:
+
+- **`install.sh`** now checks `http://localhost:$GRAFANA_PORT`
+  (`GRAFANA_PORT`, same name/default `grafana-setup.sh` already used --
+  it was never the one hardcoding 3000) instead of a bare hardcoded
+  `http://localhost:3000`.
+- **Both scripts** now perform a real identity check, not just a
+  presence check, before trusting a found instance: if this package's
+  own generated credentials (`var/grafana_admin_credentials.txt`)
+  already exist, authenticate against the found instance's real
+  `/api/dashboards/uid/straggler-detection-metrics` endpoint — this
+  package's own dashboard ships with that exact, fixed, committed UID.
+  A real HTTP 200 means the found instance accepts *our* stored
+  credentials AND has *our* dashboard provisioned — the strongest
+  ownership signal available (Grafana has no dedicated identity
+  endpoint). Anything else (401/403 — wrong credentials, a genuinely
+  different instance; 404 — right credentials but our dashboard isn't
+  there) means it's NOT verifiably ours.
+- **Honest, disclosed limitation**: if no credentials file exists yet
+  (a genuinely fresh host where something else already occupies the
+  configured port), identity cannot be verified either way — this is
+  treated as unverifiable, not silently trusted either direction.
+- **What happens on a confirmed mismatch, deliberately different per
+  script's own real responsibility**: `grafana-setup.sh` (whose job is
+  to *launch and own* an instance on that exact port) now fails loudly
+  and stops (`FATAL: ... Set GRAFANA_PORT to use a different port ...`)
+  rather than risk a second instance colliding on the same port.
+  `install.sh` (whose job here is only *discovery*, already documented
+  elsewhere as non-fatal — the rest of the pipeline works without
+  Grafana) warns loudly and simply leaves `GRAFANA_URL` empty, rather
+  than either silently wiring to the wrong instance (the original bug)
+  or hard-aborting an otherwise-successful install over an optional
+  component.
+
+**Validated against the real, reproduced collision, both directions**:
+with the real foreign instance still on port 3000 and this package's
+own real instance on 3098 (confirmed live, both running
+simultaneously) --- `grafana-setup.sh` with the default port correctly
+printed `FATAL: ... dashboard-by-UID check returned HTTP 401, expected
+200` and exited 1 (previously: silently printed "already up, nothing to
+do" and exited 0, the exact real bug); `install.sh` with the default
+port correctly warned and wrote `GRAFANA_URL=""` into `cluster.env`
+(previously: silently wrote the wrong instance's URL); `install.sh` run
+again with `GRAFANA_PORT=3098` (this cluster's own real value) correctly
+confirmed identity and wrote the real, correct
+`GRAFANA_URL="http://localhost:3098"` into `cluster.env` -- no manual
+edit needed, the real tool doing its own job correctly. `tools/
+self_test.sh`: clean PASS after re-running the full `install.sh`,
+confirming no regression to the rest of the pipeline.
 
 **Aggregator-supervisor auto-restart isolation nuance (reconfirmed)**:
 `node_aggregator_ref.py` runs under `run_aggregator_supervised.sh`'s own
