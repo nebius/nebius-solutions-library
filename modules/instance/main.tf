@@ -1,10 +1,40 @@
+data "nebius_compute_v1_disk_snapshot" "boot-disk" {
+  count = var.boot_disk_snapshot_id == null ? 0 : 1
+  id    = var.boot_disk_snapshot_id
+}
+
 resource "nebius_compute_v1_disk" "boot-disk" {
   parent_id           = var.parent_id
   name                = join("-", ["instance-boot-disk", var.instance_name])
   block_size_bytes    = 4096
   size_bytes          = 1024 * 1024 * 1024 * var.boot_disk_size_gb
   type                = "NETWORK_SSD"
-  source_image_family = { image_family = "ubuntu24.04-cuda12" }
+  source_image_family = var.boot_disk_snapshot_id == null ? { image_family = "ubuntu24.04-cuda12" } : null
+  source_snapshot_id  = var.boot_disk_snapshot_id
+
+  lifecycle {
+    precondition {
+      condition = var.boot_disk_snapshot_id == null ? true : (
+        data.nebius_compute_v1_disk_snapshot.boot-disk[0].parent_id == var.parent_id
+      )
+      error_message = "The boot disk snapshot must belong to the same project as the VM."
+    }
+
+    precondition {
+      condition = var.boot_disk_snapshot_id == null ? true : (
+        data.nebius_compute_v1_disk_snapshot.boot-disk[0].status.state == "READY"
+      )
+      error_message = "The boot disk snapshot must be in READY state."
+    }
+
+    precondition {
+      condition = var.boot_disk_snapshot_id == null ? true : (
+        1024 * 1024 * 1024 * var.boot_disk_size_gb >=
+        data.nebius_compute_v1_disk_snapshot.boot-disk[0].status.content_size_bytes
+      )
+      error_message = "boot_disk_size_gb must be at least as large as the snapshot content size."
+    }
+  }
 }
 
 resource "nebius_compute_v1_disk" "extra-storage-disk" {

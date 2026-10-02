@@ -86,6 +86,17 @@ variable "boot_disk_size_gb" {
   description = "size of the boot disk"
 }
 
+variable "boot_disk_snapshot_id" {
+  type        = string
+  default     = null
+  description = "ID of a project-local disk snapshot used to initialize the boot disk. When null, the default Ubuntu image is used."
+
+  validation {
+    condition     = var.boot_disk_snapshot_id == null || trimspace(var.boot_disk_snapshot_id) != ""
+    error_message = "boot_disk_snapshot_id must be null or a non-empty disk snapshot ID."
+  }
+}
+
 variable "extra_storage_size_gb" {
   type        = number
   default     = 50

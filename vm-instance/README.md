@@ -9,6 +9,7 @@ This Terraform configuration script provisions cloud instances with specific har
 * Mount S3 Bucket to all instances
 * Attach extra storage to all instances
 * Add VMs to a GPU cluster and connect them over Infiniband
+* Initialize VM boot disks from a project-local disk snapshot
 
 ## Configuring Terraform for Nebius Cloud
 
@@ -134,3 +135,42 @@ fabric = "fabric-6"
 This will create a GPU cluster and add all vms inside there. This gives them the possibility to connect over Infiniband. 
 
 It is not possible to change that for already running instances
+
+### Example 5: Create VMs from a disk snapshot
+
+Set `boot_disk_snapshot_id` to initialize each VM with an independent boot disk
+created from the snapshot:
+
+```hcl
+preset   = "16vcpu-64gb"
+platform = "cpu-d3"
+
+boot_disk_snapshot_id = "computedisksnapshot-..."
+boot_disk_size_gb     = 500
+
+users = [
+  {
+    user_name    = "admin"
+    ssh_key_path = "~/.ssh/id_rsa.pub"
+  }
+]
+
+public_ip     = true
+instance_count = 1
+```
+
+The snapshot must:
+
+* Be in the same project as the VM.
+* Be in `READY` state.
+* Fit within `boot_disk_size_gb`.
+* Contain an operating system compatible with the selected VM platform's CPU architecture.
+
+This is a full-disk clone, not a generalized image. The restored disk can retain
+the source VM's hostname, machine ID, SSH host keys, users, and cloud-init state.
+If cloud-init has already completed on the source disk, the `users` configuration
+above might not be applied to the restored VM. Prepare and sanitize the source
+disk before using its snapshot as a reusable VM baseline.
+
+Snapshots are project-scoped. For details, see
+[Managing disk snapshots in Compute](https://docs.nebius.com/compute/storage/disk-snapshots).
