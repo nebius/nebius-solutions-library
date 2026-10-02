@@ -1,0 +1,34 @@
+name: "PR size labeler"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label-pr:
+    name: "Label PR by size"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Apply size label
+        uses: CodelyTV/pr-size-labeler@4e3aa0f77f348c8066513d453515316ffa01a607 # v1.11.1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          xs_label: "size/XS"
+          # The action treats max-size inputs as exclusive upper bounds.
+          xs_max_size: "11"
+          s_label: "size/S"
+          s_max_size: "51"
+          m_label: "size/M"
+          m_max_size: "201"
+          l_label: "size/L"
+          l_max_size: "501"
+          xl_label: "size/XL"
+          fail_if_xl: "false"
+          message_if_xl: ""
