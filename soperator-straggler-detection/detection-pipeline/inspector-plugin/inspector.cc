@@ -701,6 +701,28 @@ static inspectorResult_t inspectorCommInfoListFinalize(struct inspectorCommInfoL
     nextComm = commList->comms->next;
     // Ring-buffer port: no guard to destroy -- the ring buffer is
     // lock-free (see inspectorCommInfo's own struct comment).
+    // Per-comm retirement queue (gRetireLock scoping fix): a real, new
+    // correctness point this scoping introduces (the old process-wide
+    // queue outlived every communicator by construction; this one does
+    // not) -- any collInfo still waiting out its retirement window in
+    // THIS comm's own queue must be freed here, now, rather than
+    // silently leaked when the comm struct itself is freed below. Safe
+    // to free immediately at this point (not deferred further): the
+    // communicator and its own proxy thread are being torn down
+    // together, the same real teardown-time reasoning this function
+    // already applies to the comm struct itself.
+    pthread_mutex_lock(&commList->comms->retireLock);
+    for (int _i = 0; _i < commList->comms->retireCount; _i++) {
+      struct inspectorCollInfo* _victim =
+        commList->comms->retireQueue[(commList->comms->retireHead + _i) % RETIRE_QUEUE_CAPACITY];
+      if (_victim != nullptr) {
+        inspectorLockDestroy(&_victim->guard);
+        memset(_victim, 0, sizeof(struct inspectorCollInfo));
+        free(_victim);
+      }
+    }
+    pthread_mutex_unlock(&commList->comms->retireLock);
+    pthread_mutex_destroy(&commList->comms->retireLock);
     free(commList->comms);
     commList->comms = nextComm;
     commList->ncomms--;
@@ -1246,6 +1268,16 @@ static inspectorResult_t inspectorFillCommInfo(struct inspectorCommInfo* commInf
   // start correctly at zero via this struct's own calloc() allocation
   // in inspectorAddComm -- no explicit init needed, and no lock to
   // create (the ring buffer is lock-free by design).
+  // Per-comm retirement queue (gRetireLock scoping fix): retireQueue/
+  // retireHead/retireCount are likewise already zero from calloc(), but
+  // retireLock is a real pthread_mutex_t embedded in dynamically
+  // allocated memory -- explicitly pthread_mutex_init'd rather than
+  // relying on this platform's zero-initialized-mutex behavior matching
+  // PTHREAD_MUTEX_INITIALIZER (true on Linux glibc today, but not a
+  // portability guarantee worth depending on).
+  if (pthread_mutex_init(&commInfo->retireLock, nullptr) != 0) {
+    INFO(NCCL_INSPECTOR, "NCCL Inspector: inspectorFillCommInfo couldn't init retireLock");
+  }
   commInfo->next = nullptr;
   return inspectorSuccess;
 }
@@ -1590,7 +1622,23 @@ void inspectorUpdateCollPerf(struct inspectorCompletedCollInfo *completedColl,
   completedColl->msgSizeBytes = collInfo->msgSizeBytes;
   completedColl->execTimeUsecs =
     calculateMaxKernelExecTimeUsecs(collInfo, &completedColl->timingSource);
-  completedColl->collEvtTrk = collInfo->collEvtTrk;
+  // Lean-mode hot-path fix (this session) -- completedColl->collEvtTrk
+  // (~3112 bytes) is read in exactly one place in this whole codebase:
+  // inspectorCompletedCollVerbose, itself only ever called when
+  // enableNcclInspectorDumpVerbose is true (see inspectorCompletedColl's
+  // own call site) -- re-verified directly against current code, not
+  // assumed from history, before cutting this. The live pipeline
+  // (node_aggregator_ref.py -> VM -> alert_engine.py) never reads this
+  // field; only the offline/verbose-only tools do, and only when
+  // verbose mode was explicitly requested. Skipping this copy in lean
+  // mode (the default) saves a real, measured ~3112-byte struct
+  // assignment on every single completed collective -- confirmed the
+  // majority of this function's own ~820-955 cycle cost via direct hot-
+  // path instrumentation. Full behavior (including this copy) is
+  // unchanged when verbose mode is explicitly active.
+  if (enableNcclInspectorDumpVerbose) {
+    completedColl->collEvtTrk = collInfo->collEvtTrk;
+  }
 }
 
 /*

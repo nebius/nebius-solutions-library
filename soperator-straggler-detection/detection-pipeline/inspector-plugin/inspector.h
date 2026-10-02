@@ -25,6 +25,25 @@
 // bitmask (& (CAPACITY-1)) instead of a modulo.
 #define INSPECTOR_RING_CAPACITY          256
 
+// P32's own deferred-free retirement queue (see inspector_plugin.cc's
+// own full docstring on inspectorRetireCollInfo for the real
+// use-after-free bug this closes), scoped from one process-wide queue
+// to one per communicator -- confirmed the dominant per-collective
+// hot-path cost this session (~1800-3060 cycles/finalize event, 2.5-3x
+// the next-largest phase) via direct, live instrumentation, traced to
+// real cross-communicator contention on a single global
+// pthread_mutex_t. Verified safe before narrowing, not assumed:
+// re-read P32's own docstring, which explicitly calibrates
+// RETIRE_QUEUE_CAPACITY's depth to real ELAPSED TIME ("several real
+// seconds of buffering... at DLRM's steady-state call rate"), not to a
+// cross-communicator object count -- scoping per-communicator can only
+// ever INCREASE this real-time margin for any given communicator's own
+// objects (no longer sharing queue depth with other communicators'
+// retirements, which drained it faster in the old global design),
+// never decrease it. 1000 is unchanged from the original, already-
+// validated depth.
+#define RETIRE_QUEUE_CAPACITY 1000
+
 #define INS_CHK_GOTO(call, res, label)                                  \
   do {                                                                  \
     res = call;                                                         \
@@ -118,6 +137,8 @@ enum {
   NCCL_COMM_HASH_LENGTH = 17
 };
 
+struct inspectorCollInfo; // forward decl -- inspectorCollInfo (below) is only ever referenced here via pointer, for the per-comm retirement queue
+
 struct inspectorCommInfo {
   struct inspectorCommInfo* next;
 
@@ -153,6 +174,23 @@ struct inspectorCommInfo {
   uint64_t ringHead;          // producer-owned; published with release so the consumer's acquire-load is guaranteed to see the fully-written slot
   uint64_t ringTail;          // consumer-owned; published with release once per drain so the producer's acquire-load sees freed capacity promptly
   uint64_t queueDropsTotal;   // cumulative; incremented atomically by the producer on every drop-newest event; surfaced in every dumped record (never silent) and in a rate-limited [WARN] (fires on drop counts 1, 2, 4, 8, 16, ... -- exact powers of two, never silent but never log-spamming either)
+
+  // P32's deferred-free retirement queue (see inspector_plugin.cc's own
+  // inspectorRetireCollInfo docstring for the real use-after-free bug
+  // it closes), scoped per-communicator instead of one process-wide
+  // queue -- see RETIRE_QUEUE_CAPACITY's own comment above for why this
+  // is safe (can only increase the real-time retention margin, never
+  // decrease it). retireLock guards all three fields below; explicitly
+  // pthread_mutex_init'd in inspectorFillCommInfo and destroyed (along
+  // with freeing any still-queued entries) in inspectorCommInfoListFinalize
+  // when this communicator itself is torn down -- a real, new
+  // correctness point this per-comm scoping introduces that the old
+  // global queue never needed (a process-wide queue outlives every
+  // individual communicator by construction; a per-comm one does not).
+  struct inspectorCollInfo* retireQueue[RETIRE_QUEUE_CAPACITY];
+  int retireHead;
+  int retireCount;
+  pthread_mutex_t retireLock;
 };
 
 struct inspectorKernelChInfo {

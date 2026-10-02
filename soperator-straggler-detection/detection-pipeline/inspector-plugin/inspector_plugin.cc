@@ -198,8 +198,24 @@ __hidden ncclResult_t inspectorPluginFinalize(void* context) {
  * reallocated memory -- the lock is never destroyed early either, so
  * every call site can unconditionally unlock afterward (no more
  * "skip unlock, the struct might already be gone" special-casing).
+ *
+ * gRetireLock scoping fix (this session) -- the single process-wide
+ * queue/lock above was confirmed, via direct live instrumentation, to
+ * be the dominant per-collective hot-path cost (~1800-3060 cycles/
+ * finalize event, 2.5-3x the next-largest phase): every communicator's
+ * proxy progress thread in the process contended on this one mutex for
+ * every single completed collective. Scoped to one queue per
+ * communicator instead (inspectorCommInfo's own retireQueue/retireHead/
+ * retireCount/retireLock -- see inspector.h's own comment on
+ * RETIRE_QUEUE_CAPACITY for why this is safe, verified not assumed: it
+ * can only increase the real-time retention margin for any given
+ * communicator, never decrease it). The queue/lock below remain as a
+ * narrow fallback for the one case a per-comm queue structurally can't
+ * cover -- collInfo->commInfo itself is null (the same defensive case
+ * the ring-buffer write already guards against) -- so retirement is
+ * never skipped outright for an object this plugin can't otherwise
+ * route.
  */
-#define RETIRE_QUEUE_CAPACITY 1000
 static struct inspectorCollInfo* gRetireQueue[RETIRE_QUEUE_CAPACITY];
 static int gRetireHead = 0;
 static int gRetireCount = 0;
@@ -207,16 +223,32 @@ static pthread_mutex_t gRetireLock = PTHREAD_MUTEX_INITIALIZER;
 
 static void inspectorRetireCollInfo(struct inspectorCollInfo* collInfo) {
   struct inspectorCollInfo* victim = nullptr;
-  pthread_mutex_lock(&gRetireLock);
-  if (gRetireCount == RETIRE_QUEUE_CAPACITY) {
-    victim = gRetireQueue[gRetireHead];
-    gRetireHead = (gRetireHead + 1) % RETIRE_QUEUE_CAPACITY;
-    gRetireCount--;
+  struct inspectorCommInfo* commInfo = collInfo->commInfo;
+  if (commInfo != nullptr) {
+    pthread_mutex_lock(&commInfo->retireLock);
+    if (commInfo->retireCount == RETIRE_QUEUE_CAPACITY) {
+      victim = commInfo->retireQueue[commInfo->retireHead];
+      commInfo->retireHead = (commInfo->retireHead + 1) % RETIRE_QUEUE_CAPACITY;
+      commInfo->retireCount--;
+    }
+    int tail = (commInfo->retireHead + commInfo->retireCount) % RETIRE_QUEUE_CAPACITY;
+    commInfo->retireQueue[tail] = collInfo;
+    commInfo->retireCount++;
+    pthread_mutex_unlock(&commInfo->retireLock);
+  } else {
+    // Fallback: collInfo->commInfo is null (rare, defensive case) --
+    // use the narrow global queue instead of skipping retirement.
+    pthread_mutex_lock(&gRetireLock);
+    if (gRetireCount == RETIRE_QUEUE_CAPACITY) {
+      victim = gRetireQueue[gRetireHead];
+      gRetireHead = (gRetireHead + 1) % RETIRE_QUEUE_CAPACITY;
+      gRetireCount--;
+    }
+    int tail = (gRetireHead + gRetireCount) % RETIRE_QUEUE_CAPACITY;
+    gRetireQueue[tail] = collInfo;
+    gRetireCount++;
+    pthread_mutex_unlock(&gRetireLock);
   }
-  int tail = (gRetireHead + gRetireCount) % RETIRE_QUEUE_CAPACITY;
-  gRetireQueue[tail] = collInfo;
-  gRetireCount++;
-  pthread_mutex_unlock(&gRetireLock);
   if (victim != nullptr) {
     // victim has survived RETIRE_QUEUE_CAPACITY further retirements
     // since its own refCount hit 0 -- safe to actually destroy/free now.

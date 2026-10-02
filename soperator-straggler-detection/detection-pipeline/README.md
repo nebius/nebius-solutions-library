@@ -1156,6 +1156,68 @@ prior track's own numbers**:
   every real completed collective instead of silently collapsing bursts
   into one record.
 
+**Follow-up — MoE/DLRM ring-buffer capacity, investigated further; burst
+characterized as unbounded-looking, not just "needs a bigger number"**:
+4 real MoE runs (256- and 4096-capacity, same 300-step config) showed
+drop counts of 2, 592, 875, and 2,212 — a ~1000x spread for IDENTICAL
+code and config. Direct analysis of the 875-drop case found the real
+cause: a genuine, **sustained** (not instantaneous) production-rate
+burst lasting ~2.7 real seconds, concentrated late in the run (~92-96%
+through), affecting a different communicator and different ranks each
+run — not the same expert/rank every time, and the affected rank's own
+real token-routing load (`[MOE-TOKEN-LOAD]`) during the burst was
+**within its own normal range**, not an outlier — ruling out "this
+rank's own routing imbalance" as the direct cause. The dump thread
+itself was confirmed still draining normally throughout (gaps <15ms,
+same as quiet periods) — ruling out a consumer stall. The real root
+cause remains undetermined (plausibly a downstream/peer-side
+synchronization effect), and the drop magnitude shows no sign of
+converging to a safe ceiling across the 4 samples gathered. **Given
+this, the data does not support "just pick a bigger number" — this
+looks like a large-but-not-clearly-bounded tail, not a well-characterized
+peak rate.** No capacity change has been made; this is reported as an
+open question for a deliberate decision, not resolved here.
+
+**Follow-up — the two validated overhead fixes, implemented**:
+1. **`gRetireLock` scoped from one process-wide mutex to one per
+   communicator** — confirmed, by re-reading P32's own docstring before
+   narrowing it (not assumed safe from the pattern alone), that this can
+   only ever *increase* the real-time retention safety margin P32's
+   design relies on for any given communicator (no longer sharing queue
+   depth with other communicators' retirements), never decrease it.
+   Real new correctness point this introduces and had to be handled: a
+   per-comm queue, unlike the old process-wide one, does not outlive
+   every individual communicator by construction — any entry still
+   waiting out its retirement window is now explicitly drained when that
+   communicator itself is torn down, rather than silently leaked.
+2. **`collEvtTrk` population/copy skipped entirely in lean mode** — the
+   dominant cost inside `inspectorUpdateCollPerf`, confirmed (re-verified
+   directly against current code, not assumed from history) to be read
+   in exactly one place in the whole codebase (`inspectorCompletedCollVerbose`,
+   itself gated behind the same verbose flag), so skipping the write
+   when lean mode is active never exposes stale data to anything that
+   reads it. Full behavior unchanged when verbose mode is explicitly
+   requested.
+
+Both built clean, `-Wall -Wextra`, zero warnings. Full revalidation: `tools/self_test.sh`
+clean PASS; Megatron coll_sn completeness reconfirmed at 0.00% loss,
+0 drops (unchanged). **Real overhead, re-measured twice (same
+methodology, same shape) to account for this shared cluster's own
+run-to-run noise**: 14.84% and 9.21% individually, **~12.0% pooled**
+(n=980 each) — against the pre-fix ~13.1%. A small, directionally
+real improvement, **not a dramatic one, and reported honestly as such**:
+the measured run-to-run spread (9.2-14.8%) is itself larger than the
+~1 percentage-point apparent gain, so this should be read as "roughly
+consistent with 13.1%, with a modest improvement more likely than not"
+rather than a precisely-quantified win. One MoE sanity run with the
+patched plugin showed a notably higher drop count (319,434, across all
+16 ranks) than any sample gathered during the capacity investigation
+above — given that investigation's own finding of a highly variable,
+possibly-unbounded burst tail even without any code change, this is
+**not** attributed to the Part B fixes (which don't touch the ring-buffer
+mechanism at all) with any confidence either way; reported as a single,
+inconclusive data point, not a claim of regression or of no regression.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
