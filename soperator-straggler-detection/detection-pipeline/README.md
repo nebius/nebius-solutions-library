@@ -1118,9 +1118,83 @@ this release.
   added alongside the ResNet number above, not replacing it**: a real
   48-GPU Megatron TP4/PP4/DP3 validation run measured **94.7ms/iter with
   Inspector on vs. 89.0ms/iter off — ~6.5% relative overhead** at full
-  48-rank, multi-communicator scale. Both numbers are real and both are
-  on record; which one is representative of *your* workload depends on
-  model/parallelism shape, same "measure your own" guidance as above.
+  48-rank, multi-communicator scale. **Conditions, confirmed directly
+  against this project's own commit timeline, not assumed**: this number
+  was recorded (`6932b2e1`, as part of that same validation's writeup)
+  roughly one hour *after* the lean-mode default flip commit
+  (`f89230e2`) — and that flip commit's own message states plainly it
+  was triggered by *this exact run*: "verbose Inspector dumps filled a
+  91GB shared volume and crashed the pipeline." The Megatron workload's
+  own launch scripts were not added to this repo until many hours later
+  (`10cbdb94`), so the exact script invoked for this measurement isn't
+  preserved in git history — but the causal link is clear: this number
+  was measured **before lean mode existed as a default at all**, on the
+  run that is on record as crashing specifically *from* verbose-mode
+  dump volume. It also predates every one of this session's fixes
+  (persistence-gating generalized to mean/`outlier_count`,
+  `straggler_incident_detected`, the z/mm staleness fix, Path C
+  window-matching, the worst-selection sign-bug fix — all committed
+  hours to a full day later). Treat this number as **pre-lean-mode,
+  pre-this-session**, not as a lean-mode baseline.
+- **Re-measured under current conditions (lean mode confirmed, every
+  fix above applied) — added alongside both numbers above, not
+  replacing either**: this project's 2-node/16-GPU dev cluster can't
+  run the full 6-node/48-GPU shape, so the real, **unmodified**,
+  already-committed `workloads/megatron/` scripts were run as-is — they
+  auto-discover the available nodes and, on 2 nodes, naturally produce
+  **TP4/PP4/DP1** (16 ranks) — exactly *one* real DP replica of the
+  original topology's own documented per-replica layout (2 nodes/replica,
+  2 PP stages/node, TP4/stage), a genuine proportional scale-down, not an
+  approximation. Two full, back-to-back 500-iteration runs (steady-state
+  stats below exclude the first 10 warmup/compile iterations; iteration 1
+  alone took 17.5s/20.4s off/on, pure CUDA/Triton/NCCL init cost, clearly
+  separable from steady-state):
+  - **Off** (Inspector fully disabled — no `NCCL_PROFILER_PLUGIN`, no
+    `NCCL_INSPECTOR_ENABLE` at all, same convention as
+    `train_node_shape1_nomonitor.sh`): mean **172.31ms**/iter, stdev
+    17.87ms, min 153.1ms, max 519.1ms, median 171.00ms (n=490).
+  - **On** (Inspector enabled, lean mode — confirmed genuinely active by
+    direct inspection of the real dump records themselves, not just the
+    script default: zero `event_trace_ts`/`event_trace_sn` fields found,
+    only the lean-only `dump_timestamp_us`, ~457 bytes/record, matching
+    the ~462 bytes/record lean-mode figure already on record above):
+    mean **193.50ms**/iter, stdev 16.79ms, min 173.4ms, max 489.9ms,
+    median 190.70ms (n=490).
+  - **Real overhead at this shape/scale: ~21.2ms absolute, ~12.3%
+    relative — meaningfully higher than the 6.5% figure above, not
+    roughly consistent with it.** Given the conditions finding directly
+    above, this is not surprising in the direction one might first
+    guess: the 6.5% figure is suspected to have been measured under
+    *verbose* mode (normally the more expensive mode), yet this *lean*-
+    mode number reads higher, not lower. The most likely real
+    explanation is topology, not verbose-vs-lean: the two measurements
+    are at genuinely different absolute scale (89.0ms/iter baseline at
+    48-rank DP3 vs. 172.31ms/iter baseline at 16-rank DP1 here — nearly
+    2x the per-iteration cost before Inspector is even added), and DP1
+    means every rank is on the critical path with no data-parallel
+    replica to overlap communication against, unlike DP3. This is
+    reported as the most plausible explanation given what this
+    investigation could check, not a proven root cause — profiling
+    exactly where Inspector's runtime cost goes at this shape is real,
+    separate follow-up work, not attempted here.
+  - **Disk volume (lean mode, this shape)**: 395MB total dump volume
+    across both nodes for these 500 iterations (~96s wall time) — per-
+    record size confirms lean mode (above), but the *accumulation rate*
+    (~123MB/min/node) is markedly higher here than the ~28.5MB/min/node
+    figure already on record for `nanogpt`'s simpler DDP-only
+    communication pattern — expected, not a regression: TP4/PP4
+    generates far more real NCCL collective calls per iteration than a
+    pure data-parallel AllReduce pattern, so lean mode's *per-record*
+    reduction holds, but the *total accumulated volume* is real and
+    workload-dependent, not a single universal rate.
+  - **Disk-usage guard**: both nodes' root volume held at a steady,
+    pre-existing 92.7% throughout this entire test (unrelated to it —
+    same value before, during, and after; a real, already-filled 2TB
+    volume with only 150GB free, flagged separately, not fixed here).
+    `[DUMP-DISK-WARN]` kept firing at its already-standing rate; the
+    95% `[DUMP-DISK-CRITICAL]` threshold never fired — the guard behaved
+    correctly, neither silent nor falsely escalating, for a normal run
+    of this length.
 - **`NCCL_INSPECTOR_DUMP_VERBOSE` now genuinely defaults to lean mode
   (`=0`) across all 17 launch scripts that set it** — a real, previously
   undocumented discrepancy existed here (this section used to correctly
