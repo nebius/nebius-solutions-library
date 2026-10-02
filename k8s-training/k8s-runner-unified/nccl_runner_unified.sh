@@ -58,10 +58,13 @@ trap 'exit 143' TERM
 
 # ============ CONFIGURE FOR YOUR CLUSTER ============
 NAMESPACE=nccl-tests
-TEMPLATE=nccl-test-template.yaml          # x86/device-plugin; DRA path swaps to the -dra variant
-TEMPLATE_DRA=nccl-test-template-dra.yaml  # GB300/DRA (GPU claims instead of nvidia.com/gpu limits)
+# Templates are env-overridable (aligns with PR 1206's form so the two don't fight
+# over this line). x86/device-plugin uses TEMPLATE; the DRA path swaps to TEMPLATE_DRA.
+TEMPLATE="${TEMPLATE:-nccl-test-template.yaml}"          # x86/device-plugin
+TEMPLATE_DRA="${TEMPLATE_DRA:-nccl-test-template-dra.yaml}"  # GB300/DRA (GPU claims, not nvidia.com/gpu limits)
 # The image is multi-arch (amd64 + arm64/Grace), so the same tag runs on x86 and GB300.
-IMAGE="cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26"
+# Overridable so you can point at a different registry/tag (e.g. cr.nebius.cloud).
+IMAGE="${IMAGE:-cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26}"
 
 # GPU node group ID — SET THIS for your cluster (env-overridable). Get it via:
 #   kubectl get nodes -o custom-columns='NAME:.metadata.name,GROUP:.metadata.labels.nebius\.com/node-group-id,GPU:.status.capacity.nvidia\.com/gpu'

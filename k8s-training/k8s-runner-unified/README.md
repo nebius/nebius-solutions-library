@@ -107,7 +107,7 @@ Top-of-script vars (several are also environment-overridable, so you don't edit 
 | Var | Default | Meaning |
 |---|---|---|
 | `NAMESPACE` | `nccl-tests` | Namespace to run in |
-| `IMAGE` | Nebius `nccl-tests` image (multi-arch) | Must be pullable on the cluster |
+| `IMAGE` | Nebius `nccl-tests` image (multi-arch) | Must be pullable on the cluster — env-overridable |
 | `NODE_GROUP_ID` | (placeholder) | **Set per cluster** — env-overridable |
 | `NCCL_TRANSPORT` | `auto` | DRA/GB300 only: `auto` (MNNVL/NVLink) or `ib` (InfiniBand) |
 | `RESERVE_CPU_CORES` / `RESERVE_MEM_GI` | `4` / `50` | Headroom left for kubelet/daemonsets |
