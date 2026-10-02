@@ -2173,25 +2173,111 @@ same reason. Don't read a short run's `coverage=0` as evidence
 anything is broken — check it on a job that's run for several real
 minutes past its own first calibration instead.
 
-**Aggregator restart replays the entire dump-directory backlog from
-byte 0 — real, disclosed operational property, not a bug in any fix
-above.** `self.file_offsets` (each dump file's own read position) is
-purely in-memory — any aggregator process restart resets it to empty,
-so the aggregator re-reads every file under its `var/dump/<host>`
-directory from the beginning before it reaches current, live data.
-Confirmed directly on a cluster whose dump directory had accumulated
-57GB/341 files across a full day of testing: one single old comm alone
-had 235,000+ real records replayed, and workload-signature resets /
-fresh signatures took multiple minutes to resolve post-restart purely
-from this replay, not from anything wrong with the pipeline itself.
-This also means every aggregator restart pays a real, measurable
-heartbeat-staleness cost (`agg_aggregator_heartbeat` pushes are delayed
-by however long the backlog replay takes) — confirmed as the real
-explanation for every `[PIPELINE-DOWN]` episode this project has ever
-logged around a deliberate restart (see the health-check reference note
-below). Not fixed here — flagging for whoever next needs a
-faster-restart or backlog-pruning story; a fresh install with an empty
-`var/dump` never hits this.
+**Aggregator restart no longer replays the entire dump-directory
+backlog from byte 0 — fixed via persistent offset checkpointing.**
+This was previously documented here as a disclosed, unfixed property
+(`self.file_offsets` being purely in-memory, confirmed on a cluster
+with 57GB/341 files where one comm alone replayed 235,000+ records on
+restart). It became a priority fix after directly causing a real
+regression: restarting both aggregators to deploy the Cyril item-6
+sacct work (6.10 above) left them replaying an ~11GB/host backlog for
+9-15 minutes (the real range observed varied run to run with how much
+historical state had accumulated), during which `tools/self_test.sh`
+genuinely **FAILED** — the aggregator was still replaying history, not
+watching the live test job, when the test's own 600s alert-wait window
+expired.
+
+**Design**: `node_aggregator_ref.py` now periodically checkpoints
+`self.file_offsets` to a small JSON file (`.aggregator_offsets_
+checkpoint.json`) inside each host's own `var/dump/<host>/` directory —
+every `OFFSET_CHECKPOINT_INTERVAL_S=10` seconds during normal operation
+AND once per file during a large backlog replay itself (so even a
+crash mid-replay loses only the interval's own small window, not the
+whole in-progress replay), via an atomic write (temp file +
+`os.replace()`, a single rename syscall — a reader can never observe a
+partially-written checkpoint). A real `SIGTERM` handler is also
+installed: the actual restart mechanism this pipeline already uses
+(clean `SIGTERM` to the leaf process, supervisor relaunches) uses
+Python's default signal disposition by default, which would terminate
+the process before any of this code ran — the handler makes a
+*deliberate* restart checkpoint right up to the moment of the signal,
+not just whatever the last periodic write happened to catch.
+
+**Real edge cases handled, not hand-waved**:
+- **Missing/corrupt/stale checkpoint** (first-ever startup, a crash
+  mid-write, an unexpected schema): `_load_offset_checkpoint()` fails
+  safe on ANY problem, falling back to `{}` — the exact pre-fix
+  behavior, never a silent skip of real data. **Validated live**:
+  deliberately corrupted the checkpoint file and confirmed the next
+  restart logged `[OFFSET-CHECKPOINT] could not load ... falling back
+  to re-reading from byte 0` and correctly did a full, safe re-read —
+  no crash, no skipped data.
+- **A dump file truncated/replaced since the checkpoint was written**
+  (the inspector plugin's own writer opens each dump path with
+  `fopen(path, "w")` — confirmed in `inspector-plugin/json.cc` — which
+  truncates in place if the OS ever reuses a rank process's PID): a
+  single guard in `poll_files()` (not duplicated in the checkpoint
+  loader) catches this by comparing current file size and inode
+  against what's already known, resetting to offset 0 on either
+  mismatch — always failing in the safe direction (reprocess, never
+  skip). This same guard also protects plain continuous live operation
+  against a PID-reuse truncation, independent of any restart.
+- **Small amount of re-processed data after a crash**: a crash between
+  two checkpoints loses at most `OFFSET_CHECKPOINT_INTERVAL_S` (10s)
+  worth of offset progress, re-processing that small window once more
+  on resume. Confirmed acceptable, not assumed: this is bounded,
+  safe-direction duplication, and the consumers of `handle_record()`'s
+  output (rolling calibration/CV windows, VictoriaMetrics ingestion)
+  already tolerate the normal jitter of a live stream.
+
+**Real validation, not just a fresh/empty install**: tested against
+this cluster's own real, multi-day accumulated dump directories
+(~11-12GB/host, 216+ files each), not a synthetic small backlog.
+- **Clean, isolated restart (no contending replay on the other host)**:
+  checkpoint-assisted resume went from heartbeat-stale to fully live in
+  **~30 seconds**, against a **9-15 minute** from-scratch baseline (the
+  range observed across this session's own restarts, worse than the
+  original ~9-12 minute figure once more historical jobs/communicators
+  had accumulated by the time of a later from-scratch test) — confirmed
+  via real `agg_aggregator_heartbeat` freshness checks against
+  VictoriaMetrics, not inferred.
+- **Fault-detection-across-restart, the real scenario that matters**:
+  launched a real fault-injection job (rank 8/worker-1,
+  `STRAGGLER_SLEEP_MS=200`), let the aggregator checkpoint partway
+  through that job's own real dump data, then `SIGKILL`'d it mid-stream
+  (simulating a true crash, not a clean shutdown) and let the supervisor
+  relaunch it. Confirmed via the checkpoint's own content that it
+  resumed from the last checkpointed offset, not byte 0 and not the
+  file's current (further-advanced) end — then confirmed the real
+  `[ALERT]` still fired afterward, naming the exact injected rank/PID
+  (`rank=938521`, `host=worker-1`) with an exact match against the
+  ground-truth PID recorded before the crash. No fault evidence was
+  lost by the crash-and-resume cycle.
+- **Checkpoint-write overhead, measured directly**: a realistic
+  216-entry payload (~29KB JSON) writes in **~0.43ms**, measured via
+  200 real back-to-back timed writes — negligible at the 10s interval
+  (~0.004% of wall-clock), not assumed negligible from the interval
+  choice alone.
+- `tools/self_test.sh`: clean **PASS** (exact rank-match, 0 new
+  `CHECK-FAILED`) after this fix, run against the real, previously-
+  failing conditions.
+
+**Remaining, disclosed caveat**: the one-time backlog replay needed to
+*seed* the very first checkpoint after deploying this fix (or after any
+genuinely fresh install) still pays the full from-scratch cost — this
+fix makes every restart *after* that fast, not the very first one. A
+narrow, unobserved-in-this-validation edge case also remains: if a
+*third* distinct job starts before a crashed job's own end-time ever
+gets one more sacct check (see 6.10's own job-end-race fix), the
+cached last-job-id check is abandoned in favor of the new job, same
+tradeoff already disclosed there. Separately noted, not fixed here (out
+of this task's own scope): this replay's real CPU cost (processing
+tens of millions of historical JSON records) drove one observed
+from-scratch run's RSS to ~60GB before settling back down after
+completion — a pre-existing characteristic of how much per-communicator
+history this aggregator keeps in memory, unrelated to the checkpoint
+mechanism itself, flagging for whoever next looks at long-term memory
+growth.
 
 **`[CHECK-FAILED]` vs. `[PIPELINE-DOWN]` — two distinct real health
 signals, easy to conflate, don't**: `[CHECK-FAILED]` (`_run_check()`,
