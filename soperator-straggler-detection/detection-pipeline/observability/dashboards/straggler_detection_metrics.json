@@ -1790,7 +1790,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "z: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "legendFormat": "z: {{hostname}} GPU{{gpu_slot}} rank={{role_rank}}/{{role_n}} (pid={{member}}) ({{coll}}@{{bucket}})",
           "range": true,
           "refId": "A",
           "useBackend": false,
@@ -1810,7 +1810,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "mm: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "legendFormat": "mm: {{hostname}} GPU{{gpu_slot}} rank={{role_rank}}/{{role_n}} (pid={{member}}) ({{coll}}@{{bucket}})",
           "range": true,
           "refId": "B",
           "useBackend": false,
@@ -1830,7 +1830,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "cv-z: {{hostname}} member={{member}} ({{coll}}@{{bucket}})",
+          "legendFormat": "cv-z: {{hostname}} GPU{{gpu_slot}} rank={{role_rank}}/{{role_n}} (pid={{member}}) ({{coll}}@{{bucket}})",
           "range": true,
           "refId": "C",
           "useBackend": false,
@@ -1936,7 +1936,210 @@
       ],
       "title": "Peer timing comparison (every member of the same comm, at the same moment)",
       "description": "Set the Comm variable from an [ALERT]/[STRAGGLER-INCIDENT] line's comm= field to see every member's own real exec time side by side (mean-path agg_mean_exec_time_us and cv-path agg_cv_exec_time, whichever the triggering stat used) -- the same data this project's own cascade/\"LOCATION UNCERTAIN\" investigation already relies on, now one filter away instead of hand-written PromQL.",
-      "type": "table"
+      "type": "table",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "hostname": 0,
+              "gpu_slot": 1,
+              "role_rank": 2,
+              "role_n": 3,
+              "member": 4
+            },
+            "renameByName": {
+              "hostname": "Worker",
+              "gpu_slot": "GPU",
+              "role_rank": "Rank",
+              "role_n": "OfN",
+              "member": "PID"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Cyril item-9 -- composed, human-readable incident summary built ENTIRELY from fields already pushed to VictoriaMetrics (tier, severity_ratio, persisted_s, Path C verdict, worker/GPU/rank identity) -- zero new free text, zero new cardinality (tier adds exactly 3 real values, the same bounded-cardinality discipline every other label here already follows). Set the Comm/Member variables from an [ALERT]/[STRAGGLER-INCIDENT] line to see that exact event's own row. Tier is the ONLY certainty signal -- see the Tier column's own color mapping: CONFIRMED is the only tier colored as urgent; PROBABLE/UNCONFIRMED are deliberately styled the same as each other and never as CONFIRMED, so this table's own visual design cannot imply more confidence than the tier label itself states.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tier"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "CONFIRMED": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "PROBABLE": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "UNCONFIRMED": {
+                        "color": "blue",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 98
+      },
+      "id": 22,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_straggler_incident_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_straggler_incident_persisted_s{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_straggler_incident_severity_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_path_c_verdict{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "D"
+        }
+      ],
+      "title": "Composed incident summary (identity + tier + evidence, no raw log reading needed)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "hostname": 0,
+              "gpu_slot": 1,
+              "role_rank": 2,
+              "role_n": 3,
+              "member": 4,
+              "tier": 5
+            },
+            "renameByName": {
+              "hostname": "Worker",
+              "gpu_slot": "GPU",
+              "role_rank": "Rank",
+              "role_n": "OfN",
+              "member": "PID",
+              "tier": "Tier",
+              "Value #A": "Incident(1=fired)",
+              "Value #B": "PersistedS",
+              "Value #C": "SeverityRatio",
+              "Value #D": "PathCVerdict(-1=unchecked,0=ruled-out,1=confirmed)"
+            }
+          }
+        }
+      ]
     }
   ],
   "preload": false,
