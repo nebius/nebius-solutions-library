@@ -290,21 +290,65 @@ error, if neither root nor passwordless `sudo` is available).
 validated value (`VERSIONS.md`'s confirmed `13.0` — installs
 `cuda-toolkit-13-0` specifically via NVIDIA's own apt repo, **never**
 `cuda`/`cuda-drivers`, so an already-working GPU driver is never
-touched), and a real NCCL source tree cloned from NVIDIA's own upstream
-(`https://github.com/NVIDIA/nccl.git`), checked out at the exact tag
-this package was validated against (`v2.28.9-1` — confirmed to still
-exist on NVIDIA's real upstream repo, not assumed), and built at a path
-`install.sh`'s own Step 2 already checks for and prefers: a sibling of
+touched), and a real, exact-version NCCL build at a path `install.sh`'s
+own Step 2 already checks for and prefers.
+
+**NCCL — checked, not rebuilt, whenever a valid tree already exists
+(fixed real bug: this used to only check ONE of the two locations
+`install.sh` itself accepts).** `environment.sh` now searches **both**
+of `install.sh`'s own candidates, same preference order — a sibling of
 this repo checkout itself (`<repo-root>/nccl-2.28-src`,
-`environment.sh`'s own default — writable by whoever can already write
-to their own clone, no root needed), falling back to the absolute
+`environment.sh`'s own default, writable by whoever can already write
+to their own clone, no root needed), then the absolute
 `/root/nccl-2.28-src` (this project's own original dev-cluster
-convention) only if that's what's actually there — set `NCCL_SRC_DIR`
-explicitly to override either script's default. It deliberately does
-**not** duplicate anything `install.sh` already handles itself
-(`bpftrace`, `libibverbs-dev`, `logrotate`, Slurm/`ssh`/`python3`
-detection, per-node GPU/NCCL/`/tmp` discovery) — those stay in
-`install.sh`'s own Step 1, unchanged.
+convention) — before deciding anything needs building. Set
+`NCCL_SRC_DIR` explicitly to pin either script to exactly one location
+instead. "Valid" means more than "the directory exists": a real build
+output (`build/lib/libnccl.so` + `build/include`) must be present AND
+its own `build/include/nccl.h` must carry the exact pinned
+`NCCL_MAJOR`/`MINOR`/`PATCH` (`2.28.9`) — a stale or partial prior
+attempt (confirmed real: an interrupted clone+build, or a tree checked
+out at the wrong tag) is never mistaken for valid; it falls through to
+obtaining a real one, the same safe-direction-only discipline as the
+aggregator offset-checkpoint fix above (§7).
+
+If nothing valid is found, **the first thing tried is NOT a source
+build** — `environment.sh` downloads NVIDIA's own prebuilt
+`libnccl2`/`libnccl-dev` packages at the exact pinned version
+(`apt-get download`, never `apt-get install` — confirmed live,
+including deliberately after a partial/failed extraction, that this
+registers **zero** entries in the host's own `dpkg` database, so the
+host's own currently-installed NCCL package, whatever version that is,
+is never touched or downgraded) and extracts them directly into
+`$NCCL_SRC_DIR/build/`. This is dramatically faster than a source
+build — confirmed live, this cluster: **~9-37s** for the
+download+extract (network-dependent; both real, measured runs) against
+**~16 minutes** for a real `git clone` + `make -j$(nproc) src.build`
+from scratch (also measured live, not estimated from NCCL's own build
+time claims). Any failure at any step of the apt path — the exact
+version unavailable, a network/download failure, a corrupt or partial
+`.deb`, or the extracted result somehow not matching — cleans up fully
+and falls back to the existing `git clone` + build path automatically,
+no manual intervention needed.
+
+This two-tier design is safe specifically because the Inspector
+plugin's own build has **zero real dependency on NCCL_HOME at all**
+(confirmed directly: zero `#include` of `nccl.h`/`nccl_device*`
+anywhere in `inspector-plugin/`, and a real build succeeds even with
+`NCCL_HOME` pointed at a nonexistent path — its own profiler-API
+headers are a permanently vendored copy under `inspector-plugin/nccl/`,
+not read from `NCCL_HOME`; validated live against an apt-extracted tree
+too, producing a byte-identical `.so`). What a real, exact-version
+**compiled** `libnccl.so` genuinely is still needed for is the separate
+`NCCL_LIB_PATH`/`LD_LIBRARY_PATH` runtime-pinning several workload
+launch scripts use — which the apt-extracted package satisfies exactly
+as well as a from-source build does, since it's NVIDIA's own binary for
+the identical pinned tag.
+
+It deliberately does **not** duplicate anything `install.sh` already
+handles itself (`bpftrace`, `libibverbs-dev`, `logrotate`,
+Slurm/`ssh`/`python3` detection, per-node GPU/NCCL/`/tmp` discovery) —
+those stay in `install.sh`'s own Step 1, unchanged.
 
 **`vm-setup.sh`** brings up a real, working VictoriaMetrics instance
 automatically, as a **plain background process directly on this host**
