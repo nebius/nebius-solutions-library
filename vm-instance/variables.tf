@@ -136,3 +136,9 @@ variable "preemptible" {
   type        = bool
   default     = false
 }
+
+variable "enable_nextflow" {
+  description = "Install Java + Nextflow via cloud-init"
+  type        = bool
+  default     = false
+}

@@ -10,67 +10,85 @@ users:
 %{ endfor}
 
 
-runcmd:
-- apt-get update
-- apt-get upgrade
+package_update: true
+package_upgrade: true
+packages:
+  - curl
+  - zip
+  - unzip
+  - ca-certificates
 
 
-# mount disk if provided
-%{ if extra_disk_id != "" }
-# Prepare partition on secondary disk
-- mkdir -p ${extra_path}
-- echo "mkdir" >> /home/tux/log.txt
-- parted -s /dev/disk/by-id/virtio-${extra_disk_id} mklabel gpt >> /home/tux/log.txt
-- parted -s /dev/disk/by-id/virtio-${extra_disk_id} mkpart primary ext4 0% 100% >> /home/tux/log.txt
-- sync
-- echo "sync" >> /home/tux/log.txt
-- mkfs.ext4 /dev/disk/by-id/virtio-${extra_disk_id}-part1 >> /home/tux/log.txt
-- sync
-- mount -o rw /dev/disk/by-id/virtio-${extra_disk_id}-part1 ${extra_path} >> /home/tux/log.txt
-- echo "/dev/disk/by-id/virtio-${extra_disk_id}-part1 ${extra_path} ext4 defaults 0 2" >> /etc/fstab
-- chown nobody:nogroup ${extra_path}
-- chmod 777 ${extra_path}
+%{ if enable_nextflow }
+write_files:
+  - path: /root/install_nextflow.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -eo pipefail
+      echo "[cloud-init] Installing Java + Nextflow"
+
+      export SDKMAN_DIR="/root/.sdkman"
+      curl -s "https://get.sdkman.io?ci=true&rcupdate=false" | bash
+      source "$SDKMAN_DIR/bin/sdkman-init.sh"
+
+      JAVA_ID="17.0.10-tem"
+      sdk install java "$JAVA_ID"
+      sdk default java "$JAVA_ID" || true
+
+      JAVA_BIN="$SDKMAN_DIR/candidates/java/current/bin/java"
+      update-alternatives --install /usr/bin/java java "$JAVA_BIN" 200
+
+      cd /usr/local/bin
+      curl -fsSL https://get.nextflow.io | bash
+      chmod +x nextflow
+      ln -sf /usr/local/bin/nextflow /usr/bin/nextflow
 %{ endif }
 
-# mount shared filesystem if provided
-%{if shared_filesystem_id != "" }
-- mkdir -p ${shared_filesystem_mount}
-- mount -t virtiofs filesystem-0 ${shared_filesystem_mount}
-- chmod a+w ${shared_filesystem_mount}
-- echo "filesystem-0 ${shared_filesystem_mount} virtiofs rw 0 0" >> /etc/fstab
-%{endif}
+runcmd:
+%{ if enable_nextflow }
+  - bash -c "/root/install_nextflow.sh > /var/log/install_nextflow.log 2>&1"
+%{ endif }
 
-# install s3 access
-%{if aws_access_key_id != ""}
-- snap install aws-cli --classic
+%{ if extra_disk_id != "" }
+  - mkdir -p ${extra_path}
+  - bash -c 'echo "mkdir" >> /var/log/extra_disk.log'
+  - bash -c "parted -s /dev/disk/by-id/virtio-${extra_disk_id} mklabel gpt >> /var/log/extra_disk.log 2>&1"
+  - bash -c "parted -s /dev/disk/by-id/virtio-${extra_disk_id} mkpart primary ext4 0% 100% >> /var/log/extra_disk.log 2>&1"
+  - sync
+  - bash -c "mkfs.ext4 /dev/disk/by-id/virtio-${extra_disk_id}-part1 >> /var/log/extra_disk.log 2>&1"
+  - sync
+  - bash -c "mount -o rw /dev/disk/by-id/virtio-${extra_disk_id}-part1 ${extra_path} >> /var/log/extra_disk.log 2>&1"
+  - bash -c 'echo "/dev/disk/by-id/virtio-${extra_disk_id}-part1 ${extra_path} ext4 defaults 0 2" >> /etc/fstab'
+  - chown nobody:nogroup ${extra_path}
+  - chmod 777 ${extra_path}
+%{ endif }
 
-%{ for user in users}
-- mkdir -p /home/${user.user_name}/.aws
-- echo "[default]" > /home/${user.user_name}/.aws/credentials
-- echo "aws_access_key_id=${aws_access_key_id}" >> /home/${user.user_name}/.aws/credentials
-- echo "aws_secret_access_key=${aws_secret_access_key}" >> /home/${user.user_name}/.aws/credentials
-- echo "[default]" > /home/${user.user_name}/.aws/config
-- echo "endpoint_url = https://storage.eu-north1.nebius.cloud:443" >> /home/${user.user_name}/.aws/config
-- echo "region = eu-north1" >> /home/${user.user_name}/.aws/config
-- chown -R ${user.user_name}:${user.user_name} /home/${user.user_name}/.aws
-- chmod 600 /home/${user.user_name}/.aws/credentials
+%{ if shared_filesystem_id != "" }
+  - mkdir -p ${shared_filesystem_mount}
+  - mount -t virtiofs filesystem-0 ${shared_filesystem_mount}
+  - chmod a+w ${shared_filesystem_mount}
+  - bash -c 'echo "filesystem-0 ${shared_filesystem_mount} virtiofs rw 0 0" >> /etc/fstab'
+%{ endif }
+
+%{ if aws_access_key_id != "" }
+  - snap install aws-cli --classic
+%{ for user in users }
+  - mkdir -p /home/${user.user_name}/.aws
+  - bash -c 'printf "[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n" "${aws_access_key_id}" "${aws_secret_access_key}" > /home/${user.user_name}/.aws/credentials'
+  - bash -c 'printf "[default]\nendpoint_url = https://storage.eu-north1.nebius.cloud:443\nregion = eu-north1\n" > /home/${user.user_name}/.aws/config'
+  - chown -R ${user.user_name}:${user.user_name} /home/${user.user_name}/.aws
+  - chmod 600 /home/${user.user_name}/.aws/credentials
 %{ endfor }
+  - mkdir -p /root/.aws
+  - bash -c 'printf "[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n" "${aws_access_key_id}" "${aws_secret_access_key}" > /root/.aws/credentials'
+  - bash -c 'printf "[default]\nendpoint_url = https://storage.eu-north1.nebius.cloud:443\nregion = eu-north1\n" > /root/.aws/config'
 
-- mkdir -p /root/.aws
-- echo "[default]" > /root/.aws/credentials
-- echo "aws_access_key_id=${aws_access_key_id}" >> /root/.aws/credentials
-- echo "aws_secret_access_key=${aws_secret_access_key}" >> /root/.aws/credentials
-- echo "[default]" > /root/.aws/config
-- echo "endpoint_url = https://storage.eu-north1.nebius.cloud:443" >> /root/.aws/config
-- echo "region = eu-north1" >> /root/.aws/config
-
-
-# install s3 mount
-
-%{if mount_bucket != "" }
-- wget https://s3.amazonaws.com/mountpoint-s3-release/1.14.0/x86_64/mount-s3-1.14.0-x86_64.deb
-- dpkg -i mount-s3-1.14.0-x86_64.deb
-- mkdir -p ${s3_mount_path}
-- mount-s3 --upload-checksums=off --maximum-throughput-gbps=200 --allow-delete --allow-overwrite --allow-other --endpoint-url=https://storage.eu-north1.nebius.cloud:443 ${mount_bucket} ${s3_mount_path}
-%{endif}
-%{endif}
+%{ if mount_bucket != "" }
+  - wget https://s3.amazonaws.com/mountpoint-s3-release/1.14.0/x86_64/mount-s3-1.14.0-x86_64.deb
+  - dpkg -i mount-s3-1.14.0-x86_64.deb
+  - mkdir -p ${s3_mount_path}
+  - mount-s3 --upload-checksums=off --maximum-throughput-gbps=200 --allow-delete --allow-overwrite --allow-other --endpoint-url=https://storage.eu-north1.nebius.cloud:443 ${mount_bucket} ${s3_mount_path}
+%{ endif }
+%{ endif }
