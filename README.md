@@ -34,6 +34,10 @@ Enhance security with a Wireguard VPN instance by minimizing the use of public I
 
 Deploys a Bastion instance that serves as a secure jump host for your infrastructure. It improves the security by minimizing the use of Public IPs and limiting access to the rest of the environment. 
 
+[Custom NAT gateway](./custom-nat-gateway/README.md)
+
+Deploys a dedicated gateway VM, custom route table, and private workload subnet so selected subnets can route internet egress through a Nebius-hosted NAT gateway instead of the default egress gateway.
+
 ### Integration
 
 [Anyscale](./anyscale/README.md)
