@@ -1253,6 +1253,127 @@ way:
   this host's platform-level cache-management behavior -- out of this
   package's own scope to fix.
 
+### 6.10 Cyril item-6: sacct job context -- a second, authoritative source alongside squeue
+
+**Investigation first, confirmed before writing any code**: this cluster has
+no "Storm API" (zero matches anywhere in this repo, no Soperator Slurm-job
+CRD found, `kubectl` unavailable from this environment) -- that specific
+integration remains genuinely unresolved and out of scope. What the
+investigation did find, real and already installed: `sacct` works on both
+the login node and worker-0/worker-1, and returns real `Start`/`End`
+epoch timestamps plus real `NNodes`/GPU-rank counts for both running and
+completed jobs -- strictly more authoritative than the `squeue -h -o "%i"
+--states=R` presence-only check this pipeline has used everywhere since
+its own original import (confirmed via grep: nothing in this pipeline
+used `sacct` before this). This is the same bug class already patched
+reactively multiple times in this project's own history (PP's role-
+baseline contamination, DLRM's stale throughput reference, Hybrid's
+cold-start gap) -- a long-lived aggregator inferring job boundaries
+purely from squeue's live presence.
+
+**Design decision, made explicit**: `sacct` **supplements** the existing
+squeue-based mechanism; it does not replace it. `maybe_reset_workload_state()`
+is untouched -- job-boundary *resets* are still triggered exclusively by
+`refresh_job_id()`'s own squeue poll, at the same `JOB_ID_REFRESH_S=60`
+cadence as before. What `sacct` adds is a second, independently-sourced
+signal used three ways:
+
+**1. A disagreement cross-check** (`check_sacct_squeue_disagreement()`):
+logs (never acts on) a `[SACCT-SQUEUE-DISAGREEMENT]` line if squeue still
+attributes live activity to a job that sacct's own authoritative record
+says already reached a terminal state -- exactly the race
+`alert_engine.py`'s own `_job_still_running()` docstring already
+describes squeue as vulnerable to. **Real validation, zero false
+positives**: across this entire deployment window, including two full
+real job-boundary transitions from live fault-injection runs (jobs 3658
+and 3659), `grep -c SACCT-SQUEUE-DISAGREEMENT` on both hosts' logs is
+**0** -- the two signals never disagreed in practice here, and the
+mechanism never fired spuriously.
+
+**2. Real job context on `[STRAGGLER-INCIDENT]`/`[ALERT]` text**
+(`alert_engine.py`'s `_query_job_sacct_info()`), informational/display
+only -- confirmed, by `determine_confirmed_path(cause)`'s own signature
+(it receives only `finding["cause"]`), that `finding["sacct_info"]` is
+structurally unreachable from tier/decision logic, not just
+conventionally kept separate. Real rendered output, from a live
+fault-injection run (job 3659, rank 916244 on worker-1):
+```
+[STRAGGLER-INCIDENT] incident_id=worker-1:0x71cb232b5c1fb6:916244:2286960:AllReduce stat=cv host=worker-1 comm=0x71cb232b5c1fb6 member=916244 gpu_slot=0 bucket=2286960 coll=AllReduce severity_ratio=520.01 persisted_s=53.9 role_rank=8 role_n=16 job_elapsed_min=3.0 job_start=2026-10-02T08:12:08Z job_nnodes=2 job_nranks=16
+
+[ALERT] rank=916244 comm=0x71cb232b5c1fb6 node=worker-1 type=compute confidence=PROBABLE severity=LOG-ONLY ...
+
+Job context (informational only, from sacct -- does not affect confidence tier): 3.0 min into a job running since 2026-10-02T08:12:08Z, out of 2 node(s)/16 rank(s) allocated.
+```
+
+**3. Grafana job-boundary annotations** -- two new Prometheus-datasource
+annotation layers on the existing dashboard (`agg_job_start_time_seconds`
+/`agg_job_end_time_seconds`), sourced from sacct's real `time.start`/
+`time.end`. Confirmed zero job-boundary markers existed in the dashboard
+JSON before this change (clean 26-insertion diff, no reformatting). The
+real start/end epoch is encoded as the **sample's own timestamp**
+(deliberately backdated, not "now") -- confirmed live, via a real
+push+export round-trip against this cluster's VictoriaMetrics, that a
+backdated sample timestamp is stored and returned correctly; Grafana's
+native annotation query places each marker at the data point's own
+timestamp, not at a value reinterpreted as time.
+
+**Real bugs found and fixed during this feature's own validation (not
+assumed correct from the design alone)**:
+- **Missing `cluster` label**: the first working version pushed these
+  two metrics without the `cluster="..."` label every other metric in
+  this file carries via `base_labels()`. The dashboard's own annotation
+  query filters on `cluster=~"$cluster"` -- a label-absent series does
+  not match a non-empty regex value, so the annotations would have
+  silently rendered nothing. Fixed by adding the label to match
+  convention.
+- **Job-end race, found via a real missed case (job 3658)**: `squeue`'s
+  own 60s poll and `sacct`'s own 60s poll are independently gated, no
+  shared phase. Once squeue stops reporting a job, `self.slurm_job_id`
+  goes empty immediately -- and the original code unconditionally
+  skipped the sacct check once that happened, so a job whose squeue
+  presence disappeared before sacct's own next 60s check landed would
+  **never get one more query to observe its real End time at all**.
+  Confirmed directly: job 3658, a real ~3.5-minute fault-injection run,
+  never got its end-time pushed under the original code. Fixed by
+  letting `refresh_job_sacct_info()` target the last-cached job id for
+  one more check when squeue's own id has gone empty but that job's end
+  was never confirmed -- re-validated on the very next real job (3659):
+  end-time pushed correctly, ~65s after the job's real end, both hosts.
+
+**Real validation evidence, from two live fault-injection runs after
+both fixes were deployed**:
+- `tools/self_test.sh`: clean **PASS** both times, exact rank-match
+  (injected PID == alerted PID), 0 new `CHECK-FAILED`.
+- Real multi-job sequence, boundaries confirmed correct: `3654 → 3655 →
+  (3656, 3657) → 3658 → 3659`, each a real, distinct `workload-signature
+  tracking reset: new job <id>` line at the real boundary, no spurious
+  mid-job resets.
+- `agg_job_start_time_seconds`/`agg_job_end_time_seconds`, confirmed via
+  direct VM query (both `/api/v1/query` instant and a `/api/v1/query_range`
+  matching Grafana's own annotation query execution path) for job 3659:
+  real start `1790930133` (`2026-10-02T08:35:33Z`) and real end
+  `1790930351` (`2026-10-02T08:39:11Z`), both hosts, correct `cluster`
+  label, exact sacct-sourced epoch (not quantized -- the small offset a
+  step-grid range query shows is that query's own evaluation-grid
+  artifact, not the stored data, which carries the raw epoch exactly).
+- **Job-boundary reset latency itself: unchanged, by design.** The
+  reset trigger is still squeue-only (`JOB_ID_REFRESH_S=60`), per the
+  explicit "supplement, not replace" scope for this change -- sacct adds
+  a cross-check and real context, not a faster reset path. No regression
+  and no speed claim either way on the reset itself.
+
+**Known, disclosed limitation**: a job that starts and ends within the
+same ~60-120s window (faster than both independent polls can settle)
+can still race the job-end fix above in the unlikely case a *third* job
+starts before sacct gets its one extra look at the previous job's end --
+the cached last-job-id check is abandoned the moment `self.slurm_job_id`
+reports a new, different real job. Not observed in this validation's own
+runs (all several minutes apart), not fixed further here -- out of this
+task's own scope to chase an edge case with no real reproduction.
+
+**Explicitly excluded from this change, per scope**: "Storm API" is
+unresolved and untouched -- nothing here guesses at or builds toward it.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
