@@ -24,19 +24,27 @@ fi
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
 
-# VPC network
+# VPC network (the project's default network, matched by name prefix)
 NEBIUS_VPC_NETWORK_ID=$(nebius vpc network list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --format json \
-  | jq -r '.items[] | select(.metadata.name | startswith("default")) | .metadata.id')
+  | jq -r '(.items // []) | map(select(.metadata.name | startswith("default"))) | .[0].metadata.id // empty')
+if [ -z "${NEBIUS_VPC_NETWORK_ID}" ]; then
+  echo "Error: no default network found in project ${NEBIUS_PROJECT_ID} (expected a network whose name starts with 'default')"
+  return 1
+fi
 export NEBIUS_VPC_NETWORK_ID
 
-# VPC subnet
+# VPC subnet (the default subnet inside that network)
 NEBIUS_VPC_SUBNET_ID=$(nebius vpc subnet list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --format json \
   | jq -r --arg NET_ID "${NEBIUS_VPC_NETWORK_ID}" \
-    '.items[] | select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default-subnet"))) | .metadata.id')
+    '(.items // []) | map(select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default-subnet")))) | .[0].metadata.id // empty')
+if [ -z "${NEBIUS_VPC_SUBNET_ID}" ]; then
+  echo "Error: no default subnet found in network ${NEBIUS_VPC_NETWORK_ID} (expected a subnet whose name starts with 'default-subnet')"
+  return 1
+fi
 export NEBIUS_VPC_SUBNET_ID
 
 # Object Storage Bucket
@@ -155,6 +163,7 @@ echo "Exported variables:"
 echo "NEBIUS_TENANT_ID: ${NEBIUS_TENANT_ID}"
 echo "NEBIUS_PROJECT_ID: ${NEBIUS_PROJECT_ID}"
 echo "NEBIUS_REGION: ${NEBIUS_REGION}"
+echo "NEBIUS_VPC_NETWORK_ID: ${NEBIUS_VPC_NETWORK_ID}"
 echo "NEBIUS_VPC_SUBNET_ID: ${NEBIUS_VPC_SUBNET_ID}"
 echo "NEBIUS_BUCKET_NAME: ${NEBIUS_BUCKET_NAME}"
 echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
