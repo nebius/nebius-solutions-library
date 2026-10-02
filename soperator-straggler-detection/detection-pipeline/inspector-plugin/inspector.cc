@@ -517,7 +517,8 @@ static inline inspectorResult_t inspectorCompletedCollVerbose(jsonFileOutput* jf
  *
  */
 static inline inspectorResult_t inspectorCompletedColl(jsonFileOutput* jfo,
-                                                        struct inspectorCompletedCollInfo* collInfo) {
+                                                        struct inspectorCompletedCollInfo* collInfo,
+                                                        uint64_t queueDropsTotal) {
   JSON_CHK(jsonStartObject(jfo));
   {
 
@@ -534,6 +535,13 @@ static inline inspectorResult_t inspectorCompletedColl(jsonFileOutput* jfo,
     JSON_CHK(jsonKey(jfo, "coll_algobw_gbs")); JSON_CHK(jsonDouble(jfo, collInfo->algoBwGbs));
 
     JSON_CHK(jsonKey(jfo, "coll_busbw_gbs")); JSON_CHK(jsonDouble(jfo, collInfo->busBwGbs));
+
+    // Ring-buffer port: cumulative, never-silent drop count for this
+    // communicator, surfaced in every single dumped record (not just
+    // when a drop first happens) so a consumer reading any one record
+    // can always see the real, current drop total without needing to
+    // scan history.
+    JSON_CHK(jsonKey(jfo, "queue_drops_total")); JSON_CHK(jsonUint64(jfo, queueDropsTotal));
 
     if (enableNcclInspectorDumpVerbose) {
       INS_CHK(inspectorCompletedCollVerbose(jfo, collInfo));
@@ -573,37 +581,50 @@ static inspectorResult_t inspectorCommInfoDump(jsonFileOutput* jfo,
   if (commInfo == nullptr)
     return inspectorSuccess;
 
-  struct inspectorCompletedCollInfo collInfo;
-  memset(&collInfo, 0, sizeof(struct inspectorCompletedCollInfo));
+  // Ring-buffer port (see INSPECTOR_RING_CAPACITY's own comment in
+  // inspector.h): drains EVERY record queued since this comm's last
+  // dump, not just one -- the old single-slot design could only ever
+  // report the most recent completion per dump-thread wakeup, silently
+  // losing every earlier one if more than one completed in the
+  // interval. ringHead is the producer's published count (acquire, so
+  // every slot up to it is guaranteed fully written); ringTail is
+  // owned entirely by this consumer, so a plain read of our own prior
+  // write is safe without an atomic load.
+  uint64_t head = __atomic_load_n(&commInfo->ringHead, __ATOMIC_ACQUIRE);
+  uint64_t tail = commInfo->ringTail;
+  if (head == tail)
+    return inspectorSuccess; // nothing new queued -- the common case between bursts
 
-  inspectorLockWr(&commInfo->guard);
-  if (commInfo->dump) {
-    *needs_writing = true;
-    memcpy(&collInfo,
-           &commInfo->completedCollInfo,
-           sizeof(struct inspectorCompletedCollInfo));
-    commInfo->dump = false;
-  }
-  inspectorUnlockRWLock(&commInfo->guard);
+  uint64_t queueDropsTotal = __atomic_load_n(&commInfo->queueDropsTotal, __ATOMIC_RELAXED);
+  inspectorResult_t res = inspectorSuccess;
 
-  if (*needs_writing) {
-    JSON_CHK(jsonLockOutput(jfo));
-    JSON_CHK(jsonStartObject(jfo));
+  JSON_CHK(jsonLockOutput(jfo));
+  while (tail != head) {
+    struct inspectorCompletedCollInfo* collInfo =
+      &commInfo->ringBuf[tail & (INSPECTOR_RING_CAPACITY - 1)];
+    JSON_CHK_GOTO(jsonStartObject(jfo), res, unlock);
     {
-      JSON_CHK(jsonKey(jfo, "header"));
+      JSON_CHK_GOTO(jsonKey(jfo, "header"), res, unlock);
       inspectorCommInfoHeader(jfo, commInfo);
 
-      JSON_CHK(jsonKey(jfo, "metadata"));
+      JSON_CHK_GOTO(jsonKey(jfo, "metadata"), res, unlock);
       inspectorCommInfoMetaHeader(jfo);
 
-      JSON_CHK(jsonKey(jfo, "coll_perf"));
-      INS_CHK(inspectorCompletedColl(jfo, &collInfo));
+      JSON_CHK_GOTO(jsonKey(jfo, "coll_perf"), res, unlock);
+      INS_CHK_GOTO(inspectorCompletedColl(jfo, collInfo, queueDropsTotal), res, unlock);
     }
-    JSON_CHK(jsonFinishObject(jfo));
-    JSON_CHK(jsonNewline(jfo));
-    JSON_CHK(jsonUnlockOutput(jfo));
+    JSON_CHK_GOTO(jsonFinishObject(jfo), res, unlock);
+    JSON_CHK_GOTO(jsonNewline(jfo), res, unlock);
+    tail++;
   }
-  return inspectorSuccess;
+  *needs_writing = true;
+unlock:
+  JSON_CHK(jsonUnlockOutput(jfo));
+  // Published once, after the full drain (not per-record): the
+  // producer only needs to learn about freed capacity promptly enough
+  // to avoid spurious drops, not after every single record.
+  __atomic_store_n(&commInfo->ringTail, tail, __ATOMIC_RELEASE);
+  return res;
 }
 
 
@@ -678,7 +699,8 @@ static inspectorResult_t inspectorCommInfoListFinalize(struct inspectorCommInfoL
     INFO(NCCL_INSPECTOR, "NCCL Inspector: comm %lu still in tracker",
          commList->comms->commHash);
     nextComm = commList->comms->next;
-    INS_CHK(inspectorLockDestroy(&commList->comms->guard));
+    // Ring-buffer port: no guard to destroy -- the ring buffer is
+    // lock-free (see inspectorCommInfo's own struct comment).
     free(commList->comms);
     commList->comms = nextComm;
     commList->ncomms--;
@@ -1220,8 +1242,10 @@ static inspectorResult_t inspectorFillCommInfo(struct inspectorCommInfo* commInf
   commInfo->rank = rank;
   commInfo->nranks = nranks;
   commInfo->nnodes = nnodes;
-  commInfo->dump = false;
-  INS_CHK(inspectorLockInit(&commInfo->guard));
+  // Ring-buffer port: ringHead/ringTail/queueDropsTotal/ringBuf all
+  // start correctly at zero via this struct's own calloc() allocation
+  // in inspectorAddComm -- no explicit init needed, and no lock to
+  // create (the ring buffer is lock-free by design).
   commInfo->next = nullptr;
   return inspectorSuccess;
 }
@@ -1359,9 +1383,12 @@ inspectorResult_t inspectorDelComm(struct inspectorCommInfo *commInfo) {
     return inspectorDeleteUnknownCommError;
   }
 
-  inspectorLockWr(&commInfoPtr->guard);
-  commInfoPtr->dump = false;
-  inspectorUnlockRWLock(&commInfoPtr->guard);
+  // Ring-buffer port: no dump flag/guard to clear -- any records still
+  // queued in this comm's ring buffer remain valid and are drained
+  // normally by the existing deletedComms dump-then-finalize pass
+  // below (inspectorStateDump already dumps g_state.deletedComms
+  // before finalizing it), rather than being discarded unconditionally
+  // the way the old single-slot design's dump=false reset did.
 
   INSPECTOR_LOCK_WR_FLAG(&deletedCommInfoList->guard, locked,
                          "inspectorDelComm: deletedCommInfoList::guard -wr");

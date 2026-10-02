@@ -573,6 +573,28 @@ confirmed via live testing, not just code review):
    real `all_to_all_single`/`all_to_all` calls that without this flag,
    zero records are produced for Send/Recv/AllToAll-style point-to-point
    traffic (not mislabeled — literally absent).
+3. **Lock-free ring buffer, replacing a silent single-slot data-loss bug**
+   — `inspector.h` (`INSPECTOR_RING_CAPACITY`, the ring buffer fields on
+   `inspectorCommInfo`), `inspector.cc` (`inspectorCommInfoDump`'s drain
+   loop, `inspectorCompletedColl`'s new `queue_drops_total` field),
+   `inspector_plugin.cc` (the hot-path producer). The old design — one
+   `completedCollInfo` slot + one dirty flag per communicator, guarded by
+   a `pthread_rwlock_t` — silently overwrote a completed collective's
+   record whenever a second one completed before the dump thread's next
+   wakeup; confirmed live, ~17-20% of real records lost on a
+   high-frequency communicator at the default 500us interval. Replaced
+   with a 256-record, lock-free SPSC ring buffer (`__atomic_*` builtins,
+   drop-newest overflow, a cumulative `queue_drops_total` counter
+   surfaced in every dumped record plus a power-of-two-backoff `[WARN]`)
+   — ported from a separately-documented prior development track's
+   validated design, not present anywhere in this repo's own git history
+   before this patch. Confirmed live: coll_sn completeness on the same
+   high-frequency communicator went from ~17-20% loss to 0.00% loss
+   (21,600/21,600 recovered); MoE/DLRM's own higher AllToAll frequency
+   does exceed 256 capacity at points (real, counted drops up to
+   15,506/7,924 on a short run) — disclosed honestly as a real, open
+   sizing question, not hidden. See README.md section 6.9 for full
+   validation detail (overhead, self_test.sh, cross-shape sweep).
 
 ---
 

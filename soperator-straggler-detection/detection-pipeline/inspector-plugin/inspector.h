@@ -8,6 +8,23 @@
 
 #define MAX_CHANNELS                     64
 
+// Ported from a prior, separately-documented development track's
+// validated design (not a commit in this repo's own history -- verified
+// directly, this branch's inspector-plugin/ source had never received
+// it): replaces the original single-slot latch (one completedCollInfo
+// + one dirty flag per communicator), which silently overwrote/dropped
+// a completed collective's record whenever a second one completed
+// before the dump thread's next wakeup -- confirmed live this session,
+// ~17-20% record loss on high-frequency communicators (TP4 AllReduce)
+// at the default 500us dump-thread interval. 256 matches the prior
+// validated capacity; re-confirmed appropriate here via direct
+// sizeof(inspectorCompletedCollInfo) measurement against THIS branch's
+// own struct layout (3168 bytes/record -> exactly 792.0 KiB/comm/rank
+// for 256 slots, same figure the prior validation reported -- no
+// adjustment needed). Must be a power of 2 so index wrapping is a cheap
+// bitmask (& (CAPACITY-1)) instead of a modulo.
+#define INSPECTOR_RING_CAPACITY          256
+
 #define INS_CHK_GOTO(call, res, label)                                  \
   do {                                                                  \
     res = call;                                                         \
@@ -111,9 +128,31 @@ struct inspectorCommInfo {
   int nranks;
   int nnodes;
 
-  bool dump;
-  struct inspectorCompletedCollInfo completedCollInfo;
-  pthread_rwlock_t guard;
+  // Lock-free, bounded SPSC ring buffer (ring-buffer port -- see
+  // INSPECTOR_RING_CAPACITY's own comment above for the real bug this
+  // replaces). Single producer: this communicator's own NCCL proxy
+  // progress thread (ncclProxyProgressCreate's guarded, one-time
+  // pthread_create guarantees exactly one such thread per communicator
+  // for any comm NOT created via an explicit ncclCommSplit-with-share
+  // -- confirmed directly against this branch's real NCCL 2.28.9
+  // source; Megatron/PyTorch's standard new_group()-based TP/PP/DP
+  // group creation does not use that opt-in path, so this holds for
+  // the workloads this project runs). Single consumer: the dump
+  // thread. ringHead/ringTail are monotonically increasing (never
+  // wrapped) produced/consumed counts -- the real array slot is always
+  // index & (INSPECTOR_RING_CAPACITY-1). Overflow policy is
+  // drop-newest: the producer never advances past a full buffer and
+  // never touches ringTail, preserving the lock-free single-producer/
+  // single-consumer invariant (an evict-oldest policy would require
+  // the producer to also touch the consumer's own index, reintroducing
+  // a race). All access is via __atomic_* builtins (matching NCCL's
+  // own atomic-builtin idiom in this codebase) -- no mutex/rwlock
+  // guards this structure at all, unlike the single-slot design it
+  // replaces.
+  struct inspectorCompletedCollInfo ringBuf[INSPECTOR_RING_CAPACITY];
+  uint64_t ringHead;          // producer-owned; published with release so the consumer's acquire-load is guaranteed to see the fully-written slot
+  uint64_t ringTail;          // consumer-owned; published with release once per drain so the producer's acquire-load sees freed capacity promptly
+  uint64_t queueDropsTotal;   // cumulative; incremented atomically by the producer on every drop-newest event; surfaced in every dumped record (never silent) and in a rate-limited [WARN] (fires on drop counts 1, 2, 4, 8, 16, ... -- exact powers of two, never silent but never log-spamming either)
 };
 
 struct inspectorKernelChInfo {

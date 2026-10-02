@@ -1038,6 +1038,124 @@ project reads a Path C evidence dict's fields turns up exactly: the two
 decision reads just named, and five display-text reads (this section's
 new line included) — nothing else, anywhere in the codebase.
 
+### 6.9 Inspector plugin: lock-free ring buffer, replacing a silent single-slot data-loss bug
+
+**Reconciliation, confirmed with direct evidence before writing any code**:
+a prior, separately-documented development track had already found and
+fixed this exact bug class and validated a ring-buffer replacement — but
+that fix was never part of this repo's own history. Checked directly: `git
+log --all` shows exactly one commit, ever, touching `inspector.cc`/
+`inspector.h`/`inspector_plugin.cc` on any of this repo's branches (the
+original "Add straggler-detection pipeline package" import) — no revert,
+because there was never a prior patched version to revert from. This
+branch's copy is byte-identical (`diff -q`, confirmed empty) to NVIDIA's
+own raw upstream tree (`/root/nccl-2.28-src/ext-profiler/inspector/`), and
+`install.sh` builds directly from this repo's own `inspector-plugin/`
+source (NCCL is only linked against for headers/`libnccl.so`), so this
+was never a wrong-file build problem either — the source itself simply
+never had the fix. It was ported/re-implemented here from the validated
+design, not cherry-picked.
+
+**The bug**: every NCCL collective's completion wrote into a single
+`completedCollInfo` slot per communicator, guarded by a plain
+`pthread_rwlock_t`, with one dirty flag. If a second collective completed
+on the same communicator before the dump thread's next wakeup
+(`NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS`, default 500us), the
+earlier record was silently overwritten — gone, with no counter, no log
+line, nothing to show it ever happened. Confirmed live this session (see
+6.8's own measurement context): **~17-20% of real collectives silently
+lost** on TP4's own high-frequency AllReduce communicator, at the default
+interval.
+
+**Design (ported, then re-verified against this branch's own real
+source before implementing, not assumed to transfer unchanged)**: a
+fixed-size, lock-free, bounded ring buffer per communicator, single
+producer (confirmed directly against this branch's actual NCCL 2.28.9
+source: `ncclProxyProgressCreate`'s guarded, one-time `pthread_create`
+guarantees exactly one proxy progress thread per communicator for any
+comm not created via an explicit `ncclCommSplit`-with-share — which
+Megatron/PyTorch's standard `new_group()`-based TP/PP/DP group creation
+does not use, so this holds for every workload this project runs),
+single consumer (the dump thread). 256-record capacity, re-confirmed
+(not reused blindly) by compiling a real `sizeof()` probe against this
+branch's own header: `sizeof(inspectorCompletedCollInfo) = 3168` bytes,
+so 256 slots = exactly 792.0 KiB/communicator/rank — matching the prior
+validation's own figure precisely, no adjustment needed. Overflow policy
+is drop-newest (the producer never touches the consumer's own index,
+preserving the lock-free invariant). A cumulative `queue_drops_total`
+counter is incremented atomically on every drop and surfaced in **every**
+dumped record (never requires scanning history to notice loss), plus a
+rate-limited `[WARN]` log line on exact powers of two (1, 2, 4, 8, 16,
+...) so a real, ongoing drop never floods the log but also never goes
+unnoticed. All access is `__atomic_*` builtins (matching NCCL's own
+atomic-builtin idiom) — the old `pthread_rwlock_t` guard is gone
+entirely, along with the single dirty-flag field it protected.
+
+**Validation — real before/after data, not assumed to transfer from the
+prior track's own numbers**:
+- Built clean via `install.sh`'s own exact `make` invocation, `-Wall
+  -Wextra`, **zero warnings**.
+- **coll_sn continuity (the direct measure of the bug this closes)**,
+  same methodology as 6.8's own investigation, same Megatron TP4/PP4/DP1
+  shape, same 500us default interval: the highest-frequency communicator
+  went from **~17-20% missing (pre-fix) to 0.00% missing, 21,600/21,600
+  real records recovered (post-fix)** — `queue_drops_total` stayed `0`
+  throughout (256 was comfortably sufficient for this shape's own real
+  burst intensity).
+- **MoE and DLRM (sparse AllToAll dispatch, this project's own
+  highest-collective-frequency shapes) push past 256 capacity at
+  points** — real, observed `queue_drops_total` of up to 15,506 (MoE) and
+  7,924 (DLRM) on a short run. This is disclosed honestly, not hidden:
+  the design's own guarantee is "loss is never silent," not "loss never
+  happens" — these counts are real, visible, and exactly what the
+  mechanism is for. Whether 256 should be raised for these specific
+  shapes is a separate, open sizing question, not resolved here.
+- **tools/self_test.sh**: clean PASS, exact rank-match, 0 new
+  `CHECK-FAILED`, with the patched plugin loaded.
+- **Full-pipeline re-check, same self_test.sh run**: `straggler_incident_
+  detected`'s `persisted_s`/`severity_ratio` and the z/mm staleness fix's
+  displayed values are internally consistent with each other (the
+  displayed `z=3506.4` in the `[ALERT]` text matches the `severity_ratio=
+  3506.42` in the paired `[STRAGGLER-INCIDENT]` line, the same
+  same-timestamp correlation 6.6's fix established) and sit within the
+  same wide, already-documented run-to-run range this exact reference
+  scenario has shown across many runs this session (305.82-3506.42) —
+  no new instability introduced. Path C fired correctly in the same run
+  (ruled out, `target_iowait_us=0`, correct for a compute fault) —
+  expected, since Path C's own evidence (eBPF `iowait`, not NCCL
+  Inspector) is structurally independent of this plugin entirely; there
+  is no mechanism by which this patch could affect it, and the same run
+  confirms its machinery is unaffected.
+- **TP4-standalone and Megatron fault-injection, reported honestly, not
+  oversold**: real 200ms-sleep fault-injection runs on both shapes
+  showed the raw data pipeline working correctly end to end (the
+  injected rank's own real exec-time samples reported continuously
+  throughout, zero gaps) and the aggregator correctly identifying it via
+  `agg_persistence_fired` — but neither run's peer-elevation z-score
+  cleared the firing threshold (TP4: max observed z=12.28 vs
+  `MEAN_Z_THRESH`-class gates; Megatron: z=13.28 vs `CV_Z_THRESH=20.0`).
+  This is **not** a ring-buffer regression: it reproduces identically on
+  both shapes for the same reason — a real, pre-existing signal-strength
+  characteristic of this specific tiny-model-plus-200ms-sleep
+  configuration on a small-message TP4 collective, unrelated to data
+  completeness. Flagged as a real, separate, open question (is the
+  threshold miscalibrated for this shape, or is 200ms genuinely too
+  small a fault at this message size) — not investigated further here,
+  out of this task's scope.
+- **Overhead re-measured with the fix in place**, same methodology as
+  6.7/6.8's own numbers, same 2-node TP4/PP4/DP1 shape, 500 iterations:
+  **mean 192.05ms/iter (ON) vs 169.82ms/iter (OFF) — ~13.1% relative
+  overhead**, against the pre-fix measurement's ~12.3% (172.31ms vs
+  193.50ms) — a ~0.8 percentage-point difference, well within this
+  shape's own observed run-to-run noise (stdev 13-16ms on both runs).
+  **The ring buffer itself adds no meaningful new cost** — the atomic
+  ops and larger per-communicator footprint (792 KiB vs one `~3.2KB`
+  struct) are not measurably more expensive than the lock it replaced.
+  Dump volume for the same 500-iteration run: 553MB (patched) vs 395MB
+  (unpatched) — a real, expected increase, since the fix now writes
+  every real completed collective instead of silently collapsing bursts
+  into one record.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive

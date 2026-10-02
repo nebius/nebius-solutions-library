@@ -552,15 +552,41 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
         res = inspectorPluginCollInfoDeRef(collInfo);
         inspectorUnlockRWLock(&collInfo->guard);
         if (commInfo != nullptr) {
-          inspectorLockWr(&commInfo->guard);
           inspectorComputeCollBw(commInfo,
                                  &completedColl,
                                  completedColl.func);
-          memcpy(&commInfo->completedCollInfo,
-                 &completedColl,
-                 sizeof(struct inspectorCompletedCollInfo));
-          commInfo->dump = true;
-          inspectorUnlockRWLock(&commInfo->guard);
+          // Ring-buffer port (see INSPECTOR_RING_CAPACITY's own comment
+          // in inspector.h): this communicator's own NCCL proxy
+          // progress thread is the sole producer, so a plain
+          // (non-atomic) read of our own prior write to ringHead is
+          // safe; ringTail is the consumer's (the dump thread's)
+          // published value, read with acquire so a just-published
+          // free slot is seen promptly. Drop-newest on overflow: the
+          // producer never advances past a full buffer and never
+          // touches ringTail, preserving the single-producer/single-
+          // consumer invariant -- an evict-oldest policy would need
+          // the producer to also touch the consumer's own index,
+          // reintroducing the exact kind of race this design avoids.
+          uint64_t head = __atomic_load_n(&commInfo->ringHead, __ATOMIC_RELAXED);
+          uint64_t tail = __atomic_load_n(&commInfo->ringTail, __ATOMIC_ACQUIRE);
+          if (head - tail >= INSPECTOR_RING_CAPACITY) {
+            uint64_t drops = __atomic_add_fetch(&commInfo->queueDropsTotal, 1, __ATOMIC_RELAXED);
+            // Never silent, never log-spamming: fires on exact powers
+            // of two (1, 2, 4, 8, 16, ...) -- the standard
+            // n & (n-1) == 0 power-of-two test.
+            if ((drops & (drops - 1)) == 0) {
+              WARN("NCCL Inspector: ring buffer full for comm 0x%lx -- dropped a completed collective record (cumulative drops: %lu)",
+                   commInfo->commHash, drops);
+            }
+          } else {
+            memcpy(&commInfo->ringBuf[head & (INSPECTOR_RING_CAPACITY - 1)],
+                   &completedColl,
+                   sizeof(struct inspectorCompletedCollInfo));
+            // Publish with release: once the consumer observes this
+            // new head value (via its own acquire-load), the slot's
+            // data is guaranteed fully visible to it.
+            __atomic_store_n(&commInfo->ringHead, head + 1, __ATOMIC_RELEASE);
+          }
         }
         return ncclSuccess;
       }
