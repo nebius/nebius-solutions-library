@@ -154,9 +154,10 @@ aggregator/         Node-side aggregator: turns raw Inspector records into
                     Prometheus-format metrics
 alerting/           Alert engine: tiered CONFIRMED/PROBABLE/UNCONFIRMED
                     firing, persistence gating, DCGM/timing 2-member
-                    fallback, role-baseline exclusion, storage-path
-                    verdicts, plus a standalone (not auto-wired) RAS
-                    fail-stop watcher
+                    fallback, the wait-induced-straggler check (its 3+-
+                    member generalization), role-baseline exclusion,
+                    storage-path verdicts, plus a standalone (not
+                    auto-wired) RAS fail-stop watcher
 observability/      iowait logger, the alert_engine + aggregator
                     supervisor scripts and their log-rotation configs,
                     and the Grafana dashboard + its provisioning config
@@ -1584,6 +1585,72 @@ structural artifact rather than a genuine fault signature — worth its
 own dedicated fix, independent of and not blocking the evidence-
 inspectability work above. Not fixed as part of this work; tracked here
 as an open item.
+
+**CLOSED — wait-induced stragglers (a real, severe fault class that
+previously produced ZERO alert at any tier, in any communicator with
+3+ members).** Found via direct investigation, not assumed: a real
+injected fault whose own timing reads LOW (it caused every other member
+of its communicator to wait on it, while it itself arrives late and
+exits fast — the inverse of a normal compute straggler's signature)
+produced a massive, real, directly-measured timing elevation in
+`agg_mean_exec_time_us` the entire time, and still fired nothing,
+confirmed live on both a real TP-inference run (11+ minutes) and real
+Megatron TP4/PP4/DP3 training (85+ minutes). Root cause, traced
+precisely: the existing worst-selection logic (`b3e2f90a`, the same fix
+that closed the rank-12-adjacent "fastest member misflagged as worst"
+bug above) only ever considers members reading ABOVE the window's own
+median — correctly, for that bug — but this means a fault whose
+signature is a lone NEGATIVE deviation with clustered positive
+deviation on its peers can never be selected, regardless of how large
+the real deviation is.
+
+Fixed with a new, independent detection path (`_wait_induced_fallback_
+evaluate`/`_check_wait_induced`, wired into `_poll_host` alongside the
+existing `_check_mean`/`_check_cv` — never modifying either), a direct
+generalization of the already-validated P27.2 2-member timing-asymmetry
+fallback: its own per-member helpers already compare each member's
+current reading against an EXTERNAL historical baseline for that exact
+role shape, not against other members in the comm at that instant, so
+there was no 2-member assumption in the comparison itself to begin
+with — only the firing rule ("exactly 1 of 2 elevated") needed
+generalizing, to "exactly N-1 of N elevated, flag the one that isn't."
+Fires `[WAIT-INDUCED-ALERT]` — a distinct header from both `[ALERT]`
+and `[STRAGGLER-INCIDENT]`, so the detection mechanism responsible for
+a given finding is never ambiguous in the logs.
+
+**Tier: PROBABLE, not CONFIRMED**, via a new `WAIT_INDUCED_STOPGAP_
+ACTIVE` flag — deliberately the same caution `TIMING_FALLBACK_STOPGAP_
+ACTIVE` already applies to its sibling mechanism, and for the identical
+reason: that stopgap exists because this exact evidence type (a
+ratio-based timing-asymmetry comparison) was found, in this project's
+own history, to false-fire CONFIRMED/PAGE on 5/5 genuinely healthy runs
+before a MAD-gated fix landed. This check's own validation is real and
+clean, but a single session's worth of exposure is not the same
+standard of evidence that earlier false-fire took to surface.
+
+**Validated, both directions, real data, both as a standalone scoped
+test and again after integration:** a real TP-inference fault fired
+20/25 times (the 5 non-fires were a transient cold-start gap in one
+PEER's own baseline availability early in the run, self-resolved by
+poll 6 onward, never a miss on the target itself), always correctly
+naming the true injected rank; real Megatron TP4/PP4/DP3 training fired
+20/20 times on the TP communicator, and additionally — unprompted —
+correctly caught a real secondary cascade effect on a second,
+unfaulted TP group sharing the same pipeline (confirmed via raw data:
+genuine ~22-27ms peer elevation against a ~140µs culprit reading, the
+same real signature, not a false positive); the 16-member DP
+communicator for the same job correctly stayed silent (no false fire,
+simply no additional coverage at that level — detection is carried
+entirely by the TP communicator, which already fires reliably). The
+safety check this is hard-constrained against — re-running the exact
+clean, no-fault scenario that originally exposed the rank-12 bias —
+produced 40/40 clean polls across all 4 real TP communicators as a
+standalone test, then a further 42+ minutes of continuous clean
+production polling after integration, zero false positives either
+time, including the exact previously-affected role position. `tools/
+self_test.sh`: clean PASS throughout, 0 new `[CHECK-FAILED]`, the
+existing positive-deviation path's own exact rank-match completely
+unaffected by this check running alongside it in the same poll cycle.
 
 This section is **not softened**. It has two parts: which fault classes
 this pipeline is validated for at all (repeated from Step 1 above, since

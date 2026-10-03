@@ -386,6 +386,62 @@ ROLE_BASELINE_MIN_HISTORY = 3
 # recorded, since this metric didn't exist yet when that validation ran).
 TIMING_FALLBACK_STOPGAP_ACTIVE = True
 
+# Wait-induced-straggler detection -- a real, confirmed gap this closes:
+# a real, severe straggler whose OWN timing reads LOW (it caused every
+# other member to wait on it, while it itself arrives late and exits
+# fast) produced ZERO alert at any tier, in ANY communicator with 3+
+# members -- not limited to TP, confirmed live this session on both a
+# real TP-inference run and real Megatron TP4/PP4/DP3 training, 11+ and
+# 85+ real minutes respectively, with the fault's own real timing
+# elevation massive and directly visible in agg_mean_exec_time_us the
+# entire time. Root cause, traced precisely: the existing worst-
+# selection logic (b3e2f90a) only ever considers POSITIVE deviation
+# from the window's own median -- correctly, since that fix was needed
+# to stop a genuinely fast, innocent member from being misflagged (the
+# rank-12 bug) -- but this means a real fault manifesting as the
+# INVERSE signature (negative deviation on the true culprit, clustered
+# positive deviation on its peers, who are all waiting on the same
+# straggler by roughly the same amount and so have almost no variance
+# AMONG themselves) can never be selected, no matter how large its real
+# deviation is.
+#
+# This is a direct generalization of the already-validated P27.2 2-
+# member timing-asymmetry fallback below, not a new mechanism: that
+# fallback's own per-member helpers (_member_role_baseline,
+# _cross_comm_peer_median, _member_exec_time_current) already compare
+# each member's CURRENT reading against an EXTERNAL historical baseline
+# for that exact role shape, not against the other member(s) in the
+# comm at this instant -- there is no 2-member assumption anywhere in
+# that comparison itself. The only genuinely 2-member-specific piece
+# was the firing rule ("fires when exactly 1 of 2 members is
+# elevated"), which generalizes cleanly to "fires when exactly N-1 of N
+# members are elevated" -- the one member that ISN'T is the real
+# culprit. Validated directly, this session: a standalone scoped test
+# reusing these exact helper functions fired 20/25 times on a real
+# TP-inference fault (the 5 non-fires were a transient cold-start gap
+# in one PEER's own baseline availability early in the run, self-
+# resolved, not a target-side miss -- see the integration commit's own
+# investigation note) and 20/20 times on real Megatron TP4/PP4/DP3
+# training, always correctly naming the true injected rank, never a
+# peer. The safety check this hard-constrains against -- re-running the
+# exact clean, no-fault scenario that originally exposed the rank-12
+# bias -- produced 40/40 clean polls across all 4 real TP comms, zero
+# false positives, including the exact previously-affected role
+# position.
+#
+# Tier: PROBABLE, not CONFIRMED, by the same reasoning TIMING_FALLBACK_
+# STOPGAP_ACTIVE above already established for its own sibling
+# mechanism -- that stopgap exists because this EXACT evidence type
+# (a ratio-based timing-asymmetry comparison) was found, in this
+# project's own history, to false-fire CONFIRMED/PAGE on 5/5 genuinely
+# healthy runs before the MAD-gated fix landed. This session's own
+# 40/40 clean safety check is real and good evidence, but it is a
+# single job's worth of exposure -- far short of the breadth that
+# earlier false-fire was only caught by. A new detection path built on
+# the identical evidence type deserves the identical initial caution,
+# not a weaker standard just because it's new.
+WAIT_INDUCED_STOPGAP_ACTIVE = True
+
 # P26.5-maintenance -- where iowait_logger.py (run separately, one process
 # per host, same convention as node_aggregator_ref.py) persists its real,
 # per-host block-I/O-wait log. build_finding_for_alert reads from here via
@@ -1510,10 +1566,19 @@ class AlertEngine:
 
     def _poll_host(self, hostname):
         self._refresh_comm_buckets(hostname)
+        seen_comms = set()
         for comm, bucket, coll in self._comm_buckets.get(hostname, []):
             self._run_check("cv", self._check_cv, hostname, comm, bucket, coll)
             self._run_check("mean", self._check_mean, hostname, comm, bucket, coll)
             self._run_check("outlier_count", self._check_outlier_count, hostname, comm, bucket, coll)
+            # Wait-induced-straggler check -- once per real, distinct comm
+            # (not per bucket/coll pair; see _check_wait_induced's own
+            # docstring), so every comm discovered here gets a real
+            # chance every cycle, the same "every eligible communicator,
+            # not a hardcoded subset" guarantee cv/mean already have.
+            if comm not in seen_comms:
+                seen_comms.add(comm)
+                self._run_check("wait_induced", self._check_wait_induced, hostname, comm)
         self._run_check("rank0_outlier_rate", self._check_rank0_outlier_rate, hostname)
         self._run_check("job_throughput", self._check_job_throughput, hostname)
 
@@ -2758,6 +2823,90 @@ class AlertEngine:
             return None
         return (m, per_member[m]["slot"], per_member)
 
+    def _wait_induced_fallback_evaluate(self, hostname, comm):
+        """Wait-induced-straggler detection -- see WAIT_INDUCED_STOPGAP_
+        ACTIVE's own module-level comment for the real gap this closes
+        and the validation evidence behind it. A direct generalization
+        of _timing_asymmetry_fallback_evaluate immediately above: same
+        per-member baseline chain (role -> role_cross_host ->
+        cross_comm_peer), same elevated_thresh/TIMING_FALLBACK_MAD_
+        MULTIPLE gate, same persistence tracker -- the only change is
+        the firing cardinality, generalized from "exactly 1 of 2
+        elevated" to "exactly N-1 of N elevated" for any N>=3. Runs
+        independently of, and never modifies, the existing positive-
+        deviation worst-selection path (_check_mean/_check_cv/
+        score_mean_window/score_cv_window) -- this is purely additive.
+
+        Deliberately does NOT overlap _timing_asymmetry_fallback_
+        evaluate: that function returns None outright for any comm with
+        != 2 members (see its own `if len(members_with_host) != 2`
+        gate), so a given comm is only ever evaluated by exactly one of
+        these two functions, never both.
+
+        Returns None whenever evidence is missing, the comm is below 3
+        real members (that shape is _timing_asymmetry_fallback_
+        evaluate's own, above), the elevated/non-elevated split isn't
+        exactly N-1/1, or persistence (T.PERSIST_REQUIRED consecutive
+        real samples, via the same self.timing_fallback_tracker this
+        file's other below-floor fallback already uses -- no new
+        tracker, no new plumbing) hasn't yet been satisfied. Otherwise
+        returns (culprit_member, slot, per_member, bucket, coll)."""
+        members_with_host = _comm_cross_node_members(self.vm_url, comm)
+        n = len(members_with_host)
+        if n < 3:
+            return None
+
+        pairs = set()
+        for hh in {hh for hh, _ in members_with_host}:
+            pairs.update(_discover_buckets(self.vm_url, hh, comm))
+        if not pairs:
+            return None
+        bucket, coll = min(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1]))
+
+        per_member = {}
+        for hh, m in members_with_host:
+            slot = _query_gpu_slot(self.vm_url, hh, m)
+            if slot is None or slot < 0:
+                return None
+            data = self._member_exec_time_current(hh, comm, m, bucket, coll)
+            if data is None:
+                return None
+            current, ts = data
+            role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
+            role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+            if role_median is not None and role_median > 0:
+                baseline, mad, source = role_median, role_mad, "role"
+            else:
+                role_median_any, role_mad_any = self._member_role_baseline(
+                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                if role_median_any is not None and role_median_any > 0:
+                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+                else:
+                    fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                    if fb_median is not None and fb_median > 0:
+                        baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                    else:
+                        return None
+            per_member[m] = {"slot": slot, "current": current, "peer_median": baseline, "peer_mad": mad,
+                              "ratio": current / baseline, "baseline_source": source, "ts": ts,
+                              "bucket": bucket, "coll": coll, "hostname": hh,
+                              "role_rank": role_rank, "role_n": role_n}
+
+        elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+        elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
+                    and (d["peer_mad"] is None or d["peer_mad"] <= 0
+                         or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
+        if len(elevated) != n - 1:
+            return None
+        culprit = [m for m in per_member if m not in elevated][0]
+
+        surplus = min(per_member[e]["ratio"] - elevated_thresh for e in elevated)
+        key = ("wait_induced", per_member[culprit]["hostname"], comm, culprit, bucket, coll)
+        fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[culprit]["ts"])
+        if not fired:
+            return None
+        return (culprit, per_member[culprit]["slot"], per_member, bucket, coll)
+
     def _emit_timing_fallback(self, hostname, comm, member, slot, per_member, trigger,
                                path_c_storage=None, storage_verdict=None):
         """P27.2 -- dedicated formatter for _timing_asymmetry_fallback_
@@ -2907,6 +3056,91 @@ class AlertEngine:
             print(text, flush=True)
             print("=" * 70, flush=True)
             self._append_alert_summary(text.splitlines()[0] if text else "")
+
+    def _emit_wait_induced_alert(self, hostname, comm, culprit, slot, per_member, bucket, coll):
+        """Dedicated formatter for _wait_induced_fallback_evaluate's
+        finding -- deliberately a distinct [WAIT-INDUCED-ALERT] header,
+        never the standard [ALERT] or [STRAGGLER-INCIDENT] formats, so
+        it's immediately obvious in the logs which of the three
+        detection mechanisms (positive-deviation worst-selection,
+        2-member timing-asymmetry, this one) caught a given event --
+        see WAIT_INDUCED_STOPGAP_ACTIVE's own module comment for why
+        this is a separate mechanism, not a modification of either
+        existing one."""
+        tier = "PROBABLE" if WAIT_INDUCED_STOPGAP_ACTIVE else "CONFIRMED"
+        severity, severity_reason = severity_for_tier(tier)
+        _wi_job_id = _comm_slurm_job_id(self.vm_url, comm)
+        if _wi_job_id:
+            _now_ts = time.time()
+            self._recent_tier_by_job[_wi_job_id].append((_now_ts, tier))
+            self._recent_tier_by_job[_wi_job_id] = [
+                (t, tr) for t, tr in self._recent_tier_by_job[_wi_job_id] if _now_ts - t <= DIRECT_IMPACT_ROOT_WINDOW_S
+            ]
+        d = per_member[culprit]
+        culprit_host = d["hostname"]
+        elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+        peer_lines = []
+        for m, od in sorted(per_member.items()):
+            if m == culprit:
+                continue
+            mad_note = (f", peer_mad_us={od['peer_mad']:.0f}, gap/mad="
+                        f"{(od['current']-od['peer_median'])/od['peer_mad']:.2f}"
+                        if od.get('peer_mad') else "")
+            peer_lines.append(
+                f"  member={m} host={od['hostname']} slot={od['slot']} role_rank={od['role_rank']} "
+                f"role_n={od['role_n']} ratio={od['ratio']:.3f} current_mean_us={od['current']:.0f} "
+                f"(baseline_us={od['peer_median']:.0f}, source={od['baseline_source']}{mad_note})"
+            )
+        lines = [
+            f"[WAIT-INDUCED-ALERT] rank={culprit} gpu_slot={slot} role_rank={d['role_rank']} "
+            f"role_n={d['role_n']} comm={comm} node={culprit_host} type=compute "
+            f"confidence={tier} severity={severity}",
+            "",
+            f"WAIT-INDUCED STRAGGLER ({len(per_member)}-member comm): this member's OWN current "
+            f"reading (ratio={d['ratio']:.3f}x its own real historical baseline, "
+            f"baseline_us={d['peer_median']:.0f}, source={d['baseline_source']}) is NOT elevated -- "
+            f"it is every OTHER real member of this comm that reads far ABOVE its own baseline "
+            f"(>{elevated_thresh:.3f}x AND >{TIMING_FALLBACK_MAD_MULTIPLE} real baseline-pool MADs "
+            f"above it), all at once, clustered together. This is the inverse of a normal compute "
+            f"straggler's signature: this member caused the other {len(per_member)-1} real member(s) "
+            f"to wait on it, so THEY show the elevated timing while this member's own reading looks "
+            f"short/normal -- the exact signature the standard positive-deviation worst-selection "
+            f"path (score_mean_window/score_cv_window) structurally cannot see, by design, since "
+            f"that logic only ever considers members reading ABOVE the window's own median (the "
+            f"b3e2f90a fix, needed to stop a genuinely fast member from being misflagged -- see "
+            f"this check's own module-level comment for the real investigation this closes). "
+            f"Generalizes _timing_asymmetry_fallback_evaluate's own below-floor (2-member) logic to "
+            f"this comm's real {len(per_member)} members: fires only when exactly {len(per_member)-1} "
+            f"of {len(per_member)} are elevated and exactly 1 (this member) is not -- an ambiguous "
+            f"split (any other count) stays silent. Scoped to this comm's own largest real "
+            f"message-size bucket (bucket={bucket} bytes, coll={coll}). Sustained for "
+            f"{T.PERSIST_REQUIRED} consecutive real samples before firing.",
+            "",
+            "The elevated peers (the actual detected anomaly):",
+        ]
+        lines.extend(peer_lines)
+        lines.append("")
+        lines.append(f"Severity: {severity} -- {severity_reason}")
+        text = "\n".join(lines)
+        with self._alerts_lock:
+            self.alerts.append(text)
+            print(text, flush=True)
+            print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
+
+    def _check_wait_induced(self, hostname, comm):
+        """Dispatch wrapper matching _check_mean/_check_cv's own call
+        pattern (see _poll_host) -- called once per real, distinct comm
+        discovered this poll cycle (not per bucket/coll pair, since
+        _wait_induced_fallback_evaluate picks its own largest-bucket
+        scope internally, same as the below-floor fallback it
+        generalizes), so this runs on every eligible 3+-member
+        communicator every cycle, not a hardcoded subset."""
+        result = self._wait_induced_fallback_evaluate(hostname, comm)
+        if result is None:
+            return
+        culprit, slot, per_member, bucket, coll = result
+        self._emit_wait_induced_alert(hostname, comm, culprit, slot, per_member, bucket, coll)
 
     def _emit_dcgm_fallback(self, hostname, comm, member, slot, per_member, trigger):
         """P21.6.1 -- dedicated formatter, same reasoning as _emit_host/

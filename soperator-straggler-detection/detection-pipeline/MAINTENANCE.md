@@ -219,10 +219,28 @@ project's dev cluster/workload mix — not universal constants.
 | `MEAN_MM_THRESH` | 2.0 | thresholds.py:32, node_aggregator_ref.py:107 |
 | `TIMING_FALLBACK_MAD_MULTIPLE` | 6 | alert_engine.py:239 |
 | `TIMING_FALLBACK_STOPGAP_ACTIVE` | True | alert_engine.py:343 |
+| `PATH_B_AND_TIMING_SUPPRESS_RATIO` | 0.6 | classifier/classifier.py:94 |
+| `WAIT_INDUCED_STOPGAP_ACTIVE` | True | alert_engine.py (module-level, near `TIMING_FALLBACK_STOPGAP_ACTIVE`) |
 | `ROLE_BASELINE_MIN_HISTORY` | 3 | alert_engine.py:300 |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
+
+**The wait-induced-straggler check (`_wait_induced_fallback_evaluate`)
+shares every one of its real thresholds with the P27.2 2-member timing-
+asymmetry fallback above — `PATH_B_AND_TIMING_SUPPRESS_RATIO`,
+`TIMING_FALLBACK_MAD_MULTIPLE`, `ROLE_BASELINE_MIN_HISTORY`,
+`ROLE_BASELINE_MAX_RELATIVE_MAD` — by deliberate design, not
+coincidence (it's a direct generalization of that same mechanism to
+3+ members). Retuning any of these for P27.2's own sake also retunes
+this check; re-validate both together, not just the one you meant to
+change. `WAIT_INDUCED_STOPGAP_ACTIVE` is its own, separate flag (tier
+PROBABLE vs CONFIRMED) — mirrors `TIMING_FALLBACK_STOPGAP_ACTIVE`'s own
+precedent (that flag exists because the identical evidence type
+false-fired CONFIRMED/PAGE on 5/5 healthy runs before a fix landed);
+do not flip it to `False` without the same breadth of real-world
+exposure that earlier false-fire took to surface, not just one
+session's clean validation.**
 
 **Drift found and fixed this pass:** `aggregator/promql_cv_verify.py` (a
 standalone manual verification CLI, not part of the live detection path —
