@@ -57,13 +57,13 @@ import time
 import urllib.parse
 import urllib.request
 
-import yaml
-
 PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PKG_ROOT, "alerting"))
+sys.path.insert(0, os.path.join(PKG_ROOT, "observability"))
 import alert_engine as ae  # noqa: E402  (reuses real, already-validated query helpers)
+import reliability_reference  # noqa: E402  (shared with alert_engine.py's own UNVALIDATED gate)
 
-REFERENCE_PATH = os.path.join(PKG_ROOT, "observability", "workload_reliability_reference.yaml")
+REFERENCE_PATH = reliability_reference.DEFAULT_PATH
 DEFAULT_LOG_PATH = os.path.join(PKG_ROOT, "var", "alert_engine_supervised.log")
 DEFAULT_WINDOW_S = 180.0  # +/- padding around a resolved real anchor timestamp
 HISTORICAL_LOOKBACK_S = 90 * 86400  # matches this project's own ROLE_XJOB_LOOKBACK_S order of magnitude
@@ -214,39 +214,15 @@ def resolve_anchor_timestamp(vm_url, hostname, comm):
 
 
 # ---------------------------------------------------------------------------
-# Reference table (observability/workload_reliability_reference.yaml)
+# Reference table (observability/workload_reliability_reference.yaml) --
+# load_reference/lookup_reference now live in observability/
+# reliability_reference.py, the one shared module both this tool and the
+# live alert_engine.py role-baseline UNVALIDATED gate import, so the two
+# never drift into two different lookup implementations.
 # ---------------------------------------------------------------------------
 
-def load_reference(path=REFERENCE_PATH):
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
-def lookup_reference(ref, workload_sig):
-    """Exact-string match against one of a shape's real workload_sigs --
-    never a fuzzy or partial match (a near-miss sig is a DIFFERENT real
-    workload, not a typo to paper over). workload_sigs is a LIST per
-    entry, not a single string -- confirmed necessary live: the same real
-    workload produced more than one real sig variant across different
-    jobs (see this file's own header comment). Falls back to the file's
-    own explicit defaults.unknown_sig_* for anything unresolved or
-    unrecognized -- hard default is UNVALIDATED, never a guess borrowed
-    from another entry."""
-    if workload_sig:
-        for entry in ref.get("workload_shapes", []):
-            if workload_sig in entry.get("workload_sigs", []):
-                return entry
-    d = ref.get("defaults", {})
-    return {
-        "workload_sig": workload_sig,
-        "human_name": "unknown workload shape",
-        "checks": {
-            name: {"status": d.get("unknown_sig_status", "UNVALIDATED"),
-                   "note": d.get("unknown_sig_note", "").strip(),
-                   "evidence_ref": None}
-            for name in ("alert_positive_deviation", "wait_induced", "role_baseline")
-        },
-    }
+load_reference = reliability_reference.load_reference
+lookup_reference = reliability_reference.lookup_reference
 
 
 # ---------------------------------------------------------------------------

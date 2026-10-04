@@ -1787,6 +1787,62 @@ VictoriaMetrics GET queries or reads a local log file — no writes, no
 pushes, no interaction with the live `alert_engine.py` process. Safe to
 run at any time, including while the pipeline is actively polling.
 
+### 6.14 `[ROLE-BASELINE-ALERT-UNVALIDATED]` — the role-baseline check now gates its OWN confidence by workload shape
+
+**The real gap this closes**: a release-gate regression sweep ran the
+role-baseline check against TP4-standalone (nanoGPT TP4, no PP) — a
+shape §6.12/§6.13's own reference table had no entry for — and found
+**9-13 real false positives per clean run**, confirmed reproducible,
+confirmed NOT the already-fixed contamination mechanism (zero
+`agg_role_baseline_excluded` entries for the shape) and NOT literal
+external contention (reproduced in isolation). At least two distinct,
+still-uncharacterized real mechanisms are present (see MAINTENANCE.md's
+own `ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` entry for the real
+numbers) — and the check was presenting them with the exact same
+`[ROLE-BASELINE-ALERT]` header and PROBABLE tier as a finding on a
+genuinely validated shape like Megatron or TP-inference, with no visual
+distinction at all.
+
+**The fix, deliberately presentation-only, never suppression**: at
+emission time, the check now resolves the firing comm's own real
+`workload_sig` and looks it up in
+`observability/workload_reliability_reference.yaml` (via the new shared
+`observability/reliability_reference.py` module, also used by
+`tools/incident_correlator.py` — one lookup implementation, not two). A
+shape whose role-baseline entry is not exactly `KNOWN_RELIABLE` still
+fires, with every real value unchanged — ratio, ratio, baseline,
+baseline_source, tier, severity — just under a distinctly different
+header, `[ROLE-BASELINE-ALERT-UNVALIDATED]`, with an added paragraph
+explicitly stating the shape hasn't been characterized and the finding
+should be read with extra skepticism. The two rejected alternatives
+were explicitly considered and rejected: silently suppressing the
+finding (hides real signal) and leaving it unflagged (overstates
+confidence) — this is the middle path, matching this project's own
+"never silently hide evidence, never silently overstate it either"
+discipline everywhere else.
+
+**Validated against the real TP4-standalone false positives**: a fresh
+clean TP4-standalone run, re-run with the gate in place, produced **zero
+new plain `[ROLE-BASELINE-ALERT]` lines and 11 new
+`[ROLE-BASELINE-ALERT-UNVALIDATED]` lines** — both of the real
+mechanisms found in the investigation (the ~36-41x dramatic pattern and
+the ~1.8-3.5x noisier one) correctly downgraded. Zero-regression
+confirmed the other direction too: a real TP-inference fault-injection
+run (role_rank=3, a `KNOWN_RELIABLE` shape) still produced the plain,
+undowngraded header on its correctly-resolved firings.
+
+**One real, honest, safe-direction side effect found during
+validation**: resolving a workload's sig requires the job to have
+reached throughput stability, a sometimes-LATER threshold than
+role-baseline's own 3-consecutive-sample firing requirement — confirmed
+live, a real `KNOWN_RELIABLE` TP-inference firing showed the
+UNVALIDATED header once, early in its own job's life, before its sig
+had resolved. The error only ever runs toward MORE caution, never
+toward false confidence, so this was disclosed (see MAINTENANCE.md) and
+not treated as a defect to chase down further.
+
+`tools/self_test.sh`: clean PASS throughout.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive

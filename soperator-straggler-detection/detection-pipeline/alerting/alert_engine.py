@@ -57,6 +57,8 @@ sys.path.insert(0, os.path.join(_PKG_ROOT, "classifier"))
 import classifier as p18k  # noqa: E402
 import storage_evidence  # noqa: E402
 import report as p18k_report  # noqa: E402
+sys.path.insert(0, os.path.join(_PKG_ROOT, "observability"))
+import reliability_reference  # noqa: E402  (role-baseline UNVALIDATED gate; see its own module docstring)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import thresholds as T  # noqa: E402
@@ -511,6 +513,40 @@ WAIT_INDUCED_STOPGAP_ACTIVE = True
 # positive-suppression testing just completed, no broader exposure
 # yet), so it gets at least the same initial caution those two did.
 ROLE_BASELINE_ALERT_STOPGAP_ACTIVE = True
+
+# V1-beta-followup -- real, confirmed gap this closes: a real regression
+# sweep found the role-baseline check firing with full, undifferentiated
+# confidence on TP4-standalone (nanoGPT TP4, no PP) -- a workload shape
+# observability/workload_reliability_reference.yaml has no entry for at
+# all -- producing 9-13 real false positives per clean run, confirmed
+# reproducible, confirmed NOT the already-fixed contamination mechanism
+# (zero agg_role_baseline_excluded entries for the shape) and NOT simple
+# external contention (reproduced in isolation, no other job/user on
+# either node). At least two distinct real mechanisms were found: a
+# dramatic, per-job-bimodal effect on one bucket (one of two roles lands
+# ~50-70x its own baseline, consistent across all TP groups within a
+# job, but WHICH role flips between separate job launches -- a real,
+# likely NCCL-ring-topology-driven effect, not yet root-caused or fixed)
+# and a smaller-magnitude noise pattern on other buckets (same general
+# class as the already-fixed TP-inference role_rank=1 volatility issue,
+# just not yet characterized for this shape). Neither is specific to
+# TP4-standalone BY DESIGN -- the real risk is that the SAME gap exists,
+# silently, for every other workload shape this project supports that
+# was never run through the Megatron/TP-inference-style validation this
+# check actually got.
+#
+# This flag gates PRESENTATION only, never suppresses real signal (that
+# was explicitly rejected -- see this change's own approval): a finding
+# on a workload shape whose reference-table entry for role_baseline is
+# not exactly KNOWN_RELIABLE still fires, still carries every real
+# value, just under a distinctly different header
+# ([ROLE-BASELINE-ALERT-UNVALIDATED], not [ROLE-BASELINE-ALERT]) with an
+# explicit note that this shape's role-baseline behavior has not been
+# characterized and the finding should be read with extra skepticism --
+# the same honest-degradation discipline this file already applies
+# everywhere else (never silently hide evidence, never silently
+# overstate it either).
+ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE = True
 
 # P26.5-maintenance -- where iowait_logger.py (run separately, one process
 # per host, same convention as node_aggregator_ref.py) persists its real,
@@ -1387,6 +1423,21 @@ class AlertEngine:
         keeping one would just let a caller quietly re-hardcode the exact
         thing this fix removes."""
         self.vm_url = vm_url
+        # V1-beta-followup -- loaded ONCE at startup, not re-read every poll
+        # (this file's own established discipline for anything that doesn't
+        # need to react to live data) -- see ROLE_BASELINE_UNVALIDATED_
+        # GATING_ACTIVE's own comment. A missing/malformed reference file
+        # degrades to an empty {} here, which reliability_reference.lookup_
+        # reference's own UNVALIDATED default already handles safely (same
+        # never-let-a-side-channel-failure-block-detection discipline as
+        # every other best-effort read in this file) -- never blocks
+        # startup, never silently claims a shape is KNOWN_RELIABLE.
+        try:
+            self._reliability_ref = reliability_reference.load_reference()
+        except Exception as e:
+            print(f"[reliability-reference-load-failed] {type(e).__name__}: {e} -- "
+                  f"all role-baseline findings will present as UNVALIDATED until this is fixed", file=sys.stderr)
+            self._reliability_ref = {}
         self.summary_log_path = summary_log_path
         self._static_hostnames = tuple(hostnames) if hostnames else None
         self._explicit_dcgm_host_map = dcgm_host_map
@@ -3448,8 +3499,36 @@ class AlertEngine:
         elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
         mad_note = (f", baseline_mad_us={data['mad']:.0f}, gap/mad={(data['current']-data['baseline'])/data['mad']:.2f}"
                     if data.get('mad') else "")
+        # V1-beta-followup -- real UNVALIDATED gate (see ROLE_BASELINE_
+        # UNVALIDATED_GATING_ACTIVE's own module comment for the real
+        # TP4-standalone regression-sweep finding this closes). Resolves
+        # this comm's own real workload_sig (same _job_workload_sig this
+        # file already uses elsewhere, no new mechanism) and looks it up
+        # in the shared, hand-maintained reference table -- a shape
+        # without a KNOWN_RELIABLE entry for role_baseline specifically
+        # still fires, with every real value unchanged, just under a
+        # visibly different header. A sig that can't be resolved (job
+        # never reached throughput stability) degrades the same honest
+        # way lookup_reference's own UNVALIDATED default already does.
+        job_id = _comm_slurm_job_id(self.vm_url, comm)
+        sig = self._job_workload_sig(data["hostname"], job_id) if job_id else None
+        rb_status = reliability_reference.check_status(self._reliability_ref, sig, "role_baseline")
+        validated = (rb_status == "KNOWN_RELIABLE")
+        header_tag = "[ROLE-BASELINE-ALERT]" if validated else "[ROLE-BASELINE-ALERT-UNVALIDATED]"
+        unvalidated_note = (
+            [] if validated else [
+                "",
+                f"UNVALIDATED WORKLOAD SHAPE (status={rb_status}): this workload's own real signature "
+                f"({sig if sig else '(not resolvable)'}) has no KNOWN_RELIABLE entry for the role-baseline "
+                f"check in observability/workload_reliability_reference.yaml -- its false-positive "
+                f"behavior on this shape has not been characterized the way it has for Megatron/"
+                f"TP-inference. Treat this finding with EXTRA skepticism; it may be a real fault, or it "
+                f"may be an uncharacterized structural/noise pattern specific to this shape (see a real "
+                f"example found live: TP4-standalone's own regression-sweep investigation).",
+            ]
+        )
         lines = [
-            f"[ROLE-BASELINE-ALERT] rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
+            f"{header_tag} rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
             f"role_n={data['role_n']} comm={comm} node={data['hostname']} type=compute "
             f"confidence={tier} severity={severity}",
             "",
@@ -3466,6 +3545,7 @@ class AlertEngine:
             f"to separate a role position's genuine fault from its own structural normal behavior, a "
             f"real, confirmed gap the window-relative comparison cannot see (see this check's own "
             f"module-level comment for the investigation this closes).",
+        ] + unvalidated_note + [
             "",
             f"Severity: {severity} -- {severity_reason}",
         ]
@@ -3488,7 +3568,8 @@ class AlertEngine:
         self._push_visibility_metric(
             f'agg_role_baseline_detected{{hostname="{data["hostname"]}",comm="{comm}",member="{member}",'
             f'gpu_slot="{slot}",role_rank="{data["role_rank"]}",role_n="{data["role_n"]}",bucket="{bucket}",'
-            f'coll="{coll}",baseline_source="{data["baseline_source"]}",volatile="{1 if volatile else 0}"}} 1')
+            f'coll="{coll}",baseline_source="{data["baseline_source"]}",volatile="{1 if volatile else 0}",'
+            f'validated="{1 if validated else 0}"}} 1')
         self._push_visibility_metric(
             f'agg_role_baseline_ratio{{hostname="{data["hostname"]}",comm="{comm}",member="{member}",'
             f'gpu_slot="{slot}",role_rank="{data["role_rank"]}",role_n="{data["role_n"]}",bucket="{bucket}",'

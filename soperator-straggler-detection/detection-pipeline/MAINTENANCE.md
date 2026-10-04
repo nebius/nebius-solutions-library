@@ -167,7 +167,7 @@ VM's own new-series visibility lag), then deployed to the real production
 | VictoriaMetrics | `v1.150.0` | `vm-setup.sh:49` |
 | Grafana | `11.5.1` | `grafana-setup.sh:58` |
 | bpftrace | not pinned/installed by this repo — `0.20.2-1ubuntu4.3` is only the confirmed-working version recorded in `VERSIONS.md:75` | n/a |
-| PyYAML (`python3-yaml`) | not pinned, whatever `apt install python3-yaml` currently resolves to (`6.0.1-2build2` on this dev cluster) | Required by `tools/incident_correlator.py` only (reads `observability/workload_reliability_reference.yaml`) — not a dependency of the live `alert_engine.py`/`node_aggregator_ref.py` pipeline, which remains stdlib-only by design. `pip install pyyaml` is refused on this cluster's externally-managed Python (PEP 668); use the system package. |
+| PyYAML (`python3-yaml`) | not pinned, whatever `apt install python3-yaml` currently resolves to (`6.0.1-2build2` on this dev cluster) | **Now required by the live `alert_engine.py` too, not just `tools/incident_correlator.py`** — both import the shared `observability/reliability_reference.py` module, which reads `observability/workload_reliability_reference.yaml` for the role-baseline UNVALIDATED gate (see §5/§6 below). This is a deliberate, disclosed break from this pipeline's prior stdlib-only design — `node_aggregator_ref.py` remains stdlib-only; `alert_engine.py` does not anymore. `pip install pyyaml` is refused on this cluster's externally-managed Python (PEP 668); use the system package, and confirm it's present before restarting `alert_engine.py`'s supervisor — a missing import here degrades to every role-baseline finding presenting as UNVALIDATED (see the engine's own load-failure log line), not a crash, but still a real loss of signal quality worth noticing promptly. |
 
 **Known version-sensitive gotchas (both from a real launch-script bind-mount
 of the host's `/usr/lib/x86_64-linux-gnu` into the container):**
@@ -227,6 +227,7 @@ project's dev cluster/workload mix — not universal constants.
 | `ROLE_BASELINE_VOLATILITY_MIN_N` | 15 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
 | `ROLE_BASELINE_VOLATILE_FLAG` | 0.3 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
 | `ROLE_BASELINE_MIN_HISTORY_VOLATILE` | 10 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
+| `ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` | True | alert_engine.py (module-level, near `ROLE_BASELINE_ALERT_STOPGAP_ACTIVE`) |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
@@ -265,6 +266,24 @@ after any change here — a change that looks correct in the alert log
 can still silently break what the panels show (e.g. a `volatile` label
 that stops matching what the live gate actually used) if only the
 detection side is re-checked.**
+
+**`ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` has one confirmed, real,
+safe-direction side effect worth knowing about, not a bug to chase:**
+resolving a comm's `workload_sig` requires `agg_job_workload_sig_info`
+to have been pushed, which itself needs the job to reach throughput
+stability -- a separate, sometimes-later threshold than role-baseline's
+own 3-consecutive-sample persistence requirement. Confirmed live: a
+real TP-inference fault-injection run (a KNOWN_RELIABLE shape) fired
+`[ROLE-BASELINE-ALERT-UNVALIDATED]`, not the plain header, because its
+sig hadn't resolved yet at the moment of firing -- re-checking moments
+later, the same sig resolved correctly to KNOWN_RELIABLE. This means
+even a well-characterized shape can transiently show the UNVALIDATED
+variant during a job's own early cold-start window. The error is always
+in the safe direction (toward MORE skepticism, never toward false
+confidence), so this was not treated as a defect worth fixing as part
+of the original change -- but don't be surprised by it, and don't
+interpret an early UNVALIDATED finding on a known-good shape as a sign
+the reference table or the lookup logic is broken.
 
 **Drift found and fixed this pass:** `aggregator/promql_cv_verify.py` (a
 standalone manual verification CLI, not part of the live detection path —
