@@ -442,6 +442,50 @@ TIMING_FALLBACK_STOPGAP_ACTIVE = True
 # not a weaker standard just because it's new.
 WAIT_INDUCED_STOPGAP_ACTIVE = True
 
+# Role-baseline-deviation check -- a real, separate structural-bias
+# investigation this session, NOT the same finding as the wait-induced
+# check above (confirmed independent: zero overlap on real data --
+# the wait-induced check never fired on any of the comms this one did).
+# Real data across 13 independent TP4 communicators (all real Megatron
+# TP4/PP4/DP3 jobs) found comm-local role_rank=0 is structurally,
+# consistently the FASTEST member of its own TP group (lowest in 12/13
+# comms, often by a large margin) -- a genuine, repeatable, position-
+# correlated timing effect, not noise. Because b3e2f90a's own correct
+# sign-fix only ever considers positive deviation from a window's own
+# cross-sectional median, role_rank=0 being reliably fastest means the
+# window's median sits low, and whichever of the remaining roles is
+# merely the least-fast THIS window -- true, normal, role-specific
+# variation, not a fault -- gets flagged as "worst" instead. Confirmed
+# this is not cosmetic: two independent clean, no-fault Megatron runs
+# produced real [ALERT] firings this way (2 in one run, 50+ in a
+# second, larger run), none of them role_rank=0.
+#
+# This check is a genuinely different design from both b3e2f90a's own
+# cross-sectional comparison and the wait-induced check's N-1-elevated
+# cardinality rule: it asks, independently per member, "is this
+# member's CURRENT reading anomalous relative to ITS OWN historical
+# baseline for that exact role shape" (reusing _member_role_baseline --
+# the same role -> role_cross_host -> cross_comm_peer chain P27.2 and
+# the wait-induced check already use, not a new mechanism) rather than
+# "anomalous relative to its peers in this window." This is the
+# distinction that should separate "structurally fast/slow by design"
+# (a role whose OWN baseline is already low/high, so reading near that
+# baseline is normal) from "actually faulted" (a real fault moves a
+# member far from its OWN history, regardless of what role it holds).
+#
+# Deliberately NOT wired into any suppression of the existing [ALERT]
+# path in this change -- that is a separate, later decision once this
+# check is validated trustworthy standing alone. Fires its own distinct
+# [ROLE-BASELINE-ALERT] finding, informational only for now.
+#
+# Tier: PROBABLE, via the same stopgap convention TIMING_FALLBACK_
+# STOPGAP_ACTIVE/WAIT_INDUCED_STOPGAP_ACTIVE already establish -- this
+# check has even less real-world validation than either sibling
+# mechanism had at its own integration point (sensitivity and false-
+# positive-suppression testing just completed, no broader exposure
+# yet), so it gets at least the same initial caution those two did.
+ROLE_BASELINE_ALERT_STOPGAP_ACTIVE = True
+
 # P26.5-maintenance -- where iowait_logger.py (run separately, one process
 # per host, same convention as node_aggregator_ref.py) persists its real,
 # per-host block-I/O-wait log. build_finding_for_alert reads from here via
@@ -1579,6 +1623,7 @@ class AlertEngine:
             if comm not in seen_comms:
                 seen_comms.add(comm)
                 self._run_check("wait_induced", self._check_wait_induced, hostname, comm)
+                self._run_check("role_baseline", self._check_role_baseline, hostname, comm)
         self._run_check("rank0_outlier_rate", self._check_rank0_outlier_rate, hostname)
         self._run_check("job_throughput", self._check_job_throughput, hostname)
 
@@ -2896,9 +2941,38 @@ class AlertEngine:
         elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
                     and (d["peer_mad"] is None or d["peer_mad"] <= 0
                          or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
+        # Role-baseline-pool hygiene (same P27-hotfix6 self-exclusion
+        # _timing_asymmetry_fallback_evaluate already does for its own
+        # elevated members, reused exactly) -- a confirmed-anomalous
+        # reading, found even once, must never silently feed a FUTURE
+        # role-baseline computation as if it were "what normal looks
+        # like" for that role shape. Real, confirmed gap this closes:
+        # direct investigation of a real false-positive on the sibling
+        # role-baseline check traced it to exactly this -- repeated
+        # fault-injection runs targeting the same role position left
+        # their own suppressed (culprit) and elevated (waiting-peer)
+        # readings in that role's own cross-job history unexcluded,
+        # permanently skewing its baseline. Pushed unconditionally here
+        # (not gated on the n-1/persistence checks below), same
+        # reasoning as the sibling check: a single qualifying reading is
+        # already real evidence it doesn't belong in "normal" history,
+        # whether or not this specific cycle goes on to actually fire.
+        for elevated_m in elevated:
+            d = per_member[elevated_m]
+            if d["role_rank"] not in (None, "na") and d["role_n"] not in (None, "na"):
+                self._push_role_baseline_exclusion(d["hostname"], comm, elevated_m, bucket, coll,
+                                                    d["role_rank"], d["role_n"])
         if len(elevated) != n - 1:
             return None
         culprit = [m for m in per_member if m not in elevated][0]
+        # Same hygiene for the culprit side -- its own suppressed
+        # reading is just as real evidence of non-normal behavior as the
+        # peers' elevation is, and is otherwise never excluded from
+        # anywhere else in this file.
+        cd = per_member[culprit]
+        if cd["role_rank"] not in (None, "na") and cd["role_n"] not in (None, "na"):
+            self._push_role_baseline_exclusion(cd["hostname"], comm, culprit, bucket, coll,
+                                                cd["role_rank"], cd["role_n"])
 
         surplus = min(per_member[e]["ratio"] - elevated_thresh for e in elevated)
         key = ("wait_induced", per_member[culprit]["hostname"], comm, culprit, bucket, coll)
@@ -3141,6 +3215,151 @@ class AlertEngine:
             return
         culprit, slot, per_member, bucket, coll = result
         self._emit_wait_induced_alert(hostname, comm, culprit, slot, per_member, bucket, coll)
+
+    def _role_baseline_fallback_evaluate(self, hostname, comm):
+        """Role-baseline-deviation check -- see ROLE_BASELINE_ALERT_
+        STOPGAP_ACTIVE's own module comment for the real structural-bias
+        investigation this closes and why it's a genuinely different
+        design from both b3e2f90a's cross-sectional worst-selection and
+        the wait-induced check's N-1-elevated cardinality rule.
+
+        Unlike both of those, this evaluates each member INDEPENDENTLY
+        -- there is no cardinality condition across the comm's other
+        members at all, deliberately: the whole point is to stop asking
+        "who looks worst relative to its peers THIS window" (which is
+        what lets a structurally-fast or structurally-slow role's own
+        normal behavior get mistaken for an anomaly) and instead ask,
+        per member, "is this member's current reading anomalous
+        relative to ITS OWN historical baseline for this exact role
+        shape." Reuses _member_role_baseline's exact role -> role_
+        cross_host -> cross_comm_peer chain (the same machinery P27.2
+        and the wait-induced check already use) and the same elevated-
+        ratio/MAD-multiple gate those two already use (PATH_B_AND_
+        TIMING_SUPPRESS_RATIO, TIMING_FALLBACK_MAD_MULTIPLE) -- not new
+        numbers, the same calibrated ones. Positive direction only
+        (current ABOVE baseline), matching b3e2f90a's own established
+        principle that a straggler detector must never flag a member
+        for being faster than normal.
+
+        Returns a list of (member, slot, data, bucket, coll) tuples --
+        zero, one, or more than one member can independently qualify
+        this poll cycle (no "exactly one" or "exactly N-1" constraint
+        here, unlike the two sibling checks), each gated through the
+        same self.timing_fallback_tracker persistence (T.PERSIST_
+        REQUIRED consecutive real samples) via its own, distinctly-
+        namespaced key so it shares infrastructure with, but never
+        collides with, either sibling mechanism's own keys."""
+        members_with_host = _comm_cross_node_members(self.vm_url, comm)
+        if len(members_with_host) < 3:
+            return []
+
+        pairs = set()
+        for hh in {hh for hh, _ in members_with_host}:
+            pairs.update(_discover_buckets(self.vm_url, hh, comm))
+        if not pairs:
+            return []
+        bucket, coll = min(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1]))
+
+        elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+        results = []
+        for hh, m in members_with_host:
+            slot = _query_gpu_slot(self.vm_url, hh, m)
+            if slot is None or slot < 0:
+                continue
+            data = self._member_exec_time_current(hh, comm, m, bucket, coll)
+            if data is None:
+                continue
+            current, ts = data
+            role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
+            role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+            if role_median is not None and role_median > 0:
+                baseline, mad, source = role_median, role_mad, "role"
+            else:
+                role_median_any, role_mad_any = self._member_role_baseline(
+                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                if role_median_any is not None and role_median_any > 0:
+                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+                else:
+                    fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                    if fb_median is not None and fb_median > 0:
+                        baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                    else:
+                        continue
+            ratio = current / baseline
+            elevated = (ratio > elevated_thresh
+                        and (mad is None or mad <= 0 or (current - baseline) > TIMING_FALLBACK_MAD_MULTIPLE * mad))
+            if not elevated:
+                continue
+            # Role-baseline-pool hygiene -- same reasoning as the
+            # identical fix in _wait_induced_fallback_evaluate (see its
+            # own comment): this member's current reading just cleared
+            # this check's own anomaly gate, so it must not also silently
+            # feed a FUTURE role-baseline computation as "normal" for
+            # this role shape. Pushed as soon as detected, not gated on
+            # the persistence check below, for the same reason the
+            # sibling checks don't gate their own exclusion either.
+            if role_rank not in (None, "na") and role_n not in (None, "na"):
+                self._push_role_baseline_exclusion(hh, comm, m, bucket, coll, role_rank, role_n)
+            d = {"slot": slot, "current": current, "baseline": baseline, "mad": mad, "ratio": ratio,
+                 "baseline_source": source, "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
+                 "role_rank": role_rank, "role_n": role_n}
+            key = ("role_baseline", hh, comm, m, bucket, coll)
+            fired, _duration_s = self.timing_fallback_tracker.observe(key, ratio - elevated_thresh, ts)
+            if fired:
+                results.append((m, slot, d, bucket, coll))
+        return results
+
+    def _emit_role_baseline_alert(self, hostname, comm, member, slot, data, bucket, coll):
+        """Dedicated formatter for _role_baseline_fallback_evaluate's
+        finding -- a distinct [ROLE-BASELINE-ALERT] header, never
+        [ALERT] or [WAIT-INDUCED-ALERT]. Deliberately informational
+        only: this check does not suppress or otherwise influence the
+        existing [ALERT] path's own firing behavior -- that is a
+        separate, later decision once this check is validated
+        trustworthy standing alone (see this check's own module-level
+        comment)."""
+        tier = "PROBABLE" if ROLE_BASELINE_ALERT_STOPGAP_ACTIVE else "CONFIRMED"
+        severity, severity_reason = severity_for_tier(tier)
+        elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+        mad_note = (f", baseline_mad_us={data['mad']:.0f}, gap/mad={(data['current']-data['baseline'])/data['mad']:.2f}"
+                    if data.get('mad') else "")
+        lines = [
+            f"[ROLE-BASELINE-ALERT] rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
+            f"role_n={data['role_n']} comm={comm} node={data['hostname']} type=compute "
+            f"confidence={tier} severity={severity}",
+            "",
+            f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="
+            f"{data['current']:.0f}) is {data['ratio']:.3f}x its OWN real historical baseline for "
+            f"this exact role shape (baseline_us={data['baseline']:.0f}, source={data['baseline_source']}"
+            f"{mad_note}) -- independent of what any other member of this comm is doing this cycle. "
+            f"Exceeds >{elevated_thresh:.3f}x AND >{TIMING_FALLBACK_MAD_MULTIPLE} real baseline-pool "
+            f"MADs above it, sustained for {T.PERSIST_REQUIRED} consecutive real samples. Scoped to "
+            f"this comm's own largest real message-size bucket (bucket={bucket} bytes, coll={coll}).",
+            "",
+            f"Informational only for now -- does NOT suppress or otherwise influence the standard "
+            f"positive-deviation [ALERT] path's own firing behavior for this comm. This check exists "
+            f"to separate a role position's genuine fault from its own structural normal behavior, a "
+            f"real, confirmed gap the window-relative comparison cannot see (see this check's own "
+            f"module-level comment for the investigation this closes).",
+            "",
+            f"Severity: {severity} -- {severity_reason}",
+        ]
+        text = "\n".join(lines)
+        with self._alerts_lock:
+            self.alerts.append(text)
+            print(text, flush=True)
+            print("=" * 70, flush=True)
+            self._append_alert_summary(text.splitlines()[0] if text else "")
+
+    def _check_role_baseline(self, hostname, comm):
+        """Dispatch wrapper matching _check_wait_induced's own call
+        pattern (see _poll_host) -- once per real, distinct comm per
+        cycle. Unlike the wait-induced check, _role_baseline_fallback_
+        evaluate can return multiple qualifying members at once (no
+        cardinality constraint), so this emits once per qualifying
+        member, not just the first."""
+        for member, slot, data, bucket, coll in self._role_baseline_fallback_evaluate(hostname, comm):
+            self._emit_role_baseline_alert(hostname, comm, member, slot, data, bucket, coll)
 
     def _emit_dcgm_fallback(self, hostname, comm, member, slot, per_member, trigger):
         """P21.6.1 -- dedicated formatter, same reasoning as _emit_host/
