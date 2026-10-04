@@ -187,18 +187,31 @@ invalidates an old overhead number.
 
 ## 5. Known limitations / disclosed gaps — current status
 
-Pulled from README §7 ("Known limitations," README.md:1550) and verified
-against its current text, not memory:
+Pulled from README §7 ("Known limitations," README.md:1899) and verified
+against its current text, not memory. **Line numbers below were re-
+verified directly against the current file during the V1 Beta release-
+gate sweep** — this project's own README grew by ~350 lines across
+this session's §6.12-6.15 additions, which silently staled every one of
+this table's own prior line-number references (all pointed at unrelated
+content afterward) — a real, found documentation-drift issue in its own
+right, not just a hypothetical one to guard against:
 
 | Item | Status | Note |
 |---|---|---|
-| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README:1773-1782) |
-| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README:1784-1789) |
+| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README:2202-2211) |
+| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README:2213-2218) |
 | `rolling_buffer.py` sampler "not deployed" | **FIXED (precision correction in README)** | The sampler genuinely isn't launched, but the query functions ARE live, reachable code gated behind one `buffer=None` call site — see §3 |
-| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as-is (README:1570-1586), but a separate Role-Baseline-Deviation check + two distinct false-positive fixes (contamination, volatility) now exist on top of it; a full dedicated README write-up of that check is still owed (README:1694-1706) |
-| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README:1203-1219) |
-| Cross-node PP-link `baseline_source` gap | **ACCEPTED, permanent topology limitation** | Hybrid's 2-ranks/node layout has no independent same-shape peer comm for the below-floor fallback to use (README §Hybrid section, ~1937-1959) |
-| First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (README:2438-2452) |
+| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as-is (README:1919-1935), but a separate Role-Baseline-Deviation check + two distinct false-positive fixes (contamination, volatility) now exist on top of it; a full dedicated README write-up of that check is still owed (README:1937+) |
+| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README:1204-1222) |
+| Cross-node PP-link `baseline_source` gap | **ACCEPTED, permanent topology limitation** | Hybrid's 2-ranks/node layout has no independent same-shape peer comm for the below-floor fallback to use (README:2378-2389) |
+| First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (README:2867-2870) |
+
+**Maintenance note, found live during this exact re-verification**: any
+future large README addition (a new `§6.x` subsection, especially one
+inserted before `## 7`) will silently re-stale every line number in this
+table again — there is no automated check tying these together. Re-grep
+each real quoted phrase above (not just trust the number) whenever this
+table is next consulted for anything higher-stakes than a quick read.
 
 **Resolved this pass:** README §7's rolling_buffer paragraph now states
 precisely which part is deployed (the query functions, reachable code) vs.
