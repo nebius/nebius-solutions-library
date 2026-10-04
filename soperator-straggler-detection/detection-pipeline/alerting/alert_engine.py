@@ -343,6 +343,32 @@ ROLE_BASELINE_MAX_RELATIVE_MAD = 0.5
 # path) instead of trusting a single unrepresentative survivor.
 ROLE_BASELINE_MIN_HISTORY = 3
 
+# V1-beta small-sample MAD-reliability fix -- real, confirmed false-positive
+# this closes (TP-inference role_rank=1, see _member_role_baseline's own
+# broad_hist_rows comment for the full investigation): ROLE_BASELINE_MIN_
+# HISTORY=3 above was borrowed from an unrelated "independent data points"
+# convention, not derived for median/MAD statistical reliability -- a real,
+# live false positive fired from a 7-point sample (above that floor) whose
+# computed mad/median (0.121) was far tighter than this exact role's real,
+# broader-sample relative MAD (0.53-0.64, confirmed via a much larger,
+# un-sig-filtered pool of the same role shape), purely by small-sample
+# chance. ROLE_BASELINE_VOLATILITY_MIN_N=15 is the broad-pool size required
+# before trusting that broader sample's OWN relative-MAD reading as real
+# signal (comfortably above this role's problem n=7, comfortably below
+# Megatron's typical n=37-100 for the same shape-class). ROLE_BASELINE_
+# VOLATILE_FLAG=0.3 is where a shape's broad relative MAD is judged "real
+# evidence of inherent noise" rather than coincidence -- confirmed against
+# real data: Megatron's non-false-positiving roles sit at 0.295-0.415,
+# TP-inference's actually-false-positiving role sits at 0.53-0.64, so 0.3
+# sits just above the former and comfortably below the latter. When a
+# shape is flagged volatile, ROLE_BASELINE_MIN_HISTORY_VOLATILE=10 replaces
+# the base floor for ITS narrow (sig-filtered) pool only -- every other,
+# non-flagged shape keeps today's ROLE_BASELINE_MIN_HISTORY=3 behavior
+# completely unchanged.
+ROLE_BASELINE_VOLATILITY_MIN_N = 15
+ROLE_BASELINE_VOLATILE_FLAG = 0.3
+ROLE_BASELINE_MIN_HISTORY_VOLATILE = 10
+
 # P27.2.6 STOPGAP -- TEMPORARY, applied immediately and separately from the
 # TIMING_FALLBACK_MAD_MULTIPLE fix above, before that fix had been live-
 # validated. Real, live investigation on this cluster found the ratio-only
@@ -2322,6 +2348,25 @@ class AlertEngine:
         # regardless of how long ago that job actually ran, rather than
         # only ones still reporting fresh data right now.
         hist_rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+        # V1-beta small-sample MAD-reliability fix -- real, confirmed gap
+        # this closes (TP-inference role_rank=1 false-positive investigation):
+        # the sig-filtered pool below (same-workload-only, needed to avoid
+        # the cross-workload contamination P27-hotfix7 already fixed) can be
+        # genuinely tiny for a workload that has reached throughput-stability
+        # only a handful of times (confirmed live: ~7 points), and a median/
+        # MAD computed from that few points is itself a statistically
+        # unstable estimate -- confirmed live, this exact case computed
+        # mad/median=0.121 (looks tight, trusted) from a 7-point sample, when
+        # this role's own TRUE population-level relative MAD (the broader,
+        # un-sig-filtered pool below, n=19-38) is 0.53-0.64 -- close to or
+        # above ROLE_BASELINE_MAX_RELATIVE_MAD's own 0.5 ceiling, which a
+        # well-sampled draw would have correctly tripped. Captured here,
+        # BEFORE the sig-filter narrows hist_rows below, so this reuses data
+        # already being fetched -- no new query. Deliberately not combined
+        # with the exclusion filtering below (anomalous entries don't
+        # meaningfully change a "how noisy is this shape in general" read
+        # the way they'd skew a tight baseline value).
+        broad_hist_rows = hist_rows
         # P27-hotfix7 -- real, confirmed cross-WORKLOAD contamination
         # this closes (Hybrid TP+PP validation session): plain PP and
         # hybrid TP+PP both produce a PP-shaped comm with the IDENTICAL
@@ -2366,12 +2411,34 @@ class AlertEngine:
                      for r in hist_rows if r["metric"].get("comm") != exclude_comm} - excluded
         if not hist_keys:
             return None, None
+        # V1-beta small-sample MAD-reliability fix (continued) -- same
+        # exclude-current-comm + known-anomalous-exclusion filtering already
+        # applied to hist_keys above, applied here to the broader,
+        # un-sig-filtered pool captured as broad_hist_rows, to decide
+        # whether THIS exact (hostname, bucket, coll, role_rank, role_n)
+        # shape is one whose timing is known, from real broad history, to be
+        # inherently volatile -- not guessed, not scaled from the same thin
+        # sample it would be used to judge (see broad_hist_rows's own
+        # comment for why that circularity doesn't work). Only promotes the
+        # required minimum history UPWARD for shapes with real evidence of
+        # high relative noise; every other shape (the common case) keeps
+        # ROLE_BASELINE_MIN_HISTORY unchanged, zero behavior change.
+        broad_keys = {(r["metric"].get("comm"), r["metric"].get("member"))
+                      for r in broad_hist_rows if r["metric"].get("comm") != exclude_comm} - excluded
+        required_min_history = ROLE_BASELINE_MIN_HISTORY
+        if len(broad_keys) >= ROLE_BASELINE_VOLATILITY_MIN_N:
+            broad_vals = [float(r["value"][1]) for r in broad_hist_rows
+                          if (r["metric"].get("comm"), r["metric"].get("member")) in broad_keys]
+            broad_median = statistics.median(broad_vals)
+            broad_mad = statistics.median([abs(v - broad_median) for v in broad_vals])
+            if broad_median > 0 and (broad_mad / broad_median) > ROLE_BASELINE_VOLATILE_FLAG:
+                required_min_history = ROLE_BASELINE_MIN_HISTORY_VOLATILE
         # Followup-fix -- see ROLE_BASELINE_MIN_HISTORY's own comment: a
         # pool this thin (after real exclusions) isn't a trustworthy
         # median regardless of what the exclusion mechanism correctly
         # removed -- degrade the same way a genuine cold start already
         # does, before ever computing a "median" of too few real points.
-        if len(hist_keys) < ROLE_BASELINE_MIN_HISTORY:
+        if len(hist_keys) < required_min_history:
             return None, None
         vals = [float(r["value"][1]) for r in hist_rows
                 if (r["metric"].get("comm"), r["metric"].get("member")) in hist_keys]
