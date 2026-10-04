@@ -1,0 +1,158 @@
+# Workload / check-reliability reference table for tools/incident_correlator.py.
+#
+# This is a structured, hand-maintained DATA file, not logic -- it exists so
+# this project's own real, hard-won check-reliability findings (which
+# workload shapes make which of the three detection checks noisy, blind, or
+# reliable) live somewhere a human edits directly, reviewed alongside
+# MAINTENANCE.md, rather than silently going stale inside hardcoded Python.
+#
+# Every entry here must be backed by a REAL, already-validated finding from
+# this project's own README/commit history -- never a guess at how a check
+# "should" behave on a shape nobody has actually tested. `unknown_sig_*`
+# below is the hard default for anything not explicitly entered: when in
+# doubt, UNVALIDATED, never an assumed status borrowed from a different
+# shape.
+#
+# The three `checks` keys are fixed, matching the three real detection
+# mechanisms by name -- do not rename them without also updating
+# tools/incident_correlator.py's own lookup.
+#   - alert_positive_deviation : the original [ALERT] path (score_mean_window
+#                                 / score_cv_window, b3e2f90a's sign-fix)
+#   - wait_induced             : [WAIT-INDUCED-ALERT]
+#   - role_baseline            : [ROLE-BASELINE-ALERT]
+#
+# Each check entry's `status` must be one of exactly:
+#   KNOWN_RELIABLE   - validated accurate on this shape (or a past issue is
+#                       now fixed and re-validated -- say so in the note)
+#   KNOWN_NOISY      - real, repeatable false-positive pattern, NOT fixed
+#   KNOWN_BLIND_SPOT - structurally cannot detect a specific fault class here
+#   UNVALIDATED      - no real data gathered yet for this check on this shape
+#
+# `note` must cite the real numbers, not a paraphrase -- this table's whole
+# value is the specific evidence, not a category label alone.
+#
+# `workload_sigs` is a LIST, not a single string -- confirmed necessary via
+# real validation data, not a hypothetical: the exact same real Megatron
+# TP4/PP4/DP3 workload produced two slightly different real signature
+# strings across two different real jobs ("...4+8+99+524288+..." vs.
+# "...4+8+99+2048+524288+...", a real, legitimate extra small message size
+# in one job's own config), and this tool's lookup is intentionally an
+# EXACT string match, never fuzzy (a near-miss sig could just as easily be
+# a genuinely different workload). Add every real sig variant you actually
+# observe for a shape here, rather than loosening the match -- confirmed
+# live by tools/incident_correlator.py's own validation run.
+
+workload_shapes:
+  - workload_sigs:
+      - "2:AllReduce+Recv+Send:571740+3234251"
+    human_name: "TP-inference"
+    known_shapes:
+      - role_n: 4
+        bucket: 3234251
+        coll: AllReduce
+    checks:
+      alert_positive_deviation:
+        status: KNOWN_BLIND_SPOT
+        note: >
+          Structurally blind to the wait-induced fault SIGNATURE specifically
+          -- not a workload-specific defect, this is b3e2f90a's own designed
+          behavior (never flags a negative deviation from the window median).
+          Confirmed live: a real, severe, correctly-measured fault produced
+          ZERO alert at any tier for 11+ minutes on this workload before the
+          wait-induced check existed. NOT characterized this session for an
+          ordinary (non-wait-induced-shaped) compute fault on this workload --
+          do not assume it "behaves normally" here without real evidence.
+        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+      wait_induced:
+        status: KNOWN_RELIABLE
+        note: >
+          Closes the blind spot above. Validated: a real TP-inference fault
+          fired 20/25 times (the 5 non-fires were a transient cold-start gap
+          in one PEER's own baseline availability early in the run,
+          self-resolved by poll 6 onward, never a miss on the target itself),
+          always correctly naming the true injected rank.
+        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+      role_baseline:
+        status: KNOWN_RELIABLE
+        note: >
+          Two DISTINCT false-positive histories on this shape, both found and
+          fixed, by two different root causes -- do not assume a fix for one
+          role covers the other. role_rank=3: baseline-pool CONTAMINATION
+          from this project's own repeated same-role fault-injection tests
+          leaving their anomalous readings unexcluded (fixed via
+          _push_role_baseline_exclusion; re-validated across 3 fresh clean
+          runs, zero new false positives, zero regression, zero loss of
+          sensitivity). role_rank=1: a DIFFERENT root cause -- genuine
+          small-sample MAD instability (this role's true population relative
+          MAD measured at 0.53-0.64, near/above the 0.5
+          ROLE_BASELINE_MAX_RELATIVE_MAD ceiling, vs. a small live sample
+          that happened to compute a falsely tight MAD) -- fixed via
+          ROLE_BASELINE_MIN_HISTORY_VOLATILE; re-validated via direct fault
+          re-injection, correctly caught via the cross_comm_peer fallback
+          with correct attribution.
+        evidence_ref: "commits 6454b61a (contamination fix), be085441 (volatility fix)"
+
+  - workload_sigs:
+      - "11:AllGather+AllReduce+Recv+Send:4+8+99+524288+1048576+2097152"
+      - "11:AllGather+AllReduce+Recv+Send:4+8+99+2048+524288+1048576+2097152"
+    human_name: "Megatron TP4/PP4/DP3"
+    known_shapes:
+      - role_n: 4
+        bucket: 524288
+        coll: AllReduce
+    checks:
+      alert_positive_deviation:
+        status: KNOWN_NOISY
+        note: >
+          role_rank=0 is structurally, consistently the FASTEST member of its
+          own TP group -- measured fastest in 12 of 13 real comms, a genuine,
+          repeatable, position-correlated timing effect, not noise. Because
+          this check only ever considers positive deviation from a window's
+          own cross-sectional median (b3e2f90a's own correct sign-fix), two
+          independent clean, no-fault Megatron runs produced real [ALERT]
+          firings this way (2 in one run, 50+ in a second, larger run), NONE
+          of them on role_rank=0 -- it misattributes "worst" to whichever
+          OTHER role is merely least-fast that particular window. Do not
+          treat a solo firing on this shape (any role_rank 1/2/3) as
+          meaningful without Check 2/3 corroboration.
+        evidence_ref: "alert_engine.py ROLE_BASELINE_ALERT_STOPGAP_ACTIVE module comment"
+      wait_induced:
+        status: KNOWN_RELIABLE
+        note: >
+          Validated 20/20 real fires on the true TP culprit, plus an
+          unprompted correct catch of a real secondary cascade effect on a
+          second, unfaulted TP group sharing the same pipeline (genuine
+          ~22-27ms peer elevation against a ~140us culprit reading -- the
+          same real signature, not a false positive). The safety check this
+          is hard-constrained against -- re-running the exact clean, no-fault
+          scenario that originally exposed the role_rank=0 bias above --
+          produced 40/40 clean polls across all 4 real TP communicators, then
+          a further 42+ minutes of continuous clean production polling,
+          zero false positives either time, including the exact
+          previously-affected role position.
+        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+      role_baseline:
+        status: KNOWN_RELIABLE
+        note: >
+          role_rank=0 is correctly, PERMANENTLY excluded from ever producing
+          a trusted role baseline by the existing ROLE_BASELINE_MAX_RELATIVE_
+          MAD=0.5 gate -- its own true relative MAD measured at 0.676, which
+          is the gate working as designed, not a bug. Zero false positives
+          confirmed across fresh clean runs after both the contamination and
+          volatility fixes landed; zero regression, zero loss of sensitivity
+          on real fault re-injection.
+        evidence_ref: "commits 6454b61a, be085441"
+
+# Hard default for any workload_sig not listed above, or that could not be
+# resolved at all (_job_workload_sig returns None for a job that never
+# reached throughput stability -- a real, honest "can't tell," not an error
+# to work around). tools/incident_correlator.py must fall back to exactly
+# this, never silently reuse another shape's notes.
+defaults:
+  unknown_sig_status: UNVALIDATED
+  unknown_sig_note: >
+    This workload's signature does not match any entry in this file, or its
+    signature could not be resolved. No check-reliability history exists
+    for this shape in this reference table -- treat every finding on its own
+    merits; do not assume any check's behavior here based on a different
+    workload shape's entry above.

@@ -1653,6 +1653,140 @@ real rows (one per comm member) immediately after each event, directly
 confirming the exclusion-push wiring fires for every qualifying member,
 not just a subset.
 
+### 6.13 `tools/incident_correlator.py` — assembling evidence across the three checks, without a new verdict
+
+**What this is, and the hard constraint it was built under.** Investigating
+a real event today means manually cross-referencing three different log
+formats (`[ALERT]`, `[WAIT-INDUCED-ALERT]`, `[ROLE-BASELINE-ALERT]`) and
+remembering, from memory, which check is known-noisy or known-blind on
+which real workload shape (§7's own role_rank=0/role-baseline findings,
+for instance). This tool assembles that evidence into one read-only
+report. **It never computes a new confidence score, never overrides the
+existing CONFIRMED/PROBABLE/UNCONFIRMED tiering, and never states a
+comparative lean ("more consistent with noise than a real fault") — every
+line it prints is either a real value copied verbatim from VictoriaMetrics
+or the raw log text itself, plus a pre-written, human-authored reference
+note quoted verbatim.** A design variant that *did* state a comparative
+lean was explicitly considered and explicitly rejected — see the real
+investigation report this was built from if you're deciding whether to
+extend it that way later; that's a separate, deliberate decision, not
+something to default into.
+
+**A real walkthrough, start to finish** — this is the thing to actually
+read if you've never used this tool before.
+
+You're tailing `var/alert_summary.log` and this scrolls by:
+```
+[WAIT-INDUCED-ALERT] rank=2692421 gpu_slot=3 role_rank=3 role_n=4 comm=0x38bd68767bcecb node=worker-0 type=compute confidence=PROBABLE severity=LOG-ONLY
+```
+You don't know yet whether this is a real fault or noise, and you don't
+want to go hunting through three log formats by hand. Paste the exact
+line you saw, unmodified:
+```
+tools/incident_correlator.py --log-line '[WAIT-INDUCED-ALERT] rank=2692421 gpu_slot=3 role_rank=3 role_n=4 comm=0x38bd68767bcecb node=worker-0 type=compute confidence=PROBABLE severity=LOG-ONLY'
+```
+No timestamp lookup needed — there's none to look up (see "the one real
+limitation" below). The tool parses `hostname`/`comm` straight out of the
+pasted text, resolves a real time window around this event from
+VictoriaMetrics's own data, and prints a report. Reading it top to
+bottom, real output from this exact real event:
+```
+resolved workload shape: TP-inference (workload_sig=2:AllReduce+Recv+Send:571740+3234251, slurm_job_id=3760)
+
+real members of this comm (4): worker-0/2692404, worker-0/2692405, worker-0/2692410, worker-0/2692421
+
+-- Check 1: [ALERT] (positive-deviation, mean/CV path) --
+  SILENT -- no [ALERT] evidence found for this identity
+  reference-table note for this shape (status=KNOWN_BLIND_SPOT, ...):
+    Structurally blind to the wait-induced fault SIGNATURE specifically ...
+
+-- Check 2: [WAIT-INDUCED-ALERT] --
+  FIRED (time-confirmed): member=2692421 role_rank=3 ... role_in_event=culprit baseline_source=role value=1
+  FIRED (time-confirmed): member=2692405 role_rank=1 ... role_in_event=elevated_peer baseline_source=cross_comm_peer value=75.86...
+  FIRED (time-confirmed): member=2692404 role_rank=0 ... role_in_event=elevated_peer baseline_source=role_cross_host value=54.52...
+  FIRED (time-confirmed): member=2692410 role_rank=2 ... role_in_event=elevated_peer baseline_source=role value=39.36...
+  reference-table note for this shape (status=KNOWN_RELIABLE, ...):
+    Closes the blind spot above. Validated: a real TP-inference fault fired 20/25 times ...
+
+-- Check 3: [ROLE-BASELINE-ALERT] --
+  FIRED (time-confirmed): member=2692404 role_rank=0 ... baseline_source=role_cross_host volatile=1 value=1
+  FIRED (time-confirmed): member=2692405 role_rank=1 ... baseline_source=cross_comm_peer volatile=1 value=1
+  FIRED (time-confirmed): member=2692410 role_rank=2 ... baseline_source=role_cross_host volatile=1 value=1
+  reference-table note for this shape (status=KNOWN_RELIABLE, ...):
+    Two DISTINCT false-positive histories on this shape, both found and fixed ...
+```
+**How to read this**: Check 1 was silent — expected, this shape's own
+reference note says it's structurally blind to exactly this signature.
+Check 2 fired, naming `2692421` as the culprit and all 3 other real
+members as elevated peers, each with its own real ratio and which
+baseline resolved it. Check 3 independently corroborates on the same 3
+peers. Nothing here is a verdict — it's three independent real
+observations plus the honest context for each. You draw the conclusion
+(here: a real, corroborated wait-induced-shaped event) from the assembled
+facts yourself.
+
+**The other two ways to invoke it**, same tool, same output format, for
+the two other real starting points:
+- You're looking at a Grafana panel (the trajectory/peer-timing/composed-
+  incident-summary/wait-induced/role-baseline panels) with hostname/comm/
+  bucket visible on screen:
+  `tools/incident_correlator.py --host worker-0 --comm 0x38bd68767bcecb --bucket 3234251 --coll AllReduce`
+  (`--bucket`/`--coll` are informational only — the tool auto-discovers
+  the comm's own largest real bucket regardless; pass them when you have
+  them, for your own clarity, not because they're required.)
+- You only have a rough time window and a host in mind ("something seemed
+  off on worker-1 around 14:30"), no comm at all:
+  `tools/incident_correlator.py --host worker-1 --from 14:25 --to 14:35`
+  — every comm with real correlator-visible activity on that host in that
+  window is found and reported automatically (confirmed live: a real run
+  of this exact command shape found 2 real comms in a 10-minute window
+  without being told either one's id).
+
+**The one real limitation this tool always discloses rather than hides**:
+raw `[ALERT]`/`[WAIT-INDUCED-ALERT]`/`[ROLE-BASELINE-ALERT]` log lines
+carry no timestamp at all (confirmed directly against the real log
+format — only this project's own supervisor bookkeeping lines do). A
+finding only has a real, confirmable timestamp when it also pushed a
+VictoriaMetrics metric (every wait-induced/role-baseline finding does;
+a plain `[ALERT]` only does if it additionally crosses the sustained
+`straggler_incident_detected` gate). Every line in this tool's output
+that could only be matched by identity (hostname/comm/member), not
+confirmed against the real requested window, is labeled, inline,
+`IDENTITY-ONLY MATCH -- not time-confirmed` — confirmed live against a
+real, long-aged-out comm (job 3745, well past VM's retention) where NO
+real timestamp could be resolved for the identity at all: the tool
+printed `window: UNRESOLVED (no real timestamp found)` up front and
+marked every subsequent match `IDENTITY-ONLY MATCH -- not time-confirmed
+(no real timestamp resolvable for this identity at all)`, rather than
+silently presenting a decade-spanning log match as if it were a fresh,
+confirmed one.
+
+**The reference table**
+(`observability/workload_reliability_reference.yaml`) is a plain,
+hand-edited YAML file, reviewed alongside MAINTENANCE.md §6 — not logic.
+It holds exactly the real check-reliability findings this README already
+documents (the role_rank=0 Megatron bias, the TP-inference wait-induced
+blind spot/fix, the role_rank=1/3 role-baseline false-positive fixes),
+quoted verbatim, keyed by this project's own real `workload_sig` string
+(reusing `_job_workload_sig`, no new workload-detection mechanism).
+`UNVALIDATED` is the hard default for anything not explicitly entered —
+confirmed live against a real historical event whose workload signature
+didn't match either entry in the file: the tool printed `resolved
+workload shape: unknown workload shape` and the file's own
+`defaults.unknown_sig_note`, rather than guessing it was close enough to
+a known shape. Found live, during validation, that the exact-match
+design requires a real workload's entry to list every real signature
+variant it's ever actually produced, not just one: the identical real
+Megatron TP4/PP4/DP3 workload produced two slightly different real sigs
+across two different jobs (one with an extra small, legitimate message
+size) — fixed by making `workload_sigs` a list per entry, re-validated
+against that same real event afterward.
+
+**Explicitly read-only.** Every function in this tool only ever issues
+VictoriaMetrics GET queries or reads a local log file — no writes, no
+pushes, no interaction with the live `alert_engine.py` process. Safe to
+run at any time, including while the pipeline is actively polling.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive

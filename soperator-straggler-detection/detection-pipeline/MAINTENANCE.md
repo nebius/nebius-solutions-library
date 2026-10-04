@@ -167,6 +167,7 @@ VM's own new-series visibility lag), then deployed to the real production
 | VictoriaMetrics | `v1.150.0` | `vm-setup.sh:49` |
 | Grafana | `11.5.1` | `grafana-setup.sh:58` |
 | bpftrace | not pinned/installed by this repo — `0.20.2-1ubuntu4.3` is only the confirmed-working version recorded in `VERSIONS.md:75` | n/a |
+| PyYAML (`python3-yaml`) | not pinned, whatever `apt install python3-yaml` currently resolves to (`6.0.1-2build2` on this dev cluster) | Required by `tools/incident_correlator.py` only (reads `observability/workload_reliability_reference.yaml`) — not a dependency of the live `alert_engine.py`/`node_aggregator_ref.py` pipeline, which remains stdlib-only by design. `pip install pyyaml` is refused on this cluster's externally-managed Python (PEP 668); use the system package. |
 
 **Known version-sensitive gotchas (both from a real launch-script bind-mount
 of the host's `/usr/lib/x86_64-linux-gnu` into the container):**
@@ -284,6 +285,21 @@ meaningfully, cluster scale changes (more nodes/GPUs per node), or new
 hardware generation is introduced — these numbers were calibrated on a
 2-node/16×H200 cluster against the specific workload shapes in
 `workloads/`, not derived analytically.
+
+**`observability/workload_reliability_reference.yaml`** (read by
+`tools/incident_correlator.py`, see README §6.13) is this same
+re-validation discipline applied to check-RELIABILITY findings rather
+than numeric constants: every time a new workload shape or a new
+noisy/blind/fixed check-behavior pattern like the ones in §6's own
+`ROLE_BASELINE_*` paragraph above is characterized, add it there as a
+new entry (or a new `workload_sigs` variant on an existing one — exact
+string match, never fuzzy; a real validation run this session found the
+SAME workload producing two slightly different real signature strings
+across two different jobs). An entry that silently goes stale (a check's
+real behavior changes after a code fix, but its note here still
+describes the old behavior) is worse than no entry at all, since a human
+reading it would be actively misled rather than honestly told
+"unvalidated."
 
 ## 7. Build/install fragility
 
