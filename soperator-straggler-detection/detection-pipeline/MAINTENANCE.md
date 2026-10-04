@@ -228,6 +228,7 @@ project's dev cluster/workload mix — not universal constants.
 | `ROLE_BASELINE_VOLATILE_FLAG` | 0.3 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
 | `ROLE_BASELINE_MIN_HISTORY_VOLATILE` | 10 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
 | `ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` | True | alert_engine.py (module-level, near `ROLE_BASELINE_ALERT_STOPGAP_ACTIVE`) |
+| `ROLE_BASELINE_JOB_LOCKSTEP_FLAG` | 0.7 | alert_engine.py (near `ROLE_BASELINE_VOLATILE_FLAG`) |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
@@ -284,6 +285,35 @@ confidence), so this was not treated as a defect worth fixing as part
 of the original change -- but don't be surprised by it, and don't
 interpret an early UNVALIDATED finding on a known-good shape as a sign
 the reference table or the lookup logic is broken.
+
+**`ROLE_BASELINE_JOB_LOCKSTEP_FLAG` has the IDENTICAL kind of early-job
+race, confirmed live, for the same structural reason.** This gate
+promotes `_cross_comm_peer_median` (same-Slurm-job comparison) ahead of
+cross-job role-baseline for a role shape whose per-job-median spread
+exceeds 0.7 (see README §6.15). `_cross_comm_peer_median` needs this
+job's OTHER same-shape comms to have posted fresh data; the role-
+baseline elevated gate's own 3-consecutive-sample persistence
+requirement can complete before that happens, letting an early firing
+fall through to the old `role`/`role_cross_host` path even on a
+lockstep-flagged shape -- confirmed live, several such firings in a
+fresh clean run's first 1-2 minutes. Re-validate this interaction
+specifically (not just the steady-state behavior) if `T.PERSIST_
+REQUIRED` or any poll-interval timing changes -- a faster persistence
+gate makes this race wider, not narrower. Deliberately NOT a blocker
+for shipping, since `ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` already
+catches every one of these (TP4-standalone's own role_baseline status
+is `KNOWN_NOISY`, not `KNOWN_RELIABLE` -- see `observability/
+workload_reliability_reference.yaml`), same safe-direction reasoning as
+the sig-resolution race above. Separately, `_role_shape_job_lockstep`
+deliberately does NOT apply `_excluded_role_pool_members`' own
+exclusion filter (unlike every other broad-pool read in this file) --
+confirmed live this is load-bearing, not cosmetic: applying it hid the
+real bimodality signal entirely (this function read 0.0 instead of the
+real 0.96 for TP4's own confirmed-bimodal shape) because the
+contamination-exclusion mechanism had already removed every "high"
+sample as an earlier false-positive artifact. Do not "fix" this by
+re-adding the exclusion filter without re-deriving the whole threshold
+against unfiltered data again.
 
 **Drift found and fixed this pass:** `aggregator/promql_cv_verify.py` (a
 standalone manual verification CLI, not part of the live detection path —

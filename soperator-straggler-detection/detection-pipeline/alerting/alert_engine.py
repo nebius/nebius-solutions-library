@@ -371,6 +371,20 @@ ROLE_BASELINE_VOLATILITY_MIN_N = 15
 ROLE_BASELINE_VOLATILE_FLAG = 0.3
 ROLE_BASELINE_MIN_HISTORY_VOLATILE = 10
 
+# V1-beta-followup -- real, confirmed gap _role_shape_volatile's own flat
+# pooled-relative-MAD check cannot catch: a role shape whose real history
+# is genuinely BIMODAL across separate job launches (not just noisy)
+# when one mode holds a numeric majority of historical samples -- see
+# _role_shape_job_lockstep's own docstring for the full real investigation
+# and the real per-job-median-spread numbers behind this exact threshold
+# (0.96 for the real confirmed-bimodal shape, 0.17-0.52 for every already-
+# validated role-baseline shape measured the same way -- comfortable
+# headroom on both sides, not a guess). Reuses ROLE_BASELINE_MIN_HISTORY
+# as its own minimum-distinct-real-job-count floor -- not a new number,
+# the same "3 independent data points" precedent that constant already
+# established for its own, different purpose.
+ROLE_BASELINE_JOB_LOCKSTEP_FLAG = 0.7
+
 # P27.2.6 STOPGAP -- TEMPORARY, applied immediately and separately from the
 # TIMING_FALLBACK_MAD_MULTIPLE fix above, before that fix had been live-
 # validated. Real, live investigation on this cluster found the ratio-only
@@ -2540,6 +2554,75 @@ class AlertEngine:
         mad = statistics.median([abs(v - median) for v in vals])
         return median > 0 and (mad / median) > ROLE_BASELINE_VOLATILE_FLAG
 
+    def _role_shape_job_lockstep(self, hostname, bucket, coll, role_rank, role_n, exclude_comm):
+        """V1-beta-followup -- real, confirmed gap this closes (TP4-
+        standalone's bucket=11863283 role_rank=0 false-positive
+        investigation): _role_shape_volatile's own flat, pooled relative-
+        MAD check cannot detect a role shape whose real history is
+        genuinely BIMODAL across jobs (one real cluster ~180-230us,
+        another ~7,000-12,700us, confirmed live across 8 real job
+        launches) when one mode happens to hold a numeric majority of
+        historical samples -- median/MAD are robust specifically because
+        they ignore a MINORITY of outliers, which is exactly the
+        property that hides a majority-held low cluster's own real
+        median/MAD looking deceptively tight even though a sizable
+        minority of real jobs sit 40-70x away.
+
+        The real, confirmed-live discriminator that DOES catch this:
+        unlike raw pooled relative MAD, computing each PAST JOB's own
+        median first, then measuring the spread ACROSS those per-job
+        medians, reveals the bimodality directly -- confirmed live,
+        TP4-standalone's role_rank=0/bucket=11863283 scored 0.96 this
+        way (8 real jobs), while every already-validated role-baseline
+        shape measured the same way (Megatron roles 0-3 at bucket=524288,
+        TP-inference roles 1/3 at bucket=3234251) scored 0.17-0.52 --
+        comfortable headroom on both sides for ROLE_BASELINE_JOB_
+        LOCKSTEP_FLAG=0.7, not a guess.
+
+        Deliberately a SEPARATE check from _role_shape_volatile (not a
+        replacement) -- a role shape can be volatile without being
+        job-wide-lockstep-bimodal, and vice versa; this file's own
+        established discipline is to add a new, narrowly-scoped check
+        for a newly-confirmed real pattern rather than overload an
+        existing one's meaning. Returns False (never guesses True) if
+        fewer than ROLE_BASELINE_MIN_HISTORY distinct real job launches
+        exist for this exact shape -- the same real-sample-count
+        discipline every other reliability gate in this file already
+        applies.
+
+        Deliberately does NOT apply _excluded_role_pool_members' own
+        exclusion filter, unlike every other broad-pool read in this
+        file -- a real, confirmed-live interaction found during
+        validation: TP4-standalone's own "high" cluster entries get
+        excluded, job after job, by this exact check's own downstream
+        firing (the elevated-gate hygiene _role_baseline_fallback_
+        evaluate already applies to its own findings), which is CORRECT
+        for real contamination but would silently erase the very
+        bimodality signal this function exists to see if applied here
+        too -- confirmed live: with exclusions applied, this function
+        read 0.0 instead of the real 0.96 for TP4's own confirmed-
+        bimodal shape, because every "high" sample had already been
+        excluded by the time this ran. This function needs the RAW
+        population's real shape, not the cleaned baseline-value pool."""
+        if role_rank in (None, "na") or role_n in (None, "na"):
+            return False
+        selector = (f'agg_mean_exec_time_us{{hostname="{hostname}",bucket="{bucket}",coll="{coll}",'
+                    f'role_rank="{role_rank}",role_n="{role_n}"}}')
+        hist_rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+        by_job = defaultdict(list)
+        for r in hist_rows:
+            comm_val = r["metric"].get("comm")
+            jid = r["metric"].get("slurm_job_id")
+            if comm_val == exclude_comm or not jid:
+                continue
+            by_job[jid].append(float(r["value"][1]))
+        job_medians = [statistics.median(vals) for vals in by_job.values() if vals]
+        if len(job_medians) < ROLE_BASELINE_MIN_HISTORY:
+            return False
+        job_median = statistics.median(job_medians)
+        job_mad = statistics.median([abs(v - job_median) for v in job_medians])
+        return job_median > 0 and (job_mad / job_median) > ROLE_BASELINE_JOB_LOCKSTEP_FLAG
+
     def _member_role_labels(self, hostname, comm, member, bucket, coll):
         """P27-hotfix4 -- reads this member's own real role_rank/role_n
         labels straight off its already-pushed agg_mean_exec_time_us
@@ -3447,20 +3530,41 @@ class AlertEngine:
                 continue
             current, ts = data
             role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
-            role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
-            if role_median is not None and role_median > 0:
-                baseline, mad, source = role_median, role_mad, "role"
-            else:
-                role_median_any, role_mad_any = self._member_role_baseline(
-                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
-                if role_median_any is not None and role_median_any > 0:
-                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+            # V1-beta-followup -- real, confirmed TP4-standalone finding:
+            # a role shape whose cross-job history is genuinely BIMODAL
+            # (not just noisy) can hand _member_role_baseline a numerically
+            # "stable-looking" median/mad that is still wrong for THIS
+            # job's own real mode (see _role_shape_job_lockstep's own
+            # docstring for the full investigation). For a shape flagged
+            # this way, the comm's OWN job-wide same-shape siblings (via
+            # _cross_comm_peer_median -- already job-scoped by design, see
+            # its own P27.5 docstring, not a new mechanism) are a more
+            # reliable comparison than ANY cross-job statistic, since the
+            # real data confirms same-job siblings agree within ~1% of
+            # each other while cross-job medians can differ by 40-70x.
+            # Tried FIRST only for flagged shapes -- every other,
+            # non-flagged shape keeps the original role -> role_cross_host
+            # -> cross_comm_peer order completely unchanged.
+            baseline = mad = source = None
+            if self._role_shape_job_lockstep(hh, bucket, coll, role_rank, role_n, exclude_comm=comm):
+                lockstep_median, lockstep_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                if lockstep_median is not None and lockstep_median > 0:
+                    baseline, mad, source = lockstep_median, lockstep_mad, "same_job_peer_lockstep"
+            if baseline is None:
+                role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+                if role_median is not None and role_median > 0:
+                    baseline, mad, source = role_median, role_mad, "role"
                 else:
-                    fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                    if fb_median is not None and fb_median > 0:
-                        baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                    role_median_any, role_mad_any = self._member_role_baseline(
+                        hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                    if role_median_any is not None and role_median_any > 0:
+                        baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
                     else:
-                        continue
+                        fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                        if fb_median is not None and fb_median > 0:
+                            baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                        else:
+                            continue
             ratio = current / baseline
             elevated = (ratio > elevated_thresh
                         and (mad is None or mad <= 0 or (current - baseline) > TIMING_FALLBACK_MAD_MULTIPLE * mad))

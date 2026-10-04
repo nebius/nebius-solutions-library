@@ -143,6 +143,72 @@ workload_shapes:
           on real fault re-injection.
         evidence_ref: "commits 6454b61a, be085441"
 
+  - workload_sigs:
+      - "6:AllReduce+Recv+Send:4+8+571740+2286960+11863283+12937002+14107901+25874004"
+    human_name: "TP4-standalone (nanoGPT TP4, no PP)"
+    known_shapes:
+      - role_n: 4
+        bucket: 11863283
+        coll: AllReduce
+      - role_n: 4
+        bucket: 25874004
+        coll: AllReduce
+    checks:
+      alert_positive_deviation:
+        status: UNVALIDATED
+        note: >
+          Not investigated this pass -- only role_baseline was characterized
+          for this shape. No real data gathered on the positive-deviation
+          path's own behavior here.
+        evidence_ref: null
+      wait_induced:
+        status: UNVALIDATED
+        note: >
+          Confirmed firing correctly on a real injected fault (STRAGGLER_
+          SLEEP_MS targeting one TP-group's role_rank=0) during the
+          role_baseline investigation below, but not separately
+          characterized for false-positive behavior on this shape -- do
+          not assume KNOWN_RELIABLE from one incidental positive result.
+        evidence_ref: null
+      role_baseline:
+        status: KNOWN_NOISY
+        note: >
+          Deliberately NOT marked KNOWN_RELIABLE -- real validation found
+          a PARTIAL fix, not a complete one; treating 3-of-4 fixed as
+          sufficient would overstate confidence. Two distinct real
+          mechanisms found live: (A) role_rank=0 at bucket=11863283 (and
+          role_rank=0/3 at bucket=25874004) is genuinely BIMODAL across
+          separate job launches (one real cluster ~180-230us, another
+          ~7,000-12,700us, confirmed across 8 real jobs) -- a per-job-
+          median-spread check (ROLE_BASELINE_JOB_LOCKSTEP_FLAG) now
+          detects this and promotes _cross_comm_peer_median (same-job,
+          cross-TP-group comparison) ahead of cross-job history for
+          flagged shapes. (B) role_rank=1 at both buckets measured BELOW
+          the lockstep-detection threshold (0.07-0.42 vs the 0.7 flag) --
+          a smaller, noisier, NOT-lockstep pattern, NOT fixed by this
+          change, still open.
+          Real validation results: a clean run's role_rank=0/bucket=
+          11863283 produced ZERO firings over a full 6+ minute run once
+          past job startup (confirmed via direct log grep). A real
+          injected fault (STRAGGLER_SLEEP_MS on one TP-group's role_rank=
+          0) was still correctly caught on that TP-group's OWN role_rank=
+          2 via the new same_job_peer_lockstep source (ratio=16.3x,
+          gap/mad=152.79), with zero false attribution to the 3 healthy
+          TP-groups -- sensitivity preserved.
+          CONFIRMED REMAINING GAP: a real, disclosed race exists at job
+          startup -- the role-baseline elevated-gate's own 3-consecutive-
+          sample persistence requirement can complete before this job's
+          OTHER same-shape comms have posted enough fresh data for
+          _cross_comm_peer_median to resolve, letting an early firing
+          fall through to the OLD cross-job role-baseline path (source=
+          role, not same_job_peer_lockstep) -- confirmed live, several
+          such firings still occurred in the first ~1-2 minutes of a
+          fresh clean run. Every one of these still presents as
+          [ROLE-BASELINE-ALERT-UNVALIDATED] (this status is not
+          KNOWN_RELIABLE), so this is a disclosed, safe-direction gap,
+          not a silent one.
+        evidence_ref: "V1-beta-followup same-job-peer-lockstep investigation and fix"
+
 # Hard default for any workload_sig not listed above, or that could not be
 # resolved at all (_job_workload_sig returns None for a job that never
 # reached throughput stability -- a real, honest "can't tell," not an error

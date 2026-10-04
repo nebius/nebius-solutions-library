@@ -1843,6 +1843,59 @@ not treated as a defect to chase down further.
 
 `tools/self_test.sh`: clean PASS throughout.
 
+### 6.15 Same-job cross-TP-group comparison for TP4-standalone's role-baseline false positives — a real, PARTIAL fix
+
+**The refined root cause**: §6.14's TP4-standalone investigation was
+extended to 8 real job launches. Role_rank=0 at bucket=11863283 (and,
+found along the way, roles 0/3 at bucket=25874004 too) is genuinely
+BIMODAL across separate job launches — a real ~180-230us cluster and a
+real ~7,000-12,700us cluster, confirmed across jobs, not noise. The
+existing `_role_shape_volatile` relative-MAD check cannot see this: when
+one mode holds a numeric majority of historical samples, median/MAD
+(robust statistics, by design) ignore the minority mode entirely,
+reporting a deceptively tight baseline. The real discriminator that DOES
+catch it: computing each PAST JOB's own median first, then measuring the
+spread ACROSS those per-job medians — TP4's confirmed-bimodal shape
+scored 0.96 this way; every already-validated role-baseline shape
+(Megatron, TP-inference) scored 0.17-0.52 measured identically,
+comfortable real headroom for the new `ROLE_BASELINE_JOB_LOCKSTEP_FLAG
+=0.7`.
+
+**The fix**: for a role shape flagged this way, `_cross_comm_peer_median`
+— already, by its own P27.5 design, scoped to the SAME real Slurm job,
+not a new mechanism — is tried BEFORE the cross-job role-baseline lookup,
+not just as its last-resort fallback. Real same-job TP-groups agree with
+each other within ~1% in the data; cross-job medians can differ by
+40-70x, so the same-job comparison is categorically more trustworthy for
+exactly this signature. Every other, non-flagged shape keeps the
+original role → role_cross_host → cross_comm_peer order unchanged.
+
+**Validated, both directions**: a clean TP4-standalone run produced
+**zero** role_rank=0/bucket=11863283 firings over a full 6+ minute run
+once past job startup. A real injected fault (`STRAGGLER_SLEEP_MS`
+targeting one TP-group's role_rank=0) was still correctly caught on that
+same TP-group's role_rank=2, via the new `same_job_peer_lockstep` source
+(ratio=16.3x, gap/mad=152.79), with zero false attribution to the 3
+healthy TP-groups — sensitivity fully preserved.
+
+**Deliberately NOT marked `KNOWN_RELIABLE`** — two real gaps remain,
+found during validation, not glossed over: (1) role_rank=1 at both
+buckets measures well below the 0.7 lockstep threshold (0.07-0.42) — a
+smaller, different, noisier pattern this fix does not address, still
+open. (2) A real, disclosed startup race: the role-baseline elevated
+gate's own 3-consecutive-sample persistence requirement can complete
+before this job's OTHER same-shape comms have posted enough fresh data
+for the same-job comparison to resolve, letting an early firing fall
+through to the old cross-job path — confirmed live, several such
+firings still occurred in a fresh clean run's first 1-2 minutes. Every
+one still presents as `[ROLE-BASELINE-ALERT-UNVALIDATED]` (§6.14's own
+gate), so this remains a disclosed, safe-direction gap, not a silent
+regression. `observability/workload_reliability_reference.yaml` records
+this shape's role_baseline status as `KNOWN_NOISY`, not
+`KNOWN_RELIABLE` — a meaningful, real improvement, not a closed case.
+
+`tools/self_test.sh`: clean PASS.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
