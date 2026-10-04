@@ -2140,6 +2140,459 @@
           }
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "id": 23,
+      "panels": [],
+      "title": "V1-beta-followup -- wait-induced / role-baseline Grafana visibility",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Wait-Induced-Straggler check (see WAIT_INDUCED_STOPGAP_ACTIVE's own module comment): fires when exactly N-1 of N real members of a comm read elevated vs. their own history while exactly one (the culprit) does not -- the inverse of a normal compute straggler's signature. Culprit row (role_in_event=culprit) is the member that CAUSED the others to wait; elevated_peer rows are the members that WERE waiting, each with its own measured ratio and the baseline_source that resolved it (role / role_cross_host / cross_comm_peer). Tier is PROBABLE via WAIT_INDUCED_STOPGAP_ACTIVE -- see the Tier column's own color mapping, identical to the composed-incident-summary panel's: PROBABLE/UNCONFIRMED are never styled as urgent as CONFIRMED, so this table cannot visually imply more certainty than the tier label itself states.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tier"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "CONFIRMED": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "PROBABLE": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "UNCONFIRMED": {
+                        "color": "blue",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 108
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_wait_induced_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_wait_induced_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_wait_induced_peer_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Wait-Induced Detections (identity + culprit-vs-peer evidence, no raw log reading needed)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "hostname": 0,
+              "gpu_slot": 1,
+              "role_rank": 2,
+              "role_n": 3,
+              "member": 4,
+              "role_in_event": 5,
+              "baseline_source": 6,
+              "tier": 7
+            },
+            "renameByName": {
+              "hostname": "Worker",
+              "gpu_slot": "GPU",
+              "role_rank": "Rank",
+              "role_n": "OfN",
+              "member": "PID",
+              "role_in_event": "Role",
+              "baseline_source": "Source",
+              "tier": "Tier",
+              "Value #A": "Culprit(1=yes)",
+              "Value #B": "TierMarker(1)",
+              "Value #C": "PeerRatio"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Role-Baseline-Deviation check (see ROLE_BASELINE_ALERT_STOPGAP_ACTIVE's own module comment): evaluates each member INDEPENDENTLY against its OWN historical baseline for its exact role shape, separating structurally-fast/slow role behavior from a genuine fault the window-relative [ALERT] path cannot see. Informational only -- does not suppress or influence the existing [ALERT] path. Volatile=1 means this role shape's own broader history is independently known to be wide enough (ROLE_BASELINE_VOLATILE_FLAG) to require the raised ROLE_BASELINE_MIN_HISTORY_VOLATILE floor -- i.e. this finding already cleared the stricter bar, not just the base one. Tier is PROBABLE via ROLE_BASELINE_ALERT_STOPGAP_ACTIVE -- same no-overstatement Tier color mapping as the composed-incident-summary panel.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tier"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "CONFIRMED": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "PROBABLE": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "UNCONFIRMED": {
+                        "color": "blue",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 117
+      },
+      "id": 25,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_role_baseline_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_role_baseline_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_role_baseline_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "title": "Role-Baseline Detections (identity + own-history deviation, no raw log reading needed)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "hostname": 0,
+              "gpu_slot": 1,
+              "role_rank": 2,
+              "role_n": 3,
+              "member": 4,
+              "baseline_source": 5,
+              "volatile": 6,
+              "tier": 7
+            },
+            "renameByName": {
+              "hostname": "Worker",
+              "gpu_slot": "GPU",
+              "role_rank": "Rank",
+              "role_n": "OfN",
+              "member": "PID",
+              "baseline_source": "Source",
+              "volatile": "Volatile(1=raised floor)",
+              "tier": "Tier",
+              "Value #A": "Detected(1)",
+              "Value #B": "Ratio",
+              "Value #C": "TierMarker(1)"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Real agg_role_baseline_excluded rows (see _push_role_baseline_exclusion's own docstring), one per (comm, member) ever found anomalous for that exact role shape and therefore dropped from that role's own future cross-job baseline pool. A role/bucket with zero or very few rows here, despite this dashboard showing real detections for it, is a sign the exclusion wiring may not be firing for that shape -- compare against the Wait-Induced/Role-Baseline Detections panels above. Footer row count is this cluster's real, current total exclusion count across every shape.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 126
+      },
+      "id": 26,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": true,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "builder",
+          "exemplar": false,
+          "expr": "agg_role_baseline_excluded{cluster=~\"$cluster\", hostname=~\"$hostname\", bucket=~\"$bucket\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Role-baseline exclusion health (per-shape exclusion rows -- real event marker)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true
+            },
+            "indexByName": {
+              "hostname": 0,
+              "role_rank": 1,
+              "role_n": 2,
+              "bucket": 3,
+              "coll": 4,
+              "member": 5,
+              "comm": 6
+            },
+            "renameByName": {
+              "hostname": "Worker",
+              "role_rank": "Rank",
+              "role_n": "OfN",
+              "bucket": "Bucket",
+              "coll": "Coll",
+              "member": "PID",
+              "comm": "Comm"
+            }
+          }
+        }
+      ]
     }
   ],
   "preload": false,

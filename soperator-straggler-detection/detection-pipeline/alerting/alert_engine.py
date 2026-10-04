@@ -2458,6 +2458,37 @@ class AlertEngine:
             return None, None
         return median, mad
 
+    def _role_shape_volatile(self, hostname, bucket, coll, role_rank, role_n, exclude_comm):
+        """V1-beta-dashboard-followup -- real Grafana visibility only,
+        NOT part of the live detection gate: a read-only, independent
+        recomputation of the exact broad-pool relative-MAD check
+        _member_role_baseline's own ROLE_BASELINE_VOLATILITY_MIN_N/
+        ROLE_BASELINE_VOLATILE_FLAG gate already applies internally (see
+        that method's own broad_hist_rows comment), so this label always
+        matches what the live gate actually used -- deliberately NOT
+        threaded through _member_role_baseline's own return value, to
+        avoid touching that already-validated 2-tuple return across its
+        4 existing call sites just to expose a dashboard label. Called
+        only at alert-emission time (a real firing, not every poll
+        cycle), so the extra query here never touches the hot path."""
+        if role_rank in (None, "na") or role_n in (None, "na"):
+            return False
+        selector = (f'agg_mean_exec_time_us{{hostname="{hostname}",bucket="{bucket}",coll="{coll}",'
+                    f'role_rank="{role_rank}",role_n="{role_n}"}}')
+        hist_rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+        excluded = self._excluded_role_pool_members(hostname, bucket, coll, role_rank, role_n, any_host=False)
+        keys = {(r["metric"].get("comm"), r["metric"].get("member"))
+                for r in hist_rows if r["metric"].get("comm") != exclude_comm} - excluded
+        if len(keys) < ROLE_BASELINE_VOLATILITY_MIN_N:
+            return False
+        vals = [float(r["value"][1]) for r in hist_rows
+                if (r["metric"].get("comm"), r["metric"].get("member")) in keys]
+        if not vals:
+            return False
+        median = statistics.median(vals)
+        mad = statistics.median([abs(v - median) for v in vals])
+        return median > 0 and (mad / median) > ROLE_BASELINE_VOLATILE_FLAG
+
     def _member_role_labels(self, hostname, comm, member, bucket, coll):
         """P27-hotfix4 -- reads this member's own real role_rank/role_n
         labels straight off its already-pushed agg_mean_exec_time_us
@@ -3268,6 +3299,33 @@ class AlertEngine:
             print(text, flush=True)
             print("=" * 70, flush=True)
             self._append_alert_summary(text.splitlines()[0] if text else "")
+        # V1-beta-dashboard-followup -- real Grafana visibility for this
+        # check, same _push_visibility_metric wire format/discipline
+        # every other dashboard-facing metric in this file already uses
+        # (a push failure here degrades to "this event isn't on the
+        # dashboard," never blocks the detection/log path above). Fires
+        # once per real firing, not per poll. role_in_event distinguishes
+        # the one culprit row from the N elevated-peer rows in the
+        # composed Grafana table (bounded cardinality: exactly 2 values,
+        # same discipline as this file's own "tier" label) -- without it,
+        # a human reading the table can't tell which member CAUSED the
+        # wait versus which members WERE waiting.
+        self._push_visibility_metric(
+            f'agg_wait_induced_detected{{hostname="{culprit_host}",comm="{comm}",member="{culprit}",'
+            f'gpu_slot="{slot}",role_rank="{d["role_rank"]}",role_n="{d["role_n"]}",bucket="{bucket}",'
+            f'coll="{coll}",baseline_source="{d["baseline_source"]}",role_in_event="culprit"}} 1')
+        self._push_visibility_metric(
+            f'agg_wait_induced_tier{{hostname="{culprit_host}",comm="{comm}",member="{culprit}",'
+            f'gpu_slot="{slot}",role_rank="{d["role_rank"]}",role_n="{d["role_n"]}",bucket="{bucket}",'
+            f'coll="{coll}",tier="{tier}"}} 1')
+        for m, od in per_member.items():
+            if m == culprit:
+                continue
+            self._push_visibility_metric(
+                f'agg_wait_induced_peer_ratio{{hostname="{od["hostname"]}",comm="{comm}",member="{m}",'
+                f'gpu_slot="{od["slot"]}",role_rank="{od["role_rank"]}",role_n="{od["role_n"]}",'
+                f'bucket="{bucket}",coll="{coll}",baseline_source="{od["baseline_source"]}",'
+                f'role_in_event="elevated_peer"}} {od["ratio"]}')
 
     def _check_wait_induced(self, hostname, comm):
         """Dispatch wrapper matching _check_mean/_check_cv's own call
@@ -3417,6 +3475,28 @@ class AlertEngine:
             print(text, flush=True)
             print("=" * 70, flush=True)
             self._append_alert_summary(text.splitlines()[0] if text else "")
+        # V1-beta-dashboard-followup -- real Grafana visibility for this
+        # check, same discipline as _emit_wait_induced_alert's own
+        # identical addition (see its comment). volatile=1 means this
+        # exact role shape's OWN broader history is independently known
+        # (via _role_shape_volatile, read-only, matches the live gate's
+        # own math) to carry a wider ROLE_BASELINE_MIN_HISTORY_VOLATILE
+        # floor -- i.e. this finding already survived the stricter bar,
+        # not just the base one. volatile=0 means the baseline this
+        # finding used came from the ordinary, unraised floor.
+        volatile = self._role_shape_volatile(data["hostname"], bucket, coll, data["role_rank"], data["role_n"], comm)
+        self._push_visibility_metric(
+            f'agg_role_baseline_detected{{hostname="{data["hostname"]}",comm="{comm}",member="{member}",'
+            f'gpu_slot="{slot}",role_rank="{data["role_rank"]}",role_n="{data["role_n"]}",bucket="{bucket}",'
+            f'coll="{coll}",baseline_source="{data["baseline_source"]}",volatile="{1 if volatile else 0}"}} 1')
+        self._push_visibility_metric(
+            f'agg_role_baseline_ratio{{hostname="{data["hostname"]}",comm="{comm}",member="{member}",'
+            f'gpu_slot="{slot}",role_rank="{data["role_rank"]}",role_n="{data["role_n"]}",bucket="{bucket}",'
+            f'coll="{coll}"}} {data["ratio"]}')
+        self._push_visibility_metric(
+            f'agg_role_baseline_tier{{hostname="{data["hostname"]}",comm="{comm}",member="{member}",'
+            f'gpu_slot="{slot}",role_rank="{data["role_rank"]}",role_n="{data["role_n"]}",bucket="{bucket}",'
+            f'coll="{coll}",tier="{tier}"}} 1')
 
     def _check_role_baseline(self, hostname, comm):
         """Dispatch wrapper matching _check_wait_induced's own call

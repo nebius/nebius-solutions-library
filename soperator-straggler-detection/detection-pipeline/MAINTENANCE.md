@@ -194,7 +194,7 @@ against its current text, not memory:
 | NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README:1773-1782) |
 | ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README:1784-1789) |
 | `rolling_buffer.py` sampler "not deployed" | **FIXED (precision correction in README)** | The sampler genuinely isn't launched, but the query functions ARE live, reachable code gated behind one `buffer=None` call site — see §3 |
-| "Rank-12-style" structural role-position bias | **GENUINELY STILL OPEN** | TP-group-local role_rank=0 fired 13x vs 0-1x for peers in one real run; tracked, not fixed (README:1570-1586) |
+| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as-is (README:1570-1586), but a separate Role-Baseline-Deviation check + two distinct false-positive fixes (contamination, volatility) now exist on top of it; a full dedicated README write-up of that check is still owed (README:1694-1706) |
 | MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README:1203-1219) |
 | Cross-node PP-link `baseline_source` gap | **ACCEPTED, permanent topology limitation** | Hybrid's 2-ranks/node layout has no independent same-shape peer comm for the below-floor fallback to use (README §Hybrid section, ~1937-1959) |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (README:2438-2452) |
@@ -222,6 +222,10 @@ project's dev cluster/workload mix — not universal constants.
 | `PATH_B_AND_TIMING_SUPPRESS_RATIO` | 0.6 | classifier/classifier.py:94 |
 | `WAIT_INDUCED_STOPGAP_ACTIVE` | True | alert_engine.py (module-level, near `TIMING_FALLBACK_STOPGAP_ACTIVE`) |
 | `ROLE_BASELINE_MIN_HISTORY` | 3 | alert_engine.py:300 |
+| `ROLE_BASELINE_ALERT_STOPGAP_ACTIVE` | True | alert_engine.py (module-level, near `WAIT_INDUCED_STOPGAP_ACTIVE`) |
+| `ROLE_BASELINE_VOLATILITY_MIN_N` | 15 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
+| `ROLE_BASELINE_VOLATILE_FLAG` | 0.3 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
+| `ROLE_BASELINE_MIN_HISTORY_VOLATILE` | 10 | alert_engine.py (near `ROLE_BASELINE_MIN_HISTORY`) |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
@@ -241,6 +245,25 @@ false-fired CONFIRMED/PAGE on 5/5 healthy runs before a fix landed);
 do not flip it to `False` without the same breadth of real-world
 exposure that earlier false-fire took to surface, not just one
 session's clean validation.**
+
+**The role-baseline-deviation check (`_role_baseline_fallback_
+evaluate`) and its own Grafana panels ("Wait-Induced Detections",
+"Role-Baseline Detections", "Role-baseline exclusion health" — see
+README §6.12) all reuse the SAME underlying role-baseline/exclusion
+infrastructure `_member_role_baseline`/`_push_role_baseline_exclusion`/
+`_excluded_role_pool_members` provides, not separate copies.
+`ROLE_BASELINE_VOLATILITY_MIN_N`/`ROLE_BASELINE_VOLATILE_FLAG`/
+`ROLE_BASELINE_MIN_HISTORY_VOLATILE` specifically gate whether a role
+shape's narrow, sig-filtered pool is trusted at all (see `_member_role_
+baseline`'s own `broad_hist_rows` comment) — retuning any of them
+changes which findings fire `role` vs. degrade to `cross_comm_peer`,
+which changes the real `baseline_source`/`volatile` values the Grafana
+panels display, not just the underlying detection behavior. Re-
+validate both the detection outcome AND the dashboard panels together
+after any change here — a change that looks correct in the alert log
+can still silently break what the panels show (e.g. a `volatile` label
+that stops matching what the live gate actually used) if only the
+detection side is re-checked.**
 
 **Drift found and fixed this pass:** `aggregator/promql_cv_verify.py` (a
 standalone manual verification CLI, not part of the live detection path —

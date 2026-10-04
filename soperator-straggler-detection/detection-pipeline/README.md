@@ -1548,6 +1548,111 @@ combination; waiting it out (a few minutes) was what actually worked
 each time. Flagging for whoever next hits this, not investigated
 further here.
 
+### 6.12 Grafana visibility for the wait-induced and role-baseline checks
+
+**Gap confirmed before designing anything**: neither
+`_emit_wait_induced_alert` nor `_emit_role_baseline_alert` pushed
+anything to VictoriaMetrics — both only wrote to the log/alert-summary
+path, so the two checks this session's own work added (see §7 below)
+had zero Grafana visibility, even though every older detection path
+already does via `_push_visibility_metric` (the same generic helper
+added for `agg_straggler_incident_*`/`agg_path_c_verdict`/
+`agg_host_load_ratio`, reused here unchanged — no new push mechanism).
+
+**Metrics added, fired once per real firing (never per poll)**:
+`agg_wait_induced_detected` (the culprit, `role_in_event="culprit"`),
+`agg_wait_induced_peer_ratio` (one row per elevated peer,
+`role_in_event="elevated_peer"`, each with its own measured ratio and
+`baseline_source`), `agg_wait_induced_tier`; `agg_role_baseline_
+detected` (`baseline_source` plus a `volatile` label — see below),
+`agg_role_baseline_ratio`, `agg_role_baseline_tier`. All reuse the
+same bounded-cardinality label discipline §6.11 already established
+(`baseline_source` has exactly 3 real values: `role`/`role_cross_host`/
+`cross_comm_peer`; `role_in_event` exactly 2; `volatile` exactly 2;
+`tier` exactly 3) — no free text, no new unbounded series.
+
+**`volatile` is a genuinely new, separate computation, not reused
+from the live detection gate.** `_member_role_baseline`'s own broad-
+pool volatility check (see §7's role_rank=1 fix below) only ever
+returns `(None, None)` either way when it degrades — the caller can't
+tell *why* from that alone. Rather than thread a third return value
+through that method's 2-tuple across its 4 existing, already-validated
+call sites just to expose a dashboard label, a small separate read-only
+method (`_role_shape_volatile`) recomputes the identical broad-pool
+median/MAD check independently, called only at alert-emission time (a
+real firing, not every poll cycle) — zero risk to the live detection
+path, guaranteed to agree with it because it's the same formula.
+
+**Panel 1 — "Wait-Induced Detections"**: one table, joining the three
+metrics above via the same `merge`+`organize` pattern as the composed-
+incident-summary panel (§6.11). The culprit row and each elevated-peer
+row share the same comm but different `member`/`Role` values, so they
+land as distinct rows in one table — a human can see, in one place,
+who caused the wait and who was waiting, and which baseline resolved
+each of them.
+
+**Panel 2 — "Role-Baseline Detections"**: same pattern, one row per
+independently-qualifying member, with its own ratio, `baseline_source`,
+and `Volatile` column.
+
+**Panel 3 — "Role-baseline exclusion health"**: a table of raw
+`agg_role_baseline_excluded` rows (already existed as a metric, never
+had its own dedicated table before — only the existing timeseries
+panel, "Below-floor fallback activity"), organized into Worker/Rank/
+OfN/Bucket/Coll/PID/Comm columns with `countRows` shown in the footer
+— a real, current total exclusion count at a glance. A role/bucket
+that shows real detections above but stays near-empty here is a sign
+the exclusion wiring isn't firing for that shape.
+
+**No-overstatement discipline reused exactly, not reinvented**: both
+new panels apply the identical `Tier` column value-mapping §6.11's
+composed-incident-summary panel already established — `CONFIRMED` red,
+`PROBABLE`/`UNCONFIRMED` the same blue, never implying more certainty
+than the tier label states. Both checks are PROBABLE-only today (via
+their own stopgap flags), so neither panel will show red under current
+settings, but the mapping is there unchanged in case either stopgap is
+ever lifted.
+
+**Found and fixed a second occurrence of the §6.11 datasource bug.**
+Before validating anything, every query against this dashboard's
+datasource returned HTTP 502 (`dial tcp 10.24.142.162:8428: connect:
+connection refused` — `10.24.142.162` is `login-0`, confirmed via
+`getent hosts`). The on-disk provisioning file
+(`observability/dashboards/provisioning/datasources/local.yaml`)
+already correctly said `http://worker-0:8428`; the *live* Grafana
+datasource record (`version: 1`, i.e. never edited since creation) was
+still serving the old, wrong value from whatever provisioning read
+happened at its last startup — Grafana datasources are only
+reconciled from disk at startup, unlike dashboards (`updateInterval
+Seconds: 30`), so a corrected file alone does not fix an already-running
+instance. Fixed the same way as §6.11: restarted the Grafana supervisor
+(killing the supervisor shell PIDs, not just the leaf process — the
+same gotcha this project's `alert_engine.py` supervisor already has);
+confirmed via `GET /api/datasources/1` that the live record now reads
+`http://worker-0:8428` post-restart.
+
+**Real validation, through Grafana's own backend, against real fired
+events — not just "the JSON is correct"**: no image-renderer plugin is
+installed here either (same disclosed limit as §6.11). Triggered both
+of this session's own fault scenarios (TP-inference, `STRAGGLER_
+TARGET_RANKS=3` and `=1`) against the restarted pipeline. Confirmed,
+via `GET /api/datasources/proxy/uid/<uid>/api/v1/query` (the identical
+path a rendered panel uses, not a direct VictoriaMetrics query) using
+each panel's own real target expression: `agg_wait_induced_detected`
+correctly returned the true injected culprit both times (`role_rank=3,
+baseline_source=role` on the first run; `role_rank=1, baseline_source=
+role_cross_host` on the second — correctly varying with whichever real
+fallback tier actually resolved it each time, not a fixed value);
+`agg_wait_induced_peer_ratio` returned exactly the 3 real elevated
+peers per event, each with its own ratio; `agg_role_baseline_detected`
+returned 3 real rows per event with `volatile=1` on every role in this
+shape (consistent with the role_rank=1 fix below — the whole shape
+family, not just role_rank=1, now carries the raised floor once its
+broad pool qualifies); `agg_role_baseline_excluded` returned exactly 4
+real rows (one per comm member) immediately after each event, directly
+confirming the exclusion-push wiring fires for every qualifying member,
+not just a subset.
+
 ## 7. Known limitations (read this before relying on any alert)
 
 **Behavior change: the mean-path check now requires 3 consecutive
@@ -1585,6 +1690,20 @@ structural artifact rather than a genuine fault signature — worth its
 own dedicated fix, independent of and not blocking the evidence-
 inspectability work above. Not fixed as part of this work; tracked here
 as an open item.
+
+**Update — addressed by a new, separate Role-Baseline-Deviation check**
+(`_role_baseline_fallback_evaluate`/`_check_role_baseline`, behind
+`ROLE_BASELINE_ALERT_STOPGAP_ACTIVE`, see §6.12 for what it pushes to
+Grafana), evaluating each member independently against its own
+historical baseline for its exact role shape rather than against its
+peers in-window. Two genuinely different false-positive causes were
+found and fixed on top of it since: a baseline-pool contamination issue
+(repeated fault-injection tests left their own anomalous readings
+unexcluded from future baselines) and, separately, a small-sample
+MAD-reliability issue for roles whose broader history is thin — neither
+is the same mechanism as the original rank-12 finding above, and a full
+write-up of that investigation and both fixes is still owed here as a
+dedicated entry (not done as part of this Grafana-panels task).
 
 **CLOSED — wait-induced stragglers (a real, severe fault class that
 previously produced ZERO alert at any tier, in any communicator with
