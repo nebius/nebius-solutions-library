@@ -119,7 +119,7 @@ EXCLUDE_CV_EXTRA = frozenset()
 EXCLUDE_OUTLIER_EXTRA = frozenset()
 
 JOB_ID_REFRESH_S = 60
-# Cyril item-6 (Soperator job-context integration) -- sacct supplements,
+# item-6 (Soperator job-context integration) -- sacct supplements,
 # never replaces, the squeue-based presence polling above: a real,
 # authoritative job-lifecycle record (covers BOTH running and completed
 # jobs, unlike squeue's live-only presence check), queried at the same
@@ -506,7 +506,7 @@ class NodeAggregator:
         self._explicit_job_id = slurm_job_id
         self.slurm_job_id = slurm_job_id or ""
         self._job_id_checked_at = 0
-        # Cyril item-6 -- sacct-sourced job-lifecycle fields, see
+        # item-6 -- sacct-sourced job-lifecycle fields, see
         # refresh_job_sacct_info()'s own docstring. All None until a
         # successful sacct query actually populates them for the
         # CURRENT self.slurm_job_id -- an honest "not yet known", never
@@ -796,7 +796,7 @@ class NodeAggregator:
             self.slurm_job_id = "unknown"
 
     def refresh_job_sacct_info(self):
-        """Cyril item-6 -- supplements refresh_job_id()'s squeue-based
+        """item-6 -- supplements refresh_job_id()'s squeue-based
         presence polling with a periodic sacct query: a real,
         authoritative job-lifecycle record for the job this aggregator
         is currently attributed to (self.slurm_job_id, kept live by
@@ -882,7 +882,7 @@ class NodeAggregator:
             self._sacct_end_epoch = end if end else None
             self._sacct_nnodes = nnodes
             self._sacct_nranks = nranks
-            # Cyril item-6, Grafana job-boundary annotations -- same
+            # item-6, Grafana job-boundary annotations -- same
             # established push_buf/flush() pipeline every other metric
             # here already uses, but pushed with the REAL historical
             # start/end time as the sample's own timestamp (not "now").
@@ -913,7 +913,7 @@ class NodeAggregator:
             print(f"[{self.hostname}] sacct lookup failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     def check_sacct_squeue_disagreement(self):
-        """Cyril item-6 -- cross-checks the two job-presence signals
+        """item-6 -- cross-checks the two job-presence signals
         rather than silently trusting either. The one disagreement that
         actually matters: squeue's own polling (refresh_job_id, above)
         still attributes live activity to self.slurm_job_id (it hasn't
@@ -1669,7 +1669,7 @@ class NodeAggregator:
         sorted_vals = sorted(means.values())
         n = len(sorted_vals)
         median = sorted_vals[n // 2] if n % 2 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
-        # Real bug found live (Cyril item-4 investigation): abs() here
+        # Real bug found live (item-4 investigation): abs() here
         # flagged whoever deviates MOST from the median in EITHER
         # direction, never checking whether that deviation means
         # "slower" (a real straggler signature) or "faster" (not a

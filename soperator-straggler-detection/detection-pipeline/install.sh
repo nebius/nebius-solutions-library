@@ -479,7 +479,7 @@ if command -v kubectl >/dev/null 2>&1; then
 else
   info "kubectl not found -- skipping the Kubernetes Grafana path entirely (not printed as an option unless it's real; see vm-standalone/README.md for why this project's own real deployments don't depend on Kubernetes access anyway)."
 fi
-# Real bug found and fixed (Cyril item: [GRAFANA-DOWN] watchdog
+# Real bug found and fixed (item: [GRAFANA-DOWN] watchdog
 # follow-up): this used to hardcode "http://localhost:3000" unconditionally,
 # ignoring GRAFANA_PORT entirely -- confirmed live, this exact collision
 # happened on a real cluster, a different, unrelated Grafana instance

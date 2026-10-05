@@ -76,7 +76,18 @@ else
   TARGET_RANK=$((GPUS_PER_NODE - 1))
   TARGET_HOST="${NODES[0]}"
 fi
-STRAGGLER_SLEEP_MS=200  # real, validated value (docs/straggler_dectection_history.md: 198.6ms observed delta against a 200ms injection)
+STRAGGLER_SLEEP_MS=1000  # raised from the original 200ms (docs/straggler_dectection_history.md:
+# 198.6ms observed delta against a 200ms injection) to make this self-test's own injected fault
+# unambiguously a sustained straggler, not a small/jitter-scale delay -- V1 Beta's validated scope
+# is sustained/compute stragglers, not jitter (see README section 1.1). This value is a real,
+# deliberate tradeoff, not an arbitrary round number: detection needs ~300 sequential samples
+# (3 consecutive persistence windows x 100 samples/window on the mean path, the one that actually
+# fires first here since it needs fewer samples than CV's 125/window) before it can even confirm
+# persistence, and each sample = one training iteration gated by this synchronous AllReduce -- so
+# total wall-clock time scales directly with this value. 1000ms keeps the real total (~300-340s
+# observed) comfortably inside this script's own 600s MAX_WAIT_S below; 1500ms+ risks exceeding it
+# and causing a false FAIL (the pipeline would still be working correctly, the test would just not
+# wait long enough to see it fire) -- do not raise this further without also raising MAX_WAIT_S.
 info "Real injected target: rank=$TARGET_RANK (real, expected host=$TARGET_HOST), STRAGGLER_SLEEP_MS=$STRAGGLER_SLEEP_MS -- recorded BEFORE launching, per this project's own mandatory verification standard."
 
 # Real, live-confirmed free port (never assumed).
@@ -170,7 +181,7 @@ info "Real alert found: $FOUND_LINE"
 # standard -- never just "an alert fired")
 # =========================================================================
 
-# Cyril item-8 -- real bug found live by this exact script, this
+# item-8 -- real bug found live by this exact script, this
 # session: a bare `(?<=rank=)` lookbehind also matches inside the new
 # role_rank= field the [ALERT] header now carries (role_rank=8 contains
 # the literal substring "rank=" too), so grep -oP returned BOTH matches

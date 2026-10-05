@@ -59,7 +59,7 @@ apt_install() {
 NCCL_TAG="v2.28.9-1"
 NCCL_VERSION_DOTS="2.28.9"  # same pin, dotted form -- matches nccl.h's own NCCL_MAJOR/MINOR/PATCH, used for the apt-extracted (no .git) validity check below.
 NCCL_APT_VERSION="2.28.9-1+cuda13.0"  # exact apt version string confirmed present in NVIDIA's own configured repo this session.
-# Real, confirmed-live bug this project's own history hit (Cyril
+# Real, confirmed-live bug this project's own history hit (the
 # environment.sh-recompilation investigation): a BARE default here only
 # ever checked ONE of the two candidate locations install.sh itself
 # accepts, so a perfectly valid, already-built tree sitting at the

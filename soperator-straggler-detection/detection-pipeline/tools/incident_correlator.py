@@ -69,6 +69,39 @@ DEFAULT_WINDOW_S = 180.0  # +/- padding around a resolved real anchor timestamp
 HISTORICAL_LOOKBACK_S = 90 * 86400  # matches this project's own ROLE_XJOB_LOOKBACK_S order of magnitude
 LOG_FALLBACK_MAX_LINES = 10  # cap when no real timestamp exists at all for an identity
 
+
+def _default_vm_url():
+    """Real bug fixed: this used to default straight to a hardcoded
+    "http://worker-0:8428" whenever VM_URL wasn't exported in the shell --
+    which happens to be this project's own 2-node dev cluster's real VM
+    address, so it silently worked during every validation run here and
+    was never caught until run on a real cluster where VM lives somewhere
+    else (confirmed live: a real 6-node cluster's own install.sh-discovered
+    VM_URL was "http://login-0:8428" -- worker-0:8428 isn't reachable there
+    at all, producing a raw ConnectionRefusedError traceback instead of a
+    useful result). Every other script in this project gets VM_URL from
+    cluster.env (install.sh's own real, live-discovered value) -- this is
+    the one standalone CLI tool meant to be run ad hoc, with no wrapper
+    script to source cluster.env first, so it now reads that file directly
+    as a fallback instead of guessing a dev-cluster-specific address.
+    Precedence: explicit VM_URL env var (highest -- an explicit override
+    always wins) > cluster.env's own real value > the old hardcoded guess
+    (last resort only, kept so this never hard-fails before --vm-url is
+    even parsed)."""
+    env_val = os.environ.get("VM_URL")
+    if env_val:
+        return env_val
+    cluster_env_path = os.path.join(PKG_ROOT, "cluster.env")
+    try:
+        with open(cluster_env_path) as f:
+            for line in f:
+                m = re.match(r'^\s*VM_URL\s*=\s*"?([^"\s]+)"?\s*$', line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return "http://worker-0:8428"
+
 HEADER_RE = re.compile(
     r"rank=(?P<member>\S+)\s+gpu_slot=(?P<gpu_slot>\S+)\s+role_rank=(?P<role_rank>\S+)\s+"
     r"role_n=(?P<role_n>\S+)\s+comm=(?P<comm>\S+)\s+node=(?P<hostname>\S+)"
@@ -160,21 +193,38 @@ def parse_window_arg(s):
 # project.
 # ---------------------------------------------------------------------------
 
+def _query_instant_safe(vm_url, selector):
+    """Same fail-safe discipline as export_metric() just below -- a real bug
+    found live: these three lookups called ae._query_instant directly, with
+    no protection, while export_metric (serving the identical purpose a few
+    lines down) already wrapped the equivalent call. VM being unreachable
+    (wrong --vm-url, VM down, a real network issue) crashed this tool with a
+    raw traceback instead of degrading to 'no historical data found' --
+    confirmed live: ConnectionRefusedError propagating all the way out of
+    historical_comm_buckets(). Fixed by giving these three the same
+    graceful-degradation behavior export_metric already has, rather than
+    adding three separate one-off try/excepts."""
+    try:
+        return ae._query_instant(vm_url, selector)
+    except Exception:
+        return []
+
+
 def historical_comm_members(vm_url, comm, lookback_s=HISTORICAL_LOOKBACK_S):
-    rows = ae._query_instant(vm_url, f'last_over_time(agg_samples_seen{{comm="{comm}"}}[{int(lookback_s)}s])')
+    rows = _query_instant_safe(vm_url, f'last_over_time(agg_samples_seen{{comm="{comm}"}}[{int(lookback_s)}s])')
     return sorted({(r["metric"].get("hostname"), r["metric"].get("member")) for r in rows
                    if r["metric"].get("hostname") and r["metric"].get("member")})
 
 
 def historical_comm_buckets(vm_url, hostname, comm, lookback_s=HISTORICAL_LOOKBACK_S):
-    rows = ae._query_instant(
+    rows = _query_instant_safe(
         vm_url, f'last_over_time(agg_samples_seen{{hostname="{hostname}",comm="{comm}"}}[{int(lookback_s)}s])')
     return sorted({(r["metric"].get("bucket"), r["metric"].get("coll")) for r in rows
                    if r["metric"].get("bucket") and r["metric"].get("coll")})
 
 
 def historical_job_id_for_comm(vm_url, comm, lookback_s=HISTORICAL_LOOKBACK_S):
-    rows = ae._query_instant(vm_url, f'last_over_time(agg_samples_seen{{comm="{comm}"}}[{int(lookback_s)}s])')
+    rows = _query_instant_safe(vm_url, f'last_over_time(agg_samples_seen{{comm="{comm}"}}[{int(lookback_s)}s])')
     ids = {r["metric"].get("slurm_job_id") for r in rows} - {None, ""}
     return next(iter(ids)) if len(ids) == 1 else None
 
@@ -432,7 +482,7 @@ def build_parser():
     p.add_argument("--window", default="3m", help="+/- padding around a resolved real timestamp (default 3m)")
     p.add_argument("--from", dest="time_from", help="coarse window start: epoch seconds, ISO timestamp, or HH:MM (today, UTC)")
     p.add_argument("--to", dest="time_to", help="coarse window end (same formats as --from)")
-    p.add_argument("--vm-url", default=os.environ.get("VM_URL", "http://worker-0:8428"))
+    p.add_argument("--vm-url", default=_default_vm_url())
     p.add_argument("--log-path", default=DEFAULT_LOG_PATH)
     p.add_argument("--reference", default=REFERENCE_PATH)
     return p

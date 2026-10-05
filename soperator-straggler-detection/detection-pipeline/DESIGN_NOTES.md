@@ -89,7 +89,7 @@ communicators and miss non-collective-bound slowdown).
 
 ### 1.2 Trusting what an alert shows you — the z/mm staleness fix, cross-reference IDs, and evidence panels
 
-Investigating Cyril's item 2 (making flag evidence inspectable) found a
+Investigating item 2 (making flag evidence inspectable) found a
 real, separate bug: **the z/mm value displayed in an alert's own text
 could be stale** — a real number, but from a different, later moment
 than the one that actually satisfied the firing condition. Root cause:
@@ -193,7 +193,7 @@ rate for that role position dropped from the 40-86% range down to under
 genuine fault's own relative visibility *increased* once it was no longer
 competing against a spurious fast-outlier for the "worst" slot.
 
-**`straggler_incident_detected`'s direct-impact estimate** (Cyril item-4
+**`straggler_incident_detected`'s direct-impact estimate** (item-4
 Part B, root-only scope): for a CONFIRMED finding that is the *only*
 CONFIRMED finding for its job within a recent window (reusing the
 already-computed tier as the root-cause signal — no new detection
@@ -340,7 +340,7 @@ alongside it in the same poll cycle.
 
 ### 1.6 Origin of the Role-Baseline-Deviation check — the rank-12 misattribution
 
-Found live during the Cyril item-2 cascade investigation (a real
+Found live during the item-2 cascade investigation (a real
 Megatron TP4/PP4/DP3 GPU-clock-fault run, job 3570): rank 12
 (role_rank=0 within its own 4-member TP group, the last pipeline stage)
 fired 13 times during the run, versus 0-1 times each for its three
@@ -1371,7 +1371,7 @@ the leaf alone will not stop it.
 
 ### 4.1 Worker/GPU/rank identity in alert headers, and a composed incident summary in Grafana
 
-**Gap-check against Cyril's own wording, done first, before proposing
+**Gap-check against the original requirement's own wording, done first, before proposing
 anything** (full investigation reported separately): "timings" and
 "detection evidence" were already covered (the trajectory panel, the
 peer-timing table, the z/mm staleness fix, §1.2). "Without overstating an
@@ -1650,7 +1650,7 @@ VictoriaMetrics GET queries or reads a local log file — no writes, no
 pushes, no interaction with the live `alert_engine.py` process. Safe to
 run at any time, including while the pipeline is actively polling.
 
-### 4.4 Cyril item-6: sacct job context — a second, authoritative source alongside squeue
+### 4.4 sacct job context — a second, authoritative source alongside squeue
 
 **Investigation first, confirmed before writing any code**: this cluster
 has no "Storm API" (zero matches anywhere in this repo, no Soperator

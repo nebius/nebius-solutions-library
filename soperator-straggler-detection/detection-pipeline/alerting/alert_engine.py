@@ -697,7 +697,7 @@ def _job_still_running(job_id, timeout=5):
 
 
 def _query_job_sacct_info(job_id, timeout=10):
-    """Cyril item-6 -- real job-lifecycle context for alert/incident
+    """item-6 -- real job-lifecycle context for alert/incident
     text, sourced from sacct (an authoritative record covering both
     running and completed jobs), NOT a tier/decision input. Returns a
     dict {state, start_epoch, end_epoch, nnodes, nranks} or None on any
@@ -1066,7 +1066,7 @@ def _comm_local_member_count(vm_url, hostname, comm):
 
 
 SELF_DETECTION_FLOOR = 3  # P21.6 -- matches node_aggregator_ref.py's own mean/CV member-count guard exactly (not a new number)
-# Direct-impact lost-compute-time estimate (Cyril item-4 Part B) -- how
+# Direct-impact lost-compute-time estimate (item-4 Part B) -- how
 # far back/forward _emit() looks, per job, to decide "is this CONFIRMED
 # finding the only one for this job right now" (root identification) and
 # to prune the small in-memory tier-tracking list. 300s is a deliberate,
@@ -1077,7 +1077,7 @@ SELF_DETECTION_FLOOR = 3  # P21.6 -- matches node_aggregator_ref.py's own mean/C
 # query-visibility behavior); this just needs to be "clearly wider than
 # one incident," not a precisely-measured floor.
 DIRECT_IMPACT_ROOT_WINDOW_S = 300.0
-# Permanent caveat (Cyril item-4 Part B, explicit requirement: this must
+# Permanent caveat (item-4 Part B, explicit requirement: this must
 # travel with the number everywhere it's shown, not live only in a
 # changelog). Demonstrated live, real data, this session: a real 5.7x
 # GPU clock suppression on one TP shard (job 3570) produced ~0 measurable
@@ -1189,7 +1189,7 @@ def build_finding_for_alert(vm_url, hostname, comm, member, bucket, stat_name, z
     # _query_instant_real_ts (existing infrastructure, not new) to know
     # this alert should fire at all.
     #
-    # Approved followup fix (Cyril item-4 Part C) -- the window START was
+    # Approved followup fix (item-4 Part C) -- the window START was
     # still wrong even after the anomaly_ts anchoring above: padding back
     # by the fixed IOWAIT_LIVE_WINDOW_S (10s) assumes the incident is 10s
     # old, when _emit()'s own caller already knows its REAL measured
@@ -1312,7 +1312,7 @@ def format_alert(finding, coverage):
     # confirm an [ALERT] and a [STRAGGLER-INCIDENT] line refer to the
     # same real event without inferring it from log adjacency.
     incident_id_part = f" incident_id={finding['incident_id']}" if finding.get("incident_id") else ""
-    # Cyril item-8 -- real worker/GPU/rank identity alongside the PID
+    # item-8 -- real worker/GPU/rank identity alongside the PID
     # (rank= above IS the real PID, kept exactly as-is per explicit
     # instruction), same gpu_slot=/role_rank=/role_n= convention
     # [STRAGGLER-INCIDENT]'s own header already uses. "unknown"/"na" are
@@ -1371,7 +1371,7 @@ def format_alert(finding, coverage):
             f"for a job that has already finished. Treat with reduced confidence."
         )
 
-    # Cyril item-6 -- real job context, informational only (never read
+    # item-6 -- real job context, informational only (never read
     # by determine_confirmed_path or any tier-affecting logic -- see
     # _query_job_sacct_info's own docstring for the full trace). Shown
     # whenever sacct successfully resolved it; silently omitted (not a
@@ -1526,7 +1526,7 @@ class AlertEngine:
         self._recent_timing_fires = []
         self.was_firing = defaultdict(bool)
         self.alerts = []  # list of rendered alert strings, in order
-        # Direct-impact lost-compute-time estimate (Cyril item-4 Part B,
+        # Direct-impact lost-compute-time estimate (item-4 Part B,
         # root-only scope, approved design) -- root identification reuses
         # the ALREADY-COMPUTED CONFIRMED/PROBABLE tier, no new detection
         # mechanism: a small, in-memory, per-job record of (ts, tier,
@@ -3225,7 +3225,7 @@ class AlertEngine:
         read side by side."""
         tier = "PROBABLE" if TIMING_FALLBACK_STOPGAP_ACTIVE else "CONFIRMED"
         severity, severity_reason = severity_for_tier(tier)
-        # Direct-impact root-identification (Cyril item-4 Part B) -- this
+        # Direct-impact root-identification (item-4 Part B) -- this
         # path has no real duration_s to anchor a direct-impact window on
         # (a below-floor fallback resolves from a single current-vs-
         # historical comparison, not a persistence sequence), so it never
@@ -3267,7 +3267,7 @@ class AlertEngine:
         hosts = sorted({od["hostname"] for od in per_member.values()})
         topology_note = ("both members co-located on this host" if len(hosts) == 1
                           else f"members span {len(hosts)} hosts ({', '.join(hosts)}) -- a cross-node comm")
-        # Cyril item-8 -- real gpu_slot alongside the PID, same convention
+        # item-8 -- real gpu_slot alongside the PID, same convention
         # as the main _emit() path's header. role_rank/role_n are
         # honestly "na" here, not guessed: this below-floor fallback's
         # own per_member structure (see this function's own docstring)
@@ -3709,7 +3709,7 @@ class AlertEngine:
         periodic sweep, with no anomaly to ride along with)."""
         tier = "CONFIRMED"
         severity, severity_reason = severity_for_tier(tier)
-        # Direct-impact root-identification (Cyril item-4 Part B) -- same
+        # Direct-impact root-identification (item-4 Part B) -- same
         # reasoning as _emit_timing_fallback's own tracking call: this
         # below-floor DCGM finding has no real duration_s (a single-
         # snapshot comparison, not a persistence sequence), so it never
@@ -3737,7 +3737,7 @@ class AlertEngine:
                 f"sm_clock={opb.get('target_sm_clock')} power={opb.get('target_power')} "
                 f"(peer_median_sm={opb.get('peer_median_sm_clock')}, peer_median_power={opb.get('peer_median_power')})"
             )
-        # Cyril item-8 -- same real gpu_slot + honest "na" role_rank/
+        # item-8 -- same real gpu_slot + honest "na" role_rank/
         # role_n convention as _emit_timing_fallback's own header (see
         # that function's comment for why "na" here, not a guess).
         lines = [
@@ -3908,7 +3908,7 @@ class AlertEngine:
 
     def _maybe_emit_direct_impact_estimate(self, tier, hostname, comm, member, bucket, coll,
                                             anomaly_ts, duration_s, slurm_job_id, role_rank, role_n):
-        """Cyril item-4 Part B (approved design, root-only scope) --
+        """item-4 Part B (approved design, root-only scope) --
         direct-impact lost-compute-time estimate in real GPU-seconds.
 
         Root identification: reuses the ALREADY-COMPUTED CONFIRMED/
@@ -4025,7 +4025,7 @@ class AlertEngine:
         # T.PERSIST_REQUIRED-gated -- only returns fired=True on the tick
         # persistence is newly satisfied, not on every tick it continues
         # to hold), so persistence IS the "sustained, not brief/
-        # intermittent" gate Cyril asked for -- reused directly, not
+        # intermittent" gate the requirement asked for -- reused directly, not
         # reinvented, and no separate edge-trigger dedup is needed here.
         # Impact floor: T.MEAN_MM_THRESH (2.0), this project's own
         # already-calibrated "2x slower is real, not noise" bar, applied
@@ -4048,7 +4048,7 @@ class AlertEngine:
         # timestamp needed for uniqueness (both lines are printed
         # together, right here).
         incident_id = f"{hostname}:{comm}:{member}:{bucket}:{coll}"
-        # Cyril item-6 -- real job-context for display, informational
+        # item-6 -- real job-context for display, informational
         # only, computed once here (before either real line below is
         # built) so both can show the same real data. Stored for reuse
         # on `finding` further down; structurally unreachable from
@@ -4083,7 +4083,7 @@ class AlertEngine:
             self._push_visibility_metric(
                 f'agg_straggler_incident_severity_ratio{{hostname="{hostname}",comm="{comm}",member="{member}",'
                 f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}')
-            # Cyril item-9 -- real persisted_s alongside the already-
+            # item-9 -- real persisted_s alongside the already-
             # pushed severity_ratio, same label set, so Grafana can show
             # both without reading raw log text. persist_duration_s is
             # already computed above (used for dur_disp in the header);
@@ -4107,7 +4107,7 @@ class AlertEngine:
         coverage = coverage_guard.check_coverage(self.vm_url, hostname, comm, bucket, member, slurm_job_id)
         finding = build_finding_for_alert(self.vm_url, hostname, comm, member, bucket, stat_name, z, mm, worst_val, peer_mean,
                                            self.dcgm_host_map, anomaly_ts=anomaly_ts, duration_s=persist_duration_s)
-        # Cyril item-8 -- real worker/GPU/rank identity for the [ALERT]
+        # item-8 -- real worker/GPU/rank identity for the [ALERT]
         # header (format_alert reads these off finding), same role_rank/
         # role_n this method already received as its own parameters --
         # no new query, just threading already-available identity
@@ -4129,7 +4129,7 @@ class AlertEngine:
         if finding["job_already_completed"] and finding["tier"] == "CONFIRMED":
             finding["tier"] = "PROBABLE"
 
-        # Cyril item-6 -- reuses the SAME sacct_info computed above
+        # item-6 -- reuses the SAME sacct_info computed above
         # (before the [STRAGGLER-INCIDENT] line) rather than querying
         # again; see that computation's own comment for the full
         # determine_confirmed_path-unreachability trace.
@@ -4160,12 +4160,25 @@ class AlertEngine:
         # alert (_check_cv/_check_mean already have them as of node_
         # aggregator_ref.py's own role_rank/role_n label) -- "na" if this
         # call path didn't have them (e.g. a future caller).
-        gpu_slot_disp = finding["dcgm_gpu_slot_used"] if finding.get("dcgm_gpu_slot_known") else "unknown"
+        # Real bug fixed: this used to compute its own gpu_slot_disp from
+        # finding["dcgm_gpu_slot_used"] (a DCGM-sourced lookup) instead of
+        # reusing slot_disp (the _query_gpu_slot result already computed
+        # above for the straggler_incident_* pushes) -- the two usually
+        # agree but are genuinely different lookups that can diverge for
+        # the same real event, and this metric was also missing the coll
+        # label the other three pushes below already carry. Either gap
+        # alone is enough to make Grafana's merge transform fail to join
+        # this row with the straggler_incident_detected/severity_ratio/
+        # persisted_s rows for the same incident -- confirmed live,
+        # split rows observed in the composed-incident-summary panel.
+        # Reusing slot_disp + adding coll makes all four pushes carry
+        # byte-identical labels for the same event, as the comment below
+        # already claimed this was doing.
         self._push_visibility_metric(
             f'agg_path_c_verdict{{hostname="{hostname}",member="{member}",comm="{comm}",bucket="{bucket}",'
-            f'gpu_slot="{gpu_slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}')
+            f'coll="{coll}",gpu_slot="{slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}')
 
-        # Cyril item-9 -- real tier, correlated to this SAME event's
+        # item-9 -- real tier, correlated to this SAME event's
         # identity (hostname/comm/member/gpu_slot/bucket/role_rank/
         # role_n -- the same label set agg_straggler_incident_detected/
         # severity_ratio/persisted_s and agg_path_c_verdict already use),
@@ -4183,9 +4196,13 @@ class AlertEngine:
         # call: this correlates to a specific straggler_incident_
         # detected event, not pushed on every ordinary alert cycle.
         if _incident_fired_this_call:
+            # Real bug fixed: was missing the coll label and used
+            # gpu_slot_disp (a separate DCGM-sourced lookup) instead of
+            # slot_disp -- see the matching fix + comment on the
+            # agg_path_c_verdict push just above for the full explanation.
             self._push_visibility_metric(
                 f'agg_straggler_incident_tier{{hostname="{hostname}",comm="{comm}",member="{member}",'
-                f'gpu_slot="{gpu_slot_disp}",bucket="{bucket}",role_rank="{role_rank}",role_n="{role_n}",'
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}",'
                 f'tier="{finding["tier"]}"}} 1')
 
         # P21.6 -- cascade-mislocalization fix. An alert sourced from a
@@ -5080,7 +5097,7 @@ class AlertEngine:
         # keeps closing new windows continuously), so the displayed z/mm
         # could be real but from a DIFFERENT, later moment than whichever
         # window actually satisfied the fired condition. Confirmed live
-        # (Cyril item-2 investigation): a real alert displayed "z=2.7"
+        # (item-2 investigation): a real alert displayed "z=2.7"
         # while the actual window that fired showed z=34.1, mm=3.54.
         #
         # Fix: stop reading the fire decision from agg_mean_fired at all.

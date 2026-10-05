@@ -110,7 +110,7 @@ def query_iowait_window(log_dir, host, pid, t_start, t_end):
     notice a genuinely empty/dead log (agent process not actually
     running) versus a real log with real data where this specific pid
     simply wasn't io-bound. coverage_seconds_present/_total (approved
-    item 2, Cyril item-4 Part C followup) are a SEPARATE, purely
+    item 2, item-4 Part C followup) are a SEPARATE, purely
     informational window-overlap-strength figure: how many of the
     incident's own real [t_start, t_end] seconds this host's agent log
     actually has a real print-tick for, regardless of which pid it

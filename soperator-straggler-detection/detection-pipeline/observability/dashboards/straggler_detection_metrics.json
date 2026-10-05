@@ -21,7 +21,7 @@
         "enable": true,
         "expr": "agg_job_start_time_seconds{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\"}",
         "iconColor": "rgba(0, 200, 0, 1)",
-        "name": "Job start (real sacct Start time, Cyril item-6)",
+        "name": "Job start (real sacct Start time)",
         "titleFormat": "Job {{slurm_job_id}} started",
         "textFormat": "host={{hostname}}",
         "step": "10s"
@@ -34,7 +34,7 @@
         "enable": true,
         "expr": "agg_job_end_time_seconds{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\"}",
         "iconColor": "rgba(200, 0, 0, 1)",
-        "name": "Job end (real sacct End time, Cyril item-6)",
+        "name": "Job end (real sacct End time)",
         "titleFormat": "Job {{slurm_job_id}} ended",
         "textFormat": "host={{hostname}}",
         "step": "10s"
@@ -1965,11 +1965,11 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Cyril item-9 -- composed, human-readable incident summary built ENTIRELY from fields already pushed to VictoriaMetrics (tier, severity_ratio, persisted_s, Path C verdict, worker/GPU/rank identity) -- zero new free text, zero new cardinality (tier adds exactly 3 real values, the same bounded-cardinality discipline every other label here already follows). Set the Comm/Member variables from an [ALERT]/[STRAGGLER-INCIDENT] line to see that exact event's own row. Tier is the ONLY certainty signal -- see the Tier column's own color mapping: CONFIRMED is the only tier colored as urgent; PROBABLE/UNCONFIRMED are deliberately styled the same as each other and never as CONFIRMED, so this table's own visual design cannot imply more confidence than the tier label itself states.",
+      "description": "Composed, human-readable incident summary built ENTIRELY from fields already pushed to VictoriaMetrics (tier, severity_ratio, persisted_s, Path C verdict, worker/GPU/rank identity) -- zero new free text, zero new cardinality (tier adds exactly 3 real values, the same bounded-cardinality discipline every other label here already follows). Set the Comm/Member variables from an [ALERT]/[STRAGGLER-INCIDENT] line to see that exact event's own row. Only two columns carry real color meaning -- Tier and PathCVerdict, both exactly-3-value fields with explicit mappings (see their own overrides below). Every other column is deliberately left uncolored (fixed/plain) rather than inheriting a default threshold color that would carry no real meaning -- PersistedS and SeverityRatio are real, continuous, workload-dependent numbers with no project-wide 'good/bad' cutoff to color by (see DESIGN_NOTES.md for just how widely severity_ratio legitimately varies across real incidents), so showing the true number uncolored is more honest than an invented color band. Tier: CONFIRMED is the only tier colored as urgent (red); PROBABLE/UNCONFIRMED are deliberately styled the same as each other (blue) and never as CONFIRMED, so this table's own visual design cannot imply more confidence than the tier label itself states.",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed"
           },
           "custom": {
             "align": "auto",
@@ -2013,6 +2013,45 @@
                       "UNCONFIRMED": {
                         "color": "blue",
                         "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "-1": {
+                        "color": "text",
+                        "index": 0,
+                        "text": "-1 (unchecked)"
+                      },
+                      "0": {
+                        "color": "green",
+                        "index": 1,
+                        "text": "0 (ruled out)"
+                      },
+                      "1": {
+                        "color": "red",
+                        "index": 2,
+                        "text": "1 (confirmed)"
                       }
                     }
                   }
@@ -2116,14 +2155,24 @@
         {
           "id": "organize",
           "options": {
-            "excludeByName": {},
+            "excludeByName": {
+              "__name__": true
+            },
             "indexByName": {
               "hostname": 0,
               "gpu_slot": 1,
               "role_rank": 2,
               "role_n": 3,
               "member": 4,
-              "tier": 5
+              "comm": 5,
+              "bucket": 6,
+              "coll": 7,
+              "Time": 8,
+              "tier": 9,
+              "Value #A": 10,
+              "Value #B": 11,
+              "Value #C": 12,
+              "Value #D": 13
             },
             "renameByName": {
               "hostname": "Worker",
@@ -2131,6 +2180,9 @@
               "role_rank": "Rank",
               "role_n": "OfN",
               "member": "PID",
+              "comm": "Comm",
+              "bucket": "Bucket",
+              "coll": "Coll",
               "tier": "Tier",
               "Value #A": "Incident(1=fired)",
               "Value #B": "PersistedS",

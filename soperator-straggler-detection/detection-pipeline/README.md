@@ -957,7 +957,7 @@ text (`sacct_info` is structurally unreachable from tier/decision logic
 real bugs found and fixed during validation (a missing `cluster` label,
 a job-end race). Full detail, real rendered output example, and
 validation evidence:
-[DESIGN_NOTES.md §4.4](DESIGN_NOTES.md#44-cyril-item-6-sacct-job-context--a-second-authoritative-source-alongside-squeue).
+[DESIGN_NOTES.md §4.4](DESIGN_NOTES.md#44-sacct-job-context--a-second-authoritative-source-alongside-squeue).
 
 ### 6.11 Worker/GPU/rank identity in alerts, and a composed incident summary panel
 

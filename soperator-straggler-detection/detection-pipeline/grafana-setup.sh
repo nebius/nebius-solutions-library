@@ -76,7 +76,7 @@ GRAFANA_AUTH_CONFIG_FILE="$VAR_DIR/grafana_auth_generated.ini"
 # =========================================================================
 # Step 1 -- idempotent check: already up with real auth enforced?
 #
-# Real bug found and fixed (Cyril item: [GRAFANA-DOWN] watchdog
+# Real bug found and fixed (item: [GRAFANA-DOWN] watchdog
 # follow-up): this used to treat ANY auth-enforced instance answering at
 # GRAFANA_URL as "already up, nothing to do" -- a presence check, not an
 # identity check. Confirmed live, this exact collision happened on a

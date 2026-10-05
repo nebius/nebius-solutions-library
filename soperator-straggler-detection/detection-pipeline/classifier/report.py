@@ -36,7 +36,7 @@ def _format_confirmed(f, subject):
                       f"{pc.get('target_iowait_us', 0)}us aggregated over "
                       f"[{pc.get('t_start', 0):.1f},{pc.get('t_end', 0):.1f}] "
                       f"({pc.get('target_count', 0)} block requests)")
-        # Approved item 2 (Cyril item-4 Part C followup) -- informational
+        # Approved item 2 (item-4 Part C followup) -- informational
         # ONLY, never read by determine_storage_path/determine_confirmed_path
         # (see storage_evidence.query_iowait_window's own docstring for the
         # trace). Path C only: the only cause-path with a real, queryable
