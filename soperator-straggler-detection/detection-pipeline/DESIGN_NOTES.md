@@ -469,6 +469,131 @@ healthy TP-groups — sensitivity fully preserved.
 
 `tools/self_test.sh`: clean PASS.
 
+### 1.9 Above-floor scoring's node-local-only blind spot for cross-node communicators — found, root-caused, confirmed covered (fix deferred)
+
+**OPEN at the code level, but confirmed covered in practice — not a
+silent-miss risk today.** Found while validating the multi-bucket fix
+(§2.x below) across parallelism shapes: `node_aggregator_ref.py`'s own
+above-floor scoring (`score_mean_window`/`score_cv_window`) gates on
+`len(members_here) < 3` (mean) / `len(cvs) < 3` (CV) before computing
+`agg_mean_z_worst`/`agg_mean_fired`/`agg_cv_fired`/`agg_cv_z_worst` —
+but `members_here`/`cvs` are built only from phys_ids **this one node's
+own aggregator process has itself seen** (each node runs its own
+aggregator, reading only its own host's dump files — see this file's
+own module docstring). For a communicator whose real membership splits
+across hosts such that no single node locally hosts 3+ of its members,
+every node's aggregator independently sees too few members and bails
+before scoring — the above-floor path goes completely silent for that
+comm, regardless of whether a real fault is present. `check_outlier_
+count`'s own gate is only `< 2`, so it does partially score such a comm
+— but only ever compares each node's own local 2-member subset against
+itself, never the real full group, a different and subtler
+miscalculation, not complete silence.
+
+Confirmed real and precisely characterized with live data, not
+assumed: launched a real TP4 job and traced actual communicator
+membership directly (not inferred from launch parameters). TP4 creates
+8 real communicators per job — 4 TP-internal ones (node-local by this
+workload's own design: `tp_rank = ddp_rank % tp_size` groups consecutive
+ranks, and GPUS_PER_NODE being a multiple of TP_SIZE keeps every TP
+group on one node) and 4 DP-gradient-sync communicators, one per
+TP-rank, each genuinely spanning both nodes 2-members-per-host. Range-
+queried `agg_mean_z_worst`/`agg_mean_fired`/`agg_cv_fired`/`agg_cv_
+z_worst` for one of the cross-node comms over its entire real lifetime:
+0 series, 0 points, on either host — while raw `agg_mean_exec_time_us`
+existed fine (pushed unconditionally, above the gate). A node-local
+comm in the same job, same window, scored normally (278 real z_worst/
+fired points) — direct contrast, not an assumption.
+
+Not TP-specific — this is about comm *topology*, not parallelism
+strategy. Any communicator (DP, FSDP, whatever) whose real membership
+happens to split such that no single node locally hosts 3+ members hits
+the identical blind spot.
+
+**A first attempt at proving real-world impact found no impact — and
+the honest reason why turned out to matter more than the result.** A
+real fault injected on a rank that is genuinely part of a cross-node
+DP-reduce group produced *no* elevation on that comm at all; the delay
+landed entirely on a node-local comm instead (and was correctly caught
+there). Traced to the injection point: `train.py`'s existing
+`STRAGGLER_SLEEP_MS` hook fires *before* `backward()`, and the real
+cross-node collective (the explicit DTensor/TP-sharded-parameter
+`dist.all_reduce(..., group=dp_group)`, run in its own unconditional
+loop *after* `backward()` fully returns) never saw the delay — it was
+fully absorbed/resynced by whichever synchronizing collective backward()
+itself triggers first. This also surfaced a separate, unrelated
+confound worth disclosing on its own: all 4 DP-reduce comms showed their
+`role_rank=0` member reading ~70x faster than its peers *regardless of
+which rank was actually targeted* — a pre-existing structural artifact
+(consistent with this project's already-documented role_rank=0/rank-0
+overhead bias elsewhere), not fault signal. An earlier, less careful
+reading of this same data mistook that artifact for a real detection
+gap; re-verifying directly, rather than trusting the first read, is what
+caught it.
+
+**A second, deliberately adversarial test closed the question.** Added
+a new, narrowly-scoped, opt-in, default-off test hook
+(`STRAGGLER_SLEEP_AT_DP_REDUCE_MS` in `workloads/tp2/train.py`) that
+injects the delay immediately before the explicit `dp_group` all_reduce
+loop, after `backward()` has already fully completed — nothing else
+synchronizing sits between the sleep and that collective, so the delay
+cannot be absorbed anywhere else first. Real result, ground-truth rank
+confirmed via its own dump file: the targeted rank's own reading stayed
+at 141µs while its 3 real peers on the cross-node comm read
+~240,000–270,000µs — a ~1,700x elevation, the cleanest signature
+produced in this entire investigation. `agg_mean_z_worst`/`agg_mean_
+fired`/`agg_cv_fired`/`agg_cv_z_worst`: confirmed still 0 series, 0
+points — the above-floor path is completely blind to it, exactly as the
+code predicts. **And it was still caught**: a real `[WAIT-INDUCED-ALERT]`
+fired, correctly naming the targeted rank, with full evidence (all 3
+peers at ratio 1658–1713x, gap/mad in the tens of thousands) — via
+`_wait_induced_fallback_evaluate`, which uses `_comm_cross_node_members`
+(a real, cross-host VM query) rather than any one node's local view, so
+it never hits the aggregator's own locality gate at all.
+
+**Why this is covered today, and the one way it could stop being
+covered without anyone noticing.** `_poll_host` calls `_check_wait_
+induced`/`_check_role_baseline` unconditionally for every discovered
+comm (see §1.5 above for the original reason this pair of checks exists
+at all: the mean-path's own worst-selection logic has a different,
+separate structural blind spot, and these checks were built from the
+start as an independent, universal companion to it, not a below-floor-
+only mechanism) — so a cross-node comm gets evaluated by the real,
+global membership the same way any other comm does, never gated by
+whatever the aggregator's own per-node view happened to see. This is a
+genuine, currently-reliable safety net, not a coincidence. The one real
+fragility: nothing explicitly documents that this pair of checks is also
+load-bearing for the cross-node gap specifically — a future change that
+made their invocation conditional on "comm is below SELF_DETECTION_
+FLOOR" (a reasonable-looking cleanup, since that's the scenario they
+were originally built for) would silently remove this coverage with no
+error, no log line, and no warning that anything had changed.
+
+**Recommendation: document, defer the aggregator-level fix.** The
+concrete fix (resolve `members_here`/`cvs` against real, globally-
+discovered membership — e.g. the same `_comm_cross_node_members`-style
+cross-host union already used correctly in `alert_engine.py` — instead
+of each node's own local view, before applying the `< 3` gate) remains a
+real, available option, scoped additively to `score_mean_window`/
+`score_cv_window` only; it would not touch `_wait_induced_fallback_
+evaluate`, `_role_baseline_fallback_evaluate`, or any other already-
+validated below-floor mechanism. Not implemented — deferred as lower
+priority given the confirmed, real coverage above, tracked in README §7
+alongside this project's other disclosed, fallback-mitigated gaps.
+
+A smaller, related finding from the same investigation:
+`agg_detection_coverage_achieved` is pushed unconditionally (1 = checked)
+for every comm/bucket once past its grace period, regardless of whether
+the `< 3` gate below it ever let real scoring proceed — so the
+dashboard's own "was this ever checked" signal reads "yes" for exactly
+the comms affected by this gap. Not separately fixed; disclosed here
+since it shares the same root cause.
+
+`tools/self_test.sh`: unaffected (the new test hook lives only in
+`workloads/tp2/train.py`, a different file from `workloads/nanogpt/
+train.py`, which `self_test.sh` actually exercises) — confirmed clean
+PASS after the unrelated multi-bucket fixes landed in the same session.
+
 ---
 
 ## 2. The below-floor (2-member) fallback saga

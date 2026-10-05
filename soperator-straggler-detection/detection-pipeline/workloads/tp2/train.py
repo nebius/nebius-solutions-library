@@ -101,6 +101,18 @@ if ddp:
     # built on (early arrivers wait inside the collective; the straggler
     # arrives late and shows the shortest exec time).
     _straggler_sleep_s = float(os.environ.get('STRAGGLER_SLEEP_MS', '0')) / 1000.0
+    # Investigation-only addition -- NOT the original P20k mechanism above,
+    # a separate opt-in hook (default 0, zero behavior change unless set)
+    # added specifically to test whether a delay landing AFTER backward()
+    # has fully completed -- i.e. one that cannot be absorbed by any
+    # earlier node-local synchronizing collective -- actually reaches the
+    # explicit dp_group all_reduce below (see that loop's own P21 comment).
+    # The original STRAGGLER_SLEEP_MS hook fires before backward(), and was
+    # confirmed live (this investigation) to be fully absorbed by whichever
+    # synchronizing collective backward() itself triggers first, never
+    # reaching dp_group at all -- this hook exists to test the one real
+    # scenario that left untested.
+    _straggler_dp_reduce_sleep_s = float(os.environ.get('STRAGGLER_SLEEP_AT_DP_REDUCE_MS', '0')) / 1000.0
     _straggler_targets_env = os.environ.get('STRAGGLER_TARGET_RANKS', '')
     _straggler_target_ranks = {int(r) for r in _straggler_targets_env.split(',') if r.strip() != ''}
     _straggler_is_target = ddp_rank in _straggler_target_ranks
@@ -480,6 +492,14 @@ while True:
     # inside RowwiseParallel automatically -- this is the separate,
     # DP-scoped gradient-averaging step for those same sharded weights).
     if ddp and tp_size > 1:
+        # Investigation-only -- see _straggler_dp_reduce_sleep_s's own
+        # comment above. Placed here, after backward() has fully
+        # returned for every rank and before the first dist.all_reduce
+        # in this loop -- nothing else synchronizing sits between this
+        # sleep and that collective, so any delay here lands directly on
+        # dp_group, unlike the original P20k hook above.
+        if ddp and _straggler_is_target and _straggler_dp_reduce_sleep_s > 0:
+            time.sleep(_straggler_dp_reduce_sleep_s)
         with torch.no_grad():
             raw_model_for_grad_sync = model.module if hasattr(model, 'module') else model
             for name, p in raw_model_for_grad_sync.named_parameters():

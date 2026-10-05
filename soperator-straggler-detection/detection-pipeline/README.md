@@ -1177,6 +1177,25 @@ change to account for.
   a DCGM fallback and the P27.2 timing-asymmetry fallback — the
   statistical limit itself is permanent.
 
+- **Above-floor scoring (`agg_mean_z_worst`/`agg_mean_fired`/`agg_cv_
+  fired`/`agg_cv_z_worst`) is blind to any communicator whose real
+  membership splits across hosts such that no single node locally hosts
+  3+ members** — each node's aggregator only ever sees its own local
+  subset, so a genuinely cross-node comm (confirmed real on a TP4 job's
+  own DP-gradient-sync communicators) never gets scored by this path at
+  all, regardless of parallelism strategy. **Confirmed covered in
+  practice, not a currently-exploitable silent miss**: a deliberately
+  adversarial real fault on exactly this comm shape (~1,700x real
+  elevation, above-floor metrics confirmed still 0 series) was still
+  caught correctly, via `_wait_induced_fallback_evaluate`'s own
+  independent, cross-host member discovery. That coverage depends on
+  `_poll_host` continuing to invoke the wait-induced/role-baseline
+  checks unconditionally on every comm — a future change that made that
+  conditional on below-floor status would silently remove it. Full
+  investigation, including the two real test iterations and the
+  structural-artifact confound the first one caught:
+  [DESIGN_NOTES.md §1.9](DESIGN_NOTES.md#19-above-floor-scorings-node-local-only-blind-spot-for-cross-node-communicators--found-root-caused-confirmed-covered-fix-deferred).
+
 - **Pure-software-delay faults cap at PROBABLE forever**, never
   CONFIRMED/PAGE. A real, correctly-localized, high-confidence anomaly
   (z-score up to 510, arrival lag up to 692x peers) on a well-above-

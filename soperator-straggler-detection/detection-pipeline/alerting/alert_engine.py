@@ -98,6 +98,36 @@ NVLINK_CHECK_INTERVAL_S = 60.0
 # checks, so it reuses that cadence rather than the slower one.
 DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 
+# P27-multibucket-followup -- real, confirmed-live gap found during PP
+# validation (this session): _member_exec_time_current and
+# _cross_comm_peer_median both smooth via avg_over_time(...[DCGM_FALLBACK_
+# CHECK_INTERVAL_S]) = 20s, which silently returns an EMPTY result (no
+# error, no signal anything's wrong) whenever a member's own real sample
+# cadence exceeds 20s -- confirmed directly: a real 2-member PP job with a
+# STRAGGLER_SLEEP_MS=3000 fault showed its OWN instant query for the
+# waiting member succeeding (a real, fresh sample existed), while the
+# exact same selector's avg_over_time([20s]) came back with zero rows,
+# because that member's own exec-time window only closes once per ~3+
+# real seconds under the induced delay -- consistent with this file's own
+# already-documented _fresh() finding ("mean's own window-close cadence
+# slows to roughly once per 25-30s" under a comparable sleep fault).
+# _real_exec_us_comparison hit the identical class of bug earlier this
+# session (fixed by widening its own window from -10/+2s to -300/+2s);
+# this is the same root cause reaching two more call sites. A dedicated
+# constant (not reusing DCGM_FALLBACK_CHECK_INTERVAL_S itself, which is
+# also a poll-gating interval at other call sites and must stay 20s
+# there). 300s chosen to match _real_exec_us_comparison's own already-
+# shipped widening for the identical class of gap, not a fresh guess --
+# confirmed live against this exact PP fault (STRAGGLER_SLEEP_MS=3000):
+# 60/120/180s windows all returned zero rows against a continuously,
+# currently-updating series (age_s=0.5s on a plain instant query, so
+# definitely not stale/dead), while 300s returned the real value
+# immediately -- this fault's own real window-close cadence sits
+# somewhere between 180-300s, consistent with _fresh()'s own documented
+# "cadence slows to ~25-30s under a 300ms sleep" scaling roughly 10x
+# worse under this fallback's 3000ms sleep.
+MEMBER_EXEC_TIME_SMOOTH_WINDOW_S = 300.0
+
 # V1-beta P0 fix -- real bug found live: a real 48-GPU Megatron validation
 # run filled a 91GB shared volume with Inspector dumps and crashed the
 # whole pipeline, with zero warning beforehand -- every other real
@@ -2235,7 +2265,7 @@ class AlertEngine:
         if not fresh_rows:
             return None
         newest_ts = max(float(r["value"][0]) for r in fresh_rows)
-        cur_rows = _query_instant(self.vm_url, f'avg_over_time({promql}[{int(DCGM_FALLBACK_CHECK_INTERVAL_S)}s])')
+        cur_rows = _query_instant(self.vm_url, f'avg_over_time({promql}[{int(MEMBER_EXEC_TIME_SMOOTH_WINDOW_S)}s])')
         if not cur_rows:
             return None
         cur_vals = [float(r["value"][1]) for r in cur_rows]
@@ -2762,7 +2792,7 @@ class AlertEngine:
         fresh_keys = {(r["metric"].get("comm"), r["metric"].get("member"))
                       for r in fresh_rows if r["metric"].get("comm") != exclude_comm}
         if fresh_keys:
-            smoothed_rows = _query_instant(self.vm_url, f'avg_over_time({selector}[{int(DCGM_FALLBACK_CHECK_INTERVAL_S)}s])')
+            smoothed_rows = _query_instant(self.vm_url, f'avg_over_time({selector}[{int(MEMBER_EXEC_TIME_SMOOTH_WINDOW_S)}s])')
             peer_vals = [float(r["value"][1]) for r in smoothed_rows
                          if (r["metric"].get("comm"), r["metric"].get("member")) in fresh_keys]
         else:
@@ -2967,9 +2997,17 @@ class AlertEngine:
         # "rank 0" needed at all: an unreliable role baseline degrades to
         # the existing _cross_comm_peer_median fallback below, the same
         # honest-degradation path a cold-start role already takes.
+        # P27-multibucket -- see _wait_induced_fallback_evaluate's own
+        # P27-multibucket note for the shared bug this closes (and
+        # _role_baseline_fallback_evaluate's equivalent fix): this used to
+        # pick exactly ONE (bucket, coll) pair via min() and silently never
+        # evaluate any other real pair discovered on the same comm. Now
+        # loops every pair and returns a LIST of (member, slot, per_member,
+        # bucket, coll) tuples, one per pair that independently qualifies
+        # (0, 1, or many) -- empty list, not None, when nothing qualifies.
         members_with_host = _comm_cross_node_members(self.vm_url, comm)
         if len(members_with_host) != 2:
-            return None
+            return []
         # _discover_buckets is comm-scoped, not member-scoped -- confirmed
         # live (PP) that either participating host already reports the
         # comm's full (bucket, coll) pair set on its own (each host's own
@@ -2982,7 +3020,7 @@ class AlertEngine:
         for hh in {hh for hh, _ in members_with_host}:
             pairs.update(_discover_buckets(self.vm_url, hh, comm))
         if not pairs:
-            return None
+            return []
         # P27-hotfix6 (bugfix) -- real, previously-undiscovered root
         # cause behind this session's own intermittent, unexplained
         # non-firing on live PP tests (traced back through what first
@@ -3010,52 +3048,59 @@ class AlertEngine:
         # signal in a point-to-point pair; Send never does), coll name
         # alphabetically as a final deterministic tiebreak for any other
         # same-size pairing this fallback hasn't seen yet.
-        bucket, coll = min(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1]))
-        per_member = {}
-        for hh, m in members_with_host:
-            slot = _query_gpu_slot(self.vm_url, hh, m)
-            if slot is None or slot < 0:
-                return None
-            data = self._member_exec_time_current(hh, comm, m, bucket, coll)
-            if data is None:
-                return None
-            current, ts = data
-            role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
-            role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
-            if role_median is not None and role_median > 0:
-                baseline, mad, source = role_median, role_mad, "role"
-            else:
-                # V1-beta cross-host role-baseline fix -- see _member_
-                # role_baseline's own any_host docstring for the real gap
-                # this closes (job-to-node placement not repeatable on a
-                # larger/shared cluster). Tried BEFORE cross_comm_peer,
-                # since a cross-host role-shape match is still more
-                # precise than a same-job symmetric-peer assumption for a
-                # structurally-asymmetric pair like PP -- only falls
-                # through to cross_comm_peer if even this misses (a
-                # genuine cold start: no history for this role shape on
-                # ANY host yet).
-                role_median_any, role_mad_any = self._member_role_baseline(
-                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
-                if role_median_any is not None and role_median_any > 0:
-                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+        results = []
+        for bucket, coll in sorted(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1])):
+            per_member = {}
+            bucket_incomplete = False
+            for hh, m in members_with_host:
+                slot = _query_gpu_slot(self.vm_url, hh, m)
+                if slot is None or slot < 0:
+                    bucket_incomplete = True
+                    break
+                data = self._member_exec_time_current(hh, comm, m, bucket, coll)
+                if data is None:
+                    bucket_incomplete = True
+                    break
+                current, ts = data
+                role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
+                role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+                if role_median is not None and role_median > 0:
+                    baseline, mad, source = role_median, role_mad, "role"
                 else:
-                    # P27-hotfix4 -- cross-comm peer fallback computed per-
-                    # member, using THAT member's own real host, not the
-                    # single shared `hostname` -- for a cross-node pair each
-                    # side can have a genuinely different local peer pool (or
-                    # none at all), same reasoning as the primary baseline
-                    # above.
-                    fallback_peer_median, fallback_peer_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                    if fallback_peer_median is not None and fallback_peer_median > 0:
-                        baseline, mad, source = fallback_peer_median, fallback_peer_mad, "cross_comm_peer"
+                    # V1-beta cross-host role-baseline fix -- see _member_
+                    # role_baseline's own any_host docstring for the real gap
+                    # this closes (job-to-node placement not repeatable on a
+                    # larger/shared cluster). Tried BEFORE cross_comm_peer,
+                    # since a cross-host role-shape match is still more
+                    # precise than a same-job symmetric-peer assumption for a
+                    # structurally-asymmetric pair like PP -- only falls
+                    # through to cross_comm_peer if even this misses (a
+                    # genuine cold start: no history for this role shape on
+                    # ANY host yet).
+                    role_median_any, role_mad_any = self._member_role_baseline(
+                        hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                    if role_median_any is not None and role_median_any > 0:
+                        baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
                     else:
-                        return None
-            per_member[m] = {"slot": slot, "current": current, "peer_median": baseline,
-                              "peer_mad": mad, "ratio": current / baseline, "baseline_source": source,
-                              "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
-                              "role_rank": role_rank, "role_n": role_n}
-        elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+                        # P27-hotfix4 -- cross-comm peer fallback computed per-
+                        # member, using THAT member's own real host, not the
+                        # single shared `hostname` -- for a cross-node pair each
+                        # side can have a genuinely different local peer pool (or
+                        # none at all), same reasoning as the primary baseline
+                        # above.
+                        fallback_peer_median, fallback_peer_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                        if fallback_peer_median is not None and fallback_peer_median > 0:
+                            baseline, mad, source = fallback_peer_median, fallback_peer_mad, "cross_comm_peer"
+                        else:
+                            bucket_incomplete = True
+                            break
+                per_member[m] = {"slot": slot, "current": current, "peer_median": baseline,
+                                  "peer_mad": mad, "ratio": current / baseline, "baseline_source": source,
+                                  "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
+                                  "role_rank": role_rank, "role_n": role_n}
+            if bucket_incomplete:
+                continue
+            elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
         # P27.2.6 -- real, live investigation on the original 2-node cluster found
         # this ratio-only check firing CONFIRMED/PAGE on 5/5 genuinely healthy TP2
         # runs (0 faults injected), root-caused to real peer-pool dispersion at
@@ -3074,40 +3119,44 @@ class AlertEngine:
         # see the per_member construction above), not one shared value for
         # both members -- required now that the two members can legitimately
         # have different baselines.
-        elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
-                    and (d["peer_mad"] is None or d["peer_mad"] <= 0
-                         or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
-        # P27-hotfix6 -- push the self-exclusion marker for every elevated
-        # member found THIS poll, before the ambiguous-count check below
-        # (0 or 2+ elevated still returns None for firing purposes, but
-        # an elevated reading is real evidence against belonging in
-        # future "normal" history either way -- not gated on the 3-
-        # sample persistence requirement that gates actually firing an
-        # alert, since that would let 1-2 poisoning readings through
-        # before the 3rd finally got excluded).
-        for elevated_m in elevated:
-            d = per_member[elevated_m]
-            if d["role_rank"] not in (None, "na") and d["role_n"] not in (None, "na"):
-                self._push_role_baseline_exclusion(d["hostname"], comm, elevated_m, bucket, coll,
-                                                    d["role_rank"], d["role_n"])
-        if len(elevated) != 1:
-            return None
-        waiting_partner = elevated[0]
-        stragglers = [mid for mid in per_member if mid != waiting_partner]
-        if len(stragglers) != 1:
-            return None
-        m = stragglers[0]
-        surplus = per_member[waiting_partner]["ratio"] - elevated_thresh
-        # P27-hotfix4 -- keyed on the flagged straggler's OWN real host
-        # (per_member[m]["hostname"]), not the single `hostname` this
-        # function was called with -- for a cross-node pair that's the
-        # straggler's actual physical location, the real identity this
-        # persistence key is meant to track.
-        key = ("timing_fallback", per_member[m]["hostname"], comm, m, bucket, coll)
-        fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[waiting_partner]["ts"])
-        if not fired:
-            return None
-        return (m, per_member[m]["slot"], per_member)
+            elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
+                        and (d["peer_mad"] is None or d["peer_mad"] <= 0
+                             or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
+            # P27-hotfix6 -- push the self-exclusion marker for every elevated
+            # member found THIS poll, before the ambiguous-count check below
+            # (0 or 2+ elevated still skips THIS bucket for firing purposes,
+            # but an elevated reading is real evidence against belonging in
+            # future "normal" history either way -- not gated on the 3-
+            # sample persistence requirement that gates actually firing an
+            # alert, since that would let 1-2 poisoning readings through
+            # before the 3rd finally got excluded).
+            for elevated_m in elevated:
+                d = per_member[elevated_m]
+                if d["role_rank"] not in (None, "na") and d["role_n"] not in (None, "na"):
+                    self._push_role_baseline_exclusion(d["hostname"], comm, elevated_m, bucket, coll,
+                                                        d["role_rank"], d["role_n"])
+            if len(elevated) != 1:
+                continue
+            waiting_partner = elevated[0]
+            stragglers = [mid for mid in per_member if mid != waiting_partner]
+            if len(stragglers) != 1:
+                continue
+            m = stragglers[0]
+            surplus = per_member[waiting_partner]["ratio"] - elevated_thresh
+            # P27-hotfix4 -- keyed on the flagged straggler's OWN real host
+            # (per_member[m]["hostname"]), not the single `hostname` this
+            # function was called with -- for a cross-node pair that's the
+            # straggler's actual physical location, the real identity this
+            # persistence key is meant to track. bucket/coll are part of the
+            # key (P27-multibucket) so each pair's persistence is tracked
+            # independently -- a different pair on the same comm firing
+            # doesn't reset or borrow this one's streak.
+            key = ("timing_fallback", per_member[m]["hostname"], comm, m, bucket, coll)
+            fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[waiting_partner]["ts"])
+            if not fired:
+                continue
+            results.append((m, per_member[m]["slot"], per_member, bucket, coll))
+        return results
 
     def _wait_induced_fallback_evaluate(self, hostname, comm):
         """Wait-induced-straggler detection -- see WAIT_INDUCED_STOPGAP_
@@ -3140,87 +3189,109 @@ class AlertEngine:
         members_with_host = _comm_cross_node_members(self.vm_url, comm)
         n = len(members_with_host)
         if n < 3:
-            return None
+            return []
 
         pairs = set()
         for hh in {hh for hh, _ in members_with_host}:
             pairs.update(_discover_buckets(self.vm_url, hh, comm))
         if not pairs:
-            return None
-        bucket, coll = min(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1]))
+            return []
 
-        per_member = {}
-        for hh, m in members_with_host:
-            slot = _query_gpu_slot(self.vm_url, hh, m)
-            if slot is None or slot < 0:
-                return None
-            data = self._member_exec_time_current(hh, comm, m, bucket, coll)
-            if data is None:
-                return None
-            current, ts = data
-            role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
-            role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
-            if role_median is not None and role_median > 0:
-                baseline, mad, source = role_median, role_mad, "role"
-            else:
-                role_median_any, role_mad_any = self._member_role_baseline(
-                    hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
-                if role_median_any is not None and role_median_any > 0:
-                    baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
-                else:
-                    fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                    if fb_median is not None and fb_median > 0:
-                        baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
-                    else:
-                        return None
-            per_member[m] = {"slot": slot, "current": current, "peer_median": baseline, "peer_mad": mad,
-                              "ratio": current / baseline, "baseline_source": source, "ts": ts,
-                              "bucket": bucket, "coll": coll, "hostname": hh,
-                              "role_rank": role_rank, "role_n": role_n}
-
+        # Real, confirmed-live gap fixed (same root cause as the identical
+        # fix in _role_baseline_fallback_evaluate above -- see its own
+        # comment for the full real-world finding this closes): this used
+        # to pick exactly ONE (bucket, coll) pair via min(pairs, key=...)
+        # and evaluate only that one, silently never checking any other
+        # message size on the same communicator. Confirmed live: a real
+        # FSDP fault with a textbook N-1-of-N wait-induced signature sat
+        # undetected for over an hour because it landed on a bucket this
+        # heuristic didn't happen to select. Fixed by evaluating every
+        # discovered pair and collecting every one that independently
+        # qualifies, rather than returning the first (or only) result.
+        # The persistence-tracker key below already included (bucket,
+        # coll), so per-bucket persistence state was already correctly
+        # isolated; only the single-bucket SELECTION was the bug.
         elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
-        elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
-                    and (d["peer_mad"] is None or d["peer_mad"] <= 0
-                         or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
-        # Role-baseline-pool hygiene (same P27-hotfix6 self-exclusion
-        # _timing_asymmetry_fallback_evaluate already does for its own
-        # elevated members, reused exactly) -- a confirmed-anomalous
-        # reading, found even once, must never silently feed a FUTURE
-        # role-baseline computation as if it were "what normal looks
-        # like" for that role shape. Real, confirmed gap this closes:
-        # direct investigation of a real false-positive on the sibling
-        # role-baseline check traced it to exactly this -- repeated
-        # fault-injection runs targeting the same role position left
-        # their own suppressed (culprit) and elevated (waiting-peer)
-        # readings in that role's own cross-job history unexcluded,
-        # permanently skewing its baseline. Pushed unconditionally here
-        # (not gated on the n-1/persistence checks below), same
-        # reasoning as the sibling check: a single qualifying reading is
-        # already real evidence it doesn't belong in "normal" history,
-        # whether or not this specific cycle goes on to actually fire.
-        for elevated_m in elevated:
-            d = per_member[elevated_m]
-            if d["role_rank"] not in (None, "na") and d["role_n"] not in (None, "na"):
-                self._push_role_baseline_exclusion(d["hostname"], comm, elevated_m, bucket, coll,
-                                                    d["role_rank"], d["role_n"])
-        if len(elevated) != n - 1:
-            return None
-        culprit = [m for m in per_member if m not in elevated][0]
-        # Same hygiene for the culprit side -- its own suppressed
-        # reading is just as real evidence of non-normal behavior as the
-        # peers' elevation is, and is otherwise never excluded from
-        # anywhere else in this file.
-        cd = per_member[culprit]
-        if cd["role_rank"] not in (None, "na") and cd["role_n"] not in (None, "na"):
-            self._push_role_baseline_exclusion(cd["hostname"], comm, culprit, bucket, coll,
-                                                cd["role_rank"], cd["role_n"])
+        results = []
+        for bucket, coll in pairs:
+            per_member = {}
+            bucket_incomplete = False
+            for hh, m in members_with_host:
+                slot = _query_gpu_slot(self.vm_url, hh, m)
+                if slot is None or slot < 0:
+                    bucket_incomplete = True
+                    break
+                data = self._member_exec_time_current(hh, comm, m, bucket, coll)
+                if data is None:
+                    bucket_incomplete = True
+                    break
+                current, ts = data
+                role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
+                role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+                if role_median is not None and role_median > 0:
+                    baseline, mad, source = role_median, role_mad, "role"
+                else:
+                    role_median_any, role_mad_any = self._member_role_baseline(
+                        hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                    if role_median_any is not None and role_median_any > 0:
+                        baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+                    else:
+                        fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                        if fb_median is not None and fb_median > 0:
+                            baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                        else:
+                            bucket_incomplete = True
+                            break
+                per_member[m] = {"slot": slot, "current": current, "peer_median": baseline, "peer_mad": mad,
+                                  "ratio": current / baseline, "baseline_source": source, "ts": ts,
+                                  "bucket": bucket, "coll": coll, "hostname": hh,
+                                  "role_rank": role_rank, "role_n": role_n}
+            if bucket_incomplete:
+                continue
 
-        surplus = min(per_member[e]["ratio"] - elevated_thresh for e in elevated)
-        key = ("wait_induced", per_member[culprit]["hostname"], comm, culprit, bucket, coll)
-        fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[culprit]["ts"])
-        if not fired:
-            return None
-        return (culprit, per_member[culprit]["slot"], per_member, bucket, coll)
+            elevated = [m for m, d in per_member.items() if d["ratio"] > elevated_thresh
+                        and (d["peer_mad"] is None or d["peer_mad"] <= 0
+                             or (d["current"] - d["peer_median"]) > TIMING_FALLBACK_MAD_MULTIPLE * d["peer_mad"])]
+            # Role-baseline-pool hygiene (same P27-hotfix6 self-exclusion
+            # _timing_asymmetry_fallback_evaluate already does for its own
+            # elevated members, reused exactly) -- a confirmed-anomalous
+            # reading, found even once, must never silently feed a FUTURE
+            # role-baseline computation as if it were "what normal looks
+            # like" for that role shape. Real, confirmed gap this closes:
+            # direct investigation of a real false-positive on the sibling
+            # role-baseline check traced it to exactly this -- repeated
+            # fault-injection runs targeting the same role position left
+            # their own suppressed (culprit) and elevated (waiting-peer)
+            # readings in that role's own cross-job history unexcluded,
+            # permanently skewing its baseline. Pushed unconditionally here
+            # (not gated on the n-1/persistence checks below), same
+            # reasoning as the sibling check: a single qualifying reading is
+            # already real evidence it doesn't belong in "normal" history,
+            # whether or not this specific cycle goes on to actually fire.
+            for elevated_m in elevated:
+                d = per_member[elevated_m]
+                if d["role_rank"] not in (None, "na") and d["role_n"] not in (None, "na"):
+                    self._push_role_baseline_exclusion(d["hostname"], comm, elevated_m, bucket, coll,
+                                                        d["role_rank"], d["role_n"])
+            if len(elevated) != n - 1:
+                continue
+            culprit = [m for m in per_member if m not in elevated][0]
+            # Same hygiene for the culprit side -- its own suppressed
+            # reading is just as real evidence of non-normal behavior as the
+            # peers' elevation is, and is otherwise never excluded from
+            # anywhere else in this file.
+            cd = per_member[culprit]
+            if cd["role_rank"] not in (None, "na") and cd["role_n"] not in (None, "na"):
+                self._push_role_baseline_exclusion(cd["hostname"], comm, culprit, bucket, coll,
+                                                    cd["role_rank"], cd["role_n"])
+
+            surplus = min(per_member[e]["ratio"] - elevated_thresh for e in elevated)
+            key = ("wait_induced", per_member[culprit]["hostname"], comm, culprit, bucket, coll)
+            fired, _duration_s = self.timing_fallback_tracker.observe(key, surplus, per_member[culprit]["ts"])
+            if not fired:
+                continue
+            results.append((culprit, per_member[culprit]["slot"], per_member, bucket, coll))
+        return results
 
     def _emit_timing_fallback(self, hostname, comm, member, slot, per_member, trigger,
                                path_c_storage=None, storage_verdict=None):
@@ -3473,16 +3544,13 @@ class AlertEngine:
     def _check_wait_induced(self, hostname, comm):
         """Dispatch wrapper matching _check_mean/_check_cv's own call
         pattern (see _poll_host) -- called once per real, distinct comm
-        discovered this poll cycle (not per bucket/coll pair, since
-        _wait_induced_fallback_evaluate picks its own largest-bucket
-        scope internally, same as the below-floor fallback it
-        generalizes), so this runs on every eligible 3+-member
-        communicator every cycle, not a hardcoded subset."""
-        result = self._wait_induced_fallback_evaluate(hostname, comm)
-        if result is None:
-            return
-        culprit, slot, per_member, bucket, coll = result
-        self._emit_wait_induced_alert(hostname, comm, culprit, slot, per_member, bucket, coll)
+        discovered this poll cycle. _wait_induced_fallback_evaluate now
+        evaluates EVERY real (bucket, coll) pair on this comm (see its
+        own docstring for the real gap this fixed -- it used to check
+        only one), so this emits once per qualifying pair, not just the
+        first/only one."""
+        for culprit, slot, per_member, bucket, coll in self._wait_induced_fallback_evaluate(hostname, comm):
+            self._emit_wait_induced_alert(hostname, comm, culprit, slot, per_member, bucket, coll)
 
     def _role_baseline_fallback_evaluate(self, hostname, comm):
         """Role-baseline-deviation check -- see ROLE_BASELINE_ALERT_
@@ -3526,76 +3594,93 @@ class AlertEngine:
             pairs.update(_discover_buckets(self.vm_url, hh, comm))
         if not pairs:
             return []
-        bucket, coll = min(pairs, key=lambda bc: (-int(bc[0]), 0 if bc[1] == "Recv" else 1, bc[1]))
 
+        # Real, confirmed-live gap fixed: this used to pick exactly ONE
+        # (bucket, coll) pair per comm via min(pairs, key=...) ("largest
+        # bucket") and silently never evaluate any other message size on
+        # the same communicator -- confirmed live on a real FSDP job: a
+        # textbook fault signature sat on a non-selected bucket for over
+        # an hour, completely invisible to this check (and to the two
+        # sibling fallbacks below, which shared this exact same pattern).
+        # Most real workloads have many distinct message sizes per comm
+        # (one per layer, roughly), so a fault on any bucket other than
+        # whichever one this heuristic happened to prefer was previously
+        # undetectable no matter how long you waited. Fixed by evaluating
+        # EVERY discovered pair, not just one -- the persistence-tracker
+        # key already included (bucket, coll) before this fix (confirmed
+        # by reading it, not assumed), so per-bucket persistence state was
+        # already correctly isolated; this only changes how many pairs
+        # get a chance to fire per cycle, not the underlying per-pair
+        # detection logic, which is unchanged.
         elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
         results = []
-        for hh, m in members_with_host:
-            slot = _query_gpu_slot(self.vm_url, hh, m)
-            if slot is None or slot < 0:
-                continue
-            data = self._member_exec_time_current(hh, comm, m, bucket, coll)
-            if data is None:
-                continue
-            current, ts = data
-            role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
-            # V1-beta-followup -- real, confirmed TP4-standalone finding:
-            # a role shape whose cross-job history is genuinely BIMODAL
-            # (not just noisy) can hand _member_role_baseline a numerically
-            # "stable-looking" median/mad that is still wrong for THIS
-            # job's own real mode (see _role_shape_job_lockstep's own
-            # docstring for the full investigation). For a shape flagged
-            # this way, the comm's OWN job-wide same-shape siblings (via
-            # _cross_comm_peer_median -- already job-scoped by design, see
-            # its own P27.5 docstring, not a new mechanism) are a more
-            # reliable comparison than ANY cross-job statistic, since the
-            # real data confirms same-job siblings agree within ~1% of
-            # each other while cross-job medians can differ by 40-70x.
-            # Tried FIRST only for flagged shapes -- every other,
-            # non-flagged shape keeps the original role -> role_cross_host
-            # -> cross_comm_peer order completely unchanged.
-            baseline = mad = source = None
-            if self._role_shape_job_lockstep(hh, bucket, coll, role_rank, role_n, exclude_comm=comm):
-                lockstep_median, lockstep_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                if lockstep_median is not None and lockstep_median > 0:
-                    baseline, mad, source = lockstep_median, lockstep_mad, "same_job_peer_lockstep"
-            if baseline is None:
-                role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
-                if role_median is not None and role_median > 0:
-                    baseline, mad, source = role_median, role_mad, "role"
-                else:
-                    role_median_any, role_mad_any = self._member_role_baseline(
-                        hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
-                    if role_median_any is not None and role_median_any > 0:
-                        baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
+        for bucket, coll in pairs:
+            for hh, m in members_with_host:
+                slot = _query_gpu_slot(self.vm_url, hh, m)
+                if slot is None or slot < 0:
+                    continue
+                data = self._member_exec_time_current(hh, comm, m, bucket, coll)
+                if data is None:
+                    continue
+                current, ts = data
+                role_rank, role_n = self._member_role_labels(hh, comm, m, bucket, coll)
+                # V1-beta-followup -- real, confirmed TP4-standalone finding:
+                # a role shape whose cross-job history is genuinely BIMODAL
+                # (not just noisy) can hand _member_role_baseline a numerically
+                # "stable-looking" median/mad that is still wrong for THIS
+                # job's own real mode (see _role_shape_job_lockstep's own
+                # docstring for the full investigation). For a shape flagged
+                # this way, the comm's OWN job-wide same-shape siblings (via
+                # _cross_comm_peer_median -- already job-scoped by design, see
+                # its own P27.5 docstring, not a new mechanism) are a more
+                # reliable comparison than ANY cross-job statistic, since the
+                # real data confirms same-job siblings agree within ~1% of
+                # each other while cross-job medians can differ by 40-70x.
+                # Tried FIRST only for flagged shapes -- every other,
+                # non-flagged shape keeps the original role -> role_cross_host
+                # -> cross_comm_peer order completely unchanged.
+                baseline = mad = source = None
+                if self._role_shape_job_lockstep(hh, bucket, coll, role_rank, role_n, exclude_comm=comm):
+                    lockstep_median, lockstep_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                    if lockstep_median is not None and lockstep_median > 0:
+                        baseline, mad, source = lockstep_median, lockstep_mad, "same_job_peer_lockstep"
+                if baseline is None:
+                    role_median, role_mad = self._member_role_baseline(hh, bucket, coll, role_rank, role_n, exclude_comm=comm)
+                    if role_median is not None and role_median > 0:
+                        baseline, mad, source = role_median, role_mad, "role"
                     else:
-                        fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
-                        if fb_median is not None and fb_median > 0:
-                            baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                        role_median_any, role_mad_any = self._member_role_baseline(
+                            hh, bucket, coll, role_rank, role_n, exclude_comm=comm, any_host=True)
+                        if role_median_any is not None and role_median_any > 0:
+                            baseline, mad, source = role_median_any, role_mad_any, "role_cross_host"
                         else:
-                            continue
-            ratio = current / baseline
-            elevated = (ratio > elevated_thresh
-                        and (mad is None or mad <= 0 or (current - baseline) > TIMING_FALLBACK_MAD_MULTIPLE * mad))
-            if not elevated:
-                continue
-            # Role-baseline-pool hygiene -- same reasoning as the
-            # identical fix in _wait_induced_fallback_evaluate (see its
-            # own comment): this member's current reading just cleared
-            # this check's own anomaly gate, so it must not also silently
-            # feed a FUTURE role-baseline computation as "normal" for
-            # this role shape. Pushed as soon as detected, not gated on
-            # the persistence check below, for the same reason the
-            # sibling checks don't gate their own exclusion either.
-            if role_rank not in (None, "na") and role_n not in (None, "na"):
-                self._push_role_baseline_exclusion(hh, comm, m, bucket, coll, role_rank, role_n)
-            d = {"slot": slot, "current": current, "baseline": baseline, "mad": mad, "ratio": ratio,
-                 "baseline_source": source, "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
-                 "role_rank": role_rank, "role_n": role_n}
-            key = ("role_baseline", hh, comm, m, bucket, coll)
-            fired, _duration_s = self.timing_fallback_tracker.observe(key, ratio - elevated_thresh, ts)
-            if fired:
-                results.append((m, slot, d, bucket, coll))
+                            fb_median, fb_mad = self._cross_comm_peer_median(hh, bucket, coll, exclude_comm=comm)
+                            if fb_median is not None and fb_median > 0:
+                                baseline, mad, source = fb_median, fb_mad, "cross_comm_peer"
+                            else:
+                                continue
+                ratio = current / baseline
+                elevated = (ratio > elevated_thresh
+                            and (mad is None or mad <= 0 or (current - baseline) > TIMING_FALLBACK_MAD_MULTIPLE * mad))
+                if not elevated:
+                    continue
+                # Role-baseline-pool hygiene -- same reasoning as the
+                # identical fix in _wait_induced_fallback_evaluate (see its
+                # own comment): this member's current reading just cleared
+                # this check's own anomaly gate, so it must not also silently
+                # feed a FUTURE role-baseline computation as "normal" for
+                # this role shape. Pushed as soon as detected, not gated on
+                # the persistence check below, for the same reason the
+                # sibling checks don't gate their own exclusion either.
+                if role_rank not in (None, "na") and role_n not in (None, "na"):
+                    self._push_role_baseline_exclusion(hh, comm, m, bucket, coll, role_rank, role_n)
+                d = {"slot": slot, "current": current, "baseline": baseline, "mad": mad, "ratio": ratio,
+                     "baseline_source": source, "ts": ts, "bucket": bucket, "coll": coll, "hostname": hh,
+                     "role_rank": role_rank, "role_n": role_n}
+                key = ("role_baseline", hh, comm, m, bucket, coll)
+                fired, _duration_s = self.timing_fallback_tracker.observe(key, ratio - elevated_thresh, ts)
+                if fired:
+                    results.append((m, slot, d, bucket, coll))
         return results
 
     def _emit_role_baseline_alert(self, hostname, comm, member, slot, data, bucket, coll):
@@ -3841,11 +3926,21 @@ class AlertEngine:
                 # A/B/C never short-circuit each other in classifier.py's
                 # determine_confirmed_path. Both get a real chance every
                 # cycle.
-                t_result = self._timing_asymmetry_fallback_evaluate(hostname, comm)
-                t_key = ("timing_fallback_standalone", hostname, comm)
-                t_fired = t_result is not None
-                if t_fired and not self.was_firing[t_key]:
-                    t_member, t_slot, t_per_member = t_result
+                # P27-multibucket -- _timing_asymmetry_fallback_evaluate now
+                # returns a list, one entry per (bucket, coll) pair that
+                # independently qualifies this cycle, not a single result.
+                # The old per-comm was_firing[t_key] dedup here is dropped,
+                # not made bucket-aware: self.timing_fallback_tracker.observe
+                # (called inside the evaluator, keyed per bucket/coll) is
+                # already edge-triggered on its own (see persistence.py's
+                # own docstring -- is_new_event, not "still true") and
+                # already the real source of "only emit once per new
+                # event" -- the extra comm-level wrapper was redundant even
+                # before this change (confirmed: _check_wait_induced, the
+                # sibling fallback using the exact same tracker, never had
+                # one). Matches that established, already-correct pattern.
+                for t_member, t_slot, t_per_member, t_bucket, t_coll in \
+                        self._timing_asymmetry_fallback_evaluate(hostname, comm):
                     # P27.3-followup -- real, GENERIC gap this closes: this
                     # fallback's own persistence gate (T.PERSIST_REQUIRED)
                     # already correctly decided a real, sustained below-
@@ -3885,7 +3980,6 @@ class AlertEngine:
                         annotations = self._correlate_firing_timing_alerts(pool)
                         self._emit_correlation_report(pool, annotations)
                     self._recent_timing_fires.append(new_alert)
-                self.was_firing[t_key] = t_fired
 
         self._dcgm_fallback_thread = threading.Thread(target=_run, daemon=True)
         self._dcgm_fallback_thread.start()
@@ -4023,7 +4117,7 @@ class AlertEngine:
                   f"{type(e).__name__}: {e}", file=sys.stderr)
 
     def _emit(self, stat_name, hostname, comm, member, bucket, coll, z, mm, worst_val, peer_mean, slurm_job_id, anomaly_ts=None,
-              role_rank="na", role_n="na", persist_duration_s=None):
+              role_rank="na", role_n="na", persist_duration_s=None, is_likely_root_cause=None):
         # --- straggler_incident_detected (approved design, cause-agnostic
         # signal) -- fires BEFORE and entirely independent of build_
         # finding_for_alert/cause-gathering below: cause-tier (CONFIRMED/
@@ -4153,6 +4247,14 @@ class AlertEngine:
         finding["role_n"] = role_n
         if _incident_fired_this_call:
             finding["incident_id"] = incident_id
+        # Real gap found live: is_likely_root_cause was only ever pushed as
+        # a VictoriaMetrics label (agg_straggler_incident_tier's own
+        # incident_role) -- visible in Grafana, but completely invisible to
+        # anyone reading the actual alert text/log, which is exactly the
+        # thing this project's own alert text is for. Threaded through the
+        # same way role_rank/role_n already are, so report.py can surface
+        # it in the real alert body too.
+        finding["is_likely_root_cause"] = is_likely_root_cause
         if coverage["degraded"] and finding["tier"] == "CONFIRMED":
             finding["tier"] = "PROBABLE"
 
@@ -4238,10 +4340,25 @@ class AlertEngine:
             # gpu_slot_disp (a separate DCGM-sourced lookup) instead of
             # slot_disp -- see the matching fix + comment on the
             # agg_path_c_verdict push just above for the full explanation.
+            # Real false-multiplication mitigation (found live via
+            # self_test.sh on a real 48-rank run): a single injected fault
+            # on one rank produced multiple composed-incident-summary rows
+            # across distinct ranks, with nothing distinguishing the real
+            # root cause from correlated downstream effects (other members
+            # of the same synchronous collective, independently crossing
+            # their OWN incident threshold because they're measuring real
+            # wait time for the slow member). role_disp here is computed
+            # directly from already-fetched per-member exec-time data (see
+            # _real_exec_us_comparison's own docstring for the full
+            # rationale) -- "unknown" (not a guess) when that data wasn't
+            # available for this specific firing, same honest-unknown
+            # convention as every other "na"/"unknown" label in this file.
+            role_disp = ("unknown" if is_likely_root_cause is None
+                         else "root_cause" if is_likely_root_cause else "downstream")
             self._push_visibility_metric(
                 f'agg_straggler_incident_tier{{hostname="{hostname}",comm="{comm}",member="{member}",'
                 f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}",'
-                f'tier="{finding["tier"]}"}} 1',
+                f'tier="{finding["tier"]}",incident_role="{role_disp}"}} 1',
                 ts_ms=event_ts_ms)
 
         # P21.6 -- cascade-mislocalization fix. An alert sourced from a
@@ -4290,11 +4407,14 @@ class AlertEngine:
                 # a later cycle where DCGM stops resolving would start
                 # timing's persistence count from cold at the worst time.
                 # Display only prefers whichever resolved first below.
-                t_key = ("timing_fallback_cascade", h, dep_comm)
-                t_result = self._timing_asymmetry_fallback_evaluate(h, dep_comm)
-                t_fired = t_result is not None
-                if t_fired and not self.was_firing[t_key]:
-                    t_member, t_slot, t_per_member = t_result
+                # P27-multibucket -- same change as the standalone trigger
+                # site above: iterate every qualifying (bucket, coll) pair
+                # instead of a single result, and drop the redundant
+                # per-comm was_firing wrapper (the tracker's own observe()
+                # is already edge-triggered per bucket/coll -- see that
+                # site's own comment for the full reasoning).
+                for t_member, t_slot, t_per_member, t_bucket, t_coll in \
+                        self._timing_asymmetry_fallback_evaluate(h, dep_comm):
                     # P27.3-followup, Part A -- same wiring as the standalone
                     # trigger site, applied here for symmetry: this call site
                     # was deliberately left unmodified in that earlier session
@@ -4306,7 +4426,6 @@ class AlertEngine:
                     self._emit_timing_fallback(h, dep_comm, t_member, t_slot, t_per_member, "cascade",
                                                 path_c_storage=t_path_c, storage_verdict=t_storage_verdict)
                     resolved_deps.setdefault((h, dep_comm), (t_member, t_slot, "TIMING"))
-                self.was_firing[t_key] = t_fired
 
             ranked = self._rank_dependents_by_deviation(dependents)
             dep_list = ", ".join(
@@ -5106,9 +5225,31 @@ class AlertEngine:
         query-staleness-floor discipline as _cv_maxmed: uses /api/v1/export
         with a query_ts anchor when given (the real firing moment), not a
         live instant query, for the same reason _cv_maxmed's own docstring
-        already explains. Returns (worst_real_us, peer_median_real_us), or
-        (None, None) if this member/peer data genuinely isn't available
-        (never a fabricated value)."""
+        already explains.
+
+        Real false-multiplication mitigation (found live via self_test.sh
+        on a real 48-rank run: a single injected fault on rank 8 produced
+        4 composed-incident-summary rows across 3 distinct ranks, with
+        nothing distinguishing the real root cause from correlated
+        downstream effects): a synchronous collective's OTHER members can
+        independently cross their OWN incident threshold at essentially
+        the same real instant as the true fault, because they're measuring
+        real wait time for the slow member -- this project's own already-
+        documented design rationale (early arrivers wait inside the
+        collective; the true straggler arrives late and shows the
+        SHORTEST exec time, having done no waiting itself). Since
+        by_member here already holds every member's real exec time at
+        this exact query_ts, the true root cause can be identified
+        directly, with no new query: whichever member's value is the
+        real minimum across the whole set. Returns (worst_real_us,
+        peer_median_real_us, is_likely_root_cause), or (None, None, None)
+        if this member/peer data genuinely isn't available (never a
+        fabricated value). is_likely_root_cause is a real, data-derived
+        boolean -- not a guess -- but still labeled "likely": a genuinely
+        ambiguous tie (two members at the same real minimum) or a
+        multi-fault scenario this single collective's own data can't
+        distinguish are real, disclosed edge cases, not claimed to be
+        impossible."""
         if query_ts is not None:
             # Real bug found live via debug tracing: a -10/+2s window (the
             # same narrow one _cv_maxmed uses for agg_cv_exec_time, copied
@@ -5147,12 +5288,13 @@ class AlertEngine:
                     continue
                 by_member[row["metric"]["member"]] = float(row["value"][1])
         if worst_member not in by_member or len(by_member) < 2:
-            return None, None
+            return None, None, None
         worst_real_us = by_member[worst_member]
         peers = [v for p, v in by_member.items() if p != worst_member]
         peer_median_real_us = sorted(peers)[len(peers) // 2] if len(peers) % 2 else \
             (sorted(peers)[len(peers) // 2 - 1] + sorted(peers)[len(peers) // 2]) / 2
-        return worst_real_us, peer_median_real_us
+        is_likely_root_cause = worst_real_us <= min(by_member.values())
+        return worst_real_us, peer_median_real_us, is_likely_root_cause
 
     def _check_cv(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added: without it this query would match
@@ -5186,11 +5328,12 @@ class AlertEngine:
                 # data instead gives report.py a genuine, accurate microsecond
                 # comparison to show, regardless of which check (cv or mean)
                 # fired.
-                real_worst_us, real_peer_us = self._real_exec_us_comparison(
+                real_worst_us, real_peer_us, is_likely_root_cause = self._real_exec_us_comparison(
                     hostname, comm, bucket, coll, member, query_ts=ts)
                 self._emit("cv", hostname, comm, member, bucket, coll, z, mm, real_worst_us, real_peer_us,
                            m.get("slurm_job_id"), anomaly_ts=ts,
-                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
+                           role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s,
+                           is_likely_root_cause=is_likely_root_cause)
 
     def _check_mean(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added to both queries, same reasoning as
@@ -5322,12 +5465,12 @@ class AlertEngine:
                 # agg_mean_exec_time_us comparison the cv path now uses, so
                 # report.py can show a genuine, accurate microsecond
                 # comparison for mean-sourced findings too, not just cv ones.
-                real_worst_us, real_peer_us = self._real_exec_us_comparison(
+                real_worst_us, real_peer_us, is_likely_root_cause = self._real_exec_us_comparison(
                     hostname, comm, bucket, row_coll, member, query_ts=disp_ts_s)
                 self._emit("mean", hostname, comm, member, bucket, coll, disp_z, disp_mm, real_worst_us, real_peer_us,
                            m_labels.get("slurm_job_id"),
                            anomaly_ts=disp_ts_s, role_rank=m_labels.get("role_rank", "na"), role_n=m_labels.get("role_n", "na"),
-                           persist_duration_s=duration_s)
+                           persist_duration_s=duration_s, is_likely_root_cause=is_likely_root_cause)
 
     def _check_outlier_count(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added, same reasoning as _check_cv/_check_mean.
