@@ -140,7 +140,7 @@ filestore_accounting = {
 nfs_in_k8s = {
   enabled = true
   spec = {
-    version         = "1.2.0"
+    version         = "1.2.2"
     use_stable_repo = true
     size_gibibytes  = 3720
     disk_type       = "NETWORK_SSD_IO_M3"
@@ -173,7 +173,7 @@ nfs_in_k8s = {
 
 # Version of soperator.
 # ---
-slurm_operator_version = "4.1.12"
+slurm_operator_version = "4.1.13"
 
 # Is the version of soperator stable or not.
 # ---
