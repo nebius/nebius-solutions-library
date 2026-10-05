@@ -2241,7 +2241,7 @@ class AlertEngine:
         cur_vals = [float(r["value"][1]) for r in cur_rows]
         return (sum(cur_vals) / len(cur_vals), newest_ts)
 
-    def _push_visibility_metric(self, metric_line):
+    def _push_visibility_metric(self, metric_line, ts_ms=None):
         """V1-beta-dashboard-followup -- generic push helper, factored
         out of _push_role_baseline_exclusion's own already-established
         wire format (metric{labels} value timestamp_ms via /api/v1/
@@ -2251,11 +2251,20 @@ class AlertEngine:
         storage Path C verdict) -- same discipline: a push failure here
         degrades to "this specific reading isn't recorded," never blocks
         the live detection path that already computed the value.
-        `metric_line` is the metric{labels} portion only; timestamp is
-        always real, current wall-clock time (these are live, per-cycle
-        readings, not historical replay)."""
+        `metric_line` is the metric{labels} portion only; timestamp
+        defaults to real, current wall-clock time (most readings are
+        live, per-cycle, not historical replay) -- but a caller pushing
+        several metrics meant to represent the SAME real event (see
+        _emit()'s own shared `event_ts_ms`) must pass the identical
+        ts_ms explicitly. Real bug found live: without this, each call
+        stamped its own `time.time()`, and _emit()'s five related
+        pushes for one incident could land up to ~2.9 real seconds apart
+        (confirmed live) -- labels alone being identical was NOT enough
+        for Grafana's table-merge transform to combine them into one row
+        in the composed-incident-summary panel; the Time column itself
+        also has to match."""
         try:
-            now_ms = int(time.time() * 1000)
+            now_ms = ts_ms if ts_ms is not None else int(time.time() * 1000)
             body = f"{metric_line} {now_ms}\n"
             req = urllib.request.Request(f"{self.vm_url}/api/v1/import/prometheus",
                                           data=body.encode(), method="POST")
@@ -4048,6 +4057,33 @@ class AlertEngine:
         # timestamp needed for uniqueness (both lines are printed
         # together, right here).
         incident_id = f"{hostname}:{comm}:{member}:{bucket}:{coll}"
+        # Real bug fixed: a shared timestamp for every agg_straggler_
+        # incident_*/agg_path_c_verdict/agg_straggler_incident_tier push
+        # below, computed ONCE here rather than letting each individual
+        # _push_visibility_metric() call stamp its own time.time(). Label
+        # consistency alone (see the push sites below) was NOT enough for
+        # Grafana's table-merge transform to combine these into one row --
+        # confirmed live against a real incident: build_finding_for_alert's
+        # own DCGM/storage-evidence gathering between the early pushes
+        # (detected/severity_ratio/persisted_s) and the later ones
+        # (path_c_verdict/tier) took ~2.9 real seconds, so the two groups
+        # landed on genuinely different Time values even with identical
+        # labels, and the merge transform treats Time as a real field to
+        # match on, not something it's lenient about.
+        event_ts_ms = int(time.time() * 1000)
+        # Real, confirmed-live regression fixed: slot_disp used to be
+        # computed only inside the `if mm_valid and mm > T.MEAN_MM_THRESH`
+        # block below, but the agg_path_c_verdict push further down in
+        # this function runs UNCONDITIONALLY (regardless of whether the
+        # straggler-incident threshold is crossed) and references
+        # slot_disp too -- any _emit() call where that condition is False
+        # threw a real UnboundLocalError, caught as [CHECK-FAILED] on
+        # every such poll (confirmed live: `cv args=('worker-1',
+        # '0xa4d5478594e5a9', '11863283', 'AllReduce')`). Moved up here,
+        # unconditional, computed exactly once per call -- removed the
+        # duplicate inner computation below.
+        slot = _query_gpu_slot(self.vm_url, hostname, member)
+        slot_disp = slot if slot is not None and slot >= 0 else "unknown"
         # item-6 -- real job-context for display, informational
         # only, computed once here (before either real line below is
         # built) so both can show the same real data. Stored for reuse
@@ -4069,8 +4105,6 @@ class AlertEngine:
                              f"job_nnodes={nnodes_disp} job_nranks={nranks_disp}")
         if mm_valid and mm > T.MEAN_MM_THRESH:
             severity_ratio = mm if stat_name == "mean" else z
-            slot = _query_gpu_slot(self.vm_url, hostname, member)
-            slot_disp = slot if slot is not None and slot >= 0 else "unknown"
             dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
             header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
                       f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
@@ -4079,10 +4113,12 @@ class AlertEngine:
             self._append_alert_summary(header)
             self._push_visibility_metric(
                 f'agg_straggler_incident_detected{{hostname="{hostname}",comm="{comm}",member="{member}",'
-                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} 1')
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} 1',
+                ts_ms=event_ts_ms)
             self._push_visibility_metric(
                 f'agg_straggler_incident_severity_ratio{{hostname="{hostname}",comm="{comm}",member="{member}",'
-                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}')
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {severity_ratio}',
+                ts_ms=event_ts_ms)
             # item-9 -- real persisted_s alongside the already-
             # pushed severity_ratio, same label set, so Grafana can show
             # both without reading raw log text. persist_duration_s is
@@ -4093,7 +4129,8 @@ class AlertEngine:
             persisted_s_val = persist_duration_s if persist_duration_s is not None else -1
             self._push_visibility_metric(
                 f'agg_straggler_incident_persisted_s{{hostname="{hostname}",comm="{comm}",member="{member}",'
-                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {persisted_s_val}')
+                f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}"}} {persisted_s_val}',
+                ts_ms=event_ts_ms)
             _incident_fired_this_call = True
         else:
             _incident_fired_this_call = False
@@ -4176,7 +4213,8 @@ class AlertEngine:
         # already claimed this was doing.
         self._push_visibility_metric(
             f'agg_path_c_verdict{{hostname="{hostname}",member="{member}",comm="{comm}",bucket="{bucket}",'
-            f'coll="{coll}",gpu_slot="{slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}')
+            f'coll="{coll}",gpu_slot="{slot_disp}",role_rank="{role_rank}",role_n="{role_n}"}} {verdict_num}',
+            ts_ms=event_ts_ms)
 
         # item-9 -- real tier, correlated to this SAME event's
         # identity (hostname/comm/member/gpu_slot/bucket/role_rank/
@@ -4203,7 +4241,8 @@ class AlertEngine:
             self._push_visibility_metric(
                 f'agg_straggler_incident_tier{{hostname="{hostname}",comm="{comm}",member="{member}",'
                 f'gpu_slot="{slot_disp}",bucket="{bucket}",coll="{coll}",role_rank="{role_rank}",role_n="{role_n}",'
-                f'tier="{finding["tier"]}"}} 1')
+                f'tier="{finding["tier"]}"}} 1',
+                ts_ms=event_ts_ms)
 
         # P21.6 -- cascade-mislocalization fix. An alert sourced from a
         # larger communicator has no way, by itself, to know whether the
@@ -5051,6 +5090,70 @@ class AlertEngine:
         mm = worst_val / peer_median if peer_median else float("inf")
         return mm, worst_val
 
+    def _real_exec_us_comparison(self, hostname, comm, bucket, coll, worst_member, query_ts=None):
+        """Real bug found live while adding a concrete timing comparison
+        to alert text: _cv_maxmed's own worst_val/peer_median come from
+        agg_cv_exec_time, which despite its name is NOT a timing value at
+        all -- it's verified_stat_cv()'s own coefficient-of-variation
+        output (stdev/mean, dimensionless), confirmed directly against
+        its real source. Labeling that as microseconds in report text
+        would have been factually wrong, not just unclear. This instead
+        queries agg_mean_exec_time_us -- a genuine raw per-member exec
+        time, confirmed in real microseconds, already pushed for every
+        window regardless of which check (cv or mean) actually fired --
+        so both paths can show the same real, honest "this rank's actual
+        exec time vs. its peers' actual exec time" comparison. Same
+        query-staleness-floor discipline as _cv_maxmed: uses /api/v1/export
+        with a query_ts anchor when given (the real firing moment), not a
+        live instant query, for the same reason _cv_maxmed's own docstring
+        already explains. Returns (worst_real_us, peer_median_real_us), or
+        (None, None) if this member/peer data genuinely isn't available
+        (never a fabricated value)."""
+        if query_ts is not None:
+            # Real bug found live via debug tracing: a -10/+2s window (the
+            # same narrow one _cv_maxmed uses for agg_cv_exec_time, copied
+            # here without re-checking the assumption) returned EMPTY for
+            # agg_mean_exec_time_us every time, confirmed via a real debug
+            # trace showing real_worst_us=None/real_peer_us=None on an
+            # incident where the data genuinely existed (confirmed
+            # separately via direct VM query). Root cause: agg_mean_exec_
+            # time_us closes on its OWN independent 100-sample window
+            # (MEAN_WINDOW), not aligned in real time with CV's own
+            # 125-sample window agg_cv_exec_time closes on -- the two
+            # windows close at genuinely different real moments, and in
+            # this project's own self-test conditions (each iteration
+            # gated by a full STRAGGLER_SLEEP_MS=1000 synchronous delay)
+            # a single window can take 100+ real seconds to close, far
+            # outside a 10s lookback. Widened to 300s -- generous enough
+            # for any real workload cadence this project validates
+            # against, while still only ever taking the real sample
+            # closest to query_ts (never a stale unrelated one) via the
+            # same min-distance selection below.
+            export_rows = _query_export(self.vm_url,
+                                         f'agg_mean_exec_time_us{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}',
+                                         query_ts - 300, query_ts + 2)
+            by_member = {}
+            for row in export_rows:
+                if not row["timestamps"]:
+                    continue
+                closest_ts = min(row["timestamps"], key=lambda t: abs(t / 1000.0 - query_ts))
+                idx = row["timestamps"].index(closest_ts)
+                by_member[row["metric"]["member"]] = row["values"][idx]
+        else:
+            res = _query_instant_real_ts(self.vm_url, f'agg_mean_exec_time_us{{hostname="{hostname}",comm="{comm}",bucket="{bucket}",coll="{coll}"}}')
+            by_member = {}
+            for row in res:
+                if not self._fresh(row):
+                    continue
+                by_member[row["metric"]["member"]] = float(row["value"][1])
+        if worst_member not in by_member or len(by_member) < 2:
+            return None, None
+        worst_real_us = by_member[worst_member]
+        peers = [v for p, v in by_member.items() if p != worst_member]
+        peer_median_real_us = sorted(peers)[len(peers) // 2] if len(peers) % 2 else \
+            (sorted(peers)[len(peers) // 2 - 1] + sorted(peers)[len(peers) // 2]) / 2
+        return worst_real_us, peer_median_real_us
+
     def _check_cv(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added: without it this query would match
         # every collective type sharing this bucket value on this
@@ -5073,7 +5176,20 @@ class AlertEngine:
             fired, duration_s = self.cv_tracker.observe(key, z, ts)
             if fired:
                 mm, worst_val = self._cv_maxmed(hostname, comm, bucket, coll, member, query_ts=ts)
-                self._emit("cv", hostname, comm, member, bucket, coll, z, mm, worst_val, None, m.get("slurm_job_id"), anomaly_ts=ts,
+                # Real fix: worst_val/peer_mean passed into _emit() below are
+                # for DISPLAY only (report.py's text), never read by any
+                # detection/tier decision -- mm/z above (from agg_cv_exec_time,
+                # a real CV ratio) remain the actual gate, completely
+                # unchanged. They used to be (worst_val, None) -- worst_val
+                # here is itself a CV ratio, not a timing, and peer_mean was
+                # never computed at all. Querying the real agg_mean_exec_time_us
+                # data instead gives report.py a genuine, accurate microsecond
+                # comparison to show, regardless of which check (cv or mean)
+                # fired.
+                real_worst_us, real_peer_us = self._real_exec_us_comparison(
+                    hostname, comm, bucket, coll, member, query_ts=ts)
+                self._emit("cv", hostname, comm, member, bucket, coll, z, mm, real_worst_us, real_peer_us,
+                           m.get("slurm_job_id"), anomaly_ts=ts,
                            role_rank=m.get("role_rank", "na"), role_n=m.get("role_n", "na"), persist_duration_s=duration_s)
 
     def _check_mean(self, hostname, comm, bucket, coll):
@@ -5200,7 +5316,16 @@ class AlertEngine:
                 age_s = decision_ts - disp_ts_s
                 print(f"[EMIT_TRACE] decision_time={decision_ts:.3f} member={member} bucket={bucket} coll={row_coll} "
                       f"z_sample_real_ts={disp_ts_s} age_s={age_s} persist_duration_s={duration_s}", flush=True)
-                self._emit("mean", hostname, comm, member, bucket, coll, disp_z, disp_mm, None, None, m_labels.get("slurm_job_id"),
+                # Real fix: worst_val/peer_mean were always (None, None) here
+                # -- never fetched at all, unlike the cv path which at least
+                # had a (dimensionless) value. Reuses the same real
+                # agg_mean_exec_time_us comparison the cv path now uses, so
+                # report.py can show a genuine, accurate microsecond
+                # comparison for mean-sourced findings too, not just cv ones.
+                real_worst_us, real_peer_us = self._real_exec_us_comparison(
+                    hostname, comm, bucket, row_coll, member, query_ts=disp_ts_s)
+                self._emit("mean", hostname, comm, member, bucket, coll, disp_z, disp_mm, real_worst_us, real_peer_us,
+                           m_labels.get("slurm_job_id"),
                            anomaly_ts=disp_ts_s, role_rank=m_labels.get("role_rank", "na"), role_n=m_labels.get("role_n", "na"),
                            persist_duration_s=duration_s)
 

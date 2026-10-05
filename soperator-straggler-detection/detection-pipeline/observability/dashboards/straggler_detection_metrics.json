@@ -2097,9 +2097,9 @@
           "exemplar": false,
           "expr": "agg_straggler_incident_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "A"
         },
         {
@@ -2111,9 +2111,9 @@
           "exemplar": false,
           "expr": "agg_straggler_incident_persisted_s{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "B"
         },
         {
@@ -2125,9 +2125,9 @@
           "exemplar": false,
           "expr": "agg_straggler_incident_severity_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "C"
         },
         {
@@ -2139,9 +2139,9 @@
           "exemplar": false,
           "expr": "agg_path_c_verdict{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "D"
         }
       ],
@@ -2304,9 +2304,9 @@
           "exemplar": false,
           "expr": "agg_wait_induced_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "A"
         },
         {
@@ -2318,9 +2318,9 @@
           "exemplar": false,
           "expr": "agg_wait_induced_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "B"
         },
         {
@@ -2332,9 +2332,9 @@
           "exemplar": false,
           "expr": "agg_wait_induced_peer_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "C"
         }
       ],
@@ -2474,9 +2474,9 @@
           "exemplar": false,
           "expr": "agg_role_baseline_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "A"
         },
         {
@@ -2488,9 +2488,9 @@
           "exemplar": false,
           "expr": "agg_role_baseline_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "B"
         },
         {
@@ -2502,9 +2502,9 @@
           "exemplar": false,
           "expr": "agg_role_baseline_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
           "format": "table",
-          "instant": true,
+          "instant": false,
           "legendFormat": "__auto",
-          "range": false,
+          "range": true,
           "refId": "C"
         }
       ],
