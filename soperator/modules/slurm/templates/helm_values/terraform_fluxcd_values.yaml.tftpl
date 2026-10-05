@@ -15,6 +15,9 @@ resources:
             url: ${soperator_helm_repo_nfs}
           soperator:
             url: ${soperator_helm_repo}
+          kruise:
+            url: ${kruise_helm_repo}
+            type: oci
         customConfigmaps:
           overrideValues:
             %{~ if enroot_direct_squashfs_enabled ~}
@@ -937,11 +940,12 @@ resources:
             enabled: true
             interval: 5m
             timeout: 5m
+            version: 1.9.1-custom
             overrideValues:
               manager:
                 image:
                   repository: cr.nebius.cloud/soperator/kruise-manager
-                  tag: v1.8.3
+                  tag: v1.9.1
                 # Scales with the sizing tier; the kruise manager OOM-ed on big
                 # clusters with the chart-default 1 cpu / 2Gi.
                 resources:
