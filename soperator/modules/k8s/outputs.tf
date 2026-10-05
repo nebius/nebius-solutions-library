@@ -25,3 +25,10 @@ output "gpu_involved" {
   description = "Whether the GPUs were involved."
   value       = length([for worker in local.node_group_gpu_present.worker : worker if worker]) > 0
 }
+
+output "gpu_cluster_id_by_fabric" {
+  description = "Map of InfiniBand fabric name to its generated GPU cluster ID."
+  value = {
+    for fabric, gc in nebius_compute_v1_gpu_cluster.this_v2 : fabric => gc.id
+  }
+}

@@ -1,6 +1,7 @@
 # Quick checks of the Slurm cluster
 
 Within an SSH session to the Slurm cluster, go to the quickcheck directory:
+
 ```shell
 cd /opt/slurm-test/quickcheck
 ```

@@ -2,6 +2,7 @@ module "network-operator" {
   depends_on = [
     nebius_mk8s_v1_node_group.cpu-only,
     nebius_mk8s_v1_node_group.gpu,
+    nebius_mk8s_v1_node_group.gb300,
   ]
   source     = "../modules/network-operator"
   parent_id  = var.parent_id
@@ -9,7 +10,7 @@ module "network-operator" {
 }
 
 module "gpu-operator" {
-  count = (!var.gpu_nodes_driverfull_image && !var.custom_driver) ? 1 : 0
+  count = (!local.use_driverfull_gpu && !var.custom_driver) ? 1 : 0
 
   depends_on = [
     module.network-operator
@@ -18,6 +19,7 @@ module "gpu-operator" {
   parent_id    = var.parent_id
   cluster_id   = nebius_mk8s_v1_cluster.k8s-cluster.id
   mig_strategy = var.mig_strategy
+  cdi_enabled  = local.gpu_operator_cdi_enabled
 }
 
 module "gpu-operator-custom" {
@@ -27,11 +29,12 @@ module "gpu-operator-custom" {
   ]
   source       = "../modules/gpu-operator-custom"
   mig_strategy = var.mig_strategy != null ? var.mig_strategy : "none"
+  cdi_enabled  = local.gpu_operator_cdi_enabled
 }
 
 
 module "device-plugin" {
-  count = var.gpu_nodes_driverfull_image ? 1 : 0
+  count = local.use_driverfull_gpu ? 1 : 0
 
   source     = "../modules/device-plugin"
   parent_id  = var.parent_id
@@ -39,10 +42,10 @@ module "device-plugin" {
 }
 
 module "o11y" {
-  source     = "../modules/o11y"
-  parent_id  = var.parent_id
-  tenant_id  = var.tenant_id
-  cluster_id = nebius_mk8s_v1_cluster.k8s-cluster.id
+  source                    = "../modules/o11y"
+  parent_id                 = var.parent_id
+  tenant_id                 = var.tenant_id
+  cluster_id                = nebius_mk8s_v1_cluster.k8s-cluster.id
   k8s_node_group_sa_id      = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[0].id : null
   k8s_node_group_sa_enabled = var.enable_k8s_node_group_sa
 
@@ -68,7 +71,7 @@ module "o11y" {
 }
 
 module "nccl-test" {
-  count = var.test_mode ? 1 : 0
+  count = var.test_mode && !local.gb300_enabled ? 1 : 0
   depends_on = [
     module.gpu-operator,
   ]

@@ -2,26 +2,32 @@ resource "local_file" "flux_release_rendered_nodesets" {
   filename = "${path.root}/assets/render/flux_release_nodesets.yaml"
 
   content = templatefile("${path.module}/templates/helm_values/flux_release_nodesets.yaml.tftpl", {
-    version      = var.operator_version
-    namespace    = "soperator"
-    release_name = "soperator-nodesets"
+    version          = var.operator_version
+    namespace        = "soperator"
+    release_name     = "soperator-nodesets"
+    cluster_name     = var.name
+    apparmor_profile = local.apparmor_profile
 
-    nodesets = var.worker_nodesets
-    resources = [for res in var.resources.worker : {
+    nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
+      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
+      slurm_node_extra  = local.slurm_node_extra_by_nodeset[nodeset.name]
+    })]
+    resources = [for i, res in var.node_capacity.worker : {
       cpu_cores = floor(
         res.cpu_cores
         -local.resources.munge.cpu
         -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
       ) - local.resources.kruise_daemon.cpu
-      memory_gibibytes = floor(
-        res.memory_gibibytes
-        -local.resources.munge.memory
-        -(var.sssd_enabled ? local.resources.sssd.memory : 0)
-      ) - local.resources.kruise_daemon.memory
-      ephemeral_storage_gibibytes = floor(
-        res.ephemeral_storage_gibibytes
-        -local.resources.munge.ephemeral_storage
-        -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+      memory_gibibytes = local.worker_memory[i]
+      ephemeral_storage_gibibytes = (
+        try(var.worker_nodesets[i].local_nvme.enabled, false) &&
+        try(var.worker_nodesets[i].local_nvme.size_limit_gibibytes, null) != null
+        ? var.worker_nodesets[i].local_nvme.size_limit_gibibytes
+        : floor(
+          res.ephemeral_storage_gibibytes
+          -local.resources.munge.ephemeral_storage
+          -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+        )
       )
       gpus          = res.gpus
       shared_memory = var.shared_memory_size_gibibytes
@@ -41,10 +47,7 @@ resource "local_file" "flux_release_rendered_nodesets" {
 
     gpu = {
       use_preinstalled_drivers = var.use_preinstalled_gpu_drivers
-      dcgm_job_mapping = {
-        enabled = var.dcgm_job_mapping_enabled
-        dir     = var.dcgm_job_map_dir
-      }
+      wait_for_persistenced    = var.wait_for_nvidia_persistenced
     }
 
     munge = {
@@ -61,7 +64,5 @@ resource "local_file" "flux_release_rendered_nodesets" {
       ldap_ca_config_map_ref_name = var.sssd_ldap_ca_config_map_ref_name
       resources                   = local.resources.sssd
     }
-
-    extra = local.slurm_node_extra
   })
 }

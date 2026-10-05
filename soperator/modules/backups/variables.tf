@@ -1,10 +1,10 @@
-variable "iam_tenant_id" {
-  description = "ID of the IAM tenant."
+variable "iam_project_id" {
+  description = "ID of the IAM project."
   type        = string
 }
 
-variable "iam_project_id" {
-  description = "ID of the IAM project."
+variable "backups_bucket_id" {
+  description = "ID of the backup bucket in the IAM project. Backup permissions are limited to this bucket."
   type        = string
 }
 
