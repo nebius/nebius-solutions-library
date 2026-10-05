@@ -32,8 +32,8 @@ this project's own history of things that actually broke:
    before assuming it's the only place that needed the change.
 3. **Relative `DUMPDIR_BASE` silently breaks dump output** — no crash, no
    error, just silent non-detection, because self-dispatching workload
-   launchers `cd` before the relative path resolves (§7, README:2772-2790).
-   Always pass an absolute path.
+   launchers `cd` before the relative path resolves (README.md §8, line
+   1333). Always pass an absolute path.
 4. **Overhead is not one number.** Five different measurements exist
    (4.5x / ~6.5% / ~12.3% / ~13.1% / ~12.0%) across different workload
    shapes, scales, and pipeline states (§8). Never quote one of these as
@@ -128,7 +128,7 @@ VM's own new-series visibility lag), then deployed to the real production
   via `deque(maxlen=PERSIST_WINDOW)` at lines 421-422.
 - **Inspector plugin ring buffer:** `INSPECTOR_RING_CAPACITY = 256` —
   `inspector-plugin/inspector.h:26`.
-- **Dump-directory accumulation (measured, workload-dependent — README:1672-1685):**
+- **Dump-directory accumulation (measured, workload-dependent — DESIGN_NOTES.md §5.2, line 2069):**
   nanoGPT lean-mode ≈ **28.5 MB/min/node**; Megatron TP4/PP4 lean-mode ≈
   **123 MB/min/node**. These are not interchangeable — re-measure per
   workload shape before sizing disk for a new one.
@@ -156,7 +156,7 @@ VM's own new-series visibility lag), then deployed to the real production
 - **Backlog-replay RSS spike:** one from-scratch checkpoint-seeding replay
   during validation drove aggregator RSS to ~**60GB** before settling —
   pre-existing, unrelated to the checkpoint fix itself, flagged not fixed
-  (README:2438-2452).
+  (DESIGN_NOTES.md §3.1, line 1055).
 
 ## 4. Version-pinned dependencies
 
@@ -171,14 +171,15 @@ VM's own new-series visibility lag), then deployed to the real production
 
 **Known version-sensitive gotchas (both from a real launch-script bind-mount
 of the host's `/usr/lib/x86_64-linux-gnu` into the container):**
-- **Host-NCCL-shadowing** (README.md:241-249): the mount silently shadows
-  the container's bundled NCCL with whatever's host-installed. Some shapes
-  force `LD_LIBRARY_PATH` to the pinned 2.28.9 build to compensate — a
-  disclosed inconsistency, not a universal fix.
-- **TE/CUBLAS shadowing** (README.md:250-260): the same mount also shadows
-  CUBLAS; a real Megatron TP4/PP4/DP3 run crashed with a `cublasLtGetVersion`
-  symbol error under `--transformer-impl=transformer_engine`, worked around
-  with `--transformer-impl=local`.
+- **Host-NCCL-shadowing** (README.md §3, line 251): the mount silently
+  shadows the container's bundled NCCL with whatever's host-installed. Some
+  shapes force `LD_LIBRARY_PATH` to the pinned 2.28.9 build to compensate —
+  a disclosed inconsistency, not a universal fix.
+- **TE/CUBLAS shadowing** (README.md §3, line 263, same bullet as above):
+  the same mount also shadows CUBLAS; a real Megatron TP4/PP4/DP3 run
+  crashed with a `cublasLtGetVersion` symbol error under
+  `--transformer-impl=transformer_engine`, worked around with
+  `--transformer-impl=local`.
 
 **If any of these versions change:** re-run `tools/self_test.sh`, re-check
 both shadowing gotchas above still apply/don't apply, and re-measure overhead
@@ -187,31 +188,31 @@ invalidates an old overhead number.
 
 ## 5. Known limitations / disclosed gaps — current status
 
-Pulled from README §7 ("Known limitations," README.md:1899) and verified
-against its current text, not memory. **Line numbers below were re-
-verified directly against the current file during the V1 Beta release-
-gate sweep** — this project's own README grew by ~350 lines across
-this session's §6.12-6.15 additions, which silently staled every one of
-this table's own prior line-number references (all pointed at unrelated
-content afterward) — a real, found documentation-drift issue in its own
-right, not just a hypothetical one to guard against:
+Pulled from README §7 ("Known limitations," README.md:1075) and verified
+against its current text, not memory. **README.md was split into a tight
+README.md + a new DESIGN_NOTES.md during the V1 Beta doc-consolidation
+pass** — every investigation narrative previously cited here by README
+line number now lives in DESIGN_NOTES.md instead; the table below was
+re-pointed accordingly, re-verified directly against both current files,
+not carried forward from memory:
 
 | Item | Status | Note |
 |---|---|---|
-| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README:2202-2211) |
-| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README:2213-2218) |
+| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README.md §7.1, line 1136) |
+| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README.md §7.1, line 1145) |
 | `rolling_buffer.py` sampler "not deployed" | **FIXED (precision correction in README)** | The sampler genuinely isn't launched, but the query functions ARE live, reachable code gated behind one `buffer=None` call site — see §3 |
-| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as-is (README:1919-1935), but a separate Role-Baseline-Deviation check + two distinct false-positive fixes (contamination, volatility) now exist on top of it; a full dedicated README write-up of that check is still owed (README:1937+) |
-| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README:1204-1222) |
-| Cross-node PP-link `baseline_source` gap | **ACCEPTED, permanent topology limitation** | Hybrid's 2-ranks/node layout has no independent same-shape peer comm for the below-floor fallback to use (README:2378-2389) |
-| First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (README:2867-2870) |
+| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as open (README.md §7.1, line 1102), with a pointer to the full origin story and the two distinct false-positive fixes (contamination, volatility) built on top of it (DESIGN_NOTES.md §1.6, line 388) |
+| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README.md §6.9, line 942; full investigation DESIGN_NOTES.md §5.1) |
+| Cross-node PP-link `baseline_source` gap (Hybrid) | **ACCEPTED, permanent topology limitation** — but see caveat | Hybrid's 2-ranks/node layout has no independent same-shape peer comm on the SAME host for the below-floor fallback to use (DESIGN_NOTES.md §2.3, line 627) — the underlying topology limitation is real and permanent, but P27.5 (same section) works around it for any real multi-worker Hybrid deployment by pooling job-wide instead of same-host; only a truly single-worker-equivalent isolated test still hits the raw gap |
+| First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
 
-**Maintenance note, found live during this exact re-verification**: any
-future large README addition (a new `§6.x` subsection, especially one
-inserted before `## 7`) will silently re-stale every line number in this
-table again — there is no automated check tying these together. Re-grep
-each real quoted phrase above (not just trust the number) whenever this
-table is next consulted for anything higher-stakes than a quick read.
+**Maintenance note, found live during the original version of this
+table's own staleness, and again confirmed during the doc-consolidation
+pass**: any future large edit to either README.md or DESIGN_NOTES.md can
+silently re-stale every line number in this table again — there is no
+automated check tying these together. Re-grep each real quoted phrase
+above (not just trust the number) whenever this table is next consulted
+for anything higher-stakes than a quick read.
 
 **Resolved this pass:** README §7's rolling_buffer paragraph now states
 precisely which part is deployed (the query functions, reachable code) vs.
@@ -303,7 +304,8 @@ the reference table or the lookup logic is broken.
 race, confirmed live, for the same structural reason.** This gate
 promotes `_cross_comm_peer_median` (same-Slurm-job comparison) ahead of
 cross-job role-baseline for a role shape whose per-job-median spread
-exceeds 0.7 (see README §6.15). `_cross_comm_peer_median` needs this
+exceeds 0.7 (see README.md §7.1's TP4-standalone entry, and the full
+mechanism in DESIGN_NOTES.md §1.8). `_cross_comm_peer_median` needs this
 job's OTHER same-shape comms to have posted fresh data; the role-
 baseline elevated gate's own 3-consecutive-sample persistence
 requirement can complete before that happens, letting an early firing
@@ -388,8 +390,8 @@ reading it would be actively misled rather than honestly told
 - **`DUMPDIR_BASE` must be absolute.** Every `workloads/*/run_*.sh` launcher
   (14 files) takes it as a plain positional arg with no normalization.
   Self-dispatching shapes `cd` into their own workload directory before a
-  relative path resolves — **silent non-detection, no error** (README:2772-2790).
-  Always pass `"$PWD/var/dump"` or similar.
+  relative path resolves — **silent non-detection, no error** (README.md
+  §8, line 1333). Always pass `"$PWD/var/dump"` or similar.
 
 ## 8. Overhead/performance — all current numbers, none permanent
 
@@ -397,20 +399,25 @@ Five distinct measurements exist, each under different conditions — never
 treat one as "the" number, and re-measure after any workload-shape, scale,
 or plugin change:
 
+All five numbers now live in DESIGN_NOTES.md (moved out of README.md
+during the V1 Beta doc-consolidation pass; README.md §7.2 keeps only the
+one-line summary and a pointer):
+
 1. ResNet, 1-GPU, earliest/undocumented mode: **~4.5x** (85ms Inspector vs.
-   19ms without vs. 7.57ms bare) — README.md:1615-1624.
+   19ms without vs. 7.57ms bare) — DESIGN_NOTES.md §5.2, line 1993.
 2. 48-GPU Megatron TP4/PP4/DP3, pre-lean-mode: **~6.5%** relative
-   (94.7ms vs. 89.0ms/iter) — README.md:1629-1645.
+   (94.7ms vs. 89.0ms/iter) — DESIGN_NOTES.md §5.2, line 2005.
 3. 2-node/16-GPU TP4/PP4/DP1, lean mode confirmed active, 500 iter:
-   **~12.3%** relative (193.50ms vs. 172.31ms) — README.md:1660-1673.
+   **~12.3%** relative (193.50ms vs. 172.31ms) — DESIGN_NOTES.md §5.2,
+   line 2049.
 4. Same shape, after the ring-buffer fix: **~13.1%** relative (192.05ms vs.
-   169.82ms) — README.md:1192-1194. Ring buffer itself adds no measurable
-   new cost; the 0.8pp shift from #3 is noise.
+   169.82ms) — DESIGN_NOTES.md §5.1, line 1882. Ring buffer itself adds no
+   measurable new cost; the 0.8pp shift from #3 is noise.
 5. Same shape, after `gRetireLock` scoping + lean-mode `collEvtTrk` skip:
    **~12.0%** pooled (individual re-measurements: 14.84% and 9.21%,
-   n=980 each) — README.md:1248-1256. Explicitly labeled a small,
-   directionally real improvement, not dramatic — run-to-run spread exceeds
-   the apparent gain.
+   n=980 each) — DESIGN_NOTES.md §5.1, line 1941. Explicitly labeled a
+   small, directionally real improvement, not dramatic — run-to-run spread
+   exceeds the apparent gain.
 
 **Rule:** re-measure overhead (same methodology as #3-5: n≥500 steady-state
 iterations, ON vs OFF) whenever a new workload shape, a scale change, or an
