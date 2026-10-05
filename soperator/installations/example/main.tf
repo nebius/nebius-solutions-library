@@ -103,6 +103,13 @@ locals {
     })]
   ])
 
+  # Generated Slurm NodeSet name -> compute platform. The partition topology validations
+  # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
+  # worker nodeset it was generated from.
+  nodeset_platform = {
+    for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform
+  }
+
   # NVMe device capacities are supplied in decimal GB because that is how the
   # hardware is advertised. Convert the per-nodeset total to GiB before using
   # it in Kubernetes resource quantities.
@@ -673,6 +680,7 @@ module "slurm" {
   login_on_worker_nodes           = local.gb300_enabled
   shared_memory_size_gibibytes    = var.slurm_shared_memory_size_gibibytes
   wait_for_nvidia_persistenced    = var.slurm_wait_for_nvidia_persistenced
+  slurm_custom_config_override    = var.slurm_custom_config_override
   slurm_partition_config_type     = var.slurm_partition_config_type
   slurm_partition_raw_config      = var.slurm_partition_raw_config
   slurm_health_check_config       = var.slurm_health_check_config

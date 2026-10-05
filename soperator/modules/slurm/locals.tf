@@ -1,6 +1,14 @@
 locals {
   apparmor_profile = var.use_default_apparmor_profile ? "soperator-default" : "unconfined"
 
+  # One Slurm setting per element. Split any entry that still carries newlines, trim each
+  # line and drop the blanks: the template renders these as a YAML block scalar, where a
+  # stray leading space or an embedded newline would silently truncate the block.
+  custom_slurm_config_lines = [
+    for line in flatten([for entry in var.slurm_custom_config_override : split("\n", entry)]) :
+    trimspace(line) if trimspace(line) != ""
+  ]
+
   kube_rbac_proxy = {
     image = "gcr.io/kubebuilder/kube-rbac-proxy"
     tag   = "v0.15.0"

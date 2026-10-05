@@ -155,6 +155,8 @@ resource "helm_release" "soperator_fluxcd_cm" {
     slurm_cluster = {
       maintenance = var.maintenance
 
+      custom_slurm_config = local.custom_slurm_config_lines
+
       partition_configuration = {
         slurm_config_type = var.slurm_partition_config_type
         slurm_raw_config  = var.slurm_partition_raw_config
