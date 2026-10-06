@@ -1335,6 +1335,43 @@ change to account for.
   has not had on any cluster tested so far (see
   `../straggler-vmsingle/DEPRECATED.md`).
 
+- **Under a sustained, severe real fault, NCCL/PyTorch's own collective-
+  wait implementation busy-polls — real, sustained high CPU on the
+  affected rank AND any rank coupled via a shared barrier/TP group, not
+  a bug in this detection pipeline.** Confirmed via direct inspection of
+  this project's own pinned NCCL source (not assumed): `ncclComm
+  IntraBarrierOut()` (`comm.h`) and the proxy progress thread
+  (`proxy.cc`) are both hardcoded spin-then-`sched_yield()` loops with no
+  backoff and no exposed config — neither has an associated `NCCL_PARAM`/
+  environment variable. Reproduced cleanly on the smallest possible
+  topology (2 nodes, one PP pair, a sustained injected delay) and
+  confirmed via `strace`: ~230,000 `sched_yield()` calls in a single real
+  3-second sample, on both the direct wait peer and a second rank only
+  coupled via the shared end-of-iteration barrier — never the targeted
+  fault itself. **This is a pre-existing NCCL/PyTorch characteristic,
+  not something this detection pipeline causes or introduces — it would
+  occur on an affected cluster under the identical real fault whether or
+  not straggler detection is installed at all.** Root-cause attribution
+  was confirmed unaffected throughout (this is a separate, parallel
+  resource-contention problem, not a detection-correctness one). **No
+  safe mitigation exists at the environment-variable/config level** —
+  checked both real candidates directly against their actual installed
+  source, not assumed: `TORCH_NCCL_BLOCKING_WAIT` (confirmed via
+  PyTorch's own real header source) changes whether `wait()` *itself*
+  busy-polls, but does not disable or replace NCCL's own internal spin
+  underneath it — enabling it would add a second polling loop on top of
+  the one already found, not remove it. PyTorch's own `timeout=`/
+  watchdog-abort mechanism bounds how long the CPU storm can last, but
+  does nothing to its rate while active, and would abort the job itself
+  before this pipeline's own persistence/grace-period detection logic
+  can finish confirming the fault — detection-hostile, not recommended.
+  **The one real, unimplemented option is a genuine source patch to this
+  project's own vendored NCCL build**, adding real exponential backoff
+  to the two identified spin sites after an elapsed-time threshold —
+  explicitly scoped future work, requiring the same n≥5 validation
+  rigor across every validated workload shape as any other fix in this
+  project, not something available today.
+
 ### 7.2 Operational notes (current behavior, not open gaps)
 
 - **`[CHECK-FAILED]` vs. `[PIPELINE-DOWN]` — don't conflate them.**

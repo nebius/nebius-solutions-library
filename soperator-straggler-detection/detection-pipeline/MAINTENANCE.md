@@ -212,6 +212,7 @@ not carried forward from memory:
 | `node_aggregator_ref.py`'s `mean_unconsumed`/`cv_unconsumed` lists grew without bound under MoE's extreme comm/bucket cardinality | **FIXED (500-entry drop-oldest cap, matching the existing `all_vals`/`rate_samples` precedent), confirmed correct for its own target** | Reduced this mechanism's real measured contribution from a ~15M-entry lower bound to ~65MB; see full writeup below |
 | `node_aggregator_ref.py`'s `push_buf` grows unbounded during a single large `poll_files()` catch-up cycle (no flush/heartbeat until that call returns, and its own deadline check never fires in practice) | **FIXED (`POLL_FILES_MAX_SECONDS=5.0` real per-call deadline), confirmed live over a full 48-minute run — zero heartbeat gaps, memory flat/bounded** | Was the dominant cause of the heartbeat/scoring blackout; see full writeup below. MoE's own separate, open detection-timing question (not this bug) is the one remaining item before MoE is fully validated |
 | `self.state`/`comm_bucket_members`/`calib.scored` key count, uncapped | **CONFIRMED NOT the dominant factor; deferred with a real growth-rate projection, not just "wasn't dominant once"** | Real bucket-identity discovery converges within ~1 minute wall-clock (confirmed twice, 202 buckets both times) — key count does not scale with job duration for this workload; see full writeup below |
+| NCCL/PyTorch's own collective-wait implementation busy-polls (sched_yield) under a sustained real fault, pinning CPU on the affected rank AND any barrier/TP-coupled rank | **CONFIRMED NOT a bug in this pipeline — a pre-existing NCCL/PyTorch characteristic; no safe mitigation exists; explains the real `[PIPELINE-DOWN]` events seen during the release-gate run** | Likely root cause of the 6-node release-gate run's 4x duration inflation and 3-worker `[PIPELINE-DOWN]` firing; see full writeup below |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -815,6 +816,63 @@ noise) or simply needs a much longer soak test to confirm eventual
 firing is a genuinely open design question — not decided here, not
 guessed at, left for whoever picks this up next with the real evidence
 above as the starting point.
+
+**NCCL/PyTorch's own collective-wait busy-polling under a sustained real
+fault — framed for whoever operates this in production, since there is
+no fix, only an explanation worth knowing.** A 6-node release-gate
+validation run hit a real fault-injection scenario that normally takes
+~11-12 minutes but took ~43 minutes instead, with peer ranks pinned at
+308% CPU for the entire duration — severe enough to fire real
+`[PIPELINE-DOWN]` events on 3 workers (heartbeat stale 150-155s) and
+block two unrelated external jobs from getting scheduled. Root-cause
+attribution for the injected fault itself was still correct throughout
+— this is a separate, parallel resource-contention problem, not a
+detection-correctness issue.
+
+Investigated directly rather than assumed, since this project's own
+code was the first and most obvious suspect: confirmed via `strace`
+during a real, isolated reproduction (same fault mechanism, smallest
+possible topology — 2 nodes, one PP pair, a sustained injected delay)
+that the CPU is consumed entirely *inside the training job's own
+process*, not in `alert_engine.py` or `node_aggregator_ref.py` (both
+confirmed at their own normal baseline CPU throughout the identical test
+window — 30% and ~11% respectively, nowhere near the pinning seen on
+the training ranks). ~230,000 `sched_yield()` calls appeared in a single
+real 3-second sample, on *both* the direct wait peer and a second rank
+only coupled via the shared end-of-iteration barrier, never the
+targeted fault itself — confirming this couples through shared
+barriers/TP groups, not just the directly-faulted pair.
+
+Traced to its real source, not assumed: this project's own pinned NCCL
+build (`comm.h`'s `ncclCommIntraBarrierOut()`, `proxy.cc`'s progress
+thread) hardcodes a spin-then-`sched_yield()` wait with no backoff and
+no exposed config, confirmed by reading the actual vendored source.
+Checked both real candidate PyTorch/NCCL-level mitigations directly
+against their actual installed/vendored source rather than assuming
+from general knowledge: `NCCL_COMM_BLOCKING` controls communicator
+setup/group-call semantics, an unrelated code path; `TORCH_NCCL_
+BLOCKING_WAIT` (confirmed real and current in this cluster's installed
+PyTorch 2.11) changes whether `wait()` itself also busy-polls, but does
+not disable NCCL's own internal spin underneath it — would add a second
+polling loop, not remove the one found. PyTorch's own timeout/watchdog
+abort bounds how long the storm can last but not its rate, and would
+tear the job down before this pipeline's own persistence/grace-period
+logic can finish confirming the fault — not a usable mitigation for
+this project's purpose. **No safe mitigation exists at the
+environment-variable/config level.** The one real option — a genuine
+patch to this project's own vendored NCCL source, adding real
+exponential backoff to the two identified spin sites — is explicitly
+scoped future work requiring the same n≥5 validation rigor as any other
+fix here, not something available today.
+
+**Practical consequence for anyone operating this in production: if you
+see high sustained CPU on peer/coupled ranks together with
+`[PIPELINE-DOWN]` during a confirmed severe, long-duration real fault,
+recognize this as an expected, already-explained consequence of the
+fault itself — not a new pipeline problem to chase.** It is also worth
+knowing this can starve other real jobs sharing the same nodes, as
+directly observed in the release-gate run, independent of whether this
+detection pipeline is installed on that cluster at all.
 
 ## 6. Calibration constants needing re-validation on change
 
