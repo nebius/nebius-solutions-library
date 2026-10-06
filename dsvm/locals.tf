@@ -32,7 +32,16 @@ locals {
     }
   }
 
-  platform          = coalesce(var.platform, try(local.region_default_platforms[var.region], null))
-  preset            = coalesce(var.preset, try(local.platform_defaults_by_platform[local.platform].preset, null))
-  boot_image_family = coalesce(var.boot_image_family, try(local.platform_defaults_by_platform[local.platform].boot_image_family, null))
+  platform = var.platform != null ? var.platform : lookup(
+    local.region_default_platforms,
+    var.region,
+    null,
+  )
+  platform_defaults = local.platform != null ? lookup(
+    local.platform_defaults_by_platform,
+    local.platform,
+    null,
+  ) : null
+  preset            = var.preset != null ? var.preset : try(local.platform_defaults.preset, null)
+  boot_image_family = var.boot_image_family != null ? var.boot_image_family : try(local.platform_defaults.boot_image_family, null)
 }

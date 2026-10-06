@@ -1,3 +1,22 @@
+resource "terraform_data" "dsvm_configuration_validation" {
+  lifecycle {
+    precondition {
+      condition     = local.platform != null
+      error_message = "No default DSVM platform is defined for region ${var.region}. Set platform explicitly. Regions with defaults: ${join(", ", sort(keys(local.region_default_platforms)))}."
+    }
+
+    precondition {
+      condition     = local.platform == null || local.preset != null
+      error_message = "No default DSVM preset is defined for platform ${coalesce(local.platform, "<unset>")}. Set preset explicitly. Platforms with defaults: ${join(", ", sort(keys(local.platform_defaults_by_platform)))}."
+    }
+
+    precondition {
+      condition     = local.platform == null || local.boot_image_family != null
+      error_message = "No default DSVM boot image family is defined for platform ${coalesce(local.platform, "<unset>")}. Set boot_image_family explicitly. Platforms with defaults: ${join(", ", sort(keys(local.platform_defaults_by_platform)))}."
+    }
+  }
+}
+
 resource "nebius_compute_v1_instance" "dsvm_instance" {
   parent_id = var.parent_id
   name      = "dsvm-instance"
@@ -25,4 +44,6 @@ resource "nebius_compute_v1_instance" "dsvm_instance" {
     ssh_user_name  = var.ssh_user_name,
     ssh_public_key = local.ssh_public_key,
   })
+
+  depends_on = [terraform_data.dsvm_configuration_validation]
 }
