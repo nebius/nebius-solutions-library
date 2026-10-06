@@ -18,22 +18,21 @@ fi
 system_namespace="${namespace}-system"
 
 if ! "$retry_script" -- kubectl get namespace "$namespace" --context "$context" >/dev/null 2>&1; then
-  echo "Namespace $namespace not found or cluster unreachable; skipping login service cleanup."
+  echo "Namespace $namespace not found or cluster unreachable; skipping PDB and login service cleanup."
   exit 0
 fi
 
-if ! "$retry_script" -- kubectl get namespace "$system_namespace" --context "$context" >/dev/null 2>&1; then
-  echo "Namespace $namespace not found or cluster unreachable; skipping login service cleanup."
-  exit 0
-fi
-
-echo "Attempting to stop soperator controller to prevent service recreation..."
+echo "Attempting to stop soperator controller to prevent resource recreation..."
 if kubectl get deployment soperator-controller-manager -n "$system_namespace" --context "$context" >/dev/null 2>&1; then
   "$retry_script" -- kubectl scale deployment soperator-controller-manager -n "$system_namespace" --context "$context" --replicas=0
-  # kubectl scale returns before pods terminate; wait so the controller can't recreate the Service.
+  # kubectl scale returns before pods terminate; wait so the controller can't recreate the resources.
   echo "Waiting for soperator controller pod to terminate..."
   kubectl wait --for=delete pod -l control-plane=controller-manager -n "$system_namespace" --context "$context" --timeout=60s || true
 fi
+
+echo "Deleting all PodDisruptionBudgets in $namespace..."
+"$retry_script" -- kubectl delete poddisruptionbudget --all -n "$namespace" --context "$context" \
+  --ignore-not-found --wait=true --timeout=5m
 
 echo "Deleting service $namespace/$service..."
 "$retry_script" -- kubectl delete service "$service" -n "$namespace" --context "$context" --ignore-not-found --wait=true --timeout=5m
