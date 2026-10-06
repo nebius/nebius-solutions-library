@@ -35,22 +35,13 @@ iam_merge_request_url = ""
 # Whether to store the controller state on filestore or network SSD.
 controller_state_on_filestore = false
 
-# Shared filesystem to be used on controller nodes.
-# Deprecated: Starting with version 1.22, this variable isn't used, as controller state is stored on network SSD disks.
-# Remains for the backward compatibility.
-# ---
-filestore_controller_spool = {
-  spec = {
-    size_gibibytes       = 128
-    block_size_kibibytes = 4
-    forbid_deletion      = false
-  }
-}
-# Or use existing filestore.
-# ---
+# Optional legacy shared filesystem for controller state. New clusters use a PVC
+# unless controller_state_on_filestore is explicitly enabled.
 # filestore_controller_spool = {
-#   existing = {
-#     id = "computefilesystem-<YOUR-FILESTORE-ID>"
+#   spec = {
+#     size_gibibytes       = 128
+#     block_size_kibibytes = 4
+#     forbid_deletion      = false
 #   }
 # }
 
@@ -101,22 +92,16 @@ filesystem_jail_submounts = [{
   }
 }]
 
-# Shared filesystem to be used for accounting DB.
-# By default, null.
-# Required if accounting_enabled is true.
-# ---
-filestore_accounting = {
-  spec = {
-    size_gibibytes       = 512
-    block_size_kibibytes = 4
-    forbid_deletion      = false
-  }
-}
-# Or use existing filestore.
-# ---
+# MariaDB uses a PVC. This controls its requested capacity for new clusters.
+accounting_storage_size_gibibytes = 512
+
+# Optional legacy accounting Filestore. Existing clusters that already declare
+# it keep the Filestore and its node attachments during in-place upgrades.
 # filestore_accounting = {
-#   existing = {
-#     id = "computefilesystem-<YOUR-FILESTORE-ID>"
+#   spec = {
+#     size_gibibytes       = 512
+#     block_size_kibibytes = 4
+#     forbid_deletion      = false
 #   }
 # }
 

@@ -262,7 +262,7 @@ module "filesystem" {
 
   k8s_cluster_name = local.k8s_cluster_name
 
-  controller_spool = {
+  controller_spool = var.filestore_controller_spool != null ? {
     spec = var.filestore_controller_spool.spec != null ? {
       size_gibibytes       = var.filestore_controller_spool.spec.size_gibibytes
       block_size_kibibytes = var.filestore_controller_spool.spec.block_size_kibibytes
@@ -271,9 +271,9 @@ module "filesystem" {
     existing = var.filestore_controller_spool.existing != null ? {
       id = var.filestore_controller_spool.existing.id
     } : null
-  }
+  } : null
 
-  accounting = var.accounting_enabled ? {
+  accounting = var.accounting_enabled && var.filestore_accounting != null ? {
     spec = var.filestore_accounting.spec != null ? {
       size_gibibytes       = var.filestore_accounting.spec.size_gibibytes
       block_size_kibibytes = var.filestore_accounting.spec.block_size_kibibytes
@@ -417,10 +417,10 @@ module "k8s" {
   }
 
   filestores = {
-    controller_spool = {
+    controller_spool = module.filesystem.controller_spool != null ? {
       id        = module.filesystem.controller_spool.id
       mount_tag = module.filesystem.controller_spool.mount_tag
-    }
+    } : null
     jail = {
       id        = module.filesystem.jail.id
       mount_tag = module.filesystem.jail.mount_tag
@@ -429,7 +429,7 @@ module "k8s" {
       id        = submount.id
       mount_tag = submount.mount_tag
     }]
-    accounting = var.accounting_enabled ? {
+    accounting = var.accounting_enabled && module.filesystem.accounting != null ? {
       id        = module.filesystem.accounting.id
       mount_tag = module.filesystem.accounting.mount_tag
     } : null
@@ -535,9 +535,10 @@ module "slurm" {
   opentelemetry_delete_jail_logs_after_read = var.opentelemetry_delete_jail_logs_after_read
   opentelemetry_delete_jail_logs_min_age    = var.opentelemetry_delete_jail_logs_min_age
 
-  use_preinstalled_gpu_drivers  = var.use_preinstalled_gpu_drivers
-  cuda_version                  = lookup(var.platform_cuda_versions, local.slurm_nodeset_workers[0].resource.platform)
-  controller_state_on_filestore = var.controller_state_on_filestore
+  use_preinstalled_gpu_drivers      = var.use_preinstalled_gpu_drivers
+  cuda_version                      = lookup(var.platform_cuda_versions, local.slurm_nodeset_workers[0].resource.platform)
+  controller_state_on_filestore     = var.controller_state_on_filestore
+  accounting_storage_size_gibibytes = var.accounting_storage_size_gibibytes
 
   node_count = {
     controller = local.slurm_nodeset_controller.size
@@ -604,10 +605,10 @@ module "slurm" {
   }
 
   filestores = {
-    controller_spool = {
+    controller_spool = module.filesystem.controller_spool != null ? {
       size_gibibytes = module.filesystem.controller_spool.size_gibibytes
       device         = module.filesystem.controller_spool.mount_tag
-    }
+    } : null
     jail = {
       size_gibibytes = module.filesystem.jail.size_gibibytes
       device         = module.filesystem.jail.mount_tag
@@ -618,7 +619,7 @@ module "slurm" {
       device         = module.filesystem.jail_submounts[submount.name].mount_tag
       mount_path     = submount.mount_path
     }]
-    accounting = var.accounting_enabled ? {
+    accounting = var.accounting_enabled && module.filesystem.accounting != null ? {
       size_gibibytes = module.filesystem.accounting.size_gibibytes
       device         = module.filesystem.accounting.mount_tag
     } : null
