@@ -486,10 +486,12 @@ resources:
                   claimName: jail-pvc
                   readOnly: false
 
+              %{~ if slurm_cluster_storage.volume.controller_spool.enabled ~}
               - name: controller-spool
                 persistentVolumeClaim:
                   claimName: controller-spool-pvc
                   readOnly: false
+              %{~ endif ~}
 
               - name: worker-spool
                 emptyDir:
@@ -808,8 +810,11 @@ resources:
             overrideValues:
               volume:
                 controllerSpool:
+                  enabled: ${slurm_cluster_storage.volume.controller_spool.enabled}
+                  %{~ if slurm_cluster_storage.volume.controller_spool.enabled ~}
                   size: ${slurm_cluster_storage.volume.controller_spool.size}
                   filestoreDeviceName: ${slurm_cluster_storage.volume.controller_spool.device}
+                  %{~ endif ~}
                 jail:
                   size: ${slurm_cluster_storage.volume.jail.size}
                   filestoreDeviceName: ${slurm_cluster_storage.volume.jail.device}

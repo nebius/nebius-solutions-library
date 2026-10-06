@@ -231,10 +231,10 @@ variable "node_group_accounting" {
 
 variable "filestores" {
   type = object({
-    controller_spool = object({
+    controller_spool = optional(object({
       id        = string
       mount_tag = string
-    })
+    }))
     jail = object({
       id        = string
       mount_tag = string

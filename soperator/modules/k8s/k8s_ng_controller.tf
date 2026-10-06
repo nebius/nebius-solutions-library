@@ -44,14 +44,18 @@ resource "nebius_mk8s_v1_node_group" "controller" {
     }
 
     filesystems = concat(
-      [
+      var.filestores.controller_spool != null
+      ? [
         {
           attach_mode = "READ_WRITE"
           mount_tag   = var.filestores.controller_spool.mount_tag
           existing_filesystem = {
             id = var.filestores.controller_spool.id
           }
-        },
+        }
+      ]
+      : [],
+      [
         {
           attach_mode = "READ_WRITE"
           mount_tag   = var.filestores.jail.mount_tag

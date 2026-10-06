@@ -143,6 +143,11 @@ variable "controller_state_on_filestore" {
   description = "Whether to use Filestore for controller node boot disk (true = Filestore, false = PVC)."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.controller_state_on_filestore || var.filestore_controller_spool != null
+    error_message = "filestore_controller_spool must be configured when controller_state_on_filestore is true."
+  }
 }
 
 variable "filestore_controller_spool" {
@@ -157,13 +162,14 @@ variable "filestore_controller_spool" {
       forbid_deletion      = optional(bool, false)
     }))
   })
-  nullable = false
+  nullable = true
+  default  = null
 
   validation {
-    condition = (
+    condition = var.filestore_controller_spool != null ? (
       (var.filestore_controller_spool.existing != null && var.filestore_controller_spool.spec == null) ||
       (var.filestore_controller_spool.existing == null && var.filestore_controller_spool.spec != null)
-    )
+    ) : true
     error_message = "One of `existing` or `spec` must be provided."
   }
 }
@@ -410,6 +416,17 @@ variable "filestore_accounting" {
       : true
     )
     error_message = "One of `existing` or `spec` must be provided."
+  }
+}
+
+variable "accounting_storage_size_gibibytes" {
+  description = "Size of the PVC used by the MariaDB accounting database when no legacy accounting Filestore is configured."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.accounting_storage_size_gibibytes > 0
+    error_message = "Accounting storage size must be greater than zero."
   }
 }
 
