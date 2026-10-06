@@ -209,6 +209,7 @@ not carried forward from memory:
 | `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — a tiebreak fix was tried, tested live, and reverted as disproven; see full writeup below** | Confirmed live on Hybrid jobs 3867, 3869, 3870, 3871 |
 | Inspector's `coll_sn` field never increments for `Send`/`Recv` (stays `0`, confirmed against 5,289 real records) — not usable as a cross-rank sequencing signal for point-to-point ops, only for `AllReduce`/`Broadcast` | **CONFIRMED DEAD END, real plugin gap, not a lean/verbose access issue** | A real plugin-level fix would be needed, not a query/panel change |
 | `_emit_timing_fallback` (the below-floor P27.2 cascade path — TP2/TP-inference/PP/Hybrid) never calls `_push_visibility_metric` | **CONFIRMED STRUCTURAL COVERAGE GAP, not a bug in any panel's own logic** | `agg_straggler_incident_tier` has zero real rows from any below-floor incident across this project's entire history; see full writeup below |
+| `node_aggregator_ref.py` has two uncapped, cardinality-keyed accumulators (`mean_unconsumed`/`cv_unconsumed`; `self.state`/`comm_bucket_members` key count) that grow without bound under MoE's extreme comm/bucket cardinality, silencing the aggregator's own heartbeat and scoring output entirely | **CONFIRMED live, DIFFERENT and more severe than the already-documented ring-buffer overflow above; recovery procedure confirmed, root fix NOT implemented** | Not a bounded/known-loss condition like the ring-buffer row above — full heartbeat/scoring blackout, see full writeup below |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -495,6 +496,122 @@ read the individual `[ALERT]`/P27.2 timing-fallback line directly — the
 same guidance already given above for `_correlate_firing_timing_alerts`'s
 own labeling gap, now extended: below-floor incidents are invisible to
 this panel before any labeling question even arises.
+
+**`node_aggregator_ref.py` can go completely dark — heartbeat and
+scoring output, not just slow — under MoE's extreme comm/bucket
+cardinality. This is a different, more severe failure mode than the
+already-documented MoE/DLRM ring-buffer overflow above; do not fold the
+two together.** The ring-buffer row is a bounded, known-loss condition
+at the Inspector-plugin level (a `queue_drops_total` counter always
+surfaces it). What's documented here is unbounded growth in the
+aggregator's own Python heap, confirmed live, with no counter
+surfacing it at all until the process goes silent.
+
+Found while running a real MoE job-wide fault-injection validation
+(`run_moe_rankfault.sh`, default `FAULT_TARGET_RANK=4`, 16 real ranks
+across 2 nodes). Ground truth established first, as always: real target
+= rank 4, PID 1343059, host worker-0. Within ~2 minutes of the job
+starting, both `[PIPELINE-DOWN]` and `[VM-DOWN]` began firing
+repeatedly. Investigated directly rather than assumed:
+
+- Both real `node_aggregator_ref.py` processes were alive (`ps aux`
+  confirmed), not crashed.
+- Worker-0's own heartbeat AND its own real scoring counter
+  (`agg_mean_windows_total`) were both completely absent from
+  VictoriaMetrics — a genuine failure to push anything, not a logging
+  quirk.
+- RSS climbed continuously: 20GB → 23.6GB → 30GB → 31.6GB → 33GB over
+  the job's ~19-minute life, **and kept climbing for 3+ minutes after
+  the job was cancelled** (no new input at all) — ruling out "just
+  catching up on live load." System memory headroom was never at risk
+  (1.5TiB/node, ~78GiB used) — this is a correctness bug, not an
+  imminent-OOM emergency.
+- `agg_records_seen_total` vs. `agg_mean_windows_total`, sampled live at
+  four points through the job's life: the records-consumed-per-window-
+  closed ratio climbed from **766 → 857 → 2,037 → 1,741** — a widening
+  gap, not a stable steady-state, confirming records were piling into
+  unconsumed queues faster than those queues could drain.
+- The checkpointed read-offset file (`.aggregator_offsets_checkpoint.
+  json`) confirmed the real scale directly: **2.17GB of unread backlog**
+  on worker-0 alone at the point of investigation, concentrated in the
+  MoE job's own dump files — each rank's dump file was **~3GB** from a
+  single 19-minute run (the real injected target's own file,
+  `worker-0-pid1343059.log`, had 1.18GB of that still unread). No other
+  shape tested this project has come close to this per-rank dump volume.
+
+**Root cause, confirmed by reading the code and matching it to the live
+counter/offset evidence above, not assumed from the symptom alone —
+two independent, compounding accumulators, both keyed by comm/bucket
+CARDINALITY, not event volume:**
+
+1. **`RankBucketState.mean_unconsumed`/`cv_unconsumed`** (plain Python
+   lists, appended on every record) have **no size cap at all**. The
+   P22.5 scalability fix (the comment at the `all_vals`/`rate_samples`
+   500-entry cap, `node_aggregator_ref.py` line ~1348) only ever touched
+   those two SEPARATE lists — it never capped the unconsumed-queue pair.
+   These only drain via `close_windows()`, which requires **every member
+   currently known for that exact `(comm, bucket)` to simultaneously
+   hold ≥ window_size unconsumed samples** before any window closes. MoE's
+   dynamic, data-dependent expert routing makes that condition
+   structurally unlikely to ever hold for many buckets — confirmed live:
+   **218-220+ distinct `(bucket, coll)` combinations discovered on a
+   single comm, still climbing when the job was cancelled** (every other
+   shape tested this project stays in the single digits). For any bucket
+   where even one member never catches up, every other member's queue
+   for that bucket grows for the rest of the job's life, uncapped.
+2. **`self.state` / `self.comm_bucket_members` / `calib.scored`** are
+   keyed by `(comm, phys_id, bucket)` / `(comm, bucket)` with **no cap on
+   the number of distinct keys** — only per-key list CONTENTS got partial
+   capping (point 1's `all_vals`/`rate_samples`), never the key count
+   itself. This grows directly with cardinality, independent of the
+   unconsumed-queue issue, and compounds it.
+
+**Recovery procedure, confirmed to work operationally — but it is a
+mitigation, not a fix.** Checked first that no other session had a test
+in flight (empty `PARALLEL_WORK_LOG.md`, empty `squeue` across all
+users). Sent a clean `SIGTERM` to the leaf `node_aggregator_ref.py`
+process on each node (never the supervisor, never `kill -9`) — confirmed
+via the supervisor log: clean `exit_code=0` (the `_checkpoint_and_exit`
+SIGTERM handler fired, flushing `file_offsets` before exit) and
+relaunch within 3s on both nodes. Memory reset immediately (33GB→6GB /
+29GB→6GB). **But this does not fix the underlying bug — confirmed
+live**: worker-0 briefly reproduced the identical symptom (heartbeat
+dark again, RSS climbing to 27GB) while the freshly-restarted process
+caught up through its own still-large remaining backlog, because the
+in-memory state resets on restart but the uncapped code paths and the
+on-disk backlog driving them do not. Both nodes fully caught up (0 bytes
+remaining, fresh sub-1s heartbeats) after roughly 10 minutes; `tools/
+self_test.sh` confirmed the recovered pipeline clean afterward (exact
+rank-match PASS, 0 new `[CHECK-FAILED]`).
+
+**Scope, stated honestly: confirmed on MoE specifically, but not a
+guaranteed MoE-only limitation.** The mechanism is comm/bucket
+cardinality combined with uneven per-member routing — any future
+workload shape that shares that combination (high distinct-bucket count
++ sparse/uneven per-member sample rates within a bucket) could trigger
+the same structural growth. MoE is simply the only shape that has
+exercised it so far; this is not proven safe for DLRM or any other
+high-frequency shape, only unconfirmed for them.
+
+**Two real design directions identified, neither implemented — this
+needs a correctness-tradeoff decision, not a quick patch:**
+1. Extend the existing 500-entry cap mechanism to also bound
+   `mean_unconsumed`/`cv_unconsumed`, which requires deciding what
+   happens to a window that can never close under the cap (drop the
+   oldest samples and never score that window? score it anyway with
+   whatever partial/trimmed membership is available, accepting a
+   possibly-incomplete comparison?) — a real detection-correctness
+   question, not just a memory one.
+2. Cap `self.state`/`comm_bucket_members` by key count, which requires a
+   cold-bucket eviction policy (evict least-recently-active
+   `(comm,bucket,member)` keys? cap total distinct buckets per comm and
+   refuse to score beyond it?) — also a real design question, since
+   evicting the wrong key could silently drop a bucket that was about to
+   matter.
+
+Neither direction is implemented here — this was a disclosure-only
+investigation, per explicit instruction not to patch this in the same
+pass that found it.
 
 ## 6. Calibration constants needing re-validation on change
 

@@ -1240,6 +1240,30 @@ change to account for.
   calibration question about the 60s correlation window itself:
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
+- **`node_aggregator_ref.py` can go completely dark — heartbeat and
+  scoring output, not just slow — under MoE's extreme comm/bucket
+  cardinality. This is a different, more severe failure mode than the
+  ring-buffer overflow in section 6.9 — do not conflate them**; that one
+  is bounded, known record loss at the Inspector-plugin level, this is
+  unbounded growth in the aggregator's own Python heap. Two structures
+  are uncapped: `mean_unconsumed`/`cv_unconsumed` (the P22.5 fix only
+  ever capped the separate `all_vals`/`rate_samples` lists) and
+  `self.state`/`comm_bucket_members` (uncapped by key count). Confirmed
+  live on a real MoE job-wide fault: **218-220+ distinct comm/bucket
+  combinations** plus **~3GB/rank of dump data in one 19-minute run**
+  drove the aggregator's heartbeat and scoring metrics completely
+  silent, with memory still climbing 3+ minutes after the triggering job
+  was cancelled. A clean leaf-process restart (checkpoint-based resume
+  already in place) recovers it operationally — but is confirmed **not**
+  a fix: the identical symptom briefly recurred on restart while
+  catching up through its own remaining on-disk backlog. Structurally
+  possible on any future shape with similarly high cardinality + uneven
+  per-member routing, not guaranteed MoE-only. Full mechanism, live
+  evidence (including the real records-per-window-closed ratio widening
+  over the job's life), the confirmed recovery procedure, and the two
+  candidate fix directions (neither implemented):
+  [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
+
 - **Pure-software-delay faults cap at PROBABLE forever**, never
   CONFIRMED/PAGE. A real, correctly-localized, high-confidence anomaly
   (z-score up to 510, arrival lag up to 692x peers) on a well-above-
