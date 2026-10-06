@@ -2,11 +2,13 @@
 
 Deploy [NVIDIA OSMO](https://nvidia.github.io/OSMO/main/user_guide/index.html) on [Nebius AI Cloud](https://nebius.com/ai-cloud) in minutes. Run simulation, training, and edge workflows on the wide variety of Nebius GPU instances—write once in YAML, run anywhere.
 
-## Supported Regions and GPU Platforms
+## Regional Defaults and GPU Availability
 
-Region, service, and GPU platform availability changes over time. See
-[Nebius AI Cloud regions](https://docs.nebius.com/overview/regions) for the
-current service and platform availability by region.
+This example provides automatic defaults for the regions defined in its
+[`region_defaults`](deploy/example/001-iac/locals.tf) map. This can be a subset
+of the regions available in Nebius AI Cloud. See
+[Nebius AI Cloud regions](https://docs.nebius.com/overview/regions) for current
+service and platform availability.
 
 ## Known Gaps and TODOs
 
@@ -141,7 +143,7 @@ This interactive script:
 2. **Checks authentication** - If not authenticated, provides instructions to run `nebius profile create`
 3. **Lists tenants** - Auto-detects if you have only one tenant
 4. **Configures project** - Select existing project, create new one, or list available projects
-5. **Sets region** - Defaults to `eu-west2`; use the region of your Nebius project (see [Nebius AI Cloud regions](https://docs.nebius.com/overview/regions))
+5. **Sets region** - Defaults to `eu-west2`; select the region of your Nebius project. Terraform verifies that regional defaults are configured for the selected region.
 6. **Exports environment variables** - Sets `NEBIUS_*` and `TF_VAR_*` variables for Terraform
 
 ### 3. Initialize Secrets (REQUIRED)

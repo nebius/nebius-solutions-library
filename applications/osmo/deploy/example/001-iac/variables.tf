@@ -13,13 +13,13 @@ variable "parent_id" {
 }
 
 variable "region" {
-  description = "Nebius region for deployment"
+  description = "Nebius region with configured defaults for this OSMO example"
   type        = string
   default     = "eu-west2"
 
   validation {
     condition     = contains(["eu-north1", "eu-north2", "eu-west1", "eu-west2", "me-west1", "uk-south1", "us-central1"], var.region)
-    error_message = "Region must be one of: eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1"
+    error_message = "OSMO example defaults are configured for these regions: eu-north1, eu-north2, eu-west1, eu-west2, me-west1, uk-south1, us-central1"
   }
 }
 
