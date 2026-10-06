@@ -1,6 +1,6 @@
 # ssh_user_name = "bastion"
 # nebius_cli_install_url = "https://artifacts.nebius.cloud/cli/install.sh"
-# nebius_api_endpoint = "api.eu.nebius.cloud"
+# nebius_api_endpoint = "api.nebius.cloud"
 # ssh_public_key = {
 #   key  = "put your public ssh key here"
 #   path = "put path to public ssh key here"

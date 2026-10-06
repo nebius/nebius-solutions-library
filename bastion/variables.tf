@@ -53,7 +53,7 @@ variable "nebius_cli_install_url" {
 variable "nebius_api_endpoint" {
   description = "Nebius API endpoint used by the CLI profile created on the bastion."
   type        = string
-  default     = "api.eu.nebius.cloud"
+  default     = "api.nebius.cloud"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9.-]+(:[0-9]+)?$", var.nebius_api_endpoint))
