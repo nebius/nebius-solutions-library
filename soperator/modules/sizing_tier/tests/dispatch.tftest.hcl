@@ -211,7 +211,7 @@ run "constants_do_not_scale_with_tier" {
   command = apply
   variables { worker_count = 6000 } # XL
   assert {
-    condition     = output.preset.kruise_daemon.cpu == 0.05 && output.preset.kruise_daemon.memory == 0.128
+    condition     = output.preset.kruise_daemon.cpu == 0.1 && output.preset.kruise_daemon.memory == 0.128
     error_message = "kruise_daemon must stay constant at XL"
   }
   assert {

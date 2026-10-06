@@ -194,8 +194,8 @@ locals {
     # Its per-node work is bounded by its own node and it holds no cluster-sized state;
     # production shows up to ~64Mi usage at every cluster size. Only used to carve out room
     # for the daemon when sizing worker/login pods; the DaemonSet itself keeps the kruise
-    # chart defaults.
-    kruise_daemon = { cpu = 0.05, memory = 0.128 }
+    # chart defaults, so this must cover the chart's requests (100m / 128Mi in 1.9.1-custom).
+    kruise_daemon = { cpu = 0.1, memory = 0.128 }
     # The per-node log agent only processes logs written on its own node (its k8s metadata
     # watch is node-scoped); the size-correlated part of the pipeline is the central
     # vm_logs sink, which is tier-scaled above.

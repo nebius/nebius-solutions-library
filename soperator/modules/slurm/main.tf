@@ -78,6 +78,9 @@ resource "helm_release" "soperator_fluxcd_cm" {
     soperator_image_repo     = local.image.repository
     soperator_image_repo_nfs = var.nfs_in_k8s.use_stable_repo ? local.image.repository_stable : local.image.repository
 
+    # The custom kruise chart is only published to the stable repo.
+    kruise_helm_repo = local.helm.repository.slurm_stable
+
     dcgm_exporter_enabled          = var.dcgm_exporter_enabled
     enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
     # Cluster-wide toggle for the [program:dockerd] block in the shared jail
