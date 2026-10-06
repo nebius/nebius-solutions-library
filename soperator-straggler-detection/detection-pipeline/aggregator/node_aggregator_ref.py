@@ -398,6 +398,58 @@ def workload_signature(n_comms, coll_types, msg_size_bins=()):
 HEARTBEAT_INTERVAL_S = 10.0
 THROUGHPUT_CHECK_INTERVAL_S = 10.0
 
+# Premature-signature-lock fix -- real, confirmed-live gap found this
+# session: workload_signature() (see maybe_check_job_throughput below)
+# locks the moment the DENOM-COUNT (how many distinct members have used
+# each already-scored bucket) stops changing -- a proxy for "comm
+# structure has settled," not for "every real collective type this job
+# will ever use has fired at least once." A collective that fires less
+# often than the ones driving denom-stability (confirmed live: FSDP's
+# own (4, 'AllReduce'), a once-per-optimizer-step scalar reduction, vs.
+# AllGather/ReduceScatter firing once per layer per iteration) can
+# simply not have appeared yet at lock time -- permanently baking an
+# incomplete signature that then never matches a healthy historical
+# run's complete one, breaking _member_role_baseline's cross-job lookup
+# for EVERY role position in the job, not just the real injected
+# target's.
+#
+# Confirmed this is exactly what happened on a real FSDP job
+# (STRAGGLER_SLEEP_MS=5000, the job-wide synchronizing delay slows
+# bucket-occurrence accumulation enough that AllReduce's own 100-
+# occurrence calibration threshold wasn't reached before denom-
+# stability triggered): the locked sig read "AllGather+ReduceScatter"
+# (no AllReduce), confirmed directly against 6 other real historical
+# FSDP jobs (including one at the SAME injected severity) whose sigs
+# all correctly include AllReduce and lock within 110-193s of real job
+# start.
+#
+# Fixed by requiring a minimum real elapsed time (measured the same
+# dump-timestamp-derived way THROUGHPUT_CHECK_INTERVAL_S's own
+# docstring already reasons about -- real training time, not wall-clock
+# aggregator-side lag) to have passed since this job's own first real
+# record, IN ADDITION TO (never instead of) the existing denom-
+# stability requirement -- grounded in that same real historical data:
+# 300s clears the entire observed 110-193s range with real margin (not
+# an arbitrary guess), while costing a genuinely healthy or moderately-
+# faulted job only a few extra minutes before cross-job role-baseline
+# becomes available (role_cross_host/cross_comm_peer already degrade
+# gracefully in the meantime -- zero loss of detection capability, only
+# of this one comparison's precision, for that short window).
+#
+# Honest, disclosed limitation (not fixed by this): this raises the
+# fault-severity bar needed to reproduce the bug, it does not
+# categorically eliminate it -- confirmed directly: a second real test
+# at this exact same severity, targeting a different rank, still had
+# not produced a complete signature even after 20+ minutes, an order of
+# magnitude past this floor. No fixed floor can fully defend against an
+# arbitrarily severe fault. Separately and also not addressed here: the
+# lock is permanent and never re-evaluated for the rest of the job even
+# if the missing collective type appears later (confirmed directly:
+# agg_job_workload_sig_info holds exactly one sample for a job's entire
+# lifetime) -- a real, deeper, separate design gap, intentionally out of
+# scope for this fix (see README/MAINTENANCE.md's own note on this).
+SIG_LOCK_MIN_ELAPSED_S = 300.0
+
 
 def stat_outlier_count(vals, k=OUTLIER_K):
     if not vals:
@@ -575,6 +627,7 @@ class NodeAggregator:
         self._throughput_last_check_wall = time.time()
         self._throughput_last_records = 0
         self._throughput_last_ts_us = None  # P22.5 -- dump-time anchor, see maybe_check_job_throughput
+        self._throughput_job_first_ts_us = None  # SIG_LOCK_MIN_ELAPSED_S -- this job's own first real dump-ts, set once, never updated again (unlike _throughput_last_ts_us above)
         self._throughput_rate_ref = None  # P23 step 3 -- this job's self-calibrated baseline raw rate, see maybe_check_job_throughput
         self._throughput_last_live_denom = None  # P23 step 3 -- previous check's live bucket-count, for stability detection
         self._throughput_denom_stable_checks = 0  # P23 step 3 -- consecutive identical-live-denom checks so far
@@ -1414,6 +1467,7 @@ class NodeAggregator:
             self._throughput_rate_ref = None
             self._throughput_last_records = self.n_records_seen
             self._throughput_last_ts_us = None
+            self._throughput_job_first_ts_us = None
             self._throughput_last_live_denom = None
             self._throughput_denom_stable_checks = 0
             self._throughput_total_checks = 0
@@ -1426,6 +1480,7 @@ class NodeAggregator:
         self._throughput_last_records = self.n_records_seen
         if self._throughput_last_ts_us is None:
             self._throughput_last_ts_us = ts_us
+            self._throughput_job_first_ts_us = ts_us
             return  # first call: no real dump-time span measured yet
         dt = (ts_us - self._throughput_last_ts_us) / 1e6
         self._throughput_last_ts_us = ts_us
@@ -1537,7 +1592,18 @@ class NodeAggregator:
             ceiling_reached = self._throughput_total_checks >= THROUGHPUT_CEILING_CHECKS
             if denom_stable or (ceiling_reached and live_denom > 0):
                 self._throughput_denom_stable_checks += 1
-                if self._throughput_denom_stable_checks >= PERSIST_WINDOW:
+                # SIG_LOCK_MIN_ELAPSED_S -- real elapsed dump-time since this
+                # job's own first record, required IN ADDITION TO (never
+                # instead of) denom-stability -- see that constant's own
+                # comment for the full real investigation this closes. Denom-
+                # stability alone can be satisfied well before a genuinely
+                # rarer collective type has fired even once; this does not
+                # change whether denom_stable itself holds (the counter above
+                # keeps incrementing normally every cycle once truly stable),
+                # it only delays the LOCK decision below until both are true.
+                elapsed_ok = (self._throughput_job_first_ts_us is not None
+                              and (ts_us - self._throughput_job_first_ts_us) / 1e6 >= SIG_LOCK_MIN_ELAPSED_S)
+                if self._throughput_denom_stable_checks >= PERSIST_WINDOW and elapsed_ok:
                     # P23 (self-calibration fix) -- stability is reached,
                     # but this job's OWN raw_rate at this exact moment is
                     # exactly the thing that can be contaminated if a

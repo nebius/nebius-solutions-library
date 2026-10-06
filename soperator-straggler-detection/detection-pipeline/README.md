@@ -1196,6 +1196,24 @@ change to account for.
   structural-artifact confound the first one caught:
   [DESIGN_NOTES.md §1.9](DESIGN_NOTES.md#19-above-floor-scorings-node-local-only-blind-spot-for-cross-node-communicators--found-root-caused-confirmed-covered-fix-deferred).
 
+- **`workload_signature()` can lock a permanently-incomplete fingerprint
+  under a severe-enough fault** — it locks the moment bucket-discovery
+  rate stabilizes, not once every real collective type has fired at
+  least once; a collective rarer than the ones driving stability (FSDP's
+  own `AllReduce`, confirmed live) can simply not have appeared yet,
+  breaking cross-job role-baseline matching for every role in that job.
+  **Mitigated, not eliminated**: a 300s minimum real-elapsed-time floor
+  (`SIG_LOCK_MIN_ELAPSED_S`), grounded in real historical lock-delay data
+  and validated live on FSDP — but this only raises the fault-severity
+  bar needed to reproduce it, and the lock itself is still permanent and
+  never re-evaluated later in the job. Confirmed NOT FSDP-specific: this
+  project's own historical signature log already shows one independent
+  prior occurrence on a different below-floor shape. Full writeup,
+  including the honest severity-bar/no-re-eval caveats and the
+  three-tier cross-shape risk assessment (confirmed / plausible /
+  unconfirmed-but-not-proven-safe):
+  [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
+
 - **Pure-software-delay faults cap at PROBABLE forever**, never
   CONFIRMED/PAGE. A real, correctly-localized, high-confidence anomaly
   (z-score up to 510, arrival lag up to 692x peers) on a well-above-

@@ -205,6 +205,7 @@ not carried forward from memory:
 | MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README.md §6.9, line 942; full investigation DESIGN_NOTES.md §5.1) |
 | Cross-node PP-link `baseline_source` gap (Hybrid) | **ACCEPTED, permanent topology limitation** — but see caveat | Hybrid's 2-ranks/node layout has no independent same-shape peer comm on the SAME host for the below-floor fallback to use (DESIGN_NOTES.md §2.3, line 627) — the underlying topology limitation is real and permanent, but P27.5 (same section) works around it for any real multi-worker Hybrid deployment by pooling job-wide instead of same-host; only a truly single-worker-equivalent isolated test still hits the raw gap |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
+| `workload_signature()` can lock permanently incomplete under a severe-enough fault | **MITIGATED (severity bar raised), NOT eliminated; see full writeup below** | `SIG_LOCK_MIN_ELAPSED_S=300.0` fix, confirmed live on FSDP |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -218,6 +219,86 @@ for anything higher-stakes than a quick read.
 precisely which part is deployed (the query functions, reachable code) vs.
 not (the sampler process and the one `buffer=None` call site) instead of
 a blanket "not deployed."
+
+**`workload_signature()`'s premature-lock gap, found and partially
+fixed this session.** `workload_signature()` (node_aggregator_ref.py)
+locks a job's cross-job-comparison fingerprint the moment bucket-
+discovery RATE stabilizes -- a proxy for "comm structure has settled,"
+not for "every real collective type this job will ever use has fired at
+least once." A collective that fires less often than the ones driving
+denom-stability (confirmed live: FSDP's own `(4, 'AllReduce')`, a once-
+per-optimizer-step scalar reduction, vs. `AllGather`/`ReduceScatter`
+firing once per layer per iteration) can simply not have appeared yet at
+lock time -- permanently baking an incomplete signature that then never
+matches a healthy historical run's complete one, breaking
+`_member_role_baseline`'s cross-job lookup for every role position in
+that job, not just the real injected target's.
+
+Fixed by `SIG_LOCK_MIN_ELAPSED_S=300.0`: the lock now also requires 300s
+of real elapsed dump-time since the job's own first record, **in
+addition to** (never instead of) the existing denom-stability
+requirement. 300s is grounded in real historical data, not a guess --
+measured directly against 6 historical FSDP jobs' own real sig-lock
+delay (110-193s, including one at the identical injected fault severity
+that still locked correctly), with real margin above the observed range.
+Validated live: a fresh FSDP fault test (STRAGGLER_SLEEP_MS=5000,
+different target rank, same severity as the original finding) now locks
+a sig that correctly includes `AllReduce`, matching every healthy
+historical job exactly, confirmed directly via
+`agg_job_workload_sig_info`. `tools/self_test.sh` (DP) confirmed
+unaffected -- DP's own sig locks fast already (no rare/asymmetric
+collective type), so the new floor costs it nothing.
+
+**Two honest limitations, deliberately not addressed by this fix (do
+not read the above as "solved"):**
+1. **This raises the fault-severity bar needed to reproduce the bug, it
+   does not categorically eliminate it.** A second real validation
+   attempt at the identical severity, targeting a different rank, still
+   had not produced a complete signature even after 20+ minutes -- an
+   order of magnitude past the new floor. No fixed time floor can fully
+   defend against an arbitrarily severe fault; it only makes the bug
+   require a worse one to reproduce.
+2. **The lock is permanent and never re-evaluated for the rest of the
+   job, even if the missing collective type appears later** --
+   confirmed directly: `agg_job_workload_sig_info` holds exactly one
+   sample for a job's entire lifetime, no matter how long it keeps
+   running afterward. A more complete fix would allow re-locking if the
+   discovered `coll_types` set ever grows past what's already recorded.
+   Deliberately **not** built as part of this fix -- scoped out as its
+   own, larger, separate future investigation, not bundled into this
+   time-floor mitigation.
+
+**Cross-shape risk -- three distinct tiers, not one blanket statement:**
+- **Confirmed affected:** FSDP (this investigation, directly fixed and
+  validated above). Separately, this project's own historical signature
+  log already shows a second, independent real occurrence of the
+  identical pattern on a different below-floor shape (same `n_comms=11`
+  family, one real historical sig reading
+  `AllGather+AllReduce+Recv+Send:4+8+99+524288+1048576+2097152`, another
+  real historical sig for the apparent same shape reading only
+  `AllReduce+Send:4+8+524288+1048576` -- missing both `AllGather` and
+  `Recv`) -- this is not hypothetical, it has already happened at least
+  once before, independent of this session's FSDP finding.
+- **Plausible but unconfirmed:** DLRM/MoE-shaped jobs (sig composed of
+  `AllReduce` only). Their real message-size-bin composition varies
+  job to job in this project's own history (`8+12+166+1024+...` vs.
+  `8+2097152+...` vs. `8+2965821+...`, etc.), meaning which large,
+  less-frequent buckets have been discovered by lock-time is not fixed
+  -- a severe fault delaying one of those could trigger the same class
+  of bug, keyed on message size rather than collective type. Not
+  directly tested.
+- **Lower-risk in practice, but not proven safe:** PP/Hybrid. Every
+  real historical sig sample found for this shape shows `AllReduce`
+  consistently co-occurring with every other collective type across
+  many samples, suggesting its own collectives discover close together
+  in practice -- but this is an observation from available history, not
+  a structural guarantee the same race can never happen there under a
+  severe enough fault.
+
+Do not flatten these three tiers into "this is fixed for every shape" --
+only FSDP has been directly fixed and validated; the others range from
+"independently confirmed to have happened" to "unconfirmed but
+plausible" to "no evidence yet, not proven safe."
 
 ## 6. Calibration constants needing re-validation on change
 
@@ -244,6 +325,7 @@ project's dev cluster/workload mix — not universal constants.
 | `ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` | True | alert_engine.py (module-level, near `ROLE_BASELINE_ALERT_STOPGAP_ACTIVE`) |
 | `ROLE_BASELINE_JOB_LOCKSTEP_FLAG` | 0.7 | alert_engine.py (near `ROLE_BASELINE_VOLATILE_FLAG`) |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
+| `SIG_LOCK_MIN_ELAPSED_S` | 300.0 | node_aggregator_ref.py:451 -- grounded in 6 real historical FSDP jobs' own sig-lock delay (110-193s observed); see §5's own full writeup for the real gap this closes and its two disclosed limitations |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
 
