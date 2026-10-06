@@ -90,6 +90,16 @@ SMOKE="${SMOKE:-false}"                     # reduced, non-canonical quick pipel
 # auto => infer from the StorageClass name; override with true|false.
 IS_SFS="${IS_SFS:-auto}"
 
+# Optional SFS reference figures for the "vs reference" delta table. Deliberately
+# EMPTY by default and NOT committed, so this public repo publishes no product
+# performance numbers. An operator who has cleared reference figures can supply them
+# (seq/rand read/write) and the comparison appears; otherwise it is omitted and the
+# run still reports its own measured numbers. Obtain current figures from the SFS team.
+SFS_REF_SEQ_READ_GBPS="${SFS_REF_SEQ_READ_GBPS:-}"
+SFS_REF_SEQ_WRITE_GBPS="${SFS_REF_SEQ_WRITE_GBPS:-}"
+SFS_REF_RAND_READ_KIOPS="${SFS_REF_RAND_READ_KIOPS:-}"
+SFS_REF_RAND_WRITE_KIOPS="${SFS_REF_RAND_WRITE_KIOPS:-}"
+
 RUN_ID="$$-$(date +%s)"
 RUN_LABEL="fio-perf/run=${RUN_ID}"
 POD_NAME="fio-perf-${RUN_ID}"
@@ -175,10 +185,13 @@ EXAMPLES:
   # 8. Quick smoke (NON-CANONICAL — small dataset, short runtime)
   ./06-run-fio-performance-test.sh --smoke --yes
 
-SFS POC REFERENCE (per host, multi-file, fio 3.36, 64 jobs, qd 32, direct I/O,
-10 GiB/job, 640 GiB, 120s/test — observed figures, NOT guarantees):
-  seq read 1M: 25.61 GB/s | seq write 1M: 19.82 GB/s
-  rand read 4K: 157.4k IOPS | rand write 4K: 110.9k IOPS
+SFS REFERENCE COMPARISON (optional, per host, multi-file, fio 3.36, 64 jobs, qd 32,
+direct I/O, 10 GiB/job, 640 GiB, 120s/test): reference figures are NOT bundled with
+this tool. To print a "vs reference" delta on an SFS target in canonical mode, supply
+cleared figures via the environment (obtain current values from the SFS team):
+  SFS_REF_SEQ_READ_GBPS, SFS_REF_SEQ_WRITE_GBPS,
+  SFS_REF_RAND_READ_KIOPS, SFS_REF_RAND_WRITE_KIOPS
+Without them the run still reports its own measured numbers; the delta is just omitted.
 EOF
 }
 
@@ -788,28 +801,37 @@ generate_report() {
     echo ""
     echo "Primary names which metric matters for that pattern; Throughput is decimal GB/s (bytes/1e9) with binary GiB/s (bytes/2^30) in parentheses; IOPS is decimal kIOPS. PARSE FAILED = fio produced no valid JSON for that test (run is incomplete)."
     echo ""
-    # Comparison requires: comparable mode AND SFS target AND all four metrics parsed.
-    # A parse failure suppresses it so a broken run can never print -100% vs reference.
-    if [ "$comparable" = "yes" ] && [ "$sfs_target" = "yes" ] && [ "$parse_failed" = 0 ]; then
-      echo "## vs SFS POC reference (observed, not a guarantee)"
+    # Comparison requires: comparable mode AND SFS target AND all four metrics parsed
+    # AND operator-supplied reference figures (none are bundled in this repo — see the
+    # SFS_REF_* env vars). A parse failure suppresses it so a broken run can never print
+    # a false delta against a reference.
+    local have_refs=0
+    if [ -n "$SFS_REF_SEQ_READ_GBPS" ] && [ -n "$SFS_REF_SEQ_WRITE_GBPS" ] \
+       && [ -n "$SFS_REF_RAND_READ_KIOPS" ] && [ -n "$SFS_REF_RAND_WRITE_KIOPS" ]; then
+      have_refs=1
+    fi
+    if [ "$comparable" = "yes" ] && [ "$sfs_target" = "yes" ] && [ "$parse_failed" = 0 ] && [ "$have_refs" = 1 ]; then
+      echo "## vs SFS reference (operator-supplied; observed, not a guarantee)"
       echo ""
-      echo "| Metric | This host | SFS reference | Δ |"
+      echo "| Metric | This host | Reference | Δ |"
       echo "|---|---|---|---|"
       # Δ computed from the RAW bytes/iops, not the 2-decimal-rounded display value (nit).
-      echo "| seq read 1M | $(gbs "$sr_bw") GB/s | 25.61 GB/s | $(awk -v b="$sr_bw" 'BEGIN{printf "%+.1f%%", (b/1e9-25.61)/25.61*100}') |"
-      echo "| seq write 1M | $(gbs "$sw_bw") GB/s | 19.82 GB/s | $(awk -v b="$sw_bw" 'BEGIN{printf "%+.1f%%", (b/1e9-19.82)/19.82*100}') |"
-      echo "| rand read 4K | $(kiops "$rr_iops")k IOPS | 157.4k IOPS | $(awk -v i="$rr_iops" 'BEGIN{printf "%+.1f%%", (i/1e3-157.4)/157.4*100}') |"
-      echo "| rand write 4K | $(kiops "$rw_iops")k IOPS | 110.9k IOPS | $(awk -v i="$rw_iops" 'BEGIN{printf "%+.1f%%", (i/1e3-110.9)/110.9*100}') |"
+      echo "| seq read 1M | $(gbs "$sr_bw") GB/s | ${SFS_REF_SEQ_READ_GBPS} GB/s | $(awk -v b="$sr_bw" -v r="$SFS_REF_SEQ_READ_GBPS" 'BEGIN{printf "%+.1f%%", (b/1e9-r)/r*100}') |"
+      echo "| seq write 1M | $(gbs "$sw_bw") GB/s | ${SFS_REF_SEQ_WRITE_GBPS} GB/s | $(awk -v b="$sw_bw" -v r="$SFS_REF_SEQ_WRITE_GBPS" 'BEGIN{printf "%+.1f%%", (b/1e9-r)/r*100}') |"
+      echo "| rand read 4K | $(kiops "$rr_iops")k IOPS | ${SFS_REF_RAND_READ_KIOPS}k IOPS | $(awk -v i="$rr_iops" -v r="$SFS_REF_RAND_READ_KIOPS" 'BEGIN{printf "%+.1f%%", (i/1e3-r)/r*100}') |"
+      echo "| rand write 4K | $(kiops "$rw_iops")k IOPS | ${SFS_REF_RAND_WRITE_KIOPS}k IOPS | $(awk -v i="$rw_iops" -v r="$SFS_REF_RAND_WRITE_KIOPS" 'BEGIN{printf "%+.1f%%", (i/1e3-r)/r*100}') |"
       echo ""
-      echo "_Reference is Nebius SFS/data-fs, per host, multi-file, fio 3.36, 64 jobs, qd 32, direct I/O,"
-      echo "10 GiB/job, 640 GiB, 120s/test. Below-reference is NOT a failure — correctness and performance are separate._"
+      echo "_Reference figures are operator-supplied via SFS_REF_* env, per host, multi-file, fio 3.36, 64 jobs,"
+      echo "qd 32, direct I/O, 10 GiB/job, 640 GiB, 120s/test. Below-reference is NOT a failure — correctness and performance are separate._"
     else
       if [ "$parse_failed" = 1 ]; then
-        echo "_One or more metrics failed to parse; SFS reference comparison omitted (run is incomplete/failed, not a regression)._"
+        echo "_One or more metrics failed to parse; reference comparison omitted (run is incomplete/failed, not a regression)._"
       elif [ "$sfs_target" != "yes" ]; then
-        echo "_Target is not Nebius SFS (StorageClass: ${STORAGE_CLASS}); SFS reference comparison intentionally omitted._"
+        echo "_Target is not Nebius SFS (StorageClass: ${STORAGE_CLASS}); reference comparison intentionally omitted._"
+      elif [ "$comparable" != "yes" ]; then
+        echo "_Mode is non-comparable (custom/smoke/single-file); reference comparison intentionally omitted._"
       else
-        echo "_Mode is non-comparable (custom/smoke/single-file); SFS reference comparison intentionally omitted._"
+        echo "_No reference figures supplied (set SFS_REF_SEQ_READ_GBPS / SFS_REF_SEQ_WRITE_GBPS / SFS_REF_RAND_READ_KIOPS / SFS_REF_RAND_WRITE_KIOPS to print a delta); reporting measured numbers only._"
       fi
     fi
   } > "$report"

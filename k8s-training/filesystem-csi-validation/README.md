@@ -184,23 +184,28 @@ The repo already ships fio benchmarks under `data-transfer/`
 methodology** — a different preset (`bsrange=64k-2M`, 16 jobs, iodepth 16, 20 G,
 60 s) driven over SSH to named workers rather than this script's kubectl-driven
 canonical preset. **Their numbers are not comparable to this script's canonical
-preset or to the SFS reference values below.** Pick one methodology and stay in it
-when comparing runs; this script (06) is the one the SFS reference figures belong to.
+preset or to any SFS reference figures.** Pick one methodology and stay in it when
+comparing runs; this script (06) is the one the SFS reference figures belong to.
 
-### SFS POC reference values (observed, not guarantees)
+### SFS reference comparison (figures not bundled)
 
-| Metric | Reference |
+Reference performance figures are **intentionally not published in this repo**. The
+script prints a "vs reference" delta only when an operator supplies cleared figures
+via the environment:
+
+| Env var | Metric |
 |---|---|
-| Sequential read, 1 MiB | 25.61 GB/s |
-| Sequential write, 1 MiB | 19.82 GB/s |
-| Random read, 4 KiB | 157.4k IOPS |
-| Random write, 4 KiB | 110.9k IOPS |
+| `SFS_REF_SEQ_READ_GBPS` | Sequential read, 1 MiB (GB/s) |
+| `SFS_REF_SEQ_WRITE_GBPS` | Sequential write, 1 MiB (GB/s) |
+| `SFS_REF_RAND_READ_KIOPS` | Random read, 4 KiB (kIOPS) |
+| `SFS_REF_RAND_WRITE_KIOPS` | Random write, 4 KiB (kIOPS) |
 
-Scope: Nebius SFS/data-fs, per host, multi-file, fio 3.36, 64 jobs, qd 32, direct
-I/O, 10 GiB/job, 640 GiB dataset, 120 s/test. These are **observed POC figures**,
-**not** pass/fail requirements or service guarantees. The script does **not** fail
-for being below them (any enforceable threshold is off by default). Execution
-correctness and performance comparison are kept separate.
+Obtain current figures from the SFS team. The scope they must match: Nebius SFS/data-fs,
+per host, multi-file, fio 3.36, 64 jobs, qd 32, direct I/O, 10 GiB/job, 640 GiB
+dataset, 120 s/test. When supplied they are treated as **observed references**, **not**
+pass/fail requirements or service guarantees — the script does **not** fail for being
+below them. Without them, the run still reports its own measured numbers and simply
+omits the delta. Execution correctness and performance comparison are kept separate.
 
 ### Capacity, runtime, cleanup
 
