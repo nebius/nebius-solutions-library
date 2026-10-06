@@ -206,7 +206,7 @@ not carried forward from memory:
 | Cross-node PP-link `baseline_source` gap (Hybrid) | **ACCEPTED, permanent topology limitation** — but see caveat | Hybrid's 2-ranks/node layout has no independent same-shape peer comm on the SAME host for the below-floor fallback to use (DESIGN_NOTES.md §2.3, line 627) — the underlying topology limitation is real and permanent, but P27.5 (same section) works around it for any real multi-worker Hybrid deployment by pooling job-wide instead of same-host; only a truly single-worker-equivalent isolated test still hits the raw gap |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
 | `workload_signature()` can lock permanently incomplete under a severe-enough fault | **MITIGATED (severity bar raised), NOT eliminated; see full writeup below** | `SIG_LOCK_MIN_ELAPSED_S=300.0` fix, confirmed live on FSDP |
-| `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — grouping works, labeling doesn't for this fault class; see full writeup below** | Confirmed live on Hybrid job 3867 |
+| `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — a tiebreak fix was tried, tested live, and reverted as disproven; see full writeup below** | Confirmed live on Hybrid jobs 3867, 3869, 3870, 3871 |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -371,6 +371,48 @@ Whether 60s is still the right value, or whether real-world fault
 propagation in a larger/slower topology can routinely exceed it, is a
 genuine open question for whoever next revisits this constant — not
 resized here, since this was a disclosure-only pass, not a fix.
+
+**Update — a fix was attempted, implemented, tested live, and reverted.
+This is now a confirmed dead end, not an untried idea; do not re-attempt
+the same approach without new evidence.** A follow-up session designed
+and implemented an additive `root_cause_candidate_tiebreak`: for a fully
+mutual echo cycle (the exact case above, where the existing heuristic
+produces zero root-cause candidates), pick whichever alert's own
+already-identified culprit fired with the earliest real sample
+timestamp. The additivity held up as designed — confirmed by
+construction and live testing that it never engages for any group the
+existing heuristic already resolves (including the original validated
+3-hop case). **But the tiebreak RULE itself was tested against real
+ground truth, three times, and failed every time it could be precisely
+checked.** Three live Hybrid tests (targeting rank 0, rank 1, and rank 2
+in turn, deliberately exercising both the stage0 and stage1 code paths)
+all reproduced the identical mutual-echo cycle regardless of which rank
+was targeted — confirming the cycle is a structural property of this
+topology's own shared, world-spanning administrative comm, not
+rank-dependent. In the cases checked precisely (real per-sample
+timestamps pulled directly via the same `timestamp()` PromQL technique
+`_query_instant_real_ts` itself uses, not query-range step boundaries or
+print order), the tiebreak picked an innocent, never-faulted rank over
+the real ground-truth target both times — the real gap between the two
+alerts' own sample timestamps was ~1 second, reflecting which comm's
+persistence window happened to close first in that poll cycle, not
+genuine causal order. **Reverted in full** (`alerting/alert_engine.py`
+matches its pre-fix commit exactly) rather than left in place
+undocumented: a confidently-wrong root-cause label is worse than the
+original honest "possible echo" ambiguity it would have replaced.
+
+**Net result: the original limitation stands, fully open, unsolved.**
+`_correlate_firing_timing_alerts` still correctly groups physically-
+connected alerts via a real BFS path (that part remains proven, live,
+multiple times), but still cannot label which one is the true root
+cause when the group forms a fully mutual cycle — and earliest-real-
+timestamp is now a *ruled-out* candidate fix, not merely an untried one.
+For this fault class, a human must keep reading the individual
+`[WAIT-INDUCED-ALERT]`/P27.2 line's own named culprit directly, exactly
+as originally disclosed above — nothing about that guidance has
+changed. Any future fix here needs a genuinely different signal than
+real sample timestamps, since this test confirmed those specifically
+don't track causal order in this mechanism's real data.
 
 ## 6. Calibration constants needing re-validation on change
 

@@ -1228,9 +1228,16 @@ change to account for.
   evidence: Hybrid job 3867, a real rank-0 fault correctly produced two
   alerts that were correctly grouped via a genuine, real shared-member
   BFS path — but both ended up labeled mutual "possible echoes" of each
-  other, with neither marked `ROOT_CAUSE_CANDIDATE`. Full writeup,
-  including why, and an open calibration question about the 60s
-  correlation window itself:
+  other, with neither marked `ROOT_CAUSE_CANDIDATE`. **An earliest-real-
+  timestamp tiebreak fix was designed, implemented, and tested live —
+  then fully reverted** after real ground-truth testing (3 live Hybrid
+  runs, different target ranks) showed the tiebreak picks an innocent
+  rank over the true target: the real ~1s gap between alerts reflects
+  which comm's persistence window happened to close first, not genuine
+  causal order. This is now a confirmed dead end, not an untried idea —
+  do not re-attempt the same fix without a genuinely different signal.
+  Full writeup, including why, the attempted fix, and an open
+  calibration question about the 60s correlation window itself:
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
 - **Pure-software-delay faults cap at PROBABLE forever**, never
