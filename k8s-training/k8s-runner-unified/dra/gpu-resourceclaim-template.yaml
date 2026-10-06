@@ -1,0 +1,28 @@
+# =============================================================================
+# GB300 / DRA GPU claim for the nccl-test worker pods.
+#
+# Applied ONLY on DRA clusters (Grace/GB300), which advertise GPUs via Dynamic
+# Resource Allocation instead of the nvidia.com/gpu device plugin. x86
+# device-plugin clusters never reach this file — nccl_runner_unified.sh
+# auto-detects the mode and uses nccl-test-template.yaml (limits.nvidia.com/gpu).
+#
+# Scoped to the nccl-tests namespace, so it is removed when the namespace is.
+# Only the MPIJob Worker pods claim GPUs; the Launcher runs mpirun and needs none.
+#
+# Placeholder patched by nccl_runner_unified.sh (envsubst):
+#   ${GPUS_PER_NODE}   GPUs to claim per worker (auto-detected)
+# =============================================================================
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: nccl-gpus
+  namespace: ${NAMESPACE}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: ${GPUS_PER_NODE}
