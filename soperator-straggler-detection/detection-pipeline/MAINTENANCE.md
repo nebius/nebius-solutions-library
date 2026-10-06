@@ -207,6 +207,8 @@ not carried forward from memory:
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
 | `workload_signature()` can lock permanently incomplete under a severe-enough fault | **MITIGATED (severity bar raised), NOT eliminated; see full writeup below** | `SIG_LOCK_MIN_ELAPSED_S=300.0` fix, confirmed live on FSDP |
 | `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — a tiebreak fix was tried, tested live, and reverted as disproven; see full writeup below** | Confirmed live on Hybrid jobs 3867, 3869, 3870, 3871 |
+| Inspector's `coll_sn` field never increments for `Send`/`Recv` (stays `0`, confirmed against 5,289 real records) — not usable as a cross-rank sequencing signal for point-to-point ops, only for `AllReduce`/`Broadcast` | **CONFIRMED DEAD END, real plugin gap, not a lean/verbose access issue** | A real plugin-level fix would be needed, not a query/panel change |
+| `_emit_timing_fallback` (the below-floor P27.2 cascade path — TP2/TP-inference/PP/Hybrid) never calls `_push_visibility_metric` | **CONFIRMED STRUCTURAL COVERAGE GAP, not a bug in any panel's own logic** | `agg_straggler_incident_tier` has zero real rows from any below-floor incident across this project's entire history; see full writeup below |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -413,6 +415,86 @@ as originally disclosed above — nothing about that guidance has
 changed. Any future fix here needs a genuinely different signal than
 real sample timestamps, since this test confirmed those specifically
 don't track causal order in this mechanism's real data.
+
+**`_emit_timing_fallback` never pushes to VictoriaMetrics — the composed-
+incident-summary panel (Grafana panel id=22, dashboard
+`straggler-detection-metrics`) has zero visibility into any below-floor
+incident, confirmed live and across this project's entire metric
+history.** Found while validating that same panel's `incident_role`/
+sort-order feature (sorting a real root-cause row above its downstream
+rows) against a genuine multi-role cascade, specifically requested to
+confirm this live rather than by code reading alone.
+
+The validation test itself worked exactly as intended: a live Hybrid
+TP+PP job (2 nodes, world_size=4), `STRAGGLER_SLEEP_MS=1000` injected on
+rank 0's PP send to rank 2, ground truth (real PID per rank) confirmed
+from each rank's own dump-file header before checking any alert. The
+resulting `[ALERT]` text is completely correct: it names rank 0
+(PID 1303182, worker-0) as the real injected straggler and rank 2
+(PID 1468478, worker-1, `ratio=136.786`, `current_mean_us=1006631`,
+matching the ~1s injection almost exactly) as the correlated downstream
+wait, on comm `0x8dfe44bde44499`. A second real incident — a cascade-
+mislocalization case onto the stage1 TP pair (comm `0x864a163fd8b4f8`,
+this project's own already-documented P21.6 phenomenon) — fired in the
+same test, independently confirming the mechanism's known
+mislocalization behavior is still real and still present.
+
+Querying VictoriaMetrics directly for `agg_straggler_incident_tier`
+scoped to either real comm returned **zero rows for both** — not a
+query-scoping artifact (confirmed by also querying bare `{member=...}`
+for each real PID, same empty result) and not a staleness-window race
+(confirmed by retrying after a delay). The panel's new `incident_role`
+column, its null-safety mappings, and its sort order were never actually
+exercised by this test, because the data they read from was never
+written in the first place.
+
+Root cause, confirmed by reading the code, not inferred from the empty
+query: `_timing_asymmetry_fallback_evaluate` (P27.2, the below-floor —
+under `SELF_DETECTION_FLOOR=3` members — fallback covering TP2,
+TP-inference, PP, and Hybrid's cross-comm cases) renders its finding
+through `_emit_timing_fallback()` (`alerting/alert_engine.py:3296`), a
+dedicated text formatter that appends to `self.alerts` and the summary
+log but **never calls `_push_visibility_metric`** anywhere in its body.
+This is a wholly different function from `_emit()` (line 4119), the only
+place `agg_straggler_incident_detected`/`_severity_ratio`/`_persisted_s`/
+`_tier` (and `incident_role`) are ever pushed. Both real call sites of
+`_timing_asymmetry_fallback_evaluate` — the standalone trigger (line
+3962) and PP's own cascade trigger (line 4426, the dependent-comm
+propagation path) — go through `_emit_timing_fallback`, never `_emit()`.
+There is no partial/conditional branch here; this entire fallback
+mechanism structurally cannot reach any dashboard panel's data source.
+
+This also explains something that had looked like it might just be
+sampling luck: a full scan of `agg_straggler_incident_tier`'s real
+history shows `incident_role="root_cause"` on exactly 7 distinct comms
+(all single-rank self-test/above-floor runs) and `incident_role=
+"downstream"` on **zero**, ever. That is not a gap in what's been
+tested — it is exactly what this code path predicts. Every real incident
+this metric has ever recorded came from the above-floor `_check_cv`/
+`_check_mean` path; the below-floor fallback class has never, in this
+project's lifetime, produced a single row here.
+
+**This is a real, structural gap in panel COVERAGE, not a defect in any
+panel's own display logic**, and it is separate in scope from the panel
+edit that surfaced it. The sort/color/null-mapping behavior validated
+earlier against real above-floor data (the single-rank self-test
+incident, and an older multi-rank historical incident with
+`incident_role` absent) remains correct for the data it is actually
+given. Wiring `_emit_timing_fallback` into `_push_visibility_metric` is
+a separate, nontrivial design question — does every below-floor alert
+need the full `incident_role`/`is_likely_root_cause` computation, or just
+basic tier/detected visibility; what's the right identity to key it on,
+given this fallback's own per-comm 2-member shape — and deserves its own
+investigation, not a quick patch bolted onto a dashboard commit; not
+attempted here.
+
+**Practical consequence for anyone operating this dashboard today: the
+composed-incident-summary panel will show nothing at all for a real
+TP2/TP-inference/PP/Hybrid below-floor incident.** For that fault class,
+read the individual `[ALERT]`/P27.2 timing-fallback line directly — the
+same guidance already given above for `_correlate_firing_timing_alerts`'s
+own labeling gap, now extended: below-floor incidents are invisible to
+this panel before any labeling question even arises.
 
 ## 6. Calibration constants needing re-validation on change
 
