@@ -1214,6 +1214,25 @@ change to account for.
   unconfirmed-but-not-proven-safe):
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
+- **`_correlate_firing_timing_alerts` (the PP/Hybrid cross-comm cascade
+  grouping mechanism) cannot identify a wait-induced-style straggler as
+  the root cause, by design.** It correctly groups alerts that are
+  genuinely physically connected (confirmed live via a real BFS-path
+  test on Hybrid TP+PP) — that part works. But it only ever traces
+  connections from an alert's ELEVATED (waiting) side; a true
+  wait-induced culprit is always the SUPPRESSED (sleeping) side of its
+  own comm, so it structurally can never surface as this mechanism's
+  `ROOT_CAUSE_CANDIDATE`. **For this fault class, rely on the individual
+  `[WAIT-INDUCED-ALERT]`/P27.2 timing-fallback line's own named culprit
+  — not this mechanism's root-cause/downstream labeling.** Real test
+  evidence: Hybrid job 3867, a real rank-0 fault correctly produced two
+  alerts that were correctly grouped via a genuine, real shared-member
+  BFS path — but both ended up labeled mutual "possible echoes" of each
+  other, with neither marked `ROOT_CAUSE_CANDIDATE`. Full writeup,
+  including why, and an open calibration question about the 60s
+  correlation window itself:
+  [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
+
 - **Pure-software-delay faults cap at PROBABLE forever**, never
   CONFIRMED/PAGE. A real, correctly-localized, high-confidence anomaly
   (z-score up to 510, arrival lag up to 692x peers) on a well-above-

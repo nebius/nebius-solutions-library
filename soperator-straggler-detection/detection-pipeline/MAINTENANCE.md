@@ -206,6 +206,7 @@ not carried forward from memory:
 | Cross-node PP-link `baseline_source` gap (Hybrid) | **ACCEPTED, permanent topology limitation** — but see caveat | Hybrid's 2-ranks/node layout has no independent same-shape peer comm on the SAME host for the below-floor fallback to use (DESIGN_NOTES.md §2.3, line 627) — the underlying topology limitation is real and permanent, but P27.5 (same section) works around it for any real multi-worker Hybrid deployment by pooling job-wide instead of same-host; only a truly single-worker-equivalent isolated test still hits the raw gap |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
 | `workload_signature()` can lock permanently incomplete under a severe-enough fault | **MITIGATED (severity bar raised), NOT eliminated; see full writeup below** | `SIG_LOCK_MIN_ELAPSED_S=300.0` fix, confirmed live on FSDP |
+| `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — grouping works, labeling doesn't for this fault class; see full writeup below** | Confirmed live on Hybrid job 3867 |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -300,6 +301,77 @@ only FSDP has been directly fixed and validated; the others range from
 "independently confirmed to have happened" to "unconfirmed but
 plausible" to "no evidence yet, not proven safe."
 
+**`_correlate_firing_timing_alerts`'s root-cause labeling cannot
+identify a wait-induced-style culprit, by design — found and confirmed
+live, not implemented around (disclosure only).** This is the PP/Hybrid
+cross-comm cascade-grouping mechanism (P27-hotfix9/9b). Re-exercised
+this session after several nearby functions it depends on
+(`_timing_asymmetry_fallback_evaluate`, `_wait_induced_fallback_
+evaluate`, `_role_baseline_fallback_evaluate`, the sig-lock fix above)
+were all touched or fixed this session — confirmed via `git log -p`
+that `_correlate_firing_timing_alerts` and its own call site were NOT
+modified by any of that work, so this is a regression check on
+untouched code, not a retest of something changed.
+
+**What still works, confirmed live:** the grouping itself. Launched a
+real Hybrid TP+PP job (3867, `STRAGGLER_SLEEP_MS=1000`, real target
+global rank 0, ground truth confirmed from its own dump file before
+checking any alert). Two real `[ALERT]` lines fired within the 60s
+correlation window, each correctly naming its own true straggler
+(`rank=1060966`, the real injected target, on the direct rank0↔rank2 PP
+comm; `rank=1278664` on the rank1↔rank3 PP comm — never faulted, the
+exact "innocent downstream pair" shape the mechanism was built to
+catch). `_correlate_firing_timing_alerts` correctly found a real,
+genuine physical connection between them via an actual BFS path over
+shared comm membership — not two alerts treated as independent faults.
+That part is proven, not assumed.
+
+**What does NOT work, confirmed live, and will not be fixed by
+retrying or recalibrating: the root-cause-vs-downstream labeling,
+specifically for a wait-induced-style straggler.** Both of job 3867's
+real alerts came back labeled mutual "possible echoes" of EACH OTHER —
+neither was marked `ROOT_CAUSE_CANDIDATE`, despite one of them being
+the comm containing the real, ground-truth-confirmed injected target.
+Root cause, traced precisely in the mechanism's own logic: it only ever
+seeds its BFS from an alert's ELEVATED (waiting) member — by this
+fallback's own foundational, already-established signature (confirmed
+throughout this project), the true wait-induced culprit is always the
+SUPPRESSED (sleeping, normal-reading) side of its own comm, never the
+elevated side. A real culprit can therefore never be the BFS's own
+starting point, and so can never itself be identified as the thing
+nothing-else-explains (`ROOT_CAUSE_CANDIDATE`) — it is structurally
+invisible to this specific algorithm's notion of "root cause," no
+matter how clean or well-isolated the real fault is. **For this fault
+class, a human must read the individual `[WAIT-INDUCED-ALERT]`/P27.2
+timing-fallback line's own named culprit directly — do not trust this
+correlation layer's root-cause/downstream labeling to surface it.**
+
+A secondary, real contributing factor found in the same test: the BFS
+path connecting the two alerts ran through a tiny, world-spanning
+administrative AllReduce (`bucket=4`, trivially shared by all 4 ranks
+in the job) rather than a substantial, real-payload comm like the
+original validated case's own TP AllReduce hop. A comm that every rank
+in a job shares membership in in makes any two alerts "BFS-reachable"
+from each other almost by construction, regardless of whether a
+meaningful causal relationship exists — worth knowing if this mechanism
+is ever extended or re-tuned, since it means shared-membership alone is
+weaker evidence when the shared comm is this trivial.
+
+**A third, independently real signal (stage1's own TP pair, also
+genuinely elevated, matching the original 3-comm Hybrid validation's
+own shape) fired in the same test but never joined the group at all —
+it fired 225 real seconds before the other two, outside the 60s
+`RECENT_TIMING_CORRELATION_WINDOW_S` correlation window.** This is an
+expected, timing-dependent property of a fixed window, not a defect —
+different comms' own persistence requirements can genuinely complete at
+different real times. It does raise a real, open calibration question,
+not resolved here: 225s of real propagation delay between genuinely
+related alerts was observed live, well past the current 60s window.
+Whether 60s is still the right value, or whether real-world fault
+propagation in a larger/slower topology can routinely exceed it, is a
+genuine open question for whoever next revisits this constant — not
+resized here, since this was a disclosure-only pass, not a fix.
+
 ## 6. Calibration constants needing re-validation on change
 
 All of these were calibrated against *specific observed behavior* on this
@@ -326,6 +398,7 @@ project's dev cluster/workload mix — not universal constants.
 | `ROLE_BASELINE_JOB_LOCKSTEP_FLAG` | 0.7 | alert_engine.py (near `ROLE_BASELINE_VOLATILE_FLAG`) |
 | `BUCKET_MATURITY_GRACE_S` | 120.0 | node_aggregator_ref.py:190 |
 | `SIG_LOCK_MIN_ELAPSED_S` | 300.0 | node_aggregator_ref.py:451 -- grounded in 6 real historical FSDP jobs' own sig-lock delay (110-193s observed); see §5's own full writeup for the real gap this closes and its two disclosed limitations |
+| `RECENT_TIMING_CORRELATION_WINDOW_S` | 60.0 (`DCGM_FALLBACK_CHECK_INTERVAL_S * 3`) | alert_engine.py:283 -- **open calibration question, not yet resolved**: a real test (Hybrid job 3867, §5) observed 225s of real propagation delay between two genuinely-related alerts, well past this window, so the third related alert never joined the group. Not resized -- flagged for whoever next revisits this constant |
 | Ring buffer capacity | 256 | inspector-plugin/inspector.h:26 |
 | `DUMP_DISK_WARN_PCT` / `CRITICAL_PCT` | 80.0 / 95.0 (env-overridable) | alert_engine.py:114-115 |
 
