@@ -1332,6 +1332,38 @@ class NodeAggregator:
         s = self.state[key]
         s.mean_unconsumed.append(val)
         s.cv_unconsumed.append(val)
+        # MoE unconsumed-queue fix -- mean_unconsumed/cv_unconsumed were
+        # NEVER capped by the P22.5 fix below (that fix only ever touched
+        # all_vals/rate_samples, two separate lists). close_windows()
+        # only drains these once EVERY member currently known for a given
+        # (comm,bucket) simultaneously holds >= window_size (100/125)
+        # unconsumed samples -- confirmed live and via direct analysis of
+        # a real MoE job's own dump files that this condition can go
+        # unmet for a long time under MoE's per-expert routing: per-
+        # bucket member arrival rates skew up to ~15x (one real bucket:
+        # 208,996 records for the fastest member vs. 13,749 for the
+        # slowest, same bucket, same ~1053s span), so a fast member's
+        # queue can grow into the hundreds of thousands of entries while
+        # waiting for a structurally slower member on the SAME bucket to
+        # catch up. Confirmed NOT a permanent stall (every member in that
+        # real test eventually exceeded both window thresholds for every
+        # one of 202 real buckets -- lowest observed per-member-per-
+        # bucket count was 273, comfortably above CV_WINDOW=125) -- this
+        # is a severe but transient skew, not a member that never
+        # reports, so a drop-oldest cap (matching the all_vals/
+        # rate_samples precedent exactly, not a force-close) is safe:
+        # once the slow member finally catches up, there are still
+        # window_size-or-more REAL recent samples from every member
+        # waiting to be consumed, so close_windows() keeps working
+        # exactly as designed, just bounded. Reduces this mechanism's
+        # real measured contribution from a ~15M-entry lower bound
+        # (mean_unconsumed+cv_unconsumed combined, summed across one
+        # real 19-minute MoE job's worth of per-bucket member imbalance
+        # on one node) to the low tens of MB.
+        if len(s.mean_unconsumed) > 500:
+            s.mean_unconsumed = s.mean_unconsumed[-500:]
+        if len(s.cv_unconsumed) > 500:
+            s.cv_unconsumed = s.cv_unconsumed[-500:]
         s.all_vals.append(val)
         # P22.5 (aggregator scalability fix) -- all_vals was NEVER
         # trimmed before this fix, growing by one entry per record for

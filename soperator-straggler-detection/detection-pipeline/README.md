@@ -1245,23 +1245,33 @@ change to account for.
   cardinality. This is a different, more severe failure mode than the
   ring-buffer overflow in section 6.9 — do not conflate them**; that one
   is bounded, known record loss at the Inspector-plugin level, this is
-  unbounded growth in the aggregator's own Python heap. Two structures
-  are uncapped: `mean_unconsumed`/`cv_unconsumed` (the P22.5 fix only
-  ever capped the separate `all_vals`/`rate_samples` lists) and
-  `self.state`/`comm_bucket_members` (uncapped by key count). Confirmed
-  live on a real MoE job-wide fault: **218-220+ distinct comm/bucket
-  combinations** plus **~3GB/rank of dump data in one 19-minute run**
-  drove the aggregator's heartbeat and scoring metrics completely
-  silent, with memory still climbing 3+ minutes after the triggering job
-  was cancelled. A clean leaf-process restart (checkpoint-based resume
-  already in place) recovers it operationally — but is confirmed **not**
-  a fix: the identical symptom briefly recurred on restart while
-  catching up through its own remaining on-disk backlog. Structurally
-  possible on any future shape with similarly high cardinality + uneven
-  per-member routing, not guaranteed MoE-only. Full mechanism, live
-  evidence (including the real records-per-window-closed ratio widening
-  over the job's life), the confirmed recovery procedure, and the two
-  candidate fix directions (neither implemented):
+  unbounded growth in the aggregator's own Python heap/blocking on its
+  own flush path. One real cause (`mean_unconsumed`/`cv_unconsumed`,
+  uncapped since the P22.5 fix only ever touched the separate
+  `all_vals`/`rate_samples` lists) is **fixed** (500-entry drop-oldest
+  cap, same precedent). **A second, likely-dominant cause is confirmed
+  but NOT fixed**: `push_buf` grows unbounded during a single large
+  `poll_files()` catch-up cycle, with no flush or heartbeat until that
+  one call returns — and `poll_files()`'s own deadline check never
+  fires in practice (it compares against the run's multi-year overall
+  duration, not a per-call budget). Re-validating the first fix with the
+  identical real scenario still produced **15+ minutes of continuous
+  blackout and a new memory peak above the original incident** — the
+  cap was real and correct for its own target, just not sufficient.
+  **Whether MoE's job-wide detection itself works is still an open,
+  unresolved question** — no alert ever fired in either test run, but
+  the aggregator was never healthy long enough, in either run, to give
+  normal detection a fair chance; this is not evidence either way.
+  `self.state`/`comm_bucket_members` key-count growth (the third
+  candidate) is confirmed NOT the dominant factor, now grounded in a
+  real measurement: this workload's full bucket vocabulary converges
+  within ~1 minute wall-clock (confirmed twice, 202 buckets both times),
+  so key count does not scale with job duration — deferred with that
+  reasoning recorded, not just asserted. Full mechanism, live evidence
+  from both validation passes, the confirmed-insufficient recovery
+  procedure (including a case needing direct cleanup of a run's own
+  dump files rather than waiting out a restart), and the still-open
+  `push_buf` fix as the next priority:
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
 - **Pure-software-delay faults cap at PROBABLE forever**, never

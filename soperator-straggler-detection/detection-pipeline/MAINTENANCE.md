@@ -209,7 +209,9 @@ not carried forward from memory:
 | `_correlate_firing_timing_alerts` cannot identify a wait-induced-style culprit as root cause | **GENUINELY OPEN, by design — a tiebreak fix was tried, tested live, and reverted as disproven; see full writeup below** | Confirmed live on Hybrid jobs 3867, 3869, 3870, 3871 |
 | Inspector's `coll_sn` field never increments for `Send`/`Recv` (stays `0`, confirmed against 5,289 real records) — not usable as a cross-rank sequencing signal for point-to-point ops, only for `AllReduce`/`Broadcast` | **CONFIRMED DEAD END, real plugin gap, not a lean/verbose access issue** | A real plugin-level fix would be needed, not a query/panel change |
 | `_emit_timing_fallback` (the below-floor P27.2 cascade path — TP2/TP-inference/PP/Hybrid) never calls `_push_visibility_metric` | **CONFIRMED STRUCTURAL COVERAGE GAP, not a bug in any panel's own logic** | `agg_straggler_incident_tier` has zero real rows from any below-floor incident across this project's entire history; see full writeup below |
-| `node_aggregator_ref.py` has two uncapped, cardinality-keyed accumulators (`mean_unconsumed`/`cv_unconsumed`; `self.state`/`comm_bucket_members` key count) that grow without bound under MoE's extreme comm/bucket cardinality, silencing the aggregator's own heartbeat and scoring output entirely | **CONFIRMED live, DIFFERENT and more severe than the already-documented ring-buffer overflow above; recovery procedure confirmed, root fix NOT implemented** | Not a bounded/known-loss condition like the ring-buffer row above — full heartbeat/scoring blackout, see full writeup below |
+| `node_aggregator_ref.py`'s `mean_unconsumed`/`cv_unconsumed` lists grew without bound under MoE's extreme comm/bucket cardinality | **FIXED (500-entry drop-oldest cap, matching the existing `all_vals`/`rate_samples` precedent), confirmed correct for its own target** | Reduced this mechanism's real measured contribution from a ~15M-entry lower bound to ~65MB; see full writeup below |
+| `node_aggregator_ref.py`'s `push_buf` grows unbounded during a single large `poll_files()` catch-up cycle (no flush/heartbeat until that call returns, and its own deadline check never fires in practice) | **CONFIRMED live, more severe than the cap fix above addresses — likely the DOMINANT cause of the heartbeat/scoring blackout; NOT fixed** | Re-validation after the cap fix still produced 15+ min of continuous blackout and a new peak above the original incident; see full writeup below |
+| `self.state`/`comm_bucket_members`/`calib.scored` key count, uncapped | **CONFIRMED NOT the dominant factor; deferred with a real growth-rate projection, not just "wasn't dominant once"** | Real bucket-identity discovery converges within ~1 minute wall-clock (confirmed twice, 202 buckets both times) — key count does not scale with job duration for this workload; see full writeup below |
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
@@ -593,25 +595,139 @@ the same structural growth. MoE is simply the only shape that has
 exercised it so far; this is not proven safe for DLRM or any other
 high-frequency shape, only unconfirmed for them.
 
-**Two real design directions identified, neither implemented — this
-needs a correctness-tradeoff decision, not a quick patch:**
-1. Extend the existing 500-entry cap mechanism to also bound
-   `mean_unconsumed`/`cv_unconsumed`, which requires deciding what
-   happens to a window that can never close under the cap (drop the
-   oldest samples and never score that window? score it anyway with
-   whatever partial/trimmed membership is available, accepting a
-   possibly-incomplete comparison?) — a real detection-correctness
-   question, not just a memory one.
-2. Cap `self.state`/`comm_bucket_members` by key count, which requires a
-   cold-bucket eviction policy (evict least-recently-active
-   `(comm,bucket,member)` keys? cap total distinct buckets per comm and
-   refuse to score beyond it?) — also a real design question, since
-   evicting the wrong key could silently drop a bucket that was about to
-   matter.
+**Update — Option A (the `mean_unconsumed`/`cv_unconsumed` cap) was
+designed, implemented, and confirmed correct for its own target, but
+validation found it does NOT resolve the real-world symptom: a second,
+separate, likely-dominant unbounded path was found live during the same
+validation pass.** Before implementing, real data from the triggering
+job's own dump files (51M records, all 8 of worker-0's own ranks, parsed
+directly with the aggregator's own `coarsen_msg_size()` logic) answered
+the two open design questions with real numbers, not guesses:
 
-Neither direction is implemented here — this was a disclosure-only
-investigation, per explicit instruction not to patch this in the same
-pass that found it.
+- **Permanent stall or transient delay? Confirmed transient, not
+  permanent.** All 202 real `(bucket, coll)` keys had every one of 8
+  local members report **and** exceed both window thresholds
+  (`MEAN_WINDOW=100`/`CV_WINDOW=125`) by job's end — lowest observed
+  per-member-per-bucket count was 273. But the real per-bucket member
+  skew reaches **~15x** (one real bucket: 208,996 records for the
+  fastest member vs. 13,749 for the slowest, same ~1053s span). Summed
+  across all 202 buckets, the fast-member-minus-slow-member gap alone —
+  a real lower bound on peak unconsumed backlog — totals **~7.58M
+  entries for one list, ~15.16M combined**, on worker-0 alone, in 19
+  minutes. This confirmed a drop-oldest cap (not a force-close) was
+  safe: since every member demonstrably does eventually catch up, a
+  500-entry cap (identical to the existing `all_vals`/`rate_samples`
+  precedent) leaves comfortably more than `window_size` real recent
+  samples for every member at all times.
+- **Implemented**: the identical 500-entry drop-oldest cap, applied to
+  both `mean_unconsumed` and `cv_unconsumed` right where they're
+  appended (`node_aggregator_ref.py`, in `handle_record()`, immediately
+  before the existing `all_vals` cap). Reduces this specific mechanism's
+  real measured contribution from the ~15M-entry lower bound above to
+  roughly 65MB (1,616 real `(comm,member,bucket)` keys × 500 × 2 lists ×
+  ~40 bytes/entry) — confirmed by the same arithmetic used to size the
+  original problem, not a new estimate.
+
+**Re-validated live, same scenario, same fault mechanism (ground truth
+established from dump files before the job even finished, this time) —
+and the aggregator still went dark, worse than before:** both nodes'
+heartbeats went **continuously** dark for 15+ minutes straight (not
+intermittently, as in the original incident), and memory climbed past
+the original run's own peak (worker-1 reached 43GB vs. the original
+34GB). The cap is real and does what it was designed to do — but it is
+not sufficient, because it was not the dominant mechanism after all.
+
+**Second real cause found, previously missed in the original
+investigation: `push_buf` is unbounded during a single large catch-up
+cycle, and `poll_files()` has no practical per-call size limit despite
+accepting a `deadline` parameter.** `push_buf` (the pending-metric-push
+list) gets a new entry on every record processed (`agg_samples_seen`,
+appended unconditionally in `handle_record()`), but is only flushed
+once per outer `run()` loop iteration, **after** `poll_files()` returns.
+`poll_files()`'s own internal deadline check
+(`node_aggregator_ref.py` line ~1236, `DEADLINE_CHECK_EVERY=2000`) only
+compares against the run's overall multi-year `--duration` deadline —
+in practice that is never true, so a single `poll_files()` call
+processes an **entire available backlog, across every file, in one
+unbroken pass**, with no flush and no heartbeat push until it fully
+returns. Live evidence from the re-validation: a fresh real `push
+error... Connection refused` appeared in the log exactly matching the
+original incident's own symptom, and `agg_pushes_total`/
+`agg_records_seen_total` both read as having zero fresh samples
+(`N/A`) while the process was confirmed alive and busy (`ps` showed `R`
+state, climbing RSS) — consistent with a single still-in-flight
+`poll_files()` call that had not yet returned to flush anything.
+**This is a more complete explanation for the heartbeat/scoring
+blackout than the original Step 1-4 investigation identified** — that
+investigation correctly found a real bug (confirmed, now fixed) but did
+not examine `push_buf`, which appears to be the larger contributor to
+the actual blackout symptom specifically (as opposed to raw RSS growth,
+where both mechanisms contribute).
+
+**Recovery for this re-validation run needed an extra step beyond the
+established SIGTERM-the-leaf-process procedure.** Because the run lasted
+~39 minutes (over 2x the original) before being cancelled, its own dump
+files had grown to ~6.3GB/rank (~50GB/node total) by the time of
+cancellation — a restart alone would have forced the fresh process to
+replay that entire backlog before recovering, plausibly taking far
+longer than the original incident's ~10-minute recovery. Since this
+specific run's own dump files had already yielded everything needed
+(ground truth, the push_buf finding) and were confirmed to serve no
+further purpose, they were deleted directly rather than waited out —
+both aggregators recovered to fresh sub-1s heartbeats and flat memory
+within ~4 minutes of that cleanup. `tools/self_test.sh`-equivalent
+health checks (heartbeat, `CHECK-FAILED` delta, queue state) confirmed
+the pipeline healthy afterward; `CHECK-FAILED` count unchanged (117).
+
+**Detection question: unresolved, not negative — investigated, not
+assumed.** No `[ALERT]`/`[STRAGGLER-INCIDENT]` ever appeared for the
+real injected target (rank 4) in either the original 19-minute run or
+this 39-minute re-validation — zero matches in the alert log, both
+times. This is **not** evidence that MoE's job-wide detection itself is
+broken: both aggregators were confirmed dark (no heartbeat, no scoring
+metrics reaching VictoriaMetrics, which `alert_engine.py` polls
+exclusively) for the large majority of both runs' real duration. There
+was no sustained window in either test where the aggregator ran in a
+genuinely healthy, live-paced state (not still catching up on stale
+backlog) for long enough to give the normal per-bucket mean/CV detection
+path a fair chance to fire. **This question remains open and blocked on
+fixing `push_buf`/`poll_files()` first** — it cannot be answered by
+retrying the same test again without that fix, since the same blackout
+would very likely recur and confound the result the same way twice now.
+
+**Option B (`self.state`/`comm_bucket_members`/`calib.scored` key-count
+cap): still deferred, now grounded in a real growth-rate measurement,
+not just "wasn't dominant in a 19-minute test."** Direct analysis of
+exactly when each of the 202 real bucket identities first appeared in
+the dump files: **192/202 (95%) appeared within the first 0.38 seconds**
+of the job, and all 202 were present by 38 seconds — a 19-minute (and,
+in the re-validation, 39-minute) job's full bucket vocabulary is fixed
+almost immediately, not discovered progressively over the job's life.
+The continuous "calibrated new bucket" log lines seen throughout a run
+reflect the **calibration threshold** (10 occurrences) being crossed
+late for rare buckets, not new bucket **identities** appearing late.
+**Reproduced exactly in the re-validation run: 202 distinct buckets
+again**, on a different real comm — strong evidence this is a fixed
+property of this model/config's own routing-size vocabulary, not an
+open-ended or run-to-run-variable quantity. Projected forward: a
+realistic multi-hour production MoE job on this same model/config would
+plausibly retain essentially the **same** ~1,616-key count (worker-0)
+observed in a 19-minute run, not scale up with duration — key-count
+overhead, even fully uncapped, stays in the low tens of MB, genuinely
+negligible next to the GB-to-tens-of-GB scale of the `push_buf`/
+unconsumed-queue mechanisms. **Caveat, stated honestly**: this
+conclusion is specific to a workload whose routing-size vocabulary is
+itself bounded by the model/config, as observed here twice; a
+hypothetical MoE config with a genuinely unbounded or continuously-novel
+message-size space was not tested and could behave differently. Design
+for eviction (LRU by last-seen real `dump_timestamp_us`, tie-broken
+toward evicting the lower-lifetime-occurrence candidate among idle
+ones, to distinguish "abandoned" from "rare but real and recurring" as
+best as an online heuristic can) remains recorded here for whoever picks
+this up, but is **not next in priority** — fixing `push_buf`/
+`poll_files()` is the higher-priority follow-up, since it is both the
+likely-dominant real cause and the blocker on ever answering the
+detection question above.
 
 ## 6. Calibration constants needing re-validation on change
 
