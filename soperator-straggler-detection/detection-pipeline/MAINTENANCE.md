@@ -210,7 +210,7 @@ not carried forward from memory:
 | Inspector's `coll_sn` field never increments for `Send`/`Recv` (stays `0`, confirmed against 5,289 real records) — not usable as a cross-rank sequencing signal for point-to-point ops, only for `AllReduce`/`Broadcast` | **CONFIRMED DEAD END, real plugin gap, not a lean/verbose access issue** | A real plugin-level fix would be needed, not a query/panel change |
 | `_emit_timing_fallback` (the below-floor P27.2 cascade path — TP2/TP-inference/PP/Hybrid) never calls `_push_visibility_metric` | **CONFIRMED STRUCTURAL COVERAGE GAP, not a bug in any panel's own logic** | `agg_straggler_incident_tier` has zero real rows from any below-floor incident across this project's entire history; see full writeup below |
 | `node_aggregator_ref.py`'s `mean_unconsumed`/`cv_unconsumed` lists grew without bound under MoE's extreme comm/bucket cardinality | **FIXED (500-entry drop-oldest cap, matching the existing `all_vals`/`rate_samples` precedent), confirmed correct for its own target** | Reduced this mechanism's real measured contribution from a ~15M-entry lower bound to ~65MB; see full writeup below |
-| `node_aggregator_ref.py`'s `push_buf` grows unbounded during a single large `poll_files()` catch-up cycle (no flush/heartbeat until that call returns, and its own deadline check never fires in practice) | **CONFIRMED live, more severe than the cap fix above addresses — likely the DOMINANT cause of the heartbeat/scoring blackout; NOT fixed** | Re-validation after the cap fix still produced 15+ min of continuous blackout and a new peak above the original incident; see full writeup below |
+| `node_aggregator_ref.py`'s `push_buf` grows unbounded during a single large `poll_files()` catch-up cycle (no flush/heartbeat until that call returns, and its own deadline check never fires in practice) | **FIXED (`POLL_FILES_MAX_SECONDS=5.0` real per-call deadline), confirmed live over a full 48-minute run — zero heartbeat gaps, memory flat/bounded** | Was the dominant cause of the heartbeat/scoring blackout; see full writeup below. MoE's own separate, open detection-timing question (not this bug) is the one remaining item before MoE is fully validated |
 | `self.state`/`comm_bucket_members`/`calib.scored` key count, uncapped | **CONFIRMED NOT the dominant factor; deferred with a real growth-rate projection, not just "wasn't dominant once"** | Real bucket-identity discovery converges within ~1 minute wall-clock (confirmed twice, 202 buckets both times) — key count does not scale with job duration for this workload; see full writeup below |
 
 **Maintenance note, found live during the original version of this
@@ -728,6 +728,93 @@ this up, but is **not next in priority** — fixing `push_buf`/
 `poll_files()` is the higher-priority follow-up, since it is both the
 likely-dominant real cause and the blocker on ever answering the
 detection question above.
+
+**Update — the `push_buf`/`poll_files()` fix was designed, implemented,
+and validated live over a full 48-minute MoE run. The heartbeat/memory
+blackout is resolved, confirmed; a separate, narrower, genuinely open
+detection-timing question was found in the process of validating it.**
+
+Root cause, confirmed precisely rather than assumed: `poll_files()`'s
+own deadline check (`node_aggregator_ref.py`, inside the per-line loop)
+compared against `run()`'s own `t_end = time.time() + duration_s` — and
+`duration_s` is always the supervisor's `--duration 315360000`
+(~10 years). That comparison is not "rarely true," it is **unreachable
+by any single real call**, so a `poll_files()` call facing a real
+backlog ran every available byte across every file in one unbroken
+pass, with zero opportunity for `flush()` (the only place anything in
+`push_buf` — including every real detection metric `alert_engine.py`
+reads, not just the heartbeat display value — reaches VictoriaMetrics)
+to run until it fully returned. A second gap: the only check that
+existed lived inside the *inner* per-line loop of whichever file was
+currently open; the *outer* per-file loop had no check at all, so even
+a working inner bound wouldn't have stopped the call from then opening
+and fully reading the next file's own backlog too.
+
+**Fixed** with `POLL_FILES_MAX_SECONDS = 5.0`, a short per-call budget
+computed fresh at the start of every `poll_files()` call
+(`effective_deadline = min(deadline, time.time() + POLL_FILES_MAX_
+SECONDS)`), checked at the top of the outer per-file loop (new) and in
+place of the old inner-loop comparison (existing cadence, corrected
+target). 5.0s is grounded, not invented: half of the already-real
+`OFFSET_CHECKPOINT_INTERVAL_S` (10.0), with ~18x margin under
+`pipeline_health.py`'s real `HEARTBEAT_STALE_THRESH_S=90.0` even
+accounting for `flush()`'s own worst-case 10s network timeout landing
+immediately after. `run()`'s existing loop structure needed no changes
+— `maybe_heartbeat()` → `maybe_checkpoint_offsets()` → `flush()` already
+runs right after every `poll_files()` return, so a capped return simply
+means that sequence now happens every ~5s during a backlog instead of
+once after 15+ minutes; the backlog itself is processed identically,
+just across more, shorter calls, with offsets already correctly tracked
+incrementally even on a partial-file break (confirmed from the existing
+code, unchanged by this fix).
+
+**Validated live, same real scenario, ground truth established before
+checking any alert, same discipline as every prior attempt — run
+extended to 48 minutes (over 2x either prior attempt) specifically to
+give detection a fair, uninterrupted shot:**
+- **Heartbeat: zero gaps, the entire 48 minutes.** Sampled every minute;
+  age never exceeded ~1s, start to finish — categorically different
+  from the 15+ continuous minutes of blackout immediately before this
+  fix, on the identical test.
+- **Memory: flat and bounded, sampled continuously, not assumed from
+  Option A's own orthogonality.** RSS bounced between ~1-7GB (worker-0)
+  and ~1-11GB (worker-1, one transient spike that receded the very next
+  sample) for the full 48 minutes — no sustained upward trend, a
+  categorically different shape from the prior monotonic climb to
+  33-43GB. Confirms Option A continues to hold with this fix layered on
+  top.
+- **Detection: still did not fire — but now for a real, separately
+  confirmed reason, not infrastructure failure. Not a confirmed miss.**
+  `agg_mean_windows_total` on worker-0 crawled from 251 to 264 over the
+  final ~20 minutes of observation (real, continuing forward progress,
+  not stalled) while `agg_mean_z_worst`/`agg_cv_z_worst` (the actual
+  values `alert_engine.py` acts on) never produced a single sample
+  despite 64.4M records processed. This is consistent with, not
+  contradicted by, the real per-bucket member-arrival skew already
+  measured directly from this workload's own dump files during the
+  design phase (**up to ~15x between the fastest and slowest member
+  reporting the identical bucket**) — this fix stopped that skew from
+  consuming unbounded memory, it does not make a structurally slow
+  member's own arrival rate for a given bucket any faster. Getting even
+  one scored window for whichever bucket(s) are relevant to this fault
+  may simply take substantially longer under MoE's routing pattern than
+  on any other shape validated in this project, independent of both
+  infrastructure bugs just fixed.
+
+**This is now the one remaining open item before MoE can be considered
+fully validated.** Everything else about MoE is closed: job-wide
+detection's own documented scope (permanent non-localization, README
+§7.1), the Inspector-plugin ring-buffer capacity limitation (bounded,
+known loss, section above), and both real aggregator infrastructure
+bugs found and fixed this investigation (`mean_unconsumed`/
+`cv_unconsumed`'s cap, and this `push_buf`/`poll_files()` fix). Whether
+the detection-timing gap needs its own fix (e.g., adjusting
+`close_windows()`'s all-members-simultaneously gate to tolerate
+sustained, structural per-member imbalance rather than only transient
+noise) or simply needs a much longer soak test to confirm eventual
+firing is a genuinely open design question — not decided here, not
+guessed at, left for whoever picks this up next with the real evidence
+above as the starting point.
 
 ## 6. Calibration constants needing re-validation on change
 

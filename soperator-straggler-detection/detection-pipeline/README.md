@@ -1240,38 +1240,45 @@ change to account for.
   calibration question about the 60s correlation window itself:
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
-- **`node_aggregator_ref.py` can go completely dark — heartbeat and
+- **`node_aggregator_ref.py` could go completely dark — heartbeat and
   scoring output, not just slow — under MoE's extreme comm/bucket
-  cardinality. This is a different, more severe failure mode than the
+  cardinality. This was a different, more severe failure mode than the
   ring-buffer overflow in section 6.9 — do not conflate them**; that one
-  is bounded, known record loss at the Inspector-plugin level, this is
-  unbounded growth in the aggregator's own Python heap/blocking on its
-  own flush path. One real cause (`mean_unconsumed`/`cv_unconsumed`,
-  uncapped since the P22.5 fix only ever touched the separate
-  `all_vals`/`rate_samples` lists) is **fixed** (500-entry drop-oldest
-  cap, same precedent). **A second, likely-dominant cause is confirmed
-  but NOT fixed**: `push_buf` grows unbounded during a single large
-  `poll_files()` catch-up cycle, with no flush or heartbeat until that
-  one call returns — and `poll_files()`'s own deadline check never
-  fires in practice (it compares against the run's multi-year overall
-  duration, not a per-call budget). Re-validating the first fix with the
-  identical real scenario still produced **15+ minutes of continuous
-  blackout and a new memory peak above the original incident** — the
-  cap was real and correct for its own target, just not sufficient.
-  **Whether MoE's job-wide detection itself works is still an open,
-  unresolved question** — no alert ever fired in either test run, but
-  the aggregator was never healthy long enough, in either run, to give
-  normal detection a fair chance; this is not evidence either way.
-  `self.state`/`comm_bucket_members` key-count growth (the third
-  candidate) is confirmed NOT the dominant factor, now grounded in a
-  real measurement: this workload's full bucket vocabulary converges
-  within ~1 minute wall-clock (confirmed twice, 202 buckets both times),
-  so key count does not scale with job duration — deferred with that
-  reasoning recorded, not just asserted. Full mechanism, live evidence
-  from both validation passes, the confirmed-insufficient recovery
-  procedure (including a case needing direct cleanup of a run's own
-  dump files rather than waiting out a restart), and the still-open
-  `push_buf` fix as the next priority:
+  is bounded, known record loss at the Inspector-plugin level, this was
+  unbounded growth in the aggregator's own Python heap and a blocked
+  flush path. **Both real causes found this investigation are now
+  fixed and validated**: `mean_unconsumed`/`cv_unconsumed` (uncapped
+  since the P22.5 fix only ever touched the separate `all_vals`/
+  `rate_samples` lists) got the same 500-entry drop-oldest cap; `push_buf`
+  (which grew unbounded during a single large `poll_files()` catch-up
+  cycle, since `poll_files()`'s own deadline check compared against the
+  run's multi-year overall duration and was therefore unreachable in
+  practice) now has a real, grounded 5-second per-call budget
+  (`POLL_FILES_MAX_SECONDS`). **Validated live over a full 48-minute MoE
+  run: zero heartbeat gaps (vs. 15+ continuous minutes of blackout
+  before), memory flat and bounded (vs. a monotonic climb to 33-43GB
+  before), sampled continuously, not assumed.** `self.state`/
+  `comm_bucket_members` key-count growth (the third candidate) was
+  confirmed NOT the dominant factor via a real measurement — this
+  workload's full bucket vocabulary converges within ~1 minute
+  wall-clock (confirmed twice, 202 buckets both times) — and remains
+  deferred, not fixed.
+  **One item remains open, separate from both now-fixed infrastructure
+  bugs: whether MoE's job-wide detection itself fires under sustained
+  conditions is still unconfirmed, for a real, specific, narrower reason
+  — not a guess.** The 48-minute validation run never produced a scored
+  z-score sample for the injected fault, despite real, continuing
+  forward progress (`agg_mean_windows_total` 251→264 over the run's
+  final ~20 minutes) — consistent with the real per-member arrival skew
+  already measured directly from this workload's own dump files (**up
+  to ~15x between the fastest and slowest member reporting the
+  identical bucket**), which the fixes above stop from consuming memory
+  but do not make converge any faster. **This is the one remaining item
+  before MoE can be considered fully validated** — whether it needs its
+  own fix (adjusting the window-closing gate's tolerance for sustained,
+  structural imbalance) or just a longer soak test is a genuinely open
+  design question, not decided here. Full mechanism, both fixes' real
+  validation evidence, and this remaining open question:
   [MAINTENANCE.md §5](MAINTENANCE.md#5-known-limitations--disclosed-gaps--current-status).
 
 - **Pure-software-delay faults cap at PROBABLE forever**, never

@@ -1062,6 +1062,28 @@ class NodeAggregator:
     # records) regardless of total backlog size.
     DEADLINE_CHECK_EVERY = 2000
 
+    # push_buf/heartbeat-blackout fix -- the comment above DEADLINE_CHECK_
+    # EVERY already describes the intended behavior ("a single call
+    # processing a large backlog could run for minutes with no
+    # opportunity for run()'s own duration check to ever see it") -- but
+    # the actual `deadline` poll_files() is called with (run()'s own
+    # t_end = time.time() + duration_s, and duration_s is always the
+    # supervisor's ~10-year --duration) is never reachable by any single
+    # real call, so that intent was never actually wired up. Confirmed
+    # live: a real MoE catch-up call ran for 15+ continuous minutes with
+    # zero flush() and zero heartbeat, because push_buf (every real
+    # detection-relevant metric -- agg_mean_z_worst/agg_cv_z_worst/etc,
+    # not just the heartbeat display value -- flush() is the ONLY place
+    # any of it reaches VictoriaMetrics) only gets sent once poll_files()
+    # fully returns. 5.0s is grounded against two already-real numbers,
+    # not invented: half of OFFSET_CHECKPOINT_INTERVAL_S (10.0), so a
+    # checkpoint opportunity still lines up at least once per capped
+    # call, and ~18x margin under pipeline_health.py's real
+    # HEARTBEAT_STALE_THRESH_S=90.0 even accounting for flush()'s own
+    # worst-case 10s network timeout landing right after (5s processing +
+    # 10s worst-case flush ~= 15s worst-case gap, still far under 90s).
+    POLL_FILES_MAX_SECONDS = 5.0
+
     def _offset_checkpoint_path(self):
         return os.path.join(self.dump_dir, OFFSET_CHECKPOINT_FILENAME)
 
@@ -1177,7 +1199,27 @@ class NodeAggregator:
         self.refresh_job_sacct_info()
         self.check_sacct_squeue_disagreement()
         self.maybe_reset_workload_state()
+        # push_buf/heartbeat-blackout fix -- a short, real per-call bound
+        # (see POLL_FILES_MAX_SECONDS's own comment), computed fresh for
+        # THIS call, taken together with whatever overall run-duration
+        # deadline was passed in (never reachable in practice today, but
+        # preserved unchanged rather than dropped). Whichever is sooner
+        # wins, so this never makes --duration's own (already-inert)
+        # semantics any less honored than they already were.
+        call_deadline = time.time() + self.POLL_FILES_MAX_SECONDS
+        effective_deadline = min(deadline, call_deadline) if deadline is not None else call_deadline
         for fp in sorted(glob.glob(f"{self.dump_dir}/*.log")):
+            # push_buf/heartbeat-blackout fix -- the ONLY deadline check
+            # that existed before this fix lived inside the per-line loop
+            # below, so a call already mid-way through file N's own huge
+            # backlog would still go on to open and fully f.read() file
+            # N+1, N+2, etc. once file N's own line loop finally broke --
+            # checking here too, before ever opening the next file, is
+            # what actually bounds total wall-clock time across the WHOLE
+            # glob, not just within whichever single file happened to be
+            # in progress when the budget ran out.
+            if time.time() >= effective_deadline:
+                break
             offset = self.file_offsets.get(fp, 0)
             try:
                 st = os.stat(fp)
@@ -1233,9 +1275,9 @@ class NodeAggregator:
                     if d is not None:
                         self.handle_record(d)
                 since_check += 1
-                if deadline is not None and since_check >= self.DEADLINE_CHECK_EVERY:
+                if since_check >= self.DEADLINE_CHECK_EVERY:
                     since_check = 0
-                    if time.time() >= deadline:
+                    if time.time() >= effective_deadline:
                         break
             self.file_offsets[fp] = offset + consumed
             # Restart-backlog-replay fix -- a single poll_files() call
