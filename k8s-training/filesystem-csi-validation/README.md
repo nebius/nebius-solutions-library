@@ -61,10 +61,11 @@ Suggested order:
    resources left from steps 01–03 when you are done testing
 
 > **Functional vs performance:** steps 01–05 validate that storage *works
-> correctly* (mounts, binds, RWX, checksum integrity). Step 06 (FIO) and the
-> cloudmeter IOR/MDTEST tests measure how *fast* it is. They complement each
-> other — a passing FIO run is not a substitute for the correctness checks, and
-> vice versa.
+> correctly* (mounts, binds, RWX, checksum integrity). Step 06 (FIO) measures how
+> *fast* it is. They complement each other — a passing FIO run is not a substitute
+> for the correctness checks, and vice versa. (Parallel/aggregate throughput tools
+> such as IOR and MDTEST live outside this suite in the separate `cloudmeter` repo,
+> not in `nebius-solutions-library`.)
 
 Prerequisites:
 
@@ -173,6 +174,18 @@ reference comparison when the target *is* SFS. Non-SFS, custom, single-file, or
 concurrent multi-host results are **not** compared to the SFS numbers. The report
 prints the tested StorageClass, PVC, filesystem type, mount, and capacity, and
 labels results with the storage target.
+
+### Relationship to the other fio scripts in the repo
+
+The repo already ships fio benchmarks under `data-transfer/`
+(`benchmark_fio_single_node.sh`, `benchmark_fio_multi_node_read.sh`,
+`benchmark_fio_multi_node_write.sh`) and an fio step in
+`applications/osmo/workflows/osmo/test_mnt_data.yaml`. Those are a **different
+methodology** — a different preset (`bsrange=64k-2M`, 16 jobs, iodepth 16, 20 G,
+60 s) driven over SSH to named workers rather than this script's kubectl-driven
+canonical preset. **Their numbers are not comparable to this script's canonical
+preset or to the SFS reference values below.** Pick one methodology and stay in it
+when comparing runs; this script (06) is the one the SFS reference figures belong to.
 
 ### SFS POC reference values (observed, not guarantees)
 
