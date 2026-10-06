@@ -1965,7 +1965,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Composed, human-readable incident summary built ENTIRELY from fields already pushed to VictoriaMetrics (tier, severity_ratio, persisted_s, Path C verdict, worker/GPU/rank identity) -- zero new free text, zero new cardinality (tier adds exactly 3 real values, the same bounded-cardinality discipline every other label here already follows). Set the Comm/Member variables from an [ALERT]/[STRAGGLER-INCIDENT] line to see that exact event's own row. Only two columns carry real color meaning -- Tier and PathCVerdict, both exactly-3-value fields with explicit mappings (see their own overrides below). Every other column is deliberately left uncolored (fixed/plain) rather than inheriting a default threshold color that would carry no real meaning -- PersistedS and SeverityRatio are real, continuous, workload-dependent numbers with no project-wide 'good/bad' cutoff to color by (see DESIGN_NOTES.md for just how widely severity_ratio legitimately varies across real incidents), so showing the true number uncolored is more honest than an invented color band. Tier: CONFIRMED is the only tier colored as urgent (red); PROBABLE/UNCONFIRMED are deliberately styled the same as each other (blue) and never as CONFIRMED, so this table's own visual design cannot imply more confidence than the tier label itself states. A new IncidentRole column identifies, among members of the same communicator firing around the same real instant, which one is the likely true root cause (ROOT CAUSE -- the real minimum exec time among all members at that moment, per this project's own documented \"the straggler arrives late and shows the shortest exec time\" rationale) versus which are correlated downstream effects (waiting on the real root cause, not independent faults of their own). \"unknown\" when the underlying per-member exec-time data genuinely was not available at firing time -- never a guess. UPDATED: rows are now sorted so every row belonging to the SAME real incident (same `comm` -- confirmed the real, already-unique join key; no separate incident_id label exists on this metric) is contiguous, with the root-cause row sorted first within its group (comm ascending, then incident_role descending -- correct for the common 2-role case; if a group also contains an 'unknown'-role row, that row can sort above root_cause -- disclosed here, not hidden). A new RealExecTimeUs column (agg_mean_exec_time_us, already-existing metric, no alert_engine.py change) shows the actual raw evidence number, not just the ratio -- compare it directly against the other rows in the same Comm group. This is a true row-level sort/consolidation, not a Grafana nested-table collapse: no image renderer or headless browser is available in this environment to visually verify pixel-level nested-table rendering, so a sort-based design using transforms with well-established, non-ambiguous behavior was chosen over an unverifiable one. Query E uses a PromQL `and on(hostname,comm,member,bucket)` intersection against agg_straggler_incident_tier, NOT a bare member filter -- confirmed live this was necessary: agg_mean_exec_time_us is pushed for EVERY member of a comm on every window-close, not just incident-firing ones (confirmed live: 16 real series returned for a comm where only 1 member actually fired an incident), so an unrestricted query would have added rows for every innocent, non-firing peer with blank Tier/PersistedS/SeverityRatio/PathCVerdict -- the exact ambiguous-blank-cell problem this fix is supposed to eliminate, not add. `coll` is deliberately excluded from the on() match (bucket alone is kept): confirmed live that older incidents (pre-dating a later label fix) have agg_straggler_incident_tier pushed WITHOUT a coll label at all, so including coll in the match would silently drop those rows to zero; bucket alone is both sufficient for correct disambiguation and present on every real incident regardless of when it was pushed, confirmed against both an old (pre-coll-label) and a new real incident.",
+      "description": "Composed, human-readable incident summary built ENTIRELY from fields already pushed to VictoriaMetrics (tier, severity_ratio, persisted_s, Path C verdict, worker/GPU/rank identity) -- zero new free text, zero new cardinality (tier adds exactly 3 real values, the same bounded-cardinality discipline every other label here already follows). Set the Comm/Member variables from an [ALERT]/[STRAGGLER-INCIDENT] line to see that exact event's own row. Only two columns carry real color meaning -- Tier and PathCVerdict, both exactly-3-value fields with explicit mappings (see their own overrides below). Every other column is deliberately left uncolored (fixed/plain) rather than inheriting a default threshold color that would carry no real meaning -- PersistedS and SeverityRatio are real, continuous, workload-dependent numbers with no project-wide 'good/bad' cutoff to color by (see DESIGN_NOTES.md for just how widely severity_ratio legitimately varies across real incidents), so showing the true number uncolored is more honest than an invented color band. Tier: CONFIRMED is the only tier colored as urgent (red); PROBABLE/UNCONFIRMED are deliberately styled the same as each other (blue) and never as CONFIRMED, so this table's own visual design cannot imply more confidence than the tier label itself states. A new IncidentRole column identifies, among members of the same communicator firing around the same real instant, which one is the likely true root cause (ROOT CAUSE -- the real minimum exec time among all members at that moment, per this project's own documented \"the straggler arrives late and shows the shortest exec time\" rationale) versus which are correlated downstream effects (waiting on the real root cause, not independent faults of their own). \"unknown\" when the underlying per-member exec-time data genuinely was not available at firing time -- never a guess. UPDATED: rows are now sorted so every row belonging to the SAME real incident (same `comm` -- confirmed the real, already-unique join key; no separate incident_id label exists on this metric) is contiguous, with the root-cause row sorted first within its group (comm ascending, then incident_role descending -- correct for the common 2-role case; if a group also contains an 'unknown'-role row, that row can sort above root_cause -- disclosed here, not hidden). A new RealExecTimeUs column (agg_mean_exec_time_us, already-existing metric, no alert_engine.py change) shows the actual raw evidence number, not just the ratio -- compare it directly against the other rows in the same Comm group. This is a true row-level sort/consolidation, not a Grafana nested-table collapse: no image renderer or headless browser is available in this environment to visually verify pixel-level nested-table rendering, so a sort-based design using transforms with well-established, non-ambiguous behavior was chosen over an unverifiable one. Query E uses a PromQL `and on(hostname,comm,member,bucket)` intersection against agg_straggler_incident_tier, NOT a bare member filter -- confirmed live this was necessary: agg_mean_exec_time_us is pushed for EVERY member of a comm on every window-close, not just incident-firing ones (confirmed live: 16 real series returned for a comm where only 1 member actually fired an incident), so an unrestricted query would have added rows for every innocent, non-firing peer with blank Tier/PersistedS/SeverityRatio/PathCVerdict -- the exact ambiguous-blank-cell problem this fix is supposed to eliminate, not add. `coll` is deliberately excluded from the on() match (bucket alone is kept): confirmed live that older incidents (pre-dating a later label fix) have agg_straggler_incident_tier pushed WITHOUT a coll label at all, so including coll in the match would silently drop those rows to zero; bucket alone is both sufficient for correct disambiguation and present on every real incident regardless of when it was pushed, confirmed against both an old (pre-coll-label) and a new real incident. V1-beta-followup (wait-induced coverage gap) -- a wait-induced-only fault (exactly N-1 of N real members elevated, the culprit's own reading looking normal -- see the standalone Wait-Induced Detections panel's own description for the full mechanism) used to produce ZERO rows here, even though it was correctly detected and agg_wait_induced_* metrics were already being pushed -- this panel's own queries simply never read them. Fixed by adding three new queries (agg_wait_induced_detected/_tier/_peer_ratio) using label_replace() to map role_in_event (culprit/elevated_peer) onto the SAME incident_role label name and values (root_cause/downstream) agg_straggler_incident_tier's own rows already use -- this is the entire mechanism that makes a wait-induced row sort, color, and consolidate identically to every other fault type, with zero changes to the existing merge/sortBy/override logic itself. A wait-induced row never has persisted_s/severity_ratio/Path C evidence pushed (confirmed by reading _emit_wait_induced_alert directly -- that path has no equivalent pushes), so those columns correctly show their existing \"not available\"/\"not checked\" labels, same as any other row missing that evidence -- not a new gap, the same honest-null discipline already established. The reverse direction is new: a non-wait-induced row now correctly shows \"not applicable\" (not blank) for the three new WaitInduced* columns, since that detection path never fired for it.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2192,6 +2192,98 @@
                 ]
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #F"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null+nan",
+                      "result": {
+                        "text": "not applicable (this row wasn't detected via the wait-induced path)",
+                        "color": "text"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #G"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null+nan",
+                      "result": {
+                        "text": "not applicable (no elevated-peer evidence for this row)",
+                        "color": "text"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #H"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null+nan",
+                      "result": {
+                        "text": "not applicable (this row wasn't detected via the wait-induced path)",
+                        "color": "text"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #E"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null+nan",
+                      "result": {
+                        "text": "not available (no real exec-time evidence for this row)",
+                        "color": "text"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
           }
         ]
       },
@@ -2285,6 +2377,48 @@
           "legendFormat": "__auto",
           "range": true,
           "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "label_replace(agg_wait_induced_detected{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}, \"incident_role\", \"root_cause\", \"role_in_event\", \"culprit\")",
+          "format": "table",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "label_replace(agg_wait_induced_peer_ratio{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}, \"incident_role\", \"downstream\", \"role_in_event\", \"elevated_peer\")",
+          "format": "table",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "agg_wait_induced_tier{cluster=~\"$cluster\", slurm_job_id=~\"$jobid\", hostname=~\"$hostname\", comm=~\"$comm\", member=~\"$member\"}",
+          "format": "table",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "H"
         }
       ],
       "title": "Composed incident summary (identity + tier + evidence, no raw log reading needed)",
@@ -2327,12 +2461,16 @@
               "Value #E": 7,
               "bucket": 8,
               "coll": 9,
-              "Time": 10,
-              "tier": 11,
-              "Value #A": 12,
-              "Value #B": 13,
-              "Value #C": 14,
-              "Value #D": 15
+              "baseline_source": 10,
+              "Time": 11,
+              "tier": 12,
+              "Value #A": 13,
+              "Value #B": 14,
+              "Value #C": 15,
+              "Value #D": 16,
+              "Value #F": 17,
+              "Value #G": 18,
+              "Value #H": 19
             },
             "renameByName": {
               "hostname": "Worker",
@@ -2349,7 +2487,11 @@
               "Value #C": "SeverityRatio",
               "Value #D": "PathCVerdict(-1=unchecked,0=ruled-out,1=confirmed)",
               "Value #E": "RealExecTimeUs (raw evidence, not just ratio)",
-              "incident_role": "IncidentRole"
+              "incident_role": "IncidentRole",
+              "baseline_source": "Source(role/role_cross_host/cross_comm_peer)",
+              "Value #F": "WaitInducedCulprit(1=yes)",
+              "Value #G": "WaitInducedPeerRatio",
+              "Value #H": "WaitInducedTierMarker(1)"
             }
           }
         }
