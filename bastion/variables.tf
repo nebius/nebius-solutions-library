@@ -42,7 +42,7 @@ variable "ssh_private_key_path" {
 variable "nebius_cli_install_url" {
   description = "Nebius CLI installer URL used by bastion cloud-init."
   type        = string
-  default     = "https://storage.eu-west2.nebius.cloud/cli/install.sh"
+  default     = "https://artifacts.nebius.cloud/cli/install.sh"
 
   validation {
     condition     = can(regex("^https://[^'[:space:]]+$", var.nebius_cli_install_url))

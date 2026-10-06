@@ -19,7 +19,7 @@ workflow:
         PARENT_ID: "project-XXX"
         NEBIUS_IAM_TOKEN: "<nebius iam get-access-token result>"
         NGC_API_KEY: "nvapi-XXX"
-        NEBIUS_CLI_INSTALL_URL: "https://storage.eu-west2.nebius.cloud/cli/install.sh"
+        NEBIUS_CLI_INSTALL_URL: "https://artifacts.nebius.cloud/cli/install.sh"
         NEBIUS_API_ENDPOINT: "api.nebius.cloud:443"
         SERVERLESS_PLATFORM: "gpu-l40s-d"
         SERVERLESS_PRESET: "1gpu-16vcpu-96gb"

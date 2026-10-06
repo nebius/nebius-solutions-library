@@ -8,7 +8,7 @@
 
 1. Install [Nebius CLI](https://docs.nebius.ai/cli/install/):
    ```bash
-   curl -sSL https://storage.eu-west2.nebius.cloud/cli/install.sh | bash
+   curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
    ```
 
 2. Reload your shell session:
