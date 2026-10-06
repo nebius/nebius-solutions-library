@@ -43,5 +43,5 @@ locals {
     null,
   ) : null
   preset            = var.preset != null ? var.preset : try(local.platform_defaults.preset, null)
-  boot_image_family = var.boot_image_family != null ? var.boot_image_family : try(local.platform_defaults.boot_image_family, null)
+  boot_image_family = var.boot_image_family != null ? var.boot_image_family : try(local.platform_defaults.boot_image_family, "ubuntu24.04-cuda12")
 }

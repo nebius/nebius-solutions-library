@@ -9,11 +9,6 @@ resource "terraform_data" "dsvm_configuration_validation" {
       condition     = local.platform == null || local.preset != null
       error_message = "No default DSVM preset is defined for platform ${coalesce(local.platform, "<unset>")}. Set preset explicitly. Platforms with defaults: ${join(", ", sort(keys(local.platform_defaults_by_platform)))}."
     }
-
-    precondition {
-      condition     = local.platform == null || local.boot_image_family != null
-      error_message = "No default DSVM boot image family is defined for platform ${coalesce(local.platform, "<unset>")}. Set boot_image_family explicitly. Platforms with defaults: ${join(", ", sort(keys(local.platform_defaults_by_platform)))}."
-    }
   }
 }
 
