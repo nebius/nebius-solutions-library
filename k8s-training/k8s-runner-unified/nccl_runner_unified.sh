@@ -57,13 +57,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ============ CONFIGURE FOR YOUR CLUSTER ============
-NAMESPACE=nccl-tests
-# Templates are env-overridable (aligns with PR 1206's form so the two don't fight
-# over this line). x86/device-plugin uses TEMPLATE; the DRA path swaps to TEMPLATE_DRA.
+NAMESPACE="${NAMESPACE:-nccl-tests}"
+# The x86/device-plugin path uses TEMPLATE; the DRA path swaps to TEMPLATE_DRA.
 TEMPLATE="${TEMPLATE:-nccl-test-template.yaml}"          # x86/device-plugin
 TEMPLATE_DRA="${TEMPLATE_DRA:-nccl-test-template-dra.yaml}"  # GB300/DRA (GPU claims, not nvidia.com/gpu limits)
 # The image is multi-arch (amd64 + arm64/Grace), so the same tag runs on x86 and GB300.
-# Overridable so you can point at a different registry/tag (e.g. cr.nebius.cloud).
+# Override IMAGE to use another compatible multi-architecture image.
 IMAGE="${IMAGE:-cr.eu-north1.nebius.cloud/e00b94r7bkvywphmn6/nccl-tests:v2.18.3-cudav13.2.1-ncclv2.30.4-1-hpcxv2.26}"
 
 # GPU node group ID — SET THIS for your cluster (env-overridable). Get it via:
@@ -98,7 +97,7 @@ TESTS=(${NCCL_TESTS:-all_reduce alltoall})
 # ======================================================
 
 if [ -z "$NODE_GROUP_ID" ] || [[ "$NODE_GROUP_ID" == "<"* ]]; then
-  echo "ERROR: set NODE_GROUP_ID at the top of this script to your GPU node group ID."
+  echo "ERROR: set NODE_GROUP_ID in the environment or at the top of this script."
   echo "Find it with:"
   echo "  kubectl get nodes -o custom-columns='NAME:.metadata.name,GROUP:.metadata.labels.nebius\\.com/node-group-id'"
   exit 1

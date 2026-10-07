@@ -55,13 +55,14 @@ it fails to start.
 kubectl apply --server-side -k \
   "github.com/kubeflow/mpi-operator/manifests/overlays/standalone?ref=v0.6.0"
 
-# 2. Set NODE_GROUP_ID (and review IMAGE) at the top of nccl_runner_unified.sh.
-#    Find the node group ID with:
+# 2. Find the node group ID with:
 kubectl get nodes -o custom-columns=\
 'NAME:.metadata.name,GROUP:.metadata.labels.nebius\.com/node-group-id,GPU:.status.capacity.nvidia\.com/gpu'
 
-# 3. Run:
-./nccl_runner_unified.sh
+# 3. Run. IMAGE is optional and defaults to the configured Nebius CUDA 13
+#    NCCL image:
+NODE_GROUP_ID=mk8snodegroup-xxxxxxxxxxxxxxxxxx \
+  ./nccl_runner_unified.sh
 #    -> results/nccl-<timestamp>/<test>-<hosts>.log  (raw NCCL output)
 #    -> results/nccl-<timestamp>/report.md           (auto-generated summary)
 ```

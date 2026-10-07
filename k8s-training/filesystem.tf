@@ -37,7 +37,7 @@ resource "helm_release" "filesystem_csi" {
   count = local.filesystem_csi_enabled ? 1 : 0
 
   name             = local.filesystem_csi_chart_name
-  repository       = "oci://cr.eu-north1.nebius.cloud/mk8s/helm"
+  repository       = var.filesystem_csi.chart_repository
   chart            = local.filesystem_csi_chart_name
   version          = var.filesystem_csi.chart_version
   namespace        = var.filesystem_csi.namespace
@@ -49,6 +49,10 @@ resource "helm_release" "filesystem_csi" {
     {
       name  = "dataDir"
       value = local.filesystem_csi_data_dir
+    },
+    {
+      name  = "image.repository"
+      value = var.filesystem_csi.image_repository
     },
   ]
 

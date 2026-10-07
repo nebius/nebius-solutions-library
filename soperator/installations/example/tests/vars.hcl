@@ -1,4 +1,4 @@
-region             = "eu-north1"
+region             = "eu-west2"
 iam_tenant_id      = "tenant-test"
 iam_project_id     = "project-test"
 o11y_iam_tenant_id = "tenant-test"

@@ -8,7 +8,7 @@
 
 1. Install [Nebius CLI](https://docs.nebius.ai/cli/install/):
    ```bash
-   curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+   curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
    ```
 
 2. Reload your shell session:
@@ -230,7 +230,9 @@ enable_filestore                                  = true
 existing_filestore                                = "" # or an existing filesystem ID
 filestore_mount_path                              = "/mnt/data"
 filesystem_csi = {
+  chart_repository                    = "oci://cr.nebius.cloud/mk8s/helm"
   chart_version                       = "0.1.5"
+  image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
   namespace                           = "kube-system"
   make_default_storage_class          = true
   previous_default_storage_class_name = "compute-csi-default-sc"

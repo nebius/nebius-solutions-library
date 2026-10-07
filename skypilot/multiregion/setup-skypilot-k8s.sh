@@ -24,7 +24,7 @@
 #
 # Examples:
 #   sky launch -c k8s-cpu --cloud kubernetes "echo hello from skypilot on k8s"
-#   sky launch -c k8s-gpu --cloud kubernetes --gpus H200 "nvidia-smi"
+#   sky launch -c k8s-gpu --cloud kubernetes --gpus B300 "nvidia-smi"
 
 set -euo pipefail
 
@@ -148,6 +148,6 @@ env -u NEBIUS_IAM_TOKEN sky check kubernetes
 echo
 echo "Ready. Example jobs:"
 echo '  sky launch -c k8s-cpu --cloud kubernetes "echo hello from skypilot on k8s"'
-echo '  sky launch -c k8s-gpu --cloud kubernetes --gpus H200 "nvidia-smi"'
+echo '  sky launch -c k8s-gpu --cloud kubernetes --gpus B300 "nvidia-smi"'
 echo '  sky logs k8s-gpu'
 echo '  sky down k8s-cpu k8s-gpu -y'

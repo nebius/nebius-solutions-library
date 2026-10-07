@@ -157,8 +157,8 @@ slurm_nodeset_workers = [
     #                    Resources                   #
     #------------------------------------------------#
     resource = {
-      platform = "gpu-h100-sxm"
-      preset   = "8gpu-128vcpu-1600gb"
+      platform = "gpu-b300-sxm"
+      preset   = "8gpu-192vcpu-2768gb"
     }
     # boot_disk omitted -> defaults are used.
     gpu_cluster = {
@@ -556,4 +556,3 @@ nvidia_config_lines = [
   "options nvidia NVreg_EnableStreamMemOPs=1",
   "options nvidia NVreg_RegistryDwords=\"PeerMappingOverride=1;\"",
 ]
-

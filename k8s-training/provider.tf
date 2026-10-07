@@ -1,8 +1,8 @@
 terraform {
   required_providers {
     nebius = {
-      source  = "terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius"
-      version = ">= 0.5.232"
+      source  = "nebius/nebius"
+      version = ">= 0.6.23"
     }
     kubernetes = {
       source = "hashicorp/kubernetes"
@@ -21,10 +21,6 @@ terraform {
       version = ">=1.19.0"
     }
   }
-}
-
-provider "nebius" {
-  domain = "api.eu.nebius.cloud:443"
 }
 
 provider "helm" {

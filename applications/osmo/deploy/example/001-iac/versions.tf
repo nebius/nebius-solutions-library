@@ -5,7 +5,7 @@ terraform {
 
   required_providers {
     nebius = {
-      source = "terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius"
+      source = "nebius/nebius"
     }
     random = {
       source  = "hashicorp/random"
@@ -16,10 +16,6 @@ terraform {
       version = ">= 1.1.1"
     }
   }
-}
-
-provider "nebius" {
-  domain = "api.eu.nebius.cloud:443"
 }
 
 provider "random" {}
