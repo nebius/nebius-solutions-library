@@ -78,6 +78,9 @@ resource "helm_release" "soperator_fluxcd_cm" {
     soperator_image_repo     = local.image.repository
     soperator_image_repo_nfs = var.nfs_in_k8s.use_stable_repo ? local.image.repository_stable : local.image.repository
 
+    # The custom kruise chart is only published to the stable repo.
+    kruise_helm_repo = local.helm.repository.slurm_stable
+
     dcgm_exporter_enabled          = var.dcgm_exporter_enabled
     enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
     # Cluster-wide toggle for the [program:dockerd] block in the shared jail
@@ -127,10 +130,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
       scheduling = local.node_filters
 
       volume = {
-        controller_spool = {
-          size   = "${var.filestores.controller_spool.size_gibibytes}Gi"
-          device = var.filestores.controller_spool.device
-        }
+        controller_spool = var.filestores.controller_spool != null ? {
+          enabled = true
+          size    = "${var.filestores.controller_spool.size_gibibytes}Gi"
+          device  = var.filestores.controller_spool.device
+        } : { enabled = false }
         jail = {
           size   = "${var.filestores.jail.size_gibibytes}Gi"
           device = var.filestores.jail.device
@@ -140,7 +144,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
           size   = "${submount.size_gibibytes}Gi"
           device = submount.device
         }]
-        accounting = var.accounting_enabled ? {
+        accounting = var.accounting_enabled && var.filestores.accounting != null ? {
           enabled = true
           size    = "${var.filestores.accounting.size_gibibytes}Gi"
           device  = var.filestores.accounting.device
@@ -192,8 +196,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
           enabled              = var.accounting_enabled
           use_protected_secret = var.use_protected_secret
           mariadb_operator = var.accounting_enabled ? {
-            enabled         = var.accounting_enabled
-            storage_size    = var.accounting_enabled ? var.filestores.accounting.size_gibibytes : 0
+            enabled = var.accounting_enabled
+            storage_size = var.accounting_enabled ? coalesce(
+              try(var.filestores.accounting.size_gibibytes, null),
+              var.accounting_storage_size_gibibytes,
+            ) : 0
             metrics_enabled = var.telemetry_enabled
             resources       = local.resources.mariadb
           } : null

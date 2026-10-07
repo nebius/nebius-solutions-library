@@ -15,6 +15,9 @@ resources:
             url: ${soperator_helm_repo_nfs}
           soperator:
             url: ${soperator_helm_repo}
+          kruise:
+            url: ${kruise_helm_repo}
+            type: oci
         customConfigmaps:
           overrideValues:
             %{~ if enroot_direct_squashfs_enabled ~}
@@ -186,9 +189,8 @@ resources:
                 spec:
                   extraArgs:
                     # Default cap for scrape jobs without their own max_scrape_size.
-                    # kube-state-metrics overrides it per-job via kubeStateMetrics.maxScrapeSize
-                    # on large clusters, so this stays at 32MiB as a guard for everything else.
-                    promscrape.maxScrapeSize: "33554432"
+                    # kube-state-metrics can override it per-job via kubeStateMetrics.maxScrapeSize.
+                    promscrape.maxScrapeSize: "134217728"
                   externalLabels:
                     iam_tenant_id: ${iam_tenant_id}
                     iam_project_id: ${iam_project_id}
@@ -487,10 +489,12 @@ resources:
                   claimName: jail-pvc
                   readOnly: false
 
+              %{~ if slurm_cluster_storage.volume.controller_spool.enabled ~}
               - name: controller-spool
                 persistentVolumeClaim:
                   claimName: controller-spool-pvc
                   readOnly: false
+              %{~ endif ~}
 
               - name: worker-spool
                 emptyDir:
@@ -809,8 +813,11 @@ resources:
             overrideValues:
               volume:
                 controllerSpool:
+                  enabled: ${slurm_cluster_storage.volume.controller_spool.enabled}
+                  %{~ if slurm_cluster_storage.volume.controller_spool.enabled ~}
                   size: ${slurm_cluster_storage.volume.controller_spool.size}
                   filestoreDeviceName: ${slurm_cluster_storage.volume.controller_spool.device}
+                  %{~ endif ~}
                 jail:
                   size: ${slurm_cluster_storage.volume.jail.size}
                   filestoreDeviceName: ${slurm_cluster_storage.volume.jail.device}
@@ -938,11 +945,12 @@ resources:
             enabled: true
             interval: 5m
             timeout: 5m
+            version: 1.9.1-custom
             overrideValues:
               manager:
                 image:
                   repository: cr.nebius.cloud/soperator/kruise-manager
-                  tag: v1.8.3
+                  tag: v1.9.1
                 # Scales with the sizing tier; the kruise manager OOM-ed on big
                 # clusters with the chart-default 1 cpu / 2Gi.
                 resources:
@@ -963,7 +971,7 @@ resources:
             values:
               checks:
                 manager:
-                  enabledNodeReplacement: ${soperator_checks_node_replacement_enabled}
+                  enableNodeReplacement: ${soperator_checks_node_replacement_enabled}
                   env:
                     maintenanceIgnoreNodeLabels: "${join(",", slurm_cluster.maintenance_ignore_node_labels)}"
                   resources:

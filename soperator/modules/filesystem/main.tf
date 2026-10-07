@@ -1,5 +1,5 @@
 resource "nebius_compute_v1_filesystem" "controller_spool" {
-  count = var.controller_spool.spec != null ? 1 : 0
+  count = try(var.controller_spool.spec != null, false) ? 1 : 0
 
   parent_id = var.iam_project_id
 
@@ -17,12 +17,12 @@ resource "nebius_compute_v1_filesystem" "controller_spool" {
   }
 }
 data "nebius_compute_v1_filesystem" "controller_spool" {
-  count = var.controller_spool.existing != null ? 1 : 0
+  count = try(var.controller_spool.existing != null, false) ? 1 : 0
 
   id = var.controller_spool.existing.id
 }
 locals {
-  controller_spool = {
+  controller_spool = var.controller_spool != null ? {
     id = try(
       one(nebius_compute_v1_filesystem.controller_spool).id,
       one(data.nebius_compute_v1_filesystem.controller_spool).id,
@@ -32,7 +32,7 @@ locals {
       one(data.nebius_compute_v1_filesystem.controller_spool).status.size_bytes,
     )))
     mount_tag = local.const.filesystem.controller_spool
-  }
+  } : null
 }
 
 resource "nebius_compute_v1_filesystem" "jail" {
@@ -169,5 +169,5 @@ locals {
       one(data.nebius_compute_v1_filesystem.accounting).status.size_bytes,
     )))
     mount_tag = local.const.filesystem.accounting
-  } : {}
+  } : null
 }

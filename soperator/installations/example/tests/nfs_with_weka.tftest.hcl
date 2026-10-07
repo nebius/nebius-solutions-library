@@ -104,6 +104,16 @@ run "nfs_on_k8s_with_weka_jail" {
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
         threads         = 128
+        node_group = {
+          resource = {
+            platform = "cpu-d3"
+          }
+          boot_disk = {
+            type                 = "NETWORK_SSD"
+            size_gibibytes       = 128
+            block_size_kibibytes = 4
+          }
+        }
       }
     }
     filesystem_jail = {
@@ -179,6 +189,16 @@ run "nfs_on_k8s_with_weka_jail_submount" {
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
         threads         = 128
+        node_group = {
+          resource = {
+            platform = "cpu-d3"
+          }
+          boot_disk = {
+            type                 = "NETWORK_SSD"
+            size_gibibytes       = 128
+            block_size_kibibytes = 4
+          }
+        }
       }
     }
   }

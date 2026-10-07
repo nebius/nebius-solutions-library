@@ -22,12 +22,14 @@ variable "controller_spool" {
       forbid_deletion      = optional(bool, false)
     }))
   })
-  nullable = false
+  nullable = true
+  default  = null
 
   validation {
-    condition = (
-      var.controller_spool.existing != null && var.controller_spool.spec == null
-    ) || (var.controller_spool.existing == null && var.controller_spool.spec != null)
+    condition = var.controller_spool != null ? (
+      (var.controller_spool.existing != null && var.controller_spool.spec == null) ||
+      (var.controller_spool.existing == null && var.controller_spool.spec != null)
+    ) : true
     error_message = "One of `existing` or `spec` must be provided."
   }
 }

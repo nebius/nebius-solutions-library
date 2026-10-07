@@ -115,6 +115,34 @@ Everything else — GPU detection, HBM sizing, 8-GPU layout, NCCL, monitoring,
 report — adapts automatically; only `SOAK_IMAGE` (and `MAX_TEMP` for Blackwell)
 changes per platform.
 
+## GB300 / DRA clusters — automatic
+
+GB300/Grace clusters are usually **DRA-native**: GPUs are advertised via Dynamic
+Resource Allocation (`gpu.nvidia.com` DeviceClass), not the `nvidia.com/gpu` device
+plugin. The script **auto-detects** this (no allocatable `nvidia.com/gpu` +
+DeviceClass present) and adapts — nothing to set:
+
+- Requests GPUs via a `ResourceClaimTemplate` (`dra/`) + the `pytorchjob-dra.yaml`
+  template instead of `nvidia.com/gpu` limits; GPUs/node read from resourceslices.
+- Creates a **ComputeDomain** so cross-node NCCL can form one MNNVL/NVLink domain —
+  without it NCCL's NVLS setup fails with `Cuda failure 801`. Torn down with the namespace.
+
+By default the cross-node collective rides **MNNVL/NVLink** (fastest on GB300). To
+soak the **InfiniBand** fabric instead (as the x86 soak does), set `SOAK_TRANSPORT=ib`
+— it disables MNNVL/NVLS so NCCL routes cross-node over IB:
+
+```bash
+SOAK_TRANSPORT=ib SOAK_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3 MAX_TEMP=90 ./run-soak-test.sh 7200 2
+```
+
+Requires the Training Operator ≥ v1.8.0 (older CRDs reject DRA `resourceClaims`).
+**Also requires Kubernetes ≥ 1.34**: the DRA manifests under `dra/` use the GA
+`resource.k8s.io/v1` API, which only reached GA in 1.34. On 1.31–1.33 DRA is served
+as `v1beta1`/`v1beta2`, so `kubectl apply` of the `ResourceClaimTemplate` fails with
+`no matches for kind "ResourceClaimTemplate" in version "resource.k8s.io/v1"` — run
+the DRA path on a 1.34+ MK8s cluster (the x86 device-plugin path has no such floor).
+The x86 device-plugin path is unchanged — none of this runs there.
+
 ## GPU type detection — automatic
 
 The script automatically detects whatever GPU node type is present in the cluster at runtime. No configuration needed.

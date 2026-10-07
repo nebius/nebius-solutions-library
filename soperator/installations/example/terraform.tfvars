@@ -35,22 +35,13 @@ iam_merge_request_url = ""
 # Whether to store the controller state on filestore or network SSD.
 controller_state_on_filestore = false
 
-# Shared filesystem to be used on controller nodes.
-# Deprecated: Starting with version 1.22, this variable isn't used, as controller state is stored on network SSD disks.
-# Remains for the backward compatibility.
-# ---
-filestore_controller_spool = {
-  spec = {
-    size_gibibytes       = 128
-    block_size_kibibytes = 4
-    forbid_deletion      = false
-  }
-}
-# Or use existing filestore.
-# ---
+# Optional legacy shared filesystem for controller state. New clusters use a PVC
+# unless controller_state_on_filestore is explicitly enabled.
 # filestore_controller_spool = {
-#   existing = {
-#     id = "computefilesystem-<YOUR-FILESTORE-ID>"
+#   spec = {
+#     size_gibibytes       = 128
+#     block_size_kibibytes = 4
+#     forbid_deletion      = false
 #   }
 # }
 
@@ -101,22 +92,16 @@ filesystem_jail_submounts = [{
   }
 }]
 
-# Shared filesystem to be used for accounting DB.
-# By default, null.
-# Required if accounting_enabled is true.
-# ---
-filestore_accounting = {
-  spec = {
-    size_gibibytes       = 512
-    block_size_kibibytes = 4
-    forbid_deletion      = false
-  }
-}
-# Or use existing filestore.
-# ---
+# MariaDB uses a PVC. This controls its requested capacity for new clusters.
+accounting_storage_size_gibibytes = 512
+
+# Optional legacy accounting Filestore. Existing clusters that already declare
+# it keep the Filestore and its node attachments during in-place upgrades.
 # filestore_accounting = {
-#   existing = {
-#     id = "computefilesystem-<YOUR-FILESTORE-ID>"
+#   spec = {
+#     size_gibibytes       = 512
+#     block_size_kibibytes = 4
+#     forbid_deletion      = false
 #   }
 # }
 
@@ -140,12 +125,23 @@ filestore_accounting = {
 nfs_in_k8s = {
   enabled = true
   spec = {
-    version         = "1.2.0"
+    version         = "1.2.2"
     use_stable_repo = true
     size_gibibytes  = 3720
     disk_type       = "NETWORK_SSD_IO_M3"
     filesystem_type = "ext4"
-    threads         = 128 # to match preset in slurm_nodeset_nfs
+    threads         = 128
+    node_group = {
+      resource = {
+        platform = "cpu-d3"
+        # preset omitted -> driven by sizing_tier. Set a preset to override.
+      }
+      boot_disk = {
+        type                 = "NETWORK_SSD"
+        size_gibibytes       = 128
+        block_size_kibibytes = 4
+      }
+    }
   }
 }
 
@@ -162,7 +158,7 @@ nfs_in_k8s = {
 
 # Version of soperator.
 # ---
-slurm_operator_version = "4.1.11"
+slurm_operator_version = "4.1.13"
 
 # Is the version of soperator stable or not.
 # ---
@@ -489,21 +485,6 @@ slurm_nodeset_login = {
 # By default, null.
 # ---
 slurm_nodeset_accounting = {
-  resource = {
-    platform = "cpu-d3"
-    # preset omitted -> driven by sizing_tier. Set a preset to override.
-  }
-  boot_disk = {
-    type                 = "NETWORK_SSD"
-    size_gibibytes       = 128
-    block_size_kibibytes = 4
-  }
-}
-
-# Configuration of NFS node set.
-# ---
-slurm_nodeset_nfs = {
-  size = 1
   resource = {
     platform = "cpu-d3"
     # preset omitted -> driven by sizing_tier. Set a preset to override.

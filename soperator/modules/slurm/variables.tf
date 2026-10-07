@@ -376,10 +376,10 @@ variable "rest_enabled" {
 variable "filestores" {
   description = "Filestores to be used in Slurm cluster."
   type = object({
-    controller_spool = object({
+    controller_spool = optional(object({
       size_gibibytes = number
       device         = string
-    })
+    }))
     jail = object({
       size_gibibytes = number
       device         = string
@@ -404,6 +404,22 @@ variable "controller_state_on_filestore" {
   description = "Whether to use filestore for controller node storage (when true) or PVC (when false)."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.controller_state_on_filestore || var.filestores.controller_spool != null
+    error_message = "A controller_spool Filestore must be configured when controller_state_on_filestore is true."
+  }
+}
+
+variable "accounting_storage_size_gibibytes" {
+  description = "Size of the PVC used by the MariaDB accounting database when no legacy accounting Filestore is configured."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.accounting_storage_size_gibibytes > 0
+    error_message = "Accounting storage size must be greater than zero."
+  }
 }
 
 variable "enroot_direct_squashfs_enabled" {

@@ -54,8 +54,14 @@ check_xid_on_node() {
   # run start is unknown, since_epoch=0 falls back to the whole buffer.)
   # `grep -c` exits 1 when the count is zero, which would mark the debugger pod
   # Failed on a HEALTHY node — so append `|| true` to keep the container clean.
+  # Count only genuine HARDWARE Xids: match the "NVRM: Xid (...): <code>," format
+  # and exclude application/process-caused codes 13/31/43/45/68. Xid 45 in
+  # particular (channel/process kill) accumulates on a shared node's dmesg from
+  # ordinary pod churn by other workloads and would fail an otherwise-clean soak.
+  # (68 — a video/NVDEC exception — is included here as commonly app-triggered on
+  # these soak workloads; revisit if a hardware-caused 68 is ever observed.)
   kubectl debug node/"$node" --image=ubuntu --profile=sysadmin -q \
-    -- chroot /host sh -c "dmesg --since \"\$(date -d @${since_epoch} '+%Y-%m-%d %H:%M:%S' 2>/dev/null)\" 2>/dev/null | grep -ic xid || true" >/dev/null 2>&1 || true
+    -- chroot /host sh -c "dmesg --since \"\$(date -d @${since_epoch} '+%Y-%m-%d %H:%M:%S' 2>/dev/null)\" 2>/dev/null | grep 'NVRM: Xid' | grep -vcE '\): (13|31|43|45|68),' || true" >/dev/null 2>&1 || true
   while [ "$waited" -lt 30 ]; do
     dbg=$(kubectl get pods --request-timeout=30s -n default -o name 2>/dev/null | grep "node-debugger-${node}" | tail -1)
     [ -n "$dbg" ] && break

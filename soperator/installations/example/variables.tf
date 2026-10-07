@@ -143,6 +143,11 @@ variable "controller_state_on_filestore" {
   description = "Whether to use Filestore for controller node boot disk (true = Filestore, false = PVC)."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.controller_state_on_filestore || var.filestore_controller_spool != null
+    error_message = "filestore_controller_spool must be configured when controller_state_on_filestore is true."
+  }
 }
 
 variable "filestore_controller_spool" {
@@ -157,13 +162,14 @@ variable "filestore_controller_spool" {
       forbid_deletion      = optional(bool, false)
     }))
   })
-  nullable = false
+  nullable = true
+  default  = null
 
   validation {
-    condition = (
+    condition = var.filestore_controller_spool != null ? (
       (var.filestore_controller_spool.existing != null && var.filestore_controller_spool.spec == null) ||
       (var.filestore_controller_spool.existing == null && var.filestore_controller_spool.spec != null)
-    )
+    ) : true
     error_message = "One of `existing` or `spec` must be provided."
   }
 }
@@ -413,6 +419,17 @@ variable "filestore_accounting" {
   }
 }
 
+variable "accounting_storage_size_gibibytes" {
+  description = "Size of the PVC used by the MariaDB accounting database when no legacy accounting Filestore is configured."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.accounting_storage_size_gibibytes > 0
+    error_message = "Accounting storage size must be greater than zero."
+  }
+}
+
 # endregion Storage
 
 # region nfs-server
@@ -487,6 +504,7 @@ resource "terraform_data" "check_nfs" {
 }
 
 variable "nfs_in_k8s" {
+  description = "In-cluster NFS server and its dedicated single-node Kubernetes node group."
   type = object({
     enabled = bool
     spec = optional(object({
@@ -496,6 +514,17 @@ variable "nfs_in_k8s" {
       disk_type       = string
       filesystem_type = string
       threads         = number
+      node_group = optional(object({
+        resource = object({
+          platform = string
+          preset   = optional(string)
+        })
+        boot_disk = object({
+          type                 = string
+          size_gibibytes       = number
+          block_size_kibibytes = number
+        })
+      }))
     }))
   })
   default = {
@@ -503,15 +532,28 @@ variable "nfs_in_k8s" {
   }
 
   validation {
-    condition = (var.nfs_in_k8s.enabled
-      ? var.nfs_in_k8s.spec != null
-      : true
-    )
-    error_message = "If .enabled, .spec should be provided."
+    condition     = var.nfs_in_k8s.enabled ? var.nfs_in_k8s.spec != null : true
+    error_message = "nfs_in_k8s.spec must be provided when nfs_in_k8s.enabled is true."
   }
 
   validation {
-    condition = (var.nfs_in_k8s.enabled
+    condition = (var.nfs_in_k8s.enabled && var.nfs_in_k8s.spec != null
+      ? var.nfs_in_k8s.spec.node_group != null
+      : true
+    )
+    error_message = "nfs_in_k8s.spec.node_group must be provided when nfs_in_k8s.enabled is true."
+  }
+
+  validation {
+    condition = (var.nfs_in_k8s.enabled && try(var.nfs_in_k8s.spec.node_group, null) != null
+      ? try(var.nfs_in_k8s.spec.node_group.boot_disk.size_gibibytes >= 128, false)
+      : true
+    )
+    error_message = "Boot disks for NFS nodes must be at least 128 GiB."
+  }
+
+  validation {
+    condition = (var.nfs_in_k8s.enabled && var.nfs_in_k8s.spec != null
       ? contains(
         ["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED", "NETWORK_SSD_IO_M3"],
         var.nfs_in_k8s.spec.disk_type
@@ -522,7 +564,7 @@ variable "nfs_in_k8s" {
   }
 
   validation {
-    condition = (var.nfs_in_k8s.enabled
+    condition = (var.nfs_in_k8s.enabled && var.nfs_in_k8s.spec != null
       ? (
         !contains(["NETWORK_SSD_IO_M3", "NETWORK_SSD_NON_REPLICATED"], var.nfs_in_k8s.spec.disk_type)
         || (var.nfs_in_k8s.spec.size_gibibytes % 93 == 0)
@@ -534,7 +576,7 @@ variable "nfs_in_k8s" {
   }
 
   validation {
-    condition = (var.nfs_in_k8s.enabled
+    condition = (var.nfs_in_k8s.enabled && var.nfs_in_k8s.spec != null
       ? contains(["ext4", "xfs"], var.nfs_in_k8s.spec.filesystem_type)
       : true
     )
@@ -1381,32 +1423,6 @@ resource "terraform_data" "check_slurm_nodeset_accounting" {
       )
       error_message = "Accounting node set must be provided when accounting is enabled."
     }
-  }
-}
-
-variable "slurm_nodeset_nfs" {
-  description = "Configuration of NFS node set."
-  type = object({
-    size = number
-    resource = object({
-      platform = string
-      preset   = optional(string)
-    })
-    boot_disk = object({
-      type                 = string
-      size_gibibytes       = number
-      block_size_kibibytes = number
-    })
-  })
-  nullable = true
-  default  = null
-  validation {
-    condition     = var.slurm_nodeset_nfs == null || var.slurm_nodeset_nfs.boot_disk.size_gibibytes >= 128
-    error_message = "Boot disks for NFS nodes must be at least 128 GiB."
-  }
-  validation {
-    condition     = var.slurm_nodeset_nfs == null || var.slurm_nodeset_nfs.size == 1
-    error_message = "Size of the NFS node group must be exactly 1."
   }
 }
 
