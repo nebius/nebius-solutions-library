@@ -25,27 +25,6 @@ Before starting, ensure you have these tools installed:
   - macOS: `brew install coreutils`
   - Ubuntu: `sudo apt-get install coreutils`
 
-## Upgrading an Existing Installation
-
-Recipe 4.1.13-2 uses the public `nebius/nebius` Terraform provider, version `>= 0.6.23`.
-New installations can follow the installation steps below. For existing state using the old provider address,
-follow the [official provider migration guide](https://docs.nebius.com/terraform-provider/manage/migrate) before using this recipe:
-
-1. In the existing configuration, keep the old provider source and upgrade to the latest published 0.5.x version.
-   Run `terraform init -upgrade`, then `terraform plan`. The plan must succeed before changing the source.
-2. Update to recipe `4.1.13-2`. In the root module or workspace that owns the state, migrate its provider address:
-
-   ```bash
-   terraform state replace-provider \
-     terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius \
-     registry.terraform.io/nebius/nebius
-   ```
-
-   This command updates the state and creates a backup. Use the guide's alternate source address if your state uses it.
-3. Run `terraform init -upgrade`, `terraform providers`, and `terraform plan`. Confirm that the provider references
-   use only `registry.terraform.io/nebius/nebius`, and review the plan before applying changes.
-   Resolve provider breaking changes as described in the guide, and retain the updated `.terraform.lock.hcl`.
-
 ## Installation Steps
 
 ### 1. Get Terraform Files
