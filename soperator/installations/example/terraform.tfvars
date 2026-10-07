@@ -13,6 +13,10 @@ company_name = ""
 # Whether the cluster is production or not.
 production = true
 
+# Cloud API environment, independent of whether this is a production deployment.
+# Testing uses beta/omega regions and the testing CLI profile.
+cloud_environment = "production"
+
 # Follow the installation guide and put IAM merge request URL here.
 # Required if production = true.
 iam_merge_request_url = ""

@@ -6,9 +6,11 @@ locals {
     p-16c-64g    = "16vcpu-64gb"
     p-32c-128g   = "32vcpu-128gb"
     p-48c-192g   = "48vcpu-192gb"
+    p-56c-224g   = "56vcpu-224gb"
     p-64c-256g   = "64vcpu-256gb"
     p-80c-320g   = "80vcpu-320gb"
     p-96c-384g   = "96vcpu-384gb"
+    p-112c-448g  = "112vcpu-448gb"
     p-128c-512g  = "128vcpu-512gb"
     p-160c-640g  = "160vcpu-640gb"
     p-192c-768g  = "192vcpu-768gb"
@@ -99,6 +101,36 @@ locals {
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
         weka                                    = true
+      }
+    }
+    c-56vcpu-224gb = {
+      cpu_cores              = 56 * local.reserve.cpu.coefficient - local.reserve.cpu.count
+      memory_gibibytes       = 224 * local.reserve.ram.coefficient - local.reserve.ram.count
+      gpus                   = 0
+      gpu_cluster_compatible = false
+      sufficient = {
+        (module.labels.name_nodeset_system)     = false
+        (module.labels.name_nodeset_controller) = false
+        (module.labels.name_nodeset_worker)     = false
+        (module.labels.name_nodeset_login)      = true
+        (module.labels.name_nodeset_accounting) = false
+        (module.labels.name_nodeset_nfs)        = false
+        weka                                    = false
+      }
+    }
+    c-112vcpu-448gb = {
+      cpu_cores              = 112 * local.reserve.cpu.coefficient - local.reserve.cpu.count
+      memory_gibibytes       = 448 * local.reserve.ram.coefficient - local.reserve.ram.count
+      gpus                   = 0
+      gpu_cluster_compatible = false
+      sufficient = {
+        (module.labels.name_nodeset_system)     = false
+        (module.labels.name_nodeset_controller) = false
+        (module.labels.name_nodeset_worker)     = false
+        (module.labels.name_nodeset_login)      = true
+        (module.labels.name_nodeset_accounting) = false
+        (module.labels.name_nodeset_nfs)        = false
+        weka                                    = false
       }
     }
     c-48vcpu-192gb = {
@@ -356,6 +388,25 @@ locals {
   ])
 
   presets_by_platforms_raw = tomap({
+    # ARM CPU nodes are supported only for login. Smaller presets remain in the
+    # catalog, but none below 16 vCPUs meets the login sufficiency minimum.
+    (local.platforms.cpu-g1) = tomap({
+      for preset, resources in {
+        (local.presets.p-2c-8g)     = local.presets_cpu.c-2vcpu-8gb
+        (local.presets.p-4c-16g)    = local.presets_cpu.c-4vcpu-16gb
+        (local.presets.p-8c-32g)    = local.presets_cpu.c-8vcpu-32gb
+        (local.presets.p-16c-64g)   = local.presets_cpu.c-16vcpu-64gb
+        (local.presets.p-32c-128g)  = local.presets_cpu.c-32vcpu-128gb
+        (local.presets.p-56c-224g)  = local.presets_cpu.c-56vcpu-224gb
+        (local.presets.p-112c-448g) = local.presets_cpu.c-112vcpu-448gb
+        } : preset => merge(resources, {
+          sufficient = {
+            for role, sufficient in resources.sufficient :
+            role => role == module.labels.name_nodeset_login && sufficient
+          }
+      })
+    })
+
     (local.platforms.cpu-e2) = tomap({
       (local.presets.p-2c-8g)    = local.presets_cpu.c-2vcpu-8gb
       (local.presets.p-4c-16g)   = local.presets_cpu.c-4vcpu-16gb
@@ -414,7 +465,7 @@ locals {
   })
 
   local_nvme_supported_by_region_platform_preset = tomap({
-    for region in [for _, region in local.regions : region] : region => tomap({
+    for region in local.supported_regions : region => tomap({
       for platform, presets in local.presets_by_platforms_raw : platform => tomap({
         for preset, _ in presets : preset => anytrue([
           for candidate in setproduct(
@@ -432,10 +483,10 @@ locals {
       for preset, resources in presets : preset => merge(resources, {
         cpu_platform = local.cpu_platform_by_platform[platform]
         local_nvme_supported = anytrue([
-          for region in [for _, region in local.regions : region] : try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
+          for region in local.supported_regions : try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
         ])
         local_nvme_supported_by_region = tomap({
-          for region in [for _, region in local.regions : region] : region => try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
+          for region in local.supported_regions : region => try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
         })
       })
     })

@@ -1,3 +1,15 @@
+variable "cloud_environment" {
+  description = "Cloud environment for provider routing and resource availability. Independent of the production deployment flag."
+  type        = string
+  default     = "production"
+  nullable    = false
+
+  validation {
+    condition     = contains(["production", "testing"], var.cloud_environment)
+    error_message = "cloud_environment must be production or testing."
+  }
+}
+
 variable "region" {
   description = "Region of the project."
   type        = string
@@ -7,7 +19,7 @@ resource "terraform_data" "check_region" {
   lifecycle {
     precondition {
       condition     = contains(module.resources.regions, var.region)
-      error_message = "Unknown region '${var.region}'. See https://docs.nebius.com/overview/regions"
+      error_message = "Unknown region '${var.region}' for cloud_environment '${var.cloud_environment}'."
     }
   }
 }
@@ -1984,4 +1996,3 @@ variable "active_checks_scope" {
     error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all."
   }
 }
-

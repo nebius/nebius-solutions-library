@@ -79,6 +79,10 @@ for o11y. This option defines whether you want to collect all infra logs in nebi
 By default, `soperator-telemetry` is used as a profile for public o11y setup. You can redefine it by setting
 `NEBIUS_OLLY_PROFILE` variable.
 
+For internal testing, set `cloud_environment = "testing"` and use the `beta` or `omega` region. This selects the testing API and the existing `testing` CLI profile; source the installation's `.envrc` so local-exec CLI calls use that profile too. This setting is separate from `production = false`, which still uses the production cloud by default. The testing catalog supports `cpu-d3` and `cpu-g1` in both regions, and GB300 in omega. Production `cpu-g1` availability is not enabled.
+
+`cpu-g1` uses ARM64, supports seven presets from `2vcpu-8gb` through `112vcpu-448gb`, and is restricted to login nodes with a minimum preset of `16vcpu-64gb`. GB300 login pods still run on workers until the dedicated login placement changes in [Plan.md](Plan.md) are implemented. The local [GB300 ARM dev installation](installations/gb300-arm-dev/README.md) uses Kubernetes 1.36 and documents the remaining deployment prerequisites.
+
 ### 4. (Optional) Create Storage Infrastructure
 
 Create a "jail" filesystem - a shared filesystem for all Slurm nodes.
