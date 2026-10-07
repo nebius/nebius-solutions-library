@@ -329,6 +329,14 @@ resources:
             podNamePrefix: disabled
             cudaVersion: ${slurm_cluster.cuda_version}
             maintenance: ${slurm_cluster.maintenance}
+            %{~ if length(slurm_cluster.custom_slurm_config) > 0 ~}
+            customSlurmConfig: |
+              %{~ for line in slurm_cluster.custom_slurm_config ~}
+              ${line}
+              %{~ endfor ~}
+            %{~ else ~}
+            customSlurmConfig: null
+            %{~ endif ~}
             plugStackConfig:
               pyxis:
                 useSquashfuse: ${enroot_direct_squashfs_enabled}

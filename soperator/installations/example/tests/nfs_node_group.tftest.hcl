@@ -10,7 +10,7 @@ mock_provider "kubernetes" {}
 mock_provider "helm" {}
 
 variables {
-  active_checks_scope              = "testing"
+  active_checks_scope              = "essential"
   company_name                     = "nfs-test"
   slurm_login_ssh_root_public_keys = ["ssh-ed25519 test"]
   slurm_nodeset_workers = [{
@@ -28,6 +28,20 @@ variables {
     node_local_image_disk     = { enabled = false }
     node_local_jail_submounts = []
   }]
+  slurm_nodesets_partitions = [
+    {
+      name               = "main"
+      is_all             = true
+      slurm_nodeset_refs = []
+      topology           = "flat"
+      config             = "Default=YES PriorityTier=10 PreemptMode=OFF MaxTime=INFINITE State=UP OverSubscribe=YES"
+    },
+    {
+      name   = "hidden"
+      is_all = true
+      config = "Default=NO PriorityTier=10 PreemptMode=OFF Hidden=YES MaxTime=INFINITE State=UP OverSubscribe=YES"
+    },
+  ]
   sizing_tier_override = "S"
   nfs                  = { enabled = false }
   nfs_in_k8s = {

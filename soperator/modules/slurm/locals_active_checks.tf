@@ -1,7 +1,7 @@
 locals {
   active_checks_scopes = {
-    # Scope for dev clusters
-    dev = {
+    # Run only checks required for cluster initialization.
+    skip_all = {
       ssh-check = {
         k8sJobSpec = {
           jobContainer = {
@@ -11,15 +11,20 @@ locals {
             }]
           }
         }
+      }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = false
       }
     }
 
-    # Run what is relevant in E2E
-    testing = {
-      gpu-checks = {
-        suspend          = true
-        runAfterCreation = false
-      }
+    # Skip everything that can be skipped in production.
+    essential = {
       ssh-check = {
         k8sJobSpec = {
           jobContainer = {
@@ -30,8 +35,18 @@ locals {
           }
         }
       }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = true
+      }
     }
-    # Check the provisioned cluster, but don't run health-checks that take long
+
+    # Run short GPU health checks.
     prod_quick = {
       ssh-check = {
         k8sJobSpec = {
@@ -46,9 +61,15 @@ locals {
       dcgmi-diag-r3 = {
         runAfterCreation = false
       }
+      gpu-checks = {
+        runAfterCreation = true
+      }
+      manage-jail-state = {
+        runAfterCreation = true
+      }
     }
 
-    # Run all available health-checks
+    # Run all available checks.
     prod_acceptance = {
       ssh-check = {
         k8sJobSpec = {
@@ -60,28 +81,14 @@ locals {
           }
         }
       }
-    }
-
-    # Skip most of checks and run only essential ones
-    essential = {
       dcgmi-diag-r3 = {
-        runAfterCreation = false
-      }
-      manage-jail-state = {
-        runAfterCreation = false
-      }
-      ssh-check = {
-        k8sJobSpec = {
-          jobContainer = {
-            env = [{
-              name : "NUM_OF_LOGIN_NODES",
-              value : tostring(var.node_count.login)
-            }]
-          }
-        }
+        runAfterCreation = true
       }
       gpu-checks = {
-        runAfterCreation = false
+        runAfterCreation = true
+      }
+      manage-jail-state = {
+        runAfterCreation = true
       }
     }
   }
