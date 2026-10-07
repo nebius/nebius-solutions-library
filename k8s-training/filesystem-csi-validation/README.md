@@ -175,6 +175,14 @@ concurrent multi-host results are **not** compared to the SFS numbers. The repor
 prints the tested StorageClass, PVC, filesystem type, mount, and capacity, and
 labels results with the storage target.
 
+Whether the target counts as SFS is controlled by **`IS_SFS`** (`auto` | `true` |
+`false`, default `auto`): `auto` infers it from the StorageClass name
+(`*mounted-fs-path*` / `*sfs*` / `*shared-fs*`). Set `IS_SFS=true` if your SFS class
+was renamed to something those patterns miss, or `IS_SFS=false` to force the
+comparison off on a look-alike name. With `--existing-pvc` the script resolves the
+claim's **real** StorageClass (`spec.storageClassName`) and infers from that, rather
+than assuming the default class.
+
 ### Relationship to the other fio scripts in the repo
 
 The repo already ships fio benchmarks under `data-transfer/`
@@ -212,6 +220,11 @@ omits the delta. Execution correctness and performance comparison are kept separ
 - **Capacity:** canonical writes **≥ 640 GiB** during preconditioning plus
   additional measured writes. The script checks free space from inside the mount
   and refuses to run if there isn't enough (dataset + configurable margin).
+  - **Multi-host `--retain-data`:** each `--target-node` host provisions its own
+    PVC, and with `--retain-data` those claims are **not** deleted between hosts —
+    so *N* retained hosts hold *N × PVC capacity* (~705 Gi each for canonical)
+    simultaneously. Without `--retain-data` each host's PVC is deleted before the
+    next, so only one is held at a time.
 - **Runtime:** the four measured tests alone take **≥ 8 minutes** (4 × 120 s),
   excluding image pull, scheduling, preconditioning, and cleanup.
 - **Cleanup:** on EXIT/INT/TERM the script removes only *its own* run's pod, PVC
