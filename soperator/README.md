@@ -79,6 +79,14 @@ for o11y. This option defines whether you want to collect all infra logs in nebi
 By default, `soperator-telemetry` is used as a profile for public o11y setup. You can redefine it by setting
 `NEBIUS_OLLY_PROFILE` variable.
 
+For internal testing, set `cloud_environment = "testing"` and use the `beta` or `omega` region. This selects the testing API and the existing `testing` CLI profile; source the installation's `.envrc` so local-exec CLI calls use that profile too. This setting is separate from `production = false`, which still uses the production cloud by default. The testing catalog supports `cpu-d3` and `cpu-g1` in both regions, and GB300 in omega. Production `cpu-g1` availability is not enabled.
+
+`cpu-g1` uses ARM64, supports seven presets from `2vcpu-8gb` through `112vcpu-448gb`, and is restricted to login nodes with a minimum preset of `16vcpu-64gb`. GB300 defaults to dedicated ARM login nodes and populates the shared jail on a login node. Omitted login resources resolve to `cpu-g1` / `32vcpu-128gb` for GB300 and `cpu-d3` / `16vcpu-64gb` for other workers. Explicit platform/preset values are preserved and checked for compatibility with the workers' jail architecture. The local [GB300 ARM dev installation](installations/gb300-arm-dev/README.md) uses Kubernetes 1.36 and documents the remaining deployment prerequisites.
+
+Existing GB300 deployments can retain worker colocation by explicitly setting `slurm_login_on_worker_nodes = true` before upgrading. This disables the dedicated login node group, places login pods and populate-jail on workers, and keeps `gb300_login_pod_worker_reserve` deductions. With `false` (the default), workers regain that capacity and login pods are sized from their own VMs. Provision ARM login capacity before migrating placement, and verify the existing jail contains compatible binaries; changing placement does not rebuild a populated jail. Production `cpu-g1` remains unavailable in the catalog, so production GB300 deployments must retain colocation until rollout is enabled.
+
+Login `size` and `autoscaling` control pod replicas/HPA. Login VM autoscaling independently keeps at least one node and allows up to 100, provisioning additional nodes for pending pods. CPU, memory, and disk requests retain Kubernetes and sidecar reserves. Static placement/rendering checks are available in [test/login-placement](test/login-placement/README.md); deployment checks remain in [Plan.md](Plan.md).
+
 ### 4. (Optional) Create Storage Infrastructure
 
 Create a "jail" filesystem - a shared filesystem for all Slurm nodes.
