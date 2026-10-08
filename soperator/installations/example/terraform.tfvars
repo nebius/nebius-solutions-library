@@ -293,13 +293,16 @@ slurm_nodesets_partitions = [
 # Login nodes is where users appear when connect to the cluster.
 # Their number and size depends on user needs.
 #
-# NOTE: For GB300 clusters, login pods live next to worker pods and dedicated login nodes aren't created. You can
-# still change the number of login pods by tuning the "size" variable here.
+# GB300 defaults to dedicated ARM login nodes. Existing colocated GB300 clusters
+# must set this to true before upgrading to retain their placement and reserves.
+slurm_login_on_worker_nodes = false
+
+# size controls pod replicas; login VMs scale independently between 1 and 100.
+# Omit platform to select cpu-g1 for GB300 and cpu-d3 for other workers.
 slurm_nodeset_login = {
   size = 2
   resource = {
-    platform = "cpu-d3"
-    preset   = "32vcpu-128gb"
+    preset = "32vcpu-128gb"
   }
   # boot_disk omitted -> defaults are used.
 }

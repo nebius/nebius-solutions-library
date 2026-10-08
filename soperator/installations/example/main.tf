@@ -3,7 +3,7 @@ locals {
     system     = module.resources.by_platform[local.slurm_nodeset_system.resource.platform][local.slurm_nodeset_system.resource.preset]
     controller = module.resources.by_platform[local.slurm_nodeset_controller.resource.platform][local.slurm_nodeset_controller.resource.preset]
     workers    = [for worker in local.slurm_nodeset_workers : module.resources.by_platform[worker.resource.platform][worker.resource.preset]]
-    login      = module.resources.by_platform[var.slurm_nodeset_login.resource.platform][var.slurm_nodeset_login.resource.preset]
+    login      = module.resources.by_platform[local.login_node_group.resource.platform][local.login_node_group.resource.preset]
     accounting = local.slurm_nodeset_accounting != null ? module.resources.by_platform[local.slurm_nodeset_accounting.resource.platform][local.slurm_nodeset_accounting.resource.preset] : null
     nfs        = local.slurm_nodeset_nfs != null ? module.resources.by_platform[local.slurm_nodeset_nfs.resource.platform][local.slurm_nodeset_nfs.resource.preset] : null
   }
@@ -54,12 +54,20 @@ locals {
     local.gb300_platform,
   ])
 
-  # GB300 keeps slurm_nodeset_login.size non-zero in tfvars so Soperator still
-  # creates login pods, while Terraform skips the separate unused CPU login node
-  # group. Non-GB300 platforms keep the configured login node group behavior.
+  # Dedicated ARM login nodes are the GB300 default. Existing clusters can
+  # explicitly retain worker colocation while migrating their shared jail.
+  login_on_worker_nodes = var.slurm_login_on_worker_nodes
   login_node_group = merge(var.slurm_nodeset_login, {
-    node_group_enabled = local.gb300_enabled ? false : var.slurm_nodeset_login.node_group_enabled
+    node_group_enabled = local.login_on_worker_nodes ? false : var.slurm_nodeset_login.node_group_enabled
+    resource = {
+      platform = coalesce(var.slurm_nodeset_login.resource.platform, local.gb300_enabled ? "cpu-g1" : "cpu-d3")
+      preset   = coalesce(var.slurm_nodeset_login.resource.preset, local.gb300_enabled ? "32vcpu-128gb" : "16vcpu-64gb")
+    }
   })
+
+  # Pull the jail image on a node matching the workers' binary architecture.
+  # x86 clusters retain their historical system-node placement.
+  populate_jail_node_filter_name = local.login_on_worker_nodes ? "worker" : contains(local.slurm_worker_cpu_platforms, "arm64") ? "login" : "system"
 
   # Apply platform-specific local NVMe defaults while preserving explicit
   # true/false overrides from slurm_nodeset_workers.
@@ -127,7 +135,7 @@ locals {
 
   # Kubelet ephemeral storage uses the local NVMe array when enabled and the
   # boot disk otherwise. Apply the Kubernetes capacity coefficient and fixed
-  # reserve in either case, plus the login-pod reserve on GB300 workers.
+  # reserve in either case, plus login reserves only during worker colocation.
   worker_ephemeral_storage_capacity_gibibytes = [
     for i, worker in local.slurm_nodeset_workers : floor(
       (worker.local_nvme.enabled
@@ -136,7 +144,7 @@ locals {
       ) * module.resources.k8s_ephemeral_storage_coefficient
       -(worker.local_nvme.enabled ? local.local_nvme_capacity_gibibytes[i] * local.local_nvme_ephemeral_storage_reserve_coefficient : 0)
       -module.resources.k8s_ephemeral_storage_reserve.gibibytes
-      -(worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.ephemeral_storage_gibibytes : 0)
+      -(local.login_on_worker_nodes && worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.ephemeral_storage_gibibytes : 0)
     )
   ]
 
@@ -580,20 +588,20 @@ module "slurm" {
     worker = [for i, worker in local.slurm_nodeset_workers :
       {
         cpu_cores = local.resources.workers[i].cpu_cores - (
-          worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.cpu_cores : 0
+          local.login_on_worker_nodes && worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.cpu_cores : 0
         )
         memory_gibibytes = floor(local.resources.workers[i].memory_gibibytes) - (
-          worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.memory_gibibytes : 0
+          local.login_on_worker_nodes && worker.resource.platform == local.gb300_platform ? var.gb300_login_pod_worker_reserve.memory_gibibytes : 0
         )
         ephemeral_storage_gibibytes = local.worker_ephemeral_storage_capacity_gibibytes[i]
         gpus                        = local.resources.workers[i].gpus
       }
     ]
-    login = local.gb300_enabled ? var.gb300_login_pod_worker_reserve : {
+    login = local.login_on_worker_nodes ? var.gb300_login_pod_worker_reserve : {
       cpu_cores        = local.resources.login.cpu_cores
       memory_gibibytes = floor(local.resources.login.memory_gibibytes)
       ephemeral_storage_gibibytes = floor(
-        var.slurm_nodeset_login.boot_disk.size_gibibytes * module.resources.k8s_ephemeral_storage_coefficient
+        local.login_node_group.boot_disk.size_gibibytes * module.resources.k8s_ephemeral_storage_coefficient
         -module.resources.k8s_ephemeral_storage_reserve.gibibytes
       )
     }
@@ -677,7 +685,8 @@ module "slurm" {
 
   use_default_apparmor_profile    = var.use_default_apparmor_profile
   worker_sshd_config_map_ref_name = var.slurm_worker_sshd_config_map_ref_name
-  login_on_worker_nodes           = local.gb300_enabled
+  login_on_worker_nodes           = local.login_on_worker_nodes
+  populate_jail_node_filter_name  = local.populate_jail_node_filter_name
   shared_memory_size_gibibytes    = var.slurm_shared_memory_size_gibibytes
   wait_for_nvidia_persistenced    = var.slurm_wait_for_nvidia_persistenced
   slurm_custom_config_override    = var.slurm_custom_config_override
