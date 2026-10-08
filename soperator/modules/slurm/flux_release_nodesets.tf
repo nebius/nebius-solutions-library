@@ -9,7 +9,7 @@ resource "local_file" "flux_release_rendered_nodesets" {
     apparmor_profile = local.apparmor_profile
 
     nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
-      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
+      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.platform], null)
       slurm_node_extra  = local.slurm_node_extra_by_nodeset[nodeset.name]
     })]
     resources = [for i, res in var.node_capacity.worker : {
