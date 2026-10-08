@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dispatcher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serverless2-dispatcher
+rules:
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [workloads, localqueues, clusterqueues, multikueueclusters, multikueueconfigs]
+    verbs: [get, list, watch]
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [workloads, workloads/status]
+    verbs: [patch, update]
+  - apiGroups: [batch]                    # the volume sweeper checks whether a worker volume's manager Jobs still exist
+    resources: [jobs]
+    verbs: [get]
+  - apiGroups: [jobset.x-k8s.io]          # multi-node runs (JobSets) own Workloads too
+    resources: [jobsets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: serverless2-dispatcher
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-dispatcher }
+subjects:
+  - { kind: ServiceAccount, name: dispatcher, namespace: kueue-system }
+---
+# prices ConfigMap (read) and the MultiKueue worker kubeconfig Secrets (read: free quota is read from the workers)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: serverless2-dispatcher
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: serverless2-dispatcher
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-dispatcher }
+subjects:
+  - { kind: ServiceAccount, name: dispatcher, namespace: kueue-system }

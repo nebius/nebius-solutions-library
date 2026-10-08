@@ -1,0 +1,27 @@
+# Tenant namespaces (label serverless2.nebius/kueue: managed) are created by charts/tenant at onboarding
+# and admitted by Kueue (managedJobsNamespaceSelector in the kueue Application). The endpoint namespace
+# (models) is managed too since F4: predictor pods that carry kueue.x-k8s.io/queue-name (charts/endpoint
+# `queue.name`) are admitted by Kueue in the model's preference order and count against the ClusterQueue;
+# pods without the label (manageJobsWithoutQueueName: false) are untouched.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: models
+  labels:
+    serverless2.nebius/kueue: managed
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+---
+# LocalQueue for endpoints that set `queue.name: endpoints` in the catalog. Per-model preference profiles are
+# LocalQueues in `models` pointing at profile ClusterQueues (rendered by charts/fleet).
+# NEVER name a LocalQueue in `models` `default`: Kueue's LocalQueueDefaulting then injects
+# kueue.x-k8s.io/queue-name=default into every Deployment of the namespace on update, and its validating
+# webhook rejects the update as an immutable-label change, so edge-auth and the Knative predictor
+# Deployments could no longer be changed (seen 2026-10-07 on both workers, docs/CONTROL-PLANE.md).
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: endpoints
+  namespace: models
+spec:
+  clusterQueue: default

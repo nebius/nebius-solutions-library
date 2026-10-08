@@ -1,0 +1,9 @@
+# Helm values for the cert-manager Application (both clusters unless hubOnly); version pinned in clusters/common/apps/cert-manager.yaml
+crds:
+  enabled: true
+# Gateway API HTTP-01 solver (ACME challenges as HTTPRoutes on the external Gateway; S17 lane B).
+config:
+  apiVersion: controller.config.cert-manager.io/v1alpha1
+  kind: ControllerConfiguration
+  gatewayAPI:
+    enabled: true

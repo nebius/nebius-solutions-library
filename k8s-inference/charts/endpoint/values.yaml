@@ -1,0 +1,82 @@
+# One InferenceService per release. Plain layout: these keys at the top level. Catalog mode: pass a
+# catalog/models/<id>.yaml as the values file plus --set cluster=<name> (README.md); that is how the
+# models ApplicationSet renders every endpoint straight from the catalog.
+name: ""                 # InferenceService name (required)
+namespace: models
+labels: {}               # extra metadata labels
+annotations: {}          # extra metadata annotations (Knative autoscaling annotations go here)
+
+image: ""                # required, prefer a digest
+imagePullSecrets: []     # e.g. [ngc]
+command: []
+args: []
+env: []                  # list of EnvVar (valueFrom allowed)
+port: 8080
+protocol: http           # informational: http | websocket | openai
+workingDir: ""
+
+resources:
+  gpu: 1
+  cpu: "4"
+  memory: 16Gi
+  cpuRequest: ""         # defaults to cpu
+  memoryRequest: ""      # defaults to memory
+  ephemeralStorage: ""   # limit; request defaults to the same
+
+pool: ""                 # value of the serverless2.nebius/pool nodeSelector (required)
+nodeSelector: {}         # extra selectors
+tolerations:
+  - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+
+scaling:
+  minReplicas: 0         # 0 = scale to zero (set in spec.predictor; the annotation alone is overridden)
+  maxReplicas: 1
+  metric: concurrency
+  target: 1              # concurrent requests per replica
+  containerConcurrency: 0  # hard limit, 0 = unlimited (soft target above drives scaling)
+  scaleToZeroRetention: 2m # autoscaling.knative.dev/scale-to-zero-pod-retention-period
+timeout: 600             # Knative revision timeout seconds (cluster max 3600)
+priorityClassName: ""    # k8s PriorityClass for the pod (serverless2-interactive on the hub; needs the Knative podspec-priorityclassname flag)
+queue:
+  priorityClass: customer-batch   # Kueue WorkloadPriorityClass label (predictor pods)
+  name: ""                 # Kueue LocalQueue in the endpoint namespace (= preference profile, e.g. prefer-l40s). When set,
+                           # predictor pods are gated by Kueue, which injects the chosen pool's nodeSelector/tolerations:
+                           # `pool` then only names the default and is NOT rendered as a nodeSelector.
+images: {}               # per-pool image tags {<pool>: <image>}: overrides `image` when the endpoint is pinned to that pool
+                         # (`pool` set, `queue.name` unset). Kueue-placed endpoints must use one image for every pool
+                         # they may land on; the pool is only known after admission (docs/SCHEDULING.md)
+
+shm:
+  enabled: true
+  size: 1Gi
+volumes: []              # extra emptyDirs: [{name, mountPath, sizeLimit, medium}]
+persistentVolumes: []    # PVCs kept across scale-to-zero: [{name, mountPath, size, storageClass}]. RWO + 1-GPU nodes deadlocks rollouts (old pod holds GPU and PVC); only with an RWX class
+
+readinessProbe: {}       # e.g. {path: /readyz, port: 8000}
+livenessProbe: {}
+securityContext: {}      # pod securityContext (runAsUser etc.)
+containerSecurityContext: {}
+
+localModelCache:         # later: KServe LocalModelCache on node-local disk
+  enabled: false
+  storageUri: ""
+  nodeGroups: []
+  size: 50Gi
+
+# Model weights on the region's shared filesystem (Terraform `weights_filesystem`: a Nebius Compute
+# shared filesystem mounted on every GPU node at /mnt/weights; exposed to pods as the ReadWriteMany
+# PVC `models/weights-shared`, clusters/<cluster>/apps/overlays/scheduling/weights-pv.yaml). The pod
+# mounts the claim with subPath <path> at mountPath. Runtimes write their caches there on the first
+# start (NIM: NIM_CACHE_PATH, HF/vLLM: HF_HOME), every later cold start is warm, and `ops/seed-weights`
+# can pre-fill it. An init container makes the directory exist and be writable for the runtime's user
+# (subPath directories are created root-owned). Knative allows hostPath only read-only, hence the PVC.
+weights:
+  sharedFilesystem:
+    enabled: false
+    claimName: weights-shared  # the cluster's RWX claim in the model namespace
+    path: ""               # subdirectory (subPath) for this model; default: the model name
+    mountPath: /weights    # where the container sees it
+    readOnly: false        # false: the runtime may write its cache; true: seeded weights only
+    prepare: true          # init container: mkdir -p and chmod 1777 of the directory (busybox)
+    prepareImage: registry.serverless2.local/docker/library/busybox:1.36
+  env: {}                  # extra NAME: value env vars for the runtime, e.g. HF_HOME: /weights

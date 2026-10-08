@@ -1,0 +1,42 @@
+# Known issue 1: a spot VM preempted with on_preemption=STOP stays in the node group (NotReady node,
+# counted against max_node_count) and nothing restarts it. Every 2 minutes: list the instances of the
+# spot node groups, `instance start` the STOPPED ones (same node, ~1 min), delete on start failure so
+# the node-group controller replaces the VM. Needs only the Nebius API (SA key in Secret ops/nebius-sa).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: recover-stopped-nodes
+  namespace: ops
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 100
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 240
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels: { app: recover-stopped-nodes }
+        spec:
+          restartPolicy: Never
+          securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
+          containers:
+            - name: recover
+              image: registry.serverless2.local/nebius/serverless2/ops:0.1.8
+              args: [recover-stopped-nodes.sh]
+              env:
+                - { name: NEBIUS_PARENT_ID, value: project-example }   # placeholder: this cluster's project (set per cluster)
+                - { name: NODE_GROUP_IDS, value: "" }   # empty: the 0.1.6 script discovers all preemptible node groups of NEBIUS_CLUSTER_ID   # serverless2-hub-h100-spot-1x; "" = all preemptible groups of NEBIUS_CLUSTER_ID (ops image >= 0.1.6)
+                - { name: NEBIUS_CLUSTER_ID, value: mk8scluster-example }   # placeholder: this cluster's id (set per cluster)
+                - { name: DELETE_ON_START_FAILURE, value: "true" }
+              volumeMounts: [{ name: sa, mountPath: /var/run/nebius, readOnly: true }]
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+          volumes:
+            - name: sa
+              secret: { secretName: nebius-sa, defaultMode: 0440 }

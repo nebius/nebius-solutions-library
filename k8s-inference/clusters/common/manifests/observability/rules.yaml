@@ -1,0 +1,175 @@
+# Recording rules (serverless2:*) and alerts. Label `release: kube-prometheus-stack`
+# is what the stack's Prometheus selects rules by. Alerts go to the stack's
+# Alertmanager, routed by severity to the in-cluster alert sink
+# (alertmanager.config in clusters/common/values/kube-prometheus-stack.yaml,
+# docs/OBSERVABILITY.md "Alert delivery").
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: serverless2-platform
+  namespace: monitoring
+  labels: { release: kube-prometheus-stack }
+spec:
+  groups:
+    - name: serverless2.recording
+      interval: 30s
+      rules:
+        # node -> pool / capacity (from the allow-listed node labels)
+        - record: serverless2:node_pool:info
+          expr: |
+            max by (node, pool, capacity, gpu_product) (
+              label_replace(label_replace(label_replace(
+                kube_node_labels{label_serverless2_nebius_pool!=""},
+                "pool", "$1", "label_serverless2_nebius_pool", "(.*)"),
+                "capacity", "$1", "label_serverless2_nebius_capacity", "(.*)"),
+                "gpu_product", "$1", "label_nvidia_com_gpu_product", "(.*)"))
+        # GPU pools only (the `system` pool has no GPUs and is not priced per GPU-hour)
+        - record: serverless2:nodes:count_by_pool
+          expr: count by (pool) (serverless2:node_pool:info{pool!="system"})
+        - record: serverless2:nodes_ready:count_by_pool
+          expr: |
+            count by (pool) (
+              kube_node_status_condition{condition="Ready",status="true"} == 1
+              and on (node) serverless2:node_pool:info{pool!="system"})
+        # GPUs requested by Running pods, per pod (node and pool attached)
+        - record: serverless2:pod_gpu_requests:running
+          expr: |
+            sum by (namespace, pod, node, pool) (
+              (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}
+                * on (namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1))
+              * on (node) group_left(pool) serverless2:node_pool:info)
+        - record: serverless2:gpu_requests_running:by_pool_namespace
+          expr: sum by (pool, namespace) (serverless2:pod_gpu_requests:running)
+        - record: serverless2:gpu_requests_running:by_isvc
+          expr: |
+            sum by (namespace, inferenceservice, pool) (
+              serverless2:pod_gpu_requests:running
+              * on (namespace, pod) group_left(inferenceservice)
+                label_replace(kube_pod_labels{label_serving_kserve_io_inferenceservice!=""},
+                  "inferenceservice", "$1", "label_serving_kserve_io_inferenceservice", "(.*)"))
+        # GPU pods that the scheduler cannot place (Kueue-gated pods are not "unschedulable")
+        - record: serverless2:gpu_pods_unschedulable:count
+          expr: |
+            count by (namespace) (
+              kube_pod_status_unschedulable == 1
+              and on (namespace, pod) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"} > 0))
+        - record: serverless2:gpu_pods_pending:count
+          expr: |
+            count by (namespace) (
+              kube_pod_status_phase{phase="Pending"} == 1
+              and on (namespace, pod) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"} > 0))
+        - record: serverless2:gpu_allocatable:by_pool
+          expr: |
+            sum by (pool) (kube_node_status_allocatable{resource="nvidia_com_gpu"}
+              * on (node) group_left(pool) serverless2:node_pool:info)
+
+    - name: serverless2.alerts
+      rules:
+        - alert: GPUPodPendingTooLong
+          expr: |
+            (kube_pod_status_unschedulable == 1
+              and on (namespace, pod) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"} > 0))
+          for: 5m
+          labels: { severity: warning, component: scheduling }
+          annotations:
+            summary: "GPU pod {{ $labels.namespace }}/{{ $labels.pod }} unschedulable for 5 min"
+            description: "No GPU node could take the pod for 5 minutes (pool at max, spot capacity gone, or a wrong toleration/nodeSelector). Kueue-gated pods do not trigger this."
+        - alert: KueueWorkloadsPending
+          expr: kueue_pending_workloads > 0
+          for: 15m
+          labels: { severity: warning, component: kueue }
+          annotations:
+            summary: "ClusterQueue {{ $labels.cluster_queue }} has {{ $value }} pending workload(s) for 15 min"
+            description: "Quota is exhausted or the cohort cannot lend. Check kueue_cluster_queue_status and the GPU pool size."
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels: { severity: critical, component: nodes }
+          annotations:
+            summary: "Node {{ $labels.node }} NotReady for 5 min"
+            description: "Spot nodes stopped by preemption keep their Node object for a while; the pod will be rescheduled by the Job controller/Knative, but the pool counts the node as used."
+        - alert: InferenceServiceNotReady
+          expr: kube_inferenceservice_status_condition{type="Ready"} == 0
+          for: 10m
+          labels: { severity: warning, component: endpoints }
+          annotations:
+            summary: "InferenceService {{ $labels.namespace }}/{{ $labels.name }} not Ready for 10 min"
+            description: "Ready=False for 10 minutes (image pull, model download, GPU wait or a crashing predictor). Scaled-to-zero endpoints stay Ready and do not trigger this."
+        - alert: PostgresDown
+          expr: |
+            (up{job=~".*cnpg-postgres"} == 0)
+            or (cnpg_collector_up == 0)
+            or (count by (namespace) (kube_pod_status_ready{namespace="data",pod=~"postgres-.*",condition="true"} == 1) < 1)
+          for: 2m
+          labels: { severity: critical, component: postgres }
+          annotations:
+            summary: "Postgres down ({{ $labels.namespace }}: CNPG `postgres` in data)"
+            description: "data/postgres is the CNPG cluster behind LiteLLM (keys, spend, logs); the API itself has no database."
+        - alert: PostgresNoPrimary
+          expr: count(cnpg_pg_replication_in_recovery == 0) < 1
+          for: 2m
+          labels: { severity: critical, component: postgres }
+          annotations:
+            summary: "No Postgres primary (all instances in recovery)"
+        - alert: CertificateExpiringSoon
+          expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 30 * 24 * 3600
+          for: 1h
+          labels: { severity: warning, component: tls }
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in {{ $value | humanizeDuration }}"
+            description: "Self-signed certificates are issued for 1 year and renewed by cert-manager 2/3 into their lifetime; this fires only if renewal is stuck."
+        - alert: CertificateNotReady
+          expr: certmanager_certificate_ready_status{condition="False"} == 1
+          for: 15m
+          labels: { severity: warning, component: tls }
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} is not Ready"
+        - alert: GPUExporterMissingOnGPUNode
+          expr: |
+            (serverless2:node_pool:info{pool!="system"} and on (node) kube_node_status_condition{condition="Ready",status="true"} == 1)
+            unless on (node) label_replace(DCGM_FI_DEV_GPU_UTIL, "node", "$1", "hostname", "(.*)")
+          for: 10m
+          labels: { severity: info, component: gpu }
+          annotations:
+            summary: "No DCGM metrics from GPU node {{ $labels.node }} (pool {{ $labels.pool }})"
+        # --- production-readiness alerts (gap 9) ---
+        - alert: APIErrorRatioHigh
+          expr: |
+            (sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/api/api/rule/0",envoy_response_code_class="5"}[5m]))
+              / clamp_min(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/api/api/rule/0"}[5m])), 0.001)) > 0.02
+            and sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/api/api/rule/0"}[5m])) > 0.05
+          for: 5m
+          labels: { severity: critical, component: api }
+          annotations:
+            summary: "API 5xx ratio {{ $value | humanizePercentage }} for 5 min (gateway route api)"
+            description: "Measured at the Envoy gateway in front of the customer API (route api/api). Check the api pods, LiteLLM (key validation) and the regional kubeconfigs."
+        - alert: ArgoCDApplicationNotHealthy
+          expr: |
+            (kube_argocd_application_health_status{status=~"Degraded|Missing|Unknown"} == 1)
+            or (kube_argocd_application_sync_status{status="OutOfSync"} == 1)
+          for: 15m
+          labels: { severity: warning, component: gitops }
+          annotations:
+            summary: "Argo CD application {{ $labels.name }} is {{ $labels.status }} for 15 min"
+            description: "Degraded/Missing, or OutOfSync for 15 min although auto-sync and self-heal are on: a sync error, a hook failure, or a resource that Argo CD cannot apply. `kubectl -n argocd get app {{ $labels.name }} -o yaml` shows the condition."
+        - alert: MonitoringVolumeFillingUp
+          expr: |
+            (kubelet_volume_stats_used_bytes{namespace="monitoring"} / kubelet_volume_stats_capacity_bytes{namespace="monitoring"}) > 0.8
+          for: 15m
+          labels: { severity: warning, component: observability }
+          annotations:
+            summary: "Volume {{ $labels.persistentvolumeclaim }} in monitoring is {{ $value | humanizePercentage }} full"
+            description: "Prometheus (retention 30d / 45GB) or Loki (retention 30d) storage above 80 percent: lower the retention or grow the volume."
+        - alert: AlertmanagerNotifyFailing
+          expr: sum by (integration) (increase(alertmanager_notifications_failed_total[1h])) > 0
+          for: 1h
+          labels: { severity: info, component: observability }
+          annotations:
+            summary: "Alertmanager cannot deliver through the {{ $labels.integration }} integration"
+            description: "A receiver is failing for an hour (the in-cluster sink, or an external receiver added later). Check `kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager`."
+        - alert: CostExportFailed
+          expr: kube_job_status_failed{namespace="monitoring",job_name=~"cost-export-.*"} > 0
+          for: 10m
+          labels: { severity: info, component: observability }
+          annotations:
+            summary: "Daily cost export job {{ $labels.job_name }} failed"

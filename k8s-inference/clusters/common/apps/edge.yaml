@@ -1,0 +1,8 @@
+name: edge
+component: edge
+namespace: models
+wave: '3'
+hubOnly: 'false'
+placement: worker
+kind: manifests
+manifestsPath: overlays/edge

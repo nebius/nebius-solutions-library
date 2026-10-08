@@ -1,0 +1,58 @@
+{{- /* Image pre-pull DaemonSet per GPU pool (replaces clusters/<cluster>/apps/overlays/edge/prepull*.yaml);
+       the image list is per cluster in clusters/<cluster>/values/fleet.yaml (prepull.images). */ -}}
+{{- if and .Values.prepull.enabled (not (include "fleet.isControl" .)) .Values.prepull.images }}
+{{- $region := include "fleet.region" . | fromYaml }}
+{{- range $pool, $p := $region.r.pools }}
+{{- $labels := dict "app.kubernetes.io/name" (printf "prepull-%s" $pool) "app.kubernetes.io/part-of" "serverless2" "serverless2.nebius/pool" $pool }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: prepull-{{ $pool }}
+  namespace: {{ $.Values.namespaces.models }}
+  labels:
+    {{- $labels | toYaml | nindent 4 }}
+  annotations:
+    serverless2.nebius/images: {{ range $i, $img := $.Values.prepull.images }}{{ if $i }}, {{ end }}{{ $img.name }}={{ $img.image }}{{ end }}
+spec:
+  selector:
+    matchLabels:
+      {{- $labels | toYaml | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+  template:
+    metadata:
+      labels:
+        {{- $labels | toYaml | nindent 8 }}
+    spec:
+      nodeSelector:
+        serverless2.nebius/pool: {{ $pool }}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+        {{- range $s := $.Values.prepull.imagePullSecrets }}
+        - name: {{ $s }}
+        {{- end }}
+      terminationGracePeriodSeconds: 1
+      initContainers:
+        {{- range $img := $.Values.prepull.images }}
+        - name: pull-{{ $img.name }}
+          image: {{ $img.image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c, "echo pulled {{ $img.image }}"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+        {{- end }}
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { cpu: 10m, memory: 16Mi }
+{{- end }}
+{{- end }}

@@ -1,0 +1,296 @@
+openapi: 3.1.0
+info:
+  title: Nebius Serverless 2.0 customer API
+  version: 0.8.1
+  description: |
+    Invoke a model, receive an operation, poll, fetch the result, cancel.
+    Auth: `Authorization: Bearer <LiteLLM virtual key>` on every request; the
+    key's metadata names the tenant (namespace `tenant-<name>`, bucket
+    `serverless2-<name>-<region>`). `Idempotency-Key` on mutating calls maps to a
+    deterministic operation id; a repeat returns the existing operation (200).
+    Operation ids are Kubernetes Job names inside the tenant namespace (docs/JOBS.md). The control
+    cluster's API (`api.<control cluster host>`) is the entry point for runs: it creates the Job on the
+    fleet's MultiKueue manager and Kueue plus the cost dispatcher place it in the best region among the
+    model's deployments and GPU classes; a regional API creates runs in its own cluster.
+    Runs keep their checkpoints on a per-operation volume: a preempted attempt resumes on its own,
+    a FAILED or CANCELLED run can be resumed in place with `:resume`.
+servers:
+  - url: /          # public hostname: PUBLIC_API_URL of the API Deployment
+security: [{ bearer: [] }]
+paths:
+  /v1/models:
+    get:
+      summary: List catalog models
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Model" } } } } } }
+  /v1/models/{model}:
+    get:
+      summary: Get one model
+      parameters: [{ $ref: "#/components/parameters/model" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Model" } } } }, "404": { $ref: "#/components/responses/Error" } }
+  /v1/models/{model}:invoke:
+    post:
+      summary: Invoke a model
+      description: |
+        `mode` defaults to the model's `default_mode`. `sync` proxies to the
+        endpoint and returns `{result, operation}` inline (202 with an operation
+        only if the endpoint does not answer within `timeout_s`). `async` and
+        `run` return an operation (202). Files are passed as artifact URIs
+        (`s3://...`) from `/v1/artifacts/uploads` inside `input`.
+      parameters: [{ $ref: "#/components/parameters/model" }, { $ref: "#/components/parameters/idem" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/InvokeRequest" } } } }
+      responses:
+        "200": { description: sync result, or existing operation for a repeated Idempotency-Key, content: { application/json: { schema: { oneOf: [{ $ref: "#/components/schemas/SyncResponse" }, { $ref: "#/components/schemas/Operation" }] } } } }
+        "202": { description: operation accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { description: "tenant limit reached (max_concurrent_operations, submissions_per_minute from the key metadata; defaults 10 and 20); Retry-After header", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { description: key service unavailable after retries, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v1/operations:
+    get:
+      summary: List the tenant's operations (newest first)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: model, in: query, schema: { type: string } }
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Operation" } } } } } }
+  /v1/operations/{id}:
+    get:
+      summary: Operation status
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" } }
+  /v1/operations/{id}/result:
+    get:
+      summary: Operation result (inline) or artifact links (presigned, 1 h)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/OperationResult" } } } }
+        "409": { description: not finished yet, content: { application/json: { schema: { $ref: "#/components/schemas/OperationResult" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/operations/{id}:cancel:
+    post:
+      summary: Cancel an operation (a queued one is deleted, a running one is stopped and kept with status CANCELLED)
+      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/idem" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" } }
+  /v1/operations/{id}:resume:
+    post:
+      summary: Resume a FAILED or CANCELLED run from its checkpoints
+      description: |
+        Creates operation `<id>-r<n>` in the same region on the same work volume (the volume is regional
+        and still holds the inputs and checkpoints); `resumed_from` on the new operation names the root
+        operation. 409 when the operation is still queued or running, or when its volume is gone
+        (successful runs release it). Preempted attempts resume on their own; this is for runs that
+        exhausted their retries, were cancelled, or failed for a reason that has since been fixed.
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: resumed operation, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "200": { description: the resumed operation already exists, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/artifacts/uploads:
+    post:
+      summary: Presigned PUT URL in the tenant bucket
+      parameters: [{ $ref: "#/components/parameters/idem" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/UploadRequest" } } } }
+      responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Upload" } } } } }
+  /v1/artifacts/{uri}:
+    get:
+      summary: Presigned GET URL for an artifact URI the tenant owns
+      parameters: [{ name: uri, in: path, required: true, schema: { type: string }, description: "URL-encoded s3://bucket/key" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Artifact" } } } }, "403": { $ref: "#/components/responses/Error" } }
+  /v1/endpoints:
+    get:
+      summary: Endpoints (InferenceServices) of catalog models in this region
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Endpoint" } } } } } }
+  /v1/endpoints/{id}:
+    get:
+      summary: One endpoint
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }, "404": { $ref: "#/components/responses/Error" } }
+    patch:
+      summary: Update scaling (admin key). Endpoints are created and deleted in git (catalog/models, charts/endpoint); a patch on a git-managed endpoint is reverted by Argo CD.
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { min_replicas: { type: integer }, max_replicas: { type: integer }, target_concurrency: { type: integer }, scale_to_zero_after_s: { type: integer } } } } } }
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } } }
+  /v1/keys:
+    get:
+      summary: Keys of the caller's tenant (admin key)
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ApiKey" } } } } } }
+    post:
+      summary: Create a key in the caller's tenant (admin key); the key itself is returned once
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [alias], properties: { alias: { type: string }, budget: { type: number, default: 10 }, models: { type: array, items: { type: string } }, expires_days: { type: integer } } } } } }
+      responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } } }
+  /v1/keys/{alias}:
+    delete:
+      summary: Revoke a key by alias (admin key)
+      parameters: [{ name: alias, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: revoked }, "404": { $ref: "#/components/responses/Error" } }
+  /v1/keys/me:
+    get:
+      summary: The calling key (alias, budget, spend, tenant, models)
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } } }
+  /healthz:
+    get: { summary: Liveness, security: [], responses: { "200": { description: ok } } }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, description: LiteLLM virtual key }
+  parameters:
+    model: { name: model, in: path, required: true, schema: { type: string } }
+    id: { name: id, in: path, required: true, schema: { type: string } }
+    idem: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+  responses:
+    Error: { description: error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  schemas:
+    Error:
+      type: object
+      properties: { detail: { type: string } }
+    Mode: { type: string, enum: [sync, async, run] }
+    OperationStatus: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+    Model:
+      type: object
+      required: [id, name, modes, default_mode, regions]
+      properties:
+        id: { type: string, description: catalog name, e.g. gromacs, s2-qwen }
+        name: { type: string }
+        description: { type: string }
+        modes: { type: array, items: { $ref: "#/components/schemas/Mode" } }
+        default_mode: { $ref: "#/components/schemas/Mode" }
+        gpu: { type: string, example: 1x H100 }
+        price: { type: string, example: $0.05 / call }
+        price_per_call: { type: number }
+        regions: { type: array, items: { type: object, properties: { region: { type: string }, status: { type: string, enum: [ready, scaled-to-zero, deploying, unavailable] }, replicas_ready: { type: [integer, "null"], description: "live count from a regional API; null from the fleet API" } } } }
+        image: { type: string }
+        protocol: { type: string, example: openai-chat }
+        cold_start_s: { type: number }
+        parameters:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name: { type: string }
+              type: { type: string, enum: [string, number, boolean, select, text, file] }
+              label: { type: string }
+              default: {}
+              options: { type: array, items: { type: string } }
+              required: { type: boolean }
+              help: { type: string }
+    InvokeRequest:
+      type: object
+      properties:
+        name: { type: string, description: free-text label stored on the operation }
+        mode: { $ref: "#/components/schemas/Mode" }
+        input: { type: object, additionalProperties: true, description: "sync/async: the request body sent to the endpoint; run: the model's parameters (unknown names are a 400)" }
+        region: { type: string, description: "run mode: pin the job to one of the model's regions (fleet API: optional, the dispatcher picks the cheapest free region by the model's GPU preference; regional API: its own region). sync/async: the region whose API serves the endpoint (the fleet API forwards)" }
+        priority: { type: string, enum: [low, normal, high] }
+        timeout_s: { type: integer, description: sync wait budget (default 600) or run deadline }
+    SyncResponse:
+      type: object
+      required: [result, operation]
+      properties:
+        result: { description: the endpoint's JSON response }
+        operation: { $ref: "#/components/schemas/Operation" }
+    Attempt:
+      type: object
+      properties:
+        index: { type: integer }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        status: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, PREEMPTED] }
+        node: { type: string, description: node name }
+        reason: { type: string }
+        exit_code: { type: integer }
+    Operation:
+      type: object
+      required: [id, model, mode, status, region, created_at]
+      properties:
+        id: { type: string, description: Kubernetes Job name }
+        name: { type: string }
+        model: { type: string }
+        mode: { $ref: "#/components/schemas/Mode" }
+        status: { $ref: "#/components/schemas/OperationStatus" }
+        region: { type: [string, "null"], description: "region whose cluster runs the job; null while a fleet-placed run waits for a region. Fleet-placed runs keep inputs and outputs in the tenant's hub-region bucket, regional ones in that region's bucket" }
+        profile: { type: string, description: "scheduling profile (Kueue queue): prefer-<gpu class> from the model's first GPU class, or default" }
+        resumed_from: { type: string, description: root operation this one resumes (same volume, same region) }
+        resumable: { type: boolean, description: "run that ended FAILED or CANCELLED; `:resume` still needs its volume to exist" }
+        priority: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        duration_s: { type: number }
+        timeout_s: { type: integer }
+        attempts: { type: array, items: { $ref: "#/components/schemas/Attempt" } }
+        logs_url: { type: string, description: Grafana Explore (Loki) query over the operation's pods }
+        error: { type: string }
+        input: { type: object, additionalProperties: true }
+        cost: { type: number, description: "sync/async: the model's price per call; run: GPU-seconds x deployments.<region>.price_per_gpu_hour, written to the key's LiteLLM spend within a minute of completion" }
+        gpu_seconds: { type: number, description: run only, main container running time x GPUs summed over all attempts }
+        tenant: { type: string }
+    Artifact:
+      type: object
+      required: [name, url]
+      properties: { name: { type: string }, uri: { type: string }, url: { type: string, description: presigned GET }, size_bytes: { type: integer } }
+    OperationResult:
+      type: object
+      required: [operation_id, status]
+      properties:
+        operation_id: { type: string }
+        status: { $ref: "#/components/schemas/OperationStatus" }
+        region: { type: string }
+        result: { description: inline result (sync/async endpoint response) }
+        artifacts: { type: array, items: { $ref: "#/components/schemas/Artifact" } }
+        error: { type: string }
+    UploadRequest:
+      type: object
+      required: [filename]
+      properties:
+        filename: { type: string }
+        content_type: { type: string, default: application/octet-stream }
+        expires_s: { type: integer, default: 3600 }
+        region: { type: string, default: eu-north1, description: which regional tenant bucket receives the upload }
+    Upload:
+      type: object
+      required: [uri, url, method, expires_at]
+      properties:
+        uri: { type: string, description: "s3://<tenant bucket>/uploads/<uuid>/<filename>; pass this in invoke input" }
+        url: { type: string, description: presigned PUT URL }
+        method: { type: string, enum: [PUT] }
+        headers: { type: object, additionalProperties: { type: string } }
+        expires_at: { type: string, format: date-time }
+    Endpoint:
+      type: object
+      required: [id, name, model, region, url, status, replicas_ready, min_replicas, max_replicas, scale_to_zero_after_s]
+      properties:
+        id: { type: string, description: InferenceService name }
+        name: { type: string }
+        model: { type: string }
+        region: { type: string }
+        url: { type: string }
+        status: { type: string, enum: [ready, scaled-to-zero, deploying, error] }
+        replicas_ready: { type: integer }
+        min_replicas: { type: integer }
+        max_replicas: { type: integer }
+        scale_to_zero_after_s: { type: integer }
+        target_concurrency: { type: integer }
+        placement: { type: string, enum: [RESERVED, SPOT, ANY] }
+        gpu: { type: string }
+        protocol: { type: string }
+        created_at: { type: string }
+        managed_by: { type: string, enum: [git, api] }
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, description: the alias }
+        key: { type: string, description: only on creation }
+        role: { type: string, enum: [user, admin] }
+        key_preview: { type: string }
+        alias: { type: string }
+        tenant: { type: string }
+        budget: { type: number }
+        spend: { type: number }
+        models: { type: array, items: { type: string } }
+        created_at: { type: string }
+        expires_at: { type: string }
+        status: { type: string, enum: [active, exhausted, expired] }

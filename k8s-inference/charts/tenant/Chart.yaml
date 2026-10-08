@@ -1,0 +1,5 @@
+apiVersion: v2
+name: tenant
+description: One tenant namespace per cluster for Serverless 2.0 runs - namespace, run-pod identity, API binding, one Kueue LocalQueue per scheduling profile, network policy; on the control cluster (MultiKueue manager) namespace, queues and API binding only. Secrets are created by services/onboarding, not here.
+type: application
+version: 0.2.0

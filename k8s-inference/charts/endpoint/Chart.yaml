@@ -1,0 +1,6 @@
+apiVersion: v2
+name: endpoint
+description: One KServe InferenceService (Knative mode) for an explicit model container with GPU, pool placement and scale-to-zero.
+type: application
+version: 0.1.0
+appVersion: "kserve-0.20"

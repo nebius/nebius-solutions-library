@@ -24,6 +24,14 @@ For those who prefer containerized environments, our Kubernetes solution include
 
 Our SLURM solutions offer a streamlined approach for users who prefer traditional HPC environments. These solutions include ready-to-use images pre-configured with NVIDIA drivers and are ideal for those looking to take advantage of SLURM’s robust job scheduling capabilities.  Similar to our Kubernetes offerings, the SLURM solutions are optimized for InfiniBand connectivity, ensuring peak performance and efficiency in data transfer and communication between nodes.
 
+<!-- k8s-inference:start -->
+### Inference
+
+[Kubernetes inference fleet](./k8s-inference/README.md)
+
+A multi-region GPU inference platform on Managed Kubernetes from one `terraform.tfvars`: a CPU control cluster, one cluster per GPU region, spot, on-demand and reserved pools (InfiniBand optional), one API for models with always-on endpoints that scale to zero, queued endpoint calls and long jobs with checkpoint resume, multi-node jobs, a per-region image cache for fast cold starts, tenants with API keys and budgets, and observability with cost reporting. Everything inside the clusters is an upstream Helm chart or a small manifest.
+
+<!-- k8s-inference:end -->
 ### Network
 
 [Wireguard](./wireguard/README.md)

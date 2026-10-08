@@ -1,0 +1,44 @@
+{{- $c := include "tenant.cluster" . | fromYaml -}}
+{{- if not $c.manager }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-runner
+  namespace: {{ include "tenant.ns" . }}
+rules:
+  - apiGroups: [""]                       # the uploader polls its own pod for the main container's exit code
+    resources: [pods]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, watch]
+  - apiGroups: [""]                       # ... and releases the run's work volume after a successful upload (docs/JOBS.md)
+    resources: [persistentvolumeclaims]
+    verbs: [get, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-runner
+  namespace: {{ include "tenant.ns" . }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-runner }
+subjects:
+  - { kind: ServiceAccount, name: {{ .Values.runnerServiceAccount }}, namespace: {{ include "tenant.ns" . }} }
+{{- if .Values.legacyRunnerServiceAccount }}
+  - { kind: ServiceAccount, name: {{ .Values.legacyRunnerServiceAccount }}, namespace: {{ include "tenant.ns" . }} }
+{{- end }}
+---
+{{- end }}
+# the API (this cluster's, and the control cluster's through its api-agent identity on a worker) manages
+# operation Jobs only in this namespace (ClusterRole serverless2-api-tenant from
+# clusters/common/manifests/api-agent/tenant-clusterrole/clusterrole.yaml)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: serverless2-api
+  namespace: {{ include "tenant.ns" . }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-tenant }
+subjects:
+{{- range .Values.apiSubjects }}
+  - { kind: {{ .kind }}, name: {{ .name }}, namespace: {{ .namespace }} }
+{{- end }}

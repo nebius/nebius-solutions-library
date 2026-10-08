@@ -1,0 +1,51 @@
+# Helm values for the loki Application (both clusters unless hubOnly); version pinned in clusters/common/apps/loki.yaml
+deploymentMode: SingleBinary
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  # Retention 30 days (the compactor deletes older chunks) and ingestion limits. Single tenant (auth off),
+  # so the limits bound the whole cluster: a runaway pod log cannot fill the 10 Gi volume in one day.
+  limits_config:
+    retention_period: 720h
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+    per_stream_rate_limit: 3MB
+    per_stream_rate_limit_burst: 15MB
+    max_streams_per_user: 50000
+    max_line_size: 256KB
+    max_query_series: 5000
+    max_entries_limit_per_query: 10000
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+    compaction_interval: 10m
+    retention_delete_delay: 2h
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+singleBinary:
+  replicas: 1
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+gateway:
+  enabled: false

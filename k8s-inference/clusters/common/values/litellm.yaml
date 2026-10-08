@@ -1,0 +1,26 @@
+# Helm values for the litellm Application (both clusters unless hubOnly); version pinned in clusters/common/apps/litellm.yaml
+replicaCount: 2                  # HA (readiness item 1): stateless proxy, state in CNPG data/postgres
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: { app.kubernetes.io/name: litellm }
+masterkeySecretName: litellm-master
+masterkeySecretKey: masterkey
+envVars:
+  STORE_MODEL_IN_DB: "True"
+db:
+  useExisting: true
+  deployStandalone: false
+  endpoint: postgres-rw.data.svc.cluster.local
+  database: litellm
+  secret:
+    name: litellm-db
+    usernameKey: username
+    passwordKey: password
+proxy_config:
+  model_list: []
+  general_settings:
+    master_key: os.environ/PROXY_MASTER_KEY
+    store_model_in_db: true

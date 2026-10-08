@@ -1,0 +1,68 @@
+id: gromacs
+displayName: GROMACS 2026.4 (run class)
+description: Molecular dynamics of the 185k-atom customer baseline; inputs and outputs in the tenant bucket of the run's region, checkpoint every 5 min, resumes after preemption on the same volume.
+task: molecular-dynamics
+mode: run
+protocol: kubernetes-job
+gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # preferred first: RTX PRO 6000 is ~3x cheaper per ns than H100 for this system (models/gromacs/README.md)
+price: { unit: gpu-hour, usd: 1.60 }       # display; billing uses deployments.<cluster>.price_per_gpu_hour
+# One Kubernetes Job (services/api/jobs.py, docs/JOBS.md): the runner's fetch init container syncs
+# input_prefix to /work/in, `main` below runs grompp once and mdrun with checkpoints on the per-run
+# volume (-cpi resumes after a preemption or a :resume), the runner's uploader syncs /work to
+# output_prefix. Tuning defaults from spikes/S16 (RTX PRO 6000, mas-20e): 12 unpinned OpenMP threads,
+# pair search every 200 steps, CPU request without a limit (a CFS quota disables pinning and throttles
+# the pair search). Behaviour and measurements: models/gromacs/README.md.
+job:
+  # one image for every region (sm_90 + sm_120 fatbin), pulled through the regional cache (docs/IMAGES.md)
+  image: registry.serverless2.local/nebius/gromacs:2026.4-cuda12.8-sm90-120
+  gpu: 1
+  cpu: "12"
+  memory: 32Gi
+  pvcSizeGi: 50
+  graceSeconds: 300               # checkpoints are written every 5 min anyway (-cpt 5); a resume loses at most that
+  command:
+    - bash
+    - -c
+    - |
+      set -euo pipefail
+      cd /work
+      echo "ATTEMPT START $(date -u +%FT%TZ) pod=$HOSTNAME gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+      if [ ! -f topol.tpr ]; then
+        # the nsteps override on a copy of the mdp is the only edit; everything else is the customer's mdp
+        sed -E 's/^(nsteps[[:space:]]*=).*/\1 {{nsteps}}/' in/{{mdp}} > run.mdp
+        gmx grompp -f run.mdp -c in/{{gro}} -r in/{{gro}} -p in/{{top}} -n in/{{ndx}} \
+          -o topol.tpr -po mdout.mdp -maxwarn 0 2>&1 \
+          | grep -vE '^$|^Excluding [0-9]+ bonded|^turning H bonds' | tail -60
+        echo "GROMPP DONE $(date -u +%FT%TZ)"
+      fi
+      [ -n "{{nb_min_ci}}" ] && export GMX_NB_MIN_CI="{{nb_min_ci}}"
+      # -cpi: resume from run.cpt when present (first attempt: no file, fresh start)
+      gmx mdrun -s topol.tpr -deffnm run -cpi run.cpt -cpt 5 \
+        -nb gpu -pme gpu -bonded gpu -update {{update}} \
+        -ntmpi 1 -ntomp {{ntomp}} -pin {{pin}} -nstlist {{nstlist}} \
+        {{extra_args}} -v 2>&1 | stdbuf -oL tr '\r' '\n' \
+        | grep --line-buffered -E 'Writing checkpoint|Reading checkpoint|continuing from|Performance|Finished|Fatal|Error|error|Inconsistency|will finish' \
+        | awk '/will finish/ { if (++n % 100 != 1) next } { print; fflush() }' || true
+      tail -n 25 run.log
+      echo "ATTEMPT END $(date -u +%FT%TZ)"
+      grep -q '^Performance:' run.log && grep -A1 '^ *Core t' run.log | head -2 && grep '^Performance:' run.log
+deployments:          # where the run class may land (fleet placement picks among these by preference and price); per-cluster
+                      # parameter defaults; no pool pin: the profile queue (prefer-rtx-pro-6000) and the class affinity place it
+  hub:
+    price_per_gpu_hour: 2.15      # H100 spot cap (pricing policy of the pool); billed on GPU-seconds of the run
+    parameters: { nb_min_ci: "16000" }
+  eu-south1:
+    price_per_gpu_hour: 1.60      # RTX PRO 6000 spot
+    parameters: { nb_min_ci: "16000" }
+parameters:
+  - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), required: true, help: "gro, top + toppar/, mdp, ndx" }
+  - { name: nsteps, type: number, label: MD steps, default: 500000, help: "2 fs per step; 500k = 1 ns" }
+  - { name: gro, type: string, label: Structure file, default: npt2.gro }
+  - { name: top, type: string, label: Topology, default: topol.top }
+  - { name: mdp, type: string, label: MD parameters, default: md.mdp }
+  - { name: ndx, type: string, label: Index groups, default: index.ndx }
+  - { name: nstlist, type: number, label: Pair-search interval (steps), default: 200, help: "mdrun -nstlist; 200 is the RTX optimum for 2 fs steps" }
+  - { name: ntomp, type: number, label: OpenMP threads, default: 12, help: "one per physical core of the 1-GPU presets" }
+  - { name: pin, type: select, label: Thread pinning, default: "off", options: ["off", "on"] }
+  - { name: update, type: select, label: Update on, default: gpu, options: [gpu, cpu], help: "-update gpu needs a supported integrator/coupling set" }
+  - { name: extra_args, type: string, label: Extra mdrun arguments, default: "", help: "appended verbatim, e.g. -notunepme" }

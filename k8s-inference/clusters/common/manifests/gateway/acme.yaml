@@ -1,0 +1,33 @@
+# Public certificates for the sslip.io hostnames through ACME HTTP-01 on the external Gateway
+# (cert-manager Gateway API solver; the challenge is an HTTPRoute on the `http` listener, port 80).
+# sslip.io is not on the Public Suffix List, so Let's Encrypt's "50 certificates per registered domain
+# per week" bucket is shared by every sslip.io user; if issuance fails with "too many certificates already
+# issued", wait (the bucket resets weekly) or request a rate-limit adjustment; cert-manager retries on its
+# own and leaves the existing Secret in place, so the listener never breaks. (Buypass was tried as a second
+# CA: its ACME directory is gone, HTTP 404.)
+# No ACME account email on purpose (optional; renewals are automatic). With a real domain: DNS-01 wildcard.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: { name: letsencrypt }
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef: { name: acme-letsencrypt-account }
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - { group: gateway.networking.k8s.io, kind: Gateway, name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: { name: letsencrypt-staging }     # for tests of the solver path; browsers do not trust it
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef: { name: acme-letsencrypt-staging-account }
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - { group: gateway.networking.k8s.io, kind: Gateway, name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }

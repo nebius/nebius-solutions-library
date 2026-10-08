@@ -1,0 +1,62 @@
+{{- /*
+Worker scheduling profiles (docs/FLEET.md):
+  default          holds the cluster's nominal GPU/CPU/memory quota per pool flavor (pool max minus warm endpoints
+                   minus the per-node reserve) in cohort .Values.cohort; the same object as today's pool.yaml.
+  prefer-<class>   nominalQuota 0 + borrowingLimit = pool capacity (the charts/tenant pattern): a workload admitted
+                   here borrows from the cohort on the FIRST flavor with free capacity, flavors ordered
+                   preferred class (reserved, on-demand, spot) first, then the other classes by price.
+                   A workload waits only when every pool is busy.
+One profile per GPU class of the WHOLE fleet (not only this region's): a fleet-placed job submitted to
+`prefer-h100` may land in a region without H100s (the dispatcher's fallback), where that queue simply
+orders the local pools by price. Tenant LocalQueues (charts/tenant) carry the same names everywhere.
+*/ -}}
+{{- if not (include "fleet.isControl" .) }}
+{{- $region := include "fleet.region" . | fromYaml }}
+{{- $pools := $region.r.pools }}
+{{- $f := .Values.fleet }}
+{{- $profiles := list "" }}
+{{- range $c := include "fleet.classes" (include "fleet.allPools" $f | fromYaml) | fromYamlArray }}{{ $profiles = append $profiles $c }}{{ end }}
+{{- range $prefer := $profiles }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: {{ if $prefer }}prefer-{{ $prefer }}{{ else }}default{{ end }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    {{- if $prefer }}
+    serverless2.nebius/prefer: {{ $prefer | quote }}
+    {{- end }}
+spec:
+  cohortName: {{ $.Values.cohort }}
+  namespaceSelector: {}            # any namespace with a LocalQueue pointing here
+  queueingStrategy: BestEffortFIFO
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch   # take the first flavor with free cohort capacity (v1beta2 name of "Borrow")
+    whenCanPreempt: TryNextFlavor  # ... before preempting on a preferred one
+  preemption:
+    withinClusterQueue: LowerPriority     # customer-batch evicts bulk-backfill
+    reclaimWithinCohort: Any              # take back nominal quota lent to other queues
+    borrowWithinCohort:
+      policy: LowerPriority               # when borrowing, may evict lower-priority borrowers
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+      flavors:
+        {{- range $pool := include "fleet.orderedPools" (dict "fleet" $f "pools" $pools "prefer" $prefer) | fromYamlArray }}
+        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $pools $pool)) | fromYaml }}
+        - name: {{ $pool }}
+          resources:
+            {{- if $prefer }}
+            - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
+            {{- else }}
+            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
+            {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

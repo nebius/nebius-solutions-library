@@ -1,0 +1,181 @@
+# The inference fleet: the one file you edit (README.md). Copy it to terraform.tfvars and change the values.
+# Every key is explained here and in stack/config/variables.tf; anything left out keeps its default.
+# Secret values never go here: NGC_API_KEY, HF_TOKEN, REGISTRY_CREDENTIALS and the state-bucket
+# credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) are environment variables at apply time.
+#
+# Three stages, one wrapper:  ./stack.sh preflight && ./stack.sh apply
+#   cloud     clusters, pools, registry, buckets, identities         (one state)
+#   platform  Helm releases and manifests per cluster                (one state per cluster)
+#   models    tenants, catalog, endpoints, keys, acceptance probe    (one state per cluster)
+
+fleet = {
+  name           = "inference"      # prefix of every cloud resource; 2-23 lowercase chars, digits, dashes
+  nebius_profile = "default"        # `nebius profile list`; needs editor on every project below
+  labels         = { owner = "platform-team" }
+  protect_data   = true             # weights filesystems and tenant buckets refuse `destroy` (README "Destroying")
+  # kubernetes_version = "1.35"
+  # hub_region = "eu-north1"        # default: the control plane's region if it is a GPU region, else the first
+  # state = { bucket = "inference-tfstate" }   # Object Storage bucket in the hub project; default <name>-tfstate
+
+  # Control plane: API, LiteLLM + Postgres, UI, MultiKueue manager, cost dispatcher, central Grafana.
+  # dedicated = true (default): its own CPU-only cluster; required for more than one region.
+  # dedicated = false: single-cluster mode, everything runs on the hub region's system pool.
+  control_plane = {
+    dedicated     = true
+    project_id    = "project-e00xxxxxxxxxxxxxxxxx"
+    region        = "eu-north1"
+    subnet_id     = "vpcsubnet-e00xxxxxxxxxxxxxxxx"  # `nebius vpc subnet list --parent-id <project>`
+    system_pool   = { platform = "cpu-d3", preset = "8vcpu-32gb", node_count = 2 }
+    allowed_cidrs = []                                  # your egress CIDRs; [] = the Kubernetes API is open
+  }
+
+  # GPU regions. Key = Nebius region; `id` = short cluster id (names, catalog `deployments.<id>`, outputs).
+  # Every region is a project of its own (one project = one region on Nebius) with its own subnet.
+  regions = {
+    eu-north1 = {
+      id            = "hub"
+      project_id    = "project-e00xxxxxxxxxxxxxxxxx"
+      subnet_id     = "vpcsubnet-e00xxxxxxxxxxxxxxxx"
+      allowed_cidrs = []
+      # shared filesystem for model weights (warm cold starts): /mnt/weights on every GPU node
+      weights_filesystem = { enabled = true, size_gib = 2048 }
+      pools = {
+        # spot with a price cap (USD per GPU-hour); the pool follows the spot price when max_price is omitted
+        h100-spot-1x = {
+          platform  = "gpu-h100-sxm"
+          preset    = "1gpu-16vcpu-200gb"
+          gpu_class = "h100"
+          capacity  = { type = "spot", max_price = "2.15" }
+          min_nodes = 0                  # warm spare nodes kept even when idle
+          max_nodes = 8
+        }
+        # reserved capacity (capacity block groups) is used first; rolled with zero surge
+        # h200-reserved-8x = {
+        #   platform   = "gpu-h200-sxm"
+        #   preset     = "8gpu-128vcpu-1600gb"
+        #   gpu_class  = "h200"
+        #   capacity   = { type = "reserved", reservation_ids = ["capacityblockgroup-e00xxxxxxxxxxxxxxxx"] }
+        #   min_nodes  = 2
+        #   max_nodes  = 2
+        #   local_nvme = true            # host NVMe as kubelet ephemeral storage: emptyDirs, image layers,
+        #                                # `scratch: local-nvme` run volumes (docs/FLEET.md "Local NVMe")
+        #   interconnect      = "infiniband"   # nodes join one GPU cluster on the fabric: multi-node jobs over IB
+        #   infiniband_fabric = "fabric-2"     # the region's fabric (eu-north1: fabric-2/3/4/6; eu-west2: eu-west2-a)
+        # }
+        # on-demand, a second GPU class (preference queue prefer-l40s)
+        l40s-ondemand-1x = {
+          platform  = "gpu-l40s-a"
+          preset    = "1gpu-8vcpu-32gb"
+          gpu_class = "l40s"
+          capacity  = { type = "on_demand" }
+          max_nodes = 2
+        }
+      }
+      # CPU-only pools for pre/post-processing run classes (gpu: 0): optional
+      # cpu_pools = { prep = { platform = "cpu-d3", preset = "16vcpu-64gb", max_nodes = 4 } }
+    }
+    # A second region: its own project and subnet; the fleet queues span both and the dispatcher sends
+    # every run to the cheapest region that has a free pool of the model's GPU class (docs/SCHEDULING.md).
+    # eu-west2 = {
+    #   project_id         = "project-e04xxxxxxxxxxxxxxxxx"
+    #   subnet_id          = "vpcsubnet-e04xxxxxxxxxxxxxxxx"
+    #   weights_filesystem = { enabled = true, size_gib = 2048 }
+    #   pools = {
+    #     b300-spot-1x = { platform = "gpu-b300-sxm", preset = "1gpu-24vcpu-346gb", gpu_class = "b300", capacity = { type = "spot" }, max_nodes = 4, local_nvme = true }
+    #   }
+    # }
+  }
+
+  # Images: the platform images are pushed once to the registry this fleet creates (tools/images.sh); every
+  # cluster caches them and the model images (NGC, Docker Hub, GHCR, Quay, registry.k8s.io) on demand.
+  images = {
+    cache = { size_gib = 1024, keep_days = 30 }
+    # source   = "cr.eu-north1.nebius.cloud/<registry id>"   # an existing registry instead of the created one
+    # versions = { api = "0.8.1" }                            # platform image tags (defaults in stack/config/variables.tf)
+  }
+
+  # USD per GPU-hour by platform (nebius.com/prices): the dispatcher orders pools by these, the cost export
+  # prices node time with them. The default table covers every current Nebius GPU platform; list only what
+  # differs (a negotiated price, a new platform).
+  # prices = {
+  #   gpu-h100-sxm  = { on_demand = 4.50, spot = 0.79 }
+  #   gpu-h200-sxm  = { on_demand = 5.40, spot = 0.79 }
+  #   gpu-b200-sxm  = { on_demand = 7.50, spot = 0.99 }
+  #   gpu-b300-sxm  = { on_demand = 9.50, spot = 0.99 }
+  #   gpu-gb300     = { on_demand = 9.50, spot = 0.99 }
+  #   gpu-l40s-a    = { on_demand = 1.55, spot = 0.74 }
+  #   gpu-l40s-d    = { on_demand = 1.82, spot = 0.90 }
+  #   gpu-rtx6000-a = { on_demand = 1.80, spot = 0.95 }
+  # }
+
+  # Edge: one static public IP per cluster gateway, hostnames <service>.<ip>.sslip.io with Let's Encrypt
+  # (no DNS needed); set `domain` once you have one (hostnames <service>.<cluster id>.<domain>, A records
+  # from `./stack.sh output`). Each region needs one free public IP in its project's quota.
+  edge = {
+    mode                      = "public"   # internal = private load balancers only (VPN/peering)
+    domain                    = null
+    source_cidrs              = []         # who may reach the public listeners ([] = anyone; the API needs a key)
+    ip_certificate            = false      # Let's Encrypt IP-address certificate for https://<ip> (no name at all)
+    acme                      = { email = "ops@example.com", staging = false }
+    api_rate_limit_per_minute = 600        # per API key
+    grafana_public            = true
+  }
+
+  observability = {
+    prometheus_retention_days = 30
+    loki_retention_days       = 30
+    alert_webhook_url         = null       # Slack/Teams/PagerDuty webhook; null = in-cluster sink only
+    cost_export               = true       # daily OpenCost reports into the backups bucket
+  }
+
+  # Names of the environment variables that carry secrets (never the values).
+  secrets = {
+    ngc_api_key_env          = "NGC_API_KEY"          # NIM images through the cache, NGC-hosted weights
+    hf_token_env             = "HF_TOKEN"             # gated Hugging Face weights
+    registry_credentials_env = "REGISTRY_CREDENTIALS" # JSON {"<host>": {"username": "...", "password": "..."}}
+  }
+
+  # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys
+  # (`./stack.sh output models control tenant_keys`).
+  tenants = {
+    demo = {
+      lifecycle_days = 90                  # run outputs expire after N days (0 = keep)
+      keys = {
+        default = { budget_usd = 100 }
+        # admin = { budget_usd = 1000, admin = true }
+      }
+      # gpu_quota         = 4             # GPUs the tenant may hold at once (null = share the fleet queues)
+      # fair_share_weight = 2             # Kueue weighted fair sharing when the fleet is full
+      # dedicated_pools   = ["h200-reserved-8x"]
+      # allowed_images    = ["registry.serverless2.local/nebius/", "registry.serverless2.local/nvcr/nim/"]
+    }
+  }
+
+  # Models: ids from the bundled catalog (catalog/models/*.yaml) to deploy, plus your own entries in the same
+  # schema. An entry with a bundled id extends the bundled one (top-level keys replace), so re-homing a
+  # bundled class to your regions is one line. `deployments.hub` is an alias for the hub cluster;
+  # deployments naming a cluster that is not in `regions` are ignored.
+  models = {
+    enabled = ["hello-run", "container-run", "gromacs", "qwen2-5-0-5b"]
+    entries = {
+      hello-run     = { deployments = { hub = {}, eu-west2 = {} } }
+      container-run = { deployments = { hub = { price_per_gpu_hour = 2.15 }, eu-west2 = { price_per_gpu_hour = 0.99 } } }
+      # my-llm = {
+      #   id = "my-llm", displayName = "My LLM", task = "text-generation", mode = "sync", protocol = "openai"
+      #   gpu     = { count = 1, memoryGiB = 40, classes = ["h100"] }
+      #   runtime = {
+      #     image = "registry.serverless2.local/docker/kserve/huggingfaceserver:v0.20.0-gpu", port = 8080
+      #     args = ["--model_id=org/model"], resources = { gpu = 1, cpu = "8", memory = "32Gi" }
+      #     scaling = { minReplicas = 0, maxReplicas = 2 }
+      #   }
+      #   deployments = { hub = { pool = "h100-spot-1x" } }
+      # }
+    }
+  }
+
+  # After the models stage: a probe Job runs `model` (a run class) and, when set, calls `endpoint` (a sync
+  # model) through the public API with the first tenant key; a failure fails the apply.
+  acceptance = { probe = true, model = "hello-run", endpoint = "qwen2-5-0-5b" }
+
+  # argocd = { enabled = true }            # optional operator UI on the control cluster; deploys nothing
+}

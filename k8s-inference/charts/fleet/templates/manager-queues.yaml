@@ -1,0 +1,79 @@
+{{- /*
+Control cluster only: the fleet-wide scheduling profiles the API submits to. Flavors are logical
+(`<region id>-<pool>`, no node labels: the job runs on a worker, whose own flavors place it) and mirror each
+worker's quota; `default` holds the nominal quota, `prefer-<class>` borrows in preference order across regions
+(preferred class: reserved, on-demand, spot; then other classes by price). Every queue carries the MultiKueue
+admission check of its profile, so a workload is only admitted here once a worker in the profile's order
+admitted it; the worker's ClusterQueue of the same name (worker-queues.yaml) does the final placement.
+*/ -}}
+{{- if include "fleet.isControl" . }}
+{{- $f := .Values.fleet }}
+{{- $all := include "fleet.allPools" $f | fromYaml }}
+{{- range $name, $p := $all }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $p.region | quote }}
+    serverless2.nebius/pool: {{ $p.pool | quote }}
+    serverless2.nebius/gpu-class: {{ $p.gpu_class | quote }}
+    serverless2.nebius/capacity: {{ (default (dict "type" "on_demand") $p.capacity).type | replace "_" "-" | quote }}
+    serverless2.nebius/interconnect: {{ default "none" $p.interconnect | quote }}
+  annotations:
+    serverless2.nebius/platform: {{ $p.platform }}/{{ $p.preset }}
+    serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) | quote }}
+spec: {}
+{{- end }}
+{{- $profiles := list "" }}
+{{- range $c := include "fleet.classes" $all | fromYamlArray }}{{ $profiles = append $profiles $c }}{{ end }}
+{{- range $prefer := $profiles }}
+{{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: {{ $profile }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    {{- if $prefer }}
+    serverless2.nebius/prefer: {{ $prefer | quote }}
+    {{- end }}
+spec:
+  cohortName: {{ $.Values.cohort }}
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: multikueue-{{ $profile }}
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch
+    whenCanPreempt: TryNextFlavor
+  preemption:
+    withinClusterQueue: LowerPriority
+    reclaimWithinCohort: Any
+    borrowWithinCohort:
+      policy: LowerPriority
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+      flavors:
+        {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" $all "prefer" $prefer) | fromYamlArray }}
+        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $all $name)) | fromYaml }}
+        - name: {{ $name }}
+          resources:
+            {{- if $prefer }}
+            - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
+            {{- else }}
+            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
+            {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

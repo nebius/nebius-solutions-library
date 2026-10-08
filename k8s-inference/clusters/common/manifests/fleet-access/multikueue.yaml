@@ -1,0 +1,43 @@
+# Identity of the Kueue MultiKueue manager (control cluster) on this worker: the rules of Kueue's documented
+# create-multikueue-kubeconfig.sh for the integrations this fleet uses (batch/job, jobset) plus the Workloads.
+# The control cluster holds a 48 h TokenRequest token of it as kueue-system/multikueue-<cluster id>
+# (MultiKueueCluster, charts/fleet), minted by bootstrap.sh register and renewed daily by ops/rotate-fleet-tokens.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: multikueue, namespace: kueue-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: multikueue-manager }
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get]
+  - apiGroups: [jobset.x-k8s.io]
+    resources: [jobsets]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [jobset.x-k8s.io]
+    resources: [jobsets/status]
+    verbs: [get]
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [workloads, workloads/status]
+    verbs: [create, delete, get, list, watch, update, patch]
+  # read-only: the cost-aware dispatcher (services/dispatcher) computes free quota per worker pool from the
+  # worker ClusterQueues through the same kubeconfig
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [clusterqueues, resourceflavors]
+    verbs: [get, list, watch]
+  # the dispatcher creates the work volume of a fleet-placed run in the worker it picks and makes the worker's
+  # Job its owner once MultiKueue created it (docs/JOBS.md "Fleet placement")
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create, get, list, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: multikueue-manager }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: multikueue-manager }
+subjects: [{ kind: ServiceAccount, name: multikueue, namespace: kueue-system }]

@@ -1,0 +1,10 @@
+# Cost-aware MultiKueue dispatcher (services/dispatcher) + price feed. Runs on the MultiKueue manager (control
+# cluster) only; its Kueue must be configured with `multiKueue.dispatcherName: serverless2.nebius/cost-dispatcher`
+# (any name other than the two built-in ones). Fleet data comes from the fleet-prices ConfigMap (charts/fleet).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kueue-system
+resources:
+  - rbac.yaml
+  - deployment.yaml
+  - price-feed.yaml

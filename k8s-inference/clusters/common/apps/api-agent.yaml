@@ -1,0 +1,8 @@
+name: api-agent
+component: api-agent
+namespace: api
+wave: '3'
+hubOnly: 'false'
+placement: worker
+kind: manifests
+manifestsPath: overlays/api-agent

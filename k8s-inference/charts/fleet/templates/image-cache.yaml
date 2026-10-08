@@ -1,0 +1,72 @@
+{{- /* Image cache (docs/IMAGES.md): the Zot pull-through cache of this cluster reads its configuration from this
+       ConfigMap (chart `zot`, clusters/common/values/zot.yaml mounts it at /etc/zot). It is rendered here so that
+       fleet.yaml `images` stays the one place naming our registry (`images.source`) and the upstreams. The
+       credentials file it references is Secret registry/zot-sync-credentials, created outside git. */ -}}
+{{- $img := required "fleet.images is required" .Values.fleet.images }}
+{{- $src := splitList "/" $img.source }}
+{{- $srcHost := index $src 0 }}
+{{- $srcPath := join "/" (rest $src) }}
+{{- $cache := default dict $img.cache }}
+{{- /* cache volume size: per-cluster `image_cache_size_gib` (control block or region block) over images.cache.size_gib */ -}}
+{{- $sizeGib := int (default 1024 $cache.size_gib) }}
+{{- if include "fleet.isControl" . }}{{ $sizeGib = int (default $sizeGib .Values.fleet.control.image_cache_size_gib) }}
+{{- else }}{{ $region := include "fleet.region" . | fromYaml }}{{ $sizeGib = int (default $sizeGib (default dict $region.r).image_cache_size_gib) }}{{ end }}
+{{- $size := ternary (printf "%dTi" (div $sizeGib 1024)) (printf "%dGi" $sizeGib) (eq (mod $sizeGib 1024) 0) }}
+{{- $keep := printf "%dh" (mul 24 (int (default 30 $cache.keep_days))) }}
+{{- $regs := list (dict "urls" (list (printf "https://%s" $srcHost)) "onDemand" true "tlsVerify" true "maxRetries" 3 "retryDelay" "30s"
+      "content" (list (dict "prefix" (printf "/%s/**" $srcPath) "destination" "/nebius" "stripPrefix" true))) }}
+{{- range $alias, $url := $img.upstreams }}
+{{- $regs = append $regs (dict "urls" (list $url) "onDemand" true "tlsVerify" true "maxRetries" 3 "retryDelay" "30s"
+      "content" (list (dict "prefix" "**" "destination" (printf "/%s" $alias)))) }}
+{{- end }}
+{{- $cfg := dict
+    "distSpecVersion" "1.1.1"
+    "storage" (dict "rootDirectory" "/var/lib/registry" "dedupe" true "gc" true "gcDelay" "1h" "gcInterval" "24h"
+        "retention" (dict "dryRun" false "delay" "24h" "policies" (list (dict "repositories" (list "**") "deleteReferrers" true "deleteUntagged" true
+            "keepTags" (list (dict "mostRecentlyPulledCount" 20 "pulledWithin" $keep "pushedWithin" $keep))))))
+    "http" (dict "address" "0.0.0.0" "port" "5000" "compat" (list "docker2s2")
+        "accessControl" (dict "repositories" (dict "**" (dict "anonymousPolicy" (list "read")))))
+    "log" (dict "level" "info")
+    "extensions" (dict "metrics" (dict "enable" true "prometheus" (dict "path" "/metrics"))
+        "sync" (dict "enable" true "credentialsFile" "/secret/credentials.json" "registries" $regs)) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-config
+  namespace: registry
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+  annotations:
+    serverless2.nebius/host: {{ $img.host | quote }}
+    serverless2.nebius/source: {{ $img.source | quote }}
+data:
+  config.json: |
+    {{- $cfg | toPrettyJson | nindent 4 }}
+---
+# The cache volume of the Zot StatefulSet (clusters/common/values/zot.yaml `pvc.create: false`, `pvc.name`): owned
+# here so that a new cluster gets it before Zot starts, and so the StatefulSet carries no volumeClaimTemplate
+# (which the fleet Argo CD could not bring to Synced under server-side apply). Growing it: edit the size (CSI
+# expansion) ; it is never shrunk.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zot-pvc-zot-0
+  namespace: registry
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: compute-csi-default-sc
+  resources:
+    requests:
+      storage: {{ $size }}

@@ -1,0 +1,11 @@
+name: nvidia-device-plugin
+component: nvidia-device-plugin
+namespace: nvidia-device-plugin
+wave: '0'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: https://nvidia.github.io/k8s-device-plugin
+chart: nvidia-device-plugin
+version: 0.20.1
+helmValues: 'true'

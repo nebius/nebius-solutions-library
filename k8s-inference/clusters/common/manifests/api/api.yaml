@@ -1,0 +1,136 @@
+# Customer API (services/api). Shared base with the hub's values; clusters/<cluster>/apps/overlays/api/ patches
+# the region, hostnames and LiteLLM address (the regional instance reaches the hub's LiteLLM over its public
+# TLS hostname). Secret api/litellm-master (copy of litellm/litellm-master) is created per cluster by
+# `python -m onboarding bootstrap`, never in git. Sync/async/streaming calls are served by the API of the
+# region that hosts the endpoint; run submissions go through the hub API, which reaches the other regions
+# with the kubeconfigs of their api-agent ServiceAccounts (hub overlay only).
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: api, namespace: api }
+---
+# RBAC for the `api` ServiceAccount: per tenant namespace a RoleBinding to ClusterRole `serverless2-api-tenant`
+# (charts/tenant, applied at onboarding; the ClusterRole comes from clusters/common/manifests/api-agent: Jobs,
+# pods, work-volume PVCs, per-operation Secrets); scale-only Role on the endpoints in `models` (create/delete
+# are git-only); one cluster-wide read: the list of tenant namespaces (billing). Run classes are rendered from
+# the catalog entry's `job` block (docs/JOBS.md), so nothing is read outside tenant namespaces and `models`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-namespaces }
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-namespaces }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-namespaces }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# the fleet's pools (GPU class per pool: nodeAffinity of a run) and registries (per-region image prefix) are read
+# from the fleet-prices ConfigMap charts/fleet renders in kueue-system
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-fleet, namespace: kueue-system }
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+    resourceNames: [fleet-prices]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-fleet, namespace: kueue-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-fleet }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# endpoints live only in `models`: read, scale (patch) for admin keys, pods for the replica count
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-endpoints, namespace: models }
+rules:
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices]
+    verbs: [get, list, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-endpoints, namespace: models }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-endpoints }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: api }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      serviceAccountName: api
+      containers:
+        - name: api
+          image: registry.serverless2.local/nebius/serverless2/api:0.8.1
+          ports: [{ containerPort: 8080 }]
+          env:
+            - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
+            - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
+            - { name: REGION, value: eu-north1 }
+            # placeholders: the platform stage (stack/platform/stage.tf) or the cluster overlay sets the public hostnames
+            - { name: PUBLIC_API_URL, value: https://api.example.invalid }
+            - { name: GRAFANA_URLS, value: "eu-north1=https://grafana.example.invalid" }
+            - { name: REGION_KUBECONFIGS, value: eu-south1=/etc/kubeconfigs/eu-south1 }
+            # registry prefixes per region and pools per GPU class come from kueue-system/fleet-prices (charts/fleet)
+          volumeMounts:
+            - { name: kubeconfigs, mountPath: /etc/kubeconfigs, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 20 }
+      volumes:
+        - name: kubeconfigs          # one key per region, written by `onboarding bootstrap --region <r>`
+          secret: { secretName: region-kubeconfigs, optional: true }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api, namespace: api }
+spec:
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api, namespace: api }
+spec:
+  parentRefs:
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: https }
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
+  hostnames: ["api.example.invalid"]   # placeholder, set per cluster
+  rules:
+    - backendRefs: [{ name: api, port: 80 }]
+      timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+---
+# Per-key rate limit for the API route: counted per distinct Authorization header in the shared Redis
+# (Envoy Gateway global rate limit), so it holds across Envoy replicas and API instances. Per-tenant
+# limits on the work itself live where it is admitted: Kueue (concurrent runs per tenant ClusterQueue) and
+# LiteLLM (`rpm_limit`, `max_budget` per key for sync/async). The Gateway-level policy in
+# clusters/common/manifests/gateway/ratelimit.yaml covers every other route.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata: { name: api-rate-limit, namespace: api }
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: HTTPRoute, name: api }
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit keeps Argo CD in sync
+          limit: { requests: 600, unit: Minute }

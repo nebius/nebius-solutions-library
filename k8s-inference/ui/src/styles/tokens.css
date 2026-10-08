@@ -1,0 +1,37 @@
+/* Nebius palette, reused from the Scientific AI admin console tokens.css */
+:root {
+  --surface-canvas: #f6f8fa;
+  --surface-default: #ffffff;
+  --surface-raised: #f0f8ff;
+  --surface-inverse: #052b42;
+  --surface-inverse-hover: #163d52;
+  --text-primary: #052b42;
+  --text-muted: #526570;
+  --text-inverse: #ffffff;
+  --border: #dce2e6;
+  --border-strong: #9cabb5;
+  --accent: #052b42;
+  --accent-soft: #f0f8ff;
+  --nebius-lime: #daff33;
+  --nebius-lime-hover: #cdef2b;
+  --nebius-violet: #5d52f6;
+  --nebius-lavender: #c1c1ff;
+  --focus: #1766cf;
+  --danger: #a02a33;
+  --danger-soft: #fbe5e7;
+  --warning: #805d00;
+  --warning-soft: #fff2c8;
+  --success: #1f6b3a;
+  --success-soft: #e0f3e6;
+  --info: #255b91;
+  --info-soft: #e2effb;
+  --unknown: #5f6670;
+  --unknown-soft: #eceff2;
+  --shadow: 0 1px 2px rgb(24 34 29 / 8%), 0 8px 24px rgb(24 34 29 / 4%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --sidebar-w: 232px;
+}

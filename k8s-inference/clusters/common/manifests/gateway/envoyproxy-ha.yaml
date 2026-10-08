@@ -1,0 +1,42 @@
+# Data-plane HA (readiness item 1): two Envoy proxy replicas per Gateway behind the LoadBalancer /
+# ClusterIP Services, spread across the system nodes, with a PodDisruptionBudget so a node drain never
+# takes the edge down. Strategic-merge patch over the EnvoyProxy objects in gateway.yaml.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: external
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    kubernetes:
+      envoyDeployment:
+        replicas: 2
+        pod:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-external }
+      envoyPDB:
+        minAvailable: 1
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: internal
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    kubernetes:
+      envoyDeployment:
+        replicas: 2
+        pod:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-internal }
+      envoyPDB:
+        minAvailable: 1

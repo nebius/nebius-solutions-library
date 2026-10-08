@@ -1,0 +1,11 @@
+name: envoy-gateway
+component: envoy-gateway
+namespace: envoy-gateway-system
+wave: '0'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: docker.io/envoyproxy
+chart: gateway-helm
+version: v1.6.0
+helmValues: 'true'

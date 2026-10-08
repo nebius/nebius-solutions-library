@@ -1,0 +1,28 @@
+# Redis for the Envoy Gateway global rate-limit service (counters only, no persistence; a restart resets
+# the windows). Values: clusters/common/values/envoy-gateway.yaml (config.envoyGateway.rateLimit).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ratelimit-redis, namespace: envoy-gateway-system }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ratelimit-redis } }
+  template:
+    metadata: { labels: { app: ratelimit-redis } }
+    spec:
+      containers:
+        - name: redis
+          image: docker.io/library/redis:7.4-alpine
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+          ports: [{ containerPort: 6379 }]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 192Mi }
+          readinessProbe: { tcpSocket: { port: 6379 }, periodSeconds: 5 }
+          securityContext: { runAsNonRoot: true, runAsUser: 999, allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ratelimit-redis, namespace: envoy-gateway-system }
+spec:
+  selector: { app: ratelimit-redis }
+  ports: [{ port: 6379, targetPort: 6379 }]

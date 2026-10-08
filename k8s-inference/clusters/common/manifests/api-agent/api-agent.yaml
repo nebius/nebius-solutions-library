@@ -1,0 +1,27 @@
+# Identity the hub customer API uses to submit and read operation Jobs in THIS cluster.
+# Cluster-wide it may only read namespaces; everything else is granted per
+# tenant namespace by a RoleBinding to `serverless2-api-tenant` that onboarding creates.
+# Credentials are never static: `python -m onboarding bootstrap --region <region>` seeds a 48 h
+# TokenRequest token as a kubeconfig in the hub Secret api/region-kubeconfigs, and the hub CronJob
+# ops/rotate-api-agent-token renews it daily (docs/OPERATIONS.md "Rotation").
+apiVersion: v1
+kind: Namespace
+metadata: { name: api }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: api-agent, namespace: api }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-agent-read }
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-agent-read }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-agent-read }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]

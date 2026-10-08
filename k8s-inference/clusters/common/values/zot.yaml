@@ -1,0 +1,48 @@
+# Zot pull-through cache (clusters/common/apps/zot.yaml, docs/IMAGES.md). The registry configuration is NOT here:
+# charts/fleet renders ConfigMap registry/zot-config from fleet.yaml `images` (source registry, upstreams,
+# retention), mounted below. Anonymous read-only; pushes go to the source registry, never to the cache.
+image:
+  repository: ghcr.io/project-zot/zot
+  tag: v2.1.22
+replicaCount: 1
+strategy: { type: Recreate }        # one ReadWriteOnce cache volume
+extraArgs: [serve, /etc/zot/config.json]
+mountConfig: false
+configFiles: {}
+extraVolumes:
+  - name: zot-config
+    configMap: { name: zot-config }
+extraVolumeMounts:
+  - name: zot-config
+    mountPath: /etc/zot
+    readOnly: true
+externalSecrets:
+  - secretName: zot-sync-credentials   # credentials.json: {"<host>": {"username": "...", "password": "..."}} (docs/IMAGES.md)
+    mountPath: /secret
+service:
+  type: NodePort
+  port: 5000
+  nodePort: 30500                     # = fleet.yaml images.cache.node_port
+persistence: true
+# The cache volume is the claim the StatefulSet created on 2026-10-07 (`zot-pvc-zot-0`, from its former
+# volumeClaimTemplate) referenced directly: a StatefulSet with a volumeClaimTemplate stays OutOfSync in the
+# fleet Argo CD (server-side apply; the API server adds apiVersion/kind/status to the template), with an empty
+# diff. The claim's size is immutable here; grow it with `kubectl -n registry patch pvc zot-pvc-zot-0`
+# (docs/IMAGES.md "Cache size"). A new cluster creates the claim once: charts/fleet image-cache.yaml.
+pvc:
+  create: false
+  name: zot-pvc-zot-0
+nodeSelector: { serverless2.nebius/pool: system }
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { memory: 2Gi }
+podAnnotations: { prometheus.io/scrape: "true", prometheus.io/port: "5000" }
+metrics:
+  enabled: true
+  serviceMonitor: { enabled: true, interval: 60s }
+podDisruptionBudget: { enabled: false }
+# Explicit empties: the chart renders `null` for unset env/securityContext, and a null field in a server-side
+# applied manifest keeps the Argo CD StatefulSet comparison OutOfSync with an empty diff (seen 2026-10-07).
+env: []
+securityContext: {}
+podSecurityContext: {}

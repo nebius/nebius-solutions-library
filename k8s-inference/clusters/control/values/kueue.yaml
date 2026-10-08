@@ -1,0 +1,40 @@
+# Kueue on the control cluster = the MultiKueue MANAGER of the fleet (docs/FLEET.md): the same HA settings as
+# clusters/common/values/kueue.yaml, a manager configuration (no pod integration: nothing runs here) and the
+# multiKueue block. The worker clusters keep the common values. Dispatcher: the default (all at once: every
+# region of the profile's MultiKueueConfig receives the workload, the first to admit wins, the others are
+# withdrawn); lane F4 replaces it with the cost-aware dispatcher.
+managerConfig:
+  controllerManagerConfigYaml: |-
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    clientConnection:
+      qps: 300
+      burst: 500
+    manageJobsWithoutQueueName: false
+    managedJobsNamespaceSelector:
+      matchLabels:
+        serverless2.nebius/kueue: managed
+    integrations:
+      labelKeysToCopy:            # region pin and profile for the dispatcher (docs/SCHEDULING.md)
+        - serverless2.nebius/region
+        - serverless2.nebius/profile
+      frameworks:
+      - batch/job
+      - jobset.x-k8s.io/jobset
+    multiKueue:
+      gcInterval: 1m
+      origin: control
+      workerLostTimeout: 15m
+      # External dispatcher (services/dispatcher, Application `dispatcher`): Kueue waits for
+      # status.nominatedClusterNames on every MultiKueue Workload; without the dispatcher running nothing is
+      # dispatched. The built-in default is kueue.x-k8s.io/multikueue-dispatcher-all-at-once.
+      dispatcherName: serverless2.nebius/cost-dispatcher

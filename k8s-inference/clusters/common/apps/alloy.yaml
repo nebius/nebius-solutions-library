@@ -1,0 +1,11 @@
+name: alloy
+component: alloy
+namespace: monitoring
+wave: '2'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: https://grafana.github.io/helm-charts
+chart: alloy
+version: 1.13.0
+helmValues: 'true'

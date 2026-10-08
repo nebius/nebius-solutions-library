@@ -1,0 +1,8 @@
+name: gateway
+component: gateway
+namespace: envoy-gateway-system
+wave: '1'
+hubOnly: 'false'
+placement: all
+kind: manifests
+manifestsPath: overlays/gateway

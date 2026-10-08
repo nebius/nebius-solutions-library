@@ -1,0 +1,5 @@
+# node-config: per-node preparation that the managed node images do not ship (docs/IMAGES.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - containerd-registry.yaml

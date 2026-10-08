@@ -1,0 +1,426 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: serverless2-dashboard-logs
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    serverless2.nebius/generated-by: spikes/S14-observability/gen_dashboards.py
+data:
+  serverless2-logs.json: |
+    {
+     "uid": "s2-logs",
+     "title": "Serverless 2.0 / Logs",
+     "description": "Loki: logs per operation (Argo workflow) and per endpoint (InferenceService), shipped by Alloy with pod labels.",
+     "tags": [
+      "serverless2"
+     ],
+     "timezone": "utc",
+     "editable": true,
+     "graphTooltip": 1,
+     "refresh": "30s",
+     "schemaVersion": 39,
+     "version": 1,
+     "time": {
+      "from": "now-3h",
+      "to": "now"
+     },
+     "templating": {
+      "list": [
+       {
+        "name": "namespace",
+        "label": "namespace",
+        "type": "query",
+        "datasource": {
+         "type": "loki",
+         "uid": "loki"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "regex": "",
+        "sort": 1,
+        "query": {
+         "label": "namespace",
+         "type": 1,
+         "stream": ""
+        },
+        "definition": "namespace",
+        "current": {
+         "selected": true,
+         "text": "All",
+         "value": "$__all"
+        }
+       },
+       {
+        "name": "workflow",
+        "label": "workflow",
+        "type": "query",
+        "datasource": {
+         "type": "loki",
+         "uid": "loki"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "regex": "",
+        "sort": 1,
+        "query": {
+         "label": "workflow",
+         "type": 1,
+         "stream": "{namespace=~\"$namespace\"}"
+        },
+        "definition": "workflow",
+        "current": {
+         "selected": true,
+         "text": "All",
+         "value": "$__all"
+        }
+       },
+       {
+        "name": "inferenceservice",
+        "label": "inferenceservice",
+        "type": "query",
+        "datasource": {
+         "type": "loki",
+         "uid": "loki"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "regex": "",
+        "sort": 1,
+        "query": {
+         "label": "inferenceservice",
+         "type": 1,
+         "stream": "{namespace=~\"$namespace\"}"
+        },
+        "definition": "inferenceservice",
+        "current": {
+         "selected": true,
+         "text": "All",
+         "value": "$__all"
+        }
+       },
+       {
+        "name": "search",
+        "label": "search (regex)",
+        "type": "textbox",
+        "query": "",
+        "description": "",
+        "current": {
+         "selected": false,
+         "text": "",
+         "value": ""
+        },
+        "options": [
+         {
+          "selected": true,
+          "text": "",
+          "value": ""
+         }
+        ]
+       }
+      ]
+     },
+     "panels": [
+      {
+       "id": 96,
+       "type": "row",
+       "title": "Per operation",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 97,
+       "type": "logs",
+       "title": "Run logs (Argo workflow = operation)",
+       "description": "Every pod of the selected workflow(s): main container only (init/wait = Argo executor).",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "{namespace=~\"$namespace\", workflow=~\"$workflow\", container!~\"init|wait\"} |~ \"$search\"",
+         "queryType": "range"
+        }
+       ],
+       "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "showLabels": false,
+        "showCommonLabels": false
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 12
+       }
+      },
+      {
+       "id": 98,
+       "type": "logs",
+       "title": "Endpoint logs (InferenceService)",
+       "description": "Predictor containers of the selected InferenceService(s); queue-proxy excluded.",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "{namespace=~\"$namespace\", inferenceservice=~\"$inferenceservice\", container!=\"queue-proxy\"} |~ \"$search\"",
+         "queryType": "range"
+        }
+       ],
+       "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "showLabels": false,
+        "showCommonLabels": false
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 12
+       }
+      },
+      {
+       "id": 99,
+       "type": "row",
+       "title": "Volume and platform",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 100,
+       "type": "timeseries",
+       "title": "Log lines per namespace",
+       "description": "",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"}[$__auto]))",
+         "legendFormat": "{{namespace}}"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 40,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "normal"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 7
+       }
+      },
+      {
+       "id": 101,
+       "type": "timeseries",
+       "title": "Error-ish lines per namespace",
+       "description": "",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|exception|traceback|xid|oom)\" [$__auto]))",
+         "legendFormat": "{{namespace}}"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 40,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "normal"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 7
+       }
+      },
+      {
+       "id": 102,
+       "type": "logs",
+       "title": "Scheduling and scaling (Kueue, Knative autoscaler/activator, KServe)",
+       "description": "",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "{namespace=~\"kueue-system|knative-serving|kserve\"} |~ \"$search\" != \"healthz\"",
+         "queryType": "range"
+        }
+       ],
+       "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "showLabels": false,
+        "showCommonLabels": false
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 10
+       }
+      },
+      {
+       "id": 103,
+       "type": "logs",
+       "title": "Errors anywhere (selected namespaces)",
+       "description": "",
+       "datasource": {
+        "type": "loki",
+        "uid": "loki"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "loki",
+          "uid": "loki"
+         },
+         "expr": "{namespace=~\"$namespace\"} |~ \"(?i)(error|exception|traceback|xid|oom)\" != \"level=info\"",
+         "queryType": "range"
+        }
+       ],
+       "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "showLabels": false,
+        "showCommonLabels": false
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 10
+       }
+      }
+     ],
+     "links": [
+      {
+       "title": "Serverless 2.0 dashboards",
+       "type": "dashboards",
+       "tags": [
+        "serverless2"
+       ],
+       "asDropdown": true,
+       "includeVars": false,
+       "keepTime": true
+      }
+     ]
+    }

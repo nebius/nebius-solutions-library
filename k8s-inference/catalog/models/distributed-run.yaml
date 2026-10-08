@@ -1,0 +1,36 @@
+id: distributed-run
+displayName: Multi-node container job (JobSet; InfiniBand optional)
+description: Run any container image on N whole GPU nodes at once (one pod per node, torchrun/NCCL conventions, MASTER_ADDR/NODE_RANK/WORLD_SIZE set); optionally only on InfiniBand-connected nodes with the fabric NICs in the pod. Inputs synced from a bucket prefix to /work/in on every node, rank 0 uploads /work/out; any node loss restarts all ranks from the last checkpoint (/work/checkpoint, on the shared filesystem with checkpoints=shared). Large-model pre-training and fine-tuning, multi-node inference benchmarks.
+task: generic
+mode: run
+protocol: kubernetes-job
+gpu: { count: "8", classes: [h100, h200, b200, b300] }    # whole nodes: `gpus_per_node` must equal the pool's preset (8)
+price: { unit: gpu-hour, usd: 2.15 }        # display; billing uses deployments.<cluster>.price_per_gpu_hour x GPUs x pods
+job:                                        # rendered by services/api/jobs.py into a JobSet (docs/JOBS.md "Multi-node runs")
+  image: "{{image}}"
+  command: "{{command}}"                    # string -> /bin/sh -c on every node; cwd /work
+  env: { OUTPUT_DIR: /work/out, INPUT_DIR: /work/in, OPERATION: "{{operation}}" }
+  nodes: "{{nodes}}"
+  gpu: "{{gpus_per_node}}"
+  cpu: "{{cpu}}"
+  memory: "{{memory}}"
+  pvcSizeGi: "{{disk_gi}}"                  # node-local scratch under /work per pod (emptyDir size limit)
+  interconnect: "{{interconnect}}"
+  checkpoints: "{{checkpoints}}"
+  shm: 64Gi
+  graceSeconds: 600
+  imagePullSecret: ngc
+deployments:
+  hub:
+    price_per_gpu_hour: 2.15      # H100 spot cap
+parameters:
+  - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md)" }
+  - { name: command, type: string, label: Command, required: true, help: "run with /bin/sh -c on every node; use $MASTER_ADDR $MASTER_PORT $NODE_RANK $NNODES $GPUS_PER_NODE $WORLD_SIZE (torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --master_addr=$MASTER_ADDR ...); checkpoint under $CHECKPOINT_DIR, results under /work/out on rank 0" }
+  - { name: nodes, type: number, label: Nodes, default: 2 }
+  - { name: gpus_per_node, type: number, label: GPUs per node, default: 8, help: "a whole node: the pool's preset GPU count" }
+  - { name: interconnect, type: string, label: Interconnect, default: required, help: "required (default: InfiniBand pools only, the pod gets every fabric NIC of its node, NCCL_IB_HCA=mlx5) | preferred (InfiniBand when free, else any whole-node pool) | none (NCCL over TCP: explicit opt-in, useless for large models)" }
+  - { name: checkpoints, type: string, label: Checkpoints, default: local, help: "local (node scratch, lost on restart) | shared (the tenant's RWX claim on the cluster's shared filesystem: restarts and :resume continue from it)" }
+  - { name: cpu, type: string, label: CPU request per node, default: "96" }
+  - { name: memory, type: string, label: Memory per node, default: 1200Gi }
+  - { name: disk_gi, type: number, label: Scratch per node (GiB), default: 500 }
+  - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), default: "", help: "optional; synced to /work/in on every node before the first attempt" }

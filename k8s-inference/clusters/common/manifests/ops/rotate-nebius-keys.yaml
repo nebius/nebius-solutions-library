@@ -1,0 +1,64 @@
+# Credential rotation (gap 3): the Nebius service-account auth keys this cluster holds (Secret
+# ops/nebius-sa, hub also ops/nebius-sa-eu-south1) are regenerated weekly with the current key and
+# the previous keys are retired after 7 days; on the hub the CNPG backup S3 key (data/backup-s3) is
+# rotated the same way. Overlays set SECRETS (and BACKUP_S3_SECRET) and mount the extra Secrets.
+# Script: services/ops/bin/rotate-nebius-keys.sh (ops image). Needs only the Nebius API plus
+# patch rights on those Secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: key-rotator, namespace: ops }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: key-rotator, namespace: ops }
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, patch]
+    resourceNames: [nebius-sa, nebius-sa-eu-south1]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: key-rotator, namespace: ops }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: key-rotator }
+subjects: [{ kind: ServiceAccount, name: key-rotator, namespace: ops }]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rotate-nebius-keys
+  namespace: ops
+spec:
+  schedule: "20 4 * * 1"            # Mondays 04:20 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels: { app: rotate-nebius-keys }
+        spec:
+          restartPolicy: Never
+          serviceAccountName: key-rotator
+          securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
+          containers:
+            - name: rotate
+              image: registry.serverless2.local/nebius/serverless2/ops:0.1.8
+              args: [rotate-nebius-keys.sh]
+              env:
+                - { name: SECRETS, value: "nebius-sa" }
+                - { name: RETIRE_AFTER_DAYS, value: "7" }
+              volumeMounts:
+                - { name: nebius-sa, mountPath: /var/run/nebius-sa, readOnly: true }
+                - { name: nebius-sa, mountPath: /var/run/nebius, readOnly: true }   # ops-login.sh profiles
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+          volumes:
+            - name: nebius-sa
+              secret: { secretName: nebius-sa, defaultMode: 0440 }

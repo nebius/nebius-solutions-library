@@ -1,0 +1,15 @@
+# One LocalQueue per scheduling profile, pointing at the fleet's ClusterQueue of the same name (charts/fleet:
+# `default` holds the nominal quota, `prefer-<gpu class>` orders the flavors by preference; on the control
+# cluster these are the MultiKueue manager queues). A run carries `kueue.x-k8s.io/queue-name: <profile>`
+# (its catalog entry's first GPU class), so the same Job queues the same way on the manager and on any
+# worker. Tenants share the fleet queues; fairness between them is Kueue's (priority classes, FIFO).
+{{- range $profile := include "tenant.profiles" . | fromYamlArray }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: {{ $profile }}
+  namespace: {{ include "tenant.ns" $ }}
+spec:
+  clusterQueue: {{ $profile }}
+{{- end }}

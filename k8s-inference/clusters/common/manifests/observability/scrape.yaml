@@ -1,0 +1,124 @@
+# Scrape targets for the platform components. The stack's Prometheus selects
+# every ServiceMonitor/PodMonitor in the cluster (nil selectors), so no
+# `release` label is needed here. Alerts/recording rules need it (rules.yaml).
+---
+# Knative control plane: activator (cold starts, buffered requests),
+# autoscaler (desired/actual pods per revision), controller. Metrics exist only
+# with config-observability `metrics-protocol: prometheus` (set in the
+# KnativeServing CR, clusters/common/manifests/knative/knative-serving.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: knative-control-plane, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [knative-serving] }
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [activator, autoscaler, controller] }
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      relabelings:
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_app], targetLabel: component }
+---
+# Knative queue-proxy sidecar on every endpoint pod: request count,
+# latency histogram, concurrency per revision. Needs
+# `request-metrics-protocol: prometheus` (same CR). Labels carry the
+# InferenceService name so dashboards group by endpoint.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: knative-queue-proxy, namespace: monitoring }
+spec:
+  namespaceSelector: { any: true }
+  selector:
+    matchExpressions:
+      - { key: serving.knative.dev/revision, operator: Exists }
+  podMetricsEndpoints:
+    - port: http-usermetric
+      interval: 15s
+      relabelings:
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_serving_kserve_io_inferenceservice], targetLabel: inferenceservice }
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_serving_knative_dev_service], targetLabel: kservice }
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_serving_knative_dev_revision], targetLabel: revision }
+---
+# KServe controller (InferenceService reconcile metrics) behind kube-rbac-proxy.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: { name: kserve-controller, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [kserve] }
+  selector:
+    matchLabels: { control-plane: kserve-controller-manager, app.kubernetes.io/name: kserve }
+  endpoints:
+    - port: https
+      scheme: https
+      path: /metrics
+      interval: 30s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+---
+# Kueue controller: pending/admitted/evicted/preempted workloads per
+# ClusterQueue, LocalQueue resource usage and reservations, admission latencies.
+# Secure metrics endpoint: token auth + self-signed cert.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: { name: kueue, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [kueue-system] }
+  selector:
+    matchLabels: { control-plane: controller-manager, app.kubernetes.io/component: metrics-service }
+  endpoints:
+    - port: https
+      scheme: https
+      path: /metrics
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+---
+# cert-manager controller: certificate expiry / ready status (self-signed
+# wildcard for sslip.io, webhook certs).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: cert-manager, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [cert-manager] }
+  selector:
+    matchLabels: { app.kubernetes.io/name: cert-manager, app.kubernetes.io/component: controller }
+  podMetricsEndpoints:
+    - port: http-metrics
+      interval: 60s
+---
+# CloudNativePG cluster `postgres` (hub only; matches nothing in a region).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: cnpg-postgres, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [data] }
+  selector:
+    matchLabels: { cnpg.io/cluster: postgres, cnpg.io/podRole: instance }
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster], targetLabel: cluster }
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_role], targetLabel: role }
+---
+# Envoy Gateway data plane (external + internal gateways): per-route upstream
+# request rate, status classes and latency histograms. Only the upstream
+# request/connection series are kept to bound cardinality.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: envoy-gateway-proxies, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [envoy-gateway-system] }
+  selector:
+    matchLabels: { app.kubernetes.io/name: envoy, app.kubernetes.io/component: proxy }
+  podMetricsEndpoints:
+    - port: metrics
+      path: /stats/prometheus
+      interval: 15s
+      relabelings:
+        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name], targetLabel: gateway }
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: "envoy_cluster_upstream_(rq_total|rq_completed|rq_xx|rq_time_bucket|rq_time_sum|rq_time_count|rq_active|cx_active|rq_pending_active)|envoy_http_downstream_rq_(total|xx|active)|envoy_server_live"
+          action: keep

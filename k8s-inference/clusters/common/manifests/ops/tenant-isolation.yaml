@@ -1,0 +1,33 @@
+# Tenant isolation. Cilium is the CNI on Nebius Managed Kubernetes, so one cluster-wide policy covers
+# every namespace labeled `serverless2.nebius/tenant` (present and future; nothing to add at onboarding).
+# Ingress: only from the same namespace, the node (kubelet probes) and Prometheus. Egress: own namespace,
+# DNS, the Kubernetes API (the uploader polls its own pod), the gateway (`envoy-gateway-system`: endpoint
+# calls go through the gateway's hostname with the caller's key, exactly like an external client; the
+# predictor Services in `models` and the Knative activator are NOT reachable from tenant pods, so no call
+# can skip the key check, the rate limit or the accounting, docs/SECURITY-PREREVIEW.md F2), and the world
+# (tenant bucket, NGC, public endpoints), never another namespace in the cluster (other tenants, litellm,
+# data, api, kube-system beyond DNS).
+# Traffic inside one tenant namespace (multi-pod runs, JobSets) is not covered here: a cluster-wide policy
+# cannot say "same namespace as mine", so charts/tenant renders the namespaced CiliumNetworkPolicy `tenant-local`
+# per tenant at onboarding (docs/OPERATIONS.md "Tenant isolation").
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: tenant-isolation
+spec:
+  description: tenant namespaces talk to themselves, DNS, the API server, endpoints and the world only
+  endpointSelector:
+    matchExpressions:
+      - { key: io.cilium.k8s.namespace.labels.serverless2.nebius/tenant, operator: Exists }
+  ingress:
+    - fromEntities: [host, remote-node]            # kubelet probes, node-local traffic
+    - fromEndpoints:
+        - matchLabels: { io.kubernetes.pod.namespace: monitoring, app.kubernetes.io/name: prometheus }
+  egress:
+    - toEndpoints:
+        - matchLabels: { io.kubernetes.pod.namespace: kube-system, k8s-app: coredns }
+      toPorts:
+        - ports: [{ port: "53", protocol: UDP }, { port: "53", protocol: TCP }]
+    - toEntities: [kube-apiserver, world]
+    - toEndpoints:
+        - matchLabels: { io.kubernetes.pod.namespace: envoy-gateway-system }

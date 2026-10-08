@@ -1,0 +1,55 @@
+# Daily cost report (gap 9): OpenCost allocation for the previous day, by namespace and by node, written to
+# s3://serverless2-backups-eu-north1/cost-reports/<cluster>/<date>-{namespace,node}.json. Credentials: Secret
+# monitoring/cost-export-s3 (ACCESS_KEY_ID / ACCESS_SECRET_KEY, a copy of data/backup-s3; hand-created on
+# both clusters, see docs/OBSERVABILITY.md). CLUSTER is patched per overlay.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cost-export
+  namespace: monitoring
+spec:
+  schedule: "30 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          initContainers:
+            - name: fetch
+              image: curlimages/curl:8.22.0
+              command: [sh, -c]
+              args:
+                - |
+                  set -e
+                  d=$(date -u -d @$(( $(date -u +%s) - 86400 )) +%F 2>/dev/null || date -u +%F)
+                  for agg in namespace node; do
+                    curl -sf "http://opencost.opencost.svc:9003/allocation/compute?window=yesterday&aggregate=$agg&accumulate=true" -o /out/$d-$agg.json
+                    echo "fetched $agg: $(wc -c < /out/$d-$agg.json) bytes"
+                  done
+              volumeMounts: [{ name: out, mountPath: /out }]
+          containers:
+            - name: upload
+              image: amazon/aws-cli:2.22.35
+              command: [sh, -c]
+              args:
+                - |
+                  set -e
+                  aws s3 cp /out/ "s3://serverless2-backups-eu-north1/cost-reports/${CLUSTER}/" --recursive --no-progress
+                  aws s3 ls "s3://serverless2-backups-eu-north1/cost-reports/${CLUSTER}/" | tail -n 4
+              env:
+                - { name: CLUSTER, value: unknown }
+                - { name: AWS_ENDPOINT_URL, value: https://storage.eu-north1.nebius.cloud }
+                - { name: AWS_DEFAULT_REGION, value: eu-north1 }
+                - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: cost-export-s3, key: ACCESS_KEY_ID } } }
+                - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: cost-export-s3, key: ACCESS_SECRET_KEY } } }
+              volumeMounts: [{ name: out, mountPath: /out }]
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+          volumes:
+            - name: out
+              emptyDir: {}

@@ -1,0 +1,19 @@
+# Cluster-wide per-key rate limit for every route on the external Gateway that does not carry its own
+# BackendTrafficPolicy (the model predictor hosts, the UIs): counted per distinct Authorization header
+# in the shared Redis, so it holds across Envoy replicas. Requests without an Authorization header
+# (browser UIs with cookies) are not matched. The API route has its own, stricter policy
+# (clusters/common/manifests/api/api.yaml). If Redis is unreachable Envoy fails open.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata: { name: per-key-rate-limit, namespace: envoy-gateway-system }
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: Gateway, name: serverless2-external }
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit keeps Argo CD in sync
+          limit: { requests: 3000, unit: Minute }

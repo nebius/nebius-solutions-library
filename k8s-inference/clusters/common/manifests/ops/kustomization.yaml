@@ -1,0 +1,9 @@
+# Shared base for the `ops` component; clusters/<cluster>/apps/overlays/ add the cluster-specific parts.
+# seed-weights-job.yaml is a Job TEMPLATE created by hand (envsubst), not listed here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - recover-stopped-nodes.yaml
+  - rotate-nebius-keys.yaml
+  - tenant-isolation.yaml

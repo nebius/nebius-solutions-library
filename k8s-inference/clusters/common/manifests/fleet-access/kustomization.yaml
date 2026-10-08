@@ -1,0 +1,10 @@
+# Identities the control cluster uses on a worker cluster (docs/CONTROL-PLANE.md):
+#   argocd-manager  the fleet Argo CD's deploy identity (cluster-admin, as `argocd cluster add` creates)
+#   multikueue      the Kueue manager's identity, scoped to what MultiKueue needs (Jobs, JobSets, Workloads)
+# clusters/control/apps/bootstrap.sh register mints 48 h TokenRequest tokens of them and writes them into the
+# control cluster's Argo CD cluster Secret and kueue-system/multikueue-<cluster>; never in git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - argocd-manager.yaml
+  - multikueue.yaml

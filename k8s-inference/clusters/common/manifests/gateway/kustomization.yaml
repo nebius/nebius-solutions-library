@@ -1,0 +1,10 @@
+# Shared base for the `gateway` component; clusters/<cluster>/apps/overlays/ add the cluster-specific parts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gateway.yaml
+  - acme.yaml
+  - redis.yaml
+  - ratelimit.yaml
+patches:
+  - path: envoyproxy-ha.yaml

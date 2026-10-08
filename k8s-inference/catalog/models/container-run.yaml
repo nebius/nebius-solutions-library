@@ -1,0 +1,33 @@
+id: container-run
+displayName: Container job (generic run class)
+description: Run any container image with a command on 0-8 GPUs; inputs synced from a bucket prefix to /work/in, everything written under /work is uploaded to the operation's output prefix; /work is a per-operation volume that survives spot interruptions (checkpoint under /work/checkpoint, resume automatically or with :resume). Fine-tuning, data processing, custom simulations.
+task: generic
+mode: run
+protocol: kubernetes-job
+gpu: { count: "0-8", classes: [h100, rtx-pro-6000, l40s] }
+price: { unit: gpu-hour, usd: 1.60 }       # display; billing uses deployments.<cluster>.price_per_gpu_hour
+job:                                        # rendered by services/api/jobs.py; {{name}} = parameter
+  image: "{{image}}"
+  scratch: "{{scratch}}"                  # network (per-run volume, resumable) | local-nvme (host NVMe emptyDir on pools with local_nvme)
+  command: "{{command}}"                    # string -> /bin/sh -c; the model image needs /bin/sh
+  env: { CHECKPOINT_DIR: /work/checkpoint, OUTPUT_DIR: /work/out, INPUT_DIR: /work/in, OPERATION: "{{operation}}" }
+  gpu: "{{gpus}}"
+  cpu: "{{cpu}}"
+  memory: "{{memory}}"
+  pvcSizeGi: "{{disk_gi}}"
+  shm: 16Gi
+  imagePullSecret: ngc
+deployments:
+  hub:
+    price_per_gpu_hour: 2.15      # H100 spot cap
+  eu-south1:
+    price_per_gpu_hour: 1.60      # RTX PRO 6000 spot
+parameters:
+  - { name: scratch, type: string, label: Scratch storage, default: network, help: "network = per-run network volume (resumes after preemption); local-nvme = host NVMe of the node (fastest, gone with the pod, checkpoint to the bucket yourself)" }
+  - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md); any public reference also works" }
+  - { name: command, type: string, label: Command, required: true, help: "run with /bin/sh -c inside /work; checkpoint under /work/checkpoint, write results under /work/out" }
+  - { name: gpus, type: number, label: GPUs, default: 1 }
+  - { name: cpu, type: string, label: CPU request, default: "8" }
+  - { name: memory, type: string, label: Memory, default: 64Gi }
+  - { name: disk_gi, type: number, label: Work volume (GiB), default: 100 }
+  - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), default: "", help: "optional; synced to /work/in before the first attempt" }

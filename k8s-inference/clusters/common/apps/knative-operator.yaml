@@ -1,0 +1,11 @@
+name: knative-operator
+component: knative-operator
+namespace: knative-operator
+wave: '1'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: https://knative.github.io/operator
+chart: knative-operator
+version: v1.23.1
+helmValues: 'false'
