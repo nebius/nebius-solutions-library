@@ -946,8 +946,6 @@ variable "worker_nodesets" {
     replicas                       = number
     max_unavailable                = string
     rolling_update_strategy        = optional(string, "slurmAwareRollingUpdate")
-    rack_number                    = optional(number)
-    nvl_instance_group_id          = optional(string)
     features                       = list(string)
     cpu_topology                   = map(number)
     gres_name                      = optional(string)
