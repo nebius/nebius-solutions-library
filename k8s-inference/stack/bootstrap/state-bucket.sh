@@ -25,7 +25,7 @@ sa=$(find_id iam service-account list "$BUCKET")
 [ -n "$sa" ] || sa=$(n iam service-account create --parent-id "$PROJECT" --name "$BUCKET" --description "Terraform state access" --format json | python3 -c 'import sys,json; print(json.load(sys.stdin)["metadata"]["id"])')
 group=$(find_id iam group list "$BUCKET")
 [ -n "$group" ] || group=$(n iam group create --parent-id "$PROJECT" --name "$BUCKET" --format json | python3 -c 'import sys,json; print(json.load(sys.stdin)["metadata"]["id"])')
-if ! n iam group-membership list-members --parent-id "$group" --page-size 500 --format json | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(sys.argv[1] in json.dumps(i) for i in d.get("items",[])) else 1)' "$sa"; then
+if ! n iam group-membership list-members --parent-id "$group" --page-size 500 --format json | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(sys.argv[1] in json.dumps(i) for i in d.get("memberships", d.get("items", []))) else 1)' "$sa"; then
   n iam group-membership create --parent-id "$group" --member-id "$sa" > /dev/null
 fi
 policy="[{\"paths\":[\"*\"],\"roles\":[\"storage.object-editor\"],\"group_id\":\"$group\"}]"

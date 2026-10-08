@@ -267,6 +267,12 @@ variable "fleet" {
     error_message = "fleet.regions: at least one GPU region."
   }
   validation {
+    # Let's Encrypt refuses accounts whose contact is example.com/.test/.invalid (400 invalidContact), and then
+    # no certificate is ever issued: port 443 stays dark on every cluster (measured on a fresh fleet, 2026-10-08).
+    condition     = var.fleet.edge.mode != "public" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.fleet.edge.acme.email)) && !can(regex("@(example\\.(com|net|org)|.*\\.(test|invalid|localhost))$", var.fleet.edge.acme.email))
+    error_message = "edge.acme.email: a real mailbox for the Let's Encrypt account (renewal and incident mail); example.com, .test and .invalid are refused by the ACME server and leave the gateway without a certificate."
+  }
+  validation {
     condition     = var.fleet.control_plane.dedicated || length(var.fleet.regions) == 1
     error_message = "control_plane.dedicated = false is the single-cluster mode: exactly one region. Multi-region needs the dedicated control cluster (Kueue's MultiKueue manager cannot be its own worker)."
   }

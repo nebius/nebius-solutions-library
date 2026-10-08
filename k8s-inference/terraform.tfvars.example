@@ -116,7 +116,7 @@ fleet = {
     domain                    = null
     source_cidrs              = []         # who may reach the public listeners ([] = anyone; the API needs a key)
     ip_certificate            = false      # Let's Encrypt IP-address certificate for https://<ip> (no name at all)
-    acme                      = { email = "ops@example.com", staging = false }
+    acme                      = { email = "CHANGE-ME@your-company.com", staging = false }  # a real mailbox: Let's Encrypt rejects example.com
     api_rate_limit_per_minute = 600        # per API key
     grafana_public            = true
   }

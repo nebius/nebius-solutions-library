@@ -45,7 +45,8 @@ requirement to the mechanism that implements it.
   a subnet in each, and quotas for the pools you plan: GPUs per platform, network-ssd for filesystems and
   caches, one public IP per cluster.
 - The Nebius CLI with a profile that has `editor` on those projects. Terraform 1.11 or newer, `helm`,
-  `kubectl`, and `docker buildx` or `crane` for the platform images.
+  `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
+  `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
 - Optional: an NVIDIA NGC key for NIM images, a Hugging Face token for gated weights. They are read from
   environment variables, never written into the tfvars.
 
@@ -59,9 +60,16 @@ stack/bootstrap/state-bucket.sh                # 2. once: the Terraform state bu
 ./stack.sh preflight                           # 3. every pool against the Nebius compatibility matrix and quotas
 ./stack.sh apply cloud                         # 4. clusters, pools, filesystems, IPs, identities, registry (about 15 min)
 tools/images.sh build                          # 5. build and push the five platform images to the fleet's registry
+                                               #    (plus any model image you build yourself, e.g. models/gromacs, see below)
 ./stack.sh apply                               # 6. platform on every cluster, then tenants, models and the acceptance probe
 ./stack.sh output models control               # 7. URLs; tenant keys: ./stack.sh output models control -json tenant_keys
 ```
+
+Model images: endpoints and run classes pull their images through the cache from public registries (Docker
+Hub, NGC, GHCR, Quay) or from this fleet's own registry. The bundled `gromacs` run class uses an image you
+build yourself (`models/gromacs/image`, about 10 minutes) and push to the fleet's registry before the first
+run: `docker buildx build --push -t $(./stack.sh registry)/gromacs:2026.4-cuda12.8-sm90-120 models/gromacs/image`.
+Until it is there, the pre-pull on the GPU pool reports `ImagePullBackOff` for that one image; nothing else waits.
 
 Then call a model:
 
@@ -140,7 +148,10 @@ tests, 3.5 hours) cost about USD 10 (`docs/VERIFICATION.md`).
 
 `./stack.sh destroy` runs models, platform and cloud in reverse. With `protect_data = true` (the default)
 the weights filesystems and tenant buckets refuse to be destroyed: set it to `false` and apply first, or
-keep them and remove the rest. The state bucket is outside Terraform (`stack/bootstrap/state-bucket.sh`).
+keep them and remove the rest. Nebius refuses to delete a bucket that still holds objects, so the destroy
+empties the disposable buckets first (`stack/scripts/empty-bucket.sh`, needs the AWS CLI) and removes every
+image from the fleet's registry (`stack/scripts/empty-registry.sh`), which Nebius refuses to delete otherwise.
+The state bucket is outside Terraform (`stack/bootstrap/state-bucket.sh`).
 
 ## Security model
 
@@ -160,8 +171,9 @@ Secrets. `docs/SECURITY-PREREVIEW.md` lists what was reviewed and what is accept
 - A `vpc.ipv4-address.public.count` quota error: the region's project has no free public IP for the gateway.
 - A run stays `QUEUED` with no queue on its Workload: the catalog entry prefers a GPU class no pool declares;
   `preflight` reports such entries.
-- `destroy platform <id>` waits on the Kueue release for ten minutes: delete the ClusterRoles
-  `kueue-batch-admin-role` and `kueue-batch-user-role` on that cluster and it finishes.
+- `destroy platform <id>` seems stuck on `kueue-batch-admin-role`/`kueue-batch-user-role`: the destroy
+  removes those two aggregated roles itself after the Kueue release (`stack/scripts/kueue-uninstall-cleanup.sh`);
+  on a fleet created before 2026-10-09 delete them by hand once.
 - `cilium-operator` with one replica Pending: Nebius runs two; keep `system_pool.node_count = 2`.
 - The first pull of a multi-GB model image in a region takes minutes (the cache syncs it once); the
   pre-pull warms catalog images per pool.

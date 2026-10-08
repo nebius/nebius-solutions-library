@@ -55,6 +55,28 @@ resource "nebius_storage_v1_bucket" "disposable" {
   lifecycle_configuration = local.lifecycle
 }
 
+# Disposable bucket (protect_data = false): emptied before Terraform deletes it (Nebius refuses to delete a
+# non-empty bucket). This resource depends on the bucket and the key, so `destroy` runs it first, while the
+# key still exists. Needs the AWS CLI on the machine that runs the destroy.
+resource "terraform_data" "empty_bucket" {
+  count = var.protect_data ? 0 : 1
+  input = {
+    script   = "${path.module}/../../scripts/empty-bucket.sh"
+    endpoint = "https://storage.${var.region}.nebius.cloud"
+    bucket   = nebius_storage_v1_bucket.disposable[0].name
+    key      = nebius_iam_v2_access_key.tenant.status.aws_access_key_id
+    secret   = nebius_iam_v2_access_key.tenant.status.secret
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${self.input.script} ${self.input.endpoint} ${self.input.bucket}"
+    environment = {
+      AWS_ACCESS_KEY_ID     = self.input.key
+      AWS_SECRET_ACCESS_KEY = self.input.secret
+    }
+  }
+}
+
 resource "nebius_iam_v2_access_key" "tenant" {
   parent_id            = var.project_id
   name                 = "${var.name}-key"

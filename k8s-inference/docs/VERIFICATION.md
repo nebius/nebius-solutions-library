@@ -332,3 +332,50 @@ Limits of multi-node runs are written down in docs/JOBS.md "Limits of multi-node
 fabric per run; 8-GPU presets; `min_nodes >= 1`; ExactCount NIC claims; restart-all on preemption; the fabric table).
 `interconnect: required` is now the default for `nodes > 1`; TCP only on an explicit `none`; 400 when no pool of the run's
 classes has a fabric (unit tests).
+
+## Fresh deployment from the library copy (2026-10-08 20:20-21:50 UTC, lane J1)
+
+The exact directory that goes into the Nebius Solutions Library (`tools/library-sync.sh` output) was copied to a
+scratch directory and the README quick start followed as a new user would: `terraform.tfvars` from the example
+with name `s2pr`, a dedicated control cluster and one region (eu-north1, one `h100-spot-1x` pool, max 1), 256 GiB
+filesystem and caches, tenant `eval`, the four bundled models, the acceptance probe. Nothing from the source
+repository or the reference fleet was used except the eval tenant's GROMACS inputs (24 MB), copied into the new
+tenant's own bucket with its own key.
+
+| Step | Time | Result |
+|---|---|---|
+| `state-bucket.sh`, `preflight` | 18 s, 2 s | bucket `s2pr-tfstate`; preflight passes |
+| `apply cloud` | 14 min 6 s | 29 resources: 2 clusters, pools, 256 GiB filesystem, 2 static IPs, identities, registry, buckets |
+| `tools/images.sh build` | 4 min 40 s | api 0.8.1, dispatcher 0.1.6, jobs 0.1.4, ops 0.1.9, ui 0.2.2 pushed to the new registry |
+| `apply` (platform hub, platform control, models hub, models control) | 19 min 32 s | platform hub 106 resources and platform control 111 resources in ONE pass each; models hub 10; models control stopped on the acceptance probe (see defect 1) |
+| probe after the fix | 2 min 7 s | hello-run SUCCEEDED in 71 s; Qwen answered through the edge after a 502 while the endpoint scaled from zero |
+| runs through the public API (tenant key from the outputs) | 5 min 16 s for all three | hello-run SUCCEEDED 49 s; container-run (busybox, `sleep 30`) SUCCEEDED 92 s; GROMACS 5000 steps SUCCEEDED 191 s on the H100 spot node, 202 ns/day, artifacts `run.{xtc,edr,gro,log,cpt}`, `topol.tpr` in the tenant bucket |
+| Qwen sync call without `model` in the body | 31 s | HTTP 200, "Hello! How can I help you today?", served model `qwen` injected by the API |
+| console `/config.json`, Grafana | | API URL and both Grafana URLs served at runtime; Grafana login page 200 on both clusters |
+| `make check` inside the copy | | 41 tests, every stage and chart renders |
+| `destroy` | 4 attempts, about 35 min of waiting in total | see defects 2 and 3; cloud destroy clean afterwards |
+| cost | | about USD 5 (two CPU clusters for 90 min, one H100 spot node for 70 min, storage) |
+
+Defects found by this run, fixed on the branch that carries this record:
+
+1. **No certificate on any fresh fleet.** The example's `acme.email = "ops@example.com"` is refused by Let's
+   Encrypt (`invalidContact: contact email has forbidden domain "example.com"`), cert-manager never issues the
+   wildcard, the https listener stays unprogrammed and the probe times out (curl exit 28). The schema now
+   validates the mailbox and refuses example.com/.test/.invalid; the example carries `CHANGE-ME@your-company.com`.
+   Lane H2's test had used a real address, which hid this.
+2. **`destroy` stopped on `BucketNotEmpty`** at the tenant bucket (run inputs and outputs inside), and would
+   have stopped again at the backups bucket (cost reports). Disposable buckets are now emptied by a destroy-time
+   provisioner with the bucket's own key (`stack/scripts/empty-bucket.sh`; the AWS CLI is a prerequisite for
+   destroying with `protect_data = false`).
+3. **`destroy platform` waited 15 minutes on the Kueue release and failed** on both clusters: Helm's
+   uninstall `--wait` watches `kueue-batch-admin-role`/`kueue-batch-user-role`, and the kube-controller-manager's
+   `clusterrole-aggregation-controller` re-creates both by server-side apply while Helm deletes the roles that
+   feed them (managedFields manager on the stale roles: `clusterrole-aggregation-controller`, Apply). Deleting
+   the re-created roles by hand let the hub's uninstall finish within a minute. Kueue is now installed and
+   uninstalled without Helm's wait; `terraform_data.kueue_ready` waits for the controller rollout before wave 2,
+   and `terraform_data.kueue_uninstall_cleanup` removes the stale roles after the uninstall.
+4. The bundled `gromacs` class references an image the fleet's registry does not have until the user builds and
+   pushes it (`models/gromacs/image`); the pre-pull reported `ImagePullBackOff` for it. README quick start says so
+   now; the run itself used the image copied from the reference fleet's registry.
+
+The reference fleet (`serverless2-*`) was not touched: its Terraform plan is unchanged (checked after the destroy).

@@ -90,6 +90,22 @@ resource "nebius_registry_v1_registry" "images" {
   labels    = local.f.labels
 }
 
+# The registry refuses deletion while it holds images: every image object is removed first at destroy time
+# through the Registry service's image API (stack/scripts/empty-registry.sh; deleting tags alone leaves the
+# manifests behind). Depends on the registry, so `destroy` runs it right before the registry is deleted.
+resource "terraform_data" "empty_registry" {
+  count = local.f.images.source == null ? 1 : 0
+  input = {
+    script   = "${path.module}/../scripts/empty-registry.sh"
+    registry = nebius_registry_v1_registry.images[0].id
+    profile  = local.f.nebius_profile
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${self.input.script} ${self.input.registry} ${self.input.profile}"
+  }
+}
+
 resource "nebius_storage_v1_bucket" "backups" {
   parent_id         = local.hub_project
   name              = "${local.f.name}-backups"
@@ -97,6 +113,26 @@ resource "nebius_storage_v1_bucket" "backups" {
   versioning_policy = "DISABLED"
   bucket_policy = {
     rules = [{ paths = ["*"], roles = ["storage.object-editor"], group_id = nebius_iam_v1_group.ops[local.hub_project].id }]
+  }
+}
+
+# The backups bucket is emptied before Terraform deletes it (Nebius refuses to delete a non-empty bucket);
+# depends on the bucket and the key, so `destroy` runs it first. Needs the AWS CLI on the operator machine.
+resource "terraform_data" "empty_backups" {
+  input = {
+    script   = "${path.module}/../scripts/empty-bucket.sh"
+    endpoint = "https://storage.${local.hub_region}.nebius.cloud"
+    bucket   = nebius_storage_v1_bucket.backups.name
+    key      = nebius_iam_v2_access_key.backups.status.aws_access_key_id
+    secret   = nebius_iam_v2_access_key.backups.status.secret
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${self.input.script} ${self.input.endpoint} ${self.input.bucket}"
+    environment = {
+      AWS_ACCESS_KEY_ID     = self.input.key
+      AWS_SECRET_ACCESS_KEY = self.input.secret
+    }
   }
 }
 
