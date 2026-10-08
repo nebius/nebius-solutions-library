@@ -30,6 +30,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "v1.11.4"
+          terraform_wrapper: false   # the wrapper buffers stdin/stdout; tools/check.sh pipes into `terraform console`
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
