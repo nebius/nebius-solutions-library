@@ -430,6 +430,10 @@ case "$CAPACITY_MARGIN_PCT" in ''|*[!0-9]*) log_fail "--capacity-margin must be 
 # would otherwise skip the fio-version + direct-I/O checks yet still read as canonical
 # in the comparison gate (Suggestion 3).
 case "$FIO_MODE" in canonical|custom) ;; *) log_fail "--mode must be 'canonical' or 'custom' (got '${FIO_MODE}')"; exit 2 ;; esac
+# IS_SFS is a documented knob, so validate it like the others: an unrecognised value
+# (e.g. the README reader who writes IS_SFS=no / 0 / False) must NOT silently fall
+# through to auto-inference, which can mis-flag the target as SFS.
+case "$IS_SFS" in auto|true|false) ;; *) log_fail "IS_SFS must be 'auto', 'true' or 'false' (got '${IS_SFS}')"; exit 2 ;; esac
 
 # Validate optional SFS reference figures (Suggestion 6): each must be a positive number
 # or the delta can't be computed (non-numeric / 0 would divide by zero or print a wrong
@@ -462,6 +466,17 @@ REQUIRED_BYTES=$(awk -v b="$DATASET_BYTES" -v m="$CAPACITY_MARGIN_PCT" 'BEGIN{pr
 REQUIRED_GIB=$(awk -v b="$REQUIRED_BYTES" 'BEGIN{printf "%.1f", b/1073741824}')
 if [ -z "$PVC_CAPACITY" ]; then
   PVC_CAPACITY="$(awk -v b="$REQUIRED_BYTES" 'BEGIN{printf "%.0fGi", (b/1073741824)+1}')"
+elif [ -z "$EXISTING_PVC" ]; then
+  # An operator-supplied --pvc-capacity for a CREATED PVC must be a valid k8s quantity
+  # AND big enough, or the run provisions a too-small claim and only fails at the
+  # in-mount check after a 600s pod wait. k8s units differ from fio (800G = 10^9, not
+  # GiB; a bare 700 is 700 bytes) so parse it as a k8s quantity (Suggestion 3).
+  if ! _PVC_CAP_BYTES="$(k8s_qty_to_bytes "$PVC_CAPACITY")"; then
+    log_fail "--pvc-capacity '${PVC_CAPACITY}' is not a valid Kubernetes quantity (e.g. 800Gi)."; exit 2
+  fi
+  if [ "$_PVC_CAP_BYTES" -lt "$REQUIRED_BYTES" ]; then
+    log_fail "--pvc-capacity ${PVC_CAPACITY} is below the required ${REQUIRED_GIB} GiB (dataset + margin)."; exit 2
+  fi
 fi
 # Measured-test floor: 4 tests x runtime (preconditioning/pulls/scheduling extra).
 MEASURE_MIN=$(( FIO_RUNTIME * 4 ))
@@ -490,16 +505,23 @@ fi
 # report, and the SFS inference describe what is actually mounted — not the default
 # class. Without this the report asserts the default class as fact and infers
 # "Target is SFS: yes" from it, misidentifying a non-SFS claim (Blocker).
+# STORAGE_CLASS holds ONLY the resolved class name (used for the PVC manifest AND the
+# *sfs* glob); it is left EMPTY when unresolved so no human-readable sentinel can ever
+# reach the glob. STORAGE_CLASS_DISPLAY is the banner/report text (Suggestion 1).
 if [ -n "$EXISTING_PVC" ]; then
   _epvc_sc="$(kubectl get pvc "$EXISTING_PVC" -n "${TEST_NAMESPACE}" --request-timeout=30s -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
   if [ -n "$_epvc_sc" ]; then
     STORAGE_CLASS="$_epvc_sc"
+    STORAGE_CLASS_DISPLAY="$_epvc_sc  (from existing PVC ${EXISTING_PVC})"
   else
-    # Could not resolve — do NOT claim the default class or infer SFS from it.
-    STORAGE_CLASS="unknown (pvc ${EXISTING_PVC})"
-    [ "$IS_SFS" = "auto" ] && IS_SFS="false"
+    # Could not resolve — leave STORAGE_CLASS empty (auto-inference can't match an
+    # empty string, so sfs_target stays "no" unless IS_SFS=true is set explicitly).
+    STORAGE_CLASS=""
+    STORAGE_CLASS_DISPLAY="unknown (pvc ${EXISTING_PVC})"
     log_info "Could not resolve the StorageClass of PVC ${EXISTING_PVC}; reporting it as unknown and not inferring SFS."
   fi
+else
+  STORAGE_CLASS_DISPLAY="$STORAGE_CLASS"
 fi
 
 # ----------------------------------------------------------------------------- Effective settings banner
@@ -520,7 +542,7 @@ log_info "Block sizes:       seq ${FIO_SEQ_BS} / rand ${FIO_RAND_BS}"
 log_info "File mode:         ${FIO_FILE_MODE}"
 log_info "Mount path:        ${MOUNT_PATH}"
 log_info "Benchmark dir:     ${RUN_TEST_DIR}"
-log_info "Storage class:     ${STORAGE_CLASS}${EXISTING_PVC:+  (overridden by existing PVC ${EXISTING_PVC})}"
+log_info "Storage class:     ${STORAGE_CLASS_DISPLAY}"
 log_info "Required capacity: >= ${REQUIRED_GIB} GiB (dataset + ${CAPACITY_MARGIN_PCT}% margin)"
 log_info "Result dir:        ${RESULT_DIR}"
 log_info "Retain data:       ${RETAIN_DATA}"
@@ -785,8 +807,16 @@ EOF
   kubectl logs --request-timeout=30s -n "${TEST_NAMESPACE}" "${POD_NAME}" >"${outdir}/pod.log" 2>/dev/null || true
 
   # Build the per-host report from the JSON.
+  HOST_TESTS_FAILED=0
   generate_report "$NODE" "$node_arch" "$claim" "$fstype" "$avail_gib" "$fio_ver" "$outdir"
-  log_pass "Host ${NODE} complete — report: ${outdir}/report.md"
+  # A host whose tests failed must NOT print PASS and must return non-zero so the
+  # driver loop's per-host failure log fires (Suggestion 2).
+  if [ "${HOST_TESTS_FAILED:-0}" = 0 ]; then
+    log_pass "Host ${NODE} complete — report: ${outdir}/report.md"
+  else
+    log_fail "Host ${NODE} completed with failed tests — report: ${outdir}/report.md"
+    return 1
+  fi
 }
 
 # parse_metric: pull a value from a fio JSON file via python3 (read or write side).
@@ -856,6 +886,9 @@ generate_report() {
 
   local tests_failed=0
   { [ "$sr_ok" = 1 ] && [ "$sw_ok" = 1 ] && [ "$rr_ok" = 1 ] && [ "$rw_ok" = 1 ]; } || tests_failed=1
+  # Export this host's verdict so run_on_node can print the right per-host PASS/FAIL
+  # (generate_report returns 0 via its final `cat`, so the caller can't infer it) (Suggestion 2).
+  HOST_TESTS_FAILED="$tests_failed"
   if [ "$tests_failed" = 1 ]; then
     OVERALL_RC=1
     log_fail "One or more FIO tests failed on ${NODE} (fio run error, or truncated/invalid/zeroed JSON) — see ${outdir}/*.json, ${outdir}/*.err, ${outdir}/parse.err"
@@ -904,7 +937,7 @@ generate_report() {
     echo "- Kubernetes context: ${KCTX}"
     echo "- Namespace: ${TEST_NAMESPACE}"
     echo "- Node: ${NODE}  (arch ${ARCH})"
-    echo "- PVC: ${CLAIM}   StorageClass: ${STORAGE_CLASS}"
+    echo "- PVC: ${CLAIM}   StorageClass: ${STORAGE_CLASS_DISPLAY}"
     echo "- Filesystem type: ${FSTYPE}   Mount: ${MOUNT_PATH}   Available before run: ${AVAIL} GiB"
     echo "- FIO image: ${FIO_IMAGE}   FIO version: ${FIOVER}   Engine: ${FIO_ENGINE}   Direct I/O: ${FIO_DIRECT}"
     echo "- Jobs: ${FIO_NUMJOBS}   Queue depth: ${FIO_IODEPTH}   Size/job: ${FIO_SIZE}   Dataset: ${DATASET_GIB} GiB   Runtime: ${FIO_RUNTIME}s"
@@ -954,7 +987,7 @@ generate_report() {
       if [ "$tests_failed" = 1 ]; then
         echo "_One or more tests failed; reference comparison omitted (run is incomplete/failed, not a regression)._"
       elif [ "$sfs_target" != "yes" ]; then
-        echo "_Target is not Nebius SFS (StorageClass: ${STORAGE_CLASS}); reference comparison intentionally omitted._"
+        echo "_Target is not Nebius SFS (StorageClass: ${STORAGE_CLASS_DISPLAY}); reference comparison intentionally omitted._"
       elif [ "$FIO_MODE" != "canonical" ] || [ "$comparable" != "yes" ]; then
         echo "_Run is non-canonical / non-comparable (custom/smoke/single-file); reference comparison intentionally omitted._"
       else
