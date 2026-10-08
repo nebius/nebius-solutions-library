@@ -12,7 +12,7 @@ from auth import Principal, check_budget, check_model, forget, principal
 from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.8.1")
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.8.2")
 
 
 class InvokeRequest(BaseModel):

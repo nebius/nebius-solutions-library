@@ -3,7 +3,7 @@
 FROM debian:bookworm-slim
 ARG NEBIUS_CLI_VERSION=0.12.284
 ARG CRANE_VERSION=0.21.5
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates curl jq \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL "https://storage.eu-north1.nebius.cloud/cli/release/${NEBIUS_CLI_VERSION}/linux/x86_64/nebius" -o /usr/local/bin/nebius && chmod +x /usr/local/bin/nebius \
  && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane

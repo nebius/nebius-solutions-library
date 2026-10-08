@@ -48,7 +48,7 @@ spec:
           securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
           containers:
             - name: rotate
-              image: registry.serverless2.local/nebius/serverless2/ops:0.1.8
+              image: registry.serverless2.local/nebius/serverless2/ops:0.1.10
               args: [rotate-nebius-keys.sh]
               env:
                 - { name: SECRETS, value: "nebius-sa" }

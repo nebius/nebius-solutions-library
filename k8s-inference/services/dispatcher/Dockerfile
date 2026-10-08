@@ -5,6 +5,8 @@ ARG OPS_IMAGE=serverless2/ops:latest
 FROM ${OPS_IMAGE} AS ops
 
 FROM python:3.12-slim
+# Debian security updates of the base image (trivy in CI fails on a fixed CRITICAL)
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir kubernetes==36.0.3
 COPY --from=ops /usr/local/bin/nebius /usr/local/bin/nebius
 WORKDIR /app

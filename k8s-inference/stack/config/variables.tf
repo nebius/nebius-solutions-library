@@ -150,11 +150,11 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.8.1")
-        dispatcher = optional(string, "0.1.6")
+        api        = optional(string, "0.8.2")
+        dispatcher = optional(string, "0.1.7")
         jobs       = optional(string, "0.1.4")
-        ops        = optional(string, "0.1.9")
-        ui         = optional(string, "0.2.2")
+        ops        = optional(string, "0.1.10")
+        ui         = optional(string, "0.2.3")
       }), {})
     }), {})
 
@@ -315,7 +315,7 @@ variable "fleet" {
     error_message = "regions: cluster ids must be unique and may not be `control` (reserved for the control cluster)."
   }
   validation {
-    condition     = var.fleet.hub_region == null || contains(keys(var.fleet.regions), var.fleet.hub_region)
+    condition     = var.fleet.hub_region == null ? true : contains(keys(var.fleet.regions), var.fleet.hub_region)
     error_message = "hub_region must be one of the regions."
   }
   validation {
@@ -323,7 +323,7 @@ variable "fleet" {
     error_message = "prices: every GPU pool platform needs an entry (USD per GPU-hour, on_demand and spot)."
   }
   validation {
-    condition     = alltrue([for tn, t in var.fleet.tenants : can(regex("^[a-z][a-z0-9-]{0,30}$", tn)) && (t.regions == null || alltrue([for r in t.regions : contains(keys(var.fleet.regions), r)]))])
+    condition     = alltrue([for tn, t in var.fleet.tenants : can(regex("^[a-z][a-z0-9-]{0,30}$", tn)) && alltrue([for r in coalesce(t.regions, []) : contains(keys(var.fleet.regions), r)])])
     error_message = "tenants: names are DNS labels; tenant regions must be fleet regions."
   }
   validation {

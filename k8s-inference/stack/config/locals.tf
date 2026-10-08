@@ -117,10 +117,10 @@ locals {
   # (none of its classes is in the fleet) keeps the bundled list and will not be admitted: preflight warns.
   catalog = { for id, e in local.catalog_raw : id => merge(e, {
     deployments = { for k, d in try(e.deployments, {}) : (k == "hub" ? local.hub_id : k) => d if contains(keys(local.clusters), k == "hub" ? local.hub_id : k) }
-    }, can(e.gpu.classes) && length([for c in e.gpu.classes : c if contains(local.gpu_classes, c)]) > 0 ? {
+    }, length([for c in try(e.gpu.classes, []) : c if contains(local.gpu_classes, c)]) > 0 ? {
     gpu = merge(e.gpu, { classes = [for c in e.gpu.classes : c if contains(local.gpu_classes, c)] })
   } : {}) }
-  catalog_without_fleet_class = [for id, e in local.catalog_raw : id if can(e.gpu.classes) && length([for c in e.gpu.classes : c if contains(local.gpu_classes, c)]) == 0]
+  catalog_without_fleet_class = [for id, e in local.catalog_raw : id if can(e.gpu.classes) && length([for c in try(e.gpu.classes, []) : c if contains(local.gpu_classes, c)]) == 0]
   # Per cluster: the entries that run or may run there.
   catalog_by_cluster = { for id in local.cluster_ids : id => { for mid, e in local.catalog : mid => e if contains(keys(e.deployments), id) } }
   # Endpoint entries (a runtime block) per worker cluster, run classes (mode run / async) are the rest.
