@@ -218,3 +218,19 @@ def test_price_feed_quotes_spot_as_follow_price_not_priority(monkeypatch):
     assert not any("priority" in a for a in cmd)   # deprecated since 2026-05-11, the CLI rejects it
     price_feed.estimate("project-x", "gpu-b300-sxm", "8gpu-192vcpu-2768gb", False)
     assert not any("preemptible" in a or "spot" in a for a in seen["cmd"])
+
+
+def test_a_small_run_does_not_boot_a_whole_node():
+    """A 1-GPU run prefers the 1-GPU pool (2.15 capped) over the 8-GPU pool following the spot price (0.79): with
+    nothing up, the 8-GPU pool would boot a whole node (8 x 0.79 = 6.32/h). Once such a node is up with free
+    GPUs, its per-GPU price counts and it wins."""
+    pools = {
+        "hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "capacity": "spot", "usd_per_gpu_hour": 2.15, "gpus_per_node": 1},
+        "hub-h100-spot-8x": {"region": "hub", "pool": "h100-spot-8x", "gpu_class": "h100", "capacity": "spot", "usd_per_gpu_hour": 0.79, "gpus_per_node": 8},
+    }
+    cl = d.clusters_from_pools(pools)
+    prof = {"classes": ["h100"], "strategy": "preferred"}
+    assert d.rank(prof, cl, {}, 1, {})[0][1] == "h100-spot-1x"
+    assert d.rank({**prof, "strategy": "cheapest"}, cl, {}, 1, {})[0][1] == "h100-spot-1x"
+    assert d.rank(prof, cl, {("hub", "h100-spot-8x"): 7}, 1, {})[0][1] == "h100-spot-8x"   # a node is up with room
+    assert d.rank(prof, cl, {}, 8, {})[0][1] == "h100-spot-8x"                              # a whole-node run

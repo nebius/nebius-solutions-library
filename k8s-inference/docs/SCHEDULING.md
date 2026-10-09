@@ -69,8 +69,9 @@ job:
 Kueue picks the pool at admission and a Job's image cannot change afterwards (see "Not possible"
 below), so for such a class the GPU class is chosen **at submission** (option A of
 `docs/DESIGN-REVIEW-2026-10-09.md`): the API asks the dispatcher's ranking (`GET /v1/rank`: the
-class preference, reserved before on-demand before spot, price, free capacity now, the caller's
-region as a pin when given), renders the Job with the best class's image, limits its node affinity
+class preference, reserved before on-demand before spot, the cost of the run (its GPUs on a node that is
+up with room, else the whole node the pool would boot: a 1-GPU run does not boot an 8-GPU node), free
+capacity now, the caller's region as a pin when given), renders the Job with the best class's image, limits its node affinity
 to that class's pools and queues it on that class's profile (`prefer-<class>`). The operation and
 every attempt record carry the class (`gpu_class`, plus the image under `image`). The run may still
 move between regions of its class while it waits (MultiKueue), and a resume keeps the class: the

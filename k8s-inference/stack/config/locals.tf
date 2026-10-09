@@ -95,8 +95,10 @@ locals {
     manager_id = local.manager_id
     dedicated  = local.dedicated
     clusters   = { for id, c in local.clusters : id => { region = c.region, project_id = c.project_id, roles = local.roles[id] } }
-    # apply order: workers first (they publish the identities the manager consumes), then the control cluster
-    order = concat([for id in local.cluster_ids : id if !local.roles[id].control], [for id in local.cluster_ids : id if local.roles[id].control])
+    # apply order: the hub region first (its models stage publishes the tenant buckets every other region's runs
+    # upload to; a region applied before it would render empty storage credentials, seen 2026-10-09), then the other
+    # workers (they publish the identities the manager consumes), then the control cluster
+    order = concat([local.hub_id], [for id in local.cluster_ids : id if !local.roles[id].control && id != local.hub_id], [for id in local.cluster_ids : id if local.roles[id].control])
     state = { bucket = local.state_bucket, region = local.state_region, endpoint = local.state_endpoint }
   }
 }

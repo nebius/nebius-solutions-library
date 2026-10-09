@@ -174,9 +174,13 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         cname, fname, price, is_free = c
         pool = clusters[cname]["pools"][fname]
         cap = CAP_RANK.get(pool.get("capacity", "spot"), 3)
-        if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then price
-            return (0 if is_free else 1, classes.index(pool["class"]), cap, price, cname, fname)
-        return (0 if is_free else 1, price, cap, cname, fname)
+        # what the run costs per hour: its GPUs on a node that is up with room, else the whole node the pool
+        # would boot (a 1-GPU run on an 8-GPU pool pays eight GPUs; measured 2026-10-09: it booted a full node)
+        node = int(pool.get("gpus_per_node") or 1)
+        eff = price * (max(gpus, 1) if is_free else max(max(gpus, 1), node))
+        if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then cost
+            return (0 if is_free else 1, classes.index(pool["class"]), cap, eff, cname, fname)
+        return (0 if is_free else 1, eff, cap, cname, fname)
 
     return sorted(cands, key=key)
 

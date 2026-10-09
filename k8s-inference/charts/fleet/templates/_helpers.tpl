@@ -56,7 +56,7 @@
 {{- end -}}
 
 {{/* Ordered pool list for a preference. args: dict "fleet" "pools" (map name->pool, names may be region-prefixed) "prefer" (gpu class or "") "regionOf" (map name->region id, optional)
-     Order: preferred class first; inside a class reserved -> on_demand -> spot (fleet.capacity_order) then price; other classes by their cheapest price. Returns a YAML list of names. */}}
+     Order: preferred class first; inside a class reserved -> on_demand -> spot (fleet.capacity_order), then the smallest preset (a 1-GPU run must not boot an 8-GPU node), then price; other classes by their cheapest price. Returns a YAML list of names. */}}
 {{- define "fleet.orderedPools" -}}
 {{- $f := .fleet }}{{ $pools := .pools }}{{ $prefer := .prefer -}}
 {{- $minByClass := dict -}}
@@ -69,7 +69,7 @@
 {{- range $n, $p := $pools -}}
 {{- $c := default "unknown" $p.gpu_class -}}
 {{- $rank := 1 }}{{ if eq $c $prefer }}{{ $rank = 0 }}{{ end -}}
-{{- $keys = append $keys (printf "%d|%010.4f|%s|%d|%010.4f|%s" $rank ((index $minByClass $c) | float64) $c (include "fleet.capIndex" (dict "fleet" $f "pool" $p) | atoi) ((include "fleet.price" (dict "fleet" $f "pool" $p)) | float64) $n) -}}
+{{- $keys = append $keys (printf "%d|%010.4f|%s|%d|%03d|%010.4f|%s" $rank ((index $minByClass $c) | float64) $c (include "fleet.capIndex" (dict "fleet" $f "pool" $p) | atoi) (include "fleet.preset" $p.preset | fromYaml).gpus ((include "fleet.price" (dict "fleet" $f "pool" $p)) | float64) $n) -}}
 {{- end -}}
 {{- $names := list -}}
 {{- range $k := sortAlpha $keys }}{{ $names = append $names (last (splitList "|" $k)) }}{{ end -}}
