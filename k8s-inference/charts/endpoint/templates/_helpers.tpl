@@ -3,7 +3,7 @@ Effective values. Two input layouts:
   plain:   the chart's values.yaml keys at the top level (name, image, pool, ...).
   catalog: a catalog entry (catalog/models/<id>.yaml) passed as a values file plus `cluster=<name>`:
            `runtime` merged with `deployments.<cluster>` (overrides win, lists replaced), name = id,
-           labels task/mode/cluster from the entry. This is how the Terraform models stage renders every
+           labels task/mode/cluster from the entry. This is how the API renders every
            endpoint straight from the catalog, with no rendered copies in git.
 */}}
 {{- define "endpoint.values" -}}

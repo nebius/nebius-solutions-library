@@ -3,7 +3,7 @@
 One file per model in `catalog/models/<id>.yaml`, one schema for endpoints and
 run classes (the API reads this directory; `services/api/catalog.py`).
 Endpoint entries (a `runtime` block) are deployed straight from this directory:
-the Terraform models stage (`stack/models`) renders `charts/endpoint` in catalogue mode.
+endpoints are defined through the API, which renders `charts/endpoint` (the catalog directory holds run classes only).
 with the entry as its values file, once per cluster named in its
 `deployments` (and not `paused`). Nothing is rendered into the repository. Run-class
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU

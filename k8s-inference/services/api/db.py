@@ -173,6 +173,19 @@ def reconciler():
                 c.execute("select pg_advisory_unlock(1229002)")
 
 
+def requeue_all() -> int:
+    """Queue a no-op change for every model without a pending one: the reconciler re-renders each endpoint and run
+    class once (server-side apply, idempotent), so objects this release renders and an older one did not (the
+    per-endpoint SecurityPolicy, for one) exist after an upgrade without an admin re-saving every model.
+    Called once at API startup; returns the number of rows queued."""
+    with pool().connection() as c, c.transaction():
+        rows = c.execute("""select m.id, m.version, m.entry from models m
+                            where not exists (select 1 from model_changes ch where ch.id = m.id)""").fetchall()
+        for mid, version, entry in rows:
+            _change(c, mid, version, entry, entry)
+        return len(rows)
+
+
 def pending_changes() -> list[dict]:
     with pool().connection() as c:
         return [dict(zip(("id", "version", "entry", "previous", "error"), r))

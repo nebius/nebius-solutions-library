@@ -1310,12 +1310,13 @@ def test_endpoint_pool_fits_the_gpu_count(monkeypatch):
         "hub-h100-res-8x": {"region": "hub", "pool": "h100-res-8x", "gpu_class": "h100", "gpus_per_node": 8, "capacity": "reserved"},
         "hub-l40s-1x": {"region": "hub", "pool": "l40s-1x", "gpu_class": "l40s", "gpus_per_node": 1, "capacity": "on_demand"}}}
     monkeypatch.setattr(kube, "fleet", lambda: pools)
-    assert models.pool_for("hub", ["h100"]) == "h100-spot-1x"                 # 1 GPU: the small preset, not a whole node
+    assert models.pool_for("hub", ["h100"]) == "h100-res-8x"                  # reserved capacity first, even for 1 GPU
     assert models.pool_for("hub", ["h100"], 8) == "h100-res-8x"              # 8 GPUs: only the 8x presets fit; reserved first
     assert models.pool_for("hub", ["l40s", "h100"], 8) == "h100-res-8x"      # the first class with a fitting pool
     assert models.pool_for("hub", ["l40s"], 8) is None
     assert models.pool_for("hub", ["h100"], 2) == "h100-res-8x"
     del pools["pools"]["hub-h100-res-8x"]
+    assert models.pool_for("hub", ["h100"]) == "h100-spot-1x"                 # no reservation: the small preset, not a whole node
     assert models.pool_for("hub", ["h100"], 8) == "h100-spot-8x"             # plain before InfiniBand
 
 
@@ -1333,3 +1334,36 @@ def test_cancel_of_a_dispatched_jobset_deactivates_its_workload(client):
     assert fake.custom[("tenant-demo", "workloads", "jobset-op-x-abc")]["spec"]["active"] is False
     assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"
     assert fake.custom[("tenant-demo", "jobsets", "op-x")]["spec"]["suspend"] is True
+
+
+def test_cancel_of_a_region_pinned_jobset_deactivates_its_workload(client, monkeypatch):
+    """A run pinned to a region holds its JobSet and Workload on that worker: the cancel reaches that cluster's Kueue."""
+    c, fake = client
+    south = FakeCluster()
+    monkeypatch.setattr(kube, "api", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
+    uid = "u-456"
+    south.custom[("tenant-demo", "workloads", "jobset-op-y-def")] = {"metadata": {"name": "jobset-op-y-def", "labels": {kube.KUEUE_JOB_UID_LABEL: uid}},
+                                                                     "spec": {"active": True}}
+    south.custom[("tenant-demo", "jobsets", "op-y")] = {"metadata": {"name": "op-y", "uid": uid}, "spec": {"suspend": False}}
+    job = {**copy.deepcopy(south.custom[("tenant-demo", "jobsets", "op-y")]), "_region": "eu-south1", "_pods": [{"metadata": {"name": "op-y-workers-0-0"}}]}
+    out = jobs._cancel_jobset("tenant-demo", "op-y", "eu-south1", job)
+    assert south.custom[("tenant-demo", "workloads", "jobset-op-y-def")]["spec"]["active"] is False
+    assert south.custom[("tenant-demo", "jobsets", "op-y")]["spec"]["suspend"] is True
+    assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"
+    assert ("tenant-demo", "workloads", "jobset-op-y-def") not in fake.custom    # nothing touched on the control cluster
+
+
+def test_cancel_keeps_the_record_when_the_worker_copy_is_already_gone(client):
+    """Deactivation evicts the run; if MultiKueue removed the worker's copy before the suspend arrived, the operation
+    keeps its manager record (annotated cancelled) instead of being deleted as 'never copied'."""
+    c, fake = client
+    uid = "u-789"
+    fake.custom[("tenant-demo", "workloads", "jobset-op-z-ghi")] = {"metadata": {"name": "jobset-op-z-ghi", "labels": {kube.KUEUE_JOB_UID_LABEL: uid}},
+                                                                    "spec": {"active": True}}
+    fake.custom[("tenant-demo", "jobsets", "op-z")] = {"metadata": {"name": "op-z", "uid": uid},
+                                                       "spec": {"managedBy": "kueue.x-k8s.io/multikueue", "suspend": False}}
+    job = {**copy.deepcopy(fake.custom[("tenant-demo", "jobsets", "op-z")]), "_cluster": "hub", "_region": "eu-south1", "_pods": []}
+    out = jobs._cancel_jobset("tenant-demo", "op-z", "eu-north1", job)      # no JobSet op-z on eu-south1: the worker answers 404
+    assert fake.custom[("tenant-demo", "workloads", "jobset-op-z-ghi")]["spec"]["active"] is False
+    assert ("tenant-demo", "jobsets", "op-z") in fake.custom
+    assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"

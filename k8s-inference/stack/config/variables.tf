@@ -363,6 +363,12 @@ variable "fleet" {
     condition     = length(var.fleet.secrets.workload_secrets) == 0 || var.fleet.secrets.mysterybox_credentials_secret != null
     error_message = "workload_secrets requires a pre-provisioned MysteryBox credentials Secret in each target namespace."
   }
+
+  validation {
+    condition = alltrue([for k, w in var.fleet.secrets.workload_secrets :
+    !w.create_namespace || !contains(["ops", "monitoring", "api", "models", "registry", "spegel", "kueue-system", "knative-serving", "litellm", "ui-app", "envoy-gateway-system", "cert-manager"], w.namespace)])
+    error_message = "workload_secrets: create_namespace is only for a namespace of your own; the platform's namespaces already exist."
+  }
   validation {
     condition     = !var.fleet.edge.ip_certificate || var.fleet.edge.mode == "public"
     error_message = "edge.ip_certificate needs edge.mode = public."

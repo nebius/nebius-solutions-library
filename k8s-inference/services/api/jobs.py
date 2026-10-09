@@ -584,9 +584,11 @@ def cancel(ns: str, name: str, region: str = REGION) -> dict:
 
 
 def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
-    """A multi-node run: never started -> deleted; running -> suspended (the JobSet controller deletes the pods,
-    each uploader records its attempt) and annotated CANCELLED. A manager JobSet: suspend the worker's copy
-    (MultiKueue mirrors the spec at creation only), annotate the manager's."""
+    """A multi-node run: never started -> deleted; running -> its Kueue Workload deactivated (Kueue evicts it and never
+    admits it again; a suspend alone is undone within seconds and the pods restart) and the JobSet suspended (the
+    JobSet controller deletes the pods, each uploader records its attempt) and annotated CANCELLED. A manager JobSet:
+    the Workload is the manager's, the suspend goes to the worker's copy (MultiKueue mirrors the spec at creation only);
+    a run pinned to a region holds both on that cluster."""
     started = job.get("_cluster") is not None if is_manager_job(job) else bool(job.get("_pods"))
     try:
         if not started:
@@ -594,17 +596,17 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
             job["metadata"].setdefault("annotations", {})[f"{LABEL}/cancelled"] = "deleted"
             return job
         if is_manager_job(job):
-            kube.deactivate_workload(ns, job["metadata"].get("uid", ""))   # Kueue evicts it; the suspend below alone is undone
+            kube.deactivate_workload(ns, job["metadata"].get("uid", ""), region)
             try:
                 patch_jobset(ns, name, job["_region"], {"spec": {"suspend": True}})
             except ApiException as e:
                 if e.status != 404:
                     raise
-                delete_jobset(ns, name, region)
-                job["metadata"].setdefault("annotations", {})[f"{LABEL}/cancelled"] = "deleted"
-                return job
+                # the eviction already removed the worker's copy (or it was never created): the run is over either
+                # way; the manager's record stays so the operation keeps its history and attempt records
             patched = patch_jobset(ns, name, region, {"metadata": {"annotations": {f"{LABEL}/cancelled": "true"}}})
         else:
+            kube.deactivate_workload(ns, job["metadata"].get("uid", ""), region)
             patched = patch_jobset(ns, name, region, {"metadata": {"annotations": {f"{LABEL}/cancelled": "true"}}, "spec": {"suspend": True}})
     except ApiException as e:
         raise HTTPException(502, f"kubernetes ({region}): {e.reason}")

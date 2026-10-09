@@ -29,7 +29,7 @@ Jobs use Kubernetes Jobs or JobSet. An idempotent replay repairs a missing per-o
 
 ## Accounting and budgets
 
-LiteLLM's upstream chart owns keys, token accounting, database migrations and proxy budgets. Its two replicas share the existing gateway Redis service. Redis uses a persistent AOF, no eviction and namespace-restricted ingress. Database-authoritative budget enforcement and fail-closed rate-limit enforcement are enabled. Redis remains one replica: an outage can reject proxy traffic until recovery rather than silently bypassing limits. For a strict availability SLO, supply an operated HA Redis service through the native chart values and validate failover.
+LiteLLM's upstream chart owns keys, token accounting, database migrations and proxy budgets. Its two replicas share the existing gateway Redis service. Redis uses a persistent AOF, TTL-based eviction when its memory limit is reached (every counter carries a TTL; a failed write would make LiteLLM fail closed) and namespace-restricted ingress. LiteLLM 1.104.0 fails closed on budget checks when Redis is down; its rate limits then stay per pod (the fail-closed rate-limit setting exists only in later releases). Database-authoritative budget enforcement and fail-closed rate-limit enforcement are enabled. Redis remains one replica: an outage can reject proxy traffic until recovery rather than silently bypassing limits. For a strict availability SLO, supply an operated HA Redis service through the native chart values and validate failover.
 
 Completed GPU jobs use a small ledger in the **existing LiteLLM database**. `(region, Kubernetes Job UID)` is the unique charge identity. Insertion of the receipt and atomic increments of `LiteLLM_VerificationToken.spend` and `total_spend` commit together. Retrying after an annotation failure never charges twice; concurrent proxy/GPU increments cannot overwrite one another. The Job annotation is a display receipt, not the deduplication authority.
 
@@ -43,7 +43,7 @@ Use `env_secrets: ["app-credentials"]` in a model definition to reference worklo
 
 Generated infrastructure credentials still appear in sensitive Terraform state. Restrict and encrypt the remote state bucket, retain recoverable versions, and limit its operators. MysteryBox payloads stay outside model definitions and Terraform values. Literal environment values are accepted for ordinary configuration; secrets belong in Secret references. Only admins can read full model specs/history.
 
-Database clients verify the server certificate and hostname. `trust_bundle_pem` optionally supplies a complete PEM trust bundle, mounted over the image's system CA bundle for the API, billing, database bootstrap and LiteLLM. It must include both public roots and any private roots needed by the fleet. There is no TLS verification bypass.
+Database clients verify the server certificate and hostname, and the API's own HTTPS clients (regional forwards, LiteLLM) read the same bundle through `SSL_CERT_FILE`. `trust_bundle_pem` optionally supplies a complete PEM trust bundle, mounted over the image's system CA bundle for the API, billing, database bootstrap and LiteLLM. It must include both public roots and any private roots needed by the fleet. There is no TLS verification bypass.
 
 Public gateways use configured DNS and cert-manager ACME. Internal gateways require `edge.domain`, `edge.private_ca_secret` (`tls.crt`/`tls.key` in `cert-manager`) and the fleet trust bundle. They use a private CA ClusterIssuer and do not install public ACME issuers. Clients/browsers must trust that CA. See `EDGE.md`.
 
@@ -66,3 +66,7 @@ Local/CI validation is necessary but does not prove a fresh Managed PostgreSQL d
 After a real deployment, verify unauthorized/forbidden endpoint calls, allowed-key HTTP/WebSocket traffic, scale from zero, pending regional recovery, one charged/retried GPU operation, dispatcher leader replacement, Redis failure behavior, TLS rejection of an untrusted CA, log persistence and database restore.
 
 `protect_data` controls the wrapper's destruction guard. Destruction can remove tenant artifact/log buckets and databases. Export required data and backups first; confirm the generated plan and bucket cleanup behavior. See the root README for the exact commands.
+
+## Upgrades
+
+At every start the control API queues a no-op change for each model that has none pending, and the reconciler re-renders every endpoint and run class once (server-side apply, idempotent). Objects a release renders and the previous one did not, such as the per-endpoint `SecurityPolicy` that replaced the namespace-wide key check, therefore exist after the upgrade without an admin re-saving every model.

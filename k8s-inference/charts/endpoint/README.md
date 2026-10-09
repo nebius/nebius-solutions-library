@@ -48,4 +48,4 @@ it ahead of time (docs/OPERATIONS.md "Model weights"). `storageUri`/KServe
 model agents are not used: this chart runs explicit containers, so the
 weights path is just a directory the container reads.
 
-Terraform's models stage renders bundled endpoints; the API renders API-managed endpoints with the same chart. Each render includes a native SecurityPolicy selecting the model's external routes and using the shared API authorizer. Use `envFrom` for Secret references. Model-write reconciliation persists retry state before applying resources; see `docs/OPERATIONS.md`.
+The API renders every endpoint with this chart (nothing in Terraform renders endpoints). Each render includes a native SecurityPolicy selecting the model's external routes and using the shared API authorizer. Use `envFrom` for Secret references. Model-write reconciliation persists retry state before applying resources; see `docs/OPERATIONS.md`.

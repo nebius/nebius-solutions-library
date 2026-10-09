@@ -1,4 +1,4 @@
-# Shared counters for Envoy and LiteLLM. Persistent AOF, no eviction; budgets also consult PostgreSQL.
+# Shared counters for Envoy and LiteLLM. Persistent AOF, TTL-based eviction when full; budgets also consult PostgreSQL.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +27,7 @@ spec:
         - --maxmemory
         - 128mb
         - --maxmemory-policy
-        - noeviction
+        - volatile-ttl   # every Envoy and LiteLLM counter carries a TTL; a full store evicts the soonest-expiring key instead of failing writes (LiteLLM fails closed on a write error)
         ports:
         - containerPort: 6379
         resources:

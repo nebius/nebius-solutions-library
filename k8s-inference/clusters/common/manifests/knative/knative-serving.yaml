@@ -42,7 +42,9 @@ spec:
       # A revision that never became Ready (bad image, no node for its GPUs) keeps its initial replica, Pending or
       # crash-looping, and so its GPU request, until the revision is collected: Knative's default keeps 20 old
       # revisions for 48 h. The platform re-renders a model from its definition (no rollback through revisions),
-      # so inactive revisions are collected after an hour (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md).
+      # so inactive revisions are collected after an hour (s2pr2, 2026-10-09). Knative never collects a model's
+      # latest revision: a first revision that never becomes Ready keeps its Pending pod until the model is
+      # changed or deleted.
       min-non-active-revisions: "0"
       max-non-active-revisions: "5"
       retain-since-create-time: "1h"

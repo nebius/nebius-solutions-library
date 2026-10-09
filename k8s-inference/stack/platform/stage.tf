@@ -103,7 +103,7 @@ locals {
   }
 
   # API environment (replaces the manifest's list wholesale; the overlays used to patch indices).
-  api_env_common = [
+  api_env_common = concat([
     { name = "LITELLM_URL", value = local.litellm_url },
     { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
     { name = "PUBLIC_API_URL", value = "https://${local.hostnames.api}" },
@@ -111,7 +111,10 @@ locals {
     { name = "CATALOG_DIRS", value = "/etc/catalog" },
     { name = "RUNNER_IMAGE", value = local.image.jobs },
     { name = "HUB_REGION", value = local.hub_region },
-  ]
+    ], local.f.trust_bundle_pem == null ? [] : [
+    # the API's own HTTPS clients (regional forwards, LiteLLM) trust the mounted bundle, not only libpq/Prisma
+    { name = "SSL_CERT_FILE", value = "/etc/ssl/certs/ca-certificates.crt" },
+  ])
   # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
   api_env_control = [for e in [
     { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },

@@ -1,6 +1,6 @@
 # One InferenceService per release. Plain layout: these keys at the top level. Catalog mode: pass a
 # catalog/models/<id>.yaml as the values file plus --set cluster=<name> (README.md); that is how the
-# models stage and API render endpoints from the same chart.
+# The API renders every endpoint from this chart (services/api/models.py).
 name: ""                 # InferenceService name (required)
 namespace: models
 labels: {}               # extra metadata labels

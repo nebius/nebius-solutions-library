@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.11.0, < 2.0.0"
+  required_version = ">= 1.12.0, < 2.0.0"
   # State in the fleet's Object Storage bucket; stack.sh passes bucket, key and endpoint at init.
   backend "s3" {}
   required_providers {

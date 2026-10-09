@@ -155,8 +155,16 @@ spec:
     - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
   hostnames: ["api.example.invalid"]   # placeholder, set per cluster
   rules:
+    - matches: [{ path: { type: PathPrefix, value: /internal } }]   # the gateway's authorizer calls (charts/endpoint SecurityPolicy) reach the Service directly
+      filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]
       timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata: { name: api-not-found, namespace: api }
+spec:
+  directResponse: { statusCode: 404 }
 ---
 # Per-key rate limit for the API route: counted per distinct Authorization header in the shared Redis
 # (Envoy Gateway global rate limit), so it holds across Envoy replicas and API instances. Per-tenant

@@ -137,7 +137,7 @@ Control cluster (Kueue MultiKueue manager):
   (lane F3). A workload is only re-dispatched to another region when the
   worker evicts it entirely.
 
-Endpoints: Knative scales them; an endpoint with `runtime.queue.name` set
+Endpoints: Knative scales them (a revision superseded by a newer one is collected after an hour; a model whose first revision never becomes Ready keeps its Pending pod and GPU request until the model is changed or deleted, Knative never collects the latest revision); an endpoint with `runtime.queue.name` set
 (`docs/SCHEDULING.md`) is admitted by Kueue like a job (the `models`
 namespace is Kueue-managed), so its warm replicas count in the quota and its
 pool's `endpoint_floor_gpus` must be 0 for them. Endpoints without

@@ -126,15 +126,16 @@ def regions_for(classes: list[str], wanted: list[str] | None) -> list[str]:
 
 def pool_for(cid: str, classes: list[str], count: int = 1) -> str | None:
     """The pool an endpoint of these classes is pinned to on a cluster: the first class that has a pool there
-    whose nodes carry at least `count` GPUs (an 8-GPU replica never fits a 1-GPU preset), the smallest such preset
-    first (no idle GPUs on the node), plain pools before InfiniBand ones (those nodes are for multi-node runs),
-    reserved before on-demand before spot (the fleet's capacity order), then by name."""
+    whose nodes carry at least `count` GPUs (an 8-GPU replica never fits a 1-GPU preset); among those, reserved
+    before on-demand before spot (the fleet's capacity order: a reservation is paid for whether it serves or not),
+    then the smallest fitting preset (fewer idle GPUs on the node), plain pools before InfiniBand ones (those nodes
+    are for multi-node runs), then by name."""
     order = {"reserved": 0, "on_demand": 1, "spot": 2}
     pools = [p for p in kube.fleet()["pools"].values() if (p.get("region") or REGION) == cid]
     for c in classes:
         cands = sorted((p for p in pools if p.get("gpu_class") == c and int(p.get("gpus_per_node") or 1) >= max(int(count), 1)),
-                       key=lambda p: (int(p.get("gpus_per_node") or 1), (p.get("interconnect") or "none") != "none",
-                                      order.get(p.get("capacity"), 9), p["pool"]))
+                       key=lambda p: (order.get(p.get("capacity"), 9), int(p.get("gpus_per_node") or 1),
+                                      (p.get("interconnect") or "none") != "none", p["pool"]))
         if cands:
             return cands[0]["pool"]
     return None

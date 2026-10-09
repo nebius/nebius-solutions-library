@@ -31,6 +31,7 @@ async def _lifespan(_app: FastAPI):
     check_placeholders()
     if db.enabled():
         log.info("database schema version %s", db.migrate())
+        log.info("queued %s model(s) for a re-render after start", db.requeue_all())
     task = asyncio.create_task(_reconcile_loop()) if db.enabled() else None
     try:
         yield

@@ -106,19 +106,21 @@ def cluster_region(cluster: str) -> str:
     return HUB_REGION if cluster == "hub" else cluster
 
 
-def deactivate_workload(ns: str, job_uid: str) -> int:
+def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Kueue `spec.active = false` on the manager Workload of a run (label kueue.x-k8s.io/job-uid): Kueue evicts the
     run everywhere (the worker's copy goes, its pods with it) and never admits it again. A `suspend` patched onto
     the worker's JobSet alone is undone within seconds: Kueue keeps an admitted workload's JobSet running, and the
     JobSet controller then restarts every pod (s2pr2, 2026-10-09: a cancelled 16-GPU run came back on fresh pods).
+    `region` is the cluster that holds the Workload: the manager for a dispatched run, the worker for a run pinned
+    to a region (its Kueue admits the JobSet directly and would undo a suspend the same way).
     Returns the number of Workloads patched (0: none found, the run never reached the queue)."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads",
+        items = retry(api(region).list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads",
                       label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}").get("items", [])
     except ApiException:
         return 0
     for w in items:
-        retry(api().patch_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads", w["metadata"]["name"],
+        retry(api(region).patch_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads", w["metadata"]["name"],
               {"spec": {"active": False}})
     return len(items)
 
