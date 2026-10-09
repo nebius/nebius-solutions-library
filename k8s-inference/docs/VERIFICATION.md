@@ -12,6 +12,32 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Redeployment from the merged copy: four spot regions, warm spare nodes (2026-10-09 evening, five clusters)
+
+The test fleet was destroyed and deployed again from this directory as merged (the shared-components refactor
+plus the large-model fixes and the review pass), with a control cluster and four GPU regions, every GPU pool on
+spot: eu-north1 H100 (1-GPU pool with a price cap and one warm spare node, two whole-node pools, one of them on
+InfiniBand), eu-west2 B300 with local NVMe, eu-west1 H200, us-central1 B200.
+
+| Check | Result |
+|---|---|
+| Fresh deployment | cloud stage 90 resources (five clusters, database, registry, buckets); platform 120 resources per worker; models stages; acceptance probe passed (hello-run, then the example endpoint on a B200 spot node answered) |
+| Spot in four regions | one 1-GPU `container-run` per region, submitted together, all SUCCEEDED on a spot node booted from zero: eu-west1 H200 about 1 min, us-central1 B200 3.5 min, eu-north1 H100 6 min, eu-west2 B300 8 min |
+| Warm spare node (`warm_nodes = 1`) | the `cluster-overprovisioner` placeholder held one H100 node; a new endpoint's pod preempted it and started there at once, the placeholder went Pending and the autoscaler added the next spare in 4 min. First call 609 s (one-time pull of the 10 GB vLLM image); after scale to zero, the next cold start answered in **68 s** (a node boot alone is 3 to 6 min on these pools) |
+| Idle endpoints stay idle | with `disable_model_info_refresh` the gateway log shows no more `GET /v1/models` from LiteLLM; a scaled-to-zero endpoint stayed down (before: woken every 5 min) |
+| Console | models, endpoints with live replica counts, jobs with metrics and logs, the multi-node job form; UI tests 15, API tests 100 |
+
+Found and fixed on this deployment: `verify-full` against the managed database failed (`certificate verify
+failed`) until the Nebius MSP CA was fetched and mounted; a region applied before the hub rendered empty
+storage credentials and its uploader failed (stage order: the hub's models stage first); a 1-GPU run on the
+hub booted an 8-GPU node because the whole-node pool's per-GPU spot price was lower than the 1-GPU pool's cap
+(queue flavors and the dispatcher order pools by the cost of the run now); the acceptance probe gave up before
+a first image pull in a fresh region finished (20 min now); the KServe CRD uninstall hung on endpoints defined
+through the API (drained first now); bucket emptying ran after the key had lost its group (ordered now); a
+region whose tenant-wide `compute.disk.count` quota is exhausted cannot host the platform (me-west1 that day;
+the preflight reports the headroom now). Cost of the evening: about 2 GPU-hours of spot across the four
+regions plus the fleet's idle cost, under 10 USD.
+
 ## Fresh test fleet with the managed database, spot pools and large models (2026-10-09, three clusters, two GPU regions)
 
 A second fleet was deployed from the pull request's copy of this directory, with the managed database and
