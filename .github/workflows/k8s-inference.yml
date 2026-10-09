@@ -29,11 +29,24 @@ jobs:
   check:
     name: 'Validate, render, test'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "v1.11.4"
+          terraform_version: "v1.12.2"
           terraform_wrapper: false   # the wrapper buffers stdin/stdout; tools/check.sh pipes into `terraform console`
       - uses: azure/setup-helm@v4
         with:

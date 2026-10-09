@@ -7,7 +7,8 @@
 variable "fleet" {
   description = "The inference fleet: control plane, GPU regions with their pools, images, prices, edge, tenants and models."
   type = object({
-    schema_version = optional(number, 1)
+    schema_version   = optional(number, 1)
+    trust_bundle_pem = optional(string) # public CA bundle, including private gateway/database roots when needed
     # Prefix of every cloud resource (clusters, service accounts, buckets, registry): <name>-<cluster id>-...
     name               = string
     kubernetes_version = optional(string, "1.35")
@@ -160,10 +161,10 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.9.6")
-        dispatcher = optional(string, "0.1.9")
-        jobs       = optional(string, "0.1.8")
-        ops        = optional(string, "0.1.10")
+        api        = optional(string, "0.10.0")
+        dispatcher = optional(string, "0.2.0")
+        jobs       = optional(string, "0.1.9")
+        ops        = optional(string, "0.1.11")
         ui         = optional(string, "0.5.0")
       }), {})
     }), {})
@@ -195,10 +196,11 @@ variable "fleet" {
     # `shortlived`, 6 days, renewed by cert-manager) so https://<ip> is browser-trusted without any name.
     # source_cidrs: who may reach the public listeners (empty = anyone; the API still needs a key).
     edge = optional(object({
-      mode           = optional(string, "public")
-      domain         = optional(string)
-      source_cidrs   = optional(list(string), [])
-      ip_certificate = optional(bool, false)
+      mode              = optional(string, "public")
+      domain            = optional(string)
+      private_ca_secret = optional(string) # cert-manager namespace; tls.crt + tls.key
+      source_cidrs      = optional(list(string), [])
+      ip_certificate    = optional(bool, false)
       acme = optional(object({
         email   = optional(string, "")
         staging = optional(bool, false)
@@ -219,9 +221,17 @@ variable "fleet" {
     # Secret values never go into this file: they are read from the environment at apply time, by the
     # variable NAMES given here (unset = the feature stays off).
     secrets = optional(object({
-      ngc_api_key_env          = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache)
-      hf_token_env             = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes)
-      registry_credentials_env = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams
+      ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache)
+      hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes)
+      registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams
+      mysterybox_credentials_secret = optional(string)                         # pre-provisioned subject-credentials.json, per cluster
+      workload_secrets = optional(map(object({
+        namespace        = string
+        name             = string
+        secret_id        = string
+        version          = optional(string)
+        create_namespace = optional(bool, false)
+      })), {})
     }), {})
 
     # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys.
@@ -260,10 +270,6 @@ variable "fleet" {
       example_endpoint = optional(bool, true) # needs a tenant key with admin = true
     }), {})
 
-    # Optional add-on: Argo CD on the control cluster (operator UI only; nothing is deployed through it).
-    argocd = optional(object({
-      enabled = optional(bool, false)
-    }), {})
   })
 
   validation {
@@ -347,6 +353,16 @@ variable "fleet" {
   validation {
     condition     = contains(["public", "internal"], var.fleet.edge.mode) && (var.fleet.edge.domain == null || can(regex("^[a-z0-9.-]+$", var.fleet.edge.domain)))
     error_message = "edge.mode is public | internal; edge.domain is a DNS name (lowercase)."
+  }
+
+  validation {
+    condition     = var.fleet.edge.mode != "internal" || (var.fleet.edge.domain != null && var.fleet.edge.private_ca_secret != null && var.fleet.trust_bundle_pem != null)
+    error_message = "Internal gateways require edge.domain, edge.private_ca_secret and trust_bundle_pem; public ACME cannot issue private gateway certificates."
+  }
+
+  validation {
+    condition     = length(var.fleet.secrets.workload_secrets) == 0 || var.fleet.secrets.mysterybox_credentials_secret != null
+    error_message = "workload_secrets requires a pre-provisioned MysteryBox credentials Secret in each target namespace."
   }
   validation {
     condition     = !var.fleet.edge.ip_certificate || var.fleet.edge.mode == "public"

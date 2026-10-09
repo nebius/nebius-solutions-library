@@ -1,6 +1,6 @@
 # scheduling: priorities and Kueue queues (lane A)
 
-Applied by the Argo CD Application `scheduling` (`clusters/common/apps/scheduling.yaml`):
+Applied by the Terraform component `scheduling` (`clusters/common/apps/scheduling.yaml`):
 this shared base (priorities) plus the cluster's ResourceFlavor and `default`
 ClusterQueue from `clusters/<cluster>/apps/overlays/scheduling/pool.yaml`.
 

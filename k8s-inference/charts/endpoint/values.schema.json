@@ -153,7 +153,10 @@
     },
     "images": {
       "type": "object",
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "queue": {
       "type": "object",
@@ -172,18 +175,37 @@
         "sharedFilesystem": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "claimName": { "type": "string", "minLength": 1 },
-            "path": { "type": "string", "pattern": "^[A-Za-z0-9._-]*$" },
-            "mountPath": { "type": "string", "pattern": "^/" },
-            "readOnly": { "type": "boolean" },
-            "prepare": { "type": "boolean" },
-            "prepareImage": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "claimName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]*$"
+            },
+            "mountPath": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "readOnly": {
+              "type": "boolean"
+            },
+            "prepare": {
+              "type": "boolean"
+            },
+            "prepareImage": {
+              "type": "string"
+            }
           }
         },
         "env": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },
@@ -246,6 +268,12 @@
     },
     "id": {
       "type": "string"
+    },
+    "envFrom": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
     }
   },
   "if": {

@@ -9,7 +9,7 @@
 #      $TOKEN_TTL_SECONDS, default 48 h),
 #   3. write the kubeconfig into the hub secret api/region-kubeconfigs under key R through the
 #      in-cluster API (this pod's ServiceAccount; Role on that one Secret).
-# The API re-reads a kubeconfig whenever its file changes (services/api/argo.py), so no restart.
+# The API re-reads a kubeconfig whenever its file changes (services/api/kube.py), so no restart.
 # Runs daily (CronJob clusters/hub/apps/overlays/ops/rotate-api-agent-token.yaml): tokens overlap.
 # Replaces the static kubernetes.io/service-account-token Secret api-agent-token and
 # `onboarding bootstrap --region` for the credential part.

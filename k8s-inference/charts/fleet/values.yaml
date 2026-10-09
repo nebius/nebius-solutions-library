@@ -1,4 +1,4 @@
-# charts/fleet values. Argo CD passes the repo's fleet.yaml (the `fleet:` key) plus
+# charts/fleet values. Terraform passes the fleet definition (the `fleet:` key) plus
 # clusters/<cluster>/values/fleet.yaml, and `cluster` = the cluster id (control, or a region's cluster id).
 cluster: ""
 fleet: {}            # the whole `fleet:` document of fleet.yaml

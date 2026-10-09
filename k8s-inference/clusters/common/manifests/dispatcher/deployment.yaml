@@ -4,7 +4,7 @@ metadata:
   name: dispatcher
   labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
 spec:
-  replicas: 1                      # reconcile loop is idempotent; a second replica would only race the patches
+  replicas: 2                      # Kubernetes client leader election; both serve ranking snapshots
   selector:
     matchLabels: { app.kubernetes.io/name: dispatcher }
   template:
@@ -15,9 +15,12 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: dispatcher
-          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.1.9
+          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.0
           args: ["/app/dispatcher.py"]
           ports: [{ name: http, containerPort: 8080 }]   # GET /v1/rank (the API's pre-placement query), /healthz
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 36 }
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 15, failureThreshold: 8 }
           env:
             - { name: INTERVAL_S, value: "15" }
             - { name: RENOMINATE_AFTER_S, value: "300" }

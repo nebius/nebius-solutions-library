@@ -43,7 +43,7 @@ S3_ENV_SECRET = os.environ.get("S3_ENV_SECRET", "s3")                # AWS_* env
 EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")            # job ServiceAccount in the tenant namespace (charts/tenant)
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
-RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.8")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.9")
 # the cost dispatcher's ranking (services/dispatcher `GET /v1/rank`, Service kueue-system/dispatcher): asked at submission
 # for a run class with per-GPU-class images (`job.images`), docs/SCHEDULING.md "Per-GPU images for runs"
 DISPATCHER_URL = os.environ.get("DISPATCHER_URL", "http://dispatcher.kueue-system.svc:80").rstrip("/")

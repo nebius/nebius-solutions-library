@@ -1,7 +1,6 @@
 # Architecture
 
-*For architects who evaluate or extend the platform, and for the security review. The owner's history
-of how the design was reached is in `DECISIONS.md`.*
+*For architects who evaluate or extend the platform, and for the security review.*
 
 ## Components
 
@@ -190,5 +189,6 @@ granted per model from its measured cold start.
 
 DevPods, invoicing (usage events only), GPU process snapshots, a second admission authority for runs
 (Kueue only), a second scaler (Knative for endpoints, Kueue for runs, the node-group autoscaler for
-nodes), MCP tooling. GitOps is optional: Argo CD can be enabled as an operator UI, but the deployment
-mechanism of this solution is Terraform.
+nodes), MCP tooling. Terraform deploys the platform; the API reconciles model definitions.
+
+The optional workload-secret integration reuses the library's External Secrets Operator and MysteryBox modules. Endpoint authorization reuses the API through native Envoy SecurityPolicies; LiteLLM and the gateway share Redis. Model changes and GPU charges use transactional state in the existing managed database. See [RELIABILITY.md](RELIABILITY.md) for recovery, pinned upstream contracts and release checks.

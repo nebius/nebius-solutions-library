@@ -157,7 +157,7 @@ The models stage renders it on every cluster of the tenant's regions.
 ## Change recipes
 
 - **Add a pool / GPU class**: one entry under `regions.<r>.pools`; `plan`
-  shows one node group (and a pricing policy for a capped spot pool); Argo CD
+  shows one node group (and a pricing policy for a capped spot pool); Terraform
   adds the flavor, the `prefer-<class>` queue, the pre-pull DaemonSet and the
   price line. No other file.
 - **Use a reservation**: `capacity: { type: reserved, reservation_ids: [...] }`

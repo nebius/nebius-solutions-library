@@ -1,7 +1,7 @@
 # Namespaces, Secrets and cross-cluster identities. Values come from the cloud state (generated once) and
 # from the environment (secrets.*_env in terraform.tfvars); nothing is read from files in the repository.
 locals {
-  # knative-serving: the KnativeServing CR (wave 2) lives there; Argo CD used to create it (CreateNamespace=true).
+  # knative-serving: the KnativeServing CR (wave 2) lives there; created here before the operator reconciles it.
   namespaces = concat(["ops", "monitoring", "api", "models", "registry", "spegel", "kueue-system", "knative-serving"], local.role.control ? ["litellm", "ui-app"] : [])
 }
 

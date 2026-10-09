@@ -12,7 +12,7 @@ data:
     {
      "uid": "s2-logs",
      "title": "Serverless 2.0 / Logs",
-     "description": "Loki: logs per operation (Argo workflow) and per endpoint (InferenceService), shipped by Alloy with pod labels.",
+     "description": "Loki: logs per operation (Kubernetes Job) and per endpoint (InferenceService), shipped by Alloy with pod labels.",
      "tags": [
       "serverless2"
      ],
@@ -144,8 +144,8 @@ data:
       {
        "id": 97,
        "type": "logs",
-       "title": "Run logs (Argo workflow = operation)",
-       "description": "Every pod of the selected workflow(s): main container only (init/wait = Argo executor).",
+       "title": "Run logs (Kubernetes Job = operation)",
+       "description": "Every pod of the selected workflow(s): main container only (init/wait = job runner).",
        "datasource": {
         "type": "loki",
         "uid": "loki"

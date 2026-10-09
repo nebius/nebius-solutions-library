@@ -167,5 +167,4 @@ fleet = {
   # The example stays as the first model of the console (delete it there when you do not want it).
   acceptance = { probe = true, model = "hello-run", example_endpoint = true }
 
-  # argocd = { enabled = true }            # optional operator UI on the control cluster; deploys nothing
 }

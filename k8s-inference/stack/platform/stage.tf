@@ -1,5 +1,5 @@
 # Per-cluster view: hostnames, image references, chart list and the per-component values/patches that
-# the Argo CD overlays used to carry (clusters/<cluster>/apps/overlays). Shared manifests and values stay in
+# are shared by every cluster. Shared manifests and values stay in
 # clusters/common; nothing here is cluster-specific except what is derived from terraform.tfvars.
 locals {
   repo   = abspath("${path.module}/../..")
@@ -9,18 +9,17 @@ locals {
 
   # Public hostnames: <service>.<gateway ip>.sslip.io, or <service>.<cluster id>.<domain>.
   host_of = { for cid, c in local.cloud.clusters : cid => (
-    local.f.edge.domain == null ? "${coalesce(c.gateway_ip, "0.0.0.0")}.sslip.io" : "${cid}.${local.f.edge.domain}"
+    local.f.edge.domain == null ? "${c.gateway_ip}.sslip.io" : "${cid}.${local.f.edge.domain}"
   ) }
-  host         = local.host_of[local.id]
-  control_host = local.host_of[local.control_id]
+  host               = local.host_of[local.id]
+  control_host       = local.host_of[local.control_id]
+  certificate_issuer = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt")
   hostnames = merge({
     api     = "api.${local.host}"
     grafana = "grafana.${local.host}"
     }, local.role.control ? {
     app     = "app.${local.host}"
     litellm = "litellm.${local.host}"
-    } : {}, local.f.argocd.enabled && local.role.control ? {
-    argocd = "argocd.${local.host}"
   } : {})
   api_urls = { for cid, c in local.cloud.clusters : c.region => "https://api.${local.host_of[cid]}" if local.roles[cid].worker }
   grafana_urls = join(",", concat(
@@ -34,17 +33,13 @@ locals {
   # The fleet document for the charts (stack/config/locals.tf), with the registry the cloud stage created.
   fleet_doc = merge(local.chart_fleet, { images = merge(local.chart_fleet.images, { source = local.cloud.hub.registry }) })
 
-  # Chart list: clusters/common/apps/*.yaml (the same files the optional Argo CD mode reads).
+  # Chart list: clusters/common/apps/*.yaml (one shared release inventory).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
   # Components this stage renders itself from templates (control-only manifests) or not at all.
-  # (postgres and cloudnative-pg no longer exist in clusters/common/apps; kept here so an older checkout of
-  # the app list is still skipped. The database is Nebius Managed PostgreSQL, stack/cloud/database.tf.)
-  apps_skip = ["postgres", "cloudnative-pg", "ui-app", "fleet-access", "api-agent"]
-  apps = { for n, a in local.apps_all : n => a if !contains(local.apps_skip, n) && (
+  apps = { for n, a in local.apps_all : n => a if(
     a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control)
   ) }
   helm_apps      = { for n, a in local.apps : n => a if a.kind == "helm" }
-  local_apps     = { for n, a in local.apps : n => a if a.kind == "localhelm" }
   manifest_apps  = { for n, a in local.apps : n => a if a.kind == "manifests" }
   manifests_base = { for n, a in local.manifest_apps : n => "../../clusters/common/manifests/${split("/", a.manifestsPath)[1] == "knative-serving" ? "knative" : split("/", a.manifestsPath)[1]}" }
 
@@ -71,9 +66,35 @@ locals {
         ] },
       ] } } }
     )
-    loki = { loki = { limits_config = { retention_period = "${local.f.observability.loki_retention_days * 24}h" } } }
+    loki = {
+      loki = {
+        limits_config = { retention_period = "${local.f.observability.loki_retention_days * 24}h" }
+        storage = {
+          type        = "s3"
+          bucketNames = { chunks = local.cloud.hub.logs_buckets[local.id], ruler = local.cloud.hub.logs_buckets[local.id], admin = local.cloud.hub.logs_buckets[local.id] }
+          s3 = {
+            endpoint         = "storage.${local.cloud.hub.region}.nebius.cloud"
+            region           = local.cloud.hub.region
+            accessKeyId      = "$${AWS_ACCESS_KEY_ID}"
+            secretAccessKey  = "$${AWS_SECRET_ACCESS_KEY}"
+            s3ForcePathStyle = true
+          }
+        }
+      }
+      singleBinary = {
+        extraArgs = ["-config.expand-env=true"]
+        extraEnv = [
+          { name = "AWS_ACCESS_KEY_ID", valueFrom = { secretKeyRef = { name = "cost-export-s3", key = "ACCESS_KEY_ID" } } },
+          { name = "AWS_SECRET_ACCESS_KEY", valueFrom = { secretKeyRef = { name = "cost-export-s3", key = "ACCESS_SECRET_KEY" } } },
+        ]
+      }
+    }
     # LiteLLM on the managed database (stack/platform/database.tf); UI behind the gateway only.
-    litellm = { db = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } } }
+    litellm = {
+      db           = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", url = "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?sslmode=require&sslaccept=strict&sslcert=/etc/ssl/certs/ca-certificates.crt", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } }
+      volumes      = local.trust_volumes
+      volumeMounts = local.trust_mounts
+    }
   }
   fleet_values = {
     cluster = local.id
@@ -98,7 +119,7 @@ locals {
     { name = "IMAGES_HOST", value = local.images_host },
     { name = "IMAGES_SOURCE", value = local.cloud.hub.registry },
     { name = "ENDPOINT_DOMAINS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=${local.host_of[cid]}"]) },
-    { name = "ACME_ISSUER", value = local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt" }, # the model endpoints' certificate (gateway/models-tls.yaml)
+    { name = "ACME_ISSUER", value = local.certificate_issuer },
   ] : e if local.role.control]
   api_env = concat(local.api_env_common, local.api_env_control, local.role.manager ? [
     { name = "REGION", value = "control" },
@@ -115,20 +136,19 @@ locals {
   # JSON 6902 patches per manifests component (what clusters/<cluster>/apps/overlays did).
   patches = {
     api = concat([
-      { target = { kind = "Deployment", name = "api", namespace = "api" }, patch = yamlencode([
+      { target = { kind = "Deployment", name = "api", namespace = "api" }, patch = yamlencode(concat([
         { op = "replace", path = "/spec/template/spec/containers/0/env", value = local.api_env },
         { op = "replace", path = "/spec/template/spec/containers/0/image", value = local.image.api },
         { op = "add", path = "/spec/template/spec/volumes/-", value = { name = "catalog", configMap = { name = "catalog" } } },
         { op = "add", path = "/spec/template/spec/containers/0/volumeMounts/-", value = { name = "catalog", mountPath = "/etc/catalog", readOnly = true } },
-      ]) },
+        ], [for v in local.trust_volumes : { op = "add", path = "/spec/template/spec/volumes/-", value = v }],
+      [for v in local.trust_mounts : { op = "add", path = "/spec/template/spec/containers/0/volumeMounts/-", value = v }])) },
       { target = { kind = "HTTPRoute", name = "api", namespace = "api" }, patch = yamlencode([{ op = "replace", path = "/spec/hostnames/0", value = local.hostnames.api }]) },
       { target = { kind = "BackendTrafficPolicy", name = "api-rate-limit", namespace = "api" }, patch = yamlencode([{ op = "replace", path = "/spec/rateLimit/global/rules/0/limit/requests", value = local.f.edge.api_rate_limit_per_minute }]) },
       ], local.role.worker ? [] : [
       { target = { kind = "Role", name = "serverless2-api-endpoints", namespace = "models" }, patch = yamlencode([{ op = "replace", path = "/metadata/name", value = "serverless2-api-endpoints-unused" }]) },
     ])
-    edge = [
-      { target = { kind = "Deployment", name = "edge-auth", namespace = "models" }, patch = yamlencode([{ op = "replace", path = "/spec/template/spec/containers/0/env/0/value", value = local.litellm_url }]) },
-    ]
+    edge = []
     gateway = concat([
       { target = { kind = "Gateway", name = "serverless2-external", namespace = "envoy-gateway-system" }, patch = yamlencode([
         { op = "replace", path = "/spec/listeners/1/hostname", value = "*.${local.host}" },
@@ -140,7 +160,10 @@ locals {
           local.f.edge.mode == "internal" ? { "nebius.com/load-balancer-type" = "internal" } : {}
         ) },
       ]) },
-      ], local.f.edge.acme.email == "" ? [] : [
+      ], local.f.edge.mode == "internal" ? [
+      { target = { kind = "ClusterIssuer", name = "letsencrypt" }, patch = "$patch: delete\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: letsencrypt\n" },
+      { target = { kind = "ClusterIssuer", name = "letsencrypt-staging" }, patch = "$patch: delete\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: letsencrypt-staging\n" },
+      ] : local.f.edge.acme.email == "" ? [] : [
       { target = { kind = "ClusterIssuer", name = "letsencrypt" }, patch = yamlencode([{ op = "add", path = "/spec/acme/email", value = local.f.edge.acme.email }]) },
       { target = { kind = "ClusterIssuer", name = "letsencrypt-staging" }, patch = yamlencode([{ op = "add", path = "/spec/acme/email", value = local.f.edge.acme.email }]) },
     ])
@@ -176,10 +199,6 @@ locals {
         [{ op = "replace", path = "/spec/hostnames/0", value = local.hostnames.grafana }],
         local.f.edge.grafana_public ? [] : [{ op = "replace", path = "/spec/parentRefs/0/name", value = "serverless2-internal" }]
       )) },
-      ], local.f.argocd.enabled && local.role.control ? [
-      { target = { kind = "HTTPRoute", name = "ui-argocd", namespace = "argocd" }, patch = yamlencode([{ op = "replace", path = "/spec/hostnames/0", value = local.hostnames.argocd }]) },
-      ] : [
-      { target = { kind = "HTTPRoute", name = "ui-argocd", namespace = "argocd" }, patch = yamlencode([{ op = "replace", path = "/metadata/namespace", value = "monitoring" }, { op = "replace", path = "/metadata/name", value = "ui-argocd-unused" }, { op = "replace", path = "/spec/hostnames/0", value = "unused.${local.host}" }]) },
     ])
     # node-config bootstraps the mirror configuration itself: its init image stays a public reference
     node-config = []

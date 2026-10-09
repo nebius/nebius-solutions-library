@@ -2,18 +2,14 @@
 
 *For operators: dashboards, logs, alerts, cost reports and what they are built from.*
 
-Everything below is deployed by the Argo CD app `observability` (wave 2, both
-clusters) from the shared `clusters/common/manifests/observability/` through
-the per-cluster overlay; GPU hardware panels are the upstream NVIDIA DCGM
-dashboard (grafana.com 12239) loaded by id from the kube-prometheus-stack values.
-Verification numbers and screenshots: `spikes/S14-observability/RESULT.md`.
+Terraform applies the shared observability manifests after the upstream Prometheus Operator chart. GPU hardware panels use the upstream NVIDIA DCGM dashboard through kube-prometheus-stack values. Loki logs are stored in per-cluster Object Storage buckets; endpoint/app monitoring is also embedded in the UI through the API.
 
 ## Stack per cluster
 
 | Piece | Where | Notes |
 |---|---|---|
 | kube-prometheus-stack 91.9 (Prometheus 3.15, Alertmanager, Grafana 13.2, kube-state-metrics, node-exporter) | `monitoring`, app `kube-prometheus-stack` | Prometheus retention 30 d / 45 GB on a 50 GiB PVC, Alertmanager 2 GiB PVC (both were emptyDir before 2026-10-06); nil ServiceMonitor/PodMonitor selectors (anything in the cluster is scraped); rules need label `release: kube-prometheus-stack` |
-| Loki 7.3 single-binary (filesystem) | `monitoring`, app `loki` | no auth, no multi-tenancy; 30 d retention and ingestion limits |
+| Loki 7.3 single-binary (Object Storage) | `monitoring`, app `loki` | no auth, no multi-tenancy; 30 d retention and ingestion limits |
 | OpenCost 2.5.32 + alert sink + cost-export CronJob | `opencost` / `monitoring`, app `observability` (child app `opencost`) | cost view and daily report; see "Cost export" and "Alert delivery" below |
 | Grafana Alloy 1.13 (DaemonSet, also on GPU nodes) | `monitoring`, child app `alloy` | log shipper: tails every pod on its node through the kubelet API, pushes to Loki |
 | NVIDIA DCGM exporter 4.8.4 (DaemonSet on the GPU pools) | `monitoring`, child apps `dcgm-exporter` and `dcgm-exporter-l40s` | node affinity on every `serverless2.nebius/pool` except `system`, tolerates the GPU taint, no GPU request, `honorLabels` so `pod`/`namespace`/`container` are the workload's. Two releases of the same chart: on Nebius L40S VMs the DCGM profiling module cannot watch the `DCGM_FI_PROF_*` fields and the exporter exits ("The third-party Profiling module returned an unrecoverable error", verified 2026-10-07 on the hub L40S pool), so `dcgm-exporter-l40s` (namespace `monitoring-l40s`, because the chart hard-codes its ConfigMap and Role names) selects `nebius.com/gpu-name: L40S` with the default counters minus the profiling fields, and `dcgm-exporter` excludes those nodes. L40S nodes therefore have no `DCGM_FI_PROF_*` series (tensor/graphics-engine activity, DRAM activity, PCIe rates); everything else is identical |
@@ -24,7 +20,7 @@ sensitive output of the platform stage, or `kubectl -n monitoring get secret gra
 `kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80` when the route is
 internal. The admin password is pinned to the Secret `grafana-admin` (the platform stage generates it,
 referenced by `grafana.admin.existingSecret`); without that the chart
-re-randomises it on every Argo CD render and Grafana (emptyDir DB) restarts
+re-randomises it on every Helm render and Grafana (emptyDir DB) restarts
 with a new one.
 
 There is no OpenTelemetry collector and no tracing; Knative and Kueue
@@ -120,7 +116,6 @@ that are kept by stopped preempted VMs.
 | CertificateExpiringSoon / CertificateNotReady | less than 30 days left (self-signed are issued for 1 year, renewed at 2/3) / Ready=False 15 min | warning |
 | GPUExporterMissingOnGPUNode | a Ready GPU-pool node without DCGM series for 10 min | info |
 | APIErrorRatioHigh | gateway 5xx ratio on the API route above 2 percent for 5 min (with traffic) | critical |
-| ArgoCDApplicationNotHealthy | an Argo CD Application Degraded/Missing/Unknown or OutOfSync for 15 min (`kube_argocd_application_*` from kube-state-metrics custom-resource state) | warning |
 | MonitoringVolumeFillingUp | a PVC in `monitoring` (Prometheus, Alertmanager, Loki) above 80 percent for 15 min | warning |
 | AlertmanagerNotifyFailing | a receiver integration failing for 1 h (`alertmanager_notifications_failed_total`) | info |
 | CostExportFailed | the daily `cost-export` Job failed | info |
@@ -200,8 +195,7 @@ nodes cost, including idle time) and the two should be compared monthly.
 API availability (1 - gateway 5xx ratio on the API route), API p95 latency
 (gateway upstream time), endpoint cold start p95 (predictor pod created ->
 Ready), run queue wait p95 (Kueue admission wait), the API 5xx ratio over
-time, node Ready flips (spot preemptions and joins) and the table of Argo CD
-Applications that are not Healthy/Synced. Targets to hold during the
+time and node Ready flips (spot preemptions and joins). Targets to hold during the
 evaluation: availability >= 99.5 percent, cold start p95 <= 120 s with
 pre-pulled images, queue wait p95 <= 10 min at the configured quotas.
 
@@ -219,7 +213,7 @@ and, when the pod carries them, `job` (`job-name`, the operation id),
 {namespace="knative-serving", app="autoscaler"} |= "scale"     # scale decisions
 ```
 
-Loki keeps logs on the single-binary PVC (10 GiB) with 30 days retention
+Loki keeps logs in per-cluster Object Storage buckets with configured retention; its single-binary PVC holds working data
 (`limits_config.retention_period: 720h`, compactor retention on) and
 ingestion limits (8 MB/s, 16 MB burst, 3 MB/s per stream, 50k streams, 256 KB
 lines) in `clusters/common/values/loki.yaml`. Each cluster keeps its own logs:
@@ -242,7 +236,7 @@ lower the retention or move the chunk store to Object Storage.
   need `metrics.enableClusterQueueResources: true` in the Kueue config (lane A's
   values); the LocalQueue and cohort series cover the same numbers today.
 - No per-tenant Grafana access (single admin); no Thanos/long-term storage
-  (Prometheus 30 d / 45 GB on a 50 GiB volume, Loki 30 d on 10 GiB).
+  (Prometheus 30 d / 45 GB on a 50 GiB volume, Loki retention in Object Storage).
 - Alerts reach only the in-cluster sink (no external receiver by owner
   decision, 2026-10-07); adding one is a values change, see "Alert delivery".
 - OpenCost prices GPU nodes as GPU price plus vCPU/RAM price, slightly above

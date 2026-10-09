@@ -1,28 +1,114 @@
-# Redis for the Envoy Gateway global rate-limit service (counters only, no persistence; a restart resets
-# the windows). Values: clusters/common/values/envoy-gateway.yaml (config.envoyGateway.rateLimit).
+# Shared counters for Envoy and LiteLLM. Persistent AOF, no eviction; budgets also consult PostgreSQL.
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: ratelimit-redis, namespace: envoy-gateway-system }
+metadata:
+  name: ratelimit-redis
+  namespace: envoy-gateway-system
 spec:
   replicas: 1
-  selector: { matchLabels: { app: ratelimit-redis } }
+  selector:
+    matchLabels:
+      app: ratelimit-redis
   template:
-    metadata: { labels: { app: ratelimit-redis } }
+    metadata:
+      labels:
+        app: ratelimit-redis
     spec:
       containers:
-        - name: redis
-          image: docker.io/library/redis:7.4-alpine
-          args: ["--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
-          ports: [{ containerPort: 6379 }]
-          resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 500m, memory: 192Mi }
-          readinessProbe: { tcpSocket: { port: 6379 }, periodSeconds: 5 }
-          securityContext: { runAsNonRoot: true, runAsUser: 999, allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      - name: redis
+        image: docker.io/library/redis:7.4-alpine
+        args:
+        - --appendonly
+        - 'yes'
+        - --appendfsync
+        - everysec
+        - --dir
+        - /data
+        - --maxmemory
+        - 128mb
+        - --maxmemory-policy
+        - noeviction
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 192Mi
+        readinessProbe:
+          tcpSocket:
+            port: 6379
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          periodSeconds: 10
+      securityContext:
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: ratelimit-redis
+  strategy:
+    type: Recreate
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: ratelimit-redis, namespace: envoy-gateway-system }
+metadata:
+  name: ratelimit-redis
+  namespace: envoy-gateway-system
 spec:
-  selector: { app: ratelimit-redis }
-  ports: [{ port: 6379, targetPort: 6379 }]
+  selector:
+    app: ratelimit-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ratelimit-redis
+  namespace: envoy-gateway-system
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ratelimit-redis
+  namespace: envoy-gateway-system
+spec:
+  podSelector:
+    matchLabels:
+      app: ratelimit-redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: litellm
+    ports:
+    - port: 6379
+      protocol: TCP

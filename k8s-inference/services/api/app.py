@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import time, urllib.parse, uuid
+import asyncio, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -11,7 +11,7 @@ import logging
 import artifacts, billing, catalog, config as cfg, db, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
-from auth import Principal, check_budget, check_model, forget, principal
+from auth import Principal, allows_model, check_budget, check_model, forget, principal
 from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
 
@@ -31,10 +31,19 @@ async def _lifespan(_app: FastAPI):
     check_placeholders()
     if db.enabled():
         log.info("database schema version %s", db.migrate())
-    yield
+    task = asyncio.create_task(_reconcile_loop()) if db.enabled() else None
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.6", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.0", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -83,7 +92,9 @@ def _model(name: str) -> dict:
     return m
 
 
-def _public(m: dict) -> dict:
+def _public(m: dict, p: Principal | None = None) -> dict:
+    if p is not None and (p.info.get("metadata") or {}).get("role") != "admin":
+        m = {**m, "spec": None}  # container configuration belongs to fleet administrators
     if m["mode"] == "run":
         return catalog.to_public(m)
     if FLEET_MANAGER:        # the endpoints live on the workers (deployments); their live state is the regional API's
@@ -115,7 +126,7 @@ def fleet_info(p: Principal = Depends(principal)):
 
 @app.get("/v1/models")
 def list_models(p: Principal = Depends(principal)):
-    return [_public(m) for m in catalog.all_models().values()]
+    return [_public(m, p) for m in catalog.all_models().values() if allows_model(p, m["name"])]
 
 
 class ModelSpec(BaseModel):
@@ -152,6 +163,7 @@ def _deploy(entry: dict, after: dict, result: dict):
         models.sync_certificate(region, after)
         if (w := models.litellm_group_upsert(entry, cid, region)):
             result.setdefault("warnings", []).append(w)
+            raise RuntimeError(w)
 
 
 def _undeploy(entry: dict, clusters: list[str], after: dict):
@@ -161,12 +173,49 @@ def _undeploy(entry: dict, clusters: list[str], after: dict):
         region = kube.cluster_region(cid)
         models.delete_rendered(entry, cid, region)
         models.sync_certificate(region, after)
-        models.litellm_group_delete(entry["id"], cid)
+        if (warning := models.litellm_group_delete(entry["id"], cid)):
+            raise RuntimeError(warning)
 
 
-def _write_model(spec: dict, p: Principal, replace: bool) -> dict:
-    """Create or replace a model: validate, render its endpoint on the clusters of its regions, store it (with
-    history) and refresh the regions' read-only copies."""
+def reconcile_models() -> dict:
+    results = {}
+    with db.reconciler() as acquired:
+        if not acquired:
+            return results
+        for change in db.pending_changes():
+            mid, entry, before = change["id"], change["entry"], change["previous"]
+            result = {"applied": {}, "version": change["version"]}
+            try:
+                after = models.list_runtime()
+                if entry:
+                    _deploy(entry, after, result)
+                removed = list(before.get("deployments", {}))
+                if entry and entry.get("mode") != "run":
+                    removed = [c for c in removed if c not in entry.get("deployments", {})]
+                if before:
+                    _undeploy(before, removed, after)
+                for region in models.copy_regions():
+                    models.save(entry, region) if entry else models.remove(mid, region)
+                db.finish_change(mid, change["version"])
+            except Exception:
+                log.exception("model reconciliation failed for %s generation %s", mid, change["version"])
+                result["pending"] = True
+                db.finish_change(mid, change["version"], "Deployment reconciliation failed; retrying.")
+            results[mid] = result
+    return results
+
+
+async def _reconcile_loop():
+    while True:
+        try:
+            await asyncio.to_thread(reconcile_models)
+        except Exception:
+            log.exception("model reconciliation unavailable")
+        await asyncio.sleep(15)
+
+
+def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None = None) -> dict:
+    """Commit desired state and history, then attempt its durable reconciliation."""
     _writes_here()
     entry = models.to_entry(spec, managed_by="api")
     if entry.get("spec", {}).get("scaling", {}).get("metric") in ("concurrency_utilization", "requests_per_second"):
@@ -180,13 +229,10 @@ def _write_model(spec: dict, p: Principal, replace: bool) -> dict:
     if existing:
         _runtime_or_409(mid)
     result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(entry["deployments"]), "applied": {}}
-    runtime = models.list_runtime()
-    before, after = runtime.get(mid) or {}, {**runtime, mid: entry}
-    _deploy(entry, after, result)
-    _undeploy(before, [c for c in (before.get("deployments") or {}) if c not in entry["deployments"]], after)   # left a region
-    row = models.persist(entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"))
+    row = db.upsert_model(entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace)
     catalog.invalidate()
-    result.update({"version": row.get("version"), "model": catalog.to_public(catalog.get(mid))})
+    result.update(reconcile_models().get(mid, {"pending": True}))
+    result.update({"version": row.get("version"), "model": catalog.to_public(catalog.normalise(entry))})
     return result
 
 
@@ -199,27 +245,24 @@ def create_model(req: ModelSpec, p: Principal = Depends(principal)):
 
 
 @app.put("/v1/models/{model}")
-def replace_model(model: str, req: ModelSpec, p: Principal = Depends(principal)):
+def replace_model(model: str, req: ModelSpec, p: Principal = Depends(principal), if_match: int | None = Header(default=None)):
     admin(p)
     spec = req.model_dump()
     if spec.get("id") != model:
         raise HTTPException(400, "id in the body must match the path")
-    return _write_model(spec, p, replace=True)
+    return _write_model(spec, p, replace=True, expected=if_match)
 
 
 @app.delete("/v1/models/{model}", status_code=204)
-def delete_model(model: str, p: Principal = Depends(principal)):
+def delete_model(model: str, p: Principal = Depends(principal), if_match: int | None = Header(default=None)):
     admin(p)
     _writes_here()
     m = _runtime_or_409(model)
     if not m:
         raise HTTPException(404, f"model {model} not found")
-    runtime = models.list_runtime()
-    raw = runtime.pop(model, None)
-    if raw:
-        _undeploy(raw, list(raw.get("deployments") or {}), runtime)
-    models.unpersist(model, by=p.info.get("key_alias") or p.info.get("key_name"))
+    db.delete_model(model, by=p.info.get("key_alias") or p.info.get("key_name"), expected=if_match)
     catalog.invalidate()
+    reconcile_models()
 
 
 @app.get("/v1/models/{model}/history")
@@ -234,7 +277,29 @@ def model_history(model: str, p: Principal = Depends(principal)):
 
 @app.get("/v1/models/{model}")
 def get_model(model: str, p: Principal = Depends(principal)):
-    return _public(_model(model))
+    check_model(p, model)
+    return _public(_model(model), p)
+
+
+@app.api_route("/internal/authorize/{model}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"], include_in_schema=False)
+@app.api_route("/internal/authorize/{model}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"], include_in_schema=False)
+async def authorize_endpoint(model: str, request: Request, path: str = ""):
+    """Envoy prefixes the original URI with a model identity fixed by the endpoint's SecurityPolicy."""
+    key = request.headers.get("authorization", "")
+    if not key.lower().startswith("bearer "):
+        token = request.query_params.get("api_key", "")
+        for protocol in request.headers.get("sec-websocket-protocol", "").split(","):
+            protocol = protocol.strip()
+            if not token and (protocol.startswith("bearer.") or protocol.startswith("sk-")):
+                token = protocol.removeprefix("bearer.")
+        key = f"Bearer {token}" if token else ""
+    p = await principal(key)
+    check_model(p, model)
+    check_budget(p)
+    m = _model(model)
+    if m["mode"] == "run":
+        raise HTTPException(404, "not an endpoint")
+    return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
 
 
 @app.get("/v1/keys/me")
@@ -485,6 +550,8 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
     selected_region = region
     out = []
     for m in catalog.all_models().values():
+        if not allows_model(p, m["name"]):
+            continue
         if m["mode"] == "run":
             continue
         for region in ([selected_region] if selected_region else served_regions):
@@ -504,6 +571,7 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
 @app.get("/v1/endpoints/{id}")
 def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(principal)):
     m = _endpoint_model(id)
+    check_model(p, m["name"])
     region = _endpoint_region(m, region)
     i = (kube.isvc(m["k8s_name"], m["namespace"]) if region == REGION else kube.isvc(m["k8s_name"], m["namespace"], region)) or {}
     if not i:

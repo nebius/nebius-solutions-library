@@ -117,6 +117,36 @@ resource "nebius_storage_v1_bucket" "backups" {
 
 # The backups bucket is emptied before Terraform deletes it (Nebius refuses to delete a non-empty bucket);
 # depends on the bucket and the key, so `destroy` runs it first. Needs the AWS CLI on the operator machine.
+resource "nebius_storage_v1_bucket" "logs" {
+  for_each          = local.clusters
+  parent_id         = local.hub_project
+  name              = "${local.f.name}-logs-${each.key}"
+  labels            = local.f.labels
+  versioning_policy = "DISABLED"
+  bucket_policy = {
+    rules = [{ paths = ["*"], roles = ["storage.object-editor"], group_id = nebius_iam_v1_group.ops[local.hub_project].id }]
+  }
+}
+
+resource "terraform_data" "empty_logs" {
+  for_each = nebius_storage_v1_bucket.logs
+  input = {
+    script   = "${path.module}/../scripts/empty-bucket.sh"
+    endpoint = "https://storage.${local.hub_region}.nebius.cloud"
+    bucket   = each.value.name
+    key      = nebius_iam_v2_access_key.backups.status.aws_access_key_id
+    secret   = nebius_iam_v2_access_key.backups.status.secret
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${self.input.script} ${self.input.endpoint} ${self.input.bucket}"
+    environment = {
+      AWS_ACCESS_KEY_ID     = self.input.key
+      AWS_SECRET_ACCESS_KEY = self.input.secret
+    }
+  }
+}
+
 resource "terraform_data" "empty_backups" {
   input = {
     script   = "${path.module}/../scripts/empty-bucket.sh"

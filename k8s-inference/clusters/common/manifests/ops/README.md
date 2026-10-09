@@ -1,6 +1,6 @@
 # ops: hardening manifests
 
-Shared base for both clusters (Argo CD Application `ops`, wave 2, from
+Shared base for both clusters (Terraform component `ops`, wave 2, from
 `clusters/common/apps/ops.yaml`); the per-cluster overlay in
 `clusters/<cluster>/apps/overlays/ops/` patches project, node group and
 registry (the fleet database is a Nebius Managed PostgreSQL whose backups are the service's,

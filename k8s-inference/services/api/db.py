@@ -5,6 +5,7 @@ writer. Regional APIs have no database: they serve the read-only copies the cont
 cluster (services/api/models.py). Schema changes are versioned below and applied at startup (`migrate`).
 """
 import json, os, threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -36,6 +37,13 @@ MIGRATIONS = [
         primary key (id, version, action)
     );
     """,
+    # 2: a durable desired-state queue. New writes retain all deployments needing cleanup.
+    """
+    create table if not exists model_changes (
+        id text primary key, version int not null, entry jsonb, previous jsonb not null,
+        error text, updated_at timestamptz not null default now()
+    );
+    """,
 ]
 
 _pool = None
@@ -60,12 +68,13 @@ def pool():
 def migrate() -> int:
     """Apply the migrations that are not applied yet; returns the schema version."""
     with pool().connection() as c:
-        c.execute("create table if not exists schema_version (version int primary key, applied_at timestamptz not null default now())")
-        done = {r[0] for r in c.execute("select version from schema_version").fetchall()}
-        for i, sql in enumerate(MIGRATIONS, start=1):
-            if i in done:
-                continue
-            with c.transaction():
+        with c.transaction():
+            c.execute("select pg_advisory_xact_lock(1229001)")
+            c.execute("create table if not exists schema_version (version int primary key, applied_at timestamptz not null default now())")
+            done = {r[0] for r in c.execute("select version from schema_version").fetchall()}
+            for i, sql in enumerate(MIGRATIONS, start=1):
+                if i in done:
+                    continue
                 c.execute(sql)
                 c.execute("insert into schema_version (version) values (%s)", (i,))
         return len(MIGRATIONS)
@@ -94,12 +103,39 @@ def get_model(mid: str) -> dict | None:
         return _get(c, mid)
 
 
-def upsert_model(entry: dict, spec: dict, by: str | None, managed_by: str = "api") -> dict:
+def _generation(c, mid: str, expected: int | None = None) -> tuple[int, dict]:
+    c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (mid,))
+    old = _get(c, mid)
+    if expected is not None and (old or {}).get("version") != expected:
+        from fastapi import HTTPException
+        raise HTTPException(409, "model version changed; reload before saving")
+    version = c.execute("select coalesce(max(version), 0) + 1 from models_history where id = %s", (mid,)).fetchone()[0]
+    pending = c.execute("select previous from model_changes where id = %s", (mid,)).fetchone()
+    previous = dict(pending[0]) if pending else {}
+    if old:
+        previous = {**old["entry"], "deployments": {**previous.get("deployments", {}), **old["entry"].get("deployments", {})}}
+        # A job class has no endpoint resources; retain the last endpoint spec for cleanup.
+        if old["entry"].get("mode") == "run" and pending:
+            previous = pending[0]
+    return version, previous
+
+
+def _change(c, mid: str, version: int, entry: dict | None, previous: dict):
+    c.execute("""insert into model_changes (id, version, entry, previous) values (%s, %s, %s, %s)
+        on conflict (id) do update set version = excluded.version, entry = excluded.entry,
+        previous = excluded.previous, error = null, updated_at = now()""",
+        (mid, version, json.dumps(entry) if entry is not None else None, json.dumps(previous)))
+
+
+def upsert_model(entry: dict, spec: dict, by: str | None, managed_by: str = "api", expected: int | None = None, create_only: bool = False) -> dict:
     """Insert or replace a model; every write lands in models_history as well."""
     mid, kind = entry["id"], spec.get("kind", "endpoint")
     with pool().connection() as c, c.transaction():
-        cur = c.execute("select version from models where id = %s for update", (mid,)).fetchone()
-        version = (cur[0] + 1) if cur else 1
+        version, previous = _generation(c, mid, expected)
+        exists = _get(c, mid) is not None
+        if create_only and exists:
+            from fastapi import HTTPException
+            raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
         c.execute(
             """insert into models (id, kind, spec, entry, version, managed_by, created_by, updated_by, updated_at)
                values (%s, %s, %s, %s, %s, %s, %s, %s, now())
@@ -107,19 +143,48 @@ def upsert_model(entry: dict, spec: dict, by: str | None, managed_by: str = "api
                  version = excluded.version, managed_by = excluded.managed_by, updated_by = excluded.updated_by, updated_at = now()""",
             (mid, kind, json.dumps(spec), json.dumps(entry), version, managed_by, by, by))
         c.execute("insert into models_history (id, version, action, spec, entry, by) values (%s, %s, %s, %s, %s, %s)",
-                  (mid, version, "create" if version == 1 else "update", json.dumps(spec), json.dumps(entry), by))
+                  (mid, version, "update" if exists else "create", json.dumps(spec), json.dumps(entry), by))
+        _change(c, mid, version, entry, previous)
         return _get(c, mid)   # the same connection: the row is not committed yet
 
 
-def delete_model(mid: str, by: str | None) -> bool:
+def delete_model(mid: str, by: str | None, expected: int | None = None) -> bool:
     with pool().connection() as c, c.transaction():
+        version, previous = _generation(c, mid, expected)
         r = c.execute("select version, spec, entry from models where id = %s for update", (mid,)).fetchone()
         if not r:
             return False
         c.execute("insert into models_history (id, version, action, spec, entry, by) values (%s, %s, 'delete', %s, %s, %s)",
-                  (mid, r[0] + 1, json.dumps(r[1]), json.dumps(r[2]), by))
+                  (mid, version, json.dumps(r[1]), json.dumps(r[2]), by))
         c.execute("delete from models where id = %s", (mid,))
+        _change(c, mid, version, None, previous)
         return True
+
+
+@contextmanager
+def reconciler():
+    """One reconciler across API replicas; writes stay short database transactions."""
+    with pool().connection() as c:
+        acquired = c.execute("select pg_try_advisory_lock(1229002)").fetchone()[0]
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                c.execute("select pg_advisory_unlock(1229002)")
+
+
+def pending_changes() -> list[dict]:
+    with pool().connection() as c:
+        return [dict(zip(("id", "version", "entry", "previous", "error"), r))
+                for r in c.execute("select id, version, entry, previous, error from model_changes order by updated_at").fetchall()]
+
+
+def finish_change(mid: str, version: int, error: str | None = None):
+    with pool().connection() as c:
+        if error:
+            c.execute("update model_changes set error = %s where id = %s and version = %s", (error, mid, version))
+        else:
+            c.execute("delete from model_changes where id = %s and version = %s", (mid, version))
 
 
 def history(mid: str, limit: int = 50) -> list[dict]:

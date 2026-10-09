@@ -1,0 +1,29 @@
+{{- $v := include "endpoint.values" . | fromYaml -}}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ $v.name }}-authorization
+  namespace: {{ $v.namespace }}
+spec:
+  targetSelectors:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      matchLabels:
+        serving.knative.dev/route: {{ $v.name }}-predictor
+      matchExpressions:
+        - key: networking.knative.dev/visibility
+          operator: NotIn
+          values: [cluster-local]
+  extAuth:
+    failOpen: false
+    timeout: 10s
+    headersToExtAuth: [authorization, sec-websocket-protocol]
+    http:
+      path: /internal/authorize/{{ $v.name }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: api
+          namespace: api
+          port: 80
+      headersToBackend: [x-serverless2-tenant, x-serverless2-key-alias]

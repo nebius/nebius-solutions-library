@@ -446,12 +446,12 @@ def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict) -> No
 
 
 
-def reconcile(core, custom, batch):
+def reconcile(core, custom, batch, dispatch=None):
     clusters, spot = load_fleet(core)
     workers, aliases = worker_clients(core, custom)
     free = free_quota(workers)
     SNAPSHOT.update({"clusters": clusters, "spot": spot, "free": dict(free), "aliases": aliases, "at": datetime.now(timezone.utc).isoformat()})
-    if not DISPATCH:
+    if not (DISPATCH if dispatch is None else dispatch):
         return
     workloads = custom.list_cluster_custom_object(GROUP, VERSION, "workloads").get("items", [])
     for wl in workloads:
@@ -508,7 +508,9 @@ class RankHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         u = urlparse(self.path)
         if u.path == "/healthz":
-            return self._json(200, {"ok": SNAPSHOT.get("at") is not None, "snapshot_at": SNAPSHOT.get("at")})
+            at = SNAPSHOT.get("at")
+            fresh = bool(at) and (datetime.now(timezone.utc) - datetime.fromisoformat(at)).total_seconds() < max(90, INTERVAL * 4)
+            return self._json(200 if fresh else 503, {"ok": fresh, "snapshot_at": at})
         if u.path != "/v1/rank":
             return self._json(404, {"error": "not found"})
         q = parse_qs(u.query)
@@ -547,10 +549,25 @@ def main():
     except config.ConfigException:
         config.load_kube_config()
     core, custom, batch = client.CoreV1Api(), client.CustomObjectsApi(), client.BatchV1Api()
+    # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs.
+    # A replica losing renewal exits immediately, fencing its reconcile loop before another leader starts.
+    leading = threading.Event()
+    if DISPATCH:
+        from kubernetes.leaderelection import electionconfig, leaderelection
+        from kubernetes.leaderelection.resourcelock.configmaplock import ConfigMapLock
+        lock = ConfigMapLock("dispatcher-leader", NS, os.environ.get("HOSTNAME", "dispatcher"))
+        election = leaderelection.LeaderElection(electionconfig.Config(
+            lock, 60, 30, 5, leading.set, lambda: os._exit(1)))
+        def elect():
+            try:
+                election.run()
+            finally:
+                os._exit(1)
+        threading.Thread(target=elect, daemon=True).start()
     serve_rank()
     while True:
         try:
-            reconcile(core, custom, batch)
+            reconcile(core, custom, batch, dispatch=leading.is_set())
         except Exception as e:
             log.exception("reconcile failed: %s", e)
         time.sleep(INTERVAL)

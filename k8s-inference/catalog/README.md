@@ -3,8 +3,7 @@
 One file per model in `catalog/models/<id>.yaml`, one schema for endpoints and
 run classes (the API reads this directory; `services/api/catalog.py`).
 Endpoint entries (a `runtime` block) are deployed straight from this directory:
-the models stage of the Terraform solution (`stack/models`), or the `models`
-ApplicationSet of the reference fleet, renders `charts/endpoint` in catalog mode
+the Terraform models stage (`stack/models`) renders `charts/endpoint` in catalogue mode.
 with the entry as its values file, once per cluster named in its
 `deployments` (and not `paused`). Nothing is rendered into the repository. Run-class
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
@@ -75,15 +74,9 @@ deployments:                   # one key per cluster directory; values override 
    and `minReplicas: 0` unless the measured cold start is unacceptable for the
    class. Requests may only use `nvidia.com/gpu`, `cpu`, `memory`
    (the Kueue ClusterQueues cover nothing else).
-4. Check the rendering locally: `helm template <id> charts/endpoint -f catalog/models/<id>.yaml
-   --set cluster=<cluster> | kubectl apply --dry-run=server -f -`; re-render the
-   pre-pull DaemonSets (`python3 spikes/S15-edge/render.py`), commit, `git pull
-   --rebase`, push. Argo CD creates `model-<id>` and syncs within about 3 minutes.
-5. Verify through the external gateway: host
-   `<id>-predictor.models.<gateway-ip>.sslip.io` (the top-level `<id>.models...` host reported in `status.url`
-   has no route in Knative + Gateway API mode). Send one real request from
-   zero, one warm; record both in `spikes/S10-endpoints/RESULT.md`.
-6. Register the endpoint with LiteLLM (lane D) and set the price.
+4. Check rendering locally with `helm template <id> charts/endpoint -f catalog/models/<id>.yaml --set cluster=<cluster>`. Run `make check`, then apply the Terraform models stage through `stack.sh` to deploy bundled entries.
+5. Customer-created models use `POST /v1/models` (admin key) or the UI. The API stores desired state/history before applying this same chart and retrying regional copies; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
+6. Verify a cold and warm request through the predictor's external HTTPS host with a permitted key. OpenAI API-managed models register their LiteLLM group during reconciliation. See `docs/EDGE.md` and `docs/OPERATIONS.md`.
 
 ## Pitfalls (measured)
 

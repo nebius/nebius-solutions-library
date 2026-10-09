@@ -15,5 +15,5 @@ spec:
       rules:
         - clientSelectors:
             - headers:
-                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit keeps Argo CD in sync
+                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit avoids render/default differences
           limit: { requests: 3000, unit: Minute }

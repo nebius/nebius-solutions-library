@@ -127,15 +127,6 @@ spec:
           annotations:
             summary: "API 5xx ratio {{ $value | humanizePercentage }} for 5 min (gateway route api)"
             description: "Measured at the Envoy gateway in front of the customer API (route api/api). Check the api pods, LiteLLM (key validation) and the regional kubeconfigs."
-        - alert: ArgoCDApplicationNotHealthy
-          expr: |
-            (kube_argocd_application_health_status{status=~"Degraded|Missing|Unknown"} == 1)
-            or (kube_argocd_application_sync_status{status="OutOfSync"} == 1)
-          for: 15m
-          labels: { severity: warning, component: gitops }
-          annotations:
-            summary: "Argo CD application {{ $labels.name }} is {{ $labels.status }} for 15 min"
-            description: "Degraded/Missing, or OutOfSync for 15 min although auto-sync and self-heal are on: a sync error, a hook failure, or a resource that Argo CD cannot apply. `kubectl -n argocd get app {{ $labels.name }} -o yaml` shows the condition."
         - alert: MonitoringVolumeFillingUp
           expr: |
             (kubelet_volume_stats_used_bytes{namespace="monitoring"} / kubelet_volume_stats_capacity_bytes{namespace="monitoring"}) > 0.8

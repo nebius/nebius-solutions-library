@@ -81,13 +81,20 @@ locals {
         metadata   = { name = "${local.id}-wildcard", namespace = "envoy-gateway-system" }
         spec = {
           secretName = "${local.id}-wildcard-tls"
-          issuerRef  = { name = local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt", kind = "ClusterIssuer" }
+          issuerRef  = { name = local.certificate_issuer, kind = "ClusterIssuer" }
           commonName = local.hostnames.api
           dnsNames   = distinct(values(local.hostnames))
           privateKey = { rotationPolicy = "Always" }
         }
       }
     },
+    { for k, v in {
+      private_issuer = {
+        apiVersion = "cert-manager.io/v1", kind = "ClusterIssuer"
+        metadata   = { name = local.certificate_issuer }
+        spec       = { ca = { secretName = local.f.edge.private_ca_secret } }
+      }
+    } : k => v if local.f.edge.mode == "internal" },
     # Let's Encrypt IP-address certificate (ACME profile shortlived) for https://<ip>, when asked for.
     { for k, v in {
       ip_certificate = {
@@ -198,6 +205,7 @@ locals {
                 env = concat([
                   { name = "LITELLM_URL", value = local.litellm_url_in_cluster },
                   { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
+                  { name = "BILLING_DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "litellm_url" } } },
                   { name = "CATALOG_DIRS", value = "/etc/catalog" },
                   { name = "HUB_REGION", value = local.hub_region },
                   ], local.dedicated ? [
@@ -207,10 +215,10 @@ locals {
                   ] : [
                   { name = "REGION", value = local.region },
                 ])
-                volumeMounts = [{ name = "kubeconfigs", mountPath = "/etc/kubeconfigs", readOnly = true }, { name = "catalog", mountPath = "/etc/catalog", readOnly = true }]
+                volumeMounts = concat([{ name = "kubeconfigs", mountPath = "/etc/kubeconfigs", readOnly = true }, { name = "catalog", mountPath = "/etc/catalog", readOnly = true }], local.trust_mounts)
                 resources    = { requests = { cpu = "50m", memory = "128Mi" }, limits = { cpu = "500m", memory = "256Mi" } }
               }]
-              volumes = [{ name = "kubeconfigs", secret = { secretName = "region-kubeconfigs", optional = true } }, { name = "catalog", configMap = { name = "catalog" } }]
+              volumes = concat([{ name = "kubeconfigs", secret = { secretName = "region-kubeconfigs", optional = true } }, { name = "catalog", configMap = { name = "catalog" } }], local.trust_volumes)
             }
           }
         } }

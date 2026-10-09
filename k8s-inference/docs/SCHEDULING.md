@@ -141,7 +141,7 @@ calculator estimate`; for spot a preemptible VM that follows the spot price:
 which Nebius moves every 15 minutes since dynamic spot pricing started on
 2026-10-08) and writes `spot.json` (USD per GPU-hour, keyed `<region
 id>/<pool>`) into the ConfigMap `kueue-system/spot-prices`, which it creates
-on first run (not in the repository, so Argo CD never reverts it). Until
+on first run (runtime-owned, outside Terraform). Until
 2026-10-09 the feed asked with `--preemptible-priority 1`, a field the API
 deprecated on 2026-05-11; the CLI 0.12 rejects it (exit 4), so the feed wrote
 an empty map and every spot pool was ranked at its list price (seen on the

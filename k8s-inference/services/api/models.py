@@ -138,6 +138,9 @@ def pool_for(cid: str, classes: list[str]) -> str | None:
 
 def validate(spec: dict) -> dict:
     s = dict(spec or {})
+    secrets = s.get("env_secrets", [])
+    if not isinstance(secrets, list) or any(not isinstance(name, str) or len(name) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", name) for name in secrets):
+        raise HTTPException(400, "env_secrets: a list of Kubernetes Secret names in the workload namespace")
     mid = s.get("id")
     if not isinstance(mid, str) or not ID_RE.match(mid):
         raise HTTPException(400, "id: lowercase letters, digits and dashes, 2-41 characters, starting with a letter")
@@ -239,6 +242,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             runtime["command"] = cmd
         if s.get("env"):
             runtime["env"] = _env_list(s["env"])
+        if s.get("env_secrets"):
+            runtime["envFrom"] = [{"secretRef": {"name": name}} for name in s["env_secrets"]]
         if s.get("health_path"):
             runtime["readinessProbe"] = {"path": s["health_path"], "port": port}
         if s.get("pull_secret"):
@@ -264,6 +269,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "cpu": str(s.get("cpu", "4")), "memory": str(s.get("memory", "16Gi")), "pvcSizeGi": int(s.get("disk_gi", 50)),
             "graceSeconds": int(s.get("grace_seconds", 300)), "scratch": s.get("scratch", "network"),
             "env": dict(s.get("env") or {}),
+            "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
         }
         if s.get("args"):
             job["args"] = s["args"]
@@ -336,24 +342,10 @@ def copy_regions() -> list[str]:
     return [r for r in kube.regions() if r != REGION]
 
 
-def persist(entry: dict, spec: dict, by: str | None) -> dict:
-    """Store a definition (database + history) and refresh its copies in every region; returns the row."""
-    row = db.upsert_model(entry, spec, by, managed_by=entry.get("managed_by", "api"))
-    for r in copy_regions():
-        save(entry, r)
-    return row
-
-
-def unpersist(mid: str, by: str | None) -> bool:
-    gone = db.delete_model(mid, by)
-    for r in copy_regions():
-        remove(mid, r)
-    return gone
-
-
 # ---- rendering: the same chart Terraform uses, applied with server-side apply --------------------------
 
 PLURALS = {"InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservices"),
+           "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
            "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches")}
 
 
@@ -393,9 +385,17 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
 
 def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str]:
     gone = []
-    for doc in render(entry, cluster):
+    # Retain authorization while Knative tears routes down asynchronously. Deleted models deny
+    # immediately; reconciliation removes their policy only after the last route disappears.
+    for doc in sorted(render(entry, cluster), key=lambda d: d["kind"] == "SecurityPolicy"):
         kind, md = doc["kind"], doc["metadata"]
         ns, name = md.get("namespace", "models"), md["name"]
+        if kind == "SecurityPolicy":
+            routes = retry(kube.api(region).list_namespaced_custom_object,
+                           "gateway.networking.k8s.io", "v1", ns, "httproutes",
+                           label_selector=f"serving.knative.dev/route={entry['id']}-predictor")
+            if routes.get("items"):
+                raise HTTPException(503, "waiting for predictor routes to be removed; authorization retained")
         try:
             if kind in PLURALS:
                 g, v, plural = PLURALS[kind]
@@ -411,7 +411,7 @@ def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str
 
 # ---- TLS: the model endpoints' certificate of a cluster follows the endpoints deployed there ----------------
 # clusters/common/manifests/gateway/models-tls.yaml: Certificate `models` of the gateway namespace, second
-# certificateRef of the https listener. Terraform and Argo CD create the self-signed placeholder and ignore the
+# certificateRef of the https listener. Terraform creates the self-signed placeholder and ignores the
 # three fields below; the API owns them (server-side apply, its own field manager).
 
 def endpoint_host(entry: dict, region: str) -> str:
@@ -470,10 +470,12 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
             "model_info": {"id": f"{mid}--{cluster}", "cluster": cluster}}
     try:
         with httpx.Client(timeout=20) as c:
-            c.post(f"{LITELLM_URL}/model/delete", json={"id": f"{mid}--{cluster}"}, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
-            r = c.post(f"{LITELLM_URL}/model/new", json=body, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
+            headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+            r = c.patch(f"{LITELLM_URL}/model/{mid}--{cluster}/update", json=body, headers=headers)
+            if r.status_code == 404:
+                r = c.post(f"{LITELLM_URL}/model/new", json=body, headers=headers)
         if r.status_code >= 300:
-            return f"litellm /model/new {r.status_code}: {r.text[:160]}"
+            return f"litellm model reconciliation {r.status_code}: {r.text[:160]}"
     except Exception as e:  # noqa: BLE001 - the endpoint works without the LiteLLM group
         return f"litellm unreachable: {e}"
     return None

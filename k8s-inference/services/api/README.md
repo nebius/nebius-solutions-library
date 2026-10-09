@@ -21,7 +21,7 @@ The runner image the Jobs use (fetch, upload, endpoint call) is `services/jobs`.
 | `GET /v1/operations/{id}/result` | 409 while running; async: `out/response.json` from the bucket; run: presigned links to `operations/<id>/...` in the tenant bucket |
 | `POST /v1/operations/{id}:cancel` | queued: Job deleted (PVC and Secret follow by owner reference); running: `activeDeadlineSeconds: 1` + `cancelled` annotation, reported CANCELLED |
 | `POST /v1/operations/{id}:resume` | FAILED/CANCELLED run with its PVC still present: Job `<id>-r<n>` with the original spec on the same volume in the same region; 409 otherwise |
-| `GET /v1/endpoints[/{id}]`, `PATCH /v1/endpoints/{id}` | InferenceServices of catalog models in `models`; PATCH (admin keys) sets min/max replicas, target concurrency, scale-to-zero retention and is reverted by Argo CD for git-managed endpoints. Create/delete: `catalog/models` + `charts/endpoint` in the repo |
+| `GET /v1/endpoints[/{id}]`, `PATCH /v1/endpoints/{id}` | InferenceServices of catalog models in `models`; PATCH (admin keys) sets min/max replicas, target concurrency, scale-to-zero retention and persists API-managed definitions. Create/delete: `/v1/models`; bundled classes remain read-only |
 | `GET/POST /v1/keys`, `DELETE /v1/keys/{alias}` | LiteLLM keys of the caller's tenant (alias prefixed `<tenant>-`, pass-through routes copied from the admin key). Admin keys only (`metadata.role=admin`) |
 | `POST /v1/artifacts/uploads`, `GET /v1/artifacts/{uri}` | presigned PUT to `s3://serverless2-<tenant>-<region>/uploads/<id>/<file>` / GET of a tenant object (credentials: secret `tenant-storage` in the tenant namespace) |
 
@@ -53,14 +53,14 @@ Deploy: image `<fleet.yaml images.source>/serverless2/api:<tag>` built from the 
 (`docker buildx build --push -f services/api/Dockerfile .`), referenced as
 `registry.serverless2.local/nebius/serverless2/api:<tag>` (docs/IMAGES.md); runner image
 `serverless2/jobs:<tag>` from `services/jobs` the same way (`RUNNER_IMAGE`). Manifests in
-`clusters/common/manifests/api` + per-cluster overlays (Argo CD app `api`: Deployment, CronJob,
+`clusters/common/manifests/api` + per-cluster overlays (Deployment, CronJob,
 HTTPRoute, rate limit, RBAC), host from `PUBLIC_API_URL`. Secret `api/litellm-master` comes from
 `python -m onboarding bootstrap`.
 
 Tests: `pip install -r services/api/requirements-dev.txt && pytest services/api/tests` (cluster and
 LiteLLM faked). Tenants: `services/onboarding` (cloud identities + bucket with the Nebius CLI,
 `charts/tenant` with `tenants/<name>.yaml` for the Kubernetes objects, Secrets by the script, LiteLLM
-key); `clusters/common/manifests/api-agent` (one ApplicationSet-generated app per worker) installs the fleet API's identity in each region.
+key); `clusters/common/manifests/api-agent` (installed by Terraform per worker) installs the fleet API's identity in each region.
 
 Not done: operation history beyond the Jobs' 90-day TTL (finished Jobs are the history; a longer
 record would be a Loki/bucket export); authz is key -> tenant only.

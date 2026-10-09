@@ -9,8 +9,6 @@ metadata:
   name: models
   labels:
     serverless2.nebius/kueue: managed
-  annotations:
-    argocd.argoproj.io/sync-options: Prune=false,Delete=false
 ---
 # LocalQueue for endpoints that set `queue.name: endpoints` in the catalog. Per-model preference profiles are
 # LocalQueues in `models` pointing at profile ClusterQueues (rendered by charts/fleet).

@@ -1,15 +1,8 @@
-# observability (lane G)
+# Observability manifests
 
-Scrape config, recording/alert rules, Grafana dashboards and the log shipper,
-shared by both clusters: Argo CD app `observability` (wave 2) syncs
-`clusters/<cluster>/apps/overlays/observability`, which is this directory with
-nothing cluster-specific on top. GPU hardware panels come from the upstream
-NVIDIA DCGM dashboard (grafana.com 12239, loaded by id through the
-kube-prometheus-stack values in `clusters/common/values/kube-prometheus-stack.yaml`).
+Terraform applies this shared base after the upstream Prometheus Operator chart. Alloy, DCGM, Loki and OpenCost are native chart releases listed in `clusters/common/apps`.
 
-- `app-dcgm-exporter.yaml`, `app-alloy.yaml`: child Argo CD Applications
-  (nvidia `dcgm-exporter` chart for GPU metrics, grafana `alloy` chart as the
-  log shipper to Loki). Both tolerate the GPU taint.
+- Native DCGM and Alloy Helm releases provide GPU metrics and log shipping.
 - `scrape.yaml`: ServiceMonitors/PodMonitors for Knative, queue-proxy, KServe,
   Kueue, Argo Workflows, cert-manager, Envoy Gateway proxies (the Nebius
   Managed PostgreSQL has no in-cluster exporter; its metrics are in the console).

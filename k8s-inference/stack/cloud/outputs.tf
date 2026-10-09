@@ -29,6 +29,7 @@ output "hub" {
     backups_bucket          = nebius_storage_v1_bucket.backups.name
     backups_bucket_endpoint = "https://${coalesce(try(nebius_storage_v1_bucket.backups.status.domain_name, null), "storage.${local.hub_region}.nebius.cloud")}" # the bucket's S3 host
     backups_bucket_region   = coalesce(try(nebius_storage_v1_bucket.backups.status.region, null), local.hub_region)
+    logs_buckets            = { for id, bucket in nebius_storage_v1_bucket.logs : id => bucket.name }
   }
 }
 

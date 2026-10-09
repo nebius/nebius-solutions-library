@@ -36,7 +36,7 @@ export interface Model {
   price_per_call?: number;
   regions: ModelRegionStatus[];
   image?: string;
-  protocol?: string; // "openai-chat", "http-json", "argo-workflow"
+  protocol?: string; // "openai-chat", "http-json", "kubernetes-job"
   cold_start_s?: number;
   parameters?: ModelParam[]; // input parameters shown in the wizard
   managed_by?: "api" | "terraform" | "catalog"; // api: defined through POST /v1/models (editable here)

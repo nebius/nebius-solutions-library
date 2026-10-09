@@ -24,11 +24,7 @@ service:
   port: 5000
   nodePort: 30500                     # = fleet.yaml images.cache.node_port
 persistence: true
-# The cache volume is the claim the StatefulSet created on 2026-10-07 (`zot-pvc-zot-0`, from its former
-# volumeClaimTemplate) referenced directly: a StatefulSet with a volumeClaimTemplate stays OutOfSync in the
-# fleet Argo CD (server-side apply; the API server adds apiVersion/kind/status to the template), with an empty
-# diff. The claim's size is immutable here; grow it with `kubectl -n registry patch pvc zot-pvc-zot-0`
-# (docs/IMAGES.md "Cache size"). A new cluster creates the claim once: charts/fleet image-cache.yaml.
+# Reuse the separately owned cache claim created by charts/fleet; keep cached layers across Helm upgrades.
 pvc:
   create: false
   name: zot-pvc-zot-0
@@ -41,8 +37,7 @@ metrics:
   enabled: true
   serviceMonitor: { enabled: true, interval: 60s }
 podDisruptionBudget: { enabled: false }
-# Explicit empties: the chart renders `null` for unset env/securityContext, and a null field in a server-side
-# applied manifest keeps the Argo CD StatefulSet comparison OutOfSync with an empty diff (seen 2026-10-07).
+# Explicit defaults keep Helm rendering deterministic.
 env: []
 securityContext: {}
 podSecurityContext: {}

@@ -48,8 +48,4 @@ it ahead of time (docs/OPERATIONS.md "Model weights"). `storageUri`/KServe
 model agents are not used: this chart runs explicit containers, so the
 weights path is just a directory the container reads.
 
-The `models` ApplicationSet of each cluster
-(`clusters/<cluster>/apps/root/applicationset-models.yaml`) creates one Argo CD
-Application `model-<id>` per entry that has a deployment on that cluster and is
-not paused, with exactly this chart and values file, so nothing is rendered
-into git and the API (which reads the same files) cannot drift from what runs.
+Terraform's models stage renders bundled endpoints; the API renders API-managed endpoints with the same chart. Each render includes a native SecurityPolicy selecting the model's external routes and using the shared API authorizer. Use `envFrom` for Secret references. Model-write reconciliation persists retry state before applying resources; see `docs/OPERATIONS.md`.

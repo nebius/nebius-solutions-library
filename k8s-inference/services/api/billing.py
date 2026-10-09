@@ -1,18 +1,14 @@
-"""Run-class spend: GPU-seconds (main container running time x GPUs over every attempt of the Job)
-x price per GPU-hour of the region (catalog deployments.<region>.price_per_gpu_hour) written to the
-submitting key's LiteLLM spend when a run finishes. Runs as one CronJob (`python -m billing`,
-clusters/control/apps/overlays/api/billing-cronjob.yaml, concurrencyPolicy Forbid), so a Job is billed
-exactly once without a claim protocol; the `billed` annotation makes the pass idempotent.
+"""GPU accounting: an idempotent ledger and atomic LiteLLM spend increment in its existing database.
 
-A fleet-placed run is billed from the manager's Job: MultiKueue deletes the worker's copy (and its pods)
-the moment the manager's Job finishes, so the attempts come from the uploader's records in the bucket
-(the design's source of truth anyway) and the price from the region the Workload was admitted in."""
-import asyncio, hashlib, logging, sys
-import httpx
+The Job annotation is a receipt, not the deduplication mechanism. The pinned LiteLLM schema and its
+database-authoritative budget checks are part of this integration contract (docs/OPERATIONS.md).
+"""
+import asyncio, hashlib, json, logging, os, sys
 from kubernetes.client.rest import ApiException
 import artifacts, catalog, jobs, kube
-from config import LABEL, LITELLM_MASTER_KEY, LITELLM_URL
-from resilience import retry, retry_http
+from config import LABEL
+from resilience import retry
+from status import _attempts, _secs
 
 log = logging.getLogger("billing")
 BILLED, KEY = f"{LABEL}/billed", f"{LABEL}/key"
@@ -29,21 +25,52 @@ def cost_of(job: dict, model: dict | None, records: list | None = None, region: 
     (a worker's copy of a fleet-placed run carries no label)."""
     gpu_s = jobs.gpu_seconds(job, records)
     region = job["metadata"].get("labels", {}).get(f"{LABEL}/region") or region or ""
-    price = float(((model or {}).get("deployments", {}).get(region) or {}).get("price_per_gpu_hour") or 0)
-    return gpu_s, round(gpu_s / 3600 * price, 6)
+    rates = json.loads(job["metadata"].get("annotations", {}).get(f"{LABEL}/billing-rates", "{}"))
+    legacy = ((model or {}).get("deployments", {}).get(region) or {}).get("price_per_gpu_hour")
+    if not rates and legacy is not None:
+        return gpu_s, round(gpu_s / 3600 * float(legacy), 6)
+    regional = rates.get(region, {})
+    usd = 0.0
+    for attempt in _attempts(job.get("_pods", []), records, job["metadata"]["name"]):
+        seconds = (_secs(attempt["started_at"], attempt["ended_at"]) or 0) * attempt["_gpus"]
+        if not seconds:
+            continue
+        price = regional.get(attempt.get("_pool"))
+        if price is None and len(set(regional.values())) == 1:
+            price = next(iter(regional.values()))
+        if price is None:
+            raise ValueError("GPU attempt has no verified pool price; accounting deferred")
+        usd += seconds / 3600 * float(price)
+    if gpu_s and not regional:
+        raise ValueError("GPU run has no price snapshot; accounting deferred")
+    return gpu_s, round(usd, 6)
 
 
-async def add_spend(token: str, usd: float) -> float:
-    """LiteLLM has no increment call: read spend, add, write (/key/update). A pass-through call that
-    lands between the two requests loses its increment; the window is one round trip per billed run."""
-    h = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    async with httpx.AsyncClient(timeout=15) as c:
-        r = await retry_http(lambda: c.get(f"{LITELLM_URL}/key/info", params={"key": token}, headers=h))
-        r.raise_for_status()
-        spend = float(r.json()["info"].get("spend") or 0) + usd
-        r = await retry_http(lambda: c.post(f"{LITELLM_URL}/key/update", json={"key": token, "spend": spend}, headers=h))
-        r.raise_for_status()
-    return spend
+def record_spend(token: str, usd: float, operation: str, gpu_s: float) -> float:
+    import psycopg
+    url = os.environ.get("BILLING_DATABASE_URL")
+    if not url:
+        raise RuntimeError("BILLING_DATABASE_URL is required; GPU accounting fails closed")
+    with psycopg.connect(url) as c:
+        c.execute("select pg_advisory_xact_lock(1229003)")
+        c.execute("""create table if not exists serverless_gpu_charges (
+            operation text primary key, token text not null, gpu_seconds double precision not null,
+            usd double precision not null, charged_at timestamptz not null default now())""")
+        inserted = c.execute("""insert into serverless_gpu_charges (operation, token, gpu_seconds, usd)
+            values (%s, %s, %s, %s) on conflict do nothing returning operation""", (operation, token, gpu_s, usd)).fetchone()
+        if inserted:
+            row = c.execute('UPDATE "LiteLLM_VerificationToken" SET spend = spend + %s, total_spend = total_spend + %s WHERE token = %s RETURNING spend', (usd, usd, token)).fetchone()
+            if row is None:
+                raise ValueError("billing key does not exist; transaction rolled back")
+            return float(row[0])
+        receipt = c.execute("select token, gpu_seconds, usd from serverless_gpu_charges where operation = %s", (operation,)).fetchone()
+        if receipt[0] != token:
+            raise ValueError("operation already belongs to another billing key")
+        return float(c.execute('SELECT spend FROM "LiteLLM_VerificationToken" WHERE token = %s', (token,)).fetchone()[0])
+
+
+async def add_spend(token: str, usd: float, operation: str, gpu_s: float) -> float:
+    return await asyncio.to_thread(record_spend, token, usd, operation, gpu_s)
 
 
 def release_volume(job: dict, ns: str, region: str) -> None:
@@ -104,9 +131,12 @@ async def bill_once() -> int:
                         pods = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
                     job["_pods"] = [p for p in pods if (p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name") or p["metadata"].get("labels", {}).get("job-name")) == name]
                 records = artifacts.attempt_records(ns, name, region, jobs.output_prefix(job))
-                gpu_s, usd = cost_of(job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region)
                 try:
-                    total = await add_spend(ann[KEY], usd) if usd else None
+                    gpu_s, usd = cost_of(job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region)
+                    identity = job["metadata"].get("uid")
+                    if not identity:
+                        raise ValueError("job UID is required for accounting")
+                    total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
                     done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
                     _annotate(region, ns, name, done, job)
                     log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)

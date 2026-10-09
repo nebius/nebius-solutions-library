@@ -6,7 +6,7 @@
 locals {
   db           = local.cloud.database
   db_password  = local.secrets.database_password
-  db_url       = { for name, dbname in local.db.databases : name => "postgresql://${local.db.user}:${urlencode(local.db_password)}@${local.db.host}:${local.db.port}/${dbname}?sslmode=require" }
+  db_url       = { for name, dbname in local.db.databases : name => "postgresql://${local.db.user}:${urlencode(local.db_password)}@${local.db.host}:${local.db.port}/${dbname}?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt" }
   db_namespace = local.role.control ? toset(["api", "litellm"]) : toset([])
 }
 
@@ -77,11 +77,27 @@ resource "kubernetes_job_v1" "database_init" {
               }
             }
           }
+          dynamic "volume_mount" {
+            for_each = local.trust_mounts
+            content {
+              name       = volume_mount.value.name
+              mount_path = volume_mount.value.mountPath
+              sub_path   = volume_mount.value.subPath
+              read_only  = true
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.trust_volumes
+          content {
+            name = volume.value.name
+            config_map { name = volume.value.configMap.name }
+          }
         }
       }
     }
   }
   wait_for_completion = true
   timeouts { create = "15m" }
-  depends_on = [kubernetes_secret_v1.database, helm_release.wave2]
+  depends_on = [kubernetes_secret_v1.database, kubernetes_config_map_v1.trust, helm_release.wave2]
 }

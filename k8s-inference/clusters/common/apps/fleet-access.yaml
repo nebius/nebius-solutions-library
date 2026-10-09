@@ -1,8 +1,0 @@
-name: fleet-access
-component: fleet-access
-namespace: kueue-system
-wave: '0'
-hubOnly: 'false'
-placement: worker
-kind: manifests
-manifestsPath: overlays/fleet-access

@@ -81,6 +81,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: { name: serverless2-api-endpoints, namespace: models }
 rules:
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [get, list]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources: [securitypolicies]
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints
@@ -109,7 +115,7 @@ spec:
       serviceAccountName: api
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.9.6
+          image: registry.serverless2.local/nebius/serverless2/api:0.10.0
           ports: [{ containerPort: 8080 }]
           env:
             - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
@@ -169,5 +175,5 @@ spec:
       rules:
         - clientSelectors:
             - headers:
-                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit keeps Argo CD in sync
+                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit avoids render/default differences
           limit: { requests: 600, unit: Minute }

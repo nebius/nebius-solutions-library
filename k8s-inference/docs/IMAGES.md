@@ -46,7 +46,7 @@ digest), so a catalog entry can pin a digest and the cache serves exactly it.
 | piece | what | where in the repo |
 |---|---|---|
 | Zot 2.1.22 (CNCF) | pull-through cache: sync extension `onDemand` from every upstream, `docker2s2` compat, anonymous read only (pushes get 401), GC + retention (tags not pulled for `images.cache.keep_days` are dropped, untagged after 24 h), Prometheus metrics | app `clusters/common/apps/zot.yaml` (chart `zot` 0.1.128), values `clusters/common/values/zot.yaml` (+ `clusters/control/values/zot.yaml`: 100 Gi), config rendered by `charts/fleet/templates/image-cache.yaml` from fleet.yaml `images` into ConfigMap `registry/zot-config` |
-| Spegel 0.7.4 (CNCF sandbox) | peer-to-peer distribution of layers between the nodes of a cluster, and the writer of containerd's `hosts.toml` for the logical host and the public registries (`additionalMirrorTargets` = the Zot NodePort) | app `clusters/common/apps/spegel.yaml` (OCI chart, repository Secret `clusters/control/apps/overlays/ops/argocd-helm-repos.yaml`), values `clusters/common/values/spegel.yaml` |
+| Spegel 0.7.4 (CNCF sandbox) | peer-to-peer distribution of layers between the nodes of a cluster, and the writer of containerd's `hosts.toml` for the logical host and the public registries (`additionalMirrorTargets` = the Zot NodePort) | app `clusters/common/apps/spegel.yaml` (native OCI chart), values `clusters/common/values/spegel.yaml` |
 | node-config DaemonSet | containerd on the GPU node images has no registry `config_path`: a drop-in `/etc/containerd/conf.d/serverless2-registry.toml` (`config_path`, `discard_unpacked_layers = false`) and one containerd restart per node, through the host's systemd (`hostPID`, privileged init container; the CPU images already ship the setting and are left alone) | `clusters/common/manifests/node-config`, app `node-config` |
 | Secret `registry/zot-sync-credentials` | `credentials.json`: `{"cr.eu-north1.nebius.cloud": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | created at bootstrap (docs/BOOTSTRAP.md); the static key: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
 | Knative | `registries-skipping-tag-resolving: registry.serverless2.local` (the host resolves on nodes, not in the cluster network) | `clusters/common/manifests/knative/knative-serving.yaml` |
@@ -82,7 +82,7 @@ the tag.
 1. Copy the images in use into the new registry (same paths), e.g. with a Job
    on the hub (`services/ops` image: `crane copy <old>/<path> <new>/<path>`; the
    ops SA mints the tokens), or `crane copy` with a static key from a laptop.
-2. Change the one key: fleet.yaml `images.source`. Argo CD re-renders
+2. Change the one key: fleet.yaml `images.source`. Terraform updates
    `registry/zot-config` on every cluster; Zot picks the new upstream up for
    every repository it does not already hold (rotate the `zot` StatefulSet to
    apply at once: `kubectl -n registry rollout restart statefulset/zot`).
@@ -106,14 +106,7 @@ flipped, the three caches restarted.
   (control: 100 Gi). The claim `registry/zot-pvc-zot-0` is rendered by
   `charts/fleet` (image-cache.yaml) and referenced by the Zot StatefulSet
   (`pvc.create: false`), so a new cluster gets it before Zot starts and the
-  StatefulSet carries no volumeClaimTemplate (which the fleet Argo CD could not
-  bring to Synced under server-side apply). Raising the size in fleet.yaml
-  expands the volume in place (CSI expansion); it is never shrunk. Retention
-  keeps the 20 most recently pulled tags per repository and anything pulled or
-  synced within `keep_days`.
-- Public references (`docker.io/...`, `nvcr.io/...` with a pull Secret) still
-  work on every node: Spegel shares their layers between nodes; the cache
-  only answers for the logical host.
+  StatefulSet mounts a separately owned cache claim, preserving it across chart upgrades.
 
 ## Adding an upstream
 
@@ -178,7 +171,7 @@ runcmd:
 - Spegel's chart has post-delete hook objects (`spegel-cleanup`); rendering
   the chart with `helm template` without `--no-hooks` and applying the output
   creates a DaemonSet that deletes the mirror configuration on every node.
-  Argo CD handles the hook correctly; never apply a plain `helm template` of it.
+  Helm handles the hook correctly; never apply a plain `helm template` of it.
 - containerd's `config_path` is read at start. On the GPU node images it is not
   set, and the node image's `config.toml` already defines the
   `cri.containerd` table: a drop-in under `conf.d` is the only safe way to add

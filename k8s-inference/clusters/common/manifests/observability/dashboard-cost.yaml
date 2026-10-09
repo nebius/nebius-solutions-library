@@ -848,7 +848,7 @@ data:
       {
        "id": 89,
        "type": "bargauge",
-       "title": "GPU-hours per run (Argo workflow)",
+       "title": "GPU-hours per run (Kubernetes Job)",
        "description": "",
        "datasource": {
         "type": "prometheus",

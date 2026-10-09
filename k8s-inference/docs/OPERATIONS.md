@@ -83,11 +83,9 @@ PodDisruptionBudget (minAvailable 1), so a node drain or a crash never takes the
 | Kueue controller | `clusters/common/values/kueue.yaml` (`controllerManager.replicas: 2`) | leader election |
 | Knative Serving (activator, autoscaler, controller, webhook) | `clusters/common/manifests/knative/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
 | Fleet database | Nebius Managed PostgreSQL (`control_plane.database.hosts`, 1 by default; the service's failover with 2) | the service's |
-| edge-auth | 2 replicas | active/active |
 
 Single replicas on purpose (not in the request path, reconcile-only; an outage delays changes, not
-traffic): KServe controller (the chart has no replica knob), JobSet, cert-manager, Knative operator, Argo
-CD when enabled, Loki, Prometheus/Grafana. Capacity: the two system nodes (8 vCPU / 32 GiB each) carry the
+traffic): KServe controller (the chart has no replica knob), JobSet, cert-manager, Knative operator, Loki, Prometheus/Grafana. Capacity: the two system nodes (8 vCPU / 32 GiB each) carry the
 second replicas with the requests the charts set (all small); `kubectl describe node` on both system nodes
 should stay below 70 % requested CPU.
 
@@ -376,3 +374,7 @@ nebius msp postgresql v1alpha1 backup list --parent-id <control project id> | he
 kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
 ./stack.sh apply models control                                   # re-runs the acceptance probe (hello-run, the example endpoint)
 ```
+
+## Reliability and upgrades
+
+See [RELIABILITY.md](RELIABILITY.md) for durable model reconciliation, atomic GPU accounting, shared Redis, Object Storage logs, private TLS and the remaining production integration checks.

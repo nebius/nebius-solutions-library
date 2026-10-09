@@ -27,3 +27,14 @@ def test_rank_response_best_first_with_class_and_region_names():
     assert {c["cluster"] for c in r["ranked"]} == {"hub"} and r["best"]["gpu_class"] == "h100"
     # nothing allowed: no best
     assert d.rank_response(snapshot({}), "default", 1, ["b300"], None)["best"] is None
+
+
+def test_follower_refreshes_ranking_without_mutating_workloads(monkeypatch):
+    monkeypatch.setattr(d, "load_fleet", lambda _: (CLUSTERS, {}))
+    monkeypatch.setattr(d, "worker_clients", lambda *_: ({}, {"eu-north1": "hub"}))
+    monkeypatch.setattr(d, "free_quota", lambda _: {("hub", "h100-spot"): 1})
+    class ReadOnly:
+        def list_cluster_custom_object(self, *a):
+            raise AssertionError("a follower must not start workload reconciliation")
+    d.reconcile(None, ReadOnly(), None, dispatch=False)
+    assert d.SNAPSHOT["at"] and d.SNAPSHOT["free"][("hub", "h100-spot")] == 1

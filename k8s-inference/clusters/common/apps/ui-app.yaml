@@ -1,8 +1,0 @@
-name: ui-app
-component: ui-app
-namespace: ui-app
-wave: '3'
-hubOnly: 'true'
-placement: control
-kind: manifests
-manifestsPath: manifests/ui-app

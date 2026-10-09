@@ -77,7 +77,7 @@ requirement to the mechanism that implements it.
   control plane, it can still be a GPU region).
 - The Nebius CLI logged in with `editor` on those projects (`nebius profile activate <name>` picks the
   profile; `./stack.sh` takes an access token from it with `nebius iam get-access-token` and hands it to
-  Terraform as `NEBIUS_IAM_TOKEN`, the same way as the other solutions in this library). Terraform 1.11 or newer with
+  Terraform as `NEBIUS_IAM_TOKEN`, the same way as the other solutions in this library). Terraform 1.12 or newer with
   the Nebius provider `nebius/nebius` from the public registry (floor `>= 0.6.23`, the newest floor in this library;
   validated with 0.6.67), `helm`, `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
   `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
@@ -239,7 +239,7 @@ that nobody assumes it does:
   container runs as the user its image sets, root included, unless the job class sets `runAsNonRoot`.
   That is container isolation, not VM isolation: a kernel or driver escape would expose the node to every
   tenant on it. Run images you trust, or give a tenant its own pools.
-- **Operator UIs.** Grafana (and Argo CD when `argocd.enabled`) use a password login behind the source-IP
+- **Operator UIs.** Grafana uses a password login behind the source-IP
   allow-list `edge.source_cidrs`; there is no single sign-on, no second factor and no audit trail beyond the
   tools' own logs. Keep the allow-list tight.
 - **Traffic inside the clusters is not encrypted.** TLS ends at the public listeners; calls from the

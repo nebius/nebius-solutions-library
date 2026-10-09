@@ -130,9 +130,6 @@ kube-state-metrics:
       - apiGroups: [serving.kserve.io]
         resources: [inferenceservices]
         verbs: [list, watch]
-      - apiGroups: [argoproj.io]
-        resources: [applications]
-        verbs: [list, watch]
   customResourceState:
     enabled: true
     config:
@@ -150,24 +147,3 @@ kube-state-metrics:
                     path: [status, conditions]
                     labelsFromPath: { type: [type] }
                     valueFrom: [status]
-          # Argo CD Applications: sync and health as state sets (alert ArgoCDApplicationNotHealthy, SLO row)
-          - groupVersionKind: { group: argoproj.io, version: v1alpha1, kind: Application }
-            metricNamePrefix: kube_argocd_application
-            labelsFromPath: { name: [metadata, name], namespace: [metadata, namespace] }
-            metrics:
-              - name: sync_status
-                help: Argo CD Application sync status
-                each:
-                  type: StateSet
-                  stateSet:
-                    path: [status, sync, status]
-                    labelName: status
-                    list: [Synced, OutOfSync, Unknown]
-              - name: health_status
-                help: Argo CD Application health status
-                each:
-                  type: StateSet
-                  stateSet:
-                    path: [status, health, status]
-                    labelName: status
-                    list: [Healthy, Progressing, Degraded, Suspended, Missing, Unknown]

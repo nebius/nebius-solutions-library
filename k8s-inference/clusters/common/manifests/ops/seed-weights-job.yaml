@@ -1,7 +1,7 @@
 # Pre-fill a model's weights on the region's shared filesystem (Terraform `weights_filesystem`, mounted on
 # every GPU node at /mnt/weights; charts/endpoint `weights.sharedFilesystem`). A catalog entry that declares
 # `weights.sharedFilesystem: {path: <dir>}` gets `<hostPath>/<dir>` mounted; this Job fills that directory
-# ahead of the first endpoint start so every cold start is warm. A plain Job template, NOT applied by Argo CD:
+# ahead of the first endpoint start so every cold start is warm. A plain Job template, submitted explicitly by the operator:
 # fill the variables and create it on the region's cluster (docs/OPERATIONS.md "Model weights").
 #
 #   SEED_PATH   subdirectory under the filesystem mount (catalog weights.sharedFilesystem.path)

@@ -1,6 +1,7 @@
 """Bearer key -> tenant, via LiteLLM /key/info with the master key (cached)."""
 import hashlib, time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import httpx
 from fastapi import Header, HTTPException
 from config import AUTH_CACHE_S, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
@@ -59,8 +60,10 @@ async def principal(authorization: str = Header(default="")) -> Principal:
     info = await key_info(key)
     if info.get("blocked"):
         raise HTTPException(403, "key is blocked")
-    if info.get("expires") and info["expires"] < time.strftime("%Y-%m-%dT%H:%M:%S"):
-        raise HTTPException(403, "key expired")
+    if info.get("expires"):
+        expiry = datetime.fromisoformat(info["expires"].replace("Z", "+00:00"))
+        if (expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)) <= datetime.now(timezone.utc):
+            raise HTTPException(403, "key expired")
     tenant = (info.get("metadata") or {}).get("tenant")
     if not tenant:
         raise HTTPException(403, "key is not bound to a tenant")
@@ -74,6 +77,10 @@ def check_budget(p: Principal) -> None:
 
 
 def check_model(p: Principal, model: str) -> None:
-    allowed = p.info.get("models") or []
-    if allowed and model not in allowed and "all-proxy-models" not in allowed:
+    if not allows_model(p, model):
         raise HTTPException(403, f"key is not allowed to use model {model}")
+
+
+def allows_model(p: Principal, model: str) -> bool:
+    allowed = p.info.get("models") or []
+    return not allowed or model in allowed or "all-proxy-models" in allowed

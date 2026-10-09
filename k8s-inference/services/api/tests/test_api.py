@@ -148,6 +148,8 @@ class FakeCluster:
         return o
 
     def delete_namespaced_custom_object(self, group, version, ns, plural, name):
+        if (ns, plural, name) not in self.custom:
+            raise ApiException(status=404, reason="NotFound")
         self.deleted.append(name)
         del self.custom[(ns, plural, name)]
 
@@ -212,7 +214,7 @@ def test_catalog_one_schema():
 
 
 def test_catalog_entries_are_renderable_or_run_classes():
-    """Every entry either has a runtime (rendered by the models ApplicationSet through charts/endpoint) or is a run class with a job block."""
+    """Every entry either has a runtime (rendered by the shared endpoint chart) or is a run class with a job block."""
     for d in os.environ["CATALOG_DIRS"].split(":"):
       for f in os.listdir(d):
         doc = yaml.safe_load(open(os.path.join(d, f)))
@@ -292,7 +294,7 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     assert rs.status_code == 202 and rs.json()["region"] == "eu-south1" and ("tenant-demo", rs.json()["id"]) in south.jobs
     sj = south.jobs[("tenant-demo", rs.json()["id"])]
     assert _main(sj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
-    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.8"
+    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.9"
     assert sj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     g = c.get(f"/v1/operations/{rs.json()['id']}", headers=H)
     assert g.status_code == 200 and g.json()["region"] == "eu-south1"
@@ -592,7 +594,7 @@ def test_admin_routes_need_admin_role(client, monkeypatch):
 def test_billing_once(cluster, monkeypatch):
     """The CronJob entry point bills finished, unbilled runs exactly once (annotation guard), no claim protocol."""
     import asyncio, billing
-    done = {"metadata": {"name": "op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo"},
+    done = {"metadata": {"name": "op-b", "uid": "uid-op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo"},
                          "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work"}},
             "spec": {}, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}
     cluster.jobs[("tenant-demo", "op-b")] = done
@@ -608,7 +610,7 @@ def test_billing_once(cluster, monkeypatch):
     assert billing.cost_of(done, catalog.get("batch-example")) == (3600.0, 1.6)
     spent = []
 
-    async def fake_add(token, usd):
+    async def fake_add(token, usd, operation, gpu_s):
         spent.append((token, usd)); return 2.1
     monkeypatch.setattr(billing, "add_spend", fake_add)
     assert asyncio.run(billing.bill_once()) == 1 and spent == [("deadbeef", 1.6)]
@@ -702,7 +704,7 @@ def test_fleet_manager_path(client, monkeypatch):
     job = control.jobs[("tenant-demo", op["id"])]
     assert job["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in job["metadata"]["labels"]
     assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "prefer-h100"
-    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.8"
+    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.9"
     tmpl = job["spec"]["template"]["metadata"]["annotations"]
     assert tmpl[f"{L}/gpu-classes"] == "h100,h200,b200,b300,gb300,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
     assert not control.pvcs and ("tenant-demo", op["id"]) not in hub.jobs                  # no volume on the manager
@@ -753,10 +755,10 @@ def test_fleet_manager_path(client, monkeypatch):
     mirror["status"] = job["status"] = {"startTime": "2026-10-07T09:00:00Z", "conditions": [{"type": "Complete", "status": "True"}]}
     hub.pods.clear()
     monkeypatch.setattr(billing.artifacts, "attempt_records", lambda ns, op, region, prefix=None: [
-        {"operation": op, "pod": f"{op}-x", "status": "succeeded", "gpus": 1, "started_at": "2026-10-07T09:00:00Z", "ended_at": "2026-10-07T10:00:00Z"}] if op == job["metadata"]["name"] else [])
+        {"operation": op, "pod": f"{op}-x", "status": "succeeded", "gpus": 1, "pool": "h100-spot-1x", "started_at": "2026-10-07T09:00:00Z", "ended_at": "2026-10-07T10:00:00Z"}] if op == job["metadata"]["name"] else [])
     spent = []
 
-    async def fake_add(token, usd):
+    async def fake_add(token, usd, operation, gpu_s):
         spent.append(usd); return 1.0
     monkeypatch.setattr(billing, "add_spend", fake_add)
     assert asyncio.run(billing.bill_once()) == 1 and spent == [2.15]                        # hub price (H100 spot cap), 1 GPU-hour from the record
@@ -947,7 +949,7 @@ ADMIN = {"Authorization": "Bearer sk-admin"}
 class FakeDB:
     """services/api/db.py in memory: the models table and its history."""
     def __init__(self):
-        self.rows, self.hist = {}, []
+        self.rows, self.hist, self.changes = {}, [], {}
 
     def enabled(self): return True
 
@@ -955,19 +957,40 @@ class FakeDB:
 
     def get_model(self, mid): return self.rows.get(mid)
 
-    def upsert_model(self, entry, spec, by, managed_by="api"):
-        version = self.rows[entry["id"]]["version"] + 1 if entry["id"] in self.rows else 1
+    def upsert_model(self, entry, spec, by, managed_by="api", expected=None, create_only=False):
+        mid = entry["id"]
+        old = self.rows.get(mid)
+        if expected is not None and (old or {}).get("version") != expected:
+            from fastapi import HTTPException
+            raise HTTPException(409, "model version changed")
+        if create_only and old:
+            from fastapi import HTTPException
+            raise HTTPException(409, "model exists")
+        version = max((h["version"] for h in self.hist if h["id"] == mid), default=0) + 1
+        self.changes[mid] = {"id": mid, "version": version, "entry": copy.deepcopy(entry), "previous": copy.deepcopy((old or {}).get("entry") or self.changes.get(mid, {}).get("previous") or {})}
         self.rows[entry["id"]] = {"id": entry["id"], "kind": spec.get("kind", "endpoint"), "spec": copy.deepcopy(spec), "entry": copy.deepcopy(entry),
                                   "version": version, "managed_by": managed_by, "updated_by": by}
-        self.hist.append({"version": version, "action": "create" if version == 1 else "update", "by": by, "at": "now", "spec": copy.deepcopy(spec), "id": entry["id"]})
+        self.hist.append({"version": version, "action": "update" if old else "create", "by": by, "at": "now", "spec": copy.deepcopy(spec), "id": entry["id"]})
         return self.rows[entry["id"]]
 
-    def delete_model(self, mid, by):
+    def delete_model(self, mid, by, expected=None):
         if mid not in self.rows:
             return False
         self.hist.append({"version": self.rows[mid]["version"] + 1, "action": "delete", "by": by, "at": "now", "spec": self.rows[mid]["spec"], "id": mid})
+        self.changes[mid] = {"id": mid, "version": self.rows[mid]["version"]+1, "entry": None, "previous": self.rows[mid]["entry"]}
         del self.rows[mid]
         return True
+
+    def pending_changes(self): return list(self.changes.values())
+
+    def finish_change(self, mid, version, error=None):
+        if self.changes.get(mid, {}).get("version") == version:
+            if error: self.changes[mid]["error"] = error
+            else: self.changes.pop(mid, None)
+
+    def reconciler(self):
+        from contextlib import nullcontext
+        return nullcontext(True)
 
     def history(self, mid, limit=50): return [h for h in reversed(self.hist) if h["id"] == mid][:limit]
 
@@ -982,7 +1005,7 @@ def admin_keys(monkeypatch):
     import db, models as m
     monkeypatch.setattr(m, "CHART_DIR", os.path.join(ROOT, "charts", "endpoint"))
     fdb = FakeDB()
-    for name in ("enabled", "list_models", "get_model", "upsert_model", "delete_model", "history"):
+    for name in ("enabled", "list_models", "get_model", "upsert_model", "delete_model", "history", "pending_changes", "finish_change", "reconciler"):
         monkeypatch.setattr(db, name, getattr(fdb, name))
     monkeypatch.setattr(m, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io", "eu-south1": "203.0.113.20.sslip.io"})
     auth.forget("sk-admin"); auth.forget("sk-good")
@@ -1015,6 +1038,8 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
         def __init__(self, **kw): pass
         def __enter__(self): return self
         def __exit__(self, *a): pass
+        def patch(self, url, json=None, headers=None):
+            return httpx.Response(404, json={})
         def post(self, url, json=None, headers=None):
             groups.append((url.rsplit("/", 1)[1], json)); return httpx.Response(200, json={})
     import models as m
@@ -1050,7 +1075,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     assert cert["dnsNames"] == ["my-llm-predictor.models.203.0.113.10.sslip.io"] and cert["issuerRef"]["name"] == "letsencrypt"
     assert ("envoy-gateway-system", "certificates", "models") not in south.custom      # nothing deployed there
     # it is a model like any other now, with the served model name injected on calls
-    got = c.get("/v1/models/my-llm", headers=H).json()
+    got = c.get("/v1/models/my-llm", headers=ADMIN).json()
     assert got["modes"] == ["sync", "async"] and got["spec"]["image"] == "vllm/vllm-openai:v0.11.0"
     assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 409          # exists; PUT replaces
     spec["scaling"] = {"min": 1, "max": 3}
@@ -1200,7 +1225,7 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
         assert pred["scaleMetric"] == "concurrency" and pred["scaleTarget"] == 8
         assert pred.get("containerConcurrency", 0) == 0 and pred["timeout"] == 120
     # A subsequent full definition edit preserves the saved scaling policy.
-    saved = c.get("/v1/models/scaling-demo", headers=H).json()["spec"]
+    saved = c.get("/v1/models/scaling-demo", headers=ADMIN).json()["spec"]
     saved["description"] = "Updated after scaling"
     assert c.put("/v1/models/scaling-demo", json=saved, headers=ADMIN).status_code == 200
     assert north.custom[key]["spec"]["predictor"]["scaleMetric"] == "concurrency"

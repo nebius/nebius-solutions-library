@@ -4,7 +4,7 @@ Reads `pools.yaml` of the fleet-prices ConfigMap (charts/fleet renders it from f
 project, platform, preset, capacity) and, for each spot or on-demand pool, asks the Nebius price calculator
 (`nebius billing v1alpha1 calculator estimate` with `--follows-spot-price`: the current spot quote, which moves every 15 min).
 Writes `spot.json` = {"<region id>/<pool>": usd_per_gpu_hour} into the spot-prices ConfigMap (created on
-first run; not in git, so Argo CD never fights it). Reserved pools are not priced (marginal cost in fleet.yaml).
+first run; runtime-owned, outside Terraform). Reserved pools are not priced (marginal cost in fleet.yaml).
 """
 import json
 import logging

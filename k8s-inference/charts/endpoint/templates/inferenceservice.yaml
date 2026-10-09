@@ -103,6 +103,10 @@ spec:
           - { name: {{ $k | quote }}, value: {{ $val | quote }} }
           {{- end }}
         {{- end }}
+        {{- with $v.envFrom }}
+        envFrom:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         ports:
           - containerPort: {{ $v.port }}
             protocol: TCP

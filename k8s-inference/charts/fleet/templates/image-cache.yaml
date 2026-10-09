@@ -53,7 +53,7 @@ data:
 ---
 # The cache volume of the Zot StatefulSet (clusters/common/values/zot.yaml `pvc.create: false`, `pvc.name`): owned
 # here so that a new cluster gets it before Zot starts, and so the StatefulSet carries no volumeClaimTemplate
-# (which the fleet Argo CD could not bring to Synced under server-side apply). Growing it: edit the size (CSI
+# (kept separately to preserve the cache through upgrades). Growing it: edit the size (CSI
 # expansion) ; it is never shrunk.
 apiVersion: v1
 kind: PersistentVolumeClaim

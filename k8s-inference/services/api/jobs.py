@@ -99,6 +99,8 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     main = {"name": "main", "image": r["image"], "command": cmd, "resources": res, "workingDir": r.get("workDir", "/work"),
             "volumeMounts": [{"name": "work", "mountPath": "/work"}, {"name": "shm", "mountPath": "/dev/shm"}],
             "securityContext": {**CONTAINER_HARDENING, **({"runAsNonRoot": True} if r.get("runAsNonRoot") else {})}}
+    if r.get("envFrom"):
+        main["envFrom"] = r["envFrom"]
     if r.get("args"):
         main["args"] = r["args"]
     if r.get("env"):
@@ -155,6 +157,13 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if gpu_class and placement:
         placement = {**placement, "profile": profile, "classes": [gpu_class]}   # the dispatcher keeps the run on this class
     meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class)
+    rates = {}
+    for pool in kube.fleet().get("pools", {}).values():
+        pool_region = kube.cluster_region(pool["region"])
+        rate = (model.get("deployments", {}).get(pool_region) or {}).get("price_per_gpu_hour", pool.get("usd_per_gpu_hour"))
+        if rate is not None:
+            rates.setdefault(pool_region, {})[pool["pool"]] = rate
+    meta["annotations"][f"{LABEL}/billing-rates"] = json.dumps(rates, sort_keys=True)
     meta["annotations"][f"{LABEL}/scratch"] = scratch
     if gpu_class:
         meta["annotations"][f"{LABEL}/image"] = job["image"]
@@ -382,6 +391,10 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     PVC and Secret are owned by the Job (garbage-collected with it). A manager Job gets no PVC here: the
     dispatcher creates it on the worker it picks (docs/JOBS.md)."""
     name = job["metadata"]["name"]
+    import hashlib
+    request_hash = hashlib.sha256(json.dumps(job["spec"], sort_keys=True).encode()).hexdigest()
+    job["metadata"].setdefault("annotations", {})[f"{LABEL}/request-hash"] = request_hash
+    was_created = True
     try:
         if is_jobset(job):
             retry(_jobset_api(region).create_namespaced_custom_object, JOBSET_GROUP, JOBSET_VERSION, ns, JOBSET_PLURAL, job)
@@ -389,13 +402,18 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
             retry(kube.batch(region).create_namespaced_job, ns, job)
     except ApiException as e:
         if e.status == 409:
-            return get(ns, name, region), False
-        if e.status == 404:
+            was_created = False
+        elif e.status == 404:
             raise HTTPException(404, f"tenant namespace {ns} is not onboarded in {region}")
-        raise HTTPException(502, f"kubernetes ({region}): {e.status} {e.reason}: {(e.body or '')[:300]}")
+        else:
+            raise HTTPException(502, f"kubernetes ({region}): {e.status} {e.reason}: {(e.body or '')[:300]}")
     created = get(ns, name, region)
+    if not was_created:
+        if created["metadata"].get("annotations", {}).get(f"{LABEL}/request-hash", request_hash) != request_hash:
+            raise HTTPException(409, "idempotency key was already used with different input")
+        job = created
     if is_jobset(job):
-        return created, True            # no per-run volume: /work is node-local, checkpoints on the shared claim
+        return created, was_created    # no per-run volume: /work is node-local, checkpoints on the shared claim
     owner = {"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": created["metadata"].get("uid", "")}
     ann, core = job["metadata"].get("annotations", {}), kube.core(region)
     pvc = None if is_manager_job(job) else ann.get(f"{LABEL}/pvc")
@@ -415,7 +433,7 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     if secret:
         secret["metadata"]["ownerReferences"] = [owner]
         _create_ignore_exists(core.create_namespaced_secret, ns, secret, region)
-    return created, True
+    return created, was_created
 
 
 def _create_ignore_exists(fn, ns: str, body: dict, region: str):

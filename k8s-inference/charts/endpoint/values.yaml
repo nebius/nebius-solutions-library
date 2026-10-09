@@ -1,6 +1,6 @@
 # One InferenceService per release. Plain layout: these keys at the top level. Catalog mode: pass a
 # catalog/models/<id>.yaml as the values file plus --set cluster=<name> (README.md); that is how the
-# models ApplicationSet renders every endpoint straight from the catalog.
+# models stage and API render endpoints from the same chart.
 name: ""                 # InferenceService name (required)
 namespace: models
 labels: {}               # extra metadata labels
@@ -11,6 +11,7 @@ imagePullSecrets: []     # e.g. [ngc]
 command: []
 args: []
 env: []                  # list of EnvVar (valueFrom allowed)
+envFrom: []              # Secret references; credentials stay outside model definitions
 port: 8080
 protocol: http           # informational: http | websocket | openai
 workingDir: ""

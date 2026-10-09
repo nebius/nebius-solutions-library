@@ -39,14 +39,15 @@ main_alive() {   # any process whose ancestry ends neither at this shell nor at 
 
 record() {   # $1 = status; the attempt as the uploader sees it now (main may still be running on SIGTERM)
   pod
-  local started ended node
+  local started ended node pool
   started=$(field '.status.containerStatuses[]? | select(.name==$m) | (.state.terminated.startedAt // .state.running.startedAt // empty)')
   ended=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.finishedAt // empty')
   node=$(field '.spec.nodeName // empty')
+  pool=$(field '.spec.nodeSelector["serverless2.nebius/pool"] // empty')
   mkdir -p /work/attempts
   [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
-  printf '{"operation":"%s","pod":"%s","node":"%s","status":"%s","exit_code":%s,"gpus":%s,"gpu_class":"%s","started_at":"%s","ended_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$node" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "$ended" > "/work/attempts/$POD_NAME.json"
+  printf '{"operation":"%s","pod":"%s","node":"%s","pool":"%s","status":"%s","exit_code":%s,"gpus":%s,"gpu_class":"%s","started_at":"%s","ended_at":"%s"}\n' \
+    "$OPERATION" "$POD_NAME" "$node" "$pool" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "$ended" > "/work/attempts/$POD_NAME.json"
 }
 
 upload() {   # $1 = status

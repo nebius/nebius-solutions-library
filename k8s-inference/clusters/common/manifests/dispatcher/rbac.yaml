@@ -39,6 +39,10 @@ rules:
     resources: [configmaps]
     verbs: [get, list, watch, create, patch]
   - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [dispatcher-leader]
+    verbs: [update]
+  - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
 ---
@@ -49,3 +53,8 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-dispatcher }
 subjects:
   - { kind: ServiceAccount, name: dispatcher, namespace: kueue-system }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dispatcher-leader

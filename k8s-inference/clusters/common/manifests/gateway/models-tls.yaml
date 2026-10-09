@@ -4,7 +4,7 @@
 # server-side apply whenever an endpoint is created or deleted on this cluster (ACME HTTP-01 per hostname
 # through the external Gateway, like acme.yaml). What is here is only the placeholder before the first model:
 # a self-signed certificate for a name nobody calls, so the listener's second certificateRef resolves.
-# Argo CD (clusters/fleet/root) and Terraform (stack/platform/manifests.tf) ignore the three fields.
+# Terraform (stack/platform/manifests.tf) ignore the three fields.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata: { name: models, namespace: envoy-gateway-system }

@@ -1,8 +1,4 @@
-# Shared base for the `observability` component; clusters/<cluster>/apps/overlays/ add the cluster-specific parts
-# (the cost-report cluster name). Alloy, the DCGM exporter and OpenCost are platform apps of their own
-# (clusters/common/apps/{alloy,dcgm-exporter,opencost}.yaml, values in clusters/common/values/) since the fleet
-# Argo CD manages every cluster: an Application object inside a manifest would land on the target cluster, not
-# on the Argo CD that manages it.
+# Shared observability base. Native chart releases install Alloy, DCGM and OpenCost; this base owns scrape rules and dashboards.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

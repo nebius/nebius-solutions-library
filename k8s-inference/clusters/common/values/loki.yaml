@@ -20,17 +20,17 @@ loki:
     max_entries_limit_per_query: 10000
   compactor:
     retention_enabled: true
-    delete_request_store: filesystem
+    delete_request_store: s3
     working_directory: /var/loki/compactor
     compaction_interval: 10m
     retention_delete_delay: 2h
   storage:
-    type: filesystem
+    type: s3
   schemaConfig:
     configs:
       - from: "2024-01-01"
         store: tsdb
-        object_store: filesystem
+        object_store: s3
         schema: v13
         index:
           prefix: loki_index_

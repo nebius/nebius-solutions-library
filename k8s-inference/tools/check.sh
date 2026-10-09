@@ -35,13 +35,13 @@ check_terraform() {
   step "terraform validate: every stage and module"
   for d in stack/config stack/cloud stack/platform stack/models stack/modules/cluster stack/modules/tenant-region; do
     tf "$d" init -backend=false -input=false > /dev/null
-    tf "$d" validate -no-color > /dev/null && echo "   ok $d"
+    tf "$d" validate -no-color > /dev/null; echo "   ok $d"
   done
   if [ -d "$ROOT/infra/cluster" ]; then
-    for d in infra/cluster infra/tenant; do tf "$d" init -backend=false -input=false > /dev/null; tf "$d" validate -no-color > /dev/null && echo "   ok $d"; done
+    for d in infra/cluster infra/tenant; do tf "$d" init -backend=false -input=false > /dev/null; tf "$d" validate -no-color > /dev/null; echo "   ok $d"; done
   fi
   step "terraform.tfvars.example passes the schema validations"
-  tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null && echo "   ok $(basename "$EXAMPLE")"
+  tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
 }
 
 check_render() {
@@ -65,15 +65,15 @@ for cid, c in plan["clusters"].items():
 EOF
   step "helm lint"
   first=$(echo "$clusters" | cut -d' ' -f1)
-  helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null && echo "   ok charts/fleet"
-  helm lint "$ROOT/charts/tenant" -f "$TMP/tenant-$first.yaml" > /dev/null && echo "   ok charts/tenant"
+  helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
+  helm lint "$ROOT/charts/tenant" -f "$TMP/tenant-$first.yaml" > /dev/null; echo "   ok charts/tenant"
   step "helm template: fleet and tenant charts for every cluster of the example, endpoint chart for every deployed entry"
   for cid in $clusters; do
-    helm template fleet "$ROOT/charts/fleet" -f "$TMP/fleet-$cid.yaml" > /dev/null && echo "   ok charts/fleet $cid"
-    helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null && echo "   ok charts/tenant $cid"
+    helm template fleet "$ROOT/charts/fleet" -f "$TMP/fleet-$cid.yaml" > /dev/null; echo "   ok charts/fleet $cid"
+    helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null; echo "   ok charts/tenant $cid"
     for f in "$TMP"/endpoint-*-"$cid".yaml; do
       [ -f "$f" ] || continue
-      helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null && echo "   ok charts/endpoint $(basename "$f" .yaml)"
+      helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint $(basename "$f" .yaml)"
     done
   done
   step "example model (stack/models/llm-example.json): the API's spec -> entry -> charts/endpoint, for the example's first GPU class"
@@ -95,12 +95,12 @@ print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['dep
 json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
 EOF
   for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
-    helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null && echo "   ok charts/endpoint llm-example $cid"
+    helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint llm-example $cid"
   done
   step "kustomize build: every shared manifest base"
   for d in "$ROOT"/clusters/common/manifests/*/; do
     [ -f "$d/kustomization.yaml" ] || continue
-    kubectl kustomize "$d" > /dev/null && echo "   ok ${d#"$ROOT"/}"
+    kubectl kustomize "$d" > /dev/null; echo "   ok ${d#"$ROOT"/}"
   done
   if [ -d "$ROOT/clusters/hub" ]; then
     for d in "$ROOT"/clusters/*/apps/overlays/*/ "$ROOT"/clusters/fleet/root/ "$ROOT"/clusters/control/apps/; do
