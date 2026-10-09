@@ -176,14 +176,15 @@ variable "fleet" {
       on_demand = number
       spot      = number
       })), {
-      gpu-h100-sxm  = { on_demand = 4.50, spot = 0.79 } # H100 SXM (Intel host)
-      gpu-h200-sxm  = { on_demand = 5.40, spot = 0.79 } # H200 SXM
-      gpu-b200-sxm  = { on_demand = 7.50, spot = 0.99 } # B200 SXM
-      gpu-b300-sxm  = { on_demand = 9.50, spot = 0.99 } # B300 SXM
-      gpu-gb300     = { on_demand = 9.50, spot = 0.99 } # GB300 NVL (ARM host)
-      gpu-l40s-a    = { on_demand = 1.55, spot = 0.74 } # L40S (Intel host)
-      gpu-l40s-d    = { on_demand = 1.82, spot = 0.90 } # L40S (AMD host)
-      gpu-rtx6000-a = { on_demand = 1.80, spot = 0.95 } # RTX PRO 6000 Blackwell
+      gpu-h100-sxm   = { on_demand = 4.50, spot = 0.79 } # H100 SXM (Intel host)
+      gpu-h200-sxm   = { on_demand = 5.40, spot = 0.79 } # H200 SXM
+      gpu-b200-sxm   = { on_demand = 7.50, spot = 0.99 } # B200 SXM
+      gpu-b200-sxm-a = { on_demand = 8.50, spot = 0.99 } # B200 SXM, the me-west1 variant
+      gpu-b300-sxm   = { on_demand = 9.50, spot = 0.99 } # B300 SXM
+      gpu-gb300      = { on_demand = 9.50, spot = 0.99 } # GB300 NVL (ARM host)
+      gpu-l40s-a     = { on_demand = 1.55, spot = 0.74 } # L40S (Intel host)
+      gpu-l40s-d     = { on_demand = 1.82, spot = 0.90 } # L40S (AMD host)
+      gpu-rtx6000-a  = { on_demand = 1.80, spot = 0.95 } # RTX PRO 6000 Blackwell
     })
     reserved_marginal_price = optional(number, 0)
 
