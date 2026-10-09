@@ -88,10 +88,30 @@ locals {
     }
   }
   use_driverfull_gpu = var.gpu_nodes_driverfull_image || local.gb300_enabled
+  # The Nebius node-group API accepts a Kubernetes minor version, optionally
+  # followed by a Nebius node release suffix (for example, 1.36 or
+  # 1.36-nebius-node.2). MK8s selects the supported patch release.
+  gpu_dra_k8s_version_parts = var.k8s_version == null ? [] : [
+    for part in split(".", split("-", trimprefix(var.k8s_version, "v"))[0]) : tonumber(part)
+    if can(tonumber(part))
+  ]
+  gpu_dra_k8s_version_supported = var.k8s_version == null || try(
+    length(local.gpu_dra_k8s_version_parts) == 2 && (
+      local.gpu_dra_k8s_version_parts[0] > 1 ||
+      (
+        local.gpu_dra_k8s_version_parts[0] == 1 &&
+        local.gpu_dra_k8s_version_parts[1] >= 34
+      )
+    ),
+    false,
+  )
+  managed_mig_dra_enabled = local.reconcile_mig_config && var.gpu_dra.enabled
   gpu_operator_cdi_enabled = (
     !local.use_driverfull_gpu &&
-    var.mig_strategy != null &&
-    var.mig_strategy != "none"
+    (
+      var.gpu_dra.enabled ||
+      (var.mig_strategy != null && var.mig_strategy != "none")
+    )
   ) ? true : null
 
   # Known-good kubelet NUMA/topology configs validated during GPU node testing.
@@ -182,7 +202,7 @@ locals {
     "gpu-h200-sxm"   = ["all-disabled", "all-enabled", "all-balanced", "all-1g.18gb", "all-1g.18gb.me", "all-1g.35gb", "all-2g.35gb", "all-3g.71gb", "all-4g.71gb", "all-7g.141gb"]
     "gpu-b200-sxm"   = ["all-disabled", "all-enabled", "all-balanced", "all-1g.23gb", "all-1g.23gb.me", "all-1g.45gb", "all-2g.45gb", "all-3g.90gb", "all-4g.90gb", "all-7g.180gb"]
     "gpu-b200-sxm-a" = ["all-disabled", "all-enabled", "all-balanced", "all-1g.23gb", "all-1g.23gb.me", "all-1g.45gb", "all-2g.45gb", "all-3g.90gb", "all-4g.90gb", "all-7g.180gb"]
-    "gpu-b300-sxm"   = ["all-disabled", "all-enabled", "all-balanced", "all-1g.23gb", "all-1g.23gb.me", "all-1g.45gb", "all-2g.45gb", "all-3g.90gb", "all-4g.90gb", "all-7g.180gb"]
+    "gpu-b300-sxm"   = ["all-disabled", "all-enabled", "all-balanced", "all-1g.34gb", "all-1g.34gb.me", "all-1g.67gb", "all-2g.67gb", "all-3g.135gb", "all-4g.135gb", "all-7g.269gb"]
     "gpu-rtx6000"    = ["all-disabled", "all-enabled", "all-balanced", "all-1g.24gb", "all-1g.24gb.me", "all-1g.48gb", "all-2g.48gb", "all-4g.96gb"]
   }
 

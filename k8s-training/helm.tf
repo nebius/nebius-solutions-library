@@ -15,11 +15,18 @@ module "gpu-operator" {
   depends_on = [
     module.network-operator
   ]
-  source       = "../modules/gpu-operator"
-  parent_id    = var.parent_id
-  cluster_id   = nebius_mk8s_v1_cluster.k8s-cluster.id
-  mig_strategy = var.mig_strategy
-  cdi_enabled  = local.gpu_operator_cdi_enabled
+  source                = "../modules/gpu-operator"
+  parent_id             = var.parent_id
+  cluster_id            = nebius_mk8s_v1_cluster.k8s-cluster.id
+  mig_strategy          = var.mig_strategy
+  cdi_enabled           = local.gpu_operator_cdi_enabled
+  device_plugin_enabled = var.gpu_dra.enabled ? false : null
+  driver_manager_env = var.gpu_dra.enabled ? [{
+    name  = "NODE_LABEL_FOR_GPU_POD_EVICTION"
+    value = "nvidia.com/dra-kubelet-plugin"
+  }] : []
+  toolkit_restart_mode  = var.gpu_operator_toolkit_restart_mode
+  toolkit_config_source = var.gpu_operator_toolkit_config_source
 }
 
 module "gpu-operator-custom" {

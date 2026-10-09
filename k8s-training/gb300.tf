@@ -122,6 +122,8 @@ resource "nebius_mk8s_v1_node_group" "gb300" {
       preset   = local.gb300_preset
     }
 
+    reservation_policy = var.gpu_nodes_reservation_policy
+
     filesystems = var.enable_filestore ? [{
       attach_mode = "READ_WRITE"
       mount_tag   = "data"

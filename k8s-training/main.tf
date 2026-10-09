@@ -119,6 +119,26 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       condition     = !local.enable_gpu_cluster || startswith(local.gpu_nodes_preset, "8gpu-")
       error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_nodes_preset}'."
     }
+
+    precondition {
+      condition = (
+        !var.gpu_nodes_driverfull_image ||
+        (
+          (var.mig_strategy == null || var.mig_strategy == "none") &&
+          var.mig_parted_config == null
+        )
+      )
+      error_message = "MIG is not supported with gpu_nodes_driverfull_image=true. Use driverless GPU nodes so GPU Operator owns the driver, Toolkit, device plugin, and MIG Manager."
+    }
+
+    precondition {
+      condition = (
+        var.mig_parted_config == null ||
+        contains(["single", "mixed"], coalesce(var.mig_strategy, "none"))
+      )
+      error_message = "mig_parted_config requires mig_strategy to be single or mixed so GPU Operator deploys MIG Manager with a compatible device-plugin strategy."
+    }
+
   }
 
   autoscaling = var.gpu_nodes_autoscaling.enabled ? {
@@ -137,9 +157,14 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
   strategy = var.node_group_strategy
   template = {
     metadata = {
-      labels = var.mig_parted_config != null ? {
-        "nvidia.com/mig.config" = var.mig_parted_config
-      } : {}
+      labels = merge(
+        local.reconcile_mig_config ? {
+          "nvidia.com/mig.config" = local.desired_mig_config
+        } : {},
+        var.gpu_dra.enabled ? {
+          "nvidia.com/dra-kubelet-plugin" = "true"
+        } : {},
+      )
     }
 
     boot_disk = {
@@ -159,6 +184,7 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       platform = local.gpu_nodes_platform
       preset   = local.gpu_nodes_preset
     }
+    reservation_policy = var.gpu_nodes_reservation_policy
     filesystems = var.enable_filestore ? [
       {
         attach_mode = "READ_WRITE"
@@ -168,8 +194,11 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
         }
       }
     ] : null
-    gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
-    gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
+    gpu_cluster = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
+    gpu_settings = (var.gpu_nodes_driverfull_image || var.gpu_dra.enabled) ? {
+      dra            = var.gpu_dra.enabled
+      drivers_preset = var.gpu_nodes_driverfull_image ? local.device_preset : null
+    } : null
     preemptible = var.gpu_nodes_preemptible ? {
       on_preemption = "STOP"
       priority      = 3

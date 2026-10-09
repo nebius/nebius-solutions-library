@@ -29,9 +29,17 @@ variable "cluster_name" {
 }
 
 variable "k8s_version" {
-  description = "Kubernetes version to be used in the cluster. Leave null to use backend default (recommended), or choose 1.31 or above."
+  description = "Kubernetes minor version used by the cluster, for example 1.36. Leave null to retain the backend-selected version; verify the actual deployed version against enabled features' requirements."
   type        = string
   default     = null
+
+  validation {
+    condition = (
+      var.k8s_version == null ||
+      can(regex("^\\d+\\.\\d+(-nebius-node\\.[1-9]\\d*)?$", var.k8s_version))
+    )
+    error_message = "k8s_version must use the Nebius provider format, such as 1.36 or 1.36-nebius-node.2; patch versions such as 1.36.3 are not accepted."
+  }
 }
 
 variable "etcd_cluster_size" {
@@ -195,6 +203,12 @@ variable "gpu_node_groups" {
   description = "Number of GPU node groups."
   type        = number
   default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.gpu_node_groups >= 0 && floor(var.gpu_node_groups) == var.gpu_node_groups
+    error_message = "gpu_node_groups must be a non-negative integer."
+  }
 }
 
 variable "gpu_nodes_platform" {
@@ -204,15 +218,95 @@ variable "gpu_nodes_platform" {
 }
 
 variable "gpu_nodes_driverfull_image" {
-  description = "Use driver full images for GPU node gropus. Disabled GPU-Operator."
+  description = "Use driverfull images for GPU node groups and disable GPU Operator. The current driverfull path supports full GPUs only; use driverless nodes for MIG."
   type        = bool
   default     = false
+}
+
+variable "gpu_dra" {
+  description = "NVIDIA DRA allocation settings. DRA is independent from MIG: without a MIG configuration it allocates full GPUs; with static MIG it allocates the devices created by GPU Operator MIG Manager. The NVIDIA DRA driver replaces the legacy device plugin in both cases."
+  type = object({
+    enabled          = optional(bool, false)
+    chart_repository = optional(string, "https://helm.ngc.nvidia.com/nvidia")
+    chart_version    = optional(string, "0.4.1")
+    namespace        = optional(string, "nvidia-dra-driver-gpu")
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = !var.gpu_dra.enabled || !var.gpu_nodes_driverfull_image
+    error_message = "gpu_dra requires gpu_nodes_driverfull_image=false so GPU Operator owns the driver and exposes it at /run/nvidia/driver."
+  }
+
+  validation {
+    condition     = !var.gpu_dra.enabled || var.gpu_node_groups > 0
+    error_message = "gpu_dra requires at least one GPU node group."
+  }
+
+  validation {
+    condition     = !var.gpu_dra.enabled || !var.custom_driver
+    error_message = "gpu_dra is currently supported only with the bundled Marketplace GPU Operator, not custom_driver."
+  }
+
+  validation {
+    condition     = !var.gpu_dra.enabled || var.gb300.rack_count == 0
+    error_message = "gpu_dra requires the driverless GPU Operator path. The current GB300 rack path uses MK8s-managed drivers, runtime, and IMEX and does not yet implement this DRA ownership handoff."
+  }
+
+  validation {
+    condition     = !var.gpu_dra.enabled || local.gpu_dra_k8s_version_supported
+    error_message = "When k8s_version is set with gpu_dra, it must be 1.34 or newer in the Nebius provider's minor-version format. When it is unset, verify that the backend-selected deployed version is 1.34.2 or newer."
+  }
+
+  validation {
+    condition = (
+      length(trimspace(var.gpu_dra.chart_repository)) > 0 &&
+      length(trimspace(var.gpu_dra.chart_version)) > 0 &&
+      length(trimspace(var.gpu_dra.namespace)) > 0
+    )
+    error_message = "gpu_dra chart_repository, chart_version, and namespace must not be empty."
+  }
 }
 
 variable "gpu_nodes_preset" {
   description = "Configuration for GPU amount, CPU, and RAM for nodes in the GPU node group."
   type        = string
   default     = null
+}
+
+variable "gpu_nodes_reservation_policy" {
+  description = "Capacity Block Group reservation policy for GPU node groups. Use STRICT with reservation_ids to require specific reserved capacity."
+  type = object({
+    policy          = string
+    reservation_ids = optional(list(string))
+  })
+  default = null
+
+  validation {
+    condition = (
+      var.gpu_nodes_reservation_policy == null ||
+      contains(["AUTO", "FORBID", "STRICT"], var.gpu_nodes_reservation_policy.policy)
+    )
+    error_message = "gpu_nodes_reservation_policy.policy must be one of AUTO, FORBID, or STRICT."
+  }
+
+  validation {
+    condition = (
+      var.gpu_nodes_reservation_policy == null ||
+      var.gpu_nodes_reservation_policy.policy != "FORBID" ||
+      length(coalesce(var.gpu_nodes_reservation_policy.reservation_ids, [])) == 0
+    )
+    error_message = "gpu_nodes_reservation_policy.reservation_ids must be empty when policy is FORBID."
+  }
+
+  validation {
+    condition = (
+      var.gpu_nodes_reservation_policy == null ||
+      alltrue([for id in coalesce(var.gpu_nodes_reservation_policy.reservation_ids, []) : length(trimspace(id)) > 0])
+    )
+    error_message = "gpu_nodes_reservation_policy.reservation_ids cannot contain empty IDs."
+  }
 }
 
 variable "gb300" {
@@ -317,9 +411,14 @@ variable "enable_k8s_node_group_sa" {
 }
 
 variable "mig_parted_config" {
-  description = "MIG partition config to be assigned to node group label"
+  description = "MIG partition config assigned through the node group label and applied by GPU Operator MIG Manager. When MIG Manager is enabled and this is null, Terraform reconciles all-disabled."
   type        = string
   default     = null
+
+  validation {
+    condition     = !(var.mig_strategy == "single" && var.mig_parted_config == "all-balanced")
+    error_message = "all-balanced creates heterogeneous MIG profiles and requires mig_strategy=mixed, not single."
+  }
 
   validation {
     condition = var.mig_parted_config == null ? true : contains(
@@ -408,6 +507,15 @@ variable "test_mode" {
   description = "Switch between real usage and testing"
   type        = bool
   default     = false
+
+  validation {
+    condition = !var.test_mode || local.gb300_enabled || (
+      !var.gpu_dra.enabled &&
+      var.gpu_node_groups > 0 &&
+      (!local.reconcile_mig_config || local.desired_mig_config == "all-disabled")
+    )
+    error_message = "The bundled NCCL test requires full GPUs advertised by the device plugin. For MIG or DRA, leave test_mode=false and use a compatible workload instead."
+  }
 }
 
 variable "nccl_test_image" {
@@ -493,9 +601,59 @@ variable "kuberay_serve_config_v2" {
 }
 
 variable "mig_strategy" {
-  description = "MIG strategy for GPU operator"
+  description = "MIG strategy for GPU Operator. Keep single or mixed enabled when MIG might be toggled later; a null mig_parted_config then reconciles all-disabled. Before changing to none, apply all-disabled and verify convergence."
   type        = string
   default     = null
+
+  validation {
+    condition     = var.mig_strategy == null || contains(["none", "single", "mixed"], coalesce(var.mig_strategy, "none"))
+    error_message = "mig_strategy must be one of: none, single, mixed, or null."
+  }
+}
+
+variable "gpu_operator_toolkit_restart_mode" {
+  description = "How NVIDIA Container Toolkit applies containerd configuration changes. MK8s uses systemd to avoid containerd exiting on SIGHUP."
+  type        = string
+  default     = "systemd"
+  nullable    = false
+
+  validation {
+    condition     = contains(["none", "signal", "systemd"], var.gpu_operator_toolkit_restart_mode)
+    error_message = "gpu_operator_toolkit_restart_mode must be one of: none, signal, systemd."
+  }
+}
+
+variable "gpu_operator_toolkit_config_source" {
+  description = "Source used by NVIDIA Container Toolkit to read the containerd configuration. MK8s uses the root file so generated drop-ins keep the same schema version."
+  type        = string
+  default     = "file"
+  nullable    = false
+
+  validation {
+    condition     = contains(["command", "file"], var.gpu_operator_toolkit_config_source)
+    error_message = "gpu_operator_toolkit_config_source must be command or file."
+  }
+}
+
+variable "mig_reconciler_kubectl_version" {
+  description = "Pinned kubectl image version for the MIG reconciliation Job (without v). Must be within one minor of the actual control plane; verify separately when k8s_version is unset."
+  type        = string
+  default     = "1.35.0"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^1\\.[0-9]+\\.[0-9]+$", var.mig_reconciler_kubectl_version))
+    error_message = "mig_reconciler_kubectl_version must be a full Kubernetes 1.x patch version, such as 1.35.0."
+  }
+
+  validation {
+    condition = (!local.reconcile_mig_config || var.k8s_version == null) ? true : try(
+      tonumber(split(".", var.mig_reconciler_kubectl_version)[0]) == local.gpu_dra_k8s_version_parts[0] &&
+      abs(tonumber(split(".", var.mig_reconciler_kubectl_version)[1]) - local.gpu_dra_k8s_version_parts[1]) <= 1,
+      false,
+    )
+    error_message = "The MIG reconciler kubectl must be within one minor version of k8s_version."
+  }
 }
 
 variable "cpu_nodes_preemptible" {

@@ -2,7 +2,7 @@ terraform {
   required_providers {
     nebius = {
       source  = "nebius/nebius"
-      version = ">= 0.6.23"
+      version = ">= 0.6.56"
     }
     kubernetes = {
       source = "hashicorp/kubernetes"

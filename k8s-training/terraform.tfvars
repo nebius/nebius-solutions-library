@@ -38,6 +38,14 @@ cpu_nodes_preset   = "4vcpu-16gb" # CPU nodes preset
 # gpu_nodes_platform = "gpu-b300-sxm"
 # gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
 gpu_enable_local_disks = false # Only B300 supports local disks.
+
+# Capacity Block Group allocation for GPU nodes. With no reservation IDs,
+# STRICT selects any suitable available Capacity Block and never falls back to PAYG.
+# gpu_nodes_reservation_policy = {
+#   policy = "STRICT"
+#   reservation_ids = ["capacityblockgroup-XXXXX"]
+# }
+
 # Infiniband fabrics: https://docs.nebius.com/compute/clusters/gpu#fabrics
 # New B300 region fabrics: eu-west2-a (eu-west2), us-north1-a (us-north1).
 # infiniband_fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2; set to "" to disable clustering.
@@ -58,7 +66,7 @@ gpu_enable_local_disks = false # Only B300 supports local disks.
 #   local_nvme                = true
 # }
 
-gpu_nodes_driverfull_image = true
+gpu_nodes_driverfull_image = false
 enable_k8s_node_group_sa   = true
 enable_egress_gateway      = false
 cpu_nodes_preemptible      = false
@@ -73,21 +81,30 @@ mk8s_cluster_public_endpoint = true # Set it to FALSE only in case if you've dep
 # host first, and you are deploying cluster from the bastion instance
 
 # MIG configuration
-# mig_strategy =        # If set, possible values include 'single', 'mixed', 'none'
-# mig_parted_config =   # If set, value will be checked against allowed for the selected 'gpu_nodes_platform'
+mig_strategy = "mixed"
+# The all-balanced layout uses model-specific MIG profiles; see README.
+mig_parted_config                  = "all-balanced"
+gpu_operator_toolkit_restart_mode  = "systemd"
+gpu_operator_toolkit_config_source = "file"
+
+# Experimental DRA allocation of the preconfigured MIG devices. This also
+# enables Nebius managed DRANet advertising for GPU-cluster-attached nodes.
+gpu_dra = {
+  enabled = true
+}
 
 # Observability by Nebius
-enable_nebius_o11y_agent = true # Enable or disable Nebius Observability Agent deployment with true or false
-enable_grafana           = true # Enable or disable Grafana® solution by Nebius with true or false
+enable_nebius_o11y_agent = false # Enable or disable Nebius Observability Agent deployment with true or false
+enable_grafana           = false # Enable or disable Grafana® solution by Nebius with true or false
 
 # Local Observability installation
 enable_prometheus = false # Enable or disable Prometheus and Grafana deployment with true or false
 loki = {
-  enabled            = true # Enable or disable Loki deployment with true or false
-  replication_factor = 2    # Number of Loki replicas for each log chunk (higher = better availability, more storage/network cost)
+  enabled            = false # Enable or disable Loki deployment with true or false
+  replication_factor = 2     # Number of Loki replicas for each log chunk (higher = better availability, more storage/network cost)
 }
 # Storage
-enable_filestore               = false # Enable or disable Filestore integration with true or false
+enable_filestore               = true  # Enable or disable Filestore integration with true or false
 existing_filestore             = ""    # If enable_filestore = true, with this variable we can add existing filestore. Require string, example existing_filestore = "computefilesystem-e00r7z9vfxmg1bk99s"
 filestore_disk_size_gibibytes  = 100   # Set Filestore disk size in Gbytes.
 filestore_block_size_kibibytes = 4     # Set Filestore block size in bytes

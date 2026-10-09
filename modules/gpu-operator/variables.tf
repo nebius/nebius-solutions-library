@@ -42,3 +42,40 @@ variable "cdi_enabled" {
   type        = bool
   default     = null
 }
+
+variable "device_plugin_enabled" {
+  description = "Whether to explicitly enable the legacy NVIDIA device plugin. Set false when NVIDIA DRA owns GPU allocation."
+  type        = bool
+  default     = null
+}
+
+variable "driver_manager_env" {
+  description = "Environment variables passed to the GPU Operator driver manager."
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
+}
+
+variable "toolkit_restart_mode" {
+  description = "Optional method used by NVIDIA Container Toolkit to apply container runtime configuration changes."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.toolkit_restart_mode == null || contains(["none", "signal", "systemd"], coalesce(var.toolkit_restart_mode, "none"))
+    error_message = "toolkit_restart_mode must be none, signal, systemd, or null."
+  }
+}
+
+variable "toolkit_config_source" {
+  description = "Optional source used by NVIDIA Container Toolkit to read the container runtime configuration."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.toolkit_config_source == null || contains(["command", "file"], coalesce(var.toolkit_config_source, "file"))
+    error_message = "toolkit_config_source must be command, file, or null."
+  }
+}
