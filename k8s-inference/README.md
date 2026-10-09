@@ -39,7 +39,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Operations? | None. | Grafana, Prometheus, Loki, OpenCost, backups and spot recovery are installed; upgrades and incidents are yours. |
 | Pick it when... | You want one or a few models online quickly and do not want to run anything. | You run a platform for several teams or customers, mix online and batch work, need placement control, reserved capacity, private networking or your own observability, and are fine operating Kubernetes. |
 
-The two are not exclusive: a team can start on Serverless AI and move to this fleet when it needs
+A feature-by-feature list and the roadmap are in `docs/ROADMAP.md`. The two are not exclusive: a team can start on Serverless AI and move to this fleet when it needs
 queues, tenants or multi-node jobs; a model is a container plus a few knobs in both. Check the
 Serverless AI documentation for its limits of the day; this table compares the shapes of the two offerings.
 
