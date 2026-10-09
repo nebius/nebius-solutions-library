@@ -115,7 +115,7 @@ variable "postgresql_preset" {
   description = "PostgreSQL resource preset (2vcpu-8gb is minimum)"
   type        = string
   default     = "2vcpu-8gb"
-  
+
   validation {
     condition     = contains(["2vcpu-8gb", "4vcpu-16gb", "8vcpu-32gb"], var.postgresql_preset)
     error_message = "PostgreSQL preset must be 2vcpu-8gb, 4vcpu-16gb, or 8vcpu-32gb."
