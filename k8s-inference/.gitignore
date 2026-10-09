@@ -3,13 +3,11 @@
 kubeconfig*
 *.secret.*
 node_modules/
-infra/state/
-infra/fleet/rendered/
 .terraform.lock.hcl
 .venv-api/
 __pycache__/
 
-# S16 review (2026-10-06): tooling output and customer inputs stay out of git
+# tooling output and customer inputs stay out of git
 .playwright-cli/
 .pytest_cache/
 __pycache__/

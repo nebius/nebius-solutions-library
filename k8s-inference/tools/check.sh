@@ -7,7 +7,8 @@
 #   tools/check.sh            everything
 #   tools/check.sh terraform | render | tests      one part
 #
-# PYTHON (default python3) runs the tests; the reference fleet's own Terraform (infra/) is checked when present.
+# PYTHON (default python3) runs the tests. Terraform roots under infra/ (a reference fleet's own; absent from the
+# library copy) are validated when a checkout has them.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="${TFVARS_EXAMPLE:-$ROOT/terraform.tfvars.example}"

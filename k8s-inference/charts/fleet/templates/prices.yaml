@@ -27,6 +27,7 @@ data:
       max_nodes: {{ $p.max_nodes }}
       interconnect: {{ default "none" $p.interconnect }}
       ib_devices_per_node: {{ include "fleet.ibDevices" $p }}
+      local_nvme: {{ if $p.local_nvme }}true{{ else }}false{{ end }}
     {{- end }}
     {{- end }}
   list.yaml: |

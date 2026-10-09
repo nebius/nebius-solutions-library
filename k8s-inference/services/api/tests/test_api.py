@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 os.environ["CATALOG_DIRS"] = os.path.join(ROOT, "catalog", "models") + ":" + os.path.join(os.path.dirname(__file__), "catalog")   # platform classes + generic endpoint/run-class fixtures
 os.environ["PUBLIC_API_URL"] = "https://api.example"
+os.environ["REGION"] = "eu-north1"   # the region this API serves in the tests (no default in config.py)
 os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"   # async endpoint calls go through the gateway (docs/JOBS.md)
 import pytest, yaml
 from fastapi.testclient import TestClient
@@ -15,7 +16,7 @@ KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, 
 L = "serverless2.nebius"
 FLEET = {"pools": {"hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100"},
                    "hub-l40s-ondemand-1x": {"region": "hub", "pool": "l40s-ondemand-1x", "gpu_class": "l40s"},
-                   "eu-south1-rtx6000-spot-1x": {"region": "eu-south1", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000"}},
+                   "eu-south1-rtx6000-spot-1x": {"region": "eu-south1", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000", "local_nvme": True}},
          "registries": {"hub": "cr.eu-north1.nebius.cloud/e00exampleexampleex", "eu-south1": "cr.eu-south1.nebius.cloud/e07exampleexampleex"}}
 
 
@@ -291,7 +292,7 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     assert rs.status_code == 202 and rs.json()["region"] == "eu-south1" and ("tenant-demo", rs.json()["id"]) in south.jobs
     sj = south.jobs[("tenant-demo", rs.json()["id"])]
     assert _main(sj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
-    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.7"
+    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.8"
     assert sj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     g = c.get(f"/v1/operations/{rs.json()['id']}", headers=H)
     assert g.status_code == 200 and g.json()["region"] == "eu-south1"
@@ -343,7 +344,7 @@ def test_async_builds_endpoint_call_job(client, monkeypatch):
 
 
 def test_async_direct_model_goes_through_the_gateway_with_the_key(client):
-    """F2 (docs/SECURITY-PREREVIEW.md): a model without a LiteLLM route is called at its gateway hostname with
+    """A model without a LiteLLM route is called at its gateway hostname with
     the caller's key, never at the predictor Service; the connection is routed to the gateway's in-cluster
     Service (pods cannot hairpin to the public IP) while the TLS name stays the public hostname."""
     c, fake = client
@@ -439,6 +440,14 @@ def test_normalise_status_and_attempts():
     assert [(a["index"], a["status"], a["node"]) for a in op["attempts"]] == [(1, "PREEMPTED", "node-0"), (2, "RUNNING", "node-1")]
     assert op["attempts"][0]["reason"] == "pod deleted (preempted)" and "_gpus" not in op["attempts"][0]
     assert jobs.gpu_seconds(job, records) == 600.0                      # the other operation's record is not ours
+    # a node that died without warning leaves only the uploader's "started" record (jobs 0.1.8): the attempt is
+    # shown as preempted with no end and bills nothing
+    records.append({"operation": "op-1", "pod": "op-1-lost", "node": "node-9", "status": "started", "exit_code": None, "gpus": 8,
+                    "started_at": "2026-10-05T17:00:00Z", "ended_at": ""})
+    op = jobs.normalise(job, None, records)
+    lost = op["attempts"][0]
+    assert (lost["status"], lost["node"], lost["ended_at"], lost["reason"]) == ("PREEMPTED", "node-9", None, "node lost without warning (no end record)")
+    assert jobs.gpu_seconds(job, records) == 600.0
 
 
 def test_resume_reuses_the_volume_in_the_same_region(client):
@@ -693,9 +702,9 @@ def test_fleet_manager_path(client, monkeypatch):
     job = control.jobs[("tenant-demo", op["id"])]
     assert job["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in job["metadata"]["labels"]
     assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "prefer-h100"
-    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.7"
+    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.8"
     tmpl = job["spec"]["template"]["metadata"]["annotations"]
-    assert tmpl[f"{L}/gpu-classes"] == "h100,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
+    assert tmpl[f"{L}/gpu-classes"] == "h100,h200,b200,b300,gb300,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
     assert not control.pvcs and ("tenant-demo", op["id"]) not in hub.jobs                  # no volume on the manager
     up = {e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][1]["env"]}
     assert up["OUTPUT_PREFIX"] == f"s3://serverless2-demo-eu-north1/operations/{op['id']}"
@@ -790,6 +799,12 @@ def test_run_pods_are_hardened_and_scratch_local_nvme_uses_host_nvme(client, mon
     terms = pod2["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"]
     assert {"key": f"{L}/local-nvme", "operator": "In", "values": ["true"]} in terms
     assert job2["metadata"]["annotations"][f"{L}/scratch"] == "local-nvme" and f"{L}/pvc" not in job2["metadata"]["annotations"]
+    # the dispatcher only sees regions with an NVMe pool (eu-south1 in this fixture), whatever the model's regions
+    assert job2["metadata"]["annotations"].get(f"{L}/regions", "eu-south1") == "eu-south1"
+    # a fleet without an NVMe pool is a 400 instead of a pod that never schedules
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {k: {kk: vv for kk, vv in v.items() if kk != "local_nvme"} for k, v in FLEET["pools"].items()}})
+    r4 = c.post("/v1/models/container-run:invoke", json={"input": {"image": "x", "command": "true", "gpus": 1, "scratch": "local-nvme"}}, headers=H)
+    assert r4.status_code == 400 and "local_nvme" in r4.text
     assert ("tenant-demo", f"{r2.json()['id']}-work") not in fake.pvcs
     up = {e["name"]: e.get("value") for e in pod2["containers"][1]["env"]}
     assert "PVC_NAME" not in up
@@ -1133,6 +1148,19 @@ def test_model_spec_validation(client, admin_keys):
     assert r.json()["model"]["gpu"] == "none"
     assert '"serverless2.nebius/pool": "system"' in json.dumps(fake.custom[("models", "inferenceservices", "cpu-echo")])
     assert c.post("/v1/models", json={"id": "bad-proto", "image": "x", "protocol": "ftp"}, headers=ADMIN).status_code == 400
+
+
+def test_startup_refuses_placeholder_hostnames(monkeypatch):
+    """The manifest's example.invalid placeholders must be replaced per cluster; the API says so at startup."""
+    import config as cfg
+    appmod.check_placeholders()                                     # the test environment sets real-looking values
+    monkeypatch.setattr(cfg, "GRAFANA_URLS", {"<region>": "https://grafana.example.invalid"})
+    with pytest.raises(RuntimeError, match="GRAFANA_URLS"):
+        appmod.check_placeholders()
+    monkeypatch.setattr(cfg, "GRAFANA_URLS", {})
+    monkeypatch.setattr(cfg, "PUBLIC_API_URL", "https://api.example.invalid")
+    with pytest.raises(RuntimeError, match="PUBLIC_API_URL"):
+        appmod.check_placeholders()
 
 
 def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, monkeypatch):

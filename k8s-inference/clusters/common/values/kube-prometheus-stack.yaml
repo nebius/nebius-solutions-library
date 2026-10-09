@@ -41,8 +41,6 @@ alertmanager:
       # a NotReady node explains pending GPU pods, pending Kueue workloads and unready endpoints
       - source_matchers: [alertname = NodeNotReady]
         target_matchers: [component =~ "scheduling|kueue|endpoints"]
-      - source_matchers: [alertname = PostgresDown]
-        target_matchers: [alertname = PostgresNoPrimary]
     route:
       receiver: platform
       group_by: [alertname, namespace]

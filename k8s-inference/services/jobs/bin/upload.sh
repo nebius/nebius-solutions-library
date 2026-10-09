@@ -44,8 +44,9 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   ended=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.finishedAt // empty')
   node=$(field '.spec.nodeName // empty')
   mkdir -p /work/attempts
+  [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
   printf '{"operation":"%s","pod":"%s","node":"%s","status":"%s","exit_code":%s,"gpus":%s,"gpu_class":"%s","started_at":"%s","ended_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$node" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "${ended:-$(date -u +%FT%TZ)}" > "/work/attempts/$POD_NAME.json"
+    "$OPERATION" "$POD_NAME" "$node" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "$ended" > "/work/attempts/$POD_NAME.json"
 }
 
 upload() {   # $1 = status
@@ -74,6 +75,13 @@ while true; do
   EXIT=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.exitCode // empty')
   [ -n "$EXIT" ] && break
   if main_alive; then
+    if [ "$SEEN" = 0 ]; then
+      # the attempt is on record from its first second: a node that dies without warning (a stopped spot VM
+      # sends no SIGTERM, measured 2026-10-09 on a B300 spot node) leaves this "started" record, which the
+      # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
+      record started
+      aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
+    fi
     SEEN=1; gone=0
   elif [ "$SEEN" = 1 ]; then
     gone=$((gone + 1))                        # main's processes are gone; the kubelet can take a while to post the exit code

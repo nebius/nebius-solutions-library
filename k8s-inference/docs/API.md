@@ -71,7 +71,7 @@ version in the history, `GET /v1/models/{model}/history` lists the versions (adm
 gateway hostname, and the edge on those hostnames accepts only a valid LiteLLM key. The group therefore
 calls as the platform's own key: alias `platform-internal` (metadata `tenant: platform, role: internal`,
 no budget, no expiry, every model), created once per fleet by the platform stage (Terraform,
-`stack/platform/litellm-internal.tf`; dev fleet: `infra/bootstrap/cluster-secrets.sh`) and kept in Secret
+`stack/platform/litellm-internal.tf`) and kept in Secret
 `api/litellm-internal`, which the control API reads as `LITELLM_INTERNAL_KEY`. The caller's own key is
 checked first: LiteLLM applies its budget, rate limit and spend before it routes to the group, then the edge
 sees the internal key, so the per-key rate limit of the edge (`SecurityPolicy model-key-check`) counts

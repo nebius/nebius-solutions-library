@@ -1046,7 +1046,7 @@ data:
       {
        "id": 92,
        "type": "row",
-       "title": "LiteLLM spend (hub only: LiteLLM Postgres datasource)",
+       "title": "LiteLLM spend (control cluster: LiteLLM database datasource)",
        "collapsed": false,
        "gridPos": {
         "x": 0,

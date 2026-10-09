@@ -4,7 +4,7 @@
 set -euo pipefail
 cd /work
 # out/ and checkpoint/ are created by this container (uid 10001) but written by `main`, which runs as the image's
-# user with every capability dropped (no CAP_DAC_OVERRIDE even as root, docs/SECURITY-PREREVIEW.md F1): world-writable
+# user with every capability dropped (no CAP_DAC_OVERRIDE even as root): world-writable
 # with the setgid bit so whatever user writes there, the files stay group-readable for the uploader
 mkdir -p out checkpoint
 chmod 2777 out checkpoint 2>/dev/null || true

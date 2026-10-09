@@ -7,7 +7,7 @@ metadata:
   labels:
     serverless2.nebius/kueue: managed      # Kueue admits every queued job in this namespace
     serverless2.nebius/tenant: {{ .Values.name }}
-    # Pod Security Admission (docs/SECURITY-PREREVIEW.md F1): the API never renders a privileged pod; the
+    # Pod Security Admission (tenant pods share the GPU nodes): the API never renders a privileged pod; the
     # admission controller proves it (baseline enforced: no privileged, hostPath, hostPID/network, added caps).
     # InfiniBand tenants stay at baseline: RDMA needs no capability on nodes whose container runtime has an
     # unlimited memlock limit (docs/JOBS.md "Multi-node runs").

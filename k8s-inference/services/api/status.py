@@ -40,7 +40,9 @@ def _gpus(pod: dict) -> int:
     return 0
 
 
-RECORD_STATUS = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED"}
+# "started" is the record the uploader writes when main starts; it stays the only one when the node died
+# without a shutdown: the attempt was preempted, its end is unknown, it bills nothing.
+RECORD_STATUS = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}
 
 
 def _attempts(pods: list, records: list | None = None, name: str | None = None) -> list[dict]:
@@ -72,7 +74,7 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         out.append({"started_at": r.get("started_at") or None, "ended_at": r.get("ended_at") or None,
                     "status": RECORD_STATUS.get(r.get("status"), "FAILED"), "node": r.get("node") or None,
                     "gpu_class": r.get("gpu_class") or None,
-                    "reason": "pod deleted (preempted)" if r.get("status") == "interrupted" else None,
+                    "reason": {"interrupted": "pod deleted (preempted)", "started": "node lost without warning (no end record)"}.get(r.get("status")),
                     "exit_code": r.get("exit_code"), "_gpus": int(r.get("gpus") or 0)})
     out.sort(key=lambda a: a["started_at"] or "")
     for i, a in enumerate(out, 1):

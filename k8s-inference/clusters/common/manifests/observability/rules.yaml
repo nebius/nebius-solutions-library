@@ -95,22 +95,6 @@ spec:
           annotations:
             summary: "InferenceService {{ $labels.namespace }}/{{ $labels.name }} not Ready for 10 min"
             description: "Ready=False for 10 minutes (image pull, model download, GPU wait or a crashing predictor). Scaled-to-zero endpoints stay Ready and do not trigger this."
-        - alert: PostgresDown
-          expr: |
-            (up{job=~".*cnpg-postgres"} == 0)
-            or (cnpg_collector_up == 0)
-            or (count by (namespace) (kube_pod_status_ready{namespace="data",pod=~"postgres-.*",condition="true"} == 1) < 1)
-          for: 2m
-          labels: { severity: critical, component: postgres }
-          annotations:
-            summary: "Postgres down ({{ $labels.namespace }}: CNPG `postgres` in data)"
-            description: "data/postgres is the CNPG cluster behind LiteLLM (keys, spend, logs); the API itself has no database."
-        - alert: PostgresNoPrimary
-          expr: count(cnpg_pg_replication_in_recovery == 0) < 1
-          for: 2m
-          labels: { severity: critical, component: postgres }
-          annotations:
-            summary: "No Postgres primary (all instances in recovery)"
         - alert: CertificateExpiringSoon
           expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 30 * 24 * 3600
           for: 1h

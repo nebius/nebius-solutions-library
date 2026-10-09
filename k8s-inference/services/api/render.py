@@ -118,7 +118,8 @@ def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None
             "volumeMounts": [{"name": "work", "mountPath": "/work"}], "securityContext": RUNNER_SECURITY_CONTEXT}
 
 
-# Hardening of every rendered pod (docs/SECURITY-PREREVIEW.md F1): no privilege escalation, no capabilities, the
+# Hardening of every rendered pod (tenant containers share the GPU nodes, README "Security notes"): no privilege
+# escalation, no capabilities, the
 # runtime's default seccomp profile. The runner containers (fetch, uploader, call) run as the image's uid 10001;
 # the model container keeps the image's user unless the job class sets `runAsNonRoot` (many model images run as root).
 # Together with Pod Security Admission `baseline` on the tenant namespaces (charts/tenant) this is what the API

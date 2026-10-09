@@ -5,7 +5,7 @@
 # appended) and restarts containerd through the host's systemd when the running process does not serve it (checked
 # by a probe pull, not the file). It also lifts the runtime's memlock limit (systemd drop-in) so RDMA works in pods
 # without CAP_IPC_LOCK (docs/JOBS.md "Multi-node runs"). Since 2026-10-07 the GPU node-group cloud-init writes the same drop-in at
-# boot (infra/cluster), so on a fresh node this is a no-op; it stays as the catch-all and repairs legacy nodes.
+# boot (`stack/modules/cluster`), so on a fresh node this is a no-op; it stays as the catch-all and repairs legacy nodes.
 # Running containers are unaffected (they belong to their shims); the kubelet reconnects. Spegel then writes
 # the per-registry hosts.toml files that this setting makes containerd read.
 apiVersion: apps/v1

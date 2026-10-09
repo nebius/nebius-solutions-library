@@ -135,6 +135,18 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
             terms.append({"key": f"{LABEL}/pool", "operator": "In", "values": pools})
     if local_nvme:
         terms.append({"key": f"{LABEL}/local-nvme", "operator": "In", "values": ["true"]})
+        # only regions with an NVMe pool are candidates for the dispatcher: Kueue ignores an affinity key that
+        # no flavor of a cluster declares, so a worker without such a pool would admit the run and leave its pod
+        # Pending for ever (measured 2026-10-08/09; the flavor of a local_nvme pool carries the label since then)
+        nvme_regions = sorted({p["region"] for p in (kube.fleet().get("pools") or {}).values() if p.get("local_nvme") in (True, "true")})
+        if kube.fleet().get("pools") and not nvme_regions:
+            raise HTTPException(400, "scratch local-nvme needs a pool with local_nvme = true; this fleet has none (docs/FLEET.md \"Local NVMe\")")
+        if placement is not None and nvme_regions:
+            wanted = placement.get("regions") or nvme_regions
+            keep = [r for r in wanted if r in nvme_regions]
+            if not keep:
+                raise HTTPException(400, f"scratch local-nvme: none of the regions {wanted} has a pool with local_nvme = true (regions with one: {nvme_regions})")
+            placement = {**placement, "regions": keep}
     if terms:
         pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}}}
     if r.get("imagePullSecret"):
@@ -305,7 +317,7 @@ def build_async(name: str, model: dict, inp: dict, tenant: str, key: str, label:
     """(Job, Secret): a queued endpoint call through LiteLLM's pass-through route when the model has
     one (spend lands on the caller's key), else through the cluster's gateway with the caller's key
     (TLS, key check, per-key rate limit: the same path as an external client; never the predictor
-    Service, docs/SECURITY-PREREVIEW.md F2). The key goes into a per-operation Secret owned by the
+    Service, so no call skips the key check or the accounting). The key goes into a per-operation Secret owned by the
     Job, never into the Job spec."""
     env = []
     if model.get("litellm_route"):

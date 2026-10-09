@@ -67,6 +67,11 @@ docker buildx build --push --platform linux/amd64 -t $SRC/serverless2/api:0.7.1 
 # reference: registry.serverless2.local/nebius/serverless2/api:0.7.1
 ```
 
+The ops image pins the Nebius CLI and crane by version and SHA-256
+(`services/ops/Dockerfile`: build args `NEBIUS_CLI_VERSION` / `NEBIUS_CLI_SHA256`,
+`CRANE_VERSION` / `CRANE_SHA256`, download host `NEBIUS_CLI_BASE_URL`); a bump
+sets both the version and the sum, and the build fails on a mismatch.
+
 Tags are immutable by convention: the caches keep what they have synced and do
 not re-check an existing tag upstream. A new build is a new tag (every
 `services/*` README bumps a version); the pre-pull list and the manifests name
@@ -118,7 +123,7 @@ reference `registry.serverless2.local/<alias>/<path>`.
 
 ## The setting at boot (Terraform, applied 2026-10-07)
 
-Two files are written by cloud-init on every GPU node (`infra/cluster/main.tf`,
+Two files are written by cloud-init on every GPU node (`stack/modules/cluster/main.tf`,
 `gpu_cloud_init`): the containerd drop-in below, and the mirror file
 `/etc/containerd/certs.d/registry.serverless2.local/hosts.toml` pointing at the
 Zot NodePort on the node itself (`server = "http://127.0.0.1:30500"`). Spegel
@@ -132,7 +137,7 @@ DaemonSet has restarted containerd (one failed pull, retried by the kubelet
 about 10 s later: measured 2 min 5 s from node creation to a running job
 container; with several pods landing at once the kubelet's pull back-off
 stretched that to minutes on 2026-10-07). Since 2026-10-07 the same drop-in is
-written by cloud-init in the GPU node-group template (`infra/cluster/main.tf`,
+written by cloud-init in the GPU node-group template (`stack/modules/cluster/main.tf`,
 `gpu_cloud_init`, next to the `weights` mount), so a fresh node's first pulls
 already go through the cache. The DaemonSet stays as the catch-all and does
 nothing on a node that already has the setting (same marker file). The

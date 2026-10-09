@@ -5,3 +5,7 @@
 
 .github/workflows/soperator* @dstaroff @asteny @rdjjke @Uburro @itechdima @theyoprst @ChessProfessor @ali-sattari
 soperator/ @dstaroff @asteny @rdjjke @Uburro @itechdima @theyoprst @ChessProfessor @ali-sattari
+
+# k8s-inference (the inference solution; the line is written by its sync, see .github/workflows/k8s-inference.yml)
+k8s-inference/ @rene-tech
+.github/workflows/k8s-inference.yml @rene-tech

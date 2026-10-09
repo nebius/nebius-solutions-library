@@ -37,8 +37,8 @@ locals {
   # Chart list: clusters/common/apps/*.yaml (the same files the optional Argo CD mode reads).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
   # Components this stage renders itself from templates (control-only manifests) or not at all.
-  # (cloudnative-pg and postgres are the reference fleet's in-cluster database until it migrates to the
-  # managed one; the solution uses Nebius Managed PostgreSQL, stack/cloud/database.tf.)
+  # (postgres and cloudnative-pg no longer exist in clusters/common/apps; kept here so an older checkout of
+  # the app list is still skipped. The database is Nebius Managed PostgreSQL, stack/cloud/database.tf.)
   apps_skip = ["postgres", "cloudnative-pg", "ui-app", "fleet-access", "api-agent"]
   apps = { for n, a in local.apps_all : n => a if !contains(local.apps_skip, n) && (
     a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control)
@@ -150,9 +150,9 @@ locals {
     observability = [
       { target = { kind = "CronJob", name = "cost-export", namespace = "monitoring" }, patch = yamlencode(concat([
         { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/0/value", value = "${local.name}-${local.id}" },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/1/value", value = local.cloud.hub.backups_bucket_endpoint },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/2/value", value = local.hub_region },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/args/0", value = "set -e\naws s3 cp /out/ \"s3://${local.cloud.hub.backups_bucket}/cost-reports/$${CLUSTER}/\" --recursive --no-progress\n" },
+        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/1/value", value = local.cloud.hub.backups_bucket },
+        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/2/value", value = local.cloud.hub.backups_bucket_endpoint },
+        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/3/value", value = try(local.cloud.hub.backups_bucket_region, local.hub_region) },
       ], local.f.observability.cost_export ? [] : [{ op = "replace", path = "/spec/suspend", value = true }])) },
     ]
     # cost dispatcher + spot price feed (control only): the platform image tag from images.versions

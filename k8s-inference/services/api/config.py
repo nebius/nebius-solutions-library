@@ -8,10 +8,10 @@ LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 # hostnames. Optional: without it no group is registered (the endpoint still answers through the API).
 LITELLM_INTERNAL_KEY = os.environ.get("LITELLM_INTERNAL_KEY", "")
 CATALOG_DIRS = os.environ.get("CATALOG_DIRS", "/app/catalog/models").split(":")
-REGION = os.environ.get("REGION", "eu-north1")                      # the region this API runs in (in-cluster client)
-HUB_REGION = os.environ.get("HUB_REGION", REGION)                   # the region the catalog's `deployments.hub` means (control cluster: eu-north1)
-# other regions: "<region>=<kubeconfig path>,..." (Secret mounted by the Deployment; missing files are skipped)
-REGION_KUBECONFIGS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_KUBECONFIGS", "eu-south1=/etc/kubeconfigs/eu-south1").split(",") if "=" in kv)
+REGION = os.environ.get("REGION", "control")                        # the region this API runs in (in-cluster client); `control` on the fleet manager
+HUB_REGION = os.environ.get("HUB_REGION", REGION)                   # the region the catalog's `deployments.hub` means (the manager sets it)
+# other regions: "<region>=<kubeconfig path>,..." (Secret mounted by the Deployment; missing files are skipped); the manager only
+REGION_KUBECONFIGS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_KUBECONFIGS", "").split(",") if "=" in kv)
 # regional API hosts: "<region>=https://api.<ip>.sslip.io,...". A sync/async invoke for another region is
 # forwarded there (same key, same body) instead of answered with 400; the control cluster's API sets this.
 REGION_API_URLS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_API_URLS", "").split(",") if "=" in kv)
@@ -43,14 +43,14 @@ S3_ENV_SECRET = os.environ.get("S3_ENV_SECRET", "s3")                # AWS_* env
 EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")            # job ServiceAccount in the tenant namespace (charts/tenant)
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
-RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.7")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.8")
 # the cost dispatcher's ranking (services/dispatcher `GET /v1/rank`, Service kueue-system/dispatcher): asked at submission
 # for a run class with per-GPU-class images (`job.images`), docs/SCHEDULING.md "Per-GPU images for runs"
 DISPATCHER_URL = os.environ.get("DISPATCHER_URL", "http://dispatcher.kueue-system.svc:80").rstrip("/")
 RANK_TIMEOUT_S = float(os.environ.get("RANK_TIMEOUT_S", "3"))
 # External domain of this cluster's endpoints (the Knative domain, e.g. <gateway ip>.sslip.io): async endpoint calls
 # from tenant Jobs go through the gateway (TLS, key check, rate limit) as https://<model>-predictor.<ns>.<domain>,
-# never to the predictor Service (docs/SECURITY-PREREVIEW.md F2). Empty = no async calls to direct endpoints.
+# never to the predictor Service (no call may skip the key check). Empty = no async calls to direct endpoints.
 ENDPOINT_DOMAIN = os.environ.get("ENDPOINT_DOMAIN", "")
 # curl --connect-to <host>:443:<this>:443 keeps the TLS name and routes the connection to the gateway's in-cluster
 # Service instead of the public IP (measured 2026-10-08: both work from a tenant pod on mk8s; the Service avoids the

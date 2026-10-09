@@ -4,7 +4,7 @@
 # DNS, the Kubernetes API (the uploader polls its own pod), the gateway (`envoy-gateway-system`: endpoint
 # calls go through the gateway's hostname with the caller's key, exactly like an external client; the
 # predictor Services in `models` and the Knative activator are NOT reachable from tenant pods, so no call
-# can skip the key check, the rate limit or the accounting, docs/SECURITY-PREREVIEW.md F2), and the world
+# can skip the key check, the rate limit or the accounting), and the world
 # (tenant bucket, NGC, public endpoints), never another namespace in the cluster (other tenants, litellm,
 # data, api, kube-system beyond DNS).
 # Traffic inside one tenant namespace (multi-pod runs, JobSets) is not covered here: a cluster-wide policy

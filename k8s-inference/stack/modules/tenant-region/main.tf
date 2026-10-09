@@ -3,7 +3,7 @@
 # tenant namespace uses (Secrets tenant-storage / s3). `protect_data` makes the bucket refuse destroy.
 terraform {
   required_providers {
-    nebius = { source = "terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius" }
+    nebius = { source = "nebius/nebius" }
   }
 }
 
@@ -62,7 +62,7 @@ resource "terraform_data" "empty_bucket" {
   count = var.protect_data ? 0 : 1
   input = {
     script   = "${path.module}/../../scripts/empty-bucket.sh"
-    endpoint = "https://storage.${var.region}.nebius.cloud"
+    endpoint = local.endpoint
     bucket   = nebius_storage_v1_bucket.disposable[0].name
     key      = nebius_iam_v2_access_key.tenant.status.aws_access_key_id
     secret   = nebius_iam_v2_access_key.tenant.status.secret
@@ -85,15 +85,23 @@ resource "nebius_iam_v2_access_key" "tenant" {
   account              = { service_account = { id = nebius_iam_v1_service_account.tenant.id } }
 }
 
+# The bucket's S3 host and region come from its status (the region name is the fallback until the first apply).
+locals {
+  bucket   = var.protect_data ? nebius_storage_v1_bucket.protected[0] : nebius_storage_v1_bucket.disposable[0]
+  host     = coalesce(try(local.bucket.status.domain_name, null), "storage.${var.region}.nebius.cloud")
+  endpoint = "https://${local.host}"
+}
+
 output "storage" {
   sensitive = true
   value = {
     bucket     = var.name
-    endpoint   = "https://storage.${var.region}.nebius.cloud"
-    region     = var.region
+    endpoint   = local.endpoint
+    region     = coalesce(try(local.bucket.status.region, null), var.region)
     access_key = nebius_iam_v2_access_key.tenant.status.aws_access_key_id
     secret_key = nebius_iam_v2_access_key.tenant.status.secret
   }
 }
 output "service_account_id" { value = nebius_iam_v1_service_account.tenant.id }
 output "bucket" { value = var.name }
+output "bucket_host" { value = local.host }

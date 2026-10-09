@@ -160,11 +160,11 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.9.3")
-        dispatcher = optional(string, "0.1.8")
-        jobs       = optional(string, "0.1.7")
+        api        = optional(string, "0.9.6")
+        dispatcher = optional(string, "0.1.9")
+        jobs       = optional(string, "0.1.8")
         ops        = optional(string, "0.1.10")
-        ui         = optional(string, "0.2.3")
+        ui         = optional(string, "0.5.0")
       }), {})
     }), {})
 
@@ -297,9 +297,11 @@ variable "fleet" {
       contains(["spot", "on_demand", "reserved"], p.capacity.type)
       && (p.capacity.type != "reserved" || length(p.capacity.reservation_ids) > 0)
       && (p.capacity.type == "reserved" || length(p.capacity.reservation_ids) == 0)
+      && (p.capacity.type == "spot" || p.capacity.max_price == null)
+      && (p.capacity.max_price == null || try(tonumber(p.capacity.max_price) > 0, false))
       && p.max_nodes >= p.min_nodes && p.min_nodes >= 0
     ])])
-    error_message = "pools: capacity.type is spot | on_demand | reserved; reserved needs reservation_ids (and only reserved may set them); 0 <= min_nodes <= max_nodes."
+    error_message = "pools: capacity.type is spot | on_demand | reserved; reserved needs reservation_ids (and only reserved may set them); max_price (USD per GPU-hour, > 0) only on spot: with it the pool is capped by a pricing policy, without it the pool follows the spot price; 0 <= min_nodes <= max_nodes."
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.pools : can(regex("^[0-9]+gpu-[0-9]+vcpu-[0-9]+gb$", p.preset))])])

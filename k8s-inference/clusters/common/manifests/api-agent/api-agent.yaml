@@ -39,6 +39,9 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]           # ready replicas of an endpoint (services/api/kube.py endpoint_status)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

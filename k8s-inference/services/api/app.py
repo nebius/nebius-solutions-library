@@ -8,22 +8,33 @@ from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
-import artifacts, billing, catalog, db, jobs, kube, models, monitoring, placement as placing
+import artifacts, billing, catalog, config as cfg, db, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
 from auth import Principal, check_budget, check_model, forget, principal
 from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
 
+def check_placeholders() -> None:
+    """Refuse to start with a manifest placeholder (clusters/common/manifests/api/api.yaml carries
+    `example.invalid` hostnames that the platform stage or the cluster overlay must replace): a placeholder
+    would end up in every invoke link and Grafana link this API hands out."""
+    bad = [name for name, value in (("PUBLIC_API_URL", cfg.PUBLIC_API_URL), ("GRAFANA_URLS", ",".join(cfg.GRAFANA_URLS.values())))
+           if "example.invalid" in value]
+    if bad:
+        raise RuntimeError(f"placeholder hostnames in {', '.join(bad)}: set them per cluster (stack/platform/stage.tf)")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """The control API owns the fleet database schema (services/api/db.py MIGRATIONS), applied at startup."""
+    check_placeholders()
     if db.enabled():
         log.info("database schema version %s", db.migrate())
     yield
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.3", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.6", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):

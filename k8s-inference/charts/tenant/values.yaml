@@ -19,11 +19,12 @@ infinibandClaimCounts: [8, 4]       # NICs per node: 8 on H100/H200/B200/B300 fu
 infinibandDeviceClass: ib.networking.nebius.ai
 sharedScratch: { claim: scratch-shared, size: 1Ti }
 fleet: {}                      # fleet.yaml `fleet:` document (GPU classes -> prefer-<class> queues); passed by onboarding
-clusters:
+clusters:                      # keyed by cluster id: the models stage passes this cluster's entry (stack/models/main.tf), a
+                               # tenants/<name>.yaml of the reference fleet all of them. The entries below are placeholders.
   control:                     # the MultiKueue manager: namespace, profile queues and the API binding only (no pods run here)
-    region: eu-north1
+    region: ""
     manager: true
-  hub:
-    region: eu-north1
-    bucket: ""                 # serverless2-<name>-<region>
-    endpoint: storage.eu-north1.nebius.cloud
+  hub:                         # a worker: its region, the tenant bucket there and that bucket's S3 host (bucket status)
+    region: ""
+    bucket: ""                 # <fleet>-<name>-<region>
+    endpoint: ""               # storage.<region>.nebius.cloud, from the bucket's status.domain_name

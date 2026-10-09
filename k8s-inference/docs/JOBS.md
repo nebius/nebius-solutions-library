@@ -110,8 +110,14 @@ on every exit path, including a partial upload on SIGTERM; `GET /v1/operations/{
 pass merge these records with the live pods (a live pod wins over its own record). The list
 endpoint shows live pods only. Measured on the hub: an endpoint scaling up on the shared H100 pool
 preempted a run's pod two seconds after `main` had finished; the Job was still `Complete`, the
-outputs were in the bucket, the pod was gone. What is lost when a node dies without warning is
-the record of that last attempt (the uploader never ran); earlier attempts stay recorded.
+outputs were in the bucket, the pod was gone. A node that dies without warning (a spot VM stopped by
+Nebius: no SIGTERM reaches the pod; measured 2026-10-09 on a B300 spot node, `docs/dev-fleet/VERIFICATION-DEV.md`)
+leaves the "started" record the uploader writes to the volume and the bucket when `main` begins (jobs
+image 0.1.8): the attempt shows as `PREEMPTED` with reason "node lost without warning", no end time, and
+bills nothing. A stop that is orderly enough for the SIGTERM path (the B300 spot VM stopped on
+2026-10-09) gets the full record on the volume, which before 0.1.8 reached the bucket, and the
+operation, only with the next upload on that volume (the resumed attempt's); the start record makes
+the attempt visible at once either way.
 
 **Manual: `POST /v1/operations/{id}:resume`.** For a run that is `FAILED` (retries exhausted,
 or a bug that has since been fixed in the inputs) or `CANCELLED`. The API renders Job `<id>-r<n>`
@@ -303,7 +309,8 @@ to the model's LiteLLM pass-through route (the caller's key, in a per-operation 
 Job, so spend lands on that key) or to the endpoint's **gateway hostname**
 (`https://<model>-predictor.models.<ENDPOINT_DOMAIN>`, the regional API's `ENDPOINT_DOMAIN`) with the
 caller's key: the same path, key check and per-key rate limit as an external client, never the
-predictor Service (the tenant policy does not reach `models`; docs/SECURITY-PREREVIEW.md F2).
+predictor Service (the tenant policy does not reach `models`, so no call skips the key check or the
+accounting).
 `call.sh` reaches the gateway's in-cluster Service with curl `--connect-to` while keeping the
 public TLS name (`ENDPOINT_CONNECT_TO`, runner 0.1.4; the public IP works from pods too, measured,
 the Service avoids the NAT hop). It retries 408/429/5xx/connection

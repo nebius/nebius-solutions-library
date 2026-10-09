@@ -3,8 +3,8 @@
 *For reviewers: what was measured, where and when, written without the names of the application-layer
 models the reference fleet uses as its acceptance tests. Every number comes from a real cluster. The ids,
 hostnames and IP addresses are those of the reference fleet and of temporary test fleets; a fleet you
-deploy has its own. The full, model-by-model record of the reference fleet stays in the source
-repository (`docs/dev-fleet/VERIFICATION-DEV.md`).*
+deploy has its own. The full, model-by-model record of the reference fleet stays with that fleet's
+maintainers; it is not part of this solution.*
 
 Test workloads used throughout: `hello-run` (a CPU job), `container-run` (any container as a job; a
 checkpoint loop and `sleep` commands), `distributed-run` (a two-node NCCL all-reduce), a molecular

@@ -39,7 +39,10 @@ fleet = {
       # shared filesystem for model weights (warm cold starts): /mnt/weights on every GPU node
       weights_filesystem = { enabled = true, size_gib = 2048 }
       pools = {
-        # spot with a price cap (USD per GPU-hour); the pool follows the spot price when max_price is omitted
+        # Spot capacity: exactly one of two modes per pool. With max_price (USD per GPU-hour) the node group
+        # is capped by a pricing policy: nodes stop when the spot price exceeds the cap and come back below it.
+        # Without max_price the pool follows the spot price (never stopped for price, only when Nebius needs
+        # the capacity back). The dispatcher orders reserved before on-demand before spot in every class.
         h100-spot-1x = {
           platform  = "gpu-h100-sxm"
           preset    = "1gpu-16vcpu-200gb"
@@ -75,12 +78,14 @@ fleet = {
     }
     # A second region: its own project and subnet; the fleet queues span both and the dispatcher sends
     # every run to the cheapest region that has a free pool of the model's GPU class (docs/SCHEDULING.md).
+    # The pool follows the spot price (no max_price) and gets the host NVMe as kubelet ephemeral storage (only
+    # the 8-GPU B300 preset ships local disks, docs/FLEET.md "Local NVMe"; verified on 2026-10-09).
     # eu-west2 = {
     #   project_id         = "project-e04xxxxxxxxxxxxxxxxx"
     #   subnet_id          = "vpcsubnet-e04xxxxxxxxxxxxxxxx"
     #   weights_filesystem = { enabled = true, size_gib = 2048 }
     #   pools = {
-    #     b300-spot-1x = { platform = "gpu-b300-sxm", preset = "1gpu-24vcpu-346gb", gpu_class = "b300", capacity = { type = "spot" }, max_nodes = 4, local_nvme = true }
+    #     b300-spot-8x = { platform = "gpu-b300-sxm", preset = "8gpu-192vcpu-2768gb", gpu_class = "b300", capacity = { type = "spot" }, max_nodes = 2, local_nvme = true }
     #   }
     # }
   }

@@ -41,7 +41,7 @@ resource "helm_release" "tenant" {
     clusters = { (local.id) = local.role.worker ? {
       region   = local.region
       bucket   = module.tenant_region[each.key].bucket
-      endpoint = "storage.${local.region}.nebius.cloud"
+      endpoint = module.tenant_region[each.key].bucket_host
       } : {
       region  = local.region
       manager = true

@@ -43,6 +43,10 @@ The two are not exclusive: a team can start on Serverless AI and move to this fl
 queues, tenants or multi-node jobs; a model is a container plus a few knobs in both. Check the
 Serverless AI documentation for its limits of the day; this table compares the shapes of the two offerings.
 
+A note on names: `serverless2` in image paths, label keys (`serverless2.nebius/...`), gateway and Service
+names is this platform's working name, the second generation of the serverless inference platform it grew
+out of. It is not Nebius Serverless AI, the managed service the table compares with.
+
 ## How it is put together
 
 ```
@@ -73,8 +77,9 @@ requirement to the mechanism that implements it.
   control plane, it can still be a GPU region).
 - The Nebius CLI logged in with `editor` on those projects (`nebius profile activate <name>` picks the
   profile; `./stack.sh` takes an access token from it with `nebius iam get-access-token` and hands it to
-  Terraform as `NEBIUS_IAM_TOKEN`, the same way as the other solutions in this library). Terraform 1.11 or newer, `helm`,
-  `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
+  Terraform as `NEBIUS_IAM_TOKEN`, the same way as the other solutions in this library). Terraform 1.11 or newer with
+  the Nebius provider `nebius/nebius` from the public registry (floor `>= 0.6.23`, the newest floor in this library;
+  validated with 0.6.67), `helm`, `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
   `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
 - Optional: an NVIDIA NGC key for NIM images, a Hugging Face token for gated weights. They are read from
   environment variables, never written into the tfvars.
@@ -123,8 +128,8 @@ jobs from a container description, observability and cost. It knows nothing abou
 
 Everything that is specific to a domain sits on top, as an application layer that brings its own models: a
 scientific-AI platform with its docking, speech and molecular-dynamics containers, a chat product with its
-LLMs, a team's fine-tuning jobs. The source repository keeps worked examples of such a layer in
-`examples/scientific-ai` (not part of this solution).
+LLMs, a team's fine-tuning jobs. Such a layer is not part of this solution; it talks to the platform
+through the API only.
 
 ## The one file
 
@@ -221,7 +226,30 @@ capabilities, no privilege escalation, the default seccomp profile and a tenant-
 APIs. Generated credentials live only in the state bucket (sensitive outputs) and in the clusters'
 Secrets. The fleet database has no public access and is reached only from the control cluster's VPC; its
 password is Terraform-generated and lives in Kubernetes Secrets; the control API is its only writer of
-model definitions. `docs/SECURITY-PREREVIEW.md` lists what was reviewed and what is accepted.
+model definitions.
+
+## Security notes and limitations
+
+This is a template for a platform team, not a hardened multi-tenant service. What it does not do, so
+that nobody assumes it does:
+
+- **Shared GPU nodes.** Tenant containers (runs and endpoints) share the GPU nodes of a region. Each pod
+  runs under Pod Security `baseline` with every capability dropped, no privilege escalation and the
+  runtime's default seccomp profile, in its own namespace behind a tenant-local network policy; the model
+  container runs as the user its image sets, root included, unless the job class sets `runAsNonRoot`.
+  That is container isolation, not VM isolation: a kernel or driver escape would expose the node to every
+  tenant on it. Run images you trust, or give a tenant its own pools.
+- **Operator UIs.** Grafana (and Argo CD when `argocd.enabled`) use a password login behind the source-IP
+  allow-list `edge.source_cidrs`; there is no single sign-on, no second factor and no audit trail beyond the
+  tools' own logs. Keep the allow-list tight.
+- **Traffic inside the clusters is not encrypted.** TLS ends at the public listeners; calls from the
+  gateway to LiteLLM, the API and the model pods, and between the control cluster and the workers over
+  the Kubernetes APIs, cross the VPC in the clear except where the endpoint itself is TLS (Kubernetes API
+  servers, the managed database). No service mesh is installed.
+- **No scanning of user images.** CI scans the five platform images with `trivy`; the images tenants
+  register through the API are pulled and run as they are. Scan them before you register them.
+- **Not reviewed for customer-facing use.** A formal security review is due before anyone outside your
+  organisation gets a key.
 
 ## Troubleshooting
 

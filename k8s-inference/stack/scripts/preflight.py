@@ -57,6 +57,25 @@ for rn, r in regions.items():
                 findings.append(f"{rn}/{pn}: interconnect = infiniband but {plat}/{preset} does not allow GPU clustering; presets that do: {', '.join(clusterable) or 'none'}")
         if p.get("local_nvme") and not (plat == "gpu-b300-sxm" and preset == "8gpu-192vcpu-2768gb"):
             findings.append(f"{rn}/{pn}: local_nvme on {plat}/{preset}: only gpu-b300-sxm/8gpu-192vcpu-2768gb ships local NVMe (docs/FLEET.md)")
+        # spot pools are preemptible VMs: the platform must be allowed for preemptibles in that project, and the
+        # quota that applies is the preemptible one (counted in VMs), not the GPU quota (docs/FLEET.md "Spot capacity")
+        if (p.get("capacity") or {}).get("type") == "spot" and d.get("status", {}).get("allowed_for_preemptibles") is not True:
+            findings.append(f"{rn}/{pn}: capacity spot, but {plat} is not allowed for preemptibles in {r['project']} (status.allowed_for_preemptibles)")
+
+# the quotas that matter, per project: preemptible VMs for spot pools, GPUs per platform for the others. The
+# allowance API exposes usage and a usage state, not the numeric limit, so this is a report, not a check: the
+# node-group creation of `apply cloud` is the hard test and fails within minutes when the quota is exhausted.
+for project in sorted({r["project"] for r in regions.values()}):
+    q, err = nebius("quotas", "quota-allowance", "list", "--parent-id", project, "--page-size", "1000")
+    if err:
+        print(f"   quotas of {project}: not readable ({err[:80]})"); continue
+    wanted = {"compute.instance.preemptible.count"} | {f"compute.instance.gpu.{p['platform'].split('-')[1]}" for r in regions.values() if r["project"] == project for p in r["pools"].values()}
+    for item in q.get("items", []):
+        name = item["metadata"]["name"]
+        if name in wanted:
+            st = item.get("status", {})
+            print(f"   quota {project} {name}: usage {st.get('usage', '?')} ({st.get('usage_state', '?')})")
+
 
 # catalog entries whose GPU classes are all absent from the fleet would name a Kueue queue that does not exist
 nc = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file={tfvars}"], input="jsonencode(local.catalog_without_fleet_class)",

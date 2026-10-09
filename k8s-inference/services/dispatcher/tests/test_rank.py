@@ -168,3 +168,39 @@ def test_nominate_restates_kueue_admission_owned_status():
 def test_owner_job_accepts_jobsets_of_multinode_runs():
     assert d.owner_job({"metadata": {"ownerReferences": [{"kind": "JobSet", "name": "op-mn"}]}}) == "op-mn"
     assert d.owner_job({"metadata": {"ownerReferences": [{"kind": "Deployment", "name": "x"}]}}) is None
+
+
+def test_spot_pool_is_a_candidate_at_once_after_on_demand_of_its_class():
+    # capacity-first: inside one class reserved, then on-demand, then spot; a spot pool needs no waiting period
+    pools = dict(POOLS)
+    pools["hub-h100-ondemand"] = {"region": "hub", "pool": "h100-ondemand", "gpu_class": "h100", "capacity": "on_demand", "usd_per_gpu_hour": 4.5}
+    clusters = d.clusters_from_pools(pools)
+    free = {("hub", "h100-reserved"): 4, ("hub", "h100-ondemand"): 4, ("hub", "h100-spot"): 4}
+    r = d.rank({"classes": ["h100"], "strategy": "preferred"}, clusters, free, 1, {"hub/h100-spot": 0.79})
+    assert [x[1] for x in r] == ["h100-reserved", "h100-ondemand", "h100-spot"]
+    assert r[2][2] == 0.79   # the live quote, not the 2.15 list price
+    # the spot pool wins as soon as the others are full
+    r = d.rank({"classes": ["h100"], "strategy": "preferred"}, clusters, {("hub", "h100-spot"): 4}, 1, {"hub/h100-spot": 0.79})
+    assert r[0][1] == "h100-spot" and r[0][3] is True
+
+
+def test_price_feed_quotes_spot_as_follow_price_not_priority(monkeypatch):
+    import price_feed
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+
+        class R:
+            stdout = '{"hourly_cost": {"general": {"total": {"cost": "7.92"}}}}'
+        return R()
+
+    monkeypatch.setattr(price_feed.subprocess, "run", fake_run)
+    assert price_feed.estimate("project-x", "gpu-b300-sxm", "8gpu-192vcpu-2768gb", True) == 7.92
+    cmd = seen["cmd"]
+    assert "--resource-spec-compute-instance-spec-follows-spot-price" in cmd
+    assert cmd[cmd.index("--resource-spec-compute-instance-spec-preemptible-on-preemption") + 1] == "STOP"
+    assert not any("priority" in a for a in cmd)   # deprecated since 2026-05-11, the CLI rejects it
+    price_feed.estimate("project-x", "gpu-b300-sxm", "8gpu-192vcpu-2768gb", False)
+    assert not any("preemptible" in a or "spot" in a for a in seen["cmd"])

@@ -6,7 +6,7 @@
 # it waits until no contributing role is left, then deletes the stale aggregated roles so a later
 # `apply platform` on the same cluster does not hit "resource already exists".
 #
-#   KUBECONFIG_CONTENT=<yaml> stack/scripts/kueue-uninstall-cleanup.sh
+#   KUBE_SERVER=https://<endpoint> KUBE_CA=<pem> NEBIUS_IAM_TOKEN=<token> stack/scripts/kueue-uninstall-cleanup.sh
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 k() { "$here/kube.sh" "$@"; }

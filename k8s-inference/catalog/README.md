@@ -15,7 +15,8 @@ offers, and carry `deployments.<cluster>.parameters` (pool, image, tuning) plus
 `price_per_gpu_hour` for billing. `container-run` is the generic single-node class (any image and command),
 `distributed-run` the multi-node one, `hello-run` the CPU smoke test. The platform ships only these;
 models are an input (`terraform.tfvars` `models`, or `POST /v1/models`), see README.md "Deploy a model".
-Worked examples of an application layer's models live in `examples/scientific-ai` of the source repository.
+An application layer (a scientific-AI product, a chat product, a team's fine-tuning) brings its own models
+through that API; none is part of the platform.
 
 ## Catalog entry
 
@@ -56,8 +57,8 @@ deployments:                   # one key per cluster directory; values override 
 
 1. Find the exact image, port, protocol, health path, resource needs and the
    user the container runs as (`crane config <image>`). Private images: pull
-   secret in namespace `models` (NGC: `ngc`, created from
-   `~/.config/fs2/nvidia-api-key` with username `$oauthtoken`; not in git).
+   secret in namespace `models` (NGC: `ngc`, created from your NGC API key
+   with username `$oauthtoken`; the key stays outside git).
 2. Images must live in a registry the region's nodes can pull from. Nodes only
    pull from registries in their own project: mirror into the regional registry
    (`nebius registry create --parent-id <project> --name serverless2-models`,

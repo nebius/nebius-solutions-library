@@ -22,6 +22,9 @@ spec:
     {{- if eq (default "none" $p.interconnect) "infiniband" }}
     serverless2.nebius/interconnect: infiniband
     {{- end }}
+    {{- if $p.local_nvme }}
+    serverless2.nebius/local-nvme: "true"
+    {{- end }}
   tolerations:
     - key: nvidia.com/gpu
       operator: Equal

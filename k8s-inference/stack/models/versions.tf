@@ -3,8 +3,8 @@ terraform {
   backend "s3" {}
   required_providers {
     nebius = {
-      source  = "terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius"
-      version = ">= 0.5.232"
+      source  = "nebius/nebius"
+      version = ">= 0.6.23"
     }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.38" }
     helm       = { source = "hashicorp/helm", version = "~> 3.0" }

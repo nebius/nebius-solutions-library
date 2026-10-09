@@ -1,7 +1,9 @@
 # Credential rotation (gap 3): the Nebius service-account auth keys this cluster holds (Secret
-# ops/nebius-sa, hub also ops/nebius-sa-eu-south1) are regenerated weekly with the current key and
-# the previous keys are retired after 7 days; on the hub the CNPG backup S3 key (data/backup-s3) is
-# rotated the same way. Overlays set SECRETS (and BACKUP_S3_SECRET) and mount the extra Secrets.
+# ops/nebius-sa; a cluster that holds other projects' keys lists them too) are regenerated weekly with
+# the current key and the previous keys are retired after 7 days. Overlays set SECRETS, mount the extra
+# Secrets and widen the Role's resourceNames to them
+# (BACKUP_S3_SECRET=<ns>/<name> would also rotate an S3 key of the first SA; unused since the managed
+# PostgreSQL replaced CloudNativePG, 2026-10-09).
 # Script: services/ops/bin/rotate-nebius-keys.sh (ops image). Needs only the Nebius API plus
 # patch rights on those Secrets.
 apiVersion: v1
@@ -15,7 +17,7 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, patch]
-    resourceNames: [nebius-sa, nebius-sa-eu-south1]
+    resourceNames: [nebius-sa]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

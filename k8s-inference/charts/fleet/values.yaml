@@ -1,5 +1,5 @@
 # charts/fleet values. Argo CD passes the repo's fleet.yaml (the `fleet:` key) plus
-# clusters/<cluster>/values/fleet.yaml, and `cluster` = the cluster id (control, hub, eu-south1, ...).
+# clusters/<cluster>/values/fleet.yaml, and `cluster` = the cluster id (control, or a region's cluster id).
 cluster: ""
 fleet: {}            # the whole `fleet:` document of fleet.yaml
 cohort: serverless2  # root cohort shared with the tenant queues (charts/tenant)

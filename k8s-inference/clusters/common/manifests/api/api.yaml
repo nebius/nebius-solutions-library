@@ -109,17 +109,18 @@ spec:
       serviceAccountName: api
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.9.3
+          image: registry.serverless2.local/nebius/serverless2/api:0.9.6
           ports: [{ containerPort: 8080 }]
           env:
             - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
             - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
             - { name: LITELLM_INTERNAL_KEY, valueFrom: { secretKeyRef: { name: litellm-internal, key: key, optional: true } } }   # model groups' key (control cluster only)
-            - { name: REGION, value: eu-north1 }
-            # placeholders: the platform stage (stack/platform/stage.tf) or the cluster overlay sets the public hostnames
+            - { name: REGION, value: control }          # per cluster: `control` on the manager, the region's name on a worker
+            # placeholders: the platform stage (stack/platform/stage.tf) or the cluster overlay sets the public hostnames;
+            # the API refuses to start while a value still carries example.invalid (services/api/app.py)
             - { name: PUBLIC_API_URL, value: https://api.example.invalid }
-            - { name: GRAFANA_URLS, value: "eu-north1=https://grafana.example.invalid" }
-            - { name: REGION_KUBECONFIGS, value: eu-south1=/etc/kubeconfigs/eu-south1 }
+            - { name: GRAFANA_URLS, value: "<region>=https://grafana.example.invalid" }
+            - { name: REGION_KUBECONFIGS, value: "" }   # "<region>=<kubeconfig path>,..." on the manager only
             # registry prefixes per region and pools per GPU class come from kueue-system/fleet-prices (charts/fleet)
           volumeMounts:
             - { name: kubeconfigs, mountPath: /etc/kubeconfigs, readOnly: true }

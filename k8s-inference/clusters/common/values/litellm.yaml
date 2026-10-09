@@ -1,5 +1,5 @@
 # Helm values for the litellm Application (both clusters unless hubOnly); version pinned in clusters/common/apps/litellm.yaml
-replicaCount: 2                  # HA (readiness item 1): stateless proxy, state in CNPG data/postgres
+replicaCount: 2                  # HA (readiness item 1): stateless proxy, state in the managed PostgreSQL (db.endpoint per cluster)
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: kubernetes.io/hostname

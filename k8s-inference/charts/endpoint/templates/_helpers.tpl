@@ -9,7 +9,7 @@ Effective values. Two input layouts:
 {{- define "endpoint.values" -}}
 {{- $v := dict -}}
 {{- if .Values.runtime -}}
-  {{- $cluster := required "catalog mode needs --set cluster=<hub|eu-south1>" .Values.cluster -}}
+  {{- $cluster := required "catalog mode needs --set cluster=<cluster id>" .Values.cluster -}}
   {{- $over := deepCopy (default (dict) (get (default (dict) .Values.deployments) $cluster)) -}}
   {{- $_ := unset $over "paused" -}}
   {{- $_ := unset $over "price_per_gpu_hour" -}}

@@ -2,7 +2,7 @@
 
 Reads `pools.yaml` of the fleet-prices ConfigMap (charts/fleet renders it from fleet.yaml: region, pool,
 project, platform, preset, capacity) and, for each spot or on-demand pool, asks the Nebius price calculator
-(`nebius billing v1alpha1 calculator estimate`; `--preemptible-priority 1` returns the current spot price).
+(`nebius billing v1alpha1 calculator estimate` with `--follows-spot-price`: the current spot quote, which moves every 15 min).
 Writes `spot.json` = {"<region id>/<pool>": usd_per_gpu_hour} into the spot-prices ConfigMap (created on
 first run; not in git, so Argo CD never fights it). Reserved pools are not priced (marginal cost in fleet.yaml).
 """
@@ -26,7 +26,10 @@ def estimate(project: str, platform: str, preset: str, spot: bool):
            "--resource-spec-compute-instance-spec-resources-platform", platform,
            "--resource-spec-compute-instance-spec-resources-preset", preset]
     if spot:
-        cmd += ["--resource-spec-compute-instance-spec-preemptible-priority", "1"]
+        # the current spot quote: a preemptible VM following the spot price (the old `priority` field has no
+        # effect since 2026-05; quotes move every 15 min, so this feed runs on a short schedule)
+        cmd += ["--resource-spec-compute-instance-spec-preemptible-on-preemption", "STOP",
+                "--resource-spec-compute-instance-spec-follows-spot-price"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True).stdout
         return float(json.loads(out)["hourly_cost"]["general"]["total"]["cost"])

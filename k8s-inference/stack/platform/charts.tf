@@ -36,11 +36,13 @@ resource "helm_release" "wave0" {
 # aggregated ClusterRoles the controller re-created during the uninstall.
 resource "terraform_data" "kueue_uninstall_cleanup" {
   count = contains(keys(local.helm_wave["1"]), "kueue") ? 1 : 0
-  input = { script = "${path.module}/../scripts/kueue-uninstall-cleanup.sh", kubeconfig = local.kubeconfig }
+  # Only the cluster's address and CA are inputs (and therefore in the state); the IAM token is read from
+  # NEBIUS_IAM_TOKEN of the calling shell at run time (stack.sh exports it; stack/scripts/kube.sh).
+  input = { script = "${path.module}/../scripts/kueue-uninstall-cleanup.sh", server = local.cluster.endpoint, ca = local.cluster.cluster_ca_certificate }
   provisioner "local-exec" {
     when        = destroy
     command     = self.input.script
-    environment = { KUBECONFIG_CONTENT = self.input.kubeconfig }
+    environment = { KUBE_SERVER = self.input.server, KUBE_CA = self.input.ca }
   }
 }
 
@@ -65,7 +67,7 @@ resource "terraform_data" "kueue_ready" {
   triggers_replace = [helm_release.wave1["kueue"].version, helm_release.wave1["kueue"].metadata]
   provisioner "local-exec" {
     command     = "${path.module}/../scripts/kube.sh -n ${local.helm_wave["1"]["kueue"].namespace} rollout status deployment/kueue-controller-manager --timeout=900s"
-    environment = { KUBECONFIG_CONTENT = local.kubeconfig }
+    environment = { KUBE_SERVER = local.cluster.endpoint, KUBE_CA = local.cluster.cluster_ca_certificate } # token: NEBIUS_IAM_TOKEN of the shell
   }
   depends_on = [helm_release.wave1]
 }

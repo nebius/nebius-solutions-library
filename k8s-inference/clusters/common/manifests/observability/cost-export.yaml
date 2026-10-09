@@ -1,7 +1,8 @@
 # Daily cost report (gap 9): OpenCost allocation for the previous day, by namespace and by node, written to
-# s3://serverless2-backups-eu-north1/cost-reports/<cluster>/<date>-{namespace,node}.json. Credentials: Secret
-# monitoring/cost-export-s3 (ACCESS_KEY_ID / ACCESS_SECRET_KEY, a copy of data/backup-s3; hand-created on
-# both clusters, see docs/OBSERVABILITY.md). CLUSTER is patched per overlay.
+# s3://<BUCKET>/cost-reports/<CLUSTER>/<date>-{namespace,node}.json in the fleet's backups bucket. Credentials:
+# Secret monitoring/cost-export-s3 (ACCESS_KEY_ID / ACCESS_SECRET_KEY: an S3 access key of the hub ops SA, written
+# by the platform stage, stack/platform/secrets.tf). CLUSTER, BUCKET, AWS_ENDPOINT_URL and AWS_DEFAULT_REGION are
+# placeholders patched per cluster (the bucket's S3 host and region come from its status).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -38,12 +39,13 @@ spec:
               args:
                 - |
                   set -e
-                  aws s3 cp /out/ "s3://serverless2-backups-eu-north1/cost-reports/${CLUSTER}/" --recursive --no-progress
-                  aws s3 ls "s3://serverless2-backups-eu-north1/cost-reports/${CLUSTER}/" | tail -n 4
+                  aws s3 cp /out/ "s3://${BUCKET}/cost-reports/${CLUSTER}/" --recursive --no-progress
+                  aws s3 ls "s3://${BUCKET}/cost-reports/${CLUSTER}/" | tail -n 4
               env:
                 - { name: CLUSTER, value: unknown }
-                - { name: AWS_ENDPOINT_URL, value: https://storage.eu-north1.nebius.cloud }
-                - { name: AWS_DEFAULT_REGION, value: eu-north1 }
+                - { name: BUCKET, value: unset }
+                - { name: AWS_ENDPOINT_URL, value: https://storage.example.invalid }
+                - { name: AWS_DEFAULT_REGION, value: unset }
                 - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: cost-export-s3, key: ACCESS_KEY_ID } } }
                 - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: cost-export-s3, key: ACCESS_SECRET_KEY } } }
               volumeMounts: [{ name: out, mountPath: /out }]

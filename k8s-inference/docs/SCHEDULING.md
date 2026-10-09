@@ -135,13 +135,32 @@ next apply was rejected ("admissionChecks[0].state: Required value") for ever (m
 2026-10-08 on the fresh-deploy test fleet, docs/VERIFICATION.md). Prices:
 the `price-feed` CronJob (every 10 min) asks the Nebius price calculator for
 each spot/on-demand pool of `fleet-prices` (`nebius billing v1alpha1
-calculator estimate`, `--resource-spec-compute-instance-spec-preemptible-
-priority 1` = spot) and writes `spot.json` (USD per GPU-hour, keyed `<region
+calculator estimate`; for spot a preemptible VM that follows the spot price:
+`--resource-spec-compute-instance-spec-preemptible-on-preemption STOP
+--resource-spec-compute-instance-spec-follows-spot-price`, the current quote,
+which Nebius moves every 15 minutes since dynamic spot pricing started on
+2026-10-08) and writes `spot.json` (USD per GPU-hour, keyed `<region
 id>/<pool>`) into the ConfigMap `kueue-system/spot-prices`, which it creates
-on first run (not in git, so Argo CD never reverts it). Measured 2026-10-07:
-H100 1-GPU preset 4.5 on-demand, 2.15 spot. The calculator needs an SA key:
-Secret `kueue-system/price-feed-nebius-sa` (optional mount; without it the
-feed logs failures and list prices are used).
+on first run (not in the repository, so Argo CD never reverts it). Until
+2026-10-09 the feed asked with `--preemptible-priority 1`, a field the API
+deprecated on 2026-05-11; the CLI 0.12 rejects it (exit 4), so the feed wrote
+an empty map and every spot pool was ranked at its list price (seen on the
+test fleet s2pr2, dispatcher 0.1.8). Quotes seen on 2026-10-09 for the 8-GPU
+B300 preset following the spot price: eu-west2 7.92 USD/h (0.99 per
+GPU-hour), us-north1 28, uk-south1 75.92; regular 76 everywhere. Measured
+2026-10-07: H100 1-GPU preset 4.5 on-demand, 2.15 spot. The calculator needs
+an SA key: Secret `kueue-system/price-feed-nebius-sa` (optional mount;
+without it the feed logs failures and list prices are used).
+
+Spot pools in the ranking: a spot pool is a candidate like any other, with no
+waiting period; inside one GPU class it sorts after the class's reserved and
+on-demand pools (`capacity_order`, capacity-first), and among spot pools the
+live quote decides. A pool with `max_price` is a capped pool (pricing policy:
+its nodes stop above the cap and return below it); a pool without one follows
+the spot price and is stopped only when Nebius reclaims the capacity. Either
+way a run on a preempted node resumes as described below, from its network
+checkpoint volume; local NVMe scratch (`scratch: local-nvme`) does not
+survive a preemption (docs/FLEET.md "Spot capacity").
 
 Packaging: `clusters/common/manifests/dispatcher` (Deployment, CronJob,
 RBAC; image `serverless2/dispatcher:0.1.1` from `services/dispatcher/

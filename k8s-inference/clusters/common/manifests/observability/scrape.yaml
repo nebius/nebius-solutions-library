@@ -87,21 +87,6 @@ spec:
     - port: http-metrics
       interval: 60s
 ---
-# CloudNativePG cluster `postgres` (hub only; matches nothing in a region).
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata: { name: cnpg-postgres, namespace: monitoring }
-spec:
-  namespaceSelector: { matchNames: [data] }
-  selector:
-    matchLabels: { cnpg.io/cluster: postgres, cnpg.io/podRole: instance }
-  podMetricsEndpoints:
-    - port: metrics
-      interval: 30s
-      relabelings:
-        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster], targetLabel: cluster }
-        - { action: replace, sourceLabels: [__meta_kubernetes_pod_label_role], targetLabel: role }
----
 # Envoy Gateway data plane (external + internal gateways): per-route upstream
 # request rate, status classes and latency histograms. Only the upstream
 # request/connection series are kept to bound cardinality.

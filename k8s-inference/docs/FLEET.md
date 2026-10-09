@@ -1,8 +1,8 @@
 # The fleet: one definition of the inference cluster
 
-*For operators and architects: how pools, capacity types, GPU classes and queues relate. Written for the reference fleet's `fleet.yaml`; in the Terraform solution the same keys live under `regions.*.pools` in `terraform.tfvars`.*
+*For operators and architects: how pools, capacity types, GPU classes and queues relate. The document uses the `fleet.yaml` form of the definition; in the Terraform solution the same keys live under `regions.*.pools` in `terraform.tfvars` (last section).*
 
-`fleet.yaml` at the repo root defines the whole Serverless 2.0 inference
+One definition (`fleet.yaml`, or the `fleet` object of `terraform.tfvars`) describes the whole inference
 cluster: the control-plane cluster, every region, every GPU pool (platform,
 preset, GPU class, reserved / on-demand / spot capacity, min and max nodes,
 warm-endpoint floor), the shared weights filesystem per region and the price
@@ -10,12 +10,10 @@ list. Two consumers read it and nothing else defines capacity:
 
 | Consumer | Reads | Produces |
 |---|---|---|
-| `infra/fleet` (Terraform wrapper over the `infra/cluster` module) | control + regions | one Managed Kubernetes cluster per entry, system pool, GPU node groups with their reservation / spot policy, node identity, ops identity, registries, backups bucket, weights filesystem; one state per cluster |
-| `charts/fleet` (Helm, rendered by Argo CD on every cluster) | regions, prices, `node_reserve`, `capacity_order` | worker: Kueue ResourceFlavor per pool, `default` + `prefer-<gpu-class>` ClusterQueues, pre-pull DaemonSet per pool, `fleet-prices` ConfigMap; control: MultiKueueCluster per region, MultiKueueConfig + AdmissionCheck per profile, fleet-wide flavors and profile queues |
+| the cloud stage (`stack/cloud`, module `stack/modules/cluster`) | control + regions | one Managed Kubernetes cluster per entry, system pool, GPU node groups with their reservation / spot policy, node identity, ops identity, registries, backups bucket, weights filesystem; one state per cluster |
+| `charts/fleet` (Helm, rendered by the platform stage on every cluster) | regions, prices, `node_reserve`, `capacity_order` | worker: Kueue ResourceFlavor per pool, `default` + `prefer-<gpu-class>` ClusterQueues, pre-pull DaemonSet per pool, `fleet-prices` ConfigMap; control: MultiKueueCluster per region, MultiKueueConfig + AdmissionCheck per profile, fleet-wide flavors and profile queues |
 
-Everything that used to live in `clusters/<cluster>/cluster.tfvars` and in
-`clusters/<cluster>/apps/overlays/scheduling/pool.yaml` + `overlays/edge/prepull*.yaml`
-is derived from this one file (the overlays stay until the cut-over below).
+Nothing else defines capacity: pools, quotas, pre-pull lists and prices all derive from it.
 
 ## fleet.yaml
 
@@ -27,7 +25,7 @@ fleet:
   control: { id: control, cluster: serverless2-control, region: eu-north1, project: ..., subnet: ..., system_pool: {...}, allowed_cidrs: [...] }
   regions:
     <region name>:
-      id: <cluster id>            # Argo CD directory clusters/<id>, Terraform state infra/state/<id>
+      id: <cluster id>            # the cluster's name in every stage (`./stack.sh apply platform <id>`)
       cluster: <mk8s name>
       project: <nebius project>   # one project = one region
       subnet: <vpc subnet>
@@ -76,55 +74,11 @@ Rules the chart derives from it:
   profile lists the regions that have the class first (by their cheapest
   pool of it), the others after.
 
-## Terraform: `infra/fleet`
-
-```
-infra/fleet/apply.sh plan all              # every cluster in fleet.yaml, read-only
-infra/fleet/apply.sh plan hub              # must be "no changes" for an adopted cluster
-infra/fleet/apply.sh apply control         # creates the control cluster (only on "go")
-```
-
-`render.py <id>` turns a cluster's entry into `infra/fleet/rendered/<id>.tfvars.json`
-(gitignored); `apply.sh` initialises the module with that cluster's own
-state (key `clusters/<id>.tfstate` in the fleet's Object Storage state bucket,
-`infra/backend.hcl`, locked per command; `infra/fleet/backend.sh`) and runs
-plan / apply / output / state. An empty state means "create everything":
-`plan` prints a `!!` line, `apply` refuses unless `FLEET_NEW_CLUSTER=<id>`
-names that one new cluster. Bucket credentials come from the environment or
-`~/.config/serverless2/tfstate.env` (`infra/bootstrap/state-bucket.sh`); any
-operator with them and a Nebius profile with `admin` on the projects can run
-this (docs/BOOTSTRAP.md). `FLEET_BACKEND=local` keeps using the local files
-`infra/state/<id>/terraform.tfstate` of before 2026-10-07 (from a git worktree
-with `FLEET_STATE_DIR=/path/to/main/infra/state`).
-The states of the hub and eu-south1 are the ones that existed before
-`fleet.yaml`: adoption was proven with `plan` = no changes on eu-south1 and
-only the new L40S pool on the hub (the `moved` blocks in `infra/cluster/main.tf`
-keep the imported ops identities in place). Never run two applies at once.
-
-Weights filesystem: `weights_filesystem: {enabled: true, size_gib: 2048}` on
-the hub (2026-10-06) and on eu-south1 (2026-10-07, after the quota
-`compute.filesystem.size.network-ssd` was raised to 5 TiB; apply = 1 added,
-1 changed, the RTX pool rolled in 4 min 47 s with surge 1). Enabling it on a
-region that already has nodes recreates the GPU nodes (the mount comes from
-the node-group template); the control cluster never has one. The region's
-`clusters/<cluster>/apps/overlays/scheduling/weights-pv.yaml` must exist
-alongside (`docs/OPERATIONS.md` "Model weights").
-
-Reservations: a pool with `capacity.type: reserved` gets
-`reservation_policy = STRICT` with its `reservation_ids`, so its nodes come
-only from those capacity blocks ("16 H100 reserved" = one pool with
-`max_nodes: 16` and the reservation id); every other pool is `FORBID`. A
-reserved pool and a spot pool of the same class are two pools; the
-preference queue orders them reserved first. The control cluster is CPU-only
-(`gpu_pools = {}`, `ops.enabled = false` because it shares the hub's project
-and ops identity, no weights filesystem).
-
 ## Scheduling: `charts/fleet`
 
-Rendered per cluster by Argo CD with `fleet.yaml` plus
-`clusters/<id>/values/fleet.yaml` (the pre-pull image list) and
-`--set cluster=<id>` (ApplicationSet kind `localhelm`, staged spec in
-`clusters/common/apps-staged/fleet.yaml`). Local check:
+Rendered per cluster by the platform stage with the fleet document plus the
+pre-pull image list and `--set cluster=<id>`. Local check (the reference
+fleet's files; `make check` does the same with the example tfvars):
 
 ```
 helm template fleet charts/fleet -f fleet.yaml -f clusters/hub/values/fleet.yaml --set cluster=hub
@@ -198,28 +152,7 @@ namespace, those queues and the API binding only. Tenants share the fleet
 queues; the per-tenant ClusterQueue caps of v1 are gone (fairness between
 tenants is Kueue's priority ordering; Kueue's usage-based admission fair
 sharing is the knob to turn on if one tenant starves others).
-`python -m onboarding create-tenant <name>` applies it everywhere and
-removes the v1 objects.
-
-## Cut-over (lane F2, done 2026-10-07)
-
-1. `infra/fleet/apply.sh apply control`; bootstrap Argo CD on it with a
-   `clusters/control/apps` tree (ApplicationSet with `cluster: control`,
-   `hubOnly` filtered out, the `localhelm` kind) and the Kueue chart with
-   the MultiKueue feature enabled.
-2. On each worker: service account + ClusterRole for MultiKueue, kubeconfig
-   into `kueue-system/multikueue-<region id>` on the control cluster.
-3. Move `clusters/common/apps-staged/fleet.yaml` to `clusters/common/apps/`
-   and in the same commit remove `pool.yaml` from
-   `clusters/<id>/apps/overlays/scheduling/kustomization.yaml` and
-   `prepull*.yaml` from `overlays/edge/kustomization.yaml` (two Applications
-   must not own one object; Argo CD applies server-side, so the objects are
-   adopted, not recreated). Keep `weights-pv.yaml` and the rest.
-4. Tenants: `charts/tenant` LocalQueues gain a `prefer-<class>` target per
-   tenant (or the API creates them on demand) on the control cluster and on
-   every worker with the same name.
-5. Hub apply for the L40S pool only when the owner wants the second class
-   live (`infra/fleet/apply.sh plan hub` shows exactly that one node group).
+The models stage renders it on every cluster of the tenant's regions.
 
 ## Change recipes
 
@@ -235,8 +168,10 @@ removes the v1 objects.
 - **Warm endpoint added**: raise the pool's `endpoint_floor_gpus` with the
   catalog change (docs/OPERATIONS.md "Capacity for runs and endpoints").
 - **Add a region**: one `regions.<name>` entry (project, subnet, pools),
-  `apply.sh apply <id>`, Argo CD bootstrap, one `MultiKueueCluster` Secret;
-  docs/OPERATIONS.md "Add a region" for the per-cluster values.
+  then `./stack.sh apply` (the cloud stage adds the cluster, the platform and
+  models stages follow on it, and the control cluster's MultiKueue gains the
+  worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2
+  with a B300 spot pool, docs/VERIFICATION.md).
 - **Prices**: `prices` block (nebius.com/prices); flavors, `fleet-prices` and
   the profile order follow.
 
@@ -250,7 +185,7 @@ removes the v1 objects.
 - Spot list prices are the "from" prices; the live spot price comes from the
   price feed (lane F4), not from this file.
 
-GPU node groups carry a cloud-init fragment (`infra/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md) and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
+GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md) and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
 
 ## Terraform solution (2026-10-08): `terraform.tfvars` instead of `fleet.yaml`
 
@@ -265,6 +200,36 @@ below), `boot_disk_gib`, `labels`; `cpu_pools` (CPU-only pools, tainted
 `fs.inotify.max_user_instances`. Boot-disk rule: a node scaled from zero advertises about 80% of its boot
 disk minus 32 GiB as ephemeral storage, never host NVMe.
 
+### Spot capacity: how `capacity` maps to the Nebius API (2026-10-09)
+
+Nebius sells preemptible capacity under dynamic pricing since 2026-10-08 (the API field is still
+`preemptible`): a preemptible VM or node group declares exactly one of `follows_spot_price` (pay the
+current quote, never stopped for price), `spot_pricing_policy` (a pricing policy with a cap: stopped above
+it, restarted below it) or `on_demand`. The pool input renders them, one and only one
+(`stack/modules/cluster/main.tf`):
+
+| `capacity` | Node-group template | Meaning |
+|---|---|---|
+| `{ type = "on_demand" }` (default) | no `preemptible` | regular VMs at the list price |
+| `{ type = "spot" }` | `preemptible = {}`, `follows_spot_price = {}` | spot at the current quote; nodes stop only when Nebius reclaims capacity |
+| `{ type = "spot", max_price = "2.15" }` | `preemptible = {}`, `spot_pricing_policy = <policy>` | spot capped at that USD per GPU-hour (one `nebius_billing_v1_pricing_policy` per pool); nodes stop above the cap and return below it |
+| `{ type = "reserved", reservation_ids = [...] }` | `reservation_policy = STRICT` | the capacity block, used first |
+
+The quotas that apply to spot pools are the preemptible ones (`compute.instance.preemptible.count`
+per regional project, counted in VMs; `./stack.sh preflight` prints their usage and refuses a spot pool
+whose platform is not `allowed_for_preemptibles` in that project). The GPU quotas
+(`compute.instance.gpu.<platform>`) apply to on-demand pools. The standalone-VM fields of the Compute
+API (`preemptible.on_preemption = STOP`, `recovery_policy = FAIL`, the deprecated `preemptible.priority`)
+do not exist on node groups: Managed Kubernetes stops a preempted node's VM and replaces it when capacity
+allows, so a spot pool can run below `min_nodes` for a while and scale-from-zero can wait. Capacity-first
+policy: prefer reserved and on-demand pools, add spot as an extra pool that follows the price (no
+discretionary cap); the scheduler orders reserved before on-demand before spot inside a class
+(`capacity_order`), the dispatcher the same across regions with the live quote (docs/SCHEDULING.md).
+What a preemption does to a run: the Job's replacement pod resumes from the network checkpoint volume in
+the same region, a multi-node JobSet restarts all its pods (docs/JOBS.md); everything on local NVMe
+(`scratch: local-nvme`, image layers) is gone with the node, so runs on NVMe must checkpoint to `/ckpt`.
+Live spot quotes change every 15 minutes; the price feed keeps the dispatcher's view current.
+
 ### Local NVMe: which platform/preset combinations have it (2026-10-08)
 
 Nebius exposes host NVMe to Managed Kubernetes nodes through the node-group template
@@ -277,7 +242,7 @@ with Intel Granite Rapids platform (gpu-b300-sxm) with the eight-GPU preset 8gpu
 
 | Platform | Preset | Local disks | Regions | Evidence |
 |---|---|---|---|---|
-| gpu-b300-sxm | 8gpu-192vcpu-2768gb | 6 x 3.84 TB NVMe | uk-south1, eu-west2, us-north1 | documentation; not creatable by this program (B300 quota of the eu-west2 project: 5 GPUs, the preset needs 8) |
+| gpu-b300-sxm | 8gpu-192vcpu-2768gb | 6 x 3.84 TB NVMe | uk-south1, eu-west2, us-north1 | **verified 2026-10-09** on a spot node in eu-west2 (test fleet s2pr2, pool `b300-spot-8x`): six `MTFDKCC3T8TGP` 3.5 TiB NVMe in a RAID0 (`md127`, ext4, 21 TiB) under `/mnt/local-ephemeral` with `/var/lib/kubelet` and `/var/lib/containerd` on it; node capacity `ephemeral-storage` 22.4 TB (allocatable 20.65 TB); a `scratch: local-nvme` run wrote 100 GiB at 6.7 GB/s (one `dd`, direct, fsync) and read it at 1.6 GB/s single-stream / 5.7 GB/s with four readers; a spot pool, so the preemptible quota applies (`compute.instance.preemptible.count`), not the B300 GPU quota |
 | gpu-b300-sxm | 1gpu-24vcpu-346gb | none | eu-west2 | node group with `local_disks` rejected on 2026-10-08 (test fleet s2lib, see docs/VERIFICATION.md) |
 | gpu-h100-sxm | 1gpu-16vcpu-200gb, 8gpu-128vcpu-1600gb | none | eu-north1 | rejected on 2026-10-08: `local_disks.passthrough_group.requested is invalid` |
 | gpu-h200-sxm, gpu-b200-sxm, gpu-gb300, gpu-l40s-a/-d, gpu-rtx6000-a | all | none | - | not listed in the documentation (the H100 probe above is the behaviour on an unlisted preset) |
@@ -290,5 +255,10 @@ and `scratch: local-nvme` run volume (`/work`, docs/JOBS.md) lands on NVMe, and 
 `serverless2.nebius/local-nvme=true` that the API's node affinity for such runs selects;
 `local_nvme_mode = raw` leaves the devices unformatted (`config.none`) for a workload that owns them. The
 rendering (node-group template, node label, catalog `scratch`, pod affinity and emptyDir) is covered by
-`terraform plan` and the API unit tests; the owner's projects have no quota for the only NVMe preset, so an
-end-to-end NVMe run is still to be done by the first fleet with an 8-GPU B300 reservation.
+`terraform plan` and the API unit tests, and the whole path ran end to end on 2026-10-09 on a B300 spot node
+(`docs/dev-fleet/VERIFICATION-DEV.md`, "Local NVMe on a B300 spot node"). Two things that test fixed: the
+Kueue flavor of an NVMe pool now carries the `local-nvme` label (without it Kueue ignored the affinity key
+and admitted such a run on any flavor), and a local-NVMe run is dispatched only to regions that have an
+NVMe pool. The NVMe content does not survive a preemption: a stopped spot VM loses `/mnt/local-ephemeral`
+(the kubelet re-formats it on the next boot), so a run on local NVMe keeps its checkpoints elsewhere
+(the network work volume of `scratch: network`, or its own uploads).

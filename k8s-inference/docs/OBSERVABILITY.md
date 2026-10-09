@@ -39,7 +39,6 @@ expose Prometheus endpoints directly.
 | KServe controller | ServiceMonitor `kserve-controller` | `:8443` via kube-rbac-proxy, SA token | controller-runtime metrics |
 | Kueue | ServiceMonitor `kueue` | `:8443` https, SA token | `kueue_pending_workloads{cluster_queue,status}`, `kueue_admitted_active_workloads`, `kueue_{admitted,evicted,preempted,finished}_workloads_total`, `kueue_local_queue_resource_usage`, `kueue_cohort_subtree_quota`, `kueue_admission_wait_time_seconds` |
 | cert-manager controller | PodMonitor `cert-manager` | `:9402` | `certmanager_certificate_expiration_timestamp_seconds`, `certmanager_certificate_ready_status` |
-| CloudNativePG `postgres` (reference fleet only, until its migration; the solution's managed PostgreSQL has no in-cluster exporter, its metrics are in the Nebius console) | PodMonitor `cnpg-postgres` | `:9187` | `cnpg_*`, `up` |
 | Envoy Gateway proxies | PodMonitor `envoy-gateway-proxies` | `:19001/stats/prometheus` | `envoy_cluster_upstream_rq_{total,xx,time_*}` per HTTPRoute cluster (only the request/connection series are kept) |
 | DCGM exporter | chart ServiceMonitor | `:9400` | `DCGM_FI_DEV_{GPU_UTIL,FB_USED,FB_FREE,POWER_USAGE,GPU_TEMP,SM_CLOCK}`, `DCGM_FI_PROF_{PIPE_TENSOR_ACTIVE,GR_ENGINE_ACTIVE,...}` with `hostname`, `gpu`, `modelName`, `namespace`, `pod`, `container` and the allow-listed pod labels `serving_kserve_io_inferenceservice`, `job_name` |
 | Alloy | chart ServiceMonitor | `:12345` | `loki_write_*`, `loki_source_kubernetes_*` |
@@ -64,18 +63,14 @@ Enabling details worth knowing:
   `kube_pod_container_resource_requests{resource="nvidia_com_gpu"}` (KSM
   sanitises the resource name).
 - LiteLLM 1.104: `/metrics` returns 404; the Prometheus callback is an
-  Enterprise feature in this version. Spend is read from LiteLLM's Postgres
-  instead (Cost dashboard, Grafana datasource `litellm-postgres`, a Secret
-  `serverless2-datasource-litellm-postgres` in `monitoring` created by hand
-  from `litellm-dbcredentials`; not in git because it carries the password).
-  In the solution the datasource points at the managed PostgreSQL: host, port,
-  user and password from Secret `litellm/database` (`litellm_url`), database
-  `litellm`, `sslmode: require`.
-  To recreate:
-  `PW=$(kubectl -n litellm get secret litellm-dbcredentials -o jsonpath='{.data.password}' | base64 -d)`
-  then a datasource YAML (type `grafana-postgresql-datasource`, url
-  `litellm-postgresql.litellm.svc:5432`, db `litellm`, user `litellm`,
-  `sslmode: disable`) in a Secret labelled `grafana_datasource: "1"`.
+  Enterprise feature in this version. Spend is read from LiteLLM's database
+  instead (Cost dashboard, Grafana datasource uid `litellm-postgres`, a Secret
+  `serverless2-datasource-litellm-postgres` in `monitoring` labelled
+  `grafana_datasource: "1"`; not in git because it carries the password). The
+  datasource points at the managed PostgreSQL: host and port from Secret
+  `litellm/database`, user and password from `litellm/litellm-db`, database
+  `litellm`, `sslmode: require`, type `grafana-postgresql-datasource`. Without
+  this Secret the Cost dashboard's spend panels stay empty.
 
 ## Recording rules (`rules.yaml`, prefix `serverless2:`)
 
@@ -122,7 +117,6 @@ that are kept by stopped preempted VMs.
 | KueueWorkloadsPending | `kueue_pending_workloads > 0` for 15 min per ClusterQueue | warning |
 | NodeNotReady | Ready=false for 5 min | critical |
 | InferenceServiceNotReady | `kube_inferenceservice_status_condition{type="Ready"} == 0` for 10 min (scaled-to-zero stays Ready) | warning |
-| PostgresDown / PostgresNoPrimary | CNPG target down, collector down, no Ready `postgres-*` pod in `data` or `litellm-postgresql-*` in `litellm`; no primary (reference fleet only: the solution's managed PostgreSQL is monitored by the service, host metrics and backups in the Nebius console) | critical |
 | CertificateExpiringSoon / CertificateNotReady | less than 30 days left (self-signed are issued for 1 year, renewed at 2/3) / Ready=False 15 min | warning |
 | GPUExporterMissingOnGPUNode | a Ready GPU-pool node without DCGM series for 10 min | info |
 | APIErrorRatioHigh | gateway 5xx ratio on the API route above 2 percent for 5 min (with traffic) | critical |
@@ -161,7 +155,9 @@ Routing: `group_by [alertname, namespace]`, `group_wait 30s`, critical repeats
 every 4 h, warning every 24 h, info only to the sink, `InfoInhibitor` to `null`.
 Inhibitions: critical silences warning/info of the same alert and namespace;
 `NodeNotReady` silences the scheduling, Kueue and endpoint alerts (a lost spot
-node explains them); `PostgresDown` silences `PostgresNoPrimary`.
+node explains them). The fleet database (Nebius Managed PostgreSQL) has no
+in-cluster alert: LiteLLM's readiness (`/health/readiness`, `db: connected`)
+and the API's `/healthz` are the signal; the service monitors the host.
 
 Synthetic test (no real alert needed):
 
@@ -188,9 +184,9 @@ reachable with `kubectl -n opencost port-forward svc/opencost 9090:9090`
 Daily report: CronJob `monitoring/cost-export` (00:30 UTC) fetches
 yesterday's allocation by namespace and by node and uploads
 `cost-reports/<cluster>/<date>-{namespace,node}.json` to
-`s3://serverless2-backups-eu-north1/` with the Secret
-`monitoring/cost-export-s3` (a copy of `data/backup-s3`, hand-created on both
-clusters). OpenCost only knows the time since it was installed (2026-10-06,
+the fleet's backups bucket (`<fleet>-backups`, in the hub region) with the Secret
+`monitoring/cost-export-s3` (an S3 key of the hub ops SA, written by the
+platform stage, `stack/platform/secrets.tf`). OpenCost only knows the time since it was installed (2026-10-06,
 15:20 UTC), so the first report is empty (25 bytes) and reports are complete
 from the second day on; the job fails (and `CostExportFailed` fires) when the
 OpenCost API is down, run it by hand with

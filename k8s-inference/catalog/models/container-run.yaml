@@ -4,7 +4,7 @@ description: Run any container image with a command on 0-8 GPUs; inputs synced f
 task: generic
 mode: run
 protocol: kubernetes-job
-gpu: { count: "0-8", classes: [h100, rtx-pro-6000, l40s] }
+gpu: { count: "0-8", classes: [h100, h200, b200, b300, gb300, rtx-pro-6000, l40s] }   # every class a fleet may declare; the fleet filters the list to its own classes
 price: { unit: gpu-hour, usd: 1.60 }       # display; billing uses deployments.<cluster>.price_per_gpu_hour
 job:                                        # rendered by services/api/jobs.py; {{name}} = parameter
   image: "{{image}}"
