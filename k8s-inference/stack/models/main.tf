@@ -234,7 +234,7 @@ resource "kubernetes_job_v1" "probe" {
             code=$(curl -s -o /tmp/m -w '%%{http_code}' -X POST -H "Authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' -d "$SPEC" "$API/v1/models" || echo 000)
             echo "POST /v1/models HTTP $code"; head -c 600 /tmp/m; echo
             case "$code" in 201) ;; 409) echo "exists already (kept)" ;; *) exit 1 ;; esac
-            for i in $(seq 1 24); do
+            for i in $(seq 1 40); do   # a first cold start in a fresh region pulls the 10 GB image once (measured 11 min, 2026-10-09)
               code=$(curl -s -o /tmp/e -w '%%{http_code}' --max-time 660 -X POST -H "$H" -H 'content-type: application/json' \
                 -d '{"mode":"sync","input":{"messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":16}}' \
                 "$API/v1/models/${local.example_spec.id}:invoke" || echo 000)
