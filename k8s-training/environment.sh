@@ -24,11 +24,15 @@ fi
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
 
-# VPC network (the project's default network, matched by name prefix)
+# VPC network (use the same "default" prefix as the Osmo environment helper)
+# Accept response envelopes and arrays when listing all pages.
 NEBIUS_VPC_NETWORK_ID=$(nebius vpc network list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
+  --all \
   --format json \
-  | jq -r '(.items // []) | map(select(.metadata.name | startswith("default"))) | .[0].metadata.id // empty')
+  | jq -r '(if type == "array" then . else (.items // []) end)
+    | map(select(.metadata.name | startswith("default")))
+    | .[0].metadata.id // empty')
 if [ -z "${NEBIUS_VPC_NETWORK_ID}" ]; then
   echo "Error: no default network found in project ${NEBIUS_PROJECT_ID} (expected a network whose name starts with 'default')"
   return 1
@@ -38,11 +42,14 @@ export NEBIUS_VPC_NETWORK_ID
 # VPC subnet (the default subnet inside that network)
 NEBIUS_VPC_SUBNET_ID=$(nebius vpc subnet list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
+  --all \
   --format json \
   | jq -r --arg NET_ID "${NEBIUS_VPC_NETWORK_ID}" \
-    '(.items // []) | map(select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default-subnet")))) | .[0].metadata.id // empty')
+    '(if type == "array" then . else (.items // []) end)
+    | map(select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default"))))
+    | .[0].metadata.id // empty')
 if [ -z "${NEBIUS_VPC_SUBNET_ID}" ]; then
-  echo "Error: no default subnet found in network ${NEBIUS_VPC_NETWORK_ID} (expected a subnet whose name starts with 'default-subnet')"
+  echo "Error: no default subnet found in network ${NEBIUS_VPC_NETWORK_ID} (expected a subnet whose name starts with 'default')"
   return 1
 fi
 export NEBIUS_VPC_SUBNET_ID
