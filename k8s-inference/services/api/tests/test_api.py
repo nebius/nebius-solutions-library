@@ -1232,7 +1232,8 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     assert c.patch("/v1/endpoints/scaling-demo", json=patch, headers=H).status_code == 403
     r = c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN)
     assert r.status_code == 200 and r.json()["scaling"]["buffer"] == 1, r.text
-    assert north.custom[key]["metadata"]["annotations"]["serverless2.nebius/buffer"] == "1"
+    assert "serverless2.nebius/buffer" not in (north.custom[key]["metadata"].get("annotations") or {})   # the dispatcher reads the model copy; no revision rolls
+    assert admin_keys.rows["scaling-demo"]["spec"]["scaling"]["buffer"] == 1
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 9}}, headers=ADMIN).status_code == 422
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"window_s": 5}}, headers=ADMIN).status_code == 422
     assert admin_keys.rows["scaling-demo"]["version"] == 4

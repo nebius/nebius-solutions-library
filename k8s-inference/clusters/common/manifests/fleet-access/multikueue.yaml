@@ -53,3 +53,18 @@ kind: ClusterRoleBinding
 metadata: { name: multikueue-manager }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: multikueue-manager }
 subjects: [{ kind: ServiceAccount, name: multikueue, namespace: kueue-system }]
+---
+# the ready-replica buffer reads the API's per-region model copies (scaling.buffer) in `api`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: multikueue-manager-catalog, namespace: api }
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: multikueue-manager-catalog, namespace: api }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: multikueue-manager-catalog }
+subjects: [{ kind: ServiceAccount, name: multikueue, namespace: kueue-system }]

@@ -32,8 +32,8 @@ def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
                "cooldown_s": _secs(annotations.get("autoscaling.knative.dev/scale-down-delay", "0s")),
                "window_s": _secs(annotations.get("autoscaling.knative.dev/window", "60s")),
                "idle_s": _secs(annotations.get("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "2m"))}
-    if annotations.get(f"{LABEL}/buffer"):
-        scaling["buffer"] = int(annotations[f"{LABEL}/buffer"])
+    if int(((m.get("spec") or {}).get("scaling") or {}).get("buffer") or 0) > 0:   # held by the dispatcher (buffer.py), not rendered
+        scaling["buffer"] = int(m["spec"]["scaling"]["buffer"])
     saved_metric = (m.get("spec") or {}).get("scaling", {}).get("metric")
     if saved_metric in ("concurrency_utilization", "requests_per_second"):
         scaling["metric"] = saved_metric

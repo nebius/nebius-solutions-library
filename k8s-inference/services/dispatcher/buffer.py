@@ -4,18 +4,20 @@ A model with `scaling.buffer = N` keeps N ready replicas more than its load need
 revision's `min-scale` is held at demand + N. Demand is Knative's own number, the stable concurrency (or
 requests per second) over the per-pod target, read from the autoscaler's metrics, so the floor we set never
 hides it. At zero demand the floor returns to the model's own minimum, so scale to zero still works, and a
-floor is lowered only after the model's cooldown (its scale-down delay, 120 s by default). The annotation
+floor is lowered only after the model's cooldown (its scale-down delay, 120 s by default). The buffer is read from the API's
+per-region model copy (a ConfigMap), never from the InferenceService, so changing it rolls no revision. The floor
 goes on the Revision, not the InferenceService: a Revision annotation takes effect at once and creates no
 rollout (verified on Knative 1.23, 2026-10-09); a new revision starts from the template and is picked up on
 the next cycle. Runs on the elected dispatcher replica, through the same worker kubeconfigs as the dispatch.
 """
+import json
 import logging
 import math
 import re
 import time
 
 LABEL = "serverless2.nebius"
-BUFFER_ANN = f"{LABEL}/buffer"              # on the InferenceService: the model's buffer (services/api/models.py)
+CATALOG_NS, CATALOG_SELECTOR = "api", f"{LABEL}/catalog=runtime"   # the API's per-region model copies (services/api/models.py save)
 RAISED_ANN = f"{LABEL}/buffer-raised-at"    # on the Revision: when we last raised its floor (epoch seconds)
 MIN_ANN = "autoscaling.knative.dev/min-scale"
 COOLDOWN_ANN = "autoscaling.knative.dev/scale-down-delay"
@@ -76,7 +78,8 @@ def reconcile_buffers(workers: dict, now: float | None = None) -> dict:
 def reconcile_worker(custom, core, now: float) -> dict:
     isvcs = custom.list_namespaced_custom_object("serving.kserve.io", "v1beta1", NAMESPACE, "inferenceservices").get("items", [])
     by_name = {i["metadata"]["name"]: i for i in isvcs}
-    buffered = {n: i for n, i in by_name.items() if int((i["metadata"].get("annotations") or {}).get(BUFFER_ANN) or 0) > 0}
+    buffers = model_buffers(core)
+    buffered = {n: i for n, i in by_name.items() if buffers.get(n, 0) > 0}
     revisions = custom.list_namespaced_custom_object("serving.knative.dev", "v1", NAMESPACE, "revisions").get("items", [])
     metrics, changed = None, {}
     for rev in revisions:
@@ -92,7 +95,7 @@ def reconcile_worker(custom, core, now: float) -> dict:
         if isvc is not None and active:
             if metrics is None:
                 metrics = parse_metrics(fetch_metrics(core))
-            buffer = int(isvc["metadata"]["annotations"][BUFFER_ANN])
+            buffer = buffers[model]
             target = floor_for(demand(metrics.get(md["name"], {})), base_min, max_replicas, buffer)
         else:
             target = base_min                               # buffer removed, or a revision no longer routed
@@ -110,8 +113,23 @@ def reconcile_worker(custom, core, now: float) -> dict:
     return changed
 
 
+def model_buffers(core) -> dict:
+    """{model id: scaling.buffer} from the API's model copies in this cluster (`spec.json` of each catalog ConfigMap)."""
+    out = {}
+    for cm in core.list_namespaced_config_map(CATALOG_NS, label_selector=CATALOG_SELECTOR).items:
+        try:
+            spec = json.loads((cm.data or {}).get("spec.json") or "{}")
+            mid = spec.get("id") or (cm.metadata.labels or {}).get(f"{LABEL}/model")
+            if mid:
+                out[mid] = int((spec.get("scaling") or {}).get("buffer") or 0)
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return out
+
+
 def fetch_metrics(core) -> str:
     """The autoscaler's /metrics through the API server's service proxy (RBAC: services/proxy on knative-serving)."""
-    resp = core.api_client.call_api(METRICS_PATH, "GET", auth_settings=["BearerToken"], response_type="str",
+    resp = core.api_client.call_api(METRICS_PATH, "GET", auth_settings=["BearerToken"],
                                     _return_http_data_only=True, _preload_content=False)
-    return resp.data.decode() if hasattr(resp, "data") else str(resp)
+    data = getattr(resp, "data", None)
+    return (data.decode() if isinstance(data, bytes) else str(data)) if data is not None else str(resp)

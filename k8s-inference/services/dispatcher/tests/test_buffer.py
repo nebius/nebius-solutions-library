@@ -2,6 +2,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import json
+
 import buffer as b  # noqa: E402
 
 METRICS = """# HELP kn_revision_concurrency_stable x
@@ -51,6 +53,7 @@ class FakeCustom:
 
 
 class FakeCore:
+    """The autoscaler metrics behind call_api, and the API's model copies (ConfigMaps with spec.json)."""
     class _Client:
         def __init__(self, text):
             self.text = text
@@ -60,15 +63,26 @@ class FakeCore:
                 data = self.text.encode()
             return R()
 
-    def __init__(self, text):
+    class _CM:
+        def __init__(self, mid, buf):
+            self.data = {"spec.json": json.dumps({"id": mid, "scaling": {"buffer": buf}})}
+            self.metadata = type("M", (), {"labels": {"serverless2.nebius/model": mid}})()
+
+    def __init__(self, text, buffers=None):
         self.api_client = self._Client(text)
+        self.buffers = buffers or {}
+
+    def list_namespaced_config_map(self, ns, label_selector=None):
+        return type("L", (), {"items": [self._CM(m, buf) for m, buf in self.buffers.items()]})()
 
 
 def isvc(name, buf, min_=0, max_=4, cooldown=None):
-    ann = {b.BUFFER_ANN: str(buf)} if buf else {}
-    if cooldown:
-        ann[b.COOLDOWN_ANN] = cooldown
+    ann = {b.COOLDOWN_ANN: cooldown} if cooldown else {}
+    BUFFERS[name] = buf
     return {"metadata": {"name": name, "annotations": ann}, "spec": {"predictor": {"minReplicas": min_, "maxReplicas": max_}}}
+
+
+BUFFERS: dict = {}
 
 
 def rev(name, model, active=True, ann=None):
@@ -77,19 +91,21 @@ def rev(name, model, active=True, ann=None):
 
 
 def test_raise_hold_lower_and_restore():
+    BUFFERS.clear()
     custom = FakeCustom([isvc("llm", 1), isvc("idle", 1)], [rev("llm-predictor-00002", "llm"), rev("idle-predictor-00001", "idle")])
-    out = b.reconcile_worker(custom, FakeCore(METRICS), now=1000.0)
+    out = b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=1000.0)
     assert out == {"llm-predictor-00002": 3}                       # demand 2 + buffer 1; the idle model keeps min 0
     assert custom.patches[-1][1] == {b.MIN_ANN: "3", b.RAISED_ANN: "1000"}
     # demand drops to 0: inside the cooldown the floor stays, after it the floor returns to the minimum and our mark goes
     quiet = METRICS.replace('kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 5.2', 'kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 0')
-    assert b.reconcile_worker(custom, FakeCore(quiet), now=1060.0) == {}
-    assert b.reconcile_worker(custom, FakeCore(quiet), now=1200.0) == {"llm-predictor-00002": 0}
+    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1060.0) == {}
+    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1200.0) == {"llm-predictor-00002": 0}
     assert custom.patches[-1][1] == {b.MIN_ANN: "0", b.RAISED_ANN: None}
 
 
 def test_buffer_removed_restores_the_floor_and_inactive_revisions_are_left_alone():
+    BUFFERS.clear()
     custom = FakeCustom([isvc("llm", 0, min_=1)], [rev("llm-predictor-00002", "llm", ann={b.MIN_ANN: "3", b.RAISED_ANN: "1"}),
                                                    rev("llm-predictor-00001", "llm", active=False)])
-    assert b.reconcile_worker(custom, FakeCore(METRICS), now=5000.0) == {"llm-predictor-00002": 1}
+    assert b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=5000.0) == {"llm-predictor-00002": 1}
     assert len(custom.patches) == 1

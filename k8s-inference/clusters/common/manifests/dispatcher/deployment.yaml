@@ -15,7 +15,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: dispatcher
-          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.4
+          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.5
           args: ["/app/dispatcher.py"]
           ports: [{ name: http, containerPort: 8080 }]   # GET /v1/rank (the API's pre-placement query), /healthz
           startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 36 }

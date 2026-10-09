@@ -22,7 +22,7 @@ spec:
           securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
           containers:
             - name: price-feed
-              image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.4
+              image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.5
               args: ["/app/price_feed.py"]
               env:
                 - { name: PRICES_NAMESPACE, value: kueue-system }

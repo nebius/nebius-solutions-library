@@ -44,7 +44,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.2", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.3", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):

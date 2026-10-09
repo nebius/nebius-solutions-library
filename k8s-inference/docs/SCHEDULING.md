@@ -181,8 +181,9 @@ so a burst finds a replica at once instead of waiting for a start. Knative's aut
 setting (it scales to load over target), so the dispatcher's elected replica adds it
 (`services/dispatcher/buffer.py`, every reconcile cycle, 15 s):
 
-1. For every InferenceService with the annotation `serverless2.nebius/buffer` (the API writes it from
-   `scaling.buffer`), take the revision that carries the traffic (`routingState=active`).
+1. For every model whose per-region copy (the API's catalog ConfigMap in `api`) carries `scaling.buffer`,
+   take the revision that carries the traffic (`routingState=active`). Nothing is rendered into the
+   InferenceService for it, so changing the buffer rolls no revision.
 2. Read demand from the Knative autoscaler's own metrics (`kn_revision_concurrency_stable` over
    `kn_revision_concurrency_target`, or the request-rate pair for that metric), through the worker API
    server's service proxy. That is Knative's formula, measured before our floor, so the floor never hides it.
@@ -195,7 +196,7 @@ setting (it scales to load over target), so the dispatcher's elected replica add
    `serverless2.nebius/buffer-raised-at` while a floor of ours is up; removing the buffer restores the minimum.
 
 Cost: N replicas' GPUs for as long as the model serves. The worker identity of the manager gains read on
-InferenceServices, patch on Revisions and `get` on the autoscaler's service proxy
+InferenceServices and the model copies, patch on Revisions and `get` on the autoscaler's service proxy
 (`clusters/common/manifests/fleet-access/multikueue.yaml`).
 
 ## Images: one host, cached per region

@@ -240,8 +240,6 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             annotations["autoscaling.knative.dev/target-utilization-percentage"] = str(scaling.get("target", 100)) if metric == "concurrency_utilization" else "100"
             if metric == "requests_per_second":
                 runtime["scaling"]["containerConcurrency"] = 0
-        if int(scaling.get("buffer") or 0) > 0:
-            annotations[f"{LABEL}/buffer"] = str(int(scaling["buffer"]))   # the dispatcher holds min-scale at demand + buffer
         if annotations:
             runtime["annotations"] = annotations
         if s.get("args"):
