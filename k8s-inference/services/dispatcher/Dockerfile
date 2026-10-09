@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir kubernetes==36.0.3
 COPY --from=ops /usr/local/bin/nebius /usr/local/bin/nebius
 WORKDIR /app
 COPY dispatcher.py price_feed.py /app/
+COPY buffer.py /app/buffer.py
 USER 65534
 ENTRYPOINT ["python", "-u"]
 CMD ["/app/dispatcher.py"]
