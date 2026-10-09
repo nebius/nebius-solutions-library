@@ -12,6 +12,17 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Scaling buffer (2026-10-09, late evening, the same test fleet)
+
+`scaling.buffer = 1` on the hub's endpoint (`max 2`, otherwise scale to zero), three request loops for
+three minutes, the dispatcher's cycle at 15 s: the floor rose from 0 to 2 (demand 1 + buffer 1) 15 s into
+the load, the second replica started on the warm spare node and was serving 2 min later (the model's image
+was not on that node yet), the floor stayed at 2 through the whole load, and 3 min after the last request
+(the 120 s cooldown measured from the first quiet sample) it returned to 0; the model then scaled to zero.
+Changing the buffer through the API rolls no revision (the dispatcher reads the model copy). The first
+build dropped the floor for 30 s on a single quiet sample mid-load; the hysteresis (demand must stay low for
+a whole cooldown) removed that. Dispatcher 0.2.6, API 0.10.3, 26 dispatcher unit tests.
+
 ## Redeployment from the merged copy: four spot regions, warm spare nodes (2026-10-09 evening, five clusters)
 
 The test fleet was destroyed and deployed again from this directory as merged (the shared-components refactor
