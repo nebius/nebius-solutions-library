@@ -1,0 +1,53 @@
+# GPU Driver Version Test Workflow
+# Validates that the correct NVIDIA driver is installed (580.95.05)
+# and that CUDA is functional on H100 GPUs.
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_gpu_driver.yaml
+
+workflow:
+  name: test-gpu-driver
+  resources:
+    gpu-resource:
+      platform: H100
+      gpu: 1
+      cpu: 2
+      memory: 4Gi
+  tasks:
+  - name: check-driver
+    image: nvidia/cuda:13.0.2-base-ubuntu24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "=== GPU Driver Verification ==="
+      echo ""
+      EXPECTED="580.95.05"
+
+      echo "--- Driver version ---"
+      DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d '[:space:]')
+      echo "Installed: ${DRIVER}"
+      echo "Expected:  ${EXPECTED}"
+      if [ "$DRIVER" = "$EXPECTED" ]; then
+        echo "PASS: driver version matches"
+      else
+        echo "FAIL: driver version mismatch"
+        exit 1
+      fi
+      echo ""
+
+      echo "--- GPU info ---"
+      nvidia-smi --query-gpu=name,memory.total,pci.bus_id --format=csv
+      echo ""
+
+      echo "--- All GPUs visible ---"
+      GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+      echo "GPU count: ${GPU_COUNT}"
+      echo ""
+
+      echo "--- CUDA compute test ---"
+      # Simple CUDA validation via nvidia-smi
+      nvidia-smi -q | grep -E "CUDA Version|Product Name|Driver Version"
+      echo ""
+
+      echo "=== GPU Driver Verification Complete ==="
+    resource: gpu-resource

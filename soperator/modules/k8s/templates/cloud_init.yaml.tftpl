@@ -1,4 +1,71 @@
 #cloud-config
+%{ if use_default_apparmor_profile }
+bootcmd:
+  - |
+    set -eu
+    command -v apparmor_parser >/dev/null || { echo "AppArmor parser is unavailable" >&2; exit 1; }
+    test -r /sys/kernel/security/apparmor/profiles || { echo "AppArmor kernel interface is unavailable" >&2; exit 1; }
+    apparmor_parser --replace <<'SOPERATOR_APPARMOR_EOF'
+    #include <tunables/global>
+
+    profile soperator-default flags=(attach_disconnected,mediate_deleted) {
+      include <abstractions/base>
+
+      file,
+      mount,
+      capability,
+      network,
+      dbus,
+      pivot_root,
+      remount,
+      ptrace,
+      signal,
+      umount,
+      unix,
+
+      /** lrixw,
+
+      deny /usr/lib/x86_64-linux-gnu/libGLES* w,
+      deny /usr/lib/x86_64-linux-gnu/libGLX_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/libnvcuvid* w,
+      deny /usr/lib/x86_64-linux-gnu/gbm/nvidia-* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/_nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/wine/nvngx.dll w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia* w,
+      deny /usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so w,
+      deny /usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia w,
+      deny /usr/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib/x86_64-linux-gnu/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/local/nvidia/lib64/libnvidia-*.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcuda.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+      deny /usr/local/nvidia/lib64/libcudadebugger.so.[0-9][0-9][0-9].[0-9][0-9].[0-9]* w,
+
+      deny /usr/bin/nvidia-smi w,
+      deny /usr/bin/nvidia-debugdump w,
+      deny /usr/bin/nvidia-persistenced w,
+      deny /usr/bin/nv-fabricmanager w,
+      deny /usr/bin/nvidia-cuda-mps-control w,
+      deny /usr/bin/nvidia-cuda-mps-server w,
+      deny /lib/firmware/nvidia/**/gsp_*.bin w,
+    }
+    SOPERATOR_APPARMOR_EOF
+    grep -Fxq 'soperator-default (enforce)' /sys/kernel/security/apparmor/profiles || { echo "soperator-default is not in enforce mode" >&2; exit 1; }
+%{ endif }
+
 %{ if length(ssh_users) > 0 }
 users:
 %{ for user in ssh_users }
@@ -12,28 +79,141 @@ users:
 %{ endfor }
 %{ endif }
 
-%{ if length(nvidia_admin_conf_lines) > 0 }
+%{ if length(nvidia_config_lines) > 0 }
 write_files:
-  - path: /etc/modprobe.d/nvidia_admin.conf
+  - path: /etc/modprobe.d/nvidia_config.conf
     owner: root:root
     permissions: "0644"
     content: |
-%{ for line in nvidia_admin_conf_lines }
+%{ for line in nvidia_config_lines }
       ${line}
 %{ endfor }
-  - path: /usr/local/bin/nvidia-conf-check.sh
+  - path: /usr/local/bin/nvidia-config-check.sh
     owner: root:root
     permissions: "0755"
     content: |
         #!/usr/bin/env bash
         set -euo pipefail
 
-        reboot_guard="/var/lib/nvidia-conf.rebooted"
-        modprobe_conf="/etc/modprobe.d/nvidia_admin.conf"
+        modprobe_conf="/etc/modprobe.d/nvidia_config.conf"
+        params_file="/proc/driver/nvidia/params"
 
-        log_prefix="[nvidia-conf]"
+        log_prefix="[nvidia-config]"
         log() {
             echo "$${log_prefix} $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
+        }
+
+        trim() {
+            local value="$${1:-}"
+            value="$${value#"$${value%%[![:space:]]*}"}"
+            value="$${value%"$${value##*[![:space:]]}"}"
+            printf '%s\n' "$${value}"
+        }
+
+        unquote() {
+            local value
+            value="$(trim "$${1:-}")"
+            if [[ "$${value}" =~ ^\"(.*)\"$ ]]; then
+                printf '%s\n' "$${BASH_REMATCH[1]}"
+                return
+            fi
+            if [[ "$${value}" =~ ^\'(.*)\'$ ]]; then
+                printf '%s\n' "$${BASH_REMATCH[1]}"
+                return
+            fi
+            printf '%s\n' "$${value}"
+        }
+
+        normalize_param_name() {
+            local key="$${1:-}"
+            case "$${key}" in
+                NVreg_RestrictProfilingToAdminUsers)
+                    printf '%s\n' "RmProfilingAdminOnly"
+                    ;;
+                NVreg_*)
+                    printf '%s\n' "$${key#NVreg_}"
+                    ;;
+                *)
+                    printf '%s\n' "$${key}"
+                    ;;
+            esac
+        }
+
+        declare -A current_params=()
+
+        load_current_params() {
+            local line key value
+
+            while IFS= read -r line; do
+                line="$(trim "$${line}")"
+                [[ -n "$${line}" ]] || continue
+
+                if [[ "$${line}" == *:* ]]; then
+                    key="$(trim "$${line%%:*}")"
+                    value="$(trim "$${line#*:}")"
+                    current_params["$${key}"]="$(unquote "$${value}")"
+                fi
+            done < "$${params_file}"
+        }
+
+        current_param_value() {
+            local key="$${1:-}" registry_dwords
+            if [[ -v current_params["$${key}"] ]]; then
+                printf '%s\n' "$${current_params["$${key}"]}"
+                return
+            fi
+
+            # Nested values under RegistryDwords are checked separately
+            if [[ -v current_params["RegistryDwords"] ]]; then
+                registry_dwords="$${current_params["RegistryDwords"]}"
+                printf '%s\n' "$${registry_dwords}" | grep -Eo "(^|[[:space:];])$${key}=[^[:space:];\"]+" | tail -n1 | sed -E "s/(^|[[:space:];])$${key}=//" || true
+            fi
+        }
+
+        check_param() {
+            local key="$${1:-}" desired_raw="$${2:-}" normalized_key desired current
+
+            normalized_key="$(normalize_param_name "$${key}")"
+            desired="$(unquote "$${desired_raw}")"
+            current="$(current_param_value "$${normalized_key}")"
+
+            log "check key=$${normalized_key} desired=$${desired:-unknown} current=$${current:-missing}"
+
+            if [[ -z "$${current}" ]]; then
+                log "mismatch=$${normalized_key} reason=missing desired=$${desired}"
+                return 1
+            fi
+
+            if [[ "$${current}" != "$${desired}" ]]; then
+                log "mismatch=$${normalized_key} desired=$${desired} current=$${current}"
+                return 1
+            fi
+
+            return 0
+        }
+
+        parse_and_check_option() {
+            local key="$${1:-}" value="$${2:-}" registry_entry registry_key registry_value rc=0
+
+            if [[ "$${key}" == "NVreg_RegistryDwords" ]]; then
+                while IFS= read -r registry_entry; do
+                    registry_entry="$(trim "$${registry_entry}")"
+                    [[ -n "$${registry_entry}" ]] || continue
+                    registry_key="$${registry_entry%%=*}"
+                    registry_value="$${registry_entry#*=}"
+                    if ! check_param "$${registry_key}" "$${registry_value}"; then
+                        rc=1
+                    fi
+                done < <(printf '%s\n' "$(unquote "$${value}")" | tr ';' '\n')
+                return "$${rc}"
+            fi
+
+            if [[ "$${key}" == "NVreg_RegistryDwordsPerDevice" ]]; then
+                log "status=skip reason=unsupported_device_scoped_option key=$${key} value=$${value@Q}"
+                return 0
+            fi
+
+            check_param "$${key}" "$${value}"
         }
 
         log "start"
@@ -43,49 +223,60 @@ write_files:
             exit 0
         fi
 
-        desired_restrict_profiling="$(grep NVreg_RestrictProfilingToAdminUsers "$${modprobe_conf}"  | cut -d'=' -f2)"
-        desired_streammem="$(grep -Eo 'NVreg_EnableStreamMemOPs=[0-9]+' "$${modprobe_conf}" | tail -n1 | cut -d= -f2 || true)"
-        desired_peer_override="$(grep -Eo 'PeerMappingOverride=[0-9]+' "$${modprobe_conf}" | tail -n1 | cut -d= -f2 || true)"
-
-        log "desired_restrict_profiling=$${desired_restrict_profiling:-unknown} desired_streammem=$${desired_streammem:-unknown} desired_peer_override=$${desired_peer_override:-unknown}"
-
-        if [ ! -r /proc/driver/nvidia/params ]; then
+        if [ ! -r "$${params_file}" ]; then
             log "status=skip reason=nvidia_params_missing"
             exit 0
         fi
 
-        current_restrict_profiling="$(grep -i RmProfilingAdminOnly /proc/driver/nvidia/params | cut -d':' -f2 | xargs)"
-        current_streammem="$(grep -iE '^EnableStreamMemOPs:' /proc/driver/nvidia/params | cut -d':' -f2 | xargs || true)"
-        current_peer_override="$(grep -Eo 'PeerMappingOverride=[0-9]+' /proc/driver/nvidia/params | cut -d= -f2 || true)"
-
-        log "current_restrict_profiling=$${current_restrict_profiling:-unknown} current_streammem=$${current_streammem:-unknown} current_peer_override=$${current_peer_override:-unknown}"
+        load_current_params
 
         mismatch=0
+        while IFS= read -r raw_line; do
+            line="$(trim "$${raw_line%%#*}")"
+            [[ -n "$${line}" ]] || continue
 
-        if [ -n "$${desired_restrict_profiling}" ] && [ -n "$${current_restrict_profiling}" ] && [ "$${current_restrict_profiling}" != "$${desired_restrict_profiling}" ]; then
-            mismatch=1
-            log "mismatch=RmProfilingAdminOnly desired=$${desired_restrict_profiling} current=$${current_restrict_profiling}"
-        fi
+            # Match an options line like:
+            # options nvidia NVreg_EnableMSI=1 NVreg_RmLogonRC=0
+            if [[ ! "$${line}" =~ ^options[[:space:]]+nvidia[[:space:]]+(.+)$ ]]; then
+                log "status=skip reason=unsupported_line line=$${line@Q}"
+                continue
+            fi
 
-        if [ -n "$${desired_streammem}" ] && [ -n "$${current_streammem}" ] && [ "$${current_streammem}" != "$${desired_streammem}" ]; then
-            mismatch=1
-            log "mismatch=EnableStreamMemOPs desired=$${desired_streammem} current=$${current_streammem}"
-        fi
+            line="$${BASH_REMATCH[1]}"
+            while [[ -n "$${line}" ]]; do
+                # Match a double-quoted value like:
+                # NVreg_RegistryDwords="RmLogonRC=0;RmMsg=0x1"
+                if [[ "$${line}" =~ ^([A-Za-z0-9_]+)=\"([^\"]*)\"[[:space:]]*(.*)$ ]]; then
+                    key="$${BASH_REMATCH[1]}"
+                    value="$${BASH_REMATCH[2]}"
+                    line="$${BASH_REMATCH[3]}"
+                # Match a single-quoted value like:
+                # NVreg_TemporaryFilePath='/var/tmp/nvidia'
+                elif [[ "$${line}" =~ ^([A-Za-z0-9_]+)=\'([^\']*)\'[[:space:]]*(.*)$ ]]; then
+                    key="$${BASH_REMATCH[1]}"
+                    value="$${BASH_REMATCH[2]}"
+                    line="$${BASH_REMATCH[3]}"
+                # Match an unquoted scalar like:
+                # NVreg_EnableStreamMemOPs=1
+                elif [[ "$${line}" =~ ^([A-Za-z0-9_]+)=([^[:space:]]+)[[:space:]]*(.*)$ ]]; then
+                    key="$${BASH_REMATCH[1]}"
+                    value="$${BASH_REMATCH[2]}"
+                    line="$${BASH_REMATCH[3]}"
+                else
+                    log "status=skip reason=unparsed_segment segment=$${line@Q}"
+                    mismatch=1
+                    break
+                fi
 
-        if [ -n "$${desired_peer_override}" ] && [ -n "$${current_peer_override}" ] && [ "$${current_peer_override}" != "$${desired_peer_override}" ]; then
-            mismatch=1
-            log "mismatch=PeerMappingOverride desired=$${desired_peer_override} current=$${current_peer_override}"
-        fi
+                if ! parse_and_check_option "$${key}" "$${value}"; then
+                    mismatch=1
+                fi
+            done
+        done < "$${modprobe_conf}"
 
         if [ "$${mismatch}" -eq 1 ]; then
-            if [ -f "$${reboot_guard}" ]; then
-                log "action=skip reboot (guard exists)"
-            else
-                log "action=reboot (mismatch)"
-                mkdir -p "$(dirname "$${reboot_guard}")"
-                date -u +%Y-%m-%dT%H:%M:%SZ > "$${reboot_guard}"
-                shutdown -r +1 "cloud-init: apply /etc/modprobe.d/nvidia_admin.conf"
-            fi
+            log "action=reboot (mismatch)"
+            shutdown -r +1 "cloud-init: apply /etc/modprobe.d/nvidia_config.conf"
         else
             log "status=ok"
         fi
@@ -93,5 +284,5 @@ write_files:
         log "end"
 
 runcmd:
-  - [ bash, -lc, "/usr/local/bin/nvidia-conf-check.sh >> /var/log/nvidia-conf-check.log 2>&1" ]
+  - [ bash, -lc, "/usr/local/bin/nvidia-config-check.sh >> /var/log/nvidia-config-check.log 2>&1" ]
 %{ endif }

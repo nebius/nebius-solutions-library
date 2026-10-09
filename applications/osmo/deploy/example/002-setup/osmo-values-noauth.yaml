@@ -1,0 +1,170 @@
+# OSMO Service values - Auth Disabled
+# For testing without authentication
+
+global:
+  osmoImageLocation: nvcr.io/nvidia/osmo
+  osmoImageTag: latest
+  imagePullPolicy: IfNotPresent
+
+services:
+  postgres:
+    enabled: false
+    serviceName: postgresql.osmo.svc.cluster.local
+    port: 5432
+    db: osmo
+    user: osmo_admin
+    passwordSecretName: db-secret
+    passwordSecretKey: db-password
+  
+  redis:
+    enabled: false
+    serviceName: redis-master.osmo.svc.cluster.local
+    port: 6379
+    tlsEnabled: false
+  
+  service:
+    scaling:
+      minReplicas: 1
+      maxReplicas: 1
+    ingress:
+      enabled: false
+    auth:
+      enabled: false
+    extraEnv:
+      - name: OSMO_POSTGRES_HOST
+        value: postgresql.osmo.svc.cluster.local
+      - name: OSMO_POSTGRES_PORT
+        value: "5432"
+      - name: OSMO_POSTGRES_USER
+        value: osmo_admin
+      - name: OSMO_POSTGRES_DATABASE
+        value: osmo
+      - name: OSMO_POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: db-password
+    extraVolumes:
+      - name: vault-secrets
+        secret:
+          secretName: vault-secrets
+    extraVolumeMounts:
+      - name: vault-secrets
+        mountPath: /home/osmo/vault-agent/secrets
+        readOnly: true
+  
+  worker:
+    scaling:
+      minReplicas: 1
+      maxReplicas: 1
+    extraEnv:
+      - name: OSMO_POSTGRES_HOST
+        value: postgresql.osmo.svc.cluster.local
+      - name: OSMO_POSTGRES_PORT
+        value: "5432"
+      - name: OSMO_POSTGRES_USER
+        value: osmo_admin
+      - name: OSMO_POSTGRES_DATABASE
+        value: osmo
+      - name: OSMO_POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: db-password
+    extraVolumes:
+      - name: vault-secrets
+        secret:
+          secretName: vault-secrets
+    extraVolumeMounts:
+      - name: vault-secrets
+        mountPath: /home/osmo/vault-agent/secrets
+        readOnly: true
+
+  logger:
+    scaling:
+      minReplicas: 1
+      maxReplicas: 1
+    extraEnv:
+      - name: OSMO_POSTGRES_HOST
+        value: postgresql.osmo.svc.cluster.local
+      - name: OSMO_POSTGRES_PORT
+        value: "5432"
+      - name: OSMO_POSTGRES_USER
+        value: osmo_admin
+      - name: OSMO_POSTGRES_DATABASE
+        value: osmo
+      - name: OSMO_POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: db-password
+    extraVolumes:
+      - name: vault-secrets
+        secret:
+          secretName: vault-secrets
+    extraVolumeMounts:
+      - name: vault-secrets
+        mountPath: /home/osmo/vault-agent/secrets
+        readOnly: true
+
+  agent:
+    scaling:
+      minReplicas: 1
+      maxReplicas: 1
+    extraEnv:
+      - name: OSMO_POSTGRES_HOST
+        value: postgresql.osmo.svc.cluster.local
+      - name: OSMO_POSTGRES_PORT
+        value: "5432"
+      - name: OSMO_POSTGRES_USER
+        value: osmo_admin
+      - name: OSMO_POSTGRES_DATABASE
+        value: osmo
+      - name: OSMO_POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: db-password
+    extraVolumes:
+      - name: vault-secrets
+        secret:
+          secretName: vault-secrets
+    extraVolumeMounts:
+      - name: vault-secrets
+        mountPath: /home/osmo/vault-agent/secrets
+        readOnly: true
+
+  delayedJobMonitor:
+    replicas: 1
+    extraEnv:
+      - name: OSMO_POSTGRES_HOST
+        value: postgresql.osmo.svc.cluster.local
+      - name: OSMO_POSTGRES_PORT
+        value: "5432"
+      - name: OSMO_POSTGRES_USER
+        value: osmo_admin
+      - name: OSMO_POSTGRES_DATABASE
+        value: osmo
+      - name: OSMO_POSTGRES_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-secret
+            key: db-password
+    extraVolumes:
+      - name: vault-secrets
+        secret:
+          secretName: vault-secrets
+    extraVolumeMounts:
+      - name: vault-secrets
+        mountPath: /home/osmo/vault-agent/secrets
+        readOnly: true
+
+sidecars:
+  envoy:
+    enabled: false
+  rateLimit:
+    enabled: false
+  logAgent:
+    enabled: false
+  otel:
+    enabled: false

@@ -1,0 +1,68 @@
+# Loki Stack Helm Values
+# https://github.com/grafana/helm-charts/tree/main/charts/loki-stack
+
+loki:
+  enabled: true
+  
+  persistence:
+    enabled: true
+    size: 50Gi
+  
+  config:
+    auth_enabled: false
+    
+    server:
+      http_listen_port: 3100
+    
+    ingester:
+      lifecycler:
+        ring:
+          kvstore:
+            store: inmemory
+          replication_factor: 1
+      chunk_idle_period: 15m
+      chunk_retain_period: 30s
+    
+    schema_config:
+      configs:
+        - from: 2020-01-01
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index:
+            prefix: index_
+            period: 24h
+    
+    storage_config:
+      boltdb_shipper:
+        active_index_directory: /data/loki/boltdb-shipper-active
+        cache_location: /data/loki/boltdb-shipper-cache
+        shared_store: filesystem
+      filesystem:
+        directory: /data/loki/chunks
+    
+    limits_config:
+      enforce_metric_name: false
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      max_entries_limit_per_query: 5000
+    
+    table_manager:
+      retention_deletes_enabled: true
+      retention_period: 168h  # 7 days
+  
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# Promtail is deployed separately
+promtail:
+  enabled: false
+
+# Grafana is deployed via kube-prometheus-stack
+grafana:
+  enabled: false

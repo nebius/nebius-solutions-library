@@ -17,6 +17,7 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
       "dcgmExporter.serviceMonitor.relabelings[0].sourceLabels[0]" = var.relabel_dcgm_exporter ? "__meta_kubernetes_pod_label_app" : null
       "dcgmExporter.serviceMonitor.relabelings[0].targetLabel"     = var.relabel_dcgm_exporter ? "app_kubernetes_io_name" : null
       "mig.strategy"                                               = var.mig_strategy != null ? var.mig_strategy : null
+      "cdi.enabled"                                                = var.cdi_enabled
     }
   }
 }

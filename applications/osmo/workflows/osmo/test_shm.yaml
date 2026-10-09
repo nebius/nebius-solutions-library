@@ -1,0 +1,75 @@
+# Shared Memory (/dev/shm) Test Workflow
+# Validates that the shm pod template is applied correctly:
+#   - /dev/shm is mounted as tmpfs
+#   - Size is 64Gi (as configured in the shm pod template)
+#   - Measures sequential write/read bandwidth
+#
+# Requires: shm pod template configured, H100 platform with shm in override_pod_template
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_shm.yaml
+
+workflow:
+  name: test-shm
+  resources:
+    gpu-resource:
+      platform: H100
+      gpu: 1
+      cpu: 4
+      memory: 8Gi
+  tasks:
+  - name: check-shm
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "=== Shared Memory (/dev/shm) Test ==="
+      echo ""
+
+      # Check mount
+      echo "--- Mount info ---"
+      if mount | grep -q "/dev/shm.*tmpfs"; then
+        echo "PASS: /dev/shm is mounted as tmpfs"
+        mount | grep "/dev/shm"
+      else
+        echo "FAIL: /dev/shm is NOT a tmpfs mount"
+        mount | grep shm || echo "(no shm mount found)"
+        exit 1
+      fi
+      echo ""
+
+      # Check size
+      echo "--- Size ---"
+      SHM_SIZE_KB=$(df -k /dev/shm | tail -1 | awk '{print $2}')
+      SHM_SIZE_GI=$((SHM_SIZE_KB / 1024 / 1024))
+      echo "Total: ${SHM_SIZE_GI}Gi (${SHM_SIZE_KB} KB)"
+      if [ "$SHM_SIZE_GI" -ge 60 ]; then
+        echo "PASS: size >= 60Gi"
+      else
+        echo "FAIL: size ${SHM_SIZE_GI}Gi is less than expected 64Gi"
+        exit 1
+      fi
+      echo ""
+
+      # Bandwidth test - write
+      echo "--- Write bandwidth (1GB) ---"
+      WRITE_OUT=$(dd if=/dev/zero of=/dev/shm/bench.tmp bs=1M count=1024 conv=fdatasync 2>&1)
+      echo "$WRITE_OUT"
+      WRITE_SPEED=$(echo "$WRITE_OUT" | grep -oP '[\d.]+ [GM]B/s' | tail -1)
+      echo "Write speed: ${WRITE_SPEED:-see above}"
+      echo ""
+
+      # Bandwidth test - read
+      echo "--- Read bandwidth (1GB) ---"
+      # Drop caches not possible without privileges, but tmpfs reads are from RAM anyway
+      READ_OUT=$(dd if=/dev/shm/bench.tmp of=/dev/null bs=1M count=1024 2>&1)
+      echo "$READ_OUT"
+      READ_SPEED=$(echo "$READ_OUT" | grep -oP '[\d.]+ [GM]B/s' | tail -1)
+      echo "Read speed: ${READ_SPEED:-see above}"
+      echo ""
+
+      # Cleanup
+      rm -f /dev/shm/bench.tmp
+
+      echo "=== Shared Memory Test Complete ==="
+    resource: gpu-resource

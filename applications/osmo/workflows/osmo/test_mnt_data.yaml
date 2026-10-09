@@ -1,0 +1,88 @@
+# /mnt/data Filestore Test Workflow
+# Validates that the Nebius Filestore is mounted at /mnt/data and measures I/O speed.
+# Uses the H100 platform (with shm template).
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_mnt_data.yaml
+
+workflow:
+  name: test-mnt-data
+  resources:
+    gpu-resource:
+      platform: gpu
+      gpu: 1
+      cpu: 4
+      memory: 4Gi
+      storage: 1Gi
+  tasks:
+  - name: check-mnt-data
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "=== /mnt/data Filestore Test ==="
+      echo ""
+
+      # Check mount
+      echo "--- Mount check ---"
+      if mountpoint -q /mnt/data 2>/dev/null || df /mnt/data 2>/dev/null | grep -q /mnt/data; then
+        echo "PASS: /mnt/data is mounted"
+      else
+        echo "FAIL: /mnt/data is NOT mounted"
+        exit 1
+      fi
+      echo ""
+
+      echo "--- Filesystem info ---"
+      df -hT /mnt/data
+      echo ""
+
+      echo "--- Mount type ---"
+      mount | grep /mnt/data || echo "(not visible in mount table -- may be host mount)"
+      echo ""
+
+      # Install fio
+      apt-get update -qq && apt-get install -y -qq fio > /dev/null 2>&1
+      echo "fio version: $(fio --version)"
+      echo ""
+
+      TEST_DIR="/mnt/data/.osmo-bench-$$"
+      mkdir -p "${TEST_DIR}"
+
+      # Sequential write test
+      echo "--- Sequential Write (direct I/O, 1M blocks, 8 jobs) ---"
+      fio --name=seq-write \
+        --ioengine=libaio --direct=1 --time_based \
+        --directory="${TEST_DIR}" \
+        --rw=write --bs=1M --iodepth=32 \
+        --thread --numjobs=8 --size=2G --runtime=30 \
+        --group_reporting
+      echo ""
+
+      # Sequential read test
+      echo "--- Sequential Read (direct I/O, 1M blocks, 8 jobs) ---"
+      fio --name=seq-read \
+        --ioengine=libaio --direct=1 --time_based \
+        --directory="${TEST_DIR}" \
+        --rw=read --bs=1M --iodepth=32 \
+        --thread --numjobs=8 --size=2G --runtime=30 \
+        --group_reporting
+      echo ""
+
+      # Random read/write (4K) for IOPS
+      echo "--- Random Read/Write 4K (IOPS test, 4 jobs) ---"
+      fio --name=rand-rw \
+        --ioengine=libaio --direct=1 --time_based \
+        --directory="${TEST_DIR}" \
+        --rw=randrw --rwmixread=70 --bs=4k --iodepth=32 \
+        --thread --numjobs=4 --size=1G --runtime=30 \
+        --group_reporting
+      echo ""
+
+      # Cleanup
+      rm -rf "${TEST_DIR}"
+
+      echo "=== /mnt/data Filestore Test Complete ==="
+    resource: gpu-resource
+    volumeMounts:
+    - /mnt/data

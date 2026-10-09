@@ -3,76 +3,89 @@ resource "nebius_iam_v1_service_account" "backups_service_account" {
   name      = "${var.instance_name}-backup-sa"
 }
 
-# TODO: replace it with more granular access binding as it becomes available
-data "nebius_iam_v1_group" "editors" {
-  name      = "editors"
-  parent_id = var.iam_tenant_id
+resource "terraform_data" "backups_service_account_ready" {
+  triggers_replace = {
+    service_account_id = nebius_iam_v1_service_account.backups_service_account.id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      SERVICE_ACCOUNT_ID = self.triggers_replace.service_account_id
+    }
+    command = <<-EOT
+      "${path.module}/../scripts/retry.sh" -n 30 -i 5 -- \
+        nebius iam service-account get --id "$SERVICE_ACCOUNT_ID" >/dev/null
+    EOT
+  }
+}
+
+resource "nebius_iam_v1_group" "backups" {
+  name      = "${var.instance_name}-backup"
+  parent_id = var.iam_project_id
+}
+
+resource "nebius_iam_v1_access_permit" "backups" {
+  # Object access supports backup/restore/prune; viewer adds bucket metadata reads.
+  for_each = toset(["storage.object-editor", "storage.viewer"])
+
+  parent_id   = nebius_iam_v1_group.backups.id
+  resource_id = var.backups_bucket_id
+  role        = each.value
 }
 
 resource "nebius_iam_v1_group_membership" "backups_service_account_group" {
-  parent_id = data.nebius_iam_v1_group.editors.id
+  depends_on = [
+    terraform_data.backups_service_account_ready,
+    nebius_iam_v1_access_permit.backups,
+  ]
+
+  parent_id = nebius_iam_v1_group.backups.id
   member_id = nebius_iam_v1_service_account.backups_service_account.id
+
+  lifecycle {
+    # For migration from the tenant editors group: establish bucket access before removing the old membership.
+    create_before_destroy = true
+  }
 }
 
 # TODO: replace this mess with proper nebius provider resources as they become available
 resource "terraform_data" "k8s_backups_bucket_access_secret" {
+  depends_on = [nebius_iam_v1_group_membership.backups_service_account_group]
 
   triggers_replace = {
     namespace           = var.soperator_namespace
     secret_name         = local.secret_name
     k8s_cluster_context = var.k8s_cluster_context
+    k8s_cluster_id      = var.k8s_cluster_id
     service_account_id  = nebius_iam_v1_service_account.backups_service_account.id
   }
 
   provisioner "local-exec" {
     when        = destroy
-    working_dir = path.root
-    interpreter = ["/bin/bash", "-c"]
-    command = join(
-      "",
-      [
-        "for AKID in $(nebius iam v2 access-key list-by-account ",
-        "--account-service-account-id ${self.triggers_replace.service_account_id} --format json | jq -r '.items[].metadata.id' ); ",
-        "do ",
-        "nebius iam v2 access-key delete --id $(echo $AKID); ",
-        "done; ",
-        "kubectl get --context ${self.triggers_replace.k8s_cluster_context} ",
-        "-n ${self.triggers_replace.namespace} secret ${self.triggers_replace.secret_name} -oyaml ",
-        "| kubectl delete --context ${self.triggers_replace.k8s_cluster_context} -f -"
-      ]
-    )
+    interpreter = ["/bin/bash"]
+    environment = {
+      K8S_CLUSTER_CONTEXT = self.triggers_replace.k8s_cluster_context
+      K8S_CLUSTER_ID      = try(self.triggers_replace.k8s_cluster_id, "")
+      NAMESPACE           = self.triggers_replace.namespace
+      SECRET_NAME         = self.triggers_replace.secret_name
+      SERVICE_ACCOUNT_ID  = self.triggers_replace.service_account_id
+    }
+    command = "${path.module}/scripts/destroy.sh"
   }
 
   provisioner "local-exec" {
     when        = create
-    working_dir = path.root
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<EOT
-set -e
-
-kubectl create namespace ${var.soperator_namespace} --context ${var.k8s_cluster_context} || true
-
-AKID=$(nebius iam v2 access-key create --parent-id ${var.iam_project_id} \
-  --account-service-account-id ${self.triggers_replace.service_account_id} \
-  --format json | jq -r '.metadata.id')
-
-kubectl apply --server-side --context ${var.k8s_cluster_context} -f -  <<EOF
-apiVersion: v1
-kind: Secret
-type: Opaque
-metadata:
-  name: ${local.secret_name}
-  namespace: ${var.soperator_namespace}
-  labels:
-    app.kubernetes.io/managed-by: soperator-terraform
-  annotations:
-    slurm.nebius.ai/service-account: ${self.triggers_replace.service_account_id}
-data:
-  aws-access-key-id: $(nebius iam v2 access-key get --id $AKID --format json | jq -r '.status.aws_access_key_id' | tr -d '\n' | base64)
-  aws-access-secret-key: $(nebius iam v2 access-key get --id $AKID --format json | jq -r '.status.secret' | tr -d '\n' | base64)
-  backup-password: $(echo -n ${var.backups_password} | base64)
-EOF
-EOT
+    interpreter = ["/bin/bash"]
+    environment = {
+      K8S_CLUSTER_CONTEXT = var.k8s_cluster_context
+      IAM_PROJECT_ID      = var.iam_project_id
+      NAMESPACE           = var.soperator_namespace
+      SECRET_NAME         = local.secret_name
+      SERVICE_ACCOUNT_ID  = nebius_iam_v1_service_account.backups_service_account.id
+      BACKUPS_PASSWORD    = var.backups_password
+    }
+    command = "${path.module}/scripts/create.sh"
   }
 }
 

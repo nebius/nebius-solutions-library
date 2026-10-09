@@ -21,6 +21,18 @@ variable "iam_project_id" {
   nullable    = false
 }
 
+variable "region" {
+  description = "Nebius region for the o11y logs project and the OpenTelemetry log ingestion endpoint."
+  type        = string
+  nullable    = false
+}
+
+variable "allow_o11y_region_migration" {
+  description = "Whether to update an existing o11y logs project when its region differs from var.region."
+  type        = bool
+  default     = false
+}
+
 variable "o11y_secret_name" {
   description = "Secret name inside k8s cluster for o11y static key."
   type        = string

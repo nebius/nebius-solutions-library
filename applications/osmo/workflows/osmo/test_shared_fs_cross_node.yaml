@@ -1,0 +1,155 @@
+# Shared Filesystem Cross-Node Test
+# Validates that /mnt/data is truly shared across different tasks and nodes.
+#
+# How it works:
+#   - 3 tasks run in parallel, each on a potentially different GPU node
+#   - Each writes a marker file with hostname + K8s node name to /mnt/data
+#   - After a sync delay, each reads ALL markers to verify cross-task visibility
+#   - The last task to finish cleans up the test directory
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_shared_fs_cross_node.yaml
+
+workflow:
+  name: test-shared-fs-cross-node
+  resources:
+    gpu-resource:
+      platform: gpu
+      gpu: 1
+      cpu: 2
+      memory: 2Gi
+      storage: 1Gi
+  tasks:
+  - name: node-a
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      set -e
+      TASK="node-a"
+      DIR="/mnt/data/.osmo-fs-test"
+      HOST=$(hostname)
+      K8S_NODE=$(cat /etc/hostname 2>/dev/null || echo "unknown")
+
+      echo "=== Task ${TASK} ==="
+      echo "Pod hostname: ${HOST}"
+      echo "K8s node env: ${MY_NODE_NAME:-not-set}"
+      df -h /mnt/data
+      echo ""
+
+      mkdir -p "${DIR}"
+      echo "${TASK}|${HOST}|$(date -Iseconds)" > "${DIR}/${TASK}.marker"
+      echo "Wrote: $(cat ${DIR}/${TASK}.marker)"
+
+      # Wait for all tasks to write
+      echo "Waiting 30s for other tasks..."
+      sleep 30
+
+      echo ""
+      echo "=== All marker files ==="
+      FOUND=0
+      for f in "${DIR}"/*.marker; do
+        [ -f "$f" ] || continue
+        FOUND=$((FOUND + 1))
+        echo "  $(basename $f): $(cat $f)"
+      done
+      echo ""
+      echo "Result: ${TASK} sees ${FOUND}/3 markers"
+      [ "${FOUND}" -ge 2 ] && echo "PASS" || echo "FAIL"
+    resource: gpu-resource
+    volumeMounts:
+    - /mnt/data
+
+  - name: node-b
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      set -e
+      TASK="node-b"
+      DIR="/mnt/data/.osmo-fs-test"
+      HOST=$(hostname)
+
+      echo "=== Task ${TASK} ==="
+      echo "Pod hostname: ${HOST}"
+      df -h /mnt/data
+      echo ""
+
+      mkdir -p "${DIR}"
+      echo "${TASK}|${HOST}|$(date -Iseconds)" > "${DIR}/${TASK}.marker"
+      echo "Wrote: $(cat ${DIR}/${TASK}.marker)"
+
+      echo "Waiting 30s for other tasks..."
+      sleep 30
+
+      echo ""
+      echo "=== All marker files ==="
+      FOUND=0
+      for f in "${DIR}"/*.marker; do
+        [ -f "$f" ] || continue
+        FOUND=$((FOUND + 1))
+        echo "  $(basename $f): $(cat $f)"
+      done
+      echo ""
+      echo "Result: ${TASK} sees ${FOUND}/3 markers"
+      [ "${FOUND}" -ge 2 ] && echo "PASS" || echo "FAIL"
+    resource: gpu-resource
+    volumeMounts:
+    - /mnt/data
+
+  - name: node-c
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      set -e
+      TASK="node-c"
+      DIR="/mnt/data/.osmo-fs-test"
+      HOST=$(hostname)
+
+      echo "=== Task ${TASK} ==="
+      echo "Pod hostname: ${HOST}"
+      df -h /mnt/data
+      echo ""
+
+      mkdir -p "${DIR}"
+      echo "${TASK}|${HOST}|$(date -Iseconds)" > "${DIR}/${TASK}.marker"
+      echo "Wrote: $(cat ${DIR}/${TASK}.marker)"
+
+      echo "Waiting 30s for other tasks..."
+      sleep 30
+
+      echo ""
+      echo "=== All marker files ==="
+      FOUND=0
+      HOSTS=""
+      for f in "${DIR}"/*.marker; do
+        [ -f "$f" ] || continue
+        FOUND=$((FOUND + 1))
+        CONTENT=$(cat "$f")
+        echo "  $(basename $f): ${CONTENT}"
+        H=$(echo "$CONTENT" | cut -d'|' -f2)
+        HOSTS="${HOSTS} ${H}"
+      done
+      NUM_UNIQUE=$(echo ${HOSTS} | tr ' ' '\n' | sort -u | grep -c . || true)
+      echo ""
+      echo "========================================"
+      echo "SUMMARY"
+      echo "========================================"
+      echo "Markers visible: ${FOUND}/3"
+      echo "Unique pods:     ${NUM_UNIQUE}"
+      if [ "${FOUND}" -ge 3 ]; then
+        echo "STATUS: PASS - all tasks see all data"
+      elif [ "${FOUND}" -ge 2 ]; then
+        echo "STATUS: PASS - cross-task sharing works"
+      else
+        echo "STATUS: FAIL - data not shared"
+      fi
+      echo "========================================"
+
+      # Cleanup (node-c runs last due to sleep timing)
+      sleep 5
+      rm -rf "${DIR}"
+    resource: gpu-resource
+    volumeMounts:
+    - /mnt/data

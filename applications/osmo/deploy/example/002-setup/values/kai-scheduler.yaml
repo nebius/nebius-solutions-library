@@ -1,0 +1,13 @@
+# KAI Scheduler Helm Values
+# GPU-aware scheduler for OSMO
+# https://nvidia.github.io/OSMO/main/deployment_guide/install_backend/dependencies/dependencies.html
+
+global:
+  # Modify the node selectors and tolerations to match your cluster
+  nodeSelector: {}
+  tolerations: []
+
+scheduler:
+  additionalArgs:
+    - --default-staleness-grace-period=-1s  # Disable staleness eviction
+    - --update-pod-eviction-condition=true  # Enable OSMO to read preemption conditions

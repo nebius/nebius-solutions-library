@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# GPU Test Workflow for Nebius
+# Validates GPU availability and CUDA functionality on Nebius L40S nodes
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/gpu_test.yaml
+#
+# Or via curl (with port-forward to osmo-service:8080):
+#   curl -X POST http://localhost:8080/api/workflow -H "Content-Type: application/yaml" --data-binary @workflows/osmo/gpu_test.yaml
+
+workflow:
+  name: gpu-test-nebius
+  resources:
+    gpu-resource:
+      platform: gpu
+      gpu: 1
+      memory: 4Gi
+      cpu: 2
+  tasks:
+  - name: check-gpu
+    image: nvcr.io/nvidia/cuda:12.6.3-base-ubuntu24.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "=== GPU Test on Nebius ==="
+        echo ""
+        echo "=== nvidia-smi output ==="
+        nvidia-smi
+        echo ""
+        echo "=== CUDA Version ==="
+        nvcc --version 2>/dev/null || echo "nvcc not available (base image)"
+        echo ""
+        echo "=== GPU Memory Info ==="
+        nvidia-smi --query-gpu=name,memory.total,memory.free,memory.used --format=csv
+        echo ""
+        echo "=== Environment ==="
+        echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
+        echo "NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-not set}"
+        echo ""
+        echo "=== GPU Test Complete ==="
+    resource: gpu-resource

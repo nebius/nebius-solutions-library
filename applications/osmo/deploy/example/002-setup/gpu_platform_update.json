@@ -1,0 +1,14 @@
+{
+  "configs": {
+    "description": "GPU platform",
+    "host_network_allowed": false,
+    "privileged_allowed": false,
+    "allowed_mounts": ["/mnt/data"],
+    "default_mounts": [],
+    "default_variables": {
+      "USER_GPU": 1
+    },
+    "resource_validations": [],
+    "override_pod_template": ["gpu_tolerations", "shm"]
+  }
+}

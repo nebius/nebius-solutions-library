@@ -1,0 +1,79 @@
+# =============================================================================
+# OSMO on Nebius - Production Configuration
+# =============================================================================
+# This configuration provides full redundancy and performance.
+# Estimated cost: ~$1000+ per 6-hour session
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Required Settings (get from nebius-env-init.sh)
+# -----------------------------------------------------------------------------
+# tenant_id = "your-tenant-id"
+# parent_id = "your-project-id"
+
+# -----------------------------------------------------------------------------
+# Environment Settings
+# -----------------------------------------------------------------------------
+region       = "eu-west2"
+environment  = "prod"
+project_name = "osmo-prod"
+
+# -----------------------------------------------------------------------------
+# Kubernetes Cluster
+# -----------------------------------------------------------------------------
+k8s_version            = null  # Use latest
+etcd_cluster_size      = 3     # HA etcd
+enable_public_endpoint = false # Private endpoint only
+
+# -----------------------------------------------------------------------------
+# CPU Nodes (production grade)
+# -----------------------------------------------------------------------------
+cpu_nodes_count            = 3
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "16vcpu-64gb"
+cpu_disk_type              = "NETWORK_SSD"
+cpu_disk_size_gib          = 256
+cpu_nodes_assign_public_ip = false
+
+# -----------------------------------------------------------------------------
+# GPU Nodes (full 8-GPU nodes with InfiniBand)
+# -----------------------------------------------------------------------------
+gpu_nodes_count_per_group  = 2
+gpu_node_groups            = 2
+gpu_nodes_platform         = null  # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null  # Use the selected region's default from locals.tf
+gpu_disk_type              = "NETWORK_SSD"
+gpu_disk_size_gib          = 1023
+gpu_nodes_assign_public_ip = false
+enable_gpu_cluster         = true  # InfiniBand enabled
+infiniband_fabric          = null  # Use region default
+enable_gpu_taints          = true
+gpu_nodes_preemptible      = false  # Preemptible requires project permissions
+gpu_nodes_driverfull_image = true   # Nebius pre-installed drivers (recommended for B200/B300)
+
+# -----------------------------------------------------------------------------
+# Storage (production grade)
+# -----------------------------------------------------------------------------
+enable_filestore         = true
+filestore_disk_type      = "NETWORK_SSD"
+filestore_size_gib       = 4096  # 4 TiB
+filestore_block_size_kib = 4
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Nebius Managed Service - HA)
+# -----------------------------------------------------------------------------
+# postgresql_platform    = null           # Auto: cpu-e2 (eu-north1), cpu-d3 (other regions)
+postgresql_preset        = "4vcpu-16gb"   # Production size (available in all regions)
+# postgresql_disk_type   = null           # Auto: network-ssd (eu-north1), nbs-csi-sc (other regions)
+postgresql_disk_size_gib = 100
+postgresql_host_count    = 3              # HA with replicas
+
+# -----------------------------------------------------------------------------
+# WireGuard VPN (enabled for secure access)
+# -----------------------------------------------------------------------------
+enable_wireguard     = true
+wireguard_platform   = "cpu-d3"
+wireguard_preset     = "2vcpu-8gb"
+wireguard_disk_size_gib = 64
+wireguard_port       = 51820
+wireguard_ui_port    = 5000

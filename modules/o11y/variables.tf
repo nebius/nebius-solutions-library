@@ -19,13 +19,6 @@ variable "namespace" {
   default = "o11y"
 }
 
-variable "cpu_nodes_count" {
-  type = number
-}
-
-variable "gpu_nodes_count" {
-  type = number
-}
 
 variable "o11y" {
   type = object({
@@ -45,7 +38,7 @@ variable "o11y" {
     loki = optional(object({
       enabled            = optional(bool, true)
       region             = string
-      replication_factor = optional(number)
+      replication_factor = optional(number, 2)
     })),
     prometheus = optional(object({
       enabled       = optional(bool, true)

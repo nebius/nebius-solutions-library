@@ -3,6 +3,11 @@ variable "k8s_cluster_context" {
   type        = string
 }
 
+variable "k8s_cluster_id" {
+  description = "ID of the K8s cluster, used to set up kubectl context on destroy."
+  type        = string
+}
+
 variable "soperator_namespace" {
   description = "Namespace where soperator resources live."
   type        = string

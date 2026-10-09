@@ -1,0 +1,21 @@
+{
+  "configs": {
+    "spec": {
+      "containers": [{
+        "name": "{{USER_CONTAINER_NAME}}",
+        "volumeMounts": [{
+          "name": "shm",
+          "mountPath": "/dev/shm"
+        }]
+      }],
+      "volumes": [{
+        "name": "shm",
+        "emptyDir": {
+          "medium": "Memory",
+          "sizeLimit": "64Gi"
+        }
+      }]
+    }
+  },
+  "description": "Add shared memory volume for IPC (PyTorch, vLLM, TensorRT, etc.)"
+}

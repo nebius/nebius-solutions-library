@@ -1,0 +1,76 @@
+# Launches an Isaac Lab job on Nebius AI serverless from an OSMO CPU-only helper pod.
+# Waits for the remote job to finish and reports the final serverless status in the task logs.
+workflow:
+  name: osmo-isaac-rl-launcher
+  pool: default
+
+  resources:
+    nebius-cli:
+      cpu: 1
+      memory: 2Gi
+
+  tasks:
+    - name: trigger-isaac-l40s-job
+      image: ubuntu:22.04
+      resource: nebius-cli
+
+      environment:
+        SUBNET_ID: "vpcsubnet-XXX"
+        PARENT_ID: "project-XXX"
+        NEBIUS_IAM_TOKEN: "<nebius iam get-access-token result>"
+        NGC_API_KEY: "nvapi-XXX"
+        NEBIUS_CLI_INSTALL_URL: "https://artifacts.nebius.cloud/cli/install.sh"
+        NEBIUS_API_ENDPOINT: "api.nebius.cloud:443"
+        SERVERLESS_PLATFORM: "gpu-l40s-d"
+        SERVERLESS_PRESET: "1gpu-16vcpu-96gb"
+      command:
+        - bash
+        - -lc
+      args:
+        - |
+          set -euo pipefail
+
+          echo "--- 1. Install Nebius CLI ---"
+          apt-get update && apt-get install -y curl bash jq
+
+          curl -sSL "$NEBIUS_CLI_INSTALL_URL" | bash
+
+          export PATH="$PATH:/root/.nebius/bin"
+          nebius version
+
+          echo "--- 2. Configure Nebius credentials ---"
+          mkdir -p /root/.nebius
+          printf 'current-profile: default\nprofiles:\n  default:\n    endpoint: %s\n    parent-id: %s\n' \
+            "$NEBIUS_API_ENDPOINT" "$PARENT_ID" > /root/.nebius/config.yaml
+
+          echo "--- 3. Launch Isaac Lab L40S job ---"
+          # The OSMO task is just a CPU launcher pod. The actual serverless
+          # target is selected by the Nebius AI job platform below.
+          JOB_OUTPUT=$(nebius ai job create \
+            --name "isaac-serverless-$(date +%s)" \
+            --image "nvcr.io/nvidia/isaac-lab:2.3.2" \
+            --registry-username "\$oauthtoken" \
+            --registry-password "$NGC_API_KEY" \
+            --platform "$SERVERLESS_PLATFORM" \
+            --preset "$SERVERLESS_PRESET" \
+            --container-command "bash" \
+            --args "-c '/workspace/isaaclab/isaaclab.sh -p -c \"import isaaclab; print(isaaclab.__version__)\"'" \
+            --timeout "60m" \
+            --subnet-id "$SUBNET_ID" \
+            --parent-id "$PARENT_ID")
+          echo "Job create response: $JOB_OUTPUT"
+          JOB_ID=$(echo "$JOB_OUTPUT" | grep -oP 'aijob-\w+' | head -1)
+          echo "Submitted job: $JOB_ID"
+
+          echo "--- 4. Wait for job completion ---"
+          while true; do
+            JOB_RAW=$(nebius ai job get --id "$JOB_ID" --format json 2>&1)
+            STATUS=$(echo "$JOB_RAW" | jq -r '.status.phase // .status.state // empty' 2>/dev/null \
+              || echo "$JOB_RAW" | grep -oP '(RUNNING|SUCCEEDED|COMPLETED|FAILED|ERROR|CANCELLED|STARTING|PENDING)' | head -1)
+            echo "Job status: $STATUS"
+            case "$STATUS" in
+              SUCCEEDED|COMPLETED) echo "Isaac Lab job completed successfully."; break ;;
+              FAILED|ERROR|CANCELLED) echo "Isaac Lab job failed with status: $STATUS"; exit 1 ;;
+              *) sleep 30 ;;
+            esac
+          done

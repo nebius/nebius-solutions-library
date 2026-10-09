@@ -1,0 +1,124 @@
+#cloud-config
+users:
+  - name: ${ssh_user_name}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+%{ if ssh_public_key != null && ssh_public_key != "" ~}
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+%{ endif ~}
+
+package_update: true
+package_upgrade: true
+packages:
+  - wireguard
+  - wireguard-tools
+  - ufw
+
+write_files:
+  - content: |
+      [Unit]
+      Description=Restart WireGuard
+      After=network.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/systemctl restart wg-quick@wg0.service
+      [Install]
+      RequiredBy=wgui.path
+    path: /etc/systemd/system/wgui.service
+    permissions: "0400"
+    owner: root:root
+  - content: |
+      [Unit]
+      Description=Watch /etc/wireguard/wg0.conf for changes
+      [Path]
+      PathModified=/etc/wireguard/wg0.conf
+      [Install]
+      WantedBy=multi-user.target
+    path: /etc/systemd/system/wgui.path
+    permissions: "0400"
+    owner: root:root
+  - content: |
+      [Unit]
+      Description=WireGuard UI Server
+      After=network.target
+      Wants=network-online.target systemd-networkd-wait-online.service
+
+      [Service]
+      ExecStart=/opt/wireguard-ui
+      Restart=on-abnormal
+      User=root
+      Group=root
+      WorkingDirectory=/var/lib/wireguard-ui
+      Environment="WGUI_PASSWORD_FILE=/var/lib/wireguard-ui/initial_password"
+      Environment="WGUI_LOG_LEVEL=DEBUG"
+
+      [Install]
+      WantedBy=multi-user.target
+    path: /etc/systemd/system/wgui_server.service
+    permissions: "0400"
+    owner: root:root
+
+runcmd:
+  # Generate WireGuard keys
+  - wg genkey | sudo tee /etc/wireguard/private.key
+  - sudo chmod go= /etc/wireguard/private.key
+  - sudo cat /etc/wireguard/private.key | wg pubkey | sudo tee /etc/wireguard/public.key
+
+  # Create WireGuard configuration
+  - export PRIVATE_KEY=$(sudo cat /etc/wireguard/private.key)
+  - export INTERFACE=$(ip route list default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+  - |
+    sudo tee /etc/wireguard/wg0.conf <<EOF
+    [Interface]
+    PrivateKey = $PRIVATE_KEY
+    Address = ${wg_network}
+    ListenPort = ${wg_port}
+    SaveConfig = true
+
+    PostUp = ufw route allow in on wg0 out on $INTERFACE
+    PostUp = iptables -t nat -I POSTROUTING -o $INTERFACE -j MASQUERADE
+    PostUp = ip6tables -t nat -I POSTROUTING -o $INTERFACE -j MASQUERADE
+    PreDown = ufw route delete allow in on wg0 out on $INTERFACE
+    PreDown = iptables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE
+    PreDown = ip6tables -t nat -D POSTROUTING -o $INTERFACE -j MASQUERADE
+    EOF
+
+  # Enable IP forwarding
+  - |
+    sudo tee -a /etc/sysctl.conf <<EOF
+    net.ipv4.ip_forward=1
+    net.ipv6.conf.all.forwarding=1
+    EOF
+  - sudo sysctl -p
+
+  # Configure firewall
+  - sudo ufw allow ${wg_port}/udp
+  - sudo ufw allow ${ui_port}/tcp
+  - sudo ufw allow OpenSSH
+  - sudo ufw --force disable
+  - sudo ufw --force enable
+
+  # Start WireGuard
+  - sudo systemctl enable wg-quick@wg0.service
+  - sudo systemctl start wg-quick@wg0.service
+
+  # Install WireGuard UI
+  - sudo mkdir -p /var/lib/wireguard-ui
+  - tr -dc A-Za-z0-9 </dev/urandom | head -c 24 | sudo tee /var/lib/wireguard-ui/initial_password
+  - |
+    until curl -LO https://github.com/nebius/nebius-solution-library/raw/9db28f7e8ddd1e7065bc99299522c474c4826728/wireguard/wireguard-ui; do
+      echo "Download failed. Retrying in 5 seconds..."
+      sleep 5
+    done
+  - sudo mv ./wireguard-ui /opt/wireguard-ui
+  - sudo chmod +x /opt/wireguard-ui
+  
+  # Enable services
+  - sudo systemctl daemon-reload
+  - sudo systemctl enable wgui.path
+  - sudo systemctl enable wgui.service
+  - sudo systemctl start wgui.path
+  - sudo systemctl start wgui.service
+  - sudo systemctl enable wgui_server.service
+  - sudo systemctl start wgui_server.service

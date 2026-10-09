@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test workflow: writes test.txt and uploads it to the default dataset bucket.
+# Use after configuring the Nebius bucket as the default (10-configure-dataset-bucket.sh).
+# Submit: osmo workflow submit workflows/osmo/test_bucket_write.yaml
+
+workflow:
+  name: test-bucket-write4
+  resources:
+    default:
+      platform: gpu
+      gpu: 1
+      cpu: 2
+      memory: 2Gi
+      storage: 1Gi
+  tasks:
+  - name: write-test-file
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "OSMO default bucket test at MEOW $(date -Iseconds)" > {{output}}/test.txt
+      echo "Wrote test.txt to task output (will be uploaded to default bucket)"
+      cat {{output}}/test.txt
+      echo "Spinning for 10 seconds before stopping..."
+      sleep 10
+      echo "Done."
+    outputs:
+    - dataset:
+        name: datasetv004

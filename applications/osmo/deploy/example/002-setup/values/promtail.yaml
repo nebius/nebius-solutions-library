@@ -1,0 +1,46 @@
+# Promtail Helm Values
+# https://github.com/grafana/helm-charts/tree/main/charts/promtail
+
+config:
+  clients:
+    - url: http://loki:3100/loki/api/v1/push
+  
+  snippets:
+    pipelineStages:
+      - cri: {}
+      - json:
+          expressions:
+            level: level
+            message: msg
+      - labels:
+          level:
+      - output:
+          source: message
+
+# Resources
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Tolerations to run on all nodes
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+# Volume mounts (for containerd logs if needed)
+# Note: The default chart already mounts /var/lib/docker and /var/log
+# Only add extra volumes if you need additional paths
+extraVolumes: []
+extraVolumeMounts: []
+
+# Service monitor
+serviceMonitor:
+  enabled: true
