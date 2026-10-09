@@ -86,6 +86,19 @@ resource "helm_release" "wave2" {
   depends_on       = [helm_release.wave1, terraform_data.kueue_ready, helm_release.fleet, kubectl_manifest.wave1]
 }
 
+# Endpoints defined through the API are not Terraform resources: at `destroy` they are removed before the
+# KServe releases go (this resource depends on wave 3, so Terraform destroys it first); stack/scripts/kserve-drain.sh.
+resource "terraform_data" "kserve_drain" {
+  count = contains(keys(local.helm_wave["3"]), "kserve") ? 1 : 0
+  input = { script = "${path.module}/../scripts/kserve-drain.sh", server = local.cluster.endpoint, ca = local.cluster.cluster_ca_certificate }
+  provisioner "local-exec" {
+    when        = destroy
+    command     = self.input.script
+    environment = { KUBE_SERVER = self.input.server, KUBE_CA = self.input.ca }
+  }
+  depends_on = [helm_release.wave3]
+}
+
 resource "helm_release" "wave3" {
   for_each         = local.helm_wave["3"]
   name             = each.key

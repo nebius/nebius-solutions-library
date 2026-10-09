@@ -119,6 +119,8 @@ export interface Operation {
   status: OperationStatus;
   region: Region;
   gpu_class?: string; // run classes with per-GPU-class images: the class chosen at submission
+  nodes?: number; // multi-node runs (JobSet): one pod per node
+  interconnect?: string; // multi-node runs: required | preferred | none
   image?: string; // the image that class got
   priority?: "low" | "normal" | "high" | string;
   queue_position?: number;

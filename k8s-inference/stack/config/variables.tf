@@ -89,8 +89,8 @@ variable "fleet" {
       image_cache_size_gib = optional(number) # default images.cache.size_gib
       # GPU node pools. capacity.type: spot (max_price caps the USD per GPU-hour, null follows the spot
       # price), on_demand, or reserved (reservation_ids = capacity block groups, policy STRICT; rolled with
-      # zero surge because a full reservation cannot surge). min_nodes = warm spare nodes kept even when
-      # idle; max_nodes = the autoscaler's ceiling. endpoint_floor_gpus = GPUs held by endpoints with a warm
+      # zero surge because a full reservation cannot surge). min_nodes = the node floor (the first model occupies it; warm_nodes keeps
+      # spares with no model); max_nodes = the autoscaler's ceiling. endpoint_floor_gpus = GPUs held by endpoints with a warm
       # floor (subtracted from the Kueue quota). local_nvme = the preset's host NVMe disks are attached
       # (docs/FLEET.md "Local NVMe" lists the platform/preset combinations that ship them; the apply fails
       # with "local_disks ... is invalid" on a preset without them): local_nvme_mode = kubelet-ephemeral (default) formats them as the
@@ -108,8 +108,13 @@ variable "fleet" {
           max_price       = optional(string)
           reservation_ids = optional(list(string), [])
         }), {})
-        min_nodes           = optional(number, 0)
-        max_nodes           = number
+        min_nodes = optional(number, 0)
+        max_nodes = number
+        # warm_nodes: spare nodes kept running WITHOUT a model on them (a placeholder pod of negative priority
+        # holds each one; any endpoint or run pod preempts it and starts without an instance boot, the
+        # placeholder then brings the next spare up through the autoscaler, within max_nodes). Costs the
+        # node price while idle; min_nodes alone keeps a floor that the first model occupies.
+        warm_nodes          = optional(number, 0)
         endpoint_floor_gpus = optional(number, 0)
         driver_preset       = optional(string, "cuda13.0")
         boot_disk_gib       = optional(number, 512)
@@ -341,6 +346,10 @@ variable "fleet" {
   validation {
     condition     = var.fleet.hub_region == null ? true : contains(keys(var.fleet.regions), var.fleet.hub_region)
     error_message = "hub_region must be one of the regions."
+  }
+  validation {
+    condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.pools : p.warm_nodes >= 0 && p.warm_nodes <= p.max_nodes && (p.warm_nodes == 0 || p.interconnect != "infiniband")])])
+    error_message = "pools: warm_nodes is between 0 and max_nodes, and 0 on an InfiniBand pool (the autoscaler never adds InfiniBand nodes; use min_nodes there)."
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.pools : contains(keys(var.fleet.prices), p.platform)])])

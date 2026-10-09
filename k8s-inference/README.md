@@ -15,7 +15,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 |---|---|
 | One API for models: invoke, poll, fetch, cancel, resume | `services/api` behind API keys (LiteLLM) and an Envoy gateway; `docs/API.md` |
 | Any container as a model; the platform ships none | a container description per model, given through the console or `POST /v1/models`, stored in the fleet database and rendered with `charts/endpoint` (KServe) or as a job template |
-| Endpoints that scale to zero, with a warm floor if you want one | KServe on Knative, one `InferenceService` per model and region |
+| Endpoints that scale to zero, with a warm floor if you want one, and warm spare nodes per pool (`warm_nodes`) that any model can start on without an instance boot | KServe on Knative, one `InferenceService` per model and region; placeholder pods of negative priority hold the spares |
 | Queued endpoint calls and long jobs that survive spot preemption | Kubernetes Jobs with a checkpoint volume; Kueue admits them, `docs/JOBS.md` |
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
 | N regions, one queue | Kueue MultiKueue on a control cluster; a dispatcher sends each job to the cheapest free pool of the GPU class the model prefers, `docs/SCHEDULING.md` |

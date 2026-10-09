@@ -52,6 +52,26 @@ const container: Model = {
     { name: "gpus", type: "number", default: 1 },
   ],
 };
+const distributed: Model = {
+  id: "distributed-run",
+  name: "Multi-node container job",
+  gpu: "whole nodes",
+  price: "metered",
+  default_mode: "run",
+  modes: ["run"],
+  regions: [{ region: "test-west", status: "ready" }],
+  parameters: [
+    { name: "image", type: "string", required: true },
+    { name: "command", type: "string", required: true },
+    { name: "nodes", type: "number", default: 2 },
+    { name: "gpus_per_node", type: "number", default: 8 },
+    { name: "interconnect", type: "select", options: ["required", "preferred", "none"], default: "required" },
+    { name: "checkpoints", type: "select", options: ["local", "shared"], default: "local" },
+    { name: "cpu", type: "string", default: "96" },
+    { name: "memory", type: "string", default: "1200Gi" },
+    { name: "disk_gi", type: "number", default: 500 },
+  ],
+};
 const endpoint: Endpoint = {
   id: "chat",
   name: "Chat model",
@@ -227,6 +247,53 @@ describe("job submission", () => {
       },
     ]);
     expect(location.hash).toBe("#/jobs/job-test");
+  });
+  it("runs a custom image on several nodes through distributed-run", async () => {
+    vi.spyOn(api(), "listModels").mockResolvedValue([container, distributed]);
+    const invoke = vi.spyOn(api(), "invoke").mockResolvedValue({
+      id: "job-multi",
+      model: distributed.id,
+      mode: "run",
+      region: "test-west",
+      status: "QUEUED",
+      created_at: "2026-01-01",
+    });
+    show(<NewJob />);
+    await userEvent.type(await screen.findByLabelText("Name *"), "big-model");
+    await userEvent.type(
+      await screen.findByLabelText("Image path *"),
+      "registry.example/vllm:tag",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Entrypoint command *"),
+      "python serve.py",
+    );
+    const nodes = screen.getByLabelText("Nodes") as HTMLInputElement;
+    fireEvent.change(nodes, { target: { value: "2" } });
+    await screen.findByLabelText("GPUs per node");
+    await userEvent.selectOptions(screen.getByLabelText("Checkpoints"), "shared");
+    await userEvent.click(screen.getByRole("button", { name: "Create job" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    expect(invoke.mock.calls[0]).toEqual([
+      "distributed-run",
+      {
+        name: "big-model",
+        mode: "run",
+        input: {
+          image: "registry.example/vllm:tag",
+          command: "python serve.py",
+          nodes: 2,
+          gpus_per_node: 8,
+          interconnect: "required",
+          checkpoints: "shared",
+          cpu: "96",
+          memory: "1200Gi",
+          disk_gi: 500,
+        },
+        priority: "normal",
+      },
+    ]);
+    expect(location.hash).toBe("#/jobs/job-multi");
   });
   it("restricts placement to available regions and prevents negative timeouts", async () => {
     vi.spyOn(api(), "listModels").mockResolvedValue([container]);

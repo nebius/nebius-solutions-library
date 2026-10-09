@@ -28,8 +28,8 @@ parameters:
   - { name: command, type: string, label: Command, required: true, help: "run with /bin/sh -c on every node; use $MASTER_ADDR $MASTER_PORT $NODE_RANK $NNODES $GPUS_PER_NODE $WORLD_SIZE (torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --master_addr=$MASTER_ADDR ...); checkpoint under $CHECKPOINT_DIR, results under /work/out on rank 0" }
   - { name: nodes, type: number, label: Nodes, default: 2 }
   - { name: gpus_per_node, type: number, label: GPUs per node, default: 8, help: "a whole node: the pool's preset GPU count" }
-  - { name: interconnect, type: string, label: Interconnect, default: required, help: "required (default: InfiniBand pools only, the pod gets every fabric NIC of its node, NCCL_IB_HCA=mlx5) | preferred (InfiniBand when free, else any whole-node pool) | none (NCCL over TCP: explicit opt-in, useless for large models)" }
-  - { name: checkpoints, type: string, label: Checkpoints, default: local, help: "local (node scratch, lost on restart) | shared (the tenant's RWX claim on the cluster's shared filesystem: restarts and :resume continue from it)" }
+  - { name: interconnect, type: select, options: [required, preferred, none], label: Interconnect, default: required, help: "required (default: InfiniBand pools only, the pod gets every fabric NIC of its node, NCCL_IB_HCA=mlx5) | preferred (InfiniBand when free, else any whole-node pool) | none (NCCL over TCP: explicit opt-in, useless for large models)" }
+  - { name: checkpoints, type: select, options: [local, shared], label: Checkpoints, default: local, help: "local (node scratch, lost on restart) | shared (the tenant's RWX claim on the cluster's shared filesystem: restarts and :resume continue from it)" }
   - { name: cpu, type: string, label: CPU request per node, default: "96" }
   - { name: memory, type: string, label: Memory per node, default: 1200Gi }
   - { name: disk_gi, type: number, label: Scratch per node (GiB), default: 500 }

@@ -47,6 +47,19 @@ locals {
   gpu_prices = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
   values_override = {
     kueue = local.role.manager ? yamldecode(file("${local.repo}/clusters/control/values/kueue.yaml")) : {}
+    # warm spare nodes per pool (docs/FLEET.md "Warm spare nodes"): one pause Deployment per pool with warm_nodes > 0,
+    # every pod sized to a whole node (the preset's GPU count) so one spare is one node
+    overprovisioner = { deployments = [for pn, p in try(local.clusters[local.id].pools, {}) : {
+      name         = pn
+      replicaCount = p.warm_nodes
+      labels       = { "app.kubernetes.io/part-of" = "serverless2", "serverless2.nebius/pool" = pn }
+      nodeSelector = { "serverless2.nebius/pool" = pn }
+      tolerations  = [{ key = "nvidia.com/gpu", operator = "Exists", effect = "NoSchedule" }]
+      resources = {
+        requests = { cpu = "5m", memory = "8Mi", "nvidia.com/gpu" = tostring(tonumber(regex("^([0-9]+)gpu", p.preset)[0])) }
+        limits   = { cpu = "10m", memory = "16Mi", "nvidia.com/gpu" = tostring(tonumber(regex("^([0-9]+)gpu", p.preset)[0])) }
+      }
+    } if p.warm_nodes > 0] }
     opencost = { opencost = {
       customPricing = { costModel = {
         GPU     = length(local.gpu_prices) > 0 ? max([for p in local.gpu_prices : p.on_demand]...) : 0

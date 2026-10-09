@@ -232,6 +232,24 @@ the same region, a multi-node JobSet restarts all its pods (docs/JOBS.md); every
 (`scratch: local-nvme`, image layers) is gone with the node, so runs on NVMe must checkpoint to `/ckpt`.
 Live spot quotes change every 15 minutes; the price feed keeps the dispatcher's view current.
 
+### Warm spare nodes (2026-10-09)
+
+`pools.<name>.warm_nodes = N` keeps N nodes of the pool running with no model on them. This is the
+cluster autoscaler's "overprovisioning" pattern, installed as the `cluster-overprovisioner` chart
+(Delivery Hero, `clusters/common/apps/overprovisioner.yaml`) on every worker: one Deployment of `pause`
+pods per pool with spares (the platform stage computes the list from the pools), each pod requesting
+every GPU of a node under the PriorityClass `serverless2-warm-spare` (value -1). Every real pod has priority 0 or more (endpoints) or the run priority classes (100 and up),
+so the scheduler evicts a placeholder the moment a model needs the node and the model starts without
+waiting for an instance to boot; the evicted placeholder goes Pending and the cluster autoscaler brings
+the next spare up (its priority cutoff is -10, so the placeholder counts), within `max_nodes`. The pre-pull
+DaemonSet has already warmed the platform images on the node; a model's own image is pulled from the cache.
+
+What it costs and what it is not: a spare is a running node (spot or on-demand, the pool's capacity type)
+billed whether a model uses it or not; `min_nodes` keeps a floor too, but the first model occupies it and
+nothing refills the spare. A spare serves every model whose GPU class and count fit the pool's preset, in
+that region. It is not an extra application replica (see `scaling.min` for that), and InfiniBand pools do
+not take it (the autoscaler never adds InfiniBand nodes; keep `min_nodes` there).
+
 ### Local NVMe: which platform/preset combinations have it (2026-10-08)
 
 Nebius exposes host NVMe to Managed Kubernetes nodes through the node-group template

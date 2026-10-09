@@ -33,12 +33,14 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
   const [priority, setPriority] = useState("normal");
   const [timeout, setTimeout] = useState(0);
   const [mode, setMode] = useState<"run" | "async">("run");
+  const [nodes, setNodes] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [code, setCode] = useState(false);
+  const genericId = nodes > 1 ? "distributed-run" : "container-run";
   const model = models.data?.find(
-    (m) => m.id === (source === "image" ? "container-run" : modelId),
+    (m) => m.id === (source === "image" ? genericId : modelId),
   );
   useEffect(() => {
     if (!model) return;
@@ -50,7 +52,18 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
           typeof p.default === "object" ? JSON.stringify(p.default) : p.default,
         ]),
     );
-    setParams(defaults);
+    setParams((current) =>
+      source === "image"
+        ? {
+            ...defaults,
+            ...Object.fromEntries(
+              ["image", "command", "input_prefix"]
+                .filter((k) => current[k] != null && current[k] !== "")
+                .map((k) => [k, current[k]]),
+            ),
+          }
+        : defaults,
+    );
     setFiles({});
     setMode(model.modes.includes("run") ? "run" : "async");
     setRegion(fleet?.fleet_manager ? "" : (model.regions[0]?.region ?? ""));
@@ -58,7 +71,11 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
   const setParam = (p: string, value: unknown) =>
     setParams((current) => ({ ...current, [p]: value }));
   function payload() {
-    const input = { ...params };
+    const declared = new Set((model?.parameters ?? []).map((p) => p.name));
+    const input = Object.fromEntries(
+      Object.entries(params).filter(([k]) => declared.has(k)),
+    ) as Record<string, unknown>;
+    if (source === "image" && nodes > 1) input.nodes = nodes;
     for (const [k, v] of Object.entries(input))
       if (
         model?.parameters?.find((p) => p.name === k)?.type === "text" &&
@@ -72,8 +89,10 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
         }
       }
     if (source === "image") {
-      input.env = parseEnvironment(env);
-      input.args = args.split("\n").filter((a) => a.trim());
+      const environment = parseEnvironment(env);
+      if (Object.keys(environment).length) input.env = environment;
+      const argv = args.split("\n").filter((a) => a.trim());
+      if (argv.length) input.args = argv;
     }
     return {
       name: name.trim(),
@@ -136,7 +155,12 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
     "disk_gi",
     "scratch",
     "input_prefix",
+    "nodes",
+    "gpus_per_node",
+    "interconnect",
+    "checkpoints",
   ]);
+  const multi = generic && nodes > 1;
   return (
     <div className="form-layout">
       <form onSubmit={submit}>
@@ -285,16 +309,67 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
         </Section>
         {generic && model && (
           <Section title="Hardware">
-            <Field label="GPUs">
-              <input
-                className="input"
-                type="number"
-                min={0}
-                max={8}
-                value={Number(params.gpus ?? 1)}
-                onChange={(e) => setParam("gpus", Number(e.target.value))}
-              />
-            </Field>
+            <div className="row">
+              <Field
+                label="Nodes"
+                help="More than one node runs the image on whole GPU nodes at once (one pod per node, torchrun/NCCL conventions: MASTER_ADDR, NODE_RANK, WORLD_SIZE)."
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={64}
+                  value={nodes}
+                  onChange={(e) =>
+                    setNodes(Math.max(1, Math.round(Number(e.target.value) || 1)))
+                  }
+                />
+              </Field>
+              {multi ? (
+                <Field
+                  label="GPUs per node"
+                  help="A whole node: the GPU count of the pool's preset (8 on H100, H200, B200 and B300 nodes)."
+                >
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={8}
+                    value={Number(params.gpus_per_node ?? 8)}
+                    onChange={(e) =>
+                      setParam("gpus_per_node", Number(e.target.value))
+                    }
+                  />
+                </Field>
+              ) : (
+                <Field label="GPUs">
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={Number(params.gpus ?? 1)}
+                    onChange={(e) => setParam("gpus", Number(e.target.value))}
+                  />
+                </Field>
+              )}
+            </div>
+            {multi && (
+              <Field
+                label="Interconnect"
+                help="Required: InfiniBand pools only, the pod gets every fabric NIC of its node. Preferred: InfiniBand when free, else any whole-node pool. None: NCCL over TCP, an explicit opt-in."
+              >
+                <select
+                  className="select"
+                  value={String(params.interconnect ?? "required")}
+                  onChange={(e) => setParam("interconnect", e.target.value)}
+                >
+                  <option value="required">InfiniBand required</option>
+                  <option value="preferred">InfiniBand preferred</option>
+                  <option value="none">None (TCP)</option>
+                </select>
+              </Field>
+            )}
             <div className="row">
               <Field label="CPUs">
                 <input
@@ -367,15 +442,31 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
         </Section>
         {generic && model && (
           <Section title="Storage and recovery">
-            <Field label="Work volume (GiB)">
+            <Field label={multi ? "Scratch per node (GiB)" : "Work volume (GiB)"}>
               <input
                 className="input"
                 type="number"
                 min={1}
-                value={Number(params.disk_gi ?? 100)}
+                value={Number(params.disk_gi ?? (multi ? 500 : 100))}
                 onChange={(e) => setParam("disk_gi", Number(e.target.value))}
               />
             </Field>
+            {multi && (
+              <Field
+                label="Checkpoints"
+                help="Shared: the tenant's claim on the region's shared filesystem; restarts and resume continue from it. Local: node scratch, lost when a node goes."
+              >
+                <select
+                  className="select"
+                  value={String(params.checkpoints ?? "local")}
+                  onChange={(e) => setParam("checkpoints", e.target.value)}
+                >
+                  <option value="local">Local node scratch</option>
+                  <option value="shared">Shared filesystem</option>
+                </select>
+              </Field>
+            )}
+            {!multi && (
             <Field label="Scratch storage">
               <select
                 className="select"
@@ -386,10 +477,13 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
                 <option value="local-nvme">Local NVMe</option>
               </select>
             </Field>
+            )}
             <div className="inline-note">
-              {params.scratch === "local-nvme"
-                ? "Local data is lost on pod replacement. Save checkpoints to object storage."
-                : "Save checkpoints under /work/checkpoint. The volume survives interruptions and can be used to resume a stopped run."}
+              {multi
+                ? "Every node syncs the input prefix to /work/in; rank 0 uploads /work/out. Any node loss restarts all ranks from the last checkpoint under /work/checkpoint."
+                : params.scratch === "local-nvme"
+                  ? "Local data is lost on pod replacement. Save checkpoints to object storage."
+                  : "Save checkpoints under /work/checkpoint. The volume survives interruptions and can be used to resume a stopped run."}
             </div>
             <Field
               label="Input prefix"

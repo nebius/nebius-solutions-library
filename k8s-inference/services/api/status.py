@@ -152,6 +152,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "resumable": status in ("FAILED", "CANCELLED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
+            "interconnect": ann.get(f"{LABEL}/interconnect"),
             "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,
             "cost": float(ann[f"{LABEL}/billed"]) if f"{LABEL}/billed" in ann else (price_per_call if status == "SUCCEEDED" and price_per_call is not None else None)}
 

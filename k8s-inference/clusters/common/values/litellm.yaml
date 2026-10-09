@@ -27,3 +27,7 @@ proxy_config:
     master_key: os.environ/PROXY_MASTER_KEY
     store_model_in_db: true
     fail_closed_budget_enforcement: true   # (fail_closed_rate_limit_enforcement exists only after 1.104; rate limits stay per pod while Redis is down)
+    # LiteLLM refreshes "model info" every 300 s with GET <api_base>/models on every deployment (proxy_server.py
+    # refresh_model_info, MODEL_INFO_REFRESH_SECONDS); through the gateway that request wakes every scaled-to-zero
+    # endpoint, so an idle GPU model ran most of the time (measured 2026-10-09). Nothing here needs that refresh.
+    disable_model_info_refresh: true

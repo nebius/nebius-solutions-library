@@ -132,6 +132,7 @@ export function Jobs() {
                       <div className="small muted">
                         {o.priority ?? "normal"} priority
                         {o.gpu_class ? ` · ${o.gpu_class}` : ""}
+                        {o.nodes && o.nodes > 1 ? ` · ${o.nodes} nodes` : ""}
                       </div>
                     </td>
                     <td>{o.region ?? "Awaiting placement"}</td>
@@ -342,6 +343,22 @@ export function JobDetail({ id }: { id: string }) {
                 <dd>{o.region ?? "Awaiting placement"}</dd>
                 <dt>GPU class</dt>
                 <dd>{o.gpu_class ?? "Selected at placement"}</dd>
+                {o.nodes && o.nodes > 1 ? (
+                  <>
+                    <dt>Nodes</dt>
+                    <dd>{o.nodes} (one pod per node, ranks 0 to {o.nodes - 1})</dd>
+                    <dt>Interconnect</dt>
+                    <dd>
+                      {o.interconnect === "required"
+                        ? "InfiniBand required"
+                        : o.interconnect === "preferred"
+                          ? "InfiniBand preferred"
+                          : o.interconnect === "none"
+                            ? "None (TCP)"
+                            : "Not reported"}
+                    </dd>
+                  </>
+                ) : null}
                 <dt>Priority</dt>
                 <dd>{o.priority ?? "Normal"}</dd>
                 <dt>Started</dt>

@@ -90,12 +90,13 @@ Disabled controls are visible reminders and are not submitted as working setting
 - [ ] **Scaling buffer (extra app replicas):** fixed extra ready app replicas
   above the autoscaler's recommendation for concurrency/RPS modes. Requires an
   autoscaler/controller extension with bounds and scale-to-zero behavior defined.
-- [ ] **Shared warm GPU buffer:** the user's additional requirement: spare GPU
-  capacity above demand, shared across compatible apps in a region/pool. Two L40S
-  apps with buffer 1 can share one spare L40S slot. Pool `min_nodes` alone keeps a
-  total node floor and cannot guarantee unoccupied capacity. Add a pool capacity
-  controller, aggregation rules, and observed spare capacity. Warm GPU capacity
-  and ready application replicas are distinct resources.
+- [x] **Shared warm GPU buffer:** a pool setting of the fleet, not of one app:
+  `pools.<name>.warm_nodes` keeps spare nodes with no model on them, shared by
+  every model of the pool's GPU class in that region (placeholder pods of negative
+  priority that any real pod preempts; `docs/FLEET.md` "Warm spare nodes"). The
+  console does not edit fleet settings; the control stays disabled here and points
+  to the tfvars. Warm GPU capacity and ready application replicas are distinct
+  resources.
 - [ ] **CPU utilization:** select HPA, ensure a resource metrics API is available,
   validate percentage targets and minimum replicas, and disable KPA-only controls.
   The bundled HPA extension is not selected by current endpoint definitions.

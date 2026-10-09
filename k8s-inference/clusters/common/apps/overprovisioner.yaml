@@ -1,0 +1,18 @@
+# Warm spare GPU nodes (terraform.tfvars pools.<name>.warm_nodes): the cluster-autoscaler "overprovisioning"
+# pattern, packaged as the cluster-overprovisioner chart (Delivery Hero): one Deployment of pause pods per pool
+# with spares, each pod asking for every GPU of a node under a PriorityClass of value -1. Any endpoint or run
+# pod (priority 0 and up) preempts a pause pod and starts on the warm node at once; the evicted pause pod goes
+# Pending and the autoscaler (priority cutoff -10) adds the next spare, within max_nodes. The deployments
+# list is computed per cluster by the platform stage (stack/platform/stage.tf values_override) from the
+# region's pools; a cluster without spares installs the PriorityClass only. docs/FLEET.md "Warm spare nodes".
+name: overprovisioner
+component: overprovisioner
+namespace: models
+wave: '1'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: https://charts.deliveryhero.io/
+chart: cluster-overprovisioner
+version: 0.7.11
+helmValues: 'true'

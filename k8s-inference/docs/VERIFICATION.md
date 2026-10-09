@@ -41,8 +41,9 @@ dispatcher's price feed asks for a VM following the spot price (the live spot-pr
 flavor of an NVMe pool declares the `local-nvme` label; a preempted attempt is on the operation from its
 first second.
 
-Limits measured on the same fleet, documented and not changed: LiteLLM's health probe (`GET /v1/models`
-every 5 min) wakes a scaled-to-zero endpoint, so an idle 8-GPU model runs most of the time; the cluster
+Limits measured on the same fleet: LiteLLM's model-info refresh (`GET /v1/models` on every endpoint every
+5 min) woke scaled-to-zero endpoints, so an idle 8-GPU model ran most of the time (switched off since:
+`disable_model_info_refresh`); the cluster
 autoscaler never adds InfiniBand nodes (its simulated node has no DRA attributes), so an InfiniBand pool's
 `min_nodes` is set to the node count of the next multi-node run and back to 0 afterwards; a run class has no
 `weights` mount, so a multi-node run downloads or copies its weights into its own checkpoint path; a run's

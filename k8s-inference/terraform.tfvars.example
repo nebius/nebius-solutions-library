@@ -48,8 +48,10 @@ fleet = {
           preset    = "1gpu-16vcpu-200gb"
           gpu_class = "h100"
           capacity  = { type = "spot", max_price = "2.15" }
-          min_nodes = 0                  # warm spare nodes kept even when idle
+          min_nodes = 0                  # node floor (the first model occupies it)
           max_nodes = 8
+          # warm_nodes = 1               # spare nodes with no model on them: a scaled-to-zero model starts on one
+                                         # without an instance boot, the autoscaler refills the spare (docs/FLEET.md)
         }
         # reserved capacity (capacity block groups) is used first; rolled with zero surge
         # h200-reserved-8x = {
