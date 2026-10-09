@@ -25,10 +25,6 @@ locals {
 
     # Run what is relevant in E2E.
     testing = {
-      gpu-checks = {
-        suspend          = true
-        runAfterCreation = false
-      }
       ssh-check = {
         k8sJobSpec = {
           jobContainer = {
@@ -38,6 +34,16 @@ locals {
             }]
           }
         }
+      }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        suspend          = true
+        runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = true
       }
     }
 
