@@ -23,7 +23,7 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.2", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.3", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):

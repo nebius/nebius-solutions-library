@@ -1130,5 +1130,6 @@ def test_model_spec_validation(client, admin_keys):
     r = c.post("/v1/models", json={"id": "cpu-echo", "kind": "endpoint", "image": "x", "port": 80, "protocol": "http",
                                    "gpu": {"count": 0, "classes": []}, "regions": ["eu-north1"]}, headers=ADMIN)
     assert r.status_code in (200, 201), r.text
-    assert r.json()["entry"]["deployments"]["eu-north1"]["pool"] == "system"
+    assert r.json()["model"]["gpu"] == "none"
+    assert '"serverless2.nebius/pool": "system"' in json.dumps(fake.custom[("models", "inferenceservices", "cpu-echo")])
     assert c.post("/v1/models", json={"id": "bad-proto", "image": "x", "protocol": "ftp"}, headers=ADMIN).status_code == 400

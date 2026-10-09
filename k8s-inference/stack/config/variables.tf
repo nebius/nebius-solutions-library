@@ -160,7 +160,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.9.2")
+        api        = optional(string, "0.9.3")
         dispatcher = optional(string, "0.1.8")
         jobs       = optional(string, "0.1.7")
         ops        = optional(string, "0.1.10")
