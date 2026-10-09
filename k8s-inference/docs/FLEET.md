@@ -169,7 +169,7 @@ The models stage renders it on every cluster of the tenant's regions.
   quota follows on the next sync.
 - **Warm endpoint added**: raise the pool's `endpoint_floor_gpus` with the
   catalog change (docs/OPERATIONS.md "Capacity for runs and endpoints").
-- **Add a region**: one `regions.<name>` entry (project, subnet, pools),
+- **Add a region**: one `regions.<name>` entry (project, subnet, pools; the preflight reports the tenant-wide `compute.disk.count` and preemptible-VM headroom of the region, a worker region needs about eight disks),
   then `./stack.sh apply` (the cloud stage adds the cluster, the platform and
   models stages follow on it, and the control cluster's MultiKueue gains the
   worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2

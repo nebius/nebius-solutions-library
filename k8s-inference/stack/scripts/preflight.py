@@ -76,6 +76,27 @@ for project in sorted({r["project"] for r in regions.values()}):
             st = item.get("status", {})
             print(f"   quota {project} {name}: usage {st.get('usage', '?')} ({st.get('usage_state', '?')})")
 
+# tenant-wide limits per region (the project-level allowances above carry no limit): every worker region needs
+# about eight disks (node boot disks, the Loki, Prometheus and image-cache volumes) and one preemptible VM per spot
+# node. me-west1 on 2026-10-09: compute.disk.count 70/70 for the whole tenant, no volume could be provisioned.
+tenant = None
+for project in sorted({r["project"] for r in regions.values()}):
+    pj, err = nebius("iam", "project", "get", "--id", project)
+    tenant = tenant or (pj.get("metadata", {}).get("parent_id") if not err else None)
+if tenant:
+    tq, err = nebius("quotas", "quota-allowance", "list", "--parent-id", tenant, "--page-size", "1000")
+    if err:
+        print(f"   tenant quotas ({tenant}): not readable ({err[:80]})")
+    else:
+        for item in tq.get("items", []):
+            name, spec, st = item["metadata"]["name"], item.get("spec", {}), item.get("status", {})
+            if spec.get("region") in regions and name in ("compute.disk.count", "compute.instance.preemptible.count"):
+                limit, usage = spec.get("limit"), st.get("usage") or 0
+                free = (int(limit) - int(usage)) if limit is not None else None
+                print(f"   tenant quota {spec['region']} {name}: {usage}/{limit}")
+                need = 8 if name == "compute.disk.count" else sum(int(p.get("max_nodes", 0)) for p in regions[spec["region"]]["pools"].values() if (p.get("capacity") or {}).get("type") == "spot")
+                if free is not None and free < need:
+                    findings.append(f"{spec['region']}: {name} has {free} left of {limit} for the whole tenant; this region needs about {need} (every volume of the platform is a disk; spot nodes are preemptible VMs)")
 
 # catalog entries whose GPU classes are all absent from the fleet would name a Kueue queue that does not exist
 nc = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file={tfvars}"], input="jsonencode(local.catalog_without_fleet_class)",
