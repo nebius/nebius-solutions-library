@@ -127,28 +127,33 @@ def workload_clusters(ns: str) -> dict[str, str]:
 _isvc_cache: dict[str, tuple[float, dict]] = {}
 
 
-def isvc(name: str, ns: str) -> dict | None:
+def invalidate_endpoint(name: str, ns: str, region: str = REGION) -> None:
+    _isvc_cache.pop(f"{region}/{ns}/{name}", None)
+
+
+def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
     try:
-        return retry(api().get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
+        return retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
     except ApiException as e:
         if e.status == 404:
             return None
         raise HTTPException(502, f"kserve: {e.reason}")
 
 
-def endpoint_status(name: str, ns: str) -> dict:
+def endpoint_status(name: str, ns: str, region: str = REGION) -> dict:
     """Live KServe state for the catalog: ready / scaled-to-zero / deploying / unavailable."""
-    hit = _isvc_cache.get(f"{ns}/{name}")
+    cache_key = f"{region}/{ns}/{name}"
+    hit = _isvc_cache.get(cache_key)
     if hit and hit[0] > time.time():
         return hit[1]
     out = {"status": "unavailable", "replicas_ready": 0}
     try:
-        i = retry(api().get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
+        i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
         ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in i.get("status", {}).get("conditions", []))
-        pods = retry(core().list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
+        pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
         n = sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
         out = {"status": "ready" if n else ("scaled-to-zero" if ready and not pods else "deploying"), "replicas_ready": n}
     except ApiException:
         pass
-    _isvc_cache[f"{ns}/{name}"] = (time.time() + 10, out)
+    _isvc_cache[cache_key] = (time.time() + 10, out)
     return out

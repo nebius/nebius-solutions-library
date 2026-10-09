@@ -180,8 +180,8 @@ def cluster(monkeypatch):
 @pytest.fixture
 def client(monkeypatch, cluster):
     monkeypatch.setattr(appmod.artifacts, "storage", lambda ns, region="eu-north1": {"bucket": f"serverless2-demo-{region}"})
-    monkeypatch.setattr(kube, "endpoint_status", lambda n, ns: {"status": "scaled-to-zero", "replicas_ready": 0})
-    monkeypatch.setattr(kube, "isvc", lambda n, ns: None)
+    monkeypatch.setattr(kube, "endpoint_status", lambda n, ns, region="eu-north1": {"status": "scaled-to-zero", "replicas_ready": 0})
+    monkeypatch.setattr(kube, "isvc", lambda n, ns, region="eu-north1": None)
 
     async def fake_info(key):
         if key != "sk-good":

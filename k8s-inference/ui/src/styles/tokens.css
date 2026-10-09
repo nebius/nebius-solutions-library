@@ -1,37 +1,44 @@
-/* Nebius palette, reused from the Scientific AI admin console tokens.css */
+/* Nebius palette; Gravity controls share these overrides with the application shell. */
 :root {
-  --surface-canvas: #f6f8fa;
+  --surface-canvas: #ffffff;
   --surface-default: #ffffff;
-  --surface-raised: #f0f8ff;
+  --surface-raised: #f6f8fa;
   --surface-inverse: #052b42;
   --surface-inverse-hover: #163d52;
   --text-primary: #052b42;
-  --text-muted: #526570;
-  --text-inverse: #ffffff;
-  --border: #dce2e6;
-  --border-strong: #9cabb5;
-  --accent: #052b42;
-  --accent-soft: #f0f8ff;
+  --text-muted: #627480;
+  --border: #e1e6ea;
+  --border-strong: #bac5cd;
   --nebius-lime: #daff33;
   --nebius-lime-hover: #cdef2b;
   --nebius-violet: #5d52f6;
-  --nebius-lavender: #c1c1ff;
-  --focus: #1766cf;
-  --danger: #a02a33;
-  --danger-soft: #fbe5e7;
+  --focus: #5d52f6;
+  --danger: #b02f3a;
+  --danger-soft: #fff0f1;
   --warning: #805d00;
-  --warning-soft: #fff2c8;
-  --success: #1f6b3a;
-  --success-soft: #e0f3e6;
+  --warning-soft: #fff6d8;
+  --success: #23854d;
   --info: #255b91;
-  --info-soft: #e2effb;
-  --unknown: #5f6670;
-  --unknown-soft: #eceff2;
-  --shadow: 0 1px 2px rgb(24 34 29 / 8%), 0 8px 24px rgb(24 34 29 / 4%);
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --info-soft: #edf5fd;
+  --shadow: 0 4px 24px rgb(5 43 66 / 12%);
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   --sidebar-w: 232px;
+}
+.g-root.g-root_theme_light {
+  --g-font-family-sans: var(--font);
+  --g-font-family-monospace: var(--mono);
+  --g-color-text-primary: var(--text-primary);
+  --g-color-text-secondary: var(--text-muted);
+  --g-color-base-brand: var(--nebius-lime);
+  --g-color-base-brand-hover: var(--nebius-lime-hover);
+  --g-color-base-selection: #eff3f6;
+  --g-color-base-selection-hover: #e5edf2;
+  --g-color-text-brand: var(--text-primary);
+  --g-color-text-brand-heavy: var(--text-primary);
+  --g-color-text-brand-contrast: var(--text-primary);
+  --g-color-line-brand: var(--nebius-lime);
+  --g-color-line-focus: var(--focus);
 }

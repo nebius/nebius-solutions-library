@@ -1,75 +1,371 @@
 import { useState } from "react";
-import { api } from "../api/client";
-import { Badge, Empty, ErrorBox, Field, Loading, Modal, Stat, fmt, useAsync, useToast } from "../components/ui";
-
+import { api, settings } from "../api/client";
+import type { ApiKey } from "../api/types";
+import {
+  Badge,
+  Empty,
+  ErrorBox,
+  Field,
+  Loading,
+  Modal,
+  Stat,
+  fmt,
+  useAsync,
+  useToast,
+} from "../components/ui";
+import {
+  Button,
+  Input,
+  MultiPick,
+  Search,
+  PageHeader,
+} from "../components/controls";
+import { useAdmin, useSession } from "../components/Session";
 export function Keys() {
+  const admin = useAdmin();
+  const { key: currentKey } = useSession();
   const toast = useToast();
-  const { data, error, loading, reload } = useAsync(() => api().listKeys(), []);
+  const { data, error, loading, reload } = useAsync(
+    () =>
+      admin
+        ? api().listKeys()
+        : api()
+            .keyInfo()
+            .then((k) => [k]),
+    [admin],
+  );
   const models = useAsync(() => api().listModels(), []);
+  const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
-  const [f, setF] = useState({ alias: "", budget: 25, models: [] as string[], expires: 90 });
+  const [revoking, setRevoking] = useState<ApiKey | null>(null);
+  const [f, setF] = useState({
+    alias: "",
+    budget: 25,
+    models: [] as string[],
+    expires: 90,
+  });
   const [busy, setBusy] = useState(false);
-  const totalSpend = (data ?? []).reduce((a, k) => a + k.spend, 0);
-  const totalBudget = (data ?? []).reduce((a, k) => a + k.budget, 0);
-
-  async function create() {
+  const [formError, setFormError] = useState("");
+  const rows = (data ?? []).filter((k) =>
+    `${k.alias} ${k.key_preview}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  async function create(ev: React.FormEvent) {
+    ev.preventDefault();
+    setFormError("");
+    if (
+      !f.alias.trim() ||
+      !Number.isFinite(f.budget) ||
+      f.budget < 0 ||
+      !Number.isInteger(f.expires) ||
+      f.expires < 1
+    ) {
+      setFormError(
+        "Enter a name, a non-negative budget and a positive whole number of days.",
+      );
+      return;
+    }
     setBusy(true);
-    try { const k = await api().createKey({ alias: f.alias, budget: f.budget, models: f.models, expires_days: f.expires }); setCreated(k.key ?? "(key not returned)"); setOpen(false); reload(); }
-    catch (e) { toast((e as Error).message, true); } finally { setBusy(false); }
+    try {
+      const k = await api().createKey({
+        alias: f.alias.trim(),
+        budget: f.budget,
+        models: f.models,
+        expires_days: f.expires,
+      });
+      setOpen(false);
+      if (k.key) setCreated(k.key);
+      else toast("Key created, but no secret was returned by the API.", true);
+      reload();
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
-  async function revoke(id: string) { try { await api().deleteKey(id); toast("Key revoked"); reload(); } catch (e) { toast((e as Error).message, true); } }
-
+  async function revoke() {
+    if (!revoking) return;
+    setBusy(true);
+    setFormError("");
+    try {
+      await api().deleteKey(revoking.alias);
+      toast("API key revoked");
+      if (revoking.alias === currentKey?.alias) {
+        settings.key = "";
+        location.reload();
+        return;
+      }
+      setRevoking(null);
+      reload();
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function copy() {
+    try {
+      if (!navigator.clipboard)
+        throw new Error("Clipboard unavailable. Select and copy the key.");
+      await navigator.clipboard.writeText(created!);
+      toast("API key copied");
+    } catch (err) {
+      toast((err as Error).message, true);
+    }
+  }
   return (
     <>
-      <div className="page-head">
-        <div><h1>API keys</h1><p>LiteLLM virtual keys for this tenant: budget, model allow-list, spend. Every call through the customer API or MCP is priced per the catalog and charged to the key. Creating and revoking keys needs an admin key of the tenant.</p></div>
-        <div className="actions"><button className="btn btn--primary" onClick={() => setOpen(true)}>Create key</button></div>
-      </div>
-      {data && <div className="stats" style={{ marginBottom: 16 }}><Stat label="Keys" value={data.length} /><Stat label="Spend (all keys)" value={fmt.usd(totalSpend)} /><Stat label="Budget (all keys)" value={fmt.usd(totalBudget)} /><Stat label="Exhausted" value={data.filter((k) => k.status === "exhausted").length} /></div>}
-      {error && <ErrorBox msg={error} retry={reload} />}
-      {loading && !data && <Loading />}
+      <PageHeader
+        title="API keys"
+        count={data?.length}
+        description={
+          admin
+            ? "Manage access, usage budgets and model permissions."
+            : "Your current API key and usage."
+        }
+      >
+        {admin && (
+          <Button
+            primary
+            onClick={() => {
+              setF({ alias: "", budget: 25, models: [], expires: 90 });
+              setFormError("");
+              setOpen(true);
+            }}
+          >
+            Create API key
+          </Button>
+        )}
+      </PageHeader>
       {data && (
-        <div className="card tbl-wrap"><table className="tbl">
-          <thead><tr><th>Alias</th><th>Key</th><th>Role</th><th>Status</th><th>Spend / budget</th><th style={{ width: 160 }}></th><th>Models</th><th>Created</th><th>Expires</th><th></th></tr></thead>
-          <tbody>
-            {data.length === 0 && <tr><td colSpan={10}><Empty>No keys yet.</Empty></td></tr>}
-            {data.map((k) => { const pct = k.budget ? Math.min(100, (k.spend / k.budget) * 100) : 0; return (
-              <tr key={k.id}>
-                <td><strong>{k.alias}</strong><div className="small muted mono">{k.id}</div></td>
-                <td className="mono">{k.key_preview}</td>
-                <td>{k.role ? <span className={`badge badge--plain ${k.role === "admin" ? "badge--violet" : ""}`}>{k.role}</span> : "-"}</td>
-                <td><Badge status={k.status} /></td>
-                <td className="mono">{fmt.usd(k.spend)} / {fmt.usd(k.budget)}</td>
-                <td><div className="meter"><i className={pct >= 100 ? "over" : ""} style={{ width: `${pct}%` }} /></div></td>
-                <td>{k.models.length ? k.models.map((m) => <span className="chip" key={m}>{m}</span>) : <span className="muted">all</span>}</td>
-                <td>{fmt.ago(k.created_at)}</td>
-                <td>{k.expires_at ? fmt.dt(k.expires_at) : <span className="muted">never</span>}</td>
-                <td><button className="btn btn--sm btn--danger" onClick={() => revoke(k.alias)}>Revoke</button></td>
-              </tr>); })}
-          </tbody>
-        </table></div>
+        <div className="stats" style={{ marginBottom: 24 }}>
+          <Stat label="API keys" value={data.length} />
+          <Stat
+            label="Total spend"
+            value={fmt.usd(data.reduce((a, k) => a + k.spend, 0))}
+          />
+          <Stat
+            label="Active keys"
+            value={data.filter((k) => k.status === "active").length}
+          />
+        </div>
+      )}
+      {error && <ErrorBox msg={error} retry={reload} />}
+      <div className="toolbar">
+        <div className="toolbar__search">
+          <Search value={search} onChange={setSearch} label="Search API keys" />
+        </div>
+        <span className="toolbar__count">{rows.length} keys</span>
+        <Button size="m" onClick={reload}>
+          Refresh
+        </Button>
+      </div>
+      {loading && !data ? (
+        <Loading />
+      ) : (
+        data && (
+          <div className="table-surface tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Spend / budget</th>
+                  <th>Models</th>
+                  <th>Expires</th>
+                  <th>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {!rows.length && (
+                  <tr>
+                    <td colSpan={6}>
+                      <Empty>
+                        <h2>
+                          {search ? "No matching API keys" : "No API keys"}
+                        </h2>
+                        <p>
+                          {search
+                            ? "Try a different name."
+                            : "Create an API key to give an application access."}
+                        </p>
+                      </Empty>
+                    </td>
+                  </tr>
+                )}
+                {rows.map((k) => {
+                  const pct =
+                    k.budget != null && k.budget > 0
+                      ? Math.min(100, (k.spend / k.budget) * 100)
+                      : 0;
+                  return (
+                    <tr key={k.id}>
+                      <td>
+                        <strong>{k.alias || "Unnamed key"}</strong>
+                        <div className="mono small muted">{k.key_preview}</div>
+                        {k.role === "admin" && (
+                          <span className="chip">Administrator</span>
+                        )}
+                      </td>
+                      <td>
+                        <Badge status={k.status} />
+                      </td>
+                      <td>
+                        {fmt.usd(k.spend)}{" "}
+                        <span className="muted">
+                          / {k.budget == null ? "Unlimited" : fmt.usd(k.budget)}
+                        </span>
+                        {k.budget != null && k.budget > 0 && (
+                          <div
+                            className="meter"
+                            role="meter"
+                            aria-label={`${k.alias} budget usage`}
+                            aria-valuenow={pct}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                          >
+                            <i
+                              className={pct === 100 ? "over" : ""}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {k.models.length ? k.models.join(", ") : "All models"}
+                      </td>
+                      <td>
+                        {k.expires_at ? fmt.dt(k.expires_at) : "No expiration"}
+                      </td>
+                      <td>
+                        {admin && (
+                          <Button
+                            size="m"
+                            view="flat-danger"
+                            onClick={() => {
+                              setFormError("");
+                              setRevoking(k);
+                            }}
+                          >
+                            Revoke
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
       {open && (
-        <Modal title="Create API key" onClose={() => setOpen(false)}>
-          <div className="form">
-            <Field label="Alias"><input className="input" value={f.alias} onChange={(e) => setF({ ...f, alias: e.target.value })} placeholder="notebook-rene" autoFocus /></Field>
-            <div className="row">
-              <Field label="Budget (USD)" help="Calls are refused once spend reaches the budget."><input className="input" type="number" min={0} step={1} value={f.budget} onChange={(e) => setF({ ...f, budget: Number(e.target.value) })} /></Field>
-              <Field label="Expires in (days)"><input className="input" type="number" min={1} value={f.expires} onChange={(e) => setF({ ...f, expires: Number(e.target.value) })} /></Field>
-            </div>
-            <Field label="Allowed models" help="None selected = all models of the tenant.">
-              <div>{(models.data ?? []).map((m) => <label key={m.id} className="chip" style={{ cursor: "pointer" }}><input type="checkbox" checked={f.models.includes(m.id)} onChange={(e) => setF({ ...f, models: e.target.checked ? [...f.models, m.id] : f.models.filter((x) => x !== m.id) })} /> {m.id}</label>)}</div>
+        <Modal title="Create API key" onClose={() => !busy && setOpen(false)}>
+          <form className="form" onSubmit={create}>
+            <Field label="Name">
+              <Input
+                value={f.alias}
+                onChange={(v) => setF({ ...f, alias: v })}
+                autoFocus
+                placeholder="my-application"
+                controlProps={{ required: true }}
+              />
             </Field>
-            <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn" onClick={() => setOpen(false)}>Cancel</button><button className="btn btn--primary" disabled={!f.alias || busy} onClick={create}>{busy && <span className="spin" />} Create</button></div>
-          </div>
+            <div className="form-grid">
+              <Field
+                label="Budget (USD)"
+                help="Requests stop when the budget is reached."
+              >
+                <Input
+                  type="number"
+                  value={f.budget}
+                  onChange={(v) => setF({ ...f, budget: Number(v) })}
+                  controlProps={{ min: 0, step: "any", required: true }}
+                />
+              </Field>
+              <Field label="Expires in (days)">
+                <Input
+                  type="number"
+                  value={f.expires}
+                  onChange={(v) => setF({ ...f, expires: Number(v) })}
+                  controlProps={{ min: 1, step: 1, required: true }}
+                />
+              </Field>
+            </div>
+            <Field
+              label="Allowed models"
+              help="Leave empty to allow all models."
+            >
+              <MultiPick
+                value={f.models}
+                onUpdate={(v) => setF({ ...f, models: v })}
+                placeholder="All models"
+                options={(models.data ?? []).map((m) => ({
+                  value: m.id,
+                  label: m.name,
+                }))}
+                loading={models.loading}
+              />
+            </Field>
+            {models.error && (
+              <ErrorBox msg={models.error} retry={models.reload} />
+            )}
+            {formError && <ErrorBox msg={formError} />}
+            <div className="dialog-actions">
+              <Button disabled={busy} onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                primary
+                type="submit"
+                loading={busy}
+                disabled={!models.data}
+              >
+                Create API key
+              </Button>
+            </div>
+          </form>
         </Modal>
       )}
       {created && (
-        <Modal title="Key created" onClose={() => setCreated(null)}>
-          <p>Copy it now; it is not shown again.</p>
-          <pre className="out">{created}</pre>
-          <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn" onClick={() => navigator.clipboard?.writeText(created).then(() => toast("Copied"))}>Copy</button><button className="btn btn--primary" onClick={() => setCreated(null)}>Done</button></div>
+        <Modal title="API key created" onClose={() => setCreated(null)}>
+          <div className="form">
+            <p>Copy this key now. You will not be able to view it again.</p>
+            <pre className="out">{created}</pre>
+            <div className="dialog-actions">
+              <Button onClick={copy}>Copy key</Button>
+              <Button primary onClick={() => setCreated(null)}>
+                Done
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {revoking && (
+        <Modal
+          title="Revoke API key"
+          onClose={() => !busy && setRevoking(null)}
+        >
+          <div className="form">
+            <p>
+              Revoke <strong>{revoking.alias}</strong>? Applications using this
+              key will lose access.
+              {revoking.alias === currentKey?.alias
+                ? " You will also be signed out."
+                : ""}
+            </p>
+            {formError && <ErrorBox msg={formError} />}
+            <div className="dialog-actions">
+              <Button disabled={busy} onClick={() => setRevoking(null)}>
+                Cancel
+              </Button>
+              <Button danger loading={busy} onClick={revoke}>
+                Revoke key
+              </Button>
+            </div>
+          </div>
         </Modal>
       )}
     </>

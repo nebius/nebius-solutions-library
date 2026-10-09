@@ -24,6 +24,7 @@ class Principal:
         return {"id": i.get("token") or i.get("key_name"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"),
                 "tenant": self.tenant, "budget": i.get("max_budget"), "spend": i.get("spend", 0), "models": i.get("models", []),
                 "created_at": i.get("created_at"), "expires_at": i.get("expires"),
+                "role": (i.get("metadata") or {}).get("role", "user"),
                 "status": "exhausted" if exhausted else "active"}
 
 

@@ -1,60 +1,88 @@
-# Serverless 2.0 UI
+# Serverless AI standalone console
 
-Customer console in the style of the Nebius Serverless AI console: dark
-sidebar, white content, cards and tables. React + Vite + TypeScript, plain CSS
-with the Nebius tokens (lime `#daff33`, violet `#5d52f6`, lavender `#c1c1ff`,
-neutral greys). No UI framework, no router library, no SSR, no mock data: every
-page talks to the customer API (`services/api`).
+React, TypeScript and Vite application for the inference fleet's customer API.
+It uses [Gravity UI](https://github.com/gravity-ui/uikit) controls, a Nebius theme,
+bundled Inter fonts and the Nebius wordmark. The UI runs independently of the
+Nebius Cloud console and authenticates with a tenant API key.
 
-Served at `https://app.<control cluster host>` by the platform stage (`ui-app` on the control cluster).
+The shell provides a fleet/tenant context, resource navigation, breadcrumbs and
+responsive navigation. Endpoints is the landing page. The tables, full-page
+forms, detail tabs, dialogs and empty states share the same components and theme.
 
-## Pages
+## Workflows
 
-| Page | What it shows | API |
-|---|---|---|
-| Login | Paste a LiteLLM virtual key; stored in `localStorage`, sent as `Authorization: Bearer`; one authenticated `GET /v1/models` tells a wrong URL from a rejected key | `GET /v1/models` |
-| Models | Catalog cards: name, mode(s), GPU, protocol, measured cold start, price, status per region; "Run job" / "Deploy endpoint" | `GET /v1/models` |
-| Jobs | Run/async operations: status, priority, region, started, duration, attempts, cost; filters; auto-refresh | `GET /v1/operations` |
-| Job detail | Attempts timeline (preemption, node, resume), input, result artifacts (presigned), logs/metrics links, cancel, resubmit | `GET /v1/operations/{id}`, `/result`, `:cancel` |
-| New job wizard | Name, catalog model or own image (command/args/env), parameters from the model's declared `parameters` (files upload via `POST /v1/artifacts/uploads`), scheduling (region, priority, timeout), review. Pool, image, retries and checkpointing come from the model's run class; `input` carries only parameters the WorkflowTemplate declares (the API rejects unknown keys) | `POST /v1/models/{m}:invoke` |
-| Endpoints | Sync/async models per region: status, replicas, scale-to-zero idle, GPU, placement, managed by (git/api), last cold start | `GET /v1/endpoints` |
-| Endpoint detail | "Try it" box (one sync invoke with timing and response), configuration, edit scaling, delete | try-it = `POST ...:invoke` `{mode: sync}`; `PATCH /v1/endpoints/{id}` (admin key; git-managed ones are reverted by Argo CD); `DELETE` (403 for git-managed) |
-| Deploy endpoint | Model, region, placement, min/max replicas, idle timeout, concurrency, auth | `POST /v1/endpoints` (admin key; model needs a catalog runtime; 409 if it exists) |
-| API keys | Keys of the tenant with role, budget, spend meter, model allow-list, expiry; create (alias, budget, models, expiry) shows the key once; revoke | `GET/POST /v1/keys`, `DELETE /v1/keys/{alias}` (admin key) |
-| Settings | API URL, probe | |
+| Page             | Behavior                                                                                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sign in          | Validates the key with `GET /v1/keys/me`; masks the key by default.                                                                                                         |
+| Endpoints        | Searches and filters live endpoint state across connected regions. Links carry both endpoint ID and region.                                                                 |
+| Endpoint details | Overview, configuration and a JSON request tester for HTTP/OpenAI compatible endpoints. Live scaling is available to administrators.                                        |
+| Create endpoint  | Full-page container, resource, networking and autoscaling form. Creates the model with `POST /v1/models`.                                                                   |
+| Jobs             | Searchable latest 100 operations, status filters and automatic refresh.                                                                                                     |
+| Job details      | Overview and attempts, input, results/downloads, cancellation and resubmission.                                                                                             |
+| Create job       | Declared model parameters, optional file uploads, region or automatic fleet placement, priority and timeout. For a custom image, select the built-in `container-run` class. |
+| Models           | Searchable endpoint/job-class definitions. Administrators can create, edit and delete API-managed models. Built-in definitions remain read-only.                            |
+| API keys         | Administrators manage tenant keys, budgets, model allow-lists and expiration. Members see their own key. New secrets are shown once; revocation requires confirmation.      |
+| Settings         | Tests a changed API URL before saving it and shows account/region information.                                                                                              |
 
-Replica history and per-endpoint metrics are not drawn here: the Metrics and
-Logs buttons open Grafana (dashboards in `clusters/common/manifests/observability`).
+Model writes use `/v1/models`; there are no endpoint creation/deletion API routes.
+Editing preserves advanced spec fields that are not exposed in the form, including
+existing argument-vector commands and weight mounts. Environment values retain
+spaces and `=` characters.
 
-## Develop
+The UI uses `GET /healthz` for connected regions and available GPU classes, and
+`GET /v1/keys/me` for the tenant and administrator role. Endpoint list, detail and
+scaling requests accept an optional `region` query. Deploy the API and UI from the
+same solution revision to get these contracts together.
+
+Metrics and logs open the configured Grafana instance. Missing in-flight or cold
+start measurements are not replaced by estimates. The JSON tester does not
+support gRPC or WebSocket protocols.
+
+## Develop and verify
+
+Use Node 22.12 or later (the container uses Node 22).
 
 ```sh
 cd ui
-npm install
-npm run dev          # http://127.0.0.1:5173
-npm run build        # tsc --noEmit + vite build -> dist/
+npm ci
+npm run dev
+npm test
+npm run build
 ```
 
-The default API base is same-origin `/api`: in the image nginx proxies it to
-`http://api.api.svc.cluster.local` (env `API_UPSTREAM`, `DNS_RESOLVER`), in
-`npm run dev` Vite proxies it to `VITE_DEV_API` (default `http://127.0.0.1:8080`),
-so the browser never needs CORS. `VITE_API_BASE` (build arg) or Settings override it.
-Fleet-specific addresses are never compiled in: nginx serves `/config.json` from the
-pod's environment (`PUBLIC_API_URL`, `GRAFANA_URLS` in the API's `region=url,...`
-format; `src/config.ts` loads it before the first render). The API client lives in
-`src/api/client.ts`; shapes in `src/api/types.ts` follow `services/api/openapi.yaml`.
+The development server runs at `http://127.0.0.1:5173`. Its same-origin `/api`
+proxy targets `VITE_DEV_API`, defaulting to `http://127.0.0.1:8080`. A tenant
+key is required; production code has no demo data or mock API.
 
-## Ship
+Interaction tests cover role restrictions, regional links and reads, job
+submission, editing payload preservation, session handling, and dialog keyboard
+behavior. API tests cover regional state, scaling authorization and cache
+isolation. CI runs the UI tests/build separately from the solution's existing
+validation and image scan.
 
-`tools/images.sh build` builds and pushes it with the other platform images to the
-fleet's registry (tag from `terraform.tfvars` `images.versions.ui`); the platform
-stage deploys nginx (unprivileged, port 8080) in namespace `ui-app` on the control
-cluster with an HTTPRoute on the `serverless2-external` gateway, host
-`app.<control cluster host>`. Current tag: `0.2.2` (runtime configuration).
+## Runtime configuration and deployment
 
-## Screenshots
+The unprivileged nginx image serves the application on port 8080 and proxies
+`/api` to `API_UPSTREAM`. Set `DNS_RESOLVER` for the cluster. The platform stage
+serves it at `https://app.<control cluster host>`.
 
-`screenshots/` (1440x900, playwright, deployed site with the demo tenant key):
-`20-live-models`, `21-live-jobs`, `22-live-endpoint-tryit`, `23-live-endpoints`,
-`24-live-keys`, `26-live-endpoint-git`. Taken with UI 0.1.x; the job wizard and
-job detail have fewer fields since 0.2.0.
+nginx generates `/config.json` from `PUBLIC_API_URL` and `GRAFANA_URLS`
+(`region=url,...`). The UI loads it before rendering, so the same image works
+for different fleets. Fleet addresses are not compiled into the bundle.
+`VITE_API_BASE` or Settings can override the API base.
+
+The API key and API URL are stored in this browser's local storage. Sign out
+removes the key. Existing deployment configuration can replace live scaling
+patches; edit the model to persist replica limits across redeployments.
+
+## Visual assets
+
+Inter is self-hosted through `@fontsource/inter` (SIL Open Font License).
+`public/nebius.svg` is the official wordmark from the Nebius documentation
+logo asset:
+[official asset](https://mintcdn.com/nebius-ai-cloud/coWpUI3da21fpBbP/logo/logo.svg).
+The application does not load fonts or branding assets from a CDN at runtime.
+
+Live comparison against the Nebius Cloud console and browser screenshot checks
+are still required before claiming an exact visual match. No screenshots from
+the Cloud console are included in this repository.

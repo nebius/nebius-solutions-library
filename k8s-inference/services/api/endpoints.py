@@ -1,6 +1,5 @@
-"""Endpoints = KServe InferenceServices rendered from the catalog by charts/endpoint and applied by
-Argo CD (git is the only writer). The API reads them and may patch scaling (reverted by selfHeal
-for git-managed objects; the UI says so)."""
+"""Public KServe endpoint state and live scaling patches. Definitions can be API- or deployment-managed;
+deployment synchronization may replace a live patch."""
 import re
 from config import LABEL, PUBLIC_API_URL, REGION
 import kube
@@ -19,12 +18,12 @@ def scaling_patch(sc: dict) -> dict:
     return body
 
 
-def to_public(m: dict, isvc: dict) -> dict:
+def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
     pred, md = isvc.get("spec", {}).get("predictor", {}), isvc.get("metadata", {})
-    st = kube.endpoint_status(m["k8s_name"], m["namespace"])
-    return {"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": REGION,
+    st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
+    return {"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": region,
             "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke", "status": "error" if st["status"] == "unavailable" else st["status"],
             "replicas_ready": st["replicas_ready"], "min_replicas": pred.get("minReplicas", 0), "max_replicas": pred.get("maxReplicas", 1),
             "scale_to_zero_after_s": _secs(md.get("annotations", {}).get("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "2m")),
-            "target_concurrency": pred.get("scaleTarget"), "placement": "SPOT", "gpu": m.get("gpu"), "protocol": m.get("protocol"),
+            "target_concurrency": pred.get("scaleTarget"), "gpu": m.get("gpu"), "protocol": m.get("protocol"),
             "created_at": md.get("creationTimestamp"), "managed_by": md.get("labels", {}).get(f"{LABEL}/created-by", "git")}

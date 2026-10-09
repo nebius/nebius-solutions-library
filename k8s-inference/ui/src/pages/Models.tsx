@@ -1,146 +1,753 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import type { Model, ModelSpec } from "../api/types";
-import { Badge, Empty, ErrorBox, Field, Loading, Modal, useAsync, useToast } from "../components/ui";
-import { href } from "../router";
+import {
+  Empty,
+  ErrorBox,
+  Field,
+  Loading,
+  Modal,
+  useAsync,
+  useToast,
+} from "../components/ui";
+import {
+  Button,
+  Input,
+  Area,
+  Pick,
+  MultiPick,
+  Search,
+  PageHeader,
+  FormSection,
+} from "../components/controls";
+import { useAdmin, useSession } from "../components/Session";
+import { href, navigate } from "../router";
 
-function actionFor(m: Model) {
-  return m.default_mode === "run" ? { label: "Run job", to: `/jobs/new?model=${m.id}` } : { label: "Open endpoint", to: `/endpoints/${m.id.replace(/\./g, "-")}` };
+export function endpointPath(id: string, region?: string) {
+  return `/endpoints/${encodeURIComponent(id.replace(/\./g, "-"))}${region ? "?region=" + encodeURIComponent(region) : ""}`;
 }
-
-// The form: a container and a few knobs, the same fields as the Nebius Serverless AI endpoint form
-// (image, command, port, environment, GPU, scale) plus the fleet's regions. POST/PUT /v1/models.
-const EMPTY: ModelSpec = { id: "", kind: "endpoint", image: "", command: "", args: [], env: {}, port: 8000, protocol: "openai",
-  health_path: "", served_model: "", gpu: { count: 1, classes: [] }, scaling: { min: 0, max: 1, target: 4 }, regions: [],
-  cpu: "4", memory: "16Gi", disk_gi: 50 };
-
-function lines(v: string): string[] { return v.split("\n").map((s) => s.trim()).filter(Boolean); }
-function envOf(v: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const l of lines(v)) { const i = l.indexOf("="); if (i > 0) out[l.slice(0, i).trim()] = l.slice(i + 1).trim(); }
-  return out;
-}
-
-export function ModelForm({ initial, onDone, onClose }: { initial?: ModelSpec; onDone: () => void; onClose: () => void }) {
-  const toast = useToast();
-  const editing = !!initial;
-  const [f, setF] = useState<ModelSpec>(initial ?? EMPTY);
-  const [argsText, setArgsText] = useState((initial?.args ?? []).join("\n"));
-  const [envText, setEnvText] = useState(Object.entries(initial?.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n"));
-  const [classesText, setClassesText] = useState((initial?.gpu?.classes ?? []).join(", "));
-  const [regionsText, setRegionsText] = useState((initial?.regions ?? []).join(", "));
-  const [busy, setBusy] = useState(false);
-  const set = (p: Partial<ModelSpec>) => setF({ ...f, ...p });
-  const isJob = f.kind === "job";
-
-  async function submit() {
-    const classes = classesText.split(",").map((s) => s.trim()).filter(Boolean);
-    const regions = regionsText.split(",").map((s) => s.trim()).filter(Boolean);
-    const spec: ModelSpec = { ...f, args: lines(argsText), env: envOf(envText), gpu: { count: Number(f.gpu?.count ?? 1), classes }, regions: regions.length ? regions : undefined };
-    if (!spec.health_path) delete spec.health_path;
-    if (!spec.served_model) delete spec.served_model;
-    if (!spec.command) delete spec.command;
-    if (!isJob) { delete spec.cpu; delete spec.memory; delete spec.disk_gi; } else { delete spec.port; delete spec.protocol; delete spec.scaling; delete spec.health_path; delete spec.served_model; }
-    setBusy(true);
-    try {
-      if (editing) await api().updateModel(spec.id, spec); else await api().createModel(spec);
-      toast(editing ? "Model updated" : (isJob ? "Job class created" : "Endpoint created; it scales up on the first call"));
-      onDone();
-    } catch (e) { toast((e as Error).message, true); } finally { setBusy(false); }
+export function parseEnvironment(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of text.split("\n").filter((l) => l.trim())) {
+    const at = line.indexOf("=");
+    const key = line.slice(0, at).trim();
+    if (at < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+      throw new Error("Use NAME=value for each environment variable.");
+    if (key in env)
+      throw new Error(`Environment variable ${key} is listed twice.`);
+    env[key] = line.slice(at + 1).replace(/\r$/, "");
   }
-
-  return (
-    <Modal title={editing ? `Edit model ${f.id}` : "New model from a container"} onClose={onClose} width={720}>
-      <div className="form-grid">
-        <Field label="Kind" help="Endpoint: always reachable, scales to zero. Job class: runs on request with a work volume and checkpoints.">
-          <select className="input" value={f.kind} disabled={editing} onChange={(e) => set({ kind: e.target.value as ModelSpec["kind"] })}><option value="endpoint">Endpoint</option><option value="job">Job class</option></select>
-        </Field>
-        <Field label="Name" help="Lowercase letters, digits and dashes. The model id in the API and in LiteLLM."><input className="input" value={f.id} disabled={editing} onChange={(e) => set({ id: e.target.value })} placeholder="my-llm" /></Field>
-        <Field label="Image path" help="Any registry, e.g. vllm/vllm-openai:v0.11.0 or nvcr.io/nim/...; pulled through the fleet's image cache."><input className="input mono" value={f.image} onChange={(e) => set({ image: e.target.value })} /></Field>
-        <Field label="Entrypoint command" help="Optional. A shell line (run by /bin/sh -c). Leave empty to use the image's entrypoint."><input className="input mono" value={typeof f.command === "string" ? f.command : (f.command ?? []).join(" ")} onChange={(e) => set({ command: e.target.value })} /></Field>
-        <Field label="Arguments" help="One per line, e.g. --model and <org>/<model> on two lines."><textarea className="input mono" rows={3} value={argsText} onChange={(e) => setArgsText(e.target.value)} /></Field>
-        <Field label="Environment variables" help="KEY=value, one per line."><textarea className="input mono" rows={3} value={envText} onChange={(e) => setEnvText(e.target.value)} /></Field>
-        {!isJob && <>
-          <Field label="Container port"><input className="input" type="number" value={f.port ?? 8000} onChange={(e) => set({ port: Number(e.target.value) })} /></Field>
-          <Field label="Protocol" help="openai: /v1/chat/completions and LiteLLM model group; http: plain requests; websocket; grpc.">
-            <select className="input" value={f.protocol} onChange={(e) => set({ protocol: e.target.value as ModelSpec["protocol"] })}>{["openai", "http", "websocket", "grpc"].map((p) => <option key={p}>{p}</option>)}</select>
-          </Field>
-          <Field label="Health path" help="Optional readiness probe path, e.g. /health."><input className="input mono" value={f.health_path ?? ""} onChange={(e) => set({ health_path: e.target.value })} /></Field>
-          <Field label="Served model name" help="openai: the model name the server expects in requests (filled in for callers that omit it)."><input className="input mono" value={f.served_model ?? ""} onChange={(e) => set({ served_model: e.target.value })} /></Field>
-          <Field label="Replicas" help="Minimum 0 = scale to zero; maximum caps the scale-out; target = concurrent requests per replica.">
-            <div className="row"><input className="input" type="number" value={f.scaling?.min ?? 0} onChange={(e) => set({ scaling: { ...f.scaling, min: Number(e.target.value) } })} /><input className="input" type="number" value={f.scaling?.max ?? 1} onChange={(e) => set({ scaling: { ...f.scaling, max: Number(e.target.value) } })} /><input className="input" type="number" value={f.scaling?.target ?? 4} onChange={(e) => set({ scaling: { ...f.scaling, target: Number(e.target.value) } })} /></div>
-          </Field>
-        </>}
-        {isJob && <>
-          <Field label="CPU / memory per run"><div className="row"><input className="input" value={f.cpu ?? "4"} onChange={(e) => set({ cpu: e.target.value })} /><input className="input" value={f.memory ?? "16Gi"} onChange={(e) => set({ memory: e.target.value })} /></div></Field>
-          <Field label="Work volume (GiB)" help="Per run; survives spot interruptions (checkpoints under /work/checkpoint)."><input className="input" type="number" value={f.disk_gi ?? 50} onChange={(e) => set({ disk_gi: Number(e.target.value) })} /></Field>
-        </>}
-        <Field label="GPUs" help="Count per replica (0 = CPU only) and the GPU classes it may run on, preferred first (h100, h200, b300, l40s, rtx-pro-6000).">
-          <div className="row"><input className="input" type="number" value={f.gpu?.count ?? 1} onChange={(e) => set({ gpu: { ...f.gpu, count: Number(e.target.value) } })} /><input className="input mono" value={classesText} onChange={(e) => setClassesText(e.target.value)} placeholder="h100, l40s" /></div>
-        </Field>
-        <Field label="Regions" help="Comma-separated; empty = every region with a pool of a listed class."><input className="input mono" value={regionsText} onChange={(e) => setRegionsText(e.target.value)} placeholder="eu-north1, eu-west2" /></Field>
-      </div>
-      <div className="actions" style={{ marginTop: 16 }}>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" disabled={busy || !f.id || !f.image} onClick={submit}>{busy ? "Saving" : (editing ? "Save" : "Create")}</button>
-      </div>
-    </Modal>
-  );
+  return env;
+}
+export function prepareSpec(
+  f: ModelSpec,
+  args: string,
+  env: string,
+  classes: string,
+): ModelSpec {
+  const spec: ModelSpec = {
+    ...f,
+    args: args.split("\n").filter((s) => s.length > 0),
+    env: parseEnvironment(env),
+    gpu: {
+      ...f.gpu,
+      classes: classes
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    },
+  };
+  if (!/^[a-z][a-z0-9-]{1,40}$/.test(spec.id))
+    throw new Error(
+      "Name must be 2–41 characters: lowercase letters, numbers and dashes, starting with a letter.",
+    );
+  if (!spec.image.trim()) throw new Error("Container image is required.");
+  if (!Number.isInteger(spec.gpu?.count) || spec.gpu!.count! < 0)
+    throw new Error("GPU count must be a whole number of zero or more.");
+  if (spec.kind === "endpoint") {
+    const { min = 0, max = 1, target = 4 } = spec.scaling ?? {};
+    if (
+      ![min, max, target].every(Number.isInteger) ||
+      min < 0 ||
+      max < 1 ||
+      max < min ||
+      target < 1
+    )
+      throw new Error(
+        "Scaling requires whole numbers: minimum ≥ 0, maximum ≥ 1 and minimum, concurrency ≥ 1.",
+      );
+    if (!Number.isInteger(spec.port) || spec.port! < 1 || spec.port! > 65535)
+      throw new Error("Container port must be between 1 and 65535.");
+    delete spec.cpu;
+    delete spec.memory;
+    delete spec.disk_gi;
+  } else {
+    if (!Number.isInteger(spec.disk_gi) || spec.disk_gi! < 1)
+      throw new Error("Work volume must be a positive whole number.");
+    delete spec.port;
+    delete spec.protocol;
+    delete spec.scaling;
+    delete spec.health_path;
+    delete spec.served_model;
+  }
+  return spec;
 }
 
 export function Models() {
   const toast = useToast();
-  const { data, error, loading, reload } = useAsync(() => api().listModels(), []);
-  const [form, setForm] = useState<null | { initial?: ModelSpec }>(null);
-  async function remove(m: Model) {
-    if (!confirm(`Delete ${m.id}? Its endpoints are removed from every region.`)) return;
-    try { await api().deleteModel(m.id); toast("Model deleted"); reload(); } catch (e) { toast((e as Error).message, true); }
+  const admin = useAdmin();
+  const { data, error, loading, reload } = useAsync(
+    () => api().listModels(),
+    [],
+  );
+  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState("all");
+  const [deleting, setDeleting] = useState<Model | null>(null);
+  const [busy, setBusy] = useState(false);
+  const rows = (data ?? []).filter(
+    (m) =>
+      (kind === "all" || (kind === "job") === (m.default_mode === "run")) &&
+      `${m.name} ${m.id} ${m.image ?? ""}`
+        .toLowerCase()
+        .includes(search.toLowerCase()),
+  );
+  async function remove() {
+    if (!deleting) return;
+    setBusy(true);
+    try {
+      await api().deleteModel(deleting.id);
+      toast("Model deleted");
+      setDeleting(null);
+      reload();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <>
-      <div className="page-head">
-        <div><h1>Models</h1><p>A model is a container plus a few knobs: an endpoint (always reachable, scales to zero) or a job class (runs on request with checkpoints). Define one here or with <span className="mono">POST /v1/models</span>; it is kept in the fleet database and deployed in every region it names. Creating, editing and deleting needs an admin key.</p></div>
-        <div className="actions"><a className="btn" href={href("/jobs/new")}>Run a one-off container</a><button className="btn btn--primary" onClick={() => setForm({})}>New model</button></div>
-      </div>
-      {form && <ModelForm initial={form.initial} onClose={() => setForm(null)} onDone={() => { setForm(null); reload(); }} />}
+      <PageHeader
+        title="Models"
+        count={data?.length}
+        description="Reusable container configurations for endpoints and jobs."
+      >
+        {admin && (
+          <Button primary href={href("/models/new")}>
+            Create model
+          </Button>
+        )}
+      </PageHeader>
       {error && <ErrorBox msg={error} retry={reload} />}
-      {loading && !data && <Loading />}
-      {data && data.length === 0 && <Empty>No models yet. Click "New model" to deploy a container.</Empty>}
-      {data && (
-        <div className="grid grid--cards">
-          {data.map((m) => {
-            const a = actionFor(m);
-            const editable = m.managed_by === "api";
-            return (
-              <div className="card model-card" key={m.id}>
-                <div className="model-card__top">
-                  <div><h3>{m.name}</h3><div className="small muted mono">{m.id}</div></div>
-                  <span className="badge badge--violet badge--plain">{m.default_mode}</span>
-                </div>
-                <p>{m.description}</p>
-                <dl className="kv">
-                  <dt>Modes</dt><dd>{m.modes.map((x) => <span className="chip" key={x}>{x}</span>)}</dd>
-                  <dt>GPU</dt><dd>{m.gpu}</dd>
-                  {m.protocol && <><dt>Protocol</dt><dd className="mono">{m.protocol}</dd></>}
-                  {m.image && <><dt>Image</dt><dd className="mono small">{m.image}</dd></>}
-                  {m.cold_start_s != null && <><dt>Cold start</dt><dd>{m.cold_start_s} s (measured)</dd></>}
-                  <dt>Regions</dt><dd>{m.regions.map((r) => <span key={r.region} style={{ marginRight: 8 }}><Badge status={r.status}>{r.region}</Badge></span>)}</dd>
-                  <dt>Managed by</dt><dd>{m.managed_by === "api" ? "this console / the API" : "the solution (built-in class)"}</dd>
-                </dl>
-                <div className="model-card__foot">
-                  <span className="price">{m.price}</span>
-                  <div className="actions">
-                    {editable && m.spec && <button className="btn btn--sm" onClick={() => setForm({ initial: m.spec })}>Edit</button>}
-                    {editable && <button className="btn btn--sm btn--danger" onClick={() => remove(m)}>Delete</button>}
-                    {m.modes.includes("run") && m.default_mode !== "run" && <a className="btn btn--sm" href={href(`/jobs/new?model=${m.id}`)}>Run job</a>}
-                    <a className="btn btn--primary btn--sm" href={href(a.to)}>{a.label}</a>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+      <div className="toolbar">
+        <div className="toolbar__search">
+          <Search value={search} onChange={setSearch} label="Search models" />
         </div>
+        <Pick
+          value={kind}
+          onChange={setKind}
+          aria-label="Model type"
+          options={[
+            { value: "all", label: "All types" },
+            { value: "endpoint", label: "Endpoints" },
+            { value: "job", label: "Job classes" },
+          ]}
+        />
+        <span className="toolbar__count">{rows.length} models</span>
+        <Button onClick={reload} size="m">
+          Refresh
+        </Button>
+      </div>
+      {loading && !data ? (
+        <Loading />
+      ) : (
+        data && (
+          <div className="table-surface tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>GPU</th>
+                  <th>Regions</th>
+                  <th>Source</th>
+                  <th>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {!rows.length && (
+                  <tr>
+                    <td colSpan={6}>
+                      <Empty>
+                        <h2>
+                          {search || kind !== "all"
+                            ? "No matching models"
+                            : "No models yet"}
+                        </h2>
+                        <p>
+                          {search || kind !== "all"
+                            ? "Try changing the search or type filter."
+                            : "Create a model to reuse a container configuration."}
+                        </p>
+                      </Empty>
+                    </td>
+                  </tr>
+                )}
+                {rows.map((m) => (
+                  <tr key={m.id}>
+                    <td>
+                      <strong>{m.name}</strong>
+                      <div className="small muted mono">{m.id}</div>
+                      {m.description && (
+                        <div className="small muted table-description">
+                          {m.description}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {m.default_mode === "run" ? "Job class" : "Endpoint"}
+                    </td>
+                    <td>{m.gpu}</td>
+                    <td>{m.regions.map((r) => r.region).join(", ") || "—"}</td>
+                    <td>{m.managed_by === "api" ? "Custom" : "Built-in"}</td>
+                    <td>
+                      <div className="actions">
+                        <Button
+                          size="m"
+                          href={href(
+                            m.default_mode === "run"
+                              ? `/jobs/new?model=${encodeURIComponent(m.id)}`
+                              : endpointPath(m.id, m.regions[0]?.region),
+                          )}
+                        >
+                          {m.default_mode === "run"
+                            ? "Run job"
+                            : "View endpoint"}
+                        </Button>
+                        {admin && m.managed_by === "api" && (
+                          <>
+                            <Button
+                              size="m"
+                              href={href(
+                                `/models/${encodeURIComponent(m.id)}/edit`,
+                              )}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="m"
+                              view="flat-danger"
+                              onClick={() => setDeleting(m)}
+                            >
+                              Delete
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
+      {deleting && (
+        <Modal title="Delete model" onClose={() => !busy && setDeleting(null)}>
+          <p>
+            Delete <strong>{deleting.name}</strong>? Its endpoints will be
+            removed from every region. Running jobs are not stopped.
+          </p>
+          <div className="dialog-actions">
+            <Button disabled={busy} onClick={() => setDeleting(null)}>
+              Cancel
+            </Button>
+            <Button danger loading={busy} onClick={remove}>
+              Delete model
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+export function ModelEditor({
+  id,
+  kind = "endpoint",
+}: {
+  id?: string;
+  kind?: ModelSpec["kind"];
+}) {
+  const admin = useAdmin();
+  const model = useAsync(
+    () => (id ? api().getModel(id) : Promise.resolve(null)),
+    [id],
+  );
+  if (!admin)
+    return (
+      <div className="empty">
+        <h2>Administrator access required</h2>
+        <p>Use an administrator key to create or edit models.</p>
+        <Button href={href("/models")}>Back to models</Button>
+      </div>
+    );
+  if (id && model.error)
+    return <ErrorBox msg={model.error} retry={model.reload} />;
+  if (id && !model.data) return <Loading />;
+  if (id && (!model.data?.spec || model.data.managed_by !== "api"))
+    return (
+      <ErrorBox msg="This model is managed by the deployment. Update its configuration at the source." />
+    );
+  return <ModelForm key={id ?? kind} initial={model.data?.spec} kind={kind} />;
+}
+function ModelForm({
+  initial,
+  kind,
+}: {
+  initial?: ModelSpec;
+  kind: ModelSpec["kind"];
+}) {
+  const { fleet } = useSession();
+  const toast = useToast();
+  const editing = !!initial;
+  const [f, setF] = useState<ModelSpec>(() => ({
+    id: "",
+    kind,
+    image: "",
+    command: "",
+    cpu: "4",
+    memory: "16Gi",
+    disk_gi: 50,
+    regions: [],
+    ...initial,
+    gpu: {
+      count: initial
+        ? (initial.gpu?.count ?? (initial.gpu?.classes?.length ? 1 : 0))
+        : 1,
+      ...initial?.gpu,
+    },
+    port: initial?.port ?? (initial ? 8080 : 8000),
+    protocol: initial?.protocol ?? (initial ? "http" : "openai"),
+    resources: { cpu: "4", memory: "16Gi", ...initial?.resources },
+    scaling: { min: 0, max: 1, target: 4, ...initial?.scaling },
+  }));
+  const [args, setArgs] = useState((initial?.args ?? []).join("\n"));
+  const [env, setEnv] = useState(
+    Object.entries(initial?.env ?? {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n"),
+  );
+  const [classes, setClasses] = useState(
+    (initial?.gpu?.classes ?? []).join(", "),
+  );
+  const [command, setCommand] = useState(
+    Array.isArray(f.command) ? JSON.stringify(f.command) : (f.command ?? ""),
+  );
+  const [commandType, setCommandType] = useState(
+    Array.isArray(f.command) ? "argv" : "shell",
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (p: Partial<ModelSpec>) => setF((s) => ({ ...s, ...p }));
+  const job = f.kind === "job";
+  const regions = [
+    ...new Set([...(fleet?.regions ?? []), ...(f.regions ?? [])]),
+  ];
+  const back = job || editing ? "/models" : "/endpoints";
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    let spec: ModelSpec;
+    try {
+      const cmd =
+        commandType === "argv" ? JSON.parse(command || "[]") : command;
+      if (
+        commandType === "argv" &&
+        (!Array.isArray(cmd) ||
+          !cmd.every((a: unknown) => typeof a === "string"))
+      )
+        throw new Error("Entrypoint must be a JSON array of strings.");
+      spec = prepareSpec({ ...f, command: cmd }, args, env, classes);
+    } catch (err) {
+      setError((err as Error).message);
+      return;
+    }
+    setBusy(true);
+    try {
+      if (editing) await api().updateModel(spec.id, spec);
+      else await api().createModel(spec);
+      toast(
+        editing
+          ? "Configuration saved"
+          : job
+            ? "Job class created"
+            : "Endpoint deployment started",
+      );
+      navigate(back);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <PageHeader
+        title={
+          editing
+            ? `Edit ${initial.display_name || initial.id}`
+            : job
+              ? "Create model"
+              : "Create endpoint"
+        }
+        description={
+          job
+            ? "Configure a reusable job class for your container."
+            : "Deploy a container with an inference API that scales with demand."
+        }
+      />
+      <form onSubmit={save} className="editor-grid">
+        <div className="editor-main">
+          <FormSection
+            title="General"
+            description="Choose how this model will be used."
+          >
+            {!editing && kind === "job" && (
+              <Field label="Model type">
+                <Pick
+                  value={f.kind}
+                  onChange={(v) => set({ kind: v as ModelSpec["kind"] })}
+                  options={[
+                    { value: "endpoint", label: "Endpoint" },
+                    { value: "job", label: "Job class" },
+                  ]}
+                />
+              </Field>
+            )}
+            <div className="form-grid">
+              <Field
+                label="Name"
+                help="2–41 lowercase letters, numbers and dashes."
+              >
+                <Input
+                  value={f.id}
+                  onChange={(v) => set({ id: v })}
+                  disabled={editing}
+                  placeholder="my-model"
+                  controlProps={{ required: true }}
+                />
+              </Field>
+              <Field
+                label="Display name"
+                help="Optional name shown in the console."
+              >
+                <Input
+                  value={f.display_name ?? ""}
+                  onChange={(v) => set({ display_name: v })}
+                />
+              </Field>
+            </div>
+            <Field label="Description">
+              <Input
+                value={f.description ?? ""}
+                onChange={(v) => set({ description: v })}
+              />
+            </Field>
+            <Field
+              label="Regions"
+              help="Leave empty to use every compatible region."
+            >
+              <MultiPick
+                value={f.regions ?? []}
+                onUpdate={(v) => set({ regions: v })}
+                options={regions}
+                placeholder={
+                  regions.length
+                    ? "All compatible regions"
+                    : "Region information unavailable"
+                }
+                disabled={!regions.length}
+              />
+            </Field>
+          </FormSection>
+          <FormSection
+            title="Container"
+            description="Image and startup configuration."
+          >
+            <Field
+              label="Container image"
+              help="Full image path with a tag or digest."
+            >
+              <Input
+                value={f.image}
+                mono
+                onChange={(v) => set({ image: v })}
+                placeholder="registry.example.com/team/model:tag"
+                controlProps={{ required: true }}
+              />
+            </Field>
+            <Field
+              label="Registry pull secret"
+              help="Optional name of an existing registry secret."
+            >
+              <Input
+                value={f.pull_secret ?? ""}
+                onChange={(v) => set({ pull_secret: v })}
+              />
+            </Field>
+            <div className="form-grid">
+              <Field label="Entrypoint format">
+                <Pick
+                  value={commandType}
+                  onChange={(v) => {
+                    if (command.trim() && v !== commandType) {
+                      setError(
+                        "Clear the entrypoint before changing its format.",
+                      );
+                      return;
+                    }
+                    setCommandType(v);
+                  }}
+                  options={[
+                    { value: "shell", label: "Shell command" },
+                    { value: "argv", label: "Argument vector (JSON)" },
+                  ]}
+                />
+              </Field>
+              <Field
+                label="Entrypoint"
+                help={
+                  commandType === "argv"
+                    ? 'JSON array, e.g. ["python", "serve.py"].'
+                    : "Optional. Leave empty to use the image entrypoint."
+                }
+              >
+                <Input value={command} mono onChange={setCommand} />
+              </Field>
+            </div>
+            <Field
+              label="Arguments"
+              help="One argument per line. Spaces within a line are preserved."
+            >
+              <Area value={args} onChange={setArgs} rows={3} />
+            </Field>
+            <Field
+              label="Environment variables"
+              help="NAME=value, one per line. Use existing secret references in your deployment for sensitive values."
+            >
+              <Area value={env} onChange={setEnv} rows={3} />
+            </Field>
+          </FormSection>
+          <FormSection
+            title="Resources"
+            description="Resources allocated to each replica or run."
+          >
+            <div className="form-grid">
+              <Field label="GPU count">
+                <Input
+                  type="number"
+                  value={f.gpu?.count ?? 1}
+                  onChange={(v) => set({ gpu: { ...f.gpu, count: Number(v) } })}
+                  controlProps={{ min: 0, step: 1, required: true }}
+                />
+              </Field>
+              <Field label="GPU classes" help="Empty uses the fleet defaults.">
+                {fleet?.gpu_classes?.length ? (
+                  <MultiPick
+                    value={classes
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)}
+                    onUpdate={(v) => setClasses(v.join(", "))}
+                    options={[
+                      ...new Set([
+                        ...fleet.gpu_classes,
+                        ...classes
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      ]),
+                    ]}
+                    placeholder="Automatic"
+                  />
+                ) : (
+                  <Input
+                    value={classes}
+                    onChange={setClasses}
+                    placeholder="Comma-separated fleet classes"
+                  />
+                )}
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="CPU">
+                <Input
+                  value={job ? (f.cpu ?? "4") : (f.resources?.cpu ?? "4")}
+                  onChange={(v) =>
+                    set(
+                      job
+                        ? { cpu: v }
+                        : { resources: { ...f.resources, cpu: v } },
+                    )
+                  }
+                />
+              </Field>
+              <Field label="Memory">
+                <Input
+                  value={
+                    job ? (f.memory ?? "16Gi") : (f.resources?.memory ?? "16Gi")
+                  }
+                  onChange={(v) =>
+                    set(
+                      job
+                        ? { memory: v }
+                        : { resources: { ...f.resources, memory: v } },
+                    )
+                  }
+                  placeholder="16Gi"
+                />
+              </Field>
+            </div>
+            {job && (
+              <Field
+                label="Work volume (GiB)"
+                help="Persistent storage for this run and its checkpoints."
+              >
+                <Input
+                  type="number"
+                  value={f.disk_gi ?? 50}
+                  onChange={(v) => set({ disk_gi: Number(v) })}
+                  controlProps={{ min: 1, step: 1, required: true }}
+                />
+              </Field>
+            )}
+          </FormSection>
+          {!job && (
+            <>
+              <FormSection
+                title="Networking"
+                description="How callers reach the container."
+              >
+                <div className="form-grid">
+                  <Field label="Protocol">
+                    <Pick
+                      value={f.protocol ?? "openai"}
+                      onChange={(v) =>
+                        set({ protocol: v as ModelSpec["protocol"] })
+                      }
+                      options={[
+                        { value: "openai", label: "OpenAI compatible" },
+                        { value: "http", label: "HTTP" },
+                        { value: "websocket", label: "WebSocket" },
+                        { value: "grpc", label: "gRPC" },
+                      ]}
+                    />
+                  </Field>
+                  <Field label="Container port">
+                    <Input
+                      type="number"
+                      value={f.port ?? 8000}
+                      onChange={(v) => set({ port: Number(v) })}
+                      controlProps={{ min: 1, max: 65535, required: true }}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid">
+                  <Field label="Health check path">
+                    <Input
+                      value={f.health_path ?? ""}
+                      mono
+                      onChange={(v) => set({ health_path: v })}
+                      placeholder="/health"
+                    />
+                  </Field>
+                  <Field
+                    label="Served model name"
+                    help="Model name expected by an OpenAI compatible server."
+                  >
+                    <Input
+                      value={f.served_model ?? ""}
+                      onChange={(v) => set({ served_model: v })}
+                    />
+                  </Field>
+                </div>
+              </FormSection>
+              <FormSection
+                title="Autoscaling"
+                description="Set the replica limits and requests per replica."
+              >
+                <div className="form-grid form-grid--three">
+                  {(
+                    [
+                      ["min", "Minimum replicas", 0],
+                      ["max", "Maximum replicas", 1],
+                      ["target", "Target concurrency", 4],
+                    ] as const
+                  ).map(([k, label, def]) => (
+                    <Field key={k} label={label}>
+                      <Input
+                        type="number"
+                        value={f.scaling?.[k] ?? def}
+                        onChange={(v) =>
+                          set({ scaling: { ...f.scaling, [k]: Number(v) } })
+                        }
+                        controlProps={{
+                          min: k === "min" ? 0 : 1,
+                          step: 1,
+                          required: true,
+                        }}
+                      />
+                    </Field>
+                  ))}
+                </div>
+                <p className="help">
+                  A minimum of zero allows the endpoint to scale down when idle.
+                </p>
+              </FormSection>
+            </>
+          )}
+          {error && <ErrorBox msg={error} />}
+          <div className="form-actions">
+            <Button href={href(back)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button primary type="submit" loading={busy}>
+              {editing
+                ? "Save changes"
+                : job
+                  ? "Create model"
+                  : "Create endpoint"}
+            </Button>
+          </div>
+        </div>
+        <aside className="editor-summary">
+          <h2>Configuration summary</h2>
+          <dl className="kv">
+            <dt>Type</dt>
+            <dd>{job ? "Job class" : "Endpoint"}</dd>
+            <dt>Name</dt>
+            <dd>{f.id || "—"}</dd>
+            <dt>GPU</dt>
+            <dd>
+              {f.gpu?.count ?? 1} per {job ? "run" : "replica"}
+            </dd>
+            <dt>Regions</dt>
+            <dd>{f.regions?.join(", ") || "Automatic"}</dd>
+            {!job && (
+              <>
+                <dt>Replicas</dt>
+                <dd>
+                  {f.scaling?.min ?? 0}–{f.scaling?.max ?? 1}
+                </dd>
+              </>
+            )}
+          </dl>
+          <p>Changes apply to every selected region.</p>
+        </aside>
+      </form>
     </>
   );
 }

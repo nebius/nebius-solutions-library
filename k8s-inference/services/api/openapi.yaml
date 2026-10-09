@@ -120,16 +120,17 @@ paths:
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Artifact" } } } }, "403": { $ref: "#/components/responses/Error" } }
   /v1/endpoints:
     get:
-      summary: Endpoints (InferenceServices) of catalog models in this region
+      summary: Endpoints of catalog models across connected regions
+      parameters: [{ $ref: "#/components/parameters/endpointRegion" }]
       responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Endpoint" } } } } } }
   /v1/endpoints/{id}:
     get:
       summary: One endpoint
-      parameters: [{ $ref: "#/components/parameters/id" }]
+      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/endpointRegion" }]
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }, "404": { $ref: "#/components/responses/Error" } }
     patch:
-      summary: Update scaling (admin key). Endpoints are created and deleted in git (catalog/models, charts/endpoint); a patch on a git-managed endpoint is reverted by Argo CD.
-      parameters: [{ $ref: "#/components/parameters/id" }]
+      summary: Update live scaling in the selected region (admin key). Deployment synchronization may replace a patch; update the model definition to persist replica limits.
+      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/endpointRegion" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { min_replicas: { type: integer }, max_replicas: { type: integer }, target_concurrency: { type: integer }, scale_to_zero_after_s: { type: integer } } } } } }
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } } }
   /v1/keys:
@@ -147,10 +148,10 @@ paths:
       responses: { "204": { description: revoked }, "404": { $ref: "#/components/responses/Error" } }
   /v1/keys/me:
     get:
-      summary: The calling key (alias, budget, spend, tenant, models)
+      summary: The calling key (alias, budget, spend, tenant, models, role)
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } } }
   /healthz:
-    get: { summary: Liveness, security: [], responses: { "200": { description: ok } } }
+    get: { summary: Liveness and fleet metadata, security: [], responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/FleetInfo" } } } } } }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer, description: LiteLLM virtual key }
@@ -158,9 +159,19 @@ components:
     model: { name: model, in: path, required: true, schema: { type: string } }
     id: { name: id, in: path, required: true, schema: { type: string } }
     idem: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+    endpointRegion: { name: region, in: query, required: false, schema: { type: string }, description: "Restrict the list to a connected region; get and patch default to the API's own region." }
   responses:
     Error: { description: error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
+    FleetInfo:
+      type: object
+      properties:
+        ok: { type: boolean }
+        models: { type: integer }
+        region: { type: string }
+        regions: { type: array, items: { type: string } }
+        fleet_manager: { type: boolean }
+        gpu_classes: { type: array, items: { type: string } }
     ModelSpec:
       description: A model as the console form defines it (services/api/models.py); kept in the fleet database with its history. Reserved for later, accepted and stored, not acted on yet - `images` (image per GPU class), `deployments.<region>.variants`, `routing`.
       type: object
@@ -333,7 +344,7 @@ components:
         gpu: { type: string }
         protocol: { type: string }
         created_at: { type: string }
-        managed_by: { type: string, enum: [catalog, api], description: "catalog: a built-in class of the solution (read-only); api: defined through POST /v1/models" }
+        managed_by: { type: string, enum: [git, api], description: "git: deployment-managed; api: defined through POST /v1/models" }
     ApiKey:
       type: object
       properties:
@@ -343,7 +354,7 @@ components:
         key_preview: { type: string }
         alias: { type: string }
         tenant: { type: string }
-        budget: { type: number }
+        budget: { type: number, nullable: true }
         spend: { type: number }
         models: { type: array, items: { type: string } }
         created_at: { type: string }

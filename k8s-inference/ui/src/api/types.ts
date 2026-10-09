@@ -1,7 +1,14 @@
 // Shapes follow services/api/openapi.yaml (customer API) plus the UI-facing list endpoints.
 
 export type Mode = "sync" | "async" | "run";
-export type Region = "eu-north1" | "eu-south1" | string;
+export type Region = string;
+export interface FleetInfo {
+  ok: boolean;
+  region: string;
+  regions: string[];
+  fleet_manager: boolean;
+  gpu_classes?: string[];
+}
 
 export interface ModelRegionStatus {
   region: Region;
@@ -10,21 +17,21 @@ export interface ModelRegionStatus {
 }
 
 export interface Model {
-  id: string;                 // e.g. "container-run", "llm-example"
+  id: string; // e.g. "container-run", "llm-example"
   name: string;
   description?: string;
   modes: Mode[];
   default_mode: Mode;
-  gpu: string;                // "1x H100", "1x RTX PRO 6000", "none"
-  price: string;              // "$0.05 / call" or "$2.40 / GPU-h"
+  gpu: string; // "1x H100", "1x RTX PRO 6000", "none"
+  price: string; // "$0.05 / call" or "$2.40 / GPU-h"
   price_per_call?: number;
   regions: ModelRegionStatus[];
   image?: string;
-  protocol?: string;          // "openai-chat", "http-json", "argo-workflow"
+  protocol?: string; // "openai-chat", "http-json", "argo-workflow"
   cold_start_s?: number;
-  parameters?: ModelParam[];  // input parameters shown in the wizard
-  managed_by?: "api" | "terraform" | "catalog";   // api: defined through POST /v1/models (editable here)
-  spec?: ModelSpec;           // the definition behind an api-managed model, for the edit form
+  parameters?: ModelParam[]; // input parameters shown in the wizard
+  managed_by?: "api" | "terraform" | "catalog"; // api: defined through POST /v1/models (editable here)
+  spec?: ModelSpec; // the definition behind an api-managed model, for the edit form
 }
 
 // A model as the "New model" form and terraform.tfvars `models` define it (services/api/models.py).
@@ -48,7 +55,11 @@ export interface ModelSpec {
   timeout_s?: number;
   shm_gib?: number;
   pull_secret?: string;
-  weights?: { path?: string; mount_path?: string; env?: Record<string, string> };
+  weights?: {
+    path?: string;
+    mount_path?: string;
+    env?: Record<string, string>;
+  };
   regions?: string[];
   display_name?: string;
   description?: string;
@@ -72,7 +83,13 @@ export interface ModelParam {
 }
 
 export type OperationStatus =
-  | "QUEUED" | "ADMITTED" | "RUNNING" | "PREEMPTED" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  | "QUEUED"
+  | "ADMITTED"
+  | "RUNNING"
+  | "PREEMPTED"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "CANCELLED";
 
 export interface Attempt {
   index: number;
@@ -80,8 +97,8 @@ export interface Attempt {
   ended_at?: string;
   status: OperationStatus | string;
   node?: string;
-  gpu_class?: string;         // the GPU class the attempt ran on (per-class images)
-  reason?: string;            // e.g. "preempted: spot reclaimed"
+  gpu_class?: string; // the GPU class the attempt ran on (per-class images)
+  reason?: string; // e.g. "preempted: spot reclaimed"
   resumed_from_checkpoint?: string;
 }
 
@@ -92,8 +109,8 @@ export interface Operation {
   mode: Mode;
   status: OperationStatus;
   region: Region;
-  gpu_class?: string;         // run classes with per-GPU-class images: the class chosen at submission
-  image?: string;             // the image that class got
+  gpu_class?: string; // run classes with per-GPU-class images: the class chosen at submission
+  image?: string; // the image that class got
   priority?: "low" | "normal" | "high" | string;
   queue_position?: number;
   created_at: string;
@@ -131,18 +148,18 @@ export interface Endpoint {
   placement?: "RESERVED" | "SPOT" | "ANY";
   gpu?: string;
   created_at?: string;
-  protocol?: string;          // "openai-chat" | "http-json"
+  protocol?: string; // "openai-chat" | "http-json"
   managed_by?: "git" | "api"; // git = Argo CD owns it (PATCH reverted, DELETE 403)
 }
 
 export interface ApiKey {
   id: string;
-  key?: string;               // only returned at creation
-  key_preview: string;        // "sk-...abcd"
+  key?: string; // only returned at creation
+  key_preview: string; // "sk-...abcd"
   alias: string;
-  budget: number;             // USD
-  spend: number;              // USD
-  models: string[];           // allow-list
+  budget: number | null; // USD; null means unlimited
+  spend: number; // USD
+  models: string[]; // allow-list
   created_at: string;
   expires_at?: string;
   status: "active" | "exhausted" | "expired";

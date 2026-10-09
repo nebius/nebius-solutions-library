@@ -80,7 +80,8 @@ def _public(m: dict) -> dict:
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "models": len(catalog.all_models()), "region": REGION, "regions": kube.regions(), "fleet_manager": FLEET_MANAGER}
+    return {"ok": True, "models": len(catalog.all_models()), "region": REGION, "regions": kube.regions(), "fleet_manager": FLEET_MANAGER,
+            "gpu_classes": sorted({p["gpu_class"] for p in kube.fleet()["pools"].values() if p.get("gpu_class")})}
 
 
 @app.get("/v1/models")
@@ -444,34 +445,45 @@ def _endpoint_model(eid: str) -> dict:
 
 
 @app.get("/v1/endpoints")
-def list_endpoints(p: Principal = Depends(principal)):
+def list_endpoints(region: str | None = None, p: Principal = Depends(principal)):
+    available = kube.regions()
+    if region and region not in available:
+        raise HTTPException(400, f"region {region} is not served by this API")
     out = []
     for m in catalog.all_models().values():
-        if m["mode"] != "run" and (i := kube.isvc(m["k8s_name"], m["namespace"])):
-            out.append(ep.to_public(m, i))
+        if m["mode"] == "run":
+            continue
+        for r in ([region] if region else available):
+            if r in m["regions"] and (i := kube.isvc(m["k8s_name"], m["namespace"], r)):
+                out.append(ep.to_public(m, i, r))
     return out
 
 
 @app.get("/v1/endpoints/{id}")
-def get_endpoint(id: str, p: Principal = Depends(principal)):
+def get_endpoint(id: str, region: str = REGION, p: Principal = Depends(principal)):
+    if region not in kube.regions():
+        raise HTTPException(400, f"region {region} is not served by this API")
     m = _endpoint_model(id)
-    i = kube.isvc(m["k8s_name"], m["namespace"]) or {}
+    i = kube.isvc(m["k8s_name"], m["namespace"], region) or {}
     if not i:
-        raise HTTPException(404, f"endpoint {id} not deployed in {REGION}")
-    return ep.to_public(m, i)
+        raise HTTPException(404, f"endpoint {id} not deployed in {region}")
+    return ep.to_public(m, i, region)
 
 
 @app.patch("/v1/endpoints/{id}")
-def update_endpoint(id: str, req: ScalingRequest, p: Principal = Depends(admin)):
-    """Scaling only. Endpoints are created and deleted in git (catalog/models + charts/endpoint via
-    Argo CD); a patch on a git-managed endpoint is reverted by the next Argo CD sync."""
+def update_endpoint(id: str, req: ScalingRequest, region: str = REGION, p: Principal = Depends(admin)):
+    """Patch live scaling in one region. Model definitions own persistent replica limits; patches on
+    git-managed endpoints are reverted by deployment synchronization."""
+    if region not in kube.regions():
+        raise HTTPException(400, f"region {region} is not served by this API")
     m = _endpoint_model(id)
     try:
-        i = kube.api().patch_namespaced_custom_object("serving.kserve.io", "v1beta1", m["namespace"], "inferenceservices", id,
+        i = kube.api(region).patch_namespaced_custom_object("serving.kserve.io", "v1beta1", m["namespace"], "inferenceservices", id,
                                                       ep.scaling_patch(req.model_dump()))
     except ApiException as e:
         raise HTTPException(404 if e.status == 404 else 502, f"kserve: {e.reason}")
-    return ep.to_public(m, i)
+    kube.invalidate_endpoint(id, m["namespace"], region)
+    return ep.to_public(m, i, region)
 
 
 async def _litellm(method: str, path: str, **kw):

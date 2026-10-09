@@ -22,6 +22,23 @@ defaults:
     working-directory: k8s-inference
 
 jobs:
+  ui:
+    name: 'UI build and interaction tests'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: k8s-inference/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: k8s-inference/ui/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
   check:
     name: 'Validate, render, test'
     runs-on: ubuntu-latest
