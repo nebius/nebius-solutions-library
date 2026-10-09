@@ -9,7 +9,7 @@ os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"   # async endpoint calls
 import pytest, yaml
 from fastapi.testclient import TestClient
 from kubernetes.client.rest import ApiException
-import app as appmod, auth, catalog, jobs, kube
+import app as appmod, auth, catalog, jobs, kube, models
 
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
             "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]}}
@@ -294,7 +294,7 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     assert rs.status_code == 202 and rs.json()["region"] == "eu-south1" and ("tenant-demo", rs.json()["id"]) in south.jobs
     sj = south.jobs[("tenant-demo", rs.json()["id"])]
     assert _main(sj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
-    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.9"
+    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.10"
     assert sj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     g = c.get(f"/v1/operations/{rs.json()['id']}", headers=H)
     assert g.status_code == 200 and g.json()["region"] == "eu-south1"
@@ -704,7 +704,7 @@ def test_fleet_manager_path(client, monkeypatch):
     job = control.jobs[("tenant-demo", op["id"])]
     assert job["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in job["metadata"]["labels"]
     assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "prefer-h100"
-    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.9"
+    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.10"
     tmpl = job["spec"]["template"]["metadata"]["annotations"]
     assert tmpl[f"{L}/gpu-classes"] == "h100,h200,b200,b300,gb300,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
     assert not control.pvcs and ("tenant-demo", op["id"]) not in hub.jobs                  # no volume on the manager
@@ -1296,3 +1296,40 @@ def test_scaling_metric_units_and_partial_updates(client, admin_keys, monkeypatc
         assert fractional["spec"]["predictor"]["containerConcurrency"] == 1
         assert fractional["spec"]["predictor"]["scaleTarget"] == 1
         assert fractional["metadata"]["annotations"]["autoscaling.knative.dev/target-utilization-percentage"] == "70"
+
+
+def test_endpoint_pool_fits_the_gpu_count(monkeypatch):
+    """An endpoint is pinned to a pool whose nodes carry at least its GPUs: the smallest preset that fits, plain pools
+    before InfiniBand ones, reserved before spot. An 8-GPU replica on a 1-GPU preset was Unschedulable forever
+    (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md)."""
+    pools = {"pools": {
+        "hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "gpus_per_node": 1, "capacity": "spot"},
+        "hub-h100-spot-8x-ib": {"region": "hub", "pool": "h100-spot-8x-ib", "gpu_class": "h100", "gpus_per_node": 8, "capacity": "spot",
+                                "interconnect": "infiniband"},
+        "hub-h100-spot-8x": {"region": "hub", "pool": "h100-spot-8x", "gpu_class": "h100", "gpus_per_node": 8, "capacity": "spot"},
+        "hub-h100-res-8x": {"region": "hub", "pool": "h100-res-8x", "gpu_class": "h100", "gpus_per_node": 8, "capacity": "reserved"},
+        "hub-l40s-1x": {"region": "hub", "pool": "l40s-1x", "gpu_class": "l40s", "gpus_per_node": 1, "capacity": "on_demand"}}}
+    monkeypatch.setattr(kube, "fleet", lambda: pools)
+    assert models.pool_for("hub", ["h100"]) == "h100-spot-1x"                 # 1 GPU: the small preset, not a whole node
+    assert models.pool_for("hub", ["h100"], 8) == "h100-res-8x"              # 8 GPUs: only the 8x presets fit; reserved first
+    assert models.pool_for("hub", ["l40s", "h100"], 8) == "h100-res-8x"      # the first class with a fitting pool
+    assert models.pool_for("hub", ["l40s"], 8) is None
+    assert models.pool_for("hub", ["h100"], 2) == "h100-res-8x"
+    del pools["pools"]["hub-h100-res-8x"]
+    assert models.pool_for("hub", ["h100"], 8) == "h100-spot-8x"             # plain before InfiniBand
+
+
+def test_cancel_of_a_dispatched_jobset_deactivates_its_workload(client):
+    """Fleet path: cancelling a running multi-node run deactivates its manager Workload (Kueue evicts it) besides
+    suspending the worker's JobSet; the suspend alone was undone by Kueue and the pods restarted (s2pr2, 2026-10-09)."""
+    c, fake = client
+    uid = "u-123"
+    fake.custom[("tenant-demo", "workloads", "jobset-op-x-abc")] = {"metadata": {"name": "jobset-op-x-abc", "labels": {kube.KUEUE_JOB_UID_LABEL: uid}},
+                                                                    "spec": {"active": True}}
+    fake.custom[("tenant-demo", "jobsets", "op-x")] = {"metadata": {"name": "op-x", "uid": uid},
+                                                       "spec": {"managedBy": "kueue.x-k8s.io/multikueue", "suspend": False}}
+    job = {**copy.deepcopy(fake.custom[("tenant-demo", "jobsets", "op-x")]), "_cluster": "hub", "_region": "eu-north1", "_pods": []}
+    out = jobs._cancel_jobset("tenant-demo", "op-x", "eu-north1", job)
+    assert fake.custom[("tenant-demo", "workloads", "jobset-op-x-abc")]["spec"]["active"] is False
+    assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"
+    assert fake.custom[("tenant-demo", "jobsets", "op-x")]["spec"]["suspend"] is True

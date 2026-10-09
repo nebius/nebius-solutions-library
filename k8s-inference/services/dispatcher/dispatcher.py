@@ -243,9 +243,16 @@ def allowed_of(wl: dict) -> tuple[list | None, list | None]:
     return classes, regions
 
 
+WORK_VOLUME = "work"                      # the run's own scratch volume (services/api/jobs.py); the only claim the dispatcher owns
+
+
 def pvc_of(template: dict) -> str | None:
+    """The claim behind the pod's `work` volume, None when it is not a claim (multi-node runs scratch on an emptyDir).
+    Other claims of the pod are never the dispatcher's: a multi-node run with `checkpoints: shared` mounts the
+    tenant's `scratch-shared` claim (charts/tenant), which the sweeper deleted as an "orphan" when it was taken for
+    the work volume (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md)."""
     for v in (template.get("spec") or {}).get("volumes") or []:
-        if v.get("persistentVolumeClaim", {}).get("claimName"):
+        if v.get("name") == WORK_VOLUME and v.get("persistentVolumeClaim", {}).get("claimName"):
             return v["persistentVolumeClaim"]["claimName"]
     return None
 
@@ -425,6 +432,8 @@ def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict) -> No
             continue
         for pvc in pvcs:
             ns, name = pvc.metadata.namespace, pvc.metadata.name
+            if not name.endswith(f"-{WORK_VOLUME}"):
+                continue                  # not a work volume the dispatcher created: never swept, whatever its labels say
             age = (datetime.now(timezone.utc) - pvc.metadata.creation_timestamp).total_seconds()
             wanted = [j for j in ((pvc.metadata.annotations or {}).get(PVC_JOBS_ANN) or "").split(",") if j]
             alive = False

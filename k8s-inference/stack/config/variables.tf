@@ -161,9 +161,9 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.10.0")
-        dispatcher = optional(string, "0.2.0")
-        jobs       = optional(string, "0.1.9")
+        api        = optional(string, "0.10.1")
+        dispatcher = optional(string, "0.2.1")
+        jobs       = optional(string, "0.1.10")
         ops        = optional(string, "0.1.11")
         ui         = optional(string, "0.5.0")
       }), {})
@@ -322,9 +322,8 @@ variable "fleet" {
       contains(["none", "infiniband"], p.interconnect)
       && (p.interconnect != "infiniband" || (p.infiniband_fabric != null && can(regex("^(8gpu-|4gpu-)", p.preset))))
       && (p.interconnect == "infiniband" || p.infiniband_fabric == null)
-      && (p.interconnect != "infiniband" || p.min_nodes >= 1)
     ])])
-    error_message = "pools: interconnect is none | infiniband; infiniband needs infiniband_fabric (the region's fabric name), a full-node preset (8gpu-*, or 4gpu-* on gpu-gb300) and min_nodes >= 1 (DRA claims for the fabric NICs cannot scale a pool from zero, docs/JOBS.md); infiniband_fabric is only valid with interconnect = infiniband."
+    error_message = "pools: interconnect is none | infiniband; infiniband needs infiniband_fabric (the region's fabric name) and a full-node preset (8gpu-*, or 4gpu-* on gpu-gb300). The autoscaler never adds InfiniBand nodes (DRA): set min_nodes to the node count of the largest multi-node run before submitting it, 0 when idle (docs/FLEET.md)."
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in merge(r.pools, r.cpu_pools) : can(regex("^[a-z0-9-]+$", pn))]) && alltrue([for pn, p in r.pools : can(regex("^[a-z0-9-]+$", p.gpu_class))])])

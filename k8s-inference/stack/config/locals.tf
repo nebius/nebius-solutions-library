@@ -76,7 +76,9 @@ locals {
       id                   = coalesce(r.id, rn)
       project              = r.project_id
       image_cache_size_gib = coalesce(r.image_cache_size_gib, local.f.images.cache.size_gib)
-      pools                = { for pn, p in r.pools : pn => merge(p, { capacity = { type = p.capacity.type, max_price = p.capacity.max_price } }) }
+      # charts/tenant multinode.yaml renders the shared scratch claim (`checkpoints: shared`) only where the region has it
+      weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib }
+      pools              = { for pn, p in r.pools : pn => merge(p, { capacity = { type = p.capacity.type, max_price = p.capacity.max_price } }) }
     } }
     prices = local.chart_prices
   }

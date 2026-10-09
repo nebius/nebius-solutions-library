@@ -132,16 +132,22 @@ locals {
           hostPath                      = { path = "/mnt/weights", type = "Directory" }, claimRef = { namespace = "models", name = "weights-shared" }
         }
       }
-      weights_pvc = {
-        apiVersion = "v1", kind = "PersistentVolumeClaim"
-        metadata   = { name = "weights-shared", namespace = "models" }
-        spec = {
-          accessModes = ["ReadWriteMany"], storageClassName = "weights-shared", volumeName = "weights-shared"
-          resources   = { requests = { storage = "${local.cluster.weights_filesystem.size_gib}Gi" } }
-        }
-      }
     } : k => v if local.cluster.weights_filesystem.enabled },
   )
+  # The claim on the static volume, kept apart from the other extras: a claim bound to a static PV cannot be
+  # resized ("only dynamically provisioned pvc can be resized"), so growing `weights_filesystem.size_gib`
+  # day-2 must change the PV's capacity only. The claim is written once (ignore_changes), sized as the
+  # volume was when the claim was created; `kubectl get pvc` then shows that first size, the mount has the real one.
+  weights_pvc = local.cluster.weights_filesystem.enabled ? {
+    weights_pvc = {
+      apiVersion = "v1", kind = "PersistentVolumeClaim"
+      metadata   = { name = "weights-shared", namespace = "models" }
+      spec = {
+        accessModes = ["ReadWriteMany"], storageClassName = "weights-shared", volumeName = "weights-shared"
+        resources   = { requests = { storage = "${local.cluster.weights_filesystem.size_gib}Gi" } }
+      }
+    }
+  } : {}
 
   # Control plane only: the console, the billing CronJob, LiteLLM UI route.
   extras_control = { for k, v in {
@@ -187,7 +193,10 @@ locals {
       apiVersion = "gateway.networking.k8s.io/v1", kind = "HTTPRoute", metadata = { name = "ui-litellm", namespace = "litellm" }
       spec = {
         parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
-        hostnames  = [try(local.hostnames.litellm, "")], rules = [{ backendRefs = [{ name = "litellm", port = 4000 }] }]
+        # a chat call through LiteLLM waits for the endpoint's cold start like the API route does (clusters/common/manifests/api);
+        # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model (s2pr2, 2026-10-09)
+        hostnames = [try(local.hostnames.litellm, "")]
+        rules     = [{ backendRefs = [{ name = "litellm", port = 4000 }], timeouts = { request = "630s", backendRequest = "630s" } }]
       }
     }
     billing = {
@@ -241,6 +250,21 @@ resource "kubectl_manifest" "extras1" {
   force_conflicts   = true
   wait              = false
   depends_on        = [helm_release.wave1, kubectl_manifest.wave1]
+}
+
+resource "kubectl_manifest" "weights_pvc" {
+  for_each          = local.weights_pvc
+  yaml_body         = yamlencode(each.value)
+  server_side_apply = true
+  force_conflicts   = true
+  wait              = false
+  depends_on        = [kubectl_manifest.extras1]
+  lifecycle { ignore_changes = [yaml_body] }
+}
+
+moved {
+  from = kubectl_manifest.extras1["weights_pvc"]
+  to   = kubectl_manifest.weights_pvc["weights_pvc"]
 }
 
 resource "kubectl_manifest" "control_extras" {

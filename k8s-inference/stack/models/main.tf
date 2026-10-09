@@ -38,6 +38,11 @@ resource "helm_release" "tenant" {
     cluster       = local.id
     fleet         = local.fleet_doc
     allowedImages = each.value.allowed_images
+    # Multi-node runs over InfiniBand need the tenant's ResourceClaimTemplates (charts/tenant multinode.yaml):
+    # on every worker whose region has an InfiniBand pool, and on the control cluster whenever any region has one
+    # (Kueue there resolves the template before MultiKueue dispatches). No tfvars input: the pools decide.
+    infiniband = anytrue([for rn, r in local.f.regions : anytrue([for p in values(r.pools) : try(p.interconnect, null) == "infiniband"])
+    if local.role.control || rn == local.region])
     clusters = { (local.id) = local.role.worker ? {
       region   = local.region
       bucket   = module.tenant_region[each.key].bucket

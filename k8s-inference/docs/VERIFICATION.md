@@ -12,6 +12,46 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Fresh test fleet with the managed database, spot pools and large models (2026-10-09, three clusters, two GPU regions)
+
+A second fleet was deployed from the pull request's copy of this directory, with the managed database and
+spot pools only, and then extended day-2 three times through `terraform.tfvars` (`./stack.sh apply cloud`,
+then `./stack.sh apply`), without touching anything by hand:
+
+| Step | Result |
+|---|---|
+| Fresh deployment: control cluster + hub region (eu-north1), Managed PostgreSQL cluster (`platform` and `litellm` databases), one H100 spot pool (1 GPU per node, price cap, 0 to 2 nodes) | every stage in one pass; the acceptance probe created its example endpoint through the API, called it and left it as the console's first model |
+| Day-2: a B300 spot region (eu-west2, the 8-GPU preset with six local NVMe disks, following the spot price, 0 to 1 node) | cloud stage 15 resources in 14 min, platform and models stages 35 min; MultiKueue worker connected, queue `prefer-b300` present |
+| `container-run` with `scratch: local-nvme`, 8 B300 GPUs | node from zero in 6 min, pod affinity `local-nvme=true`, `emptyDir` on the node's 21 TiB NVMe (6 x 3.84 TB), 6.7 GB/s write; the spot node drew on `compute.instance.preemptible.count` only |
+| Preemption: the B300 VM stopped from the cloud side at checkpoint 12 of a checkpoint loop | the ops job restarted the VM in 1 min, the run resumed from the last checkpoint, both attempts on the operation |
+| Day-2: two whole-node H100 spot pools (`h100-spot-8x`, 0 to 1; `h100-spot-8x-ib`, 0 to 2 in one InfiniBand fabric), weights filesystem 256 GiB to 1 TiB | cloud stage 7 min 30 s (the InfiniBand node boots inside the apply); Kueue flavors and quotas present before the platform stage ran |
+| 8 GPUs: a 72B chat model (145 GB of weights, vLLM tensor-parallel 8) as an endpoint through `POST /v1/models` | cold start 6 min 3 s with nothing cached (image pull 3 min, weights 56 s, engine 75 s), 2 min 19 s with image and weights cached, 133 s end to end through `:invoke` from zero pods; answers in 0.7 to 1.4 s; 8 parallel requests x 256 tokens: 567 tokens/s; scaled to zero 3 min after the last request; removed with `DELETE /v1/models/{id}` |
+| 16 GPUs: a 235B mixture-of-experts model (470 GB) as a `distributed-run` over InfiniBand (Ray + vLLM, tensor-parallel 8 x pipeline-parallel 2) | admitted in 7 s, both pods on InfiniBand nodes with `ib-8` claims; NCCL `Using network IB`, GPU Direct RDMA on all 8 HCAs per node, pipeline channels `via NET/IB` between the pods; weights loaded in 10 min from the shared filesystem into 16 workers; correct answers in 0.1 to 0.7 s; 16 parallel requests x 256 tokens: 740 tokens/s; `:cancel` ended the run and both nodes scaled down |
+
+What the test fleet found and this copy now carries: the tenant chart renders the InfiniBand claim templates
+and the shared scratch claim from the fleet (not from a tenant field); the control cluster carries the claim
+templates and Kueue's `deviceClassMappings` too (a multi-node run stayed queued without them); growing the
+weights filesystem day-2 no longer fails the platform stage; an endpoint with N GPUs is pinned to a pool
+whose preset has at least N (an 8-GPU replica on a 1-GPU preset was unschedulable for ever); Knative collects
+never-ready revisions after an hour; the LiteLLM route waits for a cold start like the API route; the
+dispatcher's orphan sweeper touches only a run's own work volume (it deleted a tenant's shared claim once);
+cancelling a running multi-node run deactivates its Kueue Workload (the suspend alone was undone); the
+uploader skips the run's checkpoint directory (32 GB of a model's weights reached the bucket once); the
+dispatcher's price feed asks for a VM following the spot price (the live spot-price map was empty); the Kueue
+flavor of an NVMe pool declares the `local-nvme` label; a preempted attempt is on the operation from its
+first second.
+
+Limits measured on the same fleet, documented and not changed: LiteLLM's health probe (`GET /v1/models`
+every 5 min) wakes a scaled-to-zero endpoint, so an idle 8-GPU model runs most of the time; the cluster
+autoscaler never adds InfiniBand nodes (its simulated node has no DRA attributes), so an InfiniBand pool's
+`min_nodes` is set to the node count of the next multi-node run and back to 0 afterwards; a run class has no
+`weights` mount, so a multi-node run downloads or copies its weights into its own checkpoint path; a run's
+image is used as given (callers name the cache's form of the reference themselves); there is no endpoint
+form for a model over several nodes yet.
+
+Cost of the day: about 42 GPU-hours of H100 spot (0.79 USD per GPU-hour) and 7 GPU-hours of B300 spot
+(0.99), roughly 42 USD.
+
 ## Fresh deployment from `terraform.tfvars` (2026-10-08, three clusters, two GPU regions)
 
 A second fleet was brought up from nothing with the Terraform solution in the owner's projects, never

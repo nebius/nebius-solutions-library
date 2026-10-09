@@ -29,6 +29,6 @@ rules:
     resources: [secrets]
     verbs: [get]
     resourceNames: [tenant-storage]
-  - apiGroups: [kueue.x-k8s.io]           # fleet placement: the Workload of a manager Job names the worker that admitted it
-    resources: [workloads]
-    verbs: [get, list]
+  - apiGroups: [kueue.x-k8s.io]           # fleet placement: the Workload of a manager Job names the worker that admitted it;
+    resources: [workloads]                # patch: a cancelled multi-node run is deactivated (spec.active) so Kueue evicts it
+    verbs: [get, list, patch]

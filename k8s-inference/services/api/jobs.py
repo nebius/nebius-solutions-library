@@ -594,6 +594,7 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
             job["metadata"].setdefault("annotations", {})[f"{LABEL}/cancelled"] = "deleted"
             return job
         if is_manager_job(job):
+            kube.deactivate_workload(ns, job["metadata"].get("uid", ""))   # Kueue evicts it; the suspend below alone is undone
             try:
                 patch_jobset(ns, name, job["_region"], {"spec": {"suspend": True}})
             except ApiException as e:

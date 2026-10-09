@@ -158,7 +158,11 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   TCP, which is useless for the models that need several nodes, so `none` is an explicit opt-in. A
   `required` run with no InfiniBand pool of a matching class in the fleet is refused with 400 at
   submission (the message says how to opt into TCP). Kueue admits the whole set at once (one pod set of N pods); the fleet path dispatches it
-  like any run (the dispatcher accepts JobSet owners).
+  like any run (the dispatcher accepts JobSet owners). The manager resolves the run's InfiniBand claim before
+  MultiKueue dispatches it, so the control cluster carries the tenant's claim templates (charts/tenant, rendered
+  there whenever any region has an InfiniBand pool) and the same Kueue `deviceClassMappings` as the workers
+  (`clusters/control/values/kueue.yaml`); without either the workload stays `QuotaReserved=False
+  DRAResourcesUnresolved` (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md).
 - **InfiniBand in the pod, without privileges.** Nebius GPU node images ship the InfiniBand
   drivers (8 x 400 Gb/s NDR ports `mlx5_0..7`, interfaces `ib0..7`, measured on an 8x H100 node in a
   fabric-3 GPU cluster), and Managed Kubernetes runs **DraNet** (Kubernetes DRA driver for the RDMA
@@ -209,10 +213,13 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
 **Scale-from-zero does not work with DRA claims.** The cluster autoscaler builds the template of an
 empty node group without ResourceSlices, so a pod that claims InfiniBand NICs never triggers a
 scale-up (`pod didn't trigger scale-up: cannot allocate all claims`, measured on the hub
-2026-10-08; GKE documents the same rule for DRA node pools). An InfiniBand pool therefore keeps
-`min_nodes >= 1` (the renderer and the solution's tfvars validation enforce it); from one node the
-autoscaler templates the ResourceSlices of the existing node. Reserved pools (the usual home of a
-16-node job) are fixed-size anyway.
+2026-10-08; GKE documents the same rule for DRA node pools). It does not grow from one node either:
+the autoscaler's simulation of a new node copies the devices without their attributes and the
+DeviceClass selector fails (`"DynamicResources" filter plugin: class ib.networking.nebius.ai: selector #0:
+CEL runtime error: no such key: ifName`, measured on s2pr2 2026-10-09 with one node in the pool). An
+InfiniBand pool therefore keeps `min_nodes` at the node count of the largest run it must take
+(`min_nodes >= 1` is what the tfvars validation enforces; the operator sets the real floor). Reserved
+pools (the usual home of a 16-node job) are fixed-size anyway.
 
 ### Limits of multi-node runs
 
@@ -224,7 +231,7 @@ measurements in docs/VERIFICATION.md):
 |---|---|
 | All pods of one run land in **one pool = one GPU cluster = one InfiniBand fabric**. No cross-pool, cross-region or mixed-platform runs. | A Nebius GPU cluster lives in one fabric of one region and one project; nodes outside it have no InfiniBand path to it (Nebius isolates GPU clusters with InfiniBand partition keys: nodes of different GPU clusters cannot talk over the fabric even on the same physical fabric). The API pins the JobSet to the pools of the model's classes that have the fabric; Kueue admits the whole pod set on one flavor. |
 | **8-GPU presets only.** | GPU clusters accept only full-node presets (`8gpu-*`); the renderer, the solution's tfvars validation and the Nebius API refuse others. One pod takes one whole node. |
-| **`min_nodes >= 1`** on an InfiniBand pool (no scale from zero). | The cluster autoscaler templates an empty node group without DRA ResourceSlices, so a pod that claims the NICs never triggers a scale-up (`cannot allocate all claims`, measured). From one node on, the autoscaler scales the pool up to `max_nodes`. Reserved pools are fixed-size anyway. |
+| **`min_nodes` = the largest run's node count** on an InfiniBand pool (the autoscaler never adds InfiniBand nodes). | The cluster autoscaler templates an empty node group without DRA ResourceSlices (`cannot allocate all claims`, measured 2026-10-08), and from one node its simulated devices carry no attributes, so the DeviceClass selector errors (`CEL runtime error: no such key: ifName`, measured 2026-10-09): no scale-up either way. Reserved pools are fixed-size anyway. |
 | **NIC claims are ExactCount: 8 per node (4 on GB300).** | Kueue's DRA accounting (0.20) supports ExactCount claims only; the tenant's `ib-8` / `ib-4` templates hand the pod every NIC of its node (the pod has the whole node anyway). |
 | **Size of one run**: `nodes <= MULTINODE_MAX_NODES` (64 by default), a node group holds at most 100 nodes, and a fabric has limited GPU capacity. | Nebius publishes no fixed maximum per GPU cluster; "each fabric has limited GPU capacity" and a GPU cluster is bounded by the quota of its project and the free capacity of its fabric. A 16-node run needs 16 nodes in ONE pool (one node group, one GPU cluster): size `max_nodes` (and the reservation) accordingly; the Kueue quota of the pool is `ib_devices_per_node x max_nodes` NICs. |
 | **Spot preemption = restart-all** from the last checkpoint; after `maxRestarts` (3) the run is FAILED. | A partial rank set cannot continue an NCCL job. Use `checkpoints: shared` so the restart (and a `:resume`) continues from the shared filesystem; `local` checkpoints die with the pod. Reserved or on-demand pools avoid the restarts. |

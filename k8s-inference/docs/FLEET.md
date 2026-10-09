@@ -46,8 +46,10 @@ fleet:
           endpoint_floor_gpus: 0  # GPUs held by warm endpoints WITHOUT runtime.queue.name (Kueue does not see those)
           interconnect: none      # or infiniband: the pool's nodes join one Nebius GPU cluster on an InfiniBand fabric
                                   # (8-GPU presets only; multi-node runs with interconnect: required land here, docs/JOBS.md;
-                                  # needs min_nodes >= 1: DRA claims cannot scale a pool from zero; the node group
-                                  # gets gpu_settings.dra = true so Managed Kubernetes runs DraNet on its nodes)
+                                  # min_nodes = the node count of the largest multi-node run: the autoscaler never
+                                  # adds InfiniBand nodes, not even from one ("DynamicResources" filter: CEL error
+                                  # on the simulated node's devices, s2pr2 2026-10-09); the node group gets
+                                  # gpu_settings.dra = true so Managed Kubernetes runs DraNet on its nodes)
           ib_devices_per_node: 8  # InfiniBand NICs a pod claims per node (default 8; 4 on gpu-gb300): Kueue quota
                                   # `nebius.ai/infiniband` = this x max_nodes (DRA, docs/JOBS.md "Multi-node runs")
           infiniband_fabric: fabric-7   # with interconnect: infiniband; defaults to the region's single fabric for the

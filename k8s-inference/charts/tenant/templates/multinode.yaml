@@ -8,7 +8,9 @@ Multi-node runs (docs/JOBS.md "Multi-node runs"), worker clusters only:
   claim in the tenant namespace (pods see a PVC, never a hostPath, so PSA baseline holds).
 */ -}}
 {{- $c := include "tenant.cluster" . | fromYaml -}}
-{{- if not $c.manager }}
+{{- /* The claim templates exist on the manager too: Kueue there resolves a multi-node run's claim template
+       (DRA accounting) before MultiKueue hands the JobSet to a worker; without them the workload stays
+       "DRAResourcesUnresolved" (s2pr2, 2026-10-09). The scratch volume below is worker-only. */ -}}
 {{- if .Values.infiniband }}
 {{- range $n := .Values.infinibandClaimCounts }}
 ---
@@ -30,6 +32,7 @@ spec:
             count: {{ $n }}
 {{- end }}
 {{- end }}
+{{- if not $c.manager }}
 {{- $region := index (default dict (default dict .Values.fleet).regions) $c.region }}
 {{- $fs := default dict (default dict $region).weights_filesystem }}
 {{- if $fs.enabled }}

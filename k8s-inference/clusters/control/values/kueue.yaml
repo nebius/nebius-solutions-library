@@ -23,6 +23,13 @@ managerConfig:
     managedJobsNamespaceSelector:
       matchLabels:
         serverless2.nebius/kueue: managed
+    # DRA, same mapping as the workers (clusters/common/values/kueue.yaml): the manager resolves a multi-node run's
+    # InfiniBand claim template (charged as nebius.ai/infiniband x count) before MultiKueue dispatches it; without the
+    # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped" (s2pr2, 2026-10-09)
+    resources:
+      deviceClassMappings:
+        - name: nebius.ai/infiniband
+          deviceClassNames: [ib.networking.nebius.ai]
     integrations:
       labelKeysToCopy:            # region pin and profile for the dispatcher (docs/SCHEDULING.md)
         - serverless2.nebius/region

@@ -138,6 +138,20 @@ def test_work_volume_only_where_admitted_and_swept_elsewhere():
     assert d.pvc_of(TEMPLATE) == "op-1-work" and d.pvc_of({"spec": {}}) is None
 
 
+def test_only_the_work_volume_is_the_dispatchers():
+    """A multi-node run with `checkpoints: shared` mounts the tenant's `scratch-shared` claim next to an emptyDir
+    `work`: the dispatcher must neither adopt nor sweep it (it deleted the tenant's claim as an "orphan" on s2pr2,
+    2026-10-09). Only the pod's `work` volume names the dispatcher's claim."""
+    shared = {"spec": {"volumes": [{"name": "work", "emptyDir": {"sizeLimit": "500Gi"}},
+                                   {"name": "shm", "emptyDir": {"medium": "Memory"}},
+                                   {"name": "checkpoints", "persistentVolumeClaim": {"claimName": "scratch-shared"}}]}}
+    assert d.pvc_of(shared) is None
+    assert d.pvc_of(TEMPLATE) == "op-1-work"
+    wl = {"metadata": {"namespace": "t", "ownerReferences": [{"kind": "JobSet", "name": "op-2"}]},
+          "spec": {"podSets": [{"template": shared}]}, "status": {"clusterName": "hub"}}
+    assert d.admitted_volume(wl) is None
+
+
 def test_nominate_uses_server_side_apply_as_kueue_admission():
     from unittest.mock import MagicMock
     custom = MagicMock()
