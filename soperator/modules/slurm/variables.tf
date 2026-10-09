@@ -931,8 +931,8 @@ variable "active_checks_scope" {
   description = "Scope of active health-checks. Defines what checks should run after the cluster is provisioned."
   default     = "prod_quick"
   validation {
-    condition     = contains(["prod_quick", "prod_acceptance", "essential", "skip_all"], var.active_checks_scope)
-    error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all."
+    condition     = contains(["prod_quick", "prod_acceptance", "essential", "skip_all", "testing"], var.active_checks_scope)
+    error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all, testing."
   }
 }
 # endregion ActiveChecks
