@@ -9,17 +9,22 @@ locals {
 
   worker_nccl_network_vars_file_name = "90-nccl-network-vars.sh"
 
+  # The list of unique platforms used across Terraform NodeSets.
+  worker_nccl_network_platforms = distinct([
+    for nodeset in var.worker_nodesets : nodeset.platform
+    if contains(keys(local.worker_nccl_network_devices_by_platform), nodeset.platform)
+  ])
+
   worker_nccl_network_vars = {
-    for nodeset in var.worker_nodesets : nodeset.name => {
-      config_map_name = lower(replace("${nodeset.name}-nccl-network-vars", "/[^0-9A-Za-z.-]/", "-"))
+    for platform in local.worker_nccl_network_platforms : platform => {
+      config_map_name = lower(replace("${platform}-nccl-network-vars", "/[^0-9A-Za-z.-]/", "-"))
       file_name       = local.worker_nccl_network_vars_file_name
       content = join("\n", [
         "# Managed by Terraform.",
-        "export UCX_NET_DEVICES=${local.worker_nccl_network_devices_by_platform[nodeset.platform]}",
-        "export NCCL_IB_HCA=${local.worker_nccl_network_devices_by_platform[nodeset.platform]}",
+        "export UCX_NET_DEVICES=${local.worker_nccl_network_devices_by_platform[platform]}",
+        "export NCCL_IB_HCA=${local.worker_nccl_network_devices_by_platform[platform]}",
         "",
       ])
     }
-    if contains(keys(local.worker_nccl_network_devices_by_platform), nodeset.platform)
   }
 }
