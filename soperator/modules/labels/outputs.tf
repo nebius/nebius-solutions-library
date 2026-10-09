@@ -88,6 +88,11 @@ output "key_nebius_gpu" {
   value       = local.label_key.nebius_gpu
 }
 
+output "key_nebius_nvlink_instance_group" {
+  description = "Nebius NVLink instance group label key."
+  value       = local.label_key.nebius_nvlink_instance_group
+}
+
 output "key_nvidia_gpu" {
   description = "Nvidia GPU label key."
   value       = local.label_key.nvidia_gpu

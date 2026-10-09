@@ -29,7 +29,7 @@ This Terraform solution deploys a Data Science Virtual Machine (DSVM) is a vi
 
 1. Install [Nebius CLI](https://docs.nebius.dev/en/cli/#installation):
    ```bash
-   curl -sSL https://storage.ai.nebius.cloud/nebius/install.sh | bash
+   curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
    ```
 
 2. Reload your shell session:

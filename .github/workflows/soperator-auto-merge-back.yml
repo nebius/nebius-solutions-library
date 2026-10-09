@@ -1,4 +1,4 @@
-name: "[Soperator] Auto merge back to main"
+name: "[Soperator] Auto merge back"
 
 on:
   push:

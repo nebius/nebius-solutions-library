@@ -9,6 +9,9 @@ resource "terraform_data" "o11y_static_key_secret" {
     o11y_profile                     = var.o11y_profile
     iam_project_id                   = var.iam_project_id
     company_name                     = var.company_name
+    # If region changes, recreate the secret and rerun the script: project region
+    # is set on the create call and verified on subsequent applies.
+    region = var.region
   }
 
   provisioner "local-exec" {
@@ -24,15 +27,17 @@ unset NEBIUS_IAM_TOKEN
 # Ensuring that profile exists
 if ! nebius profile list | grep -Fxq ${self.triggers_replace.o11y_profile}; then
   CURRENT_PROFILE=$(nebius profile current)
-  nebius profile create --endpoint api.eu.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
+  # The o11y IAM tenant is managed through the EU control plane; log ingestion itself is region-specific.
+  nebius profile create --endpoint api.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
   nebius profile activate $CURRENT_PROFILE
 fi
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
+O11Y_PROJECT_NAME="${self.triggers_replace.o11y_resources_name}-${self.triggers_replace.region}"
 
 # Creating new project for cluster logs
-echo "Creating new project for cluster logs..."
-nebius iam project create --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --labels original-project-id=${self.triggers_replace.iam_project_id},company-name=${self.triggers_replace.company_name} || true
-output=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --format json)
+echo "Creating new project for cluster logs in ${self.triggers_replace.region}..."
+nebius iam project create --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name "$O11Y_PROJECT_NAME" --region ${self.triggers_replace.region} --labels original-project-id=${self.triggers_replace.iam_project_id},company-name=${self.triggers_replace.company_name} || true
+output=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name "$O11Y_PROJECT_NAME" --format json)
 status=$?
 if [ $status -ne 0 ]; then
     echo "Failed to get project"
@@ -41,6 +46,16 @@ fi
 
 PROJECT_ID=$(echo "$output" | jq -r .metadata.id)
 echo "Project for logs $PROJECT_ID"
+
+PROJECT_REGION=$(echo "$output" | jq -r '.spec.region // ""')
+if [ "$PROJECT_REGION" != "${self.triggers_replace.region}" ]; then
+  if [ "${var.allow_o11y_region_migration}" = "true" ]; then
+    echo "Updating project region from '$PROJECT_REGION' to '${self.triggers_replace.region}'..."
+    nebius iam project update --id "$PROJECT_ID" --region ${self.triggers_replace.region}
+  else
+    echo "Existing o11y logs project $PROJECT_ID is in region '$PROJECT_REGION', expected '${self.triggers_replace.region}'. Set allow_o11y_region_migration=true to update it explicitly."
+  fi
+fi
 
 # Creating group, service account, group-membership and access-permit.
 echo "Creating service account..."
@@ -105,13 +120,13 @@ TOKEN=$(echo $output | jq -r .token)
 export NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN_BKP
 
 echo "Applying namespace..."
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ${self.triggers_replace.o11y_secret_logs_namespace}
 EOF
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -119,14 +134,12 @@ metadata:
 EOF
 
 echo "Creating secret..."
-if kubectl --context ${self.triggers_replace.k8s_cluster_context} -n logs-system get secret ${self.triggers_replace.o11y_secret_name} >/dev/null 2>&1; then
-  echo "Secret exists, deleting..."
-  kubectl --context ${self.triggers_replace.k8s_cluster_context} -n logs-system delete secret ${self.triggers_replace.o11y_secret_name}
-fi
-
-kubectl --context ${self.triggers_replace.k8s_cluster_context} create secret generic ${self.triggers_replace.o11y_secret_name} \
+kubectl --context "${self.triggers_replace.k8s_cluster_context}" create secret generic "${self.triggers_replace.o11y_secret_name}" \
   -n ${self.triggers_replace.o11y_secret_logs_namespace} \
-  --from-literal=accessToken="$TOKEN"
+  --from-literal=accessToken="$TOKEN" \
+  --dry-run=client \
+  -o yaml \
+  | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --server-side --context "${self.triggers_replace.k8s_cluster_context}"
 EOT
   }
 
@@ -139,8 +152,9 @@ set -e
 
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
+O11Y_PROJECT_NAME="${self.triggers_replace.o11y_resources_name}-${self.triggers_replace.region}"
 
-output=$(nebius iam project get-by-name --name "${self.triggers_replace.o11y_resources_name}" --parent-id "${self.triggers_replace.o11y_iam_tenant_id}" --format json)
+output=$(nebius iam project get-by-name --name "$O11Y_PROJECT_NAME" --parent-id "${self.triggers_replace.o11y_iam_tenant_id}" --format json)
 status=$?
 if [ $status -ne 0 ]; then
     echo "Failed to get project"
@@ -170,12 +184,14 @@ resource "terraform_data" "opentelemetry_collector_cm" {
   ]
 
   triggers_replace = {
-    k8s_cluster_context = var.k8s_cluster_context
-    o11y_resources_name = local.o11y_resources_name
-    o11y_iam_tenant_id  = var.o11y_iam_tenant_id
-    o11y_profile        = var.o11y_profile
-    configmap_name      = var.opentelemetry_collector_cm
-    iam_project_id      = var.iam_project_id
+    k8s_cluster_context  = var.k8s_cluster_context
+    o11y_resources_name  = local.o11y_resources_name
+    o11y_iam_tenant_id   = var.o11y_iam_tenant_id
+    o11y_profile         = var.o11y_profile
+    configmap_name       = var.opentelemetry_collector_cm
+    iam_project_id       = var.iam_project_id
+    region               = var.region
+    logs_public_endpoint = local.logs_public_endpoint
   }
 
   provisioner "local-exec" {
@@ -188,14 +204,15 @@ set -e
 NEBIUS_IAM_TOKEN_BKP=$NEBIUS_IAM_TOKEN
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
+O11Y_PROJECT_NAME="${self.triggers_replace.o11y_resources_name}-${self.triggers_replace.region}"
 
-PROJECT_ID=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name ${self.triggers_replace.o11y_resources_name} --format json | jq -r .metadata.id)
+PROJECT_ID=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name "$O11Y_PROJECT_NAME" --format json | jq -r .metadata.id)
 O11YWORKSPACE_ID=$(echo "$PROJECT_ID" | sed 's#project-#o11yworkspace-#')
 
 export NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN_BKP
 
 echo "Applying opentelemetry controller configmap with $PROJECT_ID..."
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -206,15 +223,9 @@ data:
     observability:
       logsProjectId: $PROJECT_ID
       metricsProjectId: ${self.triggers_replace.iam_project_id}
-    soperatorActiveChecks:
-      overrideValues:
-        checks:
-          extensive-check:
-            slurmJobSpec:
-              jobContainer:
-                extraEnv:
-                  - name: "SLURM_EXTRA_COMMENT_JSON"
-                    value: "{\"o11y_workspace\": \"$O11YWORKSPACE_ID\"}"
+      region: ${self.triggers_replace.region}
+      opentelemetry:
+        publicEndpoint: ${self.triggers_replace.logs_public_endpoint}
 EOF
 EOT
   }

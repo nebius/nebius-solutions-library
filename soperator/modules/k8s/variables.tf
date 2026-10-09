@@ -23,15 +23,14 @@ variable "k8s_version" {
   default     = null
 }
 
-variable "name" {
-  description = "Name of the k8s cluster."
+variable "node_group_version" {
+  description = "Nebius version of node group. Contains bundle of different component versions, e.g. driver, linux_kernel, doca, etc."
   type        = string
 }
 
-variable "etcd_cluster_size" {
-  description = "Size of the etcd cluster."
-  type        = number
-  default     = 3
+variable "name" {
+  description = "Name of the k8s cluster."
+  type        = string
 }
 
 variable "company_name" {
@@ -111,7 +110,7 @@ variable "node_group_workers" {
     size                    = number
     max_unavailable_percent = number
     max_surge_percent       = optional(number)
-    drain_timeout           = optional(string)
+    drain_timeout           = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string
@@ -122,7 +121,8 @@ variable "node_group_workers" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible   = optional(object({}))
     nodeset_index = number
@@ -133,11 +133,13 @@ variable "node_group_workers" {
 variable "node_group_workers_v2" {
   description = "Worker node groups specification for nodesets (v2)."
   type = list(object({
-    name        = string
-    size        = number
-    min_size    = number
-    max_size    = number
-    autoscaling = bool
+    name            = string
+    node_group_name = optional(string)
+    size            = number
+    min_size        = number
+    max_size        = number
+    autoscaling     = bool
+    drain_timeout   = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string
@@ -148,23 +150,45 @@ variable "node_group_workers_v2" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible = optional(object({}))
     reservation_policy = optional(object({
       policy          = optional(string)
       reservation_ids = optional(list(string))
     }))
+    nvl_instance_group_id = optional(string)
+    # Additional labels applied to the mk8s worker node template.
+    extra_labels           = optional(map(string), {})
+    max_pods               = optional(number, 32)
+    placement_policy_nodes = optional(list(string))
+    local_nvme = optional(object({
+      enabled                   = optional(bool, false)
+      device_count              = optional(number)
+      device_capacity_gigabytes = optional(number)
+      mount_path                = optional(string, "/mnt/local-nvme")
+      size_limit_gibibytes      = optional(number)
+    }), {})
     nodeset_index = number
     subset_index  = number
   }))
   default = []
+
+  validation {
+    condition = alltrue([
+      for worker in var.node_group_workers_v2 :
+      worker.max_pods > 0
+    ])
+    error_message = "Worker node group max_pods must be greater than 0."
+  }
 }
 
 variable "node_group_login" {
-  description = "Controller node group specification."
+  description = "Login node group specification."
   type = object({
-    size = number
+    size               = number
+    node_group_enabled = optional(bool, true)
     resource = object({
       platform = string
       preset   = string
@@ -207,10 +231,10 @@ variable "node_group_accounting" {
 
 variable "filestores" {
   type = object({
-    controller_spool = object({
+    controller_spool = optional(object({
       id        = string
       mount_tag = string
-    })
+    }))
     jail = object({
       id        = string
       mount_tag = string
@@ -237,8 +261,14 @@ variable "node_ssh_access_users" {
   default = []
 }
 
-variable "nvidia_admin_conf_lines" {
-  description = "Lines to write to /etc/modprobe.d/nvidia_admin.conf via cloud-init (GPU workers only)."
+variable "node_ssh_access_public_ip" {
+  description = "Assign public IP addresses to k8s nodes when node_ssh_access_users is configured."
+  type        = bool
+  default     = false
+}
+
+variable "nvidia_config_lines" {
+  description = "Lines to write to /etc/modprobe.d/nvidia_config.conf via cloud-init (GPU workers only)."
   type        = list(string)
   default     = []
 }
@@ -249,8 +279,8 @@ variable "use_preinstalled_gpu_drivers" {
   default     = false
 }
 
-variable "slurm_nodesets_enabled" {
-  description = "Enable nodesets feature for Slurm cluster. When enabled, creates separate nodesets for each worker configuration."
+variable "use_default_apparmor_profile" {
+  description = "Load the soperator-default AppArmor profile on every node at each boot. Requires AppArmor and apparmor_parser in the node image."
   type        = bool
-  default     = false
+  default     = true
 }

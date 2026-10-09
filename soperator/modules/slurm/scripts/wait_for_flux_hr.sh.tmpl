@@ -26,17 +26,21 @@ get_elapsed_time() {
 get_state_summary() {
   local ready_reason=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Ready") | .reason' 2>/dev/null)
   local released_reason=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Released") | .reason' 2>/dev/null)
+  local reconciling_status=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Reconciling") | .status' 2>/dev/null)
+  local reconciling_reason=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Reconciling") | .reason' 2>/dev/null)
 
   if [ -z "$ready_reason" ]; then
     ready_reason="Unknown"
   fi
 
-  # Only show Released status if it has a meaningful value
+  local summary="Ready=$ready_reason"
   if [ -n "$released_reason" ]; then
-    echo "Ready=$ready_reason, Released=$released_reason"
-  else
-    echo "Ready=$ready_reason"
+    summary="$summary, Released=$released_reason"
   fi
+  if [ "$reconciling_status" = "True" ] && [ -n "$reconciling_reason" ]; then
+    summary="$summary, Reconciling=$reconciling_reason"
+  fi
+  echo "$summary"
 }
 
 # Print detailed HelmRelease status
@@ -72,6 +76,30 @@ print_dependency_info() {
   fi
 }
 
+# Fetch HelmRelease JSON with retries. Sets HR_JSON (empty on failure).
+fetch_hr_json() {
+  local retries=3
+  local wait=5
+  HR_JSON=""
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  for i in $(seq 1 "$retries"); do
+    if HR_JSON=$(kubectl get helmreleases.helm.toolkit.fluxcd.io "$HELMRELEASE_NAME" \
+        -n "$NAMESPACE" --context "$CONTEXT" -o json 2>"$stderr_file"); then
+      rm -f "$stderr_file"
+      return 0
+    fi
+    if [ "$i" -lt "$retries" ]; then
+      sleep "$wait"
+    fi
+  done
+
+  echo "WARNING: kubectl failed after $retries attempts: $(cat "$stderr_file")"
+  rm -f "$stderr_file"
+  HR_JSON=""
+}
+
 # Check for failure states and exit early if detected (uses cached HR_JSON)
 # Returns 0 if failure detected (should exit), 1 otherwise
 check_hr_failure() {
@@ -83,10 +111,18 @@ check_hr_failure() {
   local released_message=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Released") | .message' 2>/dev/null)
   local ready_reason=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Ready") | .reason' 2>/dev/null)
   local ready_message=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Ready") | .message' 2>/dev/null)
+  local reconciling_status=$(echo "$HR_JSON" | jq -r '.status.conditions[]? | select(.type=="Reconciling") | .status' 2>/dev/null)
 
   # Check for Released condition failure reasons
   case "$released_reason" in
     InstallFailed|UpgradeFailed|GetLastReleaseFailed|ReconcileStrategyFailed)
+      # Install/upgrade failures are stale while Flux is still reconciling;
+      # retry exhaustion removes the Reconciling condition and falls through.
+      case "$released_reason" in
+        InstallFailed|UpgradeFailed)
+          [ "$reconciling_status" = "True" ] && return 1
+          ;;
+      esac
       echo ""
       echo "ERROR: HelmRelease $HELMRELEASE_NAME has failed!"
       echo "Reason: $released_reason"
@@ -167,8 +203,7 @@ echo "Waiting for HelmRelease $HELMRELEASE_NAME to be successfully installed..."
 ITERATION=0
 while true; do
   # Fetch HelmRelease JSON once per iteration (used by all helper functions)
-  HR_JSON=$(kubectl get helmreleases.helm.toolkit.fluxcd.io "$HELMRELEASE_NAME" -n "$NAMESPACE" --context "$CONTEXT" \
-    -o json 2>/dev/null) || true
+  fetch_hr_json
 
   # Check for failure states first (early exit)
   if check_hr_failure; then

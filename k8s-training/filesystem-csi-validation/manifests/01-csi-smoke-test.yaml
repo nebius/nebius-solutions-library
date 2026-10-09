@@ -1,0 +1,65 @@
+# -----------------------------------------------------------------------------
+# File: manifests/01-csi-smoke-test.yaml
+# Purpose:
+#   Create a minimal PVC and pod pair for validating that the Nebius
+#   csi-mounted-fs-path StorageClass can mount the shared filesystem into a pod.
+#
+# Why We Run This:
+#   This manifest provides the fastest end-to-end confirmation that the CSI
+#   driver is working, that the cluster default StorageClass is being applied
+#   to new PVCs, and that a pod can perform simple read/write operations on the
+#   shared storage.
+#
+# Reference Docs:
+#   https://docs.nebius.com/kubernetes/storage/filesystem-over-csi
+#
+# Applied By:
+#   ./02-run-csi-smoke-test.sh
+#
+# Created By: Aaron Fagan
+# Created On: 2026-03-17
+# Version: 0.1.0
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: filesystem-csi-smoke-pvc
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    app.kubernetes.io/component: smoke-test
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: filesystem-csi-smoke-pod
+  labels:
+    app.kubernetes.io/part-of: filesystem-csi-validation
+    app.kubernetes.io/component: smoke-test
+spec:
+  containers:
+    - name: filesystem-csi-smoke-pod
+      image: busybox
+      command: ["sleep", "1000000"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+      volumeMounts:
+        - mountPath: /data
+          name: my-csi-volume
+  volumes:
+    - name: my-csi-volume
+      persistentVolumeClaim:
+        claimName: filesystem-csi-smoke-pvc

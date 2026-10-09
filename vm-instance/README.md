@@ -16,13 +16,15 @@ This Terraform configuration script provisions cloud instances with specific har
 - Add environment variables for Terraform authentication in Nebuis Cloud.
 
 
-Run `source ./env.sh` if you run bash, or `source ./env.zsh` if you prefer zsh.
+Run `source ./.envrc.sh` if you use bash, or `source ./.envrc.zsh` if you use zsh.
 
-These scripts will set all necessary environment variables, as well as create a bucket where to store the terraform state file. 
-It will also attempt to install all necessary dependencies and let you select the tenant and project where you want to deploy your solution. 
+These scripts export the Terraform variables used by this module, create the Object Storage bucket used for Terraform state, and let you select the tenant and project where you want to deploy.
+
+If you want to configure S3 credentials for bucket mounting outside of Terraform, use `source ./s3_keys.sh`.
+
 ## Usage
 
-run terraform:To use this module in your Terraform environment, you must first create a Terraform configuration and change the placeholder values in the `terraform.tfvars`.
+Update the placeholder values in `terraform.tfvars`, then run:
 
 
 ```
@@ -36,14 +38,13 @@ terraform apply
 
 ### Example 1: Basic Configuration with One User
 
-The module is configured to enable public IP only for the first instance created by it.
-*Overrider this behaviour by setting `create_public_ip_for_all_instances`to `true` in `terraform.tfvars`
-*Consider setting the value of public_ip to False if you do not require public IP addresses. 
+`public_ip = true` enables a public IP on each instance created by this module.
+*Consider setting `public_ip = false` if you do not require public IP addresses.
 *Consider using [Bastion](https://github.com/nebius/nebius-solution-library/tree/main/bastion) solution if you need to manage a set of virtual machines in the same network.
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -64,7 +65,7 @@ instance_count = 1
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -72,7 +73,7 @@ users = [
     ssh_key_path = "~/.ssh/id_rsa.pub"
   }
 ]
-shared_filesystem_mount = /mnt/share  # optional
+shared_filesystem_mount = "/mnt/share"  # optional
 shared_filesystem_id = "computefilesystem-xxxxx"
 public_ip = true
 instance_count = 2
@@ -94,7 +95,7 @@ If you prefer, you can also mount a bucket into your file system.
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -114,8 +115,9 @@ This will mount the bucket into the given directory, or into `/mnt/s3` if no dir
 
 
 ```
-preset = "8gpu-128vcpu-1600gb"
-platform = "gpu-h100-sxm"
+preset = "8gpu-192vcpu-2768gb"
+platform = "gpu-b300-sxm"
+boot_image_family = "ubuntu24.04-cuda13.0"
 
 users = [
   {
@@ -127,7 +129,7 @@ users = [
 public_ip = true
 instance_count = 2
 
-fabric = "fabric-6"
+fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2.
 
 ```
 This will create a GPU cluster and add all vms inside there. This gives them the possibility to connect over Infiniband. 

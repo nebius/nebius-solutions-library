@@ -1,0 +1,101 @@
+# =============================================================================
+# OSMO on Nebius - Reserved GPU Configuration
+# =============================================================================
+# This configuration uses reserved GPU capacity (Capacity Block Groups).
+# Reserved instances guarantee availability and are billed at a fixed rate.
+#
+# Prerequisites:
+#   - A Capacity Block Group must be created in the Nebius Console
+#   - Set the capacity block group ID below
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Required Settings (set via environment or uncomment)
+# -----------------------------------------------------------------------------
+# Run: source ../000-prerequisites/nebius-env-init.sh
+# This will set TF_VAR_tenant_id and TF_VAR_parent_id automatically
+#
+# tenant_id = "your-tenant-id"
+# parent_id = "your-project-id"
+
+# -----------------------------------------------------------------------------
+# Environment Settings
+# -----------------------------------------------------------------------------
+region       = "eu-west2"
+environment  = "pro"
+project_name = "osmo"
+
+# -----------------------------------------------------------------------------
+# Kubernetes Cluster
+# -----------------------------------------------------------------------------
+k8s_version            = null
+etcd_cluster_size      = 3
+enable_public_endpoint = false  # Private API - access via WireGuard
+
+# -----------------------------------------------------------------------------
+# CPU Nodes
+# -----------------------------------------------------------------------------
+cpu_nodes_count            = 3
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "16vcpu-64gb"
+cpu_disk_size_gib          = 128
+cpu_nodes_assign_public_ip = false
+
+# -----------------------------------------------------------------------------
+# GPU Nodes (RESERVED)
+# -----------------------------------------------------------------------------
+gpu_nodes_count_per_group  = 2               # Must match your reservation size
+gpu_node_groups            = 1
+gpu_nodes_platform         = null            # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null            # Use the selected region's default from locals.tf
+gpu_disk_size_gib          = 1023
+gpu_nodes_assign_public_ip = false
+enable_gpu_cluster         = true            # InfiniBand for multi-node training
+enable_gpu_taints          = true
+gpu_nodes_preemptible      = false           # Reserved nodes are not preemptible
+gpu_nodes_driverfull_image = true
+infiniband_fabric          = null  # Use region default
+
+# RESERVATION: Set your Capacity Block Group ID here
+gpu_reservation_ids = ["capacityblockgroup-e00xxxxx"]
+
+# GPU reservation options by region:
+#   eu-north1:   gpu-h100-sxm (8gpu-128vcpu-1600gb), gpu-h200-sxm (8gpu-128vcpu-1600gb)
+#   eu-west2:    gpu-b300-sxm (8gpu-192vcpu-2768gb)
+#   eu-north2:   gpu-h200-sxm (8gpu-128vcpu-1600gb)
+#   eu-west1:    gpu-h200-sxm (8gpu-128vcpu-1600gb)
+#   me-west1:    gpu-b200-sxm-a (8gpu-160vcpu-1792gb)
+#   uk-south1:   gpu-b300-sxm (8gpu-192vcpu-2768gb)
+#   us-central1: gpu-h200-sxm (8gpu-128vcpu-1600gb), gpu-b200-sxm (8gpu-160vcpu-1792gb)
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+enable_filestore   = true
+filestore_size_gib = 1024
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Nebius Managed Service)
+# -----------------------------------------------------------------------------
+postgresql_preset        = "4vcpu-16gb"
+postgresql_disk_size_gib = 50
+postgresql_host_count    = 1
+
+# -----------------------------------------------------------------------------
+# WireGuard VPN (recommended for private clusters)
+# -----------------------------------------------------------------------------
+enable_wireguard        = true
+wireguard_platform      = "cpu-d3"
+wireguard_preset        = "2vcpu-8gb"
+wireguard_disk_size_gib = 32
+wireguard_port          = 51820
+wireguard_network       = "10.8.0.0/24"
+wireguard_ui_port       = 5000
+
+# =============================================================================
+# After deployment:
+# 1. Set up WireGuard client: cd ../000-prerequisites && ./wireguard-client-setup.sh
+# 2. Connect to VPN
+# 3. Get kubectl credentials: nebius mk8s cluster get-credentials --id <cluster-id>
+# 4. Access cluster via private endpoint
+# =============================================================================

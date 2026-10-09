@@ -1,0 +1,57 @@
+# Multi-GPU NCCL Bandwidth Test
+# Requests 8 GPUs on a single H100 node and runs nccl-tests all_reduce_perf
+# to validate GPU-to-GPU (NVLink/NVSwitch) communication.
+#
+# Uses CUDA 13.0 devel image (~4GB) to compile nccl-tests on the fly.
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_multi_gpu.yaml
+
+workflow:
+  name: test-multi-gpu
+  resources:
+    gpu-resource:
+      platform: gpu
+      gpu: 8
+      cpu: 16
+      memory: 64Gi
+  tasks:
+  - name: nccl-test
+    image: nvidia/cuda:13.0.2-devel-ubuntu24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "=== Multi-GPU NCCL Test (8x H100) ==="
+      echo ""
+
+      echo "--- GPU topology ---"
+      nvidia-smi topo -m
+      echo ""
+
+      echo "--- GPU summary ---"
+      nvidia-smi --query-gpu=index,name,memory.total --format=csv
+      GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+      echo ""
+      echo "GPUs visible: ${GPU_COUNT}"
+      if [ "$GPU_COUNT" -lt 8 ]; then
+        echo "FAIL: expected 8 GPUs, got ${GPU_COUNT}"
+        exit 1
+      fi
+      echo "PASS: all 8 GPUs visible"
+      echo ""
+
+      echo "--- Building nccl-tests ---"
+      apt-get update -qq && apt-get install -y -qq git build-essential &>/dev/null
+      cd /tmp
+      git clone --depth 1 https://github.com/NVIDIA/nccl-tests.git &>/dev/null
+      cd nccl-tests
+      make MPI=0 -j$(nproc) &>/dev/null
+      echo "Built successfully"
+      echo ""
+
+      echo "--- NCCL all_reduce bandwidth test ---"
+      ./build/all_reduce_perf -b 8M -e 1G -f 2 -g 8
+      echo ""
+
+      echo "=== Multi-GPU NCCL Test Complete ==="
+    resource: gpu-resource

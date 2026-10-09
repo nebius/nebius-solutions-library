@@ -1,0 +1,21 @@
+metadata:
+  # Project NID for the cluster that will use this client (per-project; each customer/project registers its own).
+  # Replace with the desired cluster's project NID.
+  parent_id: "project-e00xjs3hpr004svyrv35z8"
+  # Unique, descriptive name for this client within the project
+  name: "keycloak-osmo"
+spec:
+  client_authentication_methods:
+    - client_secret_basic
+  redirect_uris:
+    # MUST match AUTH_DOMAIN. After 04-deploy, use the exact URI from the "Nebius SSO – IAM redirect URI" output.
+    # Replace the dashed IP below with your LoadBalancer IP (e.g. 89.169.123.177 -> 89-169-123-177).
+    - "https://auth-osmo.89-169-122-246.nip.io/realms/osmo/broker/nebius-sso/endpoint"
+  pkce_enabled: true
+  # Minimal scope: discovery shows only "openid" is supported
+  scopes:
+    - openid
+  session_management_enabled: false
+  authorization_grant_types:
+    - authorization_code
+

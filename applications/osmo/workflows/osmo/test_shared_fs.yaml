@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared Filesystem Test Workflow
+# Validates that the Nebius Filestore mounted at /mnt/data is accessible from OSMO workflows.
+# Requires: enable_filestore=true in terraform.tfvars and allowed_mounts configured on the gpu platform.
+#
+# Submit with:
+#   osmo workflow submit workflows/osmo/test_shared_fs.yaml
+
+workflow:
+  name: test-shared-fs
+  resources:
+    gpu-resource:
+      platform: gpu
+      gpu: 1
+      cpu: 2
+      memory: 2Gi
+      storage: 1Gi
+  tasks:
+  - name: test-filestore
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args:
+    - |
+      echo "=== Shared Filesystem Test ==="
+      echo ""
+      echo "=== Mount info ==="
+      df -h /mnt/data
+      echo ""
+      echo "=== Writing test file ==="
+      echo "Hello from OSMO workflow at $(date -Iseconds)" > /mnt/data/osmo-test.txt
+      cat /mnt/data/osmo-test.txt
+      echo ""
+      echo "=== Directory listing ==="
+      ls -la /mnt/data/
+      echo ""
+      echo "=== Shared Filesystem Test Complete ==="
+    resource: gpu-resource
+    volumeMounts:
+    - /mnt/data

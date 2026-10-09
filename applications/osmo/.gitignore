@@ -1,0 +1,51 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+!*.tfvars.*.example
+.terraform/
+.terraform.lock.hcl
+*.out
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# SSH keys
+*.pem
+id_rsa*
+*.key
+
+# Secrets
+*.secret
+.env
+.env.*
+!.env.example
+osmo-deploy.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Kubernetes
+kubeconfig
+kubeconfig.*
+!kubeconfig.example
+
+# WireGuard
+*.conf
+!*.conf.example
+wg-client-*.conf

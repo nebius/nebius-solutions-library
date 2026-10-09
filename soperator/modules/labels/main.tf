@@ -30,6 +30,8 @@ locals {
     nebius_gpu = "${local.const.domain.nebius}/${local.const.name.workloads.gpu}"
     nvidia_gpu = "${local.const.domain.nvidia}/${local.const.name.workloads.gpu}"
 
+    nebius_nvlink_instance_group = "${local.const.domain.nebius}/nvlink-instance-group"
+
     slurm_nodeset      = "${local.const.domain.slurm}/${local.const.name.nodeset}"
     slurm_nodeset_name = "${local.const.domain.slurm}/${local.const.name.nodeset}-name"
     slurm_workload     = "${local.const.domain.slurm}/${local.const.name.workload}"

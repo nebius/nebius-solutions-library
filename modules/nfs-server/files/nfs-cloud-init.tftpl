@@ -10,7 +10,7 @@ users:
     groups: sudo
     shell: /bin/bash
     sudo: 'ALL=(ALL) NOPASSWD:ALL'
-    ssh-authorized-keys:
+    ssh_authorized_keys:
 %{ for key in ssh_public_keys ~}
       - ${key}
 %{ endfor ~}

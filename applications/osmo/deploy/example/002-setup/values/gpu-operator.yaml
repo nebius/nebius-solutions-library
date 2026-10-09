@@ -1,0 +1,57 @@
+# GPU Operator Helm Values
+# https://docs.nvidia.com/datacenter/cloud-native/gpu-operator
+# https://docs.nebius.com/kubernetes/gpu/set-up
+
+operator:
+  defaultRuntime: containerd
+
+# Enable driver installation by GPU Operator
+# Even though Nebius nodes may have pre-installed drivers, the GPU Operator
+# needs to manage the driver lifecycle for proper integration with device-plugin,
+# toolkit, and other components.
+driver:
+  enabled: true
+  # Let GPU Operator choose the appropriate driver version
+  # version: auto-detected by operator
+  upgradePolicy:
+    autoUpgrade: false  # Don't auto-upgrade to avoid conflicts
+
+toolkit:
+  enabled: true
+
+devicePlugin:
+  enabled: true
+  config:
+    default: "any"
+
+dcgm:
+  enabled: true
+
+dcgmExporter:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+gfd:
+  enabled: true
+
+migManager:
+  enabled: false
+
+nodeStatusExporter:
+  enabled: true
+
+# Node selector for GPU operator pods
+node-feature-discovery:
+  worker:
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+# Tolerations for GPU workloads
+daemonsets:
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule

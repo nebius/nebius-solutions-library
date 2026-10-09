@@ -1,0 +1,70 @@
+# Grafana Helm Values (standalone)
+# https://github.com/grafana/helm-charts/tree/main/charts/grafana
+
+# Note: Grafana is typically deployed as part of kube-prometheus-stack
+# This file is for standalone Grafana deployment if needed
+
+replicas: 1
+
+adminUser: admin
+# adminPassword should be set via --set or secret
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Datasources
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-kube-prometheus-prometheus:9090
+        access: proxy
+        isDefault: true
+      - name: Loki
+        type: loki
+        url: http://loki:3100
+        access: proxy
+
+# Dashboard providers
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# Sidecar for dashboards
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+  datasources:
+    enabled: true
+    label: grafana_datasource
+
+# Service
+service:
+  type: ClusterIP
+  port: 80
+
+# Ingress (disabled by default)
+ingress:
+  enabled: false

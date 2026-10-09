@@ -1,0 +1,85 @@
+# =============================================================================
+# OSMO on Nebius - Cost-Optimized Configuration
+# =============================================================================
+# This configuration minimizes resource counts for development and testing in
+# eu-west2. B300 is the only GPU platform available in this region and may cost
+# more than L40S configurations in other regions.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Required Settings (get from nebius-env-init.sh)
+# -----------------------------------------------------------------------------
+# tenant_id = "your-tenant-id"
+# parent_id = "your-project-id"
+
+# -----------------------------------------------------------------------------
+# Environment Settings
+# -----------------------------------------------------------------------------
+region       = "eu-west2"
+environment  = "dev"
+project_name = "osmo-dev"
+
+# -----------------------------------------------------------------------------
+# Kubernetes Cluster
+# -----------------------------------------------------------------------------
+k8s_version            = null  # Use latest
+etcd_cluster_size      = 1     # Single node for dev
+enable_public_endpoint = true  # Direct API access
+
+# -----------------------------------------------------------------------------
+# CPU Nodes (minimal for system workloads)
+# -----------------------------------------------------------------------------
+cpu_nodes_count            = 2
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "4vcpu-16gb"  # Smallest viable for K8s
+cpu_disk_size_gib          = 64
+cpu_nodes_assign_public_ip = false  # Private nodes only
+
+# CPU preset options (cpu-d3):
+#   2vcpu-8gb   - ~$0.08/hr (may be too small for K8s)
+#   4vcpu-16gb  - ~$0.11/hr (minimum recommended)
+#   8vcpu-32gb  - ~$0.22/hr (comfortable for dev)
+#   16vcpu-64gb - ~$0.44/hr (production)
+
+# -----------------------------------------------------------------------------
+# GPU Nodes (smallest B300 configuration available in eu-west2)
+# -----------------------------------------------------------------------------
+gpu_nodes_count_per_group  = 1
+gpu_node_groups            = 1
+gpu_nodes_platform         = "gpu-b300-sxm"
+gpu_nodes_preset           = "1gpu-24vcpu-346gb"   # Smallest GPU preset available in eu-west2
+gpu_disk_size_gib          = 256
+gpu_nodes_assign_public_ip = false
+enable_gpu_cluster         = false  # No InfiniBand for this single-node configuration
+enable_gpu_taints          = true
+gpu_nodes_preemptible      = false  # Set true if your project allows preemptible GPUs
+gpu_nodes_driverfull_image = true   # Nebius pre-installed drivers are recommended for B200/B300
+
+# GPU options by region (see locals.tf for full list):
+#   eu-north1:  gpu-l40s-a, gpu-l40s-d, gpu-h100-sxm, gpu-h200-sxm
+#   eu-west2:   gpu-b300-sxm
+#   eu-north2:  gpu-h200-sxm
+#   eu-west1:   gpu-h200-sxm
+#   me-west1:   gpu-b200-sxm-a (NVIDIA B200)
+#   uk-south1:  gpu-b300-sxm   (NVIDIA B300)
+#   us-central1: gpu-h200-sxm, gpu-b200-sxm (NVIDIA B200)
+
+# -----------------------------------------------------------------------------
+# Storage (minimal)
+# -----------------------------------------------------------------------------
+enable_filestore = true
+filestore_size_gib = 256  # Smaller filestore
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Nebius Managed Service - minimal)
+# -----------------------------------------------------------------------------
+# postgresql_platform    = null           # Auto: cpu-e2 (eu-north1), cpu-d3 (other regions)
+postgresql_preset        = "2vcpu-8gb"    # Minimum preset (cheapest)
+# postgresql_disk_type   = null           # Auto: network-ssd (eu-north1), nbs-csi-sc (other regions)
+postgresql_disk_size_gib = 20
+postgresql_host_count    = 1
+
+# -----------------------------------------------------------------------------
+# WireGuard VPN (disabled for dev)
+# -----------------------------------------------------------------------------
+enable_wireguard = false
