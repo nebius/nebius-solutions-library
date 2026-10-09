@@ -1,444 +1,559 @@
 import { useState } from "react";
+import {
+  ArrowRotateRight,
+  ArrowsRotateRight,
+  Play,
+  Plus,
+} from "@gravity-ui/icons";
 import { api } from "../api/client";
-import { grafanaUrl } from "../config";
-import type { Operation, OperationResult } from "../api/types";
+import type { Operation } from "../api/types";
 import {
   Badge,
+  Button,
   Empty,
   ErrorBox,
+  Icon,
   Loading,
   Modal,
-  Stat,
+  Tabs,
   fmt,
   useAsync,
   useToast,
 } from "../components/ui";
-import { Button, PageHeader, Search, Tabs } from "../components/controls";
+import {
+  DetailCard,
+  EmptyList,
+  PageHeader,
+  ResourceHeader,
+  ResourceName,
+  RowMenu,
+  SearchToolbar,
+  resourcePath,
+  useResourceTab,
+} from "../components/Resource";
+import { ResourceMonitoring } from "../components/LazyMonitoring";
 import { href, navigate } from "../router";
 
 const ACTIVE = new Set(["QUEUED", "ADMITTED", "RUNNING", "PREEMPTED"]);
-
+const TABS = ["Overview", "Metrics", "Logs", "Attempts", "Results", "Settings"];
 export function Jobs() {
-  const [filter, setFilter] = useState<"all" | "active" | "done">("all");
+  const jobs = useAsync(() => api().listOperations(), [], { every: 8000 });
   const [search, setSearch] = useState("");
-  const { data, error, loading, reload } = useAsync(
-    () => api().listOperations(),
-    [],
-    { every: 5000 },
-  );
-  const rows = (data ?? []).filter(
+  const [status, setStatus] = useState("");
+  const [region, setRegion] = useState("");
+  const rows = (jobs.data ?? []).filter(
     (o) =>
-      (filter === "all" ||
-        (filter === "active" ? ACTIVE.has(o.status) : !ACTIVE.has(o.status))) &&
-      `${o.name ?? ""} ${o.id} ${o.model}`
-        .toLowerCase()
-        .includes(search.toLowerCase()),
+      (!search ||
+        `${o.name ?? ""} ${o.id} ${o.model}`
+          .toLowerCase()
+          .includes(search.toLowerCase())) &&
+      (!region || o.region === region) &&
+      (!status ||
+        (status === "active"
+          ? ACTIVE.has(o.status)
+          : status === "inactive"
+            ? !ACTIVE.has(o.status)
+            : o.status === status)),
   );
+  const reset = () => {
+    setSearch("");
+    setStatus("");
+    setRegion("");
+  };
   return (
     <>
       <PageHeader
         title="Jobs"
-        count={data?.length}
-        description="Track background runs, attempts and results."
-      >
-        <Button primary href={href("/jobs/new")}>
-          Create job
-        </Button>
-      </PageHeader>
-      <Tabs
-        className="resource-tabs"
-        activeTab={filter}
-        onSelectTab={(v) => setFilter(v as typeof filter)}
-        aria-label="Job status"
-        items={[
-          { id: "all", title: "All jobs" },
-          { id: "active", title: "Active" },
-          { id: "done", title: "Completed" },
-        ]}
+        count={jobs.data?.length}
+        create={{ label: "Create job", to: "/jobs/new" }}
       />
-      <div className="toolbar">
-        <div className="toolbar__search">
-          <Search value={search} onChange={setSearch} label="Search jobs" />
-        </div>
-        <span className="toolbar__count">
-          {rows.length} of the latest 100 jobs
-        </span>
-        <Button size="m" onClick={reload}>
-          Refresh
+      <SearchToolbar
+        {...{ search, setSearch, status, setStatus, region, setRegion }}
+        statuses={[
+          ["active", "Active"],
+          ["inactive", "Inactive"],
+          ["RUNNING", "Running"],
+          ["QUEUED", "Queued"],
+          ["SUCCEEDED", "Completed"],
+          ["FAILED", "Failed"],
+          ["CANCELLED", "Cancelled"],
+        ]}
+        regions={[
+          ...new Set(jobs.data?.map((j) => j.region).filter(Boolean) ?? []),
+        ]}
+      >
+        <Button
+          view="flat"
+          size="l"
+          aria-label="Refresh jobs"
+          onClick={jobs.reload}
+        >
+          <Icon data={ArrowsRotateRight} />
         </Button>
-      </div>
-      {error && <ErrorBox msg={error} retry={reload} />}
-      {loading && !data && <Loading />}
-      {data && (
-        <div className="table-surface tbl-wrap">
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Model</th>
-                <th>Status</th>
-                <th>Region</th>
-                <th>Started</th>
-                <th>Duration</th>
-                <th className="num">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
+      </SearchToolbar>
+      {jobs.error && <ErrorBox msg={jobs.error} retry={jobs.reload} />}{" "}
+      {jobs.loading && !jobs.data && <Loading />}
+      {jobs.data &&
+        (rows.length ? (
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
                 <tr>
-                  <td colSpan={7}>
-                    <Empty>
-                      <h2>
-                        {search || filter !== "all"
-                          ? "No matching jobs"
-                          : "Run your first job"}
-                      </h2>
-                      <p>
-                        {search || filter !== "all"
-                          ? "Try a different search or filter."
-                          : "Run a model or container and track its progress here."}
-                      </p>
-                      {!search && filter === "all" && (
-                        <Button primary href={href("/jobs/new")}>
-                          Create job
-                        </Button>
+                  <th>Name and ID</th>
+                  <th>Status</th>
+                  <th>Definition</th>
+                  <th>Region</th>
+                  <th>Created</th>
+                  <th>Duration</th>
+                  <th></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((o) => (
+                  <tr key={o.id}>
+                    <td className="name-cell">
+                      <ResourceName
+                        name={o.name ?? o.id}
+                        id={o.id}
+                        to={resourcePath("jobs", o.id)}
+                      />
+                    </td>
+                    <td>
+                      <Badge status={o.status} />
+                      {o.queue_position != null && o.status === "QUEUED" && (
+                        <div className="small muted">
+                          Queue position {o.queue_position}
+                        </div>
                       )}
-                    </Empty>
-                  </td>
-                </tr>
-              )}
-              {rows.map((o) => (
-                <tr key={o.id}>
-                  <td>
-                    <a className="strong" href={href(`/jobs/${o.id}`)}>
-                      {o.name ?? o.id}
-                    </a>
-                    <div className="small muted mono">{o.id}</div>
-                  </td>
-                  <td>{o.model}</td>
-                  <td>
-                    <Badge status={o.status} />
-                    {o.status === "QUEUED" && o.queue_position != null && (
-                      <span className="small muted"> #{o.queue_position}</span>
-                    )}
-                  </td>
-                  <td>{o.region}</td>
-                  <td title={fmt.dt(o.started_at ?? o.created_at)}>
-                    {o.started_at ? (
-                      fmt.ago(o.started_at)
-                    ) : (
-                      <span className="muted">
-                        queued {fmt.ago(o.created_at)}
-                      </span>
-                    )}
-                  </td>
-                  <td>{fmt.dur(o.started_at, o.ended_at)}</td>
-                  <td className="num">{fmt.usd(o.cost)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                    </td>
+                    <td>
+                      {o.model}
+                      <div className="small muted">
+                        {o.priority ?? "normal"} priority
+                        {o.gpu_class ? ` · ${o.gpu_class}` : ""}
+                      </div>
+                    </td>
+                    <td>{o.region ?? "Awaiting placement"}</td>
+                    <td title={fmt.dt(o.created_at)}>
+                      {fmt.ago(o.created_at)}
+                    </td>
+                    <td>{fmt.dur(o.started_at, o.ended_at)}</td>
+                    <td>
+                      <Button
+                        view="outlined"
+                        size="l"
+                        href={href(
+                          resourcePath("jobs", o.id, undefined, "Logs"),
+                        )}
+                      >
+                        View logs
+                      </Button>
+                    </td>
+                    <td>
+                      <RowMenu
+                        actions={[
+                          {
+                            label: "View job",
+                            action: () => navigate(resourcePath("jobs", o.id)),
+                          },
+                          {
+                            label: "View metrics",
+                            action: () =>
+                              navigate(
+                                resourcePath(
+                                  "jobs",
+                                  o.id,
+                                  undefined,
+                                  "Metrics",
+                                ),
+                              ),
+                          },
+                          {
+                            label: "View attempts",
+                            action: () =>
+                              navigate(
+                                resourcePath(
+                                  "jobs",
+                                  o.id,
+                                  undefined,
+                                  "Attempts",
+                                ),
+                              ),
+                          },
+                        ]}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyList
+            resource="jobs"
+            filtered={Boolean(search || status || region)}
+            reset={reset}
+            action={
+              <Button view="action" size="l" href={href("/jobs/new")}>
+                <Icon data={Plus} /> Create job
+              </Button>
+            }
+          />
+        ))}
     </>
   );
 }
 
 export function JobDetail({ id }: { id: string }) {
   const toast = useToast();
-  const {
-    data: op,
-    error,
-    loading,
-    reload,
-  } = useAsync(() => api().getOperation(id), [id], { every: 5000 });
-  const [tab, setTab] = useState("overview");
-  const [result, setResult] = useState<OperationResult | null>(null);
-  const [resultError, setResultError] = useState("");
-  const [resultBusy, setResultBusy] = useState(false);
-  const [confirm, setConfirm] = useState(false);
+  const { tab, setTab } = useResourceTab(TABS);
+  const job = useAsync(() => api().getOperation(id), [id], { every: 6000 });
+  const [confirm, setConfirm] = useState<"cancel" | "resume" | "again" | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
-  async function cancel() {
+  async function action() {
+    if (!job.data || !confirm) return;
     setBusy(true);
     try {
-      await api().cancel(id);
-      toast("Cancellation requested");
-      setConfirm(false);
-      reload();
-    } catch (e) {
-      toast((e as Error).message, true);
+      if (confirm === "cancel") {
+        await api().cancel(id);
+        toast("Cancel requested");
+        job.reload();
+      } else if (confirm === "resume") {
+        const op = await api().resume(id);
+        toast("Resume submitted");
+        navigate(`/jobs/${op.id}`);
+      } else {
+        const o = job.data;
+        const result = await api().invoke(o.model, {
+          name: (o.name ?? o.id) + "-again",
+          mode: o.mode,
+          input: o.input,
+          region: o.region ?? undefined,
+          priority: o.priority,
+          timeout_s: o.timeout_s,
+        });
+        const op = "operation" in result ? result.operation : result;
+        toast("Job submitted");
+        navigate(`/jobs/${op.id}`);
+      }
+      setConfirm(null);
+    } catch (err) {
+      toast((err as Error).message, true);
     } finally {
       setBusy(false);
     }
   }
-  async function loadResult() {
-    setResultBusy(true);
-    setResultError("");
-    try {
-      setResult(await api().getResult(id));
-    } catch (e) {
-      setResultError((e as Error).message);
-    } finally {
-      setResultBusy(false);
-    }
-  }
-  async function resubmit(o: Operation) {
-    setBusy(true);
-    try {
-      const r = await api().invoke(o.model, {
-        name: (o.name ?? o.id) + "-resubmit",
-        mode: o.mode,
-        input: o.input,
-        region: o.region,
-        priority: o.priority,
-        timeout_s: o.timeout_s,
-      });
-      const n = "operation" in r ? r.operation : r;
-      toast("Job resubmitted");
-      navigate(`/jobs/${n.id}`);
-    } catch (e) {
-      toast((e as Error).message, true);
-    } finally {
-      setBusy(false);
-    }
-  }
-  if (error && !op) return <ErrorBox msg={error} retry={reload} />;
-  if (loading && !op) return <Loading />;
-  if (!op) return null;
-  const active = ACTIVE.has(op.status);
+  if (job.error) return <ErrorBox msg={job.error} retry={job.reload} />;
+  if (job.loading && !job.data) return <Loading />;
+  if (!job.data) return null;
+  const o = job.data;
+  const active = ACTIVE.has(o.status);
+  const resumable =
+    o.mode === "run" && ["FAILED", "CANCELLED"].includes(o.status);
+  const end = o.ended_at ? new Date(o.ended_at).getTime() / 1000 : undefined;
   return (
     <>
-      <PageHeader
-        title={
+      <ResourceHeader
+        name={o.name ?? o.id}
+        id={id}
+        status={<Badge status={o.status} />}
+        created={o.created_at}
+        region={o.region}
+        actions={
           <>
-            {op.name ?? op.id}
-            <Badge status={op.status} />
+            {active ? (
+              <Button
+                view="outlined-danger"
+                size="l"
+                onClick={() => setConfirm("cancel")}
+              >
+                Cancel job
+              </Button>
+            ) : (
+              <Button
+                view="normal"
+                size="l"
+                onClick={() => setConfirm("again")}
+              >
+                <Icon data={Play} /> Run again
+              </Button>
+            )}
+            {resumable && (
+              <Button
+                view="normal"
+                size="l"
+                onClick={() => setConfirm("resume")}
+              >
+                <Icon data={ArrowRotateRight} /> Resume checkpoint
+              </Button>
+            )}
+            <Button view="outlined" size="l" onClick={() => setTab("Results")}>
+              View results
+            </Button>
           </>
         }
-        description={`${op.model} · ${op.region}${op.gpu_class ? " · " + op.gpu_class : ""}`}
-      >
-        {op.logs_url ? (
-          <Button href={op.logs_url} target="_blank" rel="noreferrer">
-            Logs ↗
-          </Button>
-        ) : (
-          grafanaUrl(op.region) && (
-            <Button
-              href={`${grafanaUrl(op.region)}/explore?left=${encodeURIComponent(JSON.stringify({ datasource: "Loki", queries: [{ expr: `{namespace=~".+"} |= "${op.id}"` }] }))}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Logs ↗
-            </Button>
-          )
-        )}
-        {active ? (
-          <Button danger disabled={busy} onClick={() => setConfirm(true)}>
-            Cancel job
-          </Button>
-        ) : (
-          <Button loading={busy} onClick={() => resubmit(op)}>
-            Resubmit
-          </Button>
-        )}
-      </PageHeader>
-      {error && <ErrorBox msg={error} retry={reload} />}
-      {op.error && <ErrorBox msg={op.error} />}
-      <Tabs
-        className="resource-tabs"
-        activeTab={tab}
-        onSelectTab={setTab}
-        aria-label="Job details"
-        items={[
-          { id: "overview", title: "Overview" },
-          { id: "input", title: "Input" },
-          { id: "result", title: "Results" },
-        ]}
       />
-      {tab === "overview" && (
-        <div className="detail-stack">
-          <div className="stats">
-            <Stat
-              label="Duration"
-              value={fmt.dur(op.started_at, op.ended_at)}
-            />
-            <Stat label="Attempts" value={op.attempts?.length ?? 0} />
-            <Stat label="Priority" value={op.priority ?? "normal"} />
-            <Stat label="Cost" value={fmt.usd(op.cost)} />
-          </div>
-          <div className="grid grid--2">
-            <section className="card">
-              <div className="card__head">
-                <h2>Job information</h2>
-              </div>
-              <div className="card__body">
-                <dl className="details-kv">
-                  <dt>Job ID</dt>
-                  <dd className="mono">{op.id}</dd>
-                  <dt>Model</dt>
-                  <dd>{op.model}</dd>
-                  <dt>Mode</dt>
-                  <dd>
-                    {op.mode === "run" ? "Container job" : "Async inference"}
-                  </dd>
-                  <dt>Region</dt>
-                  <dd>{op.region}</dd>
-                  <dt>Created</dt>
-                  <dd>{fmt.dt(op.created_at)}</dd>
-                  <dt>Started</dt>
-                  <dd>
-                    {op.started_at
-                      ? fmt.dt(op.started_at)
-                      : op.queue_position != null
-                        ? `Queue position ${op.queue_position}`
-                        : "Waiting"}
-                  </dd>
-                  <dt>Timeout</dt>
-                  <dd>{fmt.secs(op.timeout_s)}</dd>
-                  {op.image && (
-                    <>
-                      <dt>Image</dt>
-                      <dd className="mono">{op.image}</dd>
-                    </>
-                  )}
-                </dl>
-              </div>
-            </section>
-            <section className="card">
-              <div className="card__head">
-                <h2>Attempts</h2>
-              </div>
-              <div className="card__body">
-                {!op.attempts?.length && (
-                  <p className="muted">This job has not started yet.</p>
-                )}
-                <ul className="timeline">
-                  {op.attempts?.map((a) => (
-                    <li key={a.index}>
-                      <span
-                        className={`dot ${a.status === "SUCCEEDED" ? "dot--ok" : a.status === "RUNNING" ? "dot--run" : a.status === "PREEMPTED" ? "dot--warn" : a.status === "FAILED" ? "dot--bad" : ""}`}
-                      />
-                      <div>
-                        <strong>Attempt {a.index}</strong>{" "}
-                        <Badge status={a.status} />
-                        <small>
-                          {fmt.dt(a.started_at)} →{" "}
-                          {a.ended_at ? fmt.dt(a.ended_at) : "Running"} ·{" "}
-                          {fmt.dur(a.started_at, a.ended_at)}
-                        </small>
-                        {a.node && (
-                          <small>
-                            Node: <span className="mono">{a.node}</span>
-                          </small>
-                        )}
-                        {a.reason && <small>{a.reason}</small>}
-                        {a.resumed_from_checkpoint && (
-                          <small>
-                            Resumed from{" "}
-                            <span className="mono">
-                              {a.resumed_from_checkpoint}
-                            </span>
-                          </small>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </section>
-          </div>
+      <Tabs items={TABS} active={tab} onChange={setTab} />
+      {o.error && (
+        <div className="banner banner--danger" style={{ marginBottom: 24 }}>
+          {o.error}
         </div>
       )}
-      {tab === "input" && (
-        <section className="card">
-          <div className="card__head">
-            <h2>Input parameters</h2>
+      {tab === "Overview" && (
+        <>
+          <div style={{ marginBottom: 32 }}>
+            <ResourceMonitoring
+              key={id}
+              kind="operations"
+              id={id}
+              region={o.region}
+              end={end}
+              compact
+            />
           </div>
-          <div className="card__body">
-            <pre className="out">{JSON.stringify(op.input ?? {}, null, 2)}</pre>
-          </div>
-        </section>
-      )}
-      {tab === "result" && (
-        <section className="card">
-          <div className="card__head">
-            <h2>Results and artifacts</h2>
-            <Button size="m" loading={resultBusy} onClick={loadResult}>
-              {result ? "Refresh" : "Fetch results"}
-            </Button>
-          </div>
-          <div className="card__body form">
-            {resultError && <ErrorBox msg={resultError} retry={loadResult} />}
-            {!result && (
-              <p className="muted">
-                {op.status === "SUCCEEDED"
-                  ? "Fetch results to view output and download artifacts."
-                  : "Results are available when the job completes."}
-              </p>
-            )}
-            {!!result?.artifacts?.length && (
-              <div className="tbl-wrap">
-                <table className="tbl">
-                  <thead>
-                    <tr>
-                      <th>Artifact</th>
-                      <th className="num">Size</th>
-                      <th>
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.artifacts.map((a) => (
-                      <tr key={a.name}>
-                        <td className="mono">{a.name}</td>
-                        <td className="num">{fmt.bytes(a.size_bytes)}</td>
-                        <td>
-                          <Button
-                            size="m"
-                            href={a.url}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Download
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {result?.result != null && (
+          <div className="overview" style={{ marginBottom: 32 }}>
+            <DetailCard title="Container settings">
+              <dl className="kv">
+                <dt>Definition</dt>
+                <dd>{o.model}</dd>
+                <dt>Image path</dt>
+                <dd>
+                  <code>
+                    {o.image ??
+                      String(
+                        o.input?.image ?? "Defined by saved configuration",
+                      )}
+                  </code>
+                </dd>
+                <dt>Execution mode</dt>
+                <dd>
+                  {o.mode === "run" ? "Container job" : "Asynchronous request"}
+                </dd>
+                <dt>Timeout</dt>
+                <dd>{o.timeout_s ? fmt.secs(o.timeout_s) : "No deadline"}</dd>
+              </dl>
+            </DetailCard>
+            <DetailCard title="Scheduling">
+              <dl className="kv">
+                <dt>Region</dt>
+                <dd>{o.region ?? "Awaiting placement"}</dd>
+                <dt>GPU class</dt>
+                <dd>{o.gpu_class ?? "Selected at placement"}</dd>
+                <dt>Priority</dt>
+                <dd>{o.priority ?? "Normal"}</dd>
+                <dt>Started</dt>
+                <dd>{fmt.dt(o.started_at)}</dd>
+                <dt>Duration</dt>
+                <dd>{fmt.dur(o.started_at, o.ended_at)}</dd>
+                <dt>Cost</dt>
+                <dd>{fmt.usd(o.cost)}</dd>
+              </dl>
+            </DetailCard>
+            <DetailCard title="Recovery">
+              <dl className="kv">
+                <dt>Attempts</dt>
+                <dd>{o.attempts?.length ?? 0}</dd>
+                <dt>Last attempt</dt>
+                <dd>
+                  {o.attempts?.[o.attempts.length - 1]?.reason ??
+                    "No interruption reported"}
+                </dd>
+                <dt>Checkpoint</dt>
+                <dd>
+                  {o.attempts?.[o.attempts.length - 1]
+                    ?.resumed_from_checkpoint ?? "Managed by job configuration"}
+                </dd>
+              </dl>
+              <Button
+                view="outlined"
+                size="l"
+                style={{ marginTop: 20 }}
+                onClick={() => setTab("Attempts")}
+              >
+                View attempts
+              </Button>
+            </DetailCard>
+            <DetailCard title="Input">
               <pre className="out">
-                {JSON.stringify(result.result, null, 2)}
+                {JSON.stringify(o.input ?? {}, null, 2)}
               </pre>
+            </DetailCard>
+          </div>
+        </>
+      )}
+      {tab === "Metrics" && (
+        <ResourceMonitoring
+          kind="operations"
+          id={id}
+          region={o.region}
+          end={end}
+        />
+      )}
+      {tab === "Logs" && (
+        <ResourceMonitoring
+          kind="operations"
+          id={id}
+          region={o.region}
+          end={end}
+          view="logs"
+        />
+      )}
+      {tab === "Attempts" && (
+        <DetailCard title="Attempts">
+          {!o.attempts?.length ? (
+            <Empty>This job has not started yet.</Empty>
+          ) : (
+            <ul className="timeline">
+              {o.attempts.map((a) => (
+                <li key={a.index}>
+                  <span
+                    className={`dot ${a.status === "SUCCEEDED" ? "dot--ok" : a.status === "RUNNING" ? "dot--run" : a.status === "PREEMPTED" ? "dot--warn" : "dot--bad"}`}
+                  />
+                  <div>
+                    <strong>Attempt {a.index}</strong>{" "}
+                    <Badge status={a.status}>
+                      {a.status === "PREEMPTED" ? "Interrupted" : undefined}
+                    </Badge>
+                    <small>
+                      {fmt.dt(a.started_at)} →{" "}
+                      {a.ended_at ? fmt.dt(a.ended_at) : "In progress"} ·{" "}
+                      {fmt.dur(a.started_at, a.ended_at)}
+                    </small>
+                    {a.node && <small>Node: {a.node}</small>}
+                    {a.gpu_class && <small>GPU: {a.gpu_class}</small>}
+                    {a.reason && <small>{a.reason}</small>}
+                    {a.resumed_from_checkpoint && (
+                      <small>Resumed from {a.resumed_from_checkpoint}</small>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </DetailCard>
+      )}
+      {tab === "Results" && <Results id={id} status={o.status} />}
+      {tab === "Settings" && (
+        <DetailCard title="Job actions">
+          <p>
+            A job's submitted configuration is immutable. Run it again to start
+            a fresh operation, or resume a failed or cancelled run when its
+            checkpoint volume is still available.
+          </p>
+          <div className="actions">
+            {active ? (
+              <Button
+                view="outlined-danger"
+                size="l"
+                onClick={() => setConfirm("cancel")}
+              >
+                Cancel job
+              </Button>
+            ) : (
+              <Button
+                view="outlined"
+                size="l"
+                onClick={() => setConfirm("again")}
+              >
+                Run again
+              </Button>
             )}
-            {result && !result.artifacts?.length && result.result == null && (
-              <p className="muted">
-                Status: {result.status.toLowerCase()}. No result artifacts are
-                available.
-              </p>
+            {resumable && (
+              <Button
+                view="outlined"
+                size="l"
+                onClick={() => setConfirm("resume")}
+              >
+                Resume checkpoint
+              </Button>
             )}
           </div>
-        </section>
+        </DetailCard>
       )}
       {confirm && (
-        <Modal title="Cancel job" onClose={() => !busy && setConfirm(false)}>
+        <Modal
+          title={
+            confirm === "cancel"
+              ? "Cancel job?"
+              : confirm === "resume"
+                ? "Resume from checkpoint?"
+                : "Run this job again?"
+          }
+          onClose={() => {
+            if (!busy) setConfirm(null);
+          }}
+        >
           <p>
-            Cancel <strong>{op.name ?? op.id}</strong>? Running attempts will
-            stop. Checkpoints are kept.
+            {confirm === "cancel"
+              ? "Stop this operation. Running containers receive a termination signal and may finish saving their checkpoint."
+              : confirm === "resume"
+                ? "Create a new operation using this job's existing work volume in the same region. The volume must still be available."
+                : "Start a fresh operation with the same configuration and input. Compute usage will count toward your API key budget."}
           </p>
-          <div className="dialog-actions">
-            <Button disabled={busy} onClick={() => setConfirm(false)}>
-              Keep running
+          <div className="actions">
+            <Button disabled={busy} onClick={() => setConfirm(null)}>
+              Keep current job
             </Button>
-            <Button danger loading={busy} onClick={cancel}>
-              Cancel job
+            <Button
+              view={confirm === "cancel" ? "outlined-danger" : "action"}
+              loading={busy}
+              onClick={action}
+            >
+              {confirm === "cancel"
+                ? "Cancel job"
+                : confirm === "resume"
+                  ? "Resume job"
+                  : "Run again"}
             </Button>
           </div>
         </Modal>
       )}
     </>
+  );
+}
+function Results({ id, status }: { id: string; status: string }) {
+  const result = useAsync(() => api().getResult(id), [id, status]);
+  if (result.error)
+    return <ErrorBox msg={result.error} retry={result.reload} />;
+  if (!result.data) return <Loading />;
+  return (
+    <DetailCard title="Results and artifacts">
+      {result.data.artifacts?.length ? (
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Artifact</th>
+              <th>Size</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.data.artifacts.map((a) => (
+              <tr key={a.name}>
+                <td className="mono">{a.name}</td>
+                <td>{fmt.bytes(a.size_bytes)}</td>
+                <td>
+                  <Button view="outlined" size="l" href={a.url} target="_blank">
+                    Download
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <Empty>
+          {ACTIVE.has(status)
+            ? "Results appear as the job produces output."
+            : "No result artifacts were returned."}
+        </Empty>
+      )}
+      {result.data.result != null && (
+        <pre className="out">{JSON.stringify(result.data.result, null, 2)}</pre>
+      )}
+    </DetailCard>
   );
 }

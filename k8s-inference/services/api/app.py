@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
-import artifacts, billing, catalog, db, jobs, kube, models, placement as placing
+import artifacts, billing, catalog, db, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
 from auth import Principal, check_budget, check_model, forget, principal
@@ -43,10 +43,12 @@ class UploadRequest(BaseModel):
 
 
 class ScalingRequest(BaseModel):
-    min_replicas: int | None = None
-    max_replicas: int | None = None
-    target_concurrency: int | None = None
-    scale_to_zero_after_s: int | None = None
+    min_replicas: int | None = Field(default=None, ge=0)
+    max_replicas: int | None = Field(default=None, ge=1)
+    target_concurrency: int | None = Field(default=None, ge=1)
+    scale_to_zero_after_s: int | None = Field(default=None, ge=0)
+    scaling: models.ScalingSpec | None = None
+    timeout_s: int | None = Field(default=None, ge=1, le=600)
 
 
 class KeyRequest(BaseModel):
@@ -74,7 +76,14 @@ def _public(m: dict) -> dict:
     if m["mode"] == "run":
         return catalog.to_public(m)
     if FLEET_MANAGER:        # the endpoints live on the workers (deployments); their live state is the regional API's
-        return catalog.to_public(m, [{"region": r, "status": "ready", "replicas_ready": None} for r in m["regions"]])
+        statuses = []
+        for region in m["regions"]:
+            try:
+                st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
+            except (HTTPException, ApiException):
+                st = {"status": "unavailable", "replicas_ready": None}
+            statuses.append({"region": region, **st})
+        return catalog.to_public(m, statuses)
     return catalog.to_public(m, [{"region": REGION, **kube.endpoint_status(m["k8s_name"], m["namespace"])}])
 
 
@@ -82,6 +91,15 @@ def _public(m: dict) -> dict:
 def healthz():
     return {"ok": True, "models": len(catalog.all_models()), "region": REGION, "regions": kube.regions(), "fleet_manager": FLEET_MANAGER,
             "gpu_classes": sorted({p["gpu_class"] for p in kube.fleet()["pools"].values() if p.get("gpu_class")})}
+
+
+@app.get("/v1/fleet")
+def fleet_info(p: Principal = Depends(principal)):
+    pools = list(kube.fleet().get("pools", {}).values())
+    regions = sorted({kube.cluster_region(pool["region"]) for pool in pools if pool.get("region")}
+                     | {r for m in catalog.all_models().values() for r in m.get("regions", [])})
+    return {"regions": regions, "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
+            "fleet_manager": FLEET_MANAGER, "region": REGION}
 
 
 @app.get("/v1/models")
@@ -140,6 +158,10 @@ def _write_model(spec: dict, p: Principal, replace: bool) -> dict:
     history) and refresh the regions' read-only copies."""
     _writes_here()
     entry = models.to_entry(spec, managed_by="api")
+    if entry.get("spec", {}).get("scaling", {}).get("metric") in ("concurrency_utilization", "requests_per_second"):
+        # Store the same policy we render: discard obsolete utilization factors and
+        # retain the normalized units/defaults, including unlimited RPS concurrency.
+        spec = {**spec, "scaling": entry["spec"]["scaling"]}
     mid = entry["id"]
     existing = catalog.get(mid)
     if existing and not replace:
@@ -446,44 +468,129 @@ def _endpoint_model(eid: str) -> dict:
 
 @app.get("/v1/endpoints")
 def list_endpoints(region: str | None = None, p: Principal = Depends(principal)):
-    available = kube.regions()
-    if region and region not in available:
+    served_regions = kube.regions()
+    if region and region not in served_regions:
         raise HTTPException(400, f"region {region} is not served by this API")
+    selected_region = region
     out = []
     for m in catalog.all_models().values():
         if m["mode"] == "run":
             continue
-        for r in ([region] if region else available):
-            if r in m["regions"] and (i := kube.isvc(m["k8s_name"], m["namespace"], r)):
-                out.append(ep.to_public(m, i, r))
+        for region in ([selected_region] if selected_region else served_regions):
+            if region not in m["regions"]:
+                continue
+            try:
+                i = kube.isvc(m["k8s_name"], m["namespace"]) if region == REGION else kube.isvc(m["k8s_name"], m["namespace"], region)
+                if i:
+                    out.append(ep.to_public(m, i, region))
+            except (HTTPException, ApiException):
+                out.append({"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": region,
+                            "status": "unavailable", "replicas_ready": None, "gpu": m.get("gpu"),
+                            "managed_by": m.get("managed_by"), "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke"})
     return out
 
 
 @app.get("/v1/endpoints/{id}")
-def get_endpoint(id: str, region: str = REGION, p: Principal = Depends(principal)):
-    if region not in kube.regions():
-        raise HTTPException(400, f"region {region} is not served by this API")
+def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(principal)):
     m = _endpoint_model(id)
-    i = kube.isvc(m["k8s_name"], m["namespace"], region) or {}
+    region = _endpoint_region(m, region)
+    i = (kube.isvc(m["k8s_name"], m["namespace"]) if region == REGION else kube.isvc(m["k8s_name"], m["namespace"], region)) or {}
     if not i:
         raise HTTPException(404, f"endpoint {id} not deployed in {region}")
     return ep.to_public(m, i, region)
 
 
 @app.patch("/v1/endpoints/{id}")
-def update_endpoint(id: str, req: ScalingRequest, region: str = REGION, p: Principal = Depends(admin)):
-    """Patch live scaling in one region. Model definitions own persistent replica limits; patches on
-    git-managed endpoints are reverted by deployment synchronization."""
-    if region not in kube.regions():
-        raise HTTPException(400, f"region {region} is not served by this API")
+def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: Principal = Depends(admin)):
+    """Persist desired scaling on API-managed definitions and reconcile every deployment."""
     m = _endpoint_model(id)
+    if m.get("managed_by") != "api" or not m.get("spec"):
+        raise HTTPException(403, "This endpoint is managed by the fleet configuration. Update its source definition.")
+    region = _endpoint_region(m, region)
+    spec = {**m["spec"], "scaling": {**m["spec"].get("scaling", {})}}
+    if req.scaling is not None:
+        spec["scaling"].update(req.scaling.model_dump(exclude_none=True))
+    if req.target_concurrency is not None and spec["scaling"].get("metric") in ("concurrency_utilization", "requests_per_second"):
+        raise HTTPException(422, "Use scaling.target for metric-specific targets; target_concurrency is only valid for legacy raw policies.")
+    if req.timeout_s is not None:
+        spec["timeout_s"] = req.timeout_s
+    for key, target in (("min_replicas", "min"), ("max_replicas", "max"), ("target_concurrency", "target"), ("scale_to_zero_after_s", "idle_s")):
+        if (value := getattr(req, key)) is not None:
+            spec["scaling"][target] = value
+    if spec["scaling"].get("min", 0) > spec["scaling"].get("max", 1):
+        raise HTTPException(422, "Minimum replicas cannot exceed maximum replicas.")
+    _write_model(spec, p, replace=True)
+    return get_endpoint(id, region, p)
+
+
+def _endpoint_region(m: dict, region: str | None) -> str:
+    selected = region or (REGION if REGION in m["regions"] else m["regions"][0])
+    if selected not in kube.regions():
+        raise HTTPException(400, f"region {selected} is not served by this API")
+    if selected not in m["regions"]:
+        raise HTTPException(404, "Endpoint not deployed in this region")
+    return selected
+
+
+async def _remote_monitoring(p: Principal, region: str, path: str, params: dict):
+    url = REGION_API_URLS.get(region)
+    if not url:
+        raise HTTPException(503, "Monitoring for this region is not connected to the fleet API.")
     try:
-        i = kube.api(region).patch_namespaced_custom_object("serving.kserve.io", "v1beta1", m["namespace"], "inferenceservices", id,
-                                                      ep.scaling_patch(req.model_dump()))
-    except ApiException as e:
-        raise HTTPException(404 if e.status == 404 else 502, f"kserve: {e.reason}")
-    kube.invalidate_endpoint(id, m["namespace"], region)
-    return ep.to_public(m, i, region)
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url.rstrip("/") + path, params={k: v for k, v in params.items() if v is not None},
+                                        headers={"Authorization": f"Bearer {p.key}"})
+        if response.status_code in (401, 403, 404, 422):
+            raise HTTPException(response.status_code, "Resource monitoring is not available for this request.")
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(503, "Monitoring for this region is temporarily unavailable.")
+
+
+@app.get("/v1/endpoints/{id}/metrics")
+async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h", end: float | None = None,
+                           p: Principal = Depends(principal)):
+    m = _endpoint_model(id)
+    check_model(p, m["name"])
+    region = _endpoint_region(m, region)
+    monitoring.window(range, end)
+    if region != REGION:
+        return await _remote_monitoring(p, region, f"/v1/endpoints/{urllib.parse.quote(id, safe='')}/metrics", {"range": range, "end": end})
+    return await monitoring.metrics("endpoint", m["namespace"], m["k8s_name"], region, range, end)
+
+
+@app.get("/v1/endpoints/{id}/logs")
+async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", search: str = Query("", max_length=200),
+                        limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+    m = _endpoint_model(id)
+    check_model(p, m["name"])
+    region = _endpoint_region(m, region)
+    monitoring.window(range, end)
+    if region != REGION:
+        return await _remote_monitoring(p, region, f"/v1/endpoints/{urllib.parse.quote(id, safe='')}/logs",
+                                        {"range": range, "search": search, "limit": limit, "end": end})
+    return await monitoring.logs("endpoint", m["namespace"], m["k8s_name"], region, range, search, limit, end)
+
+
+@app.get("/v1/operations/{id}/metrics")
+async def operation_metrics(id: str, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)):
+    job, region = _owned(p, id)
+    monitoring.window(range, end)
+    if region and region != REGION:
+        return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/metrics", {"range": range, "end": end})
+    return await monitoring.metrics("job", p.namespace, id, region or REGION, range, end)
+
+
+@app.get("/v1/operations/{id}/logs")
+async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
+                         limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+    job, region = _owned(p, id)
+    monitoring.window(range, end)
+    if region and region != REGION:
+        return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/logs",
+                                        {"range": range, "search": search, "limit": limit, "end": end})
+    return await monitoring.logs("jobset" if jobs.is_jobset(job) else "job", p.namespace, id, region or REGION, range, search, limit, end)
 
 
 async def _litellm(method: str, path: str, **kw):

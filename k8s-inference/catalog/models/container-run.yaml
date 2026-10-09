@@ -10,6 +10,8 @@ job:                                        # rendered by services/api/jobs.py; 
   image: "{{image}}"
   scratch: "{{scratch}}"                  # network (per-run volume, resumable) | local-nvme (host NVMe emptyDir on pools with local_nvme)
   command: "{{command}}"                    # string -> /bin/sh -c; the model image needs /bin/sh
+  argsParameter: args                       # typed input list, handled by jobs.build_run (not string interpolation)
+  envParameter: env                         # typed environment map, merged with the fixed work/checkpoint variables
   env: { CHECKPOINT_DIR: /work/checkpoint, OUTPUT_DIR: /work/out, INPUT_DIR: /work/in, OPERATION: "{{operation}}" }
   gpu: "{{gpus}}"
   cpu: "{{cpu}}"
@@ -26,6 +28,8 @@ parameters:
   - { name: scratch, type: string, label: Scratch storage, default: network, help: "network = per-run network volume (resumes after preemption); local-nvme = host NVMe of the node (fastest, gone with the pod, checkpoint to the bucket yourself)" }
   - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md); any public reference also works" }
   - { name: command, type: string, label: Command, required: true, help: "run with /bin/sh -c inside /work; checkpoint under /work/checkpoint, write results under /work/out" }
+  - { name: args, type: text, label: Arguments, default: [], help: "JSON array of command arguments" }
+  - { name: env, type: text, label: Environment variables, default: {}, help: "JSON object of environment names and string values" }
   - { name: gpus, type: number, label: GPUs, default: 1 }
   - { name: cpu, type: string, label: CPU request, default: "8" }
   - { name: memory, type: string, label: Memory, default: 64Gi }

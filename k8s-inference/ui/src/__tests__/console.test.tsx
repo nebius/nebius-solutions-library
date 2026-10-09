@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ThemeProvider } from "@gravity-ui/uikit";
 import { api, settings } from "../api/client";
@@ -8,14 +8,20 @@ import type { ApiKey, Endpoint, Model, ModelSpec } from "../api/types";
 import { SessionProvider } from "../components/Session";
 import { Modal, ToastProvider, Field } from "../components/ui";
 import { Input, Button } from "../components/controls";
-import { Models, ModelEditor, prepareSpec } from "../pages/Models";
+import { Models } from "../pages/Models";
+import {
+  DefinitionForm,
+  DefinitionEditor,
+  parseEnvironment,
+} from "../pages/DefinitionForm";
+import { scalingValidation } from "../components/ScalingFields";
 import {
   Endpoints,
   EndpointDetail,
   sampleBody,
   curlFor,
 } from "../pages/Endpoints";
-import { NewJob, buildJobRequest, defaultsFor } from "../pages/NewJob";
+import { NewJob } from "../pages/NewJob";
 import { Keys } from "../pages/Keys";
 import App from "../App";
 
@@ -84,42 +90,55 @@ function show(children: ReactNode, role: "user" | "admin" = "admin") {
 beforeEach(() => {
   localStorage.clear();
   location.hash = "";
+  vi.spyOn(api(), "metrics").mockResolvedValue({
+    region: "test-west",
+    start: 0,
+    end: 1,
+    step: 15,
+    panels: [],
+  });
 });
 
 describe("model configuration", () => {
-  it("preserves existing advanced fields, argument boundaries and environment values during edits", () => {
+  it("preserves existing advanced fields, argument boundaries and environment values during edits", async () => {
     const spec: ModelSpec = {
       id: "my-model",
       kind: "endpoint",
       image: "image:tag",
       command: ["python", "server.py"],
       port: 8000,
-      gpu: { count: 1 },
+      gpu: { count: 1, classes: ["h100"] },
       scaling: { min: 0, max: 2, target: 4 },
       weights: { path: "s3://bucket/weights", mount_path: "/weights" },
       resources: { cpu: "8", memory: "32Gi" },
       path: "/generate",
     };
-    const payload = prepareSpec(
-      spec,
-      "--message\nhello world",
-      "URL=https://example.test/?a=b=c\nPAD= spaced ",
-      "h100",
+    const update = vi
+      .spyOn(api(), "updateModel")
+      .mockResolvedValue({ id: spec.id, model: container });
+    show(
+      <DefinitionEditor initial={spec} onDone={() => {}} onCancel={() => {}} />,
     );
-    expect(payload).toMatchObject({
-      command: ["python", "server.py"],
+    await userEvent.type(
+      screen.getByLabelText("Arguments"),
+      "--message\nhello world",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Environment variables"),
+      "URL=https://example.test/?a=b=c\nPAD= spaced ",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][1]).toMatchObject({
+      command: spec.command,
       args: ["--message", "hello world"],
       env: { URL: "https://example.test/?a=b=c", PAD: " spaced " },
       weights: spec.weights,
       resources: spec.resources,
       path: "/generate",
     });
-    expect(() =>
-      prepareSpec({ ...spec, scaling: { min: 2, max: 1 } }, "", "", ""),
-    ).toThrow("Scaling");
-    expect(() => prepareSpec(spec, "", "INVALID ENV=value", "")).toThrow(
-      "NAME=value",
-    );
+    expect(scalingValidation({ min: 2, max: 1 })).toContain("Minimum replicas");
+    expect(() => parseEnvironment("INVALID ENV=value")).toThrow("NAME=value");
   });
   it("loads an existing sparse spec with its CPU-only defaults and saves through the update API", async () => {
     const spec: ModelSpec = {
@@ -137,14 +156,14 @@ describe("model configuration", () => {
     const update = vi
       .spyOn(api(), "updateModel")
       .mockResolvedValue({ id: spec.id, model: container });
-    show(<ModelEditor id={spec.id} />);
-    await screen.findByLabelText("Container image");
+    show(<DefinitionForm modelId={spec.id} />);
+    await screen.findByLabelText("Image path *");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(update).toHaveBeenCalled());
     expect(update.mock.calls[0][1]).toMatchObject({
       id: spec.id,
       gpu: { count: 0 },
-      port: 8080,
+      port: 8000,
       protocol: "http",
       weights: spec.weights,
     });
@@ -160,7 +179,7 @@ describe("model configuration", () => {
     show(<Models />, "user");
     await screen.findByText("Container run");
     expect(
-      screen.queryByRole("link", { name: "Create model" }),
+      screen.queryByRole("link", { name: "Create definition" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("link", { name: "Edit" }),
@@ -173,18 +192,16 @@ describe("model configuration", () => {
 describe("job submission", () => {
   it("uses container-run and only its declared inputs for a custom image", async () => {
     vi.spyOn(api(), "listModels").mockResolvedValue([container]);
-    const invoke = vi
-      .spyOn(api(), "invoke")
-      .mockResolvedValue({
-        id: "job-test",
-        model: container.id,
-        mode: "run",
-        region: "test-west",
-        status: "QUEUED",
-        created_at: "2026-01-01",
-      });
+    const invoke = vi.spyOn(api(), "invoke").mockResolvedValue({
+      id: "job-test",
+      model: container.id,
+      mode: "run",
+      region: "test-west",
+      status: "QUEUED",
+      created_at: "2026-01-01",
+    });
     show(<NewJob initialModel="container-run" />);
-    await userEvent.type(await screen.findByLabelText("Job name"), "my-job");
+    await userEvent.type(await screen.findByLabelText("Name *"), "my-job");
     await userEvent.type(
       await screen.findByLabelText("image *"),
       "registry.example/container:tag",
@@ -206,40 +223,29 @@ describe("job submission", () => {
           cpu: "8",
           gpus: 1,
         },
-        region: undefined,
         priority: "normal",
-        timeout_s: 7200,
       },
     ]);
     expect(location.hash).toBe("#/jobs/job-test");
   });
-  it("requires file inputs and validates placement and timeout before submitting", () => {
-    const fileModel: Model = {
-      ...container,
-      parameters: [
-        { name: "dataset", label: "Dataset", type: "file", required: true },
-      ],
-    };
-    const options = {
-      name: "job",
-      region: "test-west",
-      priority: "normal",
-      timeoutH: 1,
-      mode: "run" as const,
-    };
-    expect(() =>
-      buildJobRequest(fileModel, defaultsFor(fileModel), options),
-    ).toThrow("Dataset is required");
+  it("restricts placement to available regions and prevents negative timeouts", async () => {
+    vi.spyOn(api(), "listModels").mockResolvedValue([container]);
+    const invoke = vi.spyOn(api(), "invoke");
+    show(<NewJob initialModel={container.id} />);
+    await userEvent.type(await screen.findByLabelText("Name *"), "job");
+    await userEvent.type(screen.getByLabelText("image *"), "image:tag");
+    await userEvent.type(screen.getByLabelText("command *"), "python run.py");
+    const region = screen.getByLabelText("Region") as HTMLSelectElement;
     expect(
-      buildJobRequest(fileModel, {}, options, { dataset: "s3://test/dataset" })
-        .input,
-    ).toEqual({ dataset: "s3://test/dataset" });
-    expect(() =>
-      buildJobRequest(container, {}, { ...options, timeoutH: 0 }),
-    ).toThrow("Timeout");
-    expect(() =>
-      buildJobRequest(container, {}, { ...options, region: "unknown" }),
-    ).toThrow("region");
+      [...region.options].some((option) => option.value === "unknown"),
+    ).toBe(false);
+    const timeout = screen.getByLabelText(
+      "Job timeout (hours)",
+    ) as HTMLInputElement;
+    fireEvent.change(timeout, { target: { value: "-1" } });
+    expect(timeout.checkValidity()).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Create job" }));
+    expect(invoke).not.toHaveBeenCalled();
   });
   it("shows a recoverable catalog error", async () => {
     vi.spyOn(api(), "listModels").mockRejectedValue(
@@ -263,28 +269,32 @@ describe("job submission", () => {
     const upload = vi
       .spyOn(api(), "uploadArtifact")
       .mockResolvedValue("s3://test/dataset");
-    const invoke = vi
-      .spyOn(api(), "invoke")
-      .mockResolvedValue({
-        id: "file-result",
-        model: model.id,
-        mode: "run",
-        region: "test-west",
-        status: "QUEUED",
-        created_at: "2026-01-01",
-      });
+    const invoke = vi.spyOn(api(), "invoke").mockResolvedValue({
+      id: "file-result",
+      model: model.id,
+      mode: "run",
+      region: "test-west",
+      status: "QUEUED",
+      created_at: "2026-01-01",
+    });
     show(<NewJob initialModel={model.id} />);
-    await userEvent.type(await screen.findByLabelText("Job name"), "file-job");
+    await userEvent.type(await screen.findByLabelText("Name *"), "file-job");
     await userEvent.click(screen.getByRole("button", { name: "Create job" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Dataset is required",
-    );
+    expect(
+      (screen.getByLabelText("Dataset *") as HTMLInputElement).checkValidity(),
+    ).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
     const file = new File(["synthetic data"], "data.txt", {
       type: "text/plain",
     });
     await userEvent.upload(screen.getByLabelText("Dataset *"), file);
-    await userEvent.click(screen.getByRole("button", { name: "Create job" }));
+    expect(
+      (screen.getByLabelText("Dataset *") as HTMLInputElement).files?.[0],
+    ).toBe(file);
+    // jsdom's required-file validator does not see user-event's synthetic FileList.
+    fireEvent.submit(
+      screen.getByRole("button", { name: "Create job" }).closest("form")!,
+    );
     await waitFor(() => expect(invoke).toHaveBeenCalled());
     expect(upload).toHaveBeenCalledWith(file, undefined);
     expect(invoke.mock.calls[0][1].input).toEqual({
@@ -305,10 +315,7 @@ describe("regional endpoints", () => {
       "href",
       "#/endpoints/chat?region=test-east",
     );
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "Search endpoints" }),
-      "east",
-    );
+    await userEvent.type(screen.getByLabelText("Search by name or ID"), "east");
     expect(
       screen.queryByRole("link", { name: "Chat model" }),
     ).not.toBeInTheDocument();
@@ -316,14 +323,14 @@ describe("regional endpoints", () => {
   it("passes the region on detail reads and does not invent telemetry", async () => {
     const get = vi.spyOn(api(), "getEndpoint").mockResolvedValue(endpoint);
     show(<EndpointDetail id="chat" region="test-west" />);
-    await screen.findByText("Endpoint information");
+    await screen.findByText("Endpoint URL");
     expect(get).toHaveBeenCalledWith("chat", "test-west");
     expect(screen.queryByText("In-flight requests")).not.toBeInTheDocument();
     expect(screen.queryByText("Last cold start")).not.toBeInTheDocument();
     expect(
-      screen.getByText("Monitoring is not configured for this console."),
-    ).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "Try it" }));
+      screen.queryByText("Monitoring is not configured for this console."),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Test request" }));
     expect(screen.getByLabelText("Request body (JSON)")).toHaveValue(
       JSON.stringify(sampleBody(endpoint), null, 2),
     );
@@ -340,7 +347,7 @@ it("members see their own key without making an administrator-only list request"
   vi.spyOn(api(), "keyInfo").mockResolvedValue({ ...principal, role: "user" });
   vi.spyOn(api(), "listModels").mockResolvedValue([]);
   show(<Keys />, "user");
-  await screen.findByText(/Unlimited/);
+  await screen.findAllByText(/Unlimited/);
   expect(list).not.toHaveBeenCalled();
   expect(
     screen.queryByRole("button", { name: "Create API key" }),
@@ -366,7 +373,7 @@ it("validates the saved session, starts on Endpoints and clears the key on sign 
   );
   await screen.findByRole("heading", { name: "Endpoints" });
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
-  await screen.findByRole("heading", { name: "Sign in" });
+  await screen.findByRole("heading", { name: "Nebius Serverless" });
   expect(settings.key).toBe("");
 });
 it("the skip link focuses content without changing the hash route", async () => {

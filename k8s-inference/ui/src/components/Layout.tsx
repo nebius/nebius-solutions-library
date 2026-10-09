@@ -1,28 +1,28 @@
-import { useRef, useState, type ReactNode } from "react";
-import { Icon } from "@gravity-ui/uikit";
+import { useState, type ReactNode } from "react";
 import {
   Bars,
   Cube,
-  Server,
-  Key,
   Gear,
-  CirclePlay,
-  ArrowRightFromSquare,
-  Globe,
-  Person,
+  Key,
+  SquareListUl,
+  PlugConnection,
 } from "@gravity-ui/icons";
+import { Button, Icon } from "@gravity-ui/uikit";
 import { href } from "../router";
-import { apiHost } from "../api/client";
-import { grafanaUrl } from "../config";
-import { Button } from "./controls";
 import { useSession } from "./Session";
+import { previewEnabled } from "../api/client";
+import { ErrorBox, Loading } from "./ui";
 
 const NAV = [
-  ["/endpoints", "Endpoints", Server],
-  ["/jobs", "Jobs", CirclePlay],
-  ["/models", "Models", Cube],
-  ["/keys", "API keys", Key],
+  ["/endpoints", "Endpoints", PlugConnection],
+  ["/jobs", "Jobs", SquareListUl],
+  ["/models", "Saved definitions", Cube],
 ] as const;
+const MANAGE = [
+  ["/keys", "API keys", Key],
+  ["/settings", "Settings", Gear],
+] as const;
+
 export function Layout({
   path,
   crumbs,
@@ -34,131 +34,145 @@ export function Layout({
   children: ReactNode;
   onLogout: () => void;
 }) {
-  const { key, fleet } = useSession();
-  const [expanded, setExpanded] = useState(false);
-  const mainRef = useRef<HTMLElement>(null);
+  const { key, fleet, error, reload } = useSession();
+  const [open, setOpen] = useState(false);
+  if (!key)
+    return (
+      <div className="session-loading">
+        {error ? (
+          <>
+            <ErrorBox msg={error} retry={reload} />
+            <Button onClick={onLogout}>Use another key</Button>
+          </>
+        ) : (
+          <Loading />
+        )}
+      </div>
+    );
   return (
-    <div className="shell">
+    <div
+      className="shell"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}
+    >
       <a
         className="skip-link"
         href="#main-content"
-        onClick={(e) => {
-          e.preventDefault();
-          mainRef.current?.focus();
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
         }}
       >
         Skip to content
       </a>
-      <aside className={`sidebar ${expanded ? "sidebar--expanded" : ""}`}>
+      <aside
+        id="serverless-navigation"
+        className={`sidebar ${open ? "sidebar--open" : ""}`}
+      >
         <a
           className="brand"
           href={href("/endpoints")}
-          aria-label="Nebius Serverless AI home"
+          aria-label="Nebius Serverless home"
         >
-          <img src="/nebius.svg" width="117" height="18" alt="Nebius" />
-          <span>Serverless AI</span>
+          <img src="/nebius-logo.svg" alt="Nebius" width="118" height="24" />
         </a>
-        <div className="sidebar__context">
-          <Icon data={Cube} size={18} />
-          <div>
-            <strong>Inference fleet</strong>
-            <span>Standalone console</span>
-          </div>
-        </div>
         <div className="sidebar__section">Serverless AI</div>
         <nav className="nav" aria-label="Main navigation">
           {NAV.map(([to, label, icon]) => (
             <a
               key={to}
               href={href(to)}
-              onClick={() => setExpanded(false)}
-              aria-current={path === to ? "page" : undefined}
               className={path === to ? "active" : ""}
+              aria-current={path === to ? "page" : undefined}
+              onClick={() => setOpen(false)}
             >
-              <Icon data={icon} size={18} />
+              <Icon data={icon} size={16} />
               {label}
             </a>
           ))}
         </nav>
-        <div className="sidebar__bottom">
-          <nav className="nav" aria-label="Console navigation">
-            {grafanaUrl() && (
-              <a href={grafanaUrl()} target="_blank" rel="noreferrer">
-                <Icon data={Globe} size={18} />
-                Observability
-              </a>
-            )}
+        <div className="sidebar__section">Manage</div>
+        <nav className="nav" aria-label="Management">
+          {MANAGE.map(([to, label, icon]) => (
             <a
-              href={href("/settings")}
-              onClick={() => setExpanded(false)}
-              className={path === "/settings" ? "active" : ""}
-              aria-current={path === "/settings" ? "page" : undefined}
+              key={to}
+              href={href(to)}
+              className={path === to ? "active" : ""}
+              onClick={() => setOpen(false)}
             >
-              <Icon data={Gear} size={18} />
-              Settings
+              <Icon data={icon} size={16} />
+              {label}
             </a>
-          </nav>
-          <div className="sidebar__footer">
-            <div className="account">
-              <span className="account__avatar">
-                <Icon data={Person} size={18} />
-              </span>
-              <div>
-                <strong>{key?.alias || key?.tenant || "API key"}</strong>
-                <span>
-                  {key?.role === "admin" ? "Administrator" : "Member"}
-                </span>
-              </div>
-            </div>
-            <Button view="flat" size="m" onClick={onLogout}>
-              <Icon data={ArrowRightFromSquare} size={16} />
-              Sign out
-            </Button>
-          </div>
+          ))}
+        </nav>
+        <div className="sidebar__footer">
+          <div>Serverless inference fleet</div>
+          <div className="small">{key?.tenant ?? "Connecting…"}</div>
+          <button onClick={onLogout}>Sign out</button>
         </div>
       </aside>
       <div className="main">
         <header className="topbar">
-          <div className="row">
+          <div className="context">
             <Button
-              className="menu-toggle"
+              className="mobile-menu"
               view="flat"
               aria-label="Toggle navigation"
-              aria-expanded={expanded}
-              onClick={() => setExpanded(!expanded)}
+              aria-expanded={open}
+              aria-controls="serverless-navigation"
+              onClick={() => setOpen(!open)}
             >
-              <Icon data={Bars} size={20} />
+              <Icon data={Bars} />
             </Button>
             <Icon data={Cube} size={16} />
-            <strong>{key?.tenant || "Inference fleet"}</strong>
-            <span className="context-tag">Standalone</span>
+            <span>{key?.tenant ?? "Serverless"}</span>
+            <span className="context-separator">/</span>
+            <span>Inference fleet</span>
           </div>
-          <span className="topbar__region">
-            <Icon data={Globe} size={16} />
-            {fleet
-              ? `${fleet.regions.length} region${fleet.regions.length === 1 ? "" : "s"}`
-              : "Region information unavailable"}
-          </span>
-        </header>
-        <main id="main-content" ref={mainRef} tabIndex={-1} className="content">
-          <nav className="crumbs" aria-label="Breadcrumb">
-            <a href={href("/endpoints")}>Serverless AI</a>
-            {crumbs.map((c, i) => (
-              <span key={i}>
-                <span className="crumb-divider">/</span>
-                {c.to ? (
-                  <a href={href(c.to)}>{c.label}</a>
-                ) : (
-                  <span aria-current="page">{c.label}</span>
-                )}
+          <div className="topbar-tools">
+            {previewEnabled && (
+              <span
+                className="badge preview-label"
+                title="UI preview · sample data"
+              >
+                <span className="preview-label-desktop">
+                  UI preview · sample data
+                </span>
+                <span className="preview-label-mobile">Sample data</span>
               </span>
-            ))}
-          </nav>
+            )}
+            <span className="region-context small muted">
+              {fleet?.regions.length
+                ? `${fleet.regions.length} region${fleet.regions.length === 1 ? "" : "s"}`
+                : ""}
+            </span>
+            <span className="tenant-role small muted">
+              {key?.role === "admin" ? "Administrator" : ""}
+            </span>
+            <span className="tenant-avatar" aria-label="Tenant">
+              {key?.tenant?.slice(0, 1).toUpperCase() ?? "N"}
+            </span>
+          </div>
+        </header>
+        <main id="main-content" className="content" tabIndex={-1}>
+          {crumbs.length > 1 && (
+            <nav className="crumbs" aria-label="Breadcrumb">
+              <a href={href("/endpoints")}>Serverless</a>
+              {crumbs.map((c, i) => (
+                <span key={i} className="crumbs" style={{ margin: 0 }}>
+                  <span>/</span>
+                  {c.to ? (
+                    <a href={href(c.to)}>{c.label}</a>
+                  ) : (
+                    <span className="current">{c.label}</span>
+                  )}
+                </span>
+              ))}
+            </nav>
+          )}
           {children}
         </main>
-        <footer className="main-footer">
-          Serverless AI<span title={apiHost()}>Connected to {apiHost()}</span>
-        </footer>
       </div>
     </div>
   );

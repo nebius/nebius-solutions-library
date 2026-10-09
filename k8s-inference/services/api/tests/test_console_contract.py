@@ -41,14 +41,9 @@ def test_endpoint_reads_and_scaling_target_the_selected_region(client, monkeypat
     async def admin_info(key):
         return dict(ADMIN_INFO)
     monkeypatch.setattr(auth, "key_info", admin_info)
-    calls = []
-    def patch(*args):
-        calls.append(args)
-        return isvc
-    monkeypatch.setattr(south, "patch_namespaced_custom_object", patch)
-    assert c.patch("/v1/endpoints/llm-example?region=eu-south1", json={"min_replicas": 1}, headers=H).json()["region"] == "eu-south1"
-    assert len(calls) == 1
-    assert calls[0][-1]["spec"]["predictor"] == {"minReplicas": 1}
+    # Fleet definitions are read-only for admins as well. API-managed policies are
+    # persisted and reconciled across regions, covered in test_api.py.
+    assert c.patch("/v1/endpoints/llm-example?region=eu-south1", json={"min_replicas": 1}, headers=H).status_code == 403
 
 
 def test_replica_cache_is_separate_for_each_region(cluster, monkeypatch):

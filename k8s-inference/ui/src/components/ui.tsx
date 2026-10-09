@@ -1,4 +1,5 @@
 import {
+  Children,
   cloneElement,
   createContext,
   isValidElement,
@@ -10,8 +11,9 @@ import {
   type ReactNode,
   type ReactElement,
 } from "react";
-import { Modal as GravityModal, Loader, Label } from "@gravity-ui/uikit";
-import { Button } from "./controls";
+import { Button, Icon, Modal as GravityModal } from "@gravity-ui/uikit";
+import { Copy, Xmark } from "@gravity-ui/icons";
+export { Button, Icon };
 import type { OperationStatus } from "../api/types";
 
 // ---------- formatting ----------
@@ -45,7 +47,8 @@ export const fmt = {
     return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
   },
   secs(s?: number) {
-    if (s == null) return "—";
+    if (s == null) return "-";
+    if (s === 0) return "off";
     if (s < 60) return `${s} s`;
     if (s < 3600) return `${Math.round(s / 60)} min`;
     return `${(s / 3600).toFixed(1)} h`;
@@ -60,15 +63,15 @@ export const fmt = {
     }
     return `${b.toFixed(i ? 1 : 0)} ${u[i]}`;
   },
-  usd(v?: number | null) {
-    return v == null ? "—" : `$${v.toFixed(2)}`;
+  usd(v?: number) {
+    return v == null ? "-" : `$${v.toFixed(2)}`;
   },
 };
 
 // ---------- status badge ----------
 const tone: Record<string, string> = {
   SUCCEEDED: "success",
-  RUNNING: "violet",
+  RUNNING: "success",
   ADMITTED: "info",
   QUEUED: "info",
   PREEMPTED: "warning",
@@ -91,21 +94,19 @@ export function Badge({
   children?: ReactNode;
 }) {
   const t = tone[status] ?? "";
-  const theme =
-    (
-      {
-        success: "success",
-        violet: "info",
-        info: "info",
-        warning: "warning",
-        danger: "danger",
-      } as const
-    )[t as "success" | "violet" | "info" | "warning" | "danger"] ?? "normal";
+  const names: Record<string, string> = {
+    ready: "Running",
+    "scaled-to-zero": "Idle",
+    SUCCEEDED: "Completed",
+    PREEMPTED: "Recovering",
+  };
   return (
-    <Label theme={theme} size="m" className="status-label">
-      <span className={`status-dot ${t}`} />
-      {children ?? status.toLowerCase().replace(/-/g, " ")}
-    </Label>
+    <span className={`badge ${t ? "badge--" + t : ""}`}>
+      {children ??
+        names[status] ??
+        status.slice(0, 1).toUpperCase() +
+          status.slice(1).toLowerCase().replace(/-/g, " ")}
+    </span>
   );
 }
 
@@ -120,10 +121,6 @@ export function useAsync<T>(
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((t) => t + 1), []);
-  useEffect(() => {
-    setData(null);
-    setError(null);
-  }, deps);
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -172,13 +169,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div className="toasts" aria-live="polite">
+      <div className="toasts">
         {list.map((t) => (
-          <div
-            key={t.id}
-            role={t.err ? "alert" : "status"}
-            className={`toast ${t.err ? "toast--err" : ""}`}
-          >
+          <div key={t.id} className={`toast ${t.err ? "toast--err" : ""}`}>
             {t.text}
           </div>
         ))}
@@ -199,21 +192,20 @@ export function Modal({
   children: ReactNode;
   width?: number;
 }) {
-  const id = useId();
+  const heading = useId();
   return (
     <GravityModal
       open
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
-      aria-labelledby={id}
-      contentClassName="console-modal"
+      aria-labelledby={heading}
     >
-      <div style={{ width: width ?? 520, maxWidth: "calc(100vw - 32px)" }}>
+      <div className="modal" style={{ width: width ?? 560 }}>
         <div className="card__head">
-          <h2 id={id}>{title}</h2>
-          <Button view="flat" onClick={onClose} aria-label="Close dialog">
-            ×
+          <h2 id={heading}>{title}</h2>
+          <Button view="flat" onClick={onClose} aria-label="Close">
+            <Icon data={Xmark} />
           </Button>
         </div>
         <div className="card__body">{children}</div>
@@ -227,9 +219,8 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 export function Loading() {
   return (
-    <div className="empty" role="status">
-      <Loader size="m" />
-      <span>Loading resources…</span>
+    <div className="empty">
+      <span className="spin" /> Loading
     </div>
   );
 }
@@ -238,9 +229,9 @@ export function ErrorBox({ msg, retry }: { msg: string; retry?: () => void }) {
     <div className="banner banner--danger" role="alert">
       <span>{msg}</span>
       {retry && (
-        <Button size="m" onClick={retry}>
+        <button className="btn btn--sm" onClick={retry}>
           Retry
-        </Button>
+        </button>
       )}
     </div>
   );
@@ -256,35 +247,127 @@ export function Stat({ label, value }: { label: string; value: ReactNode }) {
 export function Field({
   label,
   help,
-  children,
   error,
+  children,
 }: {
   label: string;
   help?: string;
-  children: ReactNode;
   error?: string;
+  children: ReactNode;
 }) {
   const id = useId();
-  const child = isValidElement(children)
-    ? (children as ReactElement<Record<string, unknown>>)
-    : null;
-  const control =
-    child && child.type !== "div" && child.type !== "label"
-      ? cloneElement(child, {
-          id: child.props.id ?? id,
-          "aria-describedby": `${id}-help`,
-          "aria-invalid": !!error,
+  const controls = Children.map(children, (child) =>
+    isValidElement(child) &&
+    (typeof child.type !== "string" ||
+      ["input", "select", "textarea"].includes(child.type))
+      ? cloneElement(child as ReactElement<Record<string, unknown>>, {
+          id,
+          "aria-describedby": help || error ? id + "-help" : undefined,
+          "aria-invalid": Boolean(error),
         })
-      : children;
+      : child,
+  );
   return (
     <div className="field">
-      <label htmlFor={child ? String(child.props.id ?? id) : undefined}>
-        {label}
-      </label>
-      {control}
-      <span id={`${id}-help`} className={error ? "field-error" : "help"}>
-        {error ?? help}
-      </span>
+      <label htmlFor={id}>{label}</label>
+      {controls}
+      {(help || error) && (
+        <span id={id + "-help"} className={error ? "help field-error" : "help"}>
+          {error ?? help}
+        </span>
+      )}
     </div>
+  );
+}
+
+export function CopyButton({
+  value,
+  label = "Copy ID",
+}: {
+  value: string;
+  label?: string;
+}) {
+  const toast = useToast();
+  return (
+    <Button
+      view="flat"
+      size="s"
+      className="copy-button"
+      aria-label={label}
+      title={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(value).then(
+          () => toast("Copied"),
+          () => toast("Could not copy", true),
+        );
+      }}
+    >
+      <Icon data={Copy} size={13} />
+    </Button>
+  );
+}
+
+export function Tabs({
+  items,
+  active,
+  onChange,
+}: {
+  items: string[];
+  active: string;
+  onChange: (tab: string) => void;
+}) {
+  return (
+    <div className="tabs" role="tablist" aria-label="Resource sections">
+      {items.map((tab) => (
+        <button
+          key={tab}
+          role="tab"
+          aria-selected={tab === active}
+          tabIndex={tab === active ? 0 : -1}
+          className={tab === active ? "active" : ""}
+          onClick={() => onChange(tab)}
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
+              return;
+            event.preventDefault();
+            const index = items.indexOf(tab);
+            const next =
+              event.key === "Home"
+                ? 0
+                : event.key === "End"
+                  ? items.length - 1
+                  : (index +
+                      (event.key === "ArrowRight" ? 1 : -1) +
+                      items.length) %
+                    items.length;
+            onChange(items[next]);
+            event.currentTarget.parentElement
+              ?.querySelectorAll<HTMLButtonElement>("[role=tab]")
+              [next]?.focus();
+          }}
+        >
+          {tab}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Section({
+  title,
+  children,
+  help,
+}: {
+  title: string;
+  children: ReactNode;
+  help?: string;
+}) {
+  return (
+    <section className="form-section">
+      <h2>{title}</h2>
+      {help && <p className="help">{help}</p>}
+      <div className="form">{children}</div>
+    </section>
   );
 }

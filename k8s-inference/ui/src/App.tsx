@@ -1,14 +1,14 @@
 import { useState } from "react";
-import { api, settings } from "./api/client";
+import { previewEnabled, settings } from "./api/client";
 import { Layout } from "./components/Layout";
-import { ErrorBox, Loading, ToastProvider, useAsync } from "./components/ui";
-import { Button } from "./components/controls";
+import { ToastProvider } from "./components/ui";
 import { SessionProvider } from "./components/Session";
+import { DefinitionForm } from "./pages/DefinitionForm";
 import { Endpoints, EndpointDetail } from "./pages/Endpoints";
 import { Jobs, JobDetail } from "./pages/Jobs";
 import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
-import { ModelEditor, Models } from "./pages/Models";
+import { Models } from "./pages/Models";
 import { NewJob } from "./pages/NewJob";
 import { Settings } from "./pages/Settings";
 import { navigate, useRoute } from "./router";
@@ -17,20 +17,7 @@ export default function App() {
   const route = useRoute();
   const [, bump] = useState(0);
   const rerender = () => bump((n) => n + 1);
-  const signedIn = Boolean(settings.key);
-  const session = useAsync(
-    () => (signedIn ? api().keyInfo() : Promise.resolve(null)),
-    [settings.key, settings.apiBase],
-  );
-  const fleet = useAsync(
-    () => (signedIn ? api().fleetInfo() : Promise.resolve(null)),
-    [settings.key, settings.apiBase],
-  );
-  const logout = () => {
-    settings.key = "";
-    rerender();
-    navigate("/");
-  };
+  const signedIn = previewEnabled || Boolean(settings.key);
   if (!signedIn)
     return (
       <Login
@@ -39,19 +26,6 @@ export default function App() {
           if (!location.hash || location.hash === "#/") navigate("/endpoints");
         }}
       />
-    );
-  if (!session.data)
-    return (
-      <div className="session-loading">
-        {session.error ? (
-          <>
-            <ErrorBox msg={session.error} retry={session.reload} />
-            <Button onClick={logout}>Use another key</Button>
-          </>
-        ) : (
-          <Loading />
-        )}
-      </div>
     );
 
   const [root, id] = route.parts;
@@ -77,7 +51,7 @@ export default function App() {
       break;
     case "endpoints":
       if (id === "new") {
-        page = <ModelEditor kind="endpoint" />;
+        page = <DefinitionForm kind="endpoint" />;
         crumbs = [
           { label: "Endpoints", to: "/endpoints" },
           { label: "Create endpoint" },
@@ -85,7 +59,7 @@ export default function App() {
       } else if (id) {
         page = (
           <EndpointDetail
-            key={`${id}:${route.query.get("region")}`}
+            key={`${id}-${route.query.get("region")}`}
             id={id}
             region={route.query.get("region") ?? undefined}
           />
@@ -96,25 +70,6 @@ export default function App() {
         crumbs = [{ label: "Endpoints" }];
       }
       break;
-    case "models":
-      if (id === "new") {
-        page = <ModelEditor kind="job" />;
-        crumbs = [
-          { label: "Models", to: "/models" },
-          { label: "Create model" },
-        ];
-      } else if (id && route.parts[2] === "edit") {
-        page = <ModelEditor key={id} id={id} />;
-        crumbs = [
-          { label: "Models", to: "/models" },
-          { label: id },
-          { label: "Edit" },
-        ];
-      } else {
-        page = <Models />;
-        crumbs = [{ label: "Models" }];
-      }
-      break;
     case "keys":
       page = <Keys />;
       crumbs = [{ label: "API keys" }];
@@ -123,6 +78,22 @@ export default function App() {
       page = <Settings onChange={rerender} />;
       crumbs = [{ label: "Settings" }];
       break;
+    case "models":
+      page =
+        id === "new" ? (
+          <DefinitionForm kind="job" />
+        ) : id ? (
+          <DefinitionForm key={id} modelId={id} />
+        ) : (
+          <Models />
+        );
+      crumbs = [
+        { label: "Saved definitions", to: "/models" },
+        ...(id
+          ? [{ label: id === "new" ? "Create definition" : "Edit definition" }]
+          : []),
+      ];
+      break;
     default:
       page = <Endpoints />;
       crumbs = [{ label: "Endpoints" }];
@@ -130,8 +101,16 @@ export default function App() {
   const path = root ? "/" + root : "/endpoints";
   return (
     <ToastProvider>
-      <SessionProvider value={{ key: session.data, fleet: fleet.data }}>
-        <Layout path={path} crumbs={crumbs} onLogout={logout}>
+      <SessionProvider key={settings.apiBase}>
+        <Layout
+          path={path}
+          crumbs={crumbs}
+          onLogout={() => {
+            settings.key = "";
+            rerender();
+            navigate("/");
+          }}
+        >
           {page}
         </Layout>
       </SessionProvider>

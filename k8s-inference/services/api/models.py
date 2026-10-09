@@ -32,6 +32,8 @@ are read-only here.
 import json, logging, os, re, subprocess, sys, tempfile, time
 import yaml
 from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube
 from config import ACME_ISSUER, API_NAMESPACE, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, REGION
@@ -47,6 +49,20 @@ ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 PROTOCOLS = ("http", "openai", "websocket", "grpc")
 PROTOCOL_PATH = {"openai": "/v1/chat/completions", "http": "/", "websocket": "/", "grpc": "/"}
 RESERVED = ("images", "routing")            # stored, not acted on
+
+
+class ScalingSpec(BaseModel):
+    """Knative KPA controls supported by the pinned endpoint deployment."""
+    model_config = ConfigDict(extra="forbid")
+    min: int | None = Field(default=None, ge=0)
+    max: int | None = Field(default=None, ge=1)
+    metric: Literal["concurrency_utilization", "requests_per_second", "concurrency", "rps"] | None = None
+    target: int | None = Field(default=None, ge=1)
+    utilization_percent: int | None = Field(default=None, ge=1, le=100)
+    container_concurrency: int | None = Field(default=None, ge=0, le=1000)
+    cooldown_s: int | None = Field(default=None, ge=0, le=3600)
+    window_s: int | None = Field(default=None, ge=6, le=3600)
+    idle_s: int | None = Field(default=None, ge=0, le=3600)
 # public registries -> the alias the image cache serves them under (terraform.tfvars `images.upstreams`)
 UPSTREAM_ALIAS = {"docker.io": "docker", "registry-1.docker.io": "docker", "index.docker.io": "docker",
                   "nvcr.io": "nvcr", "ghcr.io": "ghcr", "quay.io": "quay", "registry.k8s.io": "k8s"}
@@ -138,6 +154,27 @@ def validate(spec: dict) -> dict:
             raise HTTPException(400, f"protocol: one of {PROTOCOLS}")
         if not isinstance(s.get("port", 8080), int):
             raise HTTPException(400, "port: an integer")
+        try:
+            scaling = ScalingSpec.model_validate(s.get("scaling") or {}).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(400, f"scaling: {exc.errors()[0]['msg']}") from exc
+        if scaling.get("min", 0) > scaling.get("max", 1):
+            raise HTTPException(400, "Minimum replicas cannot exceed maximum replicas.")
+        metric = scaling.get("metric", "concurrency")
+        if metric in ("concurrency_utilization", "requests_per_second"):
+            if scaling.get("window_s", 30) > 300:
+                raise HTTPException(400, "Evaluation interval must be between 6 and 300 seconds.")
+            scaling.pop("utilization_percent", None)  # target has metric-specific units
+            if metric == "concurrency_utilization":
+                target = scaling.setdefault("target", 100)
+                concurrency = scaling.setdefault("container_concurrency", 1)
+                if target > 100 or concurrency < 1:
+                    raise HTTPException(400, "Concurrency target must be 1–100%; replica concurrency must be at least 1.")
+            else:
+                scaling.setdefault("target", 5)
+                scaling["container_concurrency"] = 0  # request-rate mode has no concurrency cap
+            scaling.setdefault("window_s", 30)
+        s["scaling"] = scaling
     classes = list(gpu.get("classes") or [])
     fleet_classes = sorted({p.get("gpu_class") for p in kube.fleet()["pools"].values() if p.get("gpu_class")})
     if classes and fleet_classes and not any(c in fleet_classes for c in classes):
@@ -167,15 +204,35 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         path = s.get("path") or PROTOCOL_PATH[protocol]
         port = int(s.get("port", 8080))
         scaling = s.get("scaling") or {}
+        metric = scaling.get("metric", "concurrency")
+        concurrency = int(scaling.get("container_concurrency", 1 if metric == "concurrency_utilization" else 0))
+        native_metric = "concurrency" if metric == "concurrency_utilization" else "rps" if metric == "requests_per_second" else metric
+        native_target = concurrency if metric == "concurrency_utilization" else int(scaling.get("target", 5 if metric == "requests_per_second" else 4))
         res = s.get("resources") or {}
         runtime: dict = {
             "image": image, "port": port, "protocol": protocol,
             "resources": {"gpu": count, "cpu": str(res.get("cpu", "4")), "memory": str(res.get("memory", "16Gi"))},
             "scaling": {"minReplicas": int(scaling.get("min", 0)), "maxReplicas": int(scaling.get("max", 1)),
-                        "metric": "concurrency", "target": int(scaling.get("target", 4))},
+                        "metric": native_metric, "target": native_target,
+                        **({"containerConcurrency": concurrency} if "container_concurrency" in scaling or metric == "concurrency_utilization" else {}),
+                        **({"scaleToZeroRetention": f"{int(scaling['idle_s'])}s"} if scaling.get("idle_s") is not None else {})},
             "timeout": int(s.get("timeout_s", 600)),
             "shm": {"enabled": True, "size": f"{int(s.get('shm_gib', 1))}Gi"},
         }
+        annotations = {}
+        for key, annotation, suffix in (
+            ("utilization_percent", "target-utilization-percentage", ""),
+            ("cooldown_s", "scale-down-delay", "s"),
+            ("window_s", "window", "s"),
+        ):
+            if key in scaling:
+                annotations[f"autoscaling.knative.dev/{annotation}"] = f"{scaling[key]}{suffix}"
+        if metric in ("concurrency_utilization", "requests_per_second"):
+            annotations["autoscaling.knative.dev/target-utilization-percentage"] = str(scaling.get("target", 100)) if metric == "concurrency_utilization" else "100"
+            if metric == "requests_per_second":
+                runtime["scaling"]["containerConcurrency"] = 0
+        if annotations:
+            runtime["annotations"] = annotations
         if s.get("args"):
             runtime["args"] = [str(a) for a in s["args"]]
         if (cmd := _command(s.get("command"))):
@@ -208,6 +265,10 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "graceSeconds": int(s.get("grace_seconds", 300)), "scratch": s.get("scratch", "network"),
             "env": dict(s.get("env") or {}),
         }
+        if s.get("args"):
+            job["args"] = s["args"]
+        if s.get("pull_secret"):
+            job["imagePullSecret"] = s["pull_secret"]
         entry.update({
             "mode": "run", "protocol": "kubernetes-job",
             "gpu": {"count": count, "classes": classes} if classes else "none",

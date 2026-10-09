@@ -1,139 +1,115 @@
 import { useEffect, useState } from "react";
-import { Checkbox } from "@gravity-ui/uikit";
+import { Cube, Terminal } from "@gravity-ui/icons";
 import { api } from "../api/client";
-import type { Model, ModelParam, InvokeRequest } from "../api/types";
+import type { ModelParam } from "../api/types";
+import { useSession } from "../components/Session";
 import {
-  Empty,
+  Button,
   ErrorBox,
   Field,
+  Icon,
   Loading,
+  Modal,
+  Section,
   fmt,
   useAsync,
   useToast,
 } from "../components/ui";
-import {
-  Button,
-  Input,
-  Area,
-  Pick,
-  PageHeader,
-  FormSection,
-} from "../components/controls";
-import { useSession } from "../components/Session";
-import { href, navigate } from "../router";
+import { parseEnvironment } from "./DefinitionForm";
+import { navigate } from "../router";
 
-type ParamValue = string | number | boolean;
-export function defaultsFor(m: Model): Record<string, ParamValue> {
-  return Object.fromEntries(
-    (m.parameters ?? [])
-      .filter((p) => p.default != null)
-      .map((p) => [p.name, p.default!]),
-  );
-}
-export function buildJobRequest(
-  model: Model,
-  values: Record<string, ParamValue>,
-  options: {
-    name: string;
-    region: string;
-    priority: string;
-    timeoutH: number;
-    mode: "run" | "async";
-  },
-  uploads: Record<string, string> = {},
-): InvokeRequest {
-  if (!options.name.trim()) throw new Error("Job name is required.");
-  if (!Number.isFinite(options.timeoutH) || options.timeoutH <= 0)
-    throw new Error("Timeout must be greater than zero.");
-  if (options.region && !model.regions.some((r) => r.region === options.region))
-    throw new Error("Select a region where this model is deployed.");
-  if (!model.modes.includes(options.mode))
-    throw new Error("This model does not support the selected execution mode.");
-  const input: Record<string, unknown> = {};
-  for (const p of model.parameters ?? []) {
-    const value = uploads[p.name] ?? values[p.name];
-    if (p.required && (value == null || value === ""))
-      throw new Error(`${p.label ?? p.name} is required.`);
-    if (value == null || value === "") continue;
-    if (p.type === "number") {
-      if (!Number.isFinite(Number(value)))
-        throw new Error(`${p.label ?? p.name} must be a number.`);
-      input[p.name] = Number(value);
-    } else if (
-      p.type === "text" &&
-      typeof value === "string" &&
-      /^\s*[[{]/.test(value)
-    ) {
-      try {
-        input[p.name] = JSON.parse(value);
-      } catch {
-        throw new Error(`${p.label ?? p.name} must contain valid JSON.`);
-      }
-    } else input[p.name] = value;
-  }
-  return {
-    name: options.name.trim(),
-    mode: options.mode,
-    input,
-    region: options.region || undefined,
-    priority: options.priority,
-    timeout_s: Math.round(options.timeoutH * 3600),
-  };
-}
 export function NewJob({ initialModel }: { initialModel?: string }) {
+  const { key, fleet } = useSession();
   const toast = useToast();
-  const { fleet } = useSession();
   const models = useAsync(() => api().listModels(), []);
-  const [selected, setSelected] = useState(initialModel ?? "");
+  const [source, setSource] = useState(initialModel ? "saved" : "image");
+  const [modelId, setModelId] = useState(initialModel ?? "");
   const [name, setName] = useState("");
-  const [params, setParams] = useState<Record<string, ParamValue>>({});
+  const [params, setParams] = useState<Record<string, unknown>>({});
   const [files, setFiles] = useState<Record<string, File>>({});
+  const [env, setEnv] = useState("");
+  const [args, setArgs] = useState("");
   const [region, setRegion] = useState("");
-  const [mode, setMode] = useState<"run" | "async">("run");
   const [priority, setPriority] = useState("normal");
-  const [timeoutH, setTimeoutH] = useState(2);
-  const [error, setError] = useState("");
+  const [timeout, setTimeout] = useState(0);
+  const [mode, setMode] = useState<"run" | "async">("run");
   const [busy, setBusy] = useState(false);
-  const runnable = (models.data ?? []).filter((m) =>
-    m.modes.some((v) => v === "run" || v === "async"),
+  const [error, setError] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [code, setCode] = useState(false);
+  const model = models.data?.find(
+    (m) => m.id === (source === "image" ? "container-run" : modelId),
   );
-  const model = runnable.find((m) => m.id === selected);
   useEffect(() => {
     if (!model) return;
-    setParams(defaultsFor(model));
-    setFiles({});
-    setError("");
-    setMode(model.modes.includes("run") ? "run" : "async");
-    setRegion(
-      fleet?.fleet_manager && model.modes.includes("run")
-        ? ""
-        : (model.regions[0]?.region ?? ""),
+    const defaults = Object.fromEntries(
+      (model.parameters ?? [])
+        .filter((p) => p.default != null)
+        .map((p) => [
+          p.name,
+          typeof p.default === "object" ? JSON.stringify(p.default) : p.default,
+        ]),
     );
-  }, [model?.id, fleet?.fleet_manager]);
-  async function submit(ev: React.FormEvent) {
-    ev.preventDefault();
-    setError("");
-    if (!model) {
-      setError("Choose a model or the container-run job class.");
-      return;
-    }
-    const options = { name, region, mode, priority, timeoutH };
-    try {
-      buildJobRequest(model, params, options);
-    } catch (err) {
-      setError((err as Error).message);
-      return;
-    }
-    setBusy(true);
-    try {
-      const uploads: Record<string, string> = {};
-      for (const [key, file] of Object.entries(files)) {
-        toast(`Uploading ${file.name}`);
-        uploads[key] = await api().uploadArtifact(file, region || undefined);
+    setParams(defaults);
+    setFiles({});
+    setMode(model.modes.includes("run") ? "run" : "async");
+    setRegion(fleet?.fleet_manager ? "" : (model.regions[0]?.region ?? ""));
+  }, [model?.id, source, fleet?.fleet_manager]);
+  const setParam = (p: string, value: unknown) =>
+    setParams((current) => ({ ...current, [p]: value }));
+  function payload() {
+    const input = { ...params };
+    for (const [k, v] of Object.entries(input))
+      if (
+        model?.parameters?.find((p) => p.name === k)?.type === "text" &&
+        typeof v === "string" &&
+        /^\s*[\[{]/.test(v)
+      ) {
+        try {
+          input[k] = JSON.parse(v);
+        } catch {
+          throw new Error(`${k}: enter valid JSON.`);
+        }
       }
-      const request = buildJobRequest(model, params, options, uploads);
-      const r = await api().invoke(model.id, request);
-      const op = "operation" in r ? r.operation : r;
+    if (source === "image") {
+      input.env = parseEnvironment(env);
+      input.args = args.split("\n").filter((a) => a.trim());
+    }
+    return {
+      name: name.trim(),
+      mode,
+      input,
+      ...(region ? { region } : {}),
+      priority,
+      ...(timeout > 0 ? { timeout_s: Math.round(timeout * 3600) } : {}),
+    };
+  }
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const invalid: Record<string, string> = {};
+    if (!name.trim()) invalid.name = "Enter a job name.";
+    if (!model) invalid.model = "Choose an available definition.";
+    model?.parameters?.forEach((p) => {
+      if (
+        p.required &&
+        (params[p.name] == null || params[p.name] === "") &&
+        !files[p.name]
+      )
+        invalid[p.name] = `${p.label ?? p.name} is required.`;
+    });
+    setErrors(invalid);
+    if (Object.keys(invalid).length) return;
+    setBusy(true);
+    setError("");
+    try {
+      const request = payload();
+      for (const [p, file] of Object.entries(files))
+        request.input[p] = await api().uploadArtifact(
+          file,
+          region || undefined,
+        );
+      const result = await api().invoke(model!.id, request);
+      const op = "operation" in result ? result.operation : result;
       toast("Job submitted");
       navigate(`/jobs/${op.id}`);
     } catch (err) {
@@ -145,239 +121,414 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
   if (models.error)
     return <ErrorBox msg={models.error} retry={models.reload} />;
   if (!models.data) return <Loading />;
+  const available = models.data.filter(
+    (m) => m.modes.includes("run") || m.modes.includes("async"),
+  );
+  const generic = source === "image";
+  const hidden = new Set([
+    "image",
+    "command",
+    "args",
+    "env",
+    "gpus",
+    "cpu",
+    "memory",
+    "disk_gi",
+    "scratch",
+    "input_prefix",
+  ]);
   return (
-    <>
-      <PageHeader
-        title="Create job"
-        description="Run a model or your own container as a background job."
-      />
-      {!runnable.length ? (
-        <Empty>
-          <h2>No job models available</h2>
-          <p>Create a job class or ask an administrator to enable one.</p>
-          <Button href={href("/models")}>View models</Button>
-        </Empty>
-      ) : (
-        <form className="editor-grid" onSubmit={submit}>
-          <div className="editor-main">
-            <FormSection
-              title="General"
-              description="Name the run and choose its configuration."
+    <div className="form-layout">
+      <form onSubmit={submit}>
+        <div className="page-head">
+          <h1>Create job</h1>
+        </div>
+        {error && <ErrorBox msg={error} />}
+        <Section title="Name and context">
+          <Field label="Tenant">
+            <input className="input" value={key?.tenant ?? ""} readOnly />
+          </Field>
+          <Field label="Name *" error={errors.name}>
+            <input
+              className="input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my-training-job"
+              required
+            />
+          </Field>
+        </Section>
+        <Section title="Job settings">
+          <div className="radio-cards">
+            <button
+              type="button"
+              className={`radio-card ${generic ? "active" : ""}`}
+              onClick={() => setSource("image")}
             >
-              <Field label="Job name">
-                <Input
-                  value={name}
-                  onChange={setName}
-                  placeholder="my-job"
-                  controlProps={{ required: true }}
-                />
-              </Field>
-              <Field
-                label="Model"
-                help="Choose container-run to run your own image."
-              >
-                <Pick
-                  value={selected}
-                  onChange={setSelected}
-                  placeholder="Select a model"
-                  filterable
-                  options={runnable.map((m) => ({
-                    value: m.id,
-                    label:
-                      m.id === "container-run"
-                        ? "Your own container · container-run"
-                        : m.name,
-                  }))}
-                />
-              </Field>
-              {model?.description && (
-                <p className="help">{model.description}</p>
-              )}
-              {model &&
-                model.modes.includes("run") &&
-                model.modes.includes("async") && (
-                  <Field label="Execution mode">
-                    <Pick
-                      value={mode}
-                      onChange={(v) => {
-                        setMode(v as typeof mode);
-                        if (v === "async" && !region)
-                          setRegion(model.regions[0]?.region ?? "");
-                      }}
-                      options={[
-                        { value: "run", label: "Container job" },
-                        { value: "async", label: "Asynchronous inference" },
-                      ]}
-                    />
-                  </Field>
-                )}
-            </FormSection>
-            {model && (
-              <FormSection
-                title={
-                  model.id === "container-run"
-                    ? "Container and resources"
-                    : "Input parameters"
-                }
-                description={
-                  model.id === "container-run"
-                    ? "Set the image, shell command and resources for this run."
-                    : "Inputs accepted by this model."
-                }
-              >
-                {model.parameters?.length ? (
-                  model.parameters.map((p) => (
-                    <ParamInput
-                      key={`${model.id}:${p.name}`}
-                      p={p}
-                      value={params[p.name]}
-                      onChange={(v) =>
-                        setParams((s) => ({ ...s, [p.name]: v }))
-                      }
-                      onFile={(file) =>
-                        setFiles((s) => {
-                          const out = { ...s };
-                          if (file) out[p.name] = file;
-                          else delete out[p.name];
-                          return out;
-                        })
-                      }
-                    />
-                  ))
-                ) : (
-                  <p className="muted">This model has no input parameters.</p>
-                )}
-              </FormSection>
-            )}
-            <FormSection
-              title="Scheduling"
-              description="Choose where and how long the job can run."
+              <Icon data={Terminal} size={22} />
+              <strong>Custom container</strong>
+              <small>Run your image and command.</small>
+            </button>
+            <button
+              type="button"
+              className={`radio-card ${!generic ? "active" : ""}`}
+              onClick={() => setSource("saved")}
             >
-              <div className="form-grid">
-                <Field label="Region">
-                  <Pick
-                    value={region}
-                    onChange={setRegion}
-                    placeholder="Select a model first"
-                    disabled={!model}
-                    options={[
-                      ...(fleet?.fleet_manager && mode === "run"
-                        ? [{ value: "", label: "Automatic placement" }]
-                        : []),
-                      ...(model?.regions ?? []).map((r) => ({
-                        value: r.region,
-                        label: r.region,
-                      })),
-                    ]}
-                  />
-                </Field>
-                <Field label="Priority">
-                  <Pick
-                    value={priority}
-                    onChange={setPriority}
-                    options={["low", "normal", "high"]}
-                  />
-                </Field>
-              </div>
-              <Field
-                label="Timeout (hours)"
-                help="The job stops if it exceeds this duration."
-              >
-                <Input
-                  type="number"
-                  value={timeoutH}
-                  onChange={(v) => setTimeoutH(Number(v))}
-                  controlProps={{ min: 0.01, step: "any", required: true }}
-                />
-              </Field>
-            </FormSection>
-            {error && <ErrorBox msg={error} />}
-            <div className="form-actions">
-              <Button href={href("/jobs")} disabled={busy}>
-                Cancel
-              </Button>
-              <Button primary type="submit" loading={busy}>
-                Create job
-              </Button>
-            </div>
+              <Icon data={Cube} size={22} />
+              <strong>Saved definition</strong>
+              <small>Reuse container and hardware settings.</small>
+            </button>
           </div>
-          <aside className="editor-summary">
-            <h2>Job summary</h2>
-            <dl className="kv">
-              <dt>Name</dt>
-              <dd>{name || "—"}</dd>
-              <dt>Model</dt>
-              <dd>{model?.name ?? "—"}</dd>
-              <dt>Mode</dt>
-              <dd>{mode === "run" ? "Container job" : "Async inference"}</dd>
-              <dt>Region</dt>
-              <dd>{region || (model ? "Automatic" : "—")}</dd>
-              <dt>GPU</dt>
-              <dd>{model?.gpu ?? "—"}</dd>
-              <dt>Priority</dt>
-              <dd>{priority}</dd>
-              <dt>Timeout</dt>
-              <dd>{fmt.secs(timeoutH * 3600)}</dd>
-            </dl>
-            {model && (
-              <div className="summary-note">
-                <span className="help">Pricing</span>
-                <strong>{model.price}</strong>
-              </div>
-            )}
-            <p>Track progress, attempts and results on the job page.</p>
-          </aside>
-        </form>
+          {!generic && (
+            <Field label="Saved definition *" error={errors.model}>
+              <select
+                className="select"
+                required
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
+              >
+                <option value="">Choose a definition</option>
+                {available.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {generic && !model && (
+            <ErrorBox msg="The generic container-run definition is not available in this fleet." />
+          )}
+          {generic && model && (
+            <>
+              <Field label="Image path *" error={errors.image}>
+                <input
+                  className="input"
+                  required
+                  value={String(params.image ?? "")}
+                  onChange={(e) => setParam("image", e.target.value)}
+                  placeholder="registry.example.com/team/image:tag"
+                />
+              </Field>
+              <Field
+                label="Entrypoint command *"
+                error={errors.command}
+                help="Executed by /bin/sh -c. Save results under /work/out."
+              >
+                <textarea
+                  className="textarea mono"
+                  rows={3}
+                  required
+                  value={String(params.command ?? "")}
+                  onChange={(e) => setParam("command", e.target.value)}
+                  placeholder="python train.py"
+                />
+              </Field>
+              <Field
+                label="Arguments"
+                help="One argument per line; each line stays intact."
+              >
+                <textarea
+                  className="textarea mono"
+                  rows={3}
+                  value={args}
+                  onChange={(e) => setArgs(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="Environment variables"
+                help="NAME=value, one variable per line."
+              >
+                <textarea
+                  className="textarea mono"
+                  rows={3}
+                  value={env}
+                  onChange={(e) => setEnv(e.target.value)}
+                />
+              </Field>
+            </>
+          )}
+          {model && model.modes.filter((m) => m !== "sync").length > 1 && (
+            <Field label="Execution mode">
+              <select
+                className="select"
+                value={mode}
+                onChange={(e) => setMode(e.target.value as "run" | "async")}
+              >
+                {model.modes
+                  .filter((m) => m !== "sync")
+                  .map((m) => (
+                    <option key={m}>{m}</option>
+                  ))}
+              </select>
+            </Field>
+          )}
+          {model?.parameters
+            ?.filter((p) => !generic || !hidden.has(p.name))
+            .map((p) => (
+              <ParamInput
+                key={p.name}
+                p={p}
+                value={params[p.name]}
+                error={errors[p.name]}
+                onChange={(v) => setParam(p.name, v)}
+                onFile={(file) =>
+                  setFiles((current) => {
+                    const next = { ...current };
+                    if (file) next[p.name] = file;
+                    else delete next[p.name];
+                    return next;
+                  })
+                }
+              />
+            ))}
+        </Section>
+        {generic && model && (
+          <Section title="Hardware">
+            <Field label="GPUs">
+              <input
+                className="input"
+                type="number"
+                min={0}
+                max={8}
+                value={Number(params.gpus ?? 1)}
+                onChange={(e) => setParam("gpus", Number(e.target.value))}
+              />
+            </Field>
+            <div className="row">
+              <Field label="CPUs">
+                <input
+                  className="input"
+                  value={String(params.cpu ?? "8")}
+                  onChange={(e) => setParam("cpu", e.target.value)}
+                  required
+                />
+              </Field>
+              <Field label="Memory">
+                <input
+                  className="input"
+                  value={String(params.memory ?? "64Gi")}
+                  onChange={(e) => setParam("memory", e.target.value)}
+                  required
+                />
+              </Field>
+            </div>
+          </Section>
+        )}
+        <Section title="Scheduling">
+          <Field
+            label="Region"
+            help={
+              fleet?.fleet_manager
+                ? "Automatic placement selects a compatible worker region."
+                : "Choose an available region for this definition."
+            }
+          >
+            <select
+              className="select"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+            >
+              {fleet?.fleet_manager && (
+                <option value="">
+                  {mode === "run"
+                    ? "Automatic · capacity and cost"
+                    : "Automatic"}
+                </option>
+              )}
+              {model?.regions.map((r) => (
+                <option key={r.region} value={r.region}>
+                  {r.region}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Priority">
+            <select
+              className="select"
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+            >
+              <option value="low">Low</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+            </select>
+          </Field>
+          <Field label="Job timeout (hours)" help="0 means no deadline.">
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={0.5}
+              value={timeout}
+              onChange={(e) => setTimeout(Number(e.target.value))}
+            />
+          </Field>
+        </Section>
+        {generic && model && (
+          <Section title="Storage and recovery">
+            <Field label="Work volume (GiB)">
+              <input
+                className="input"
+                type="number"
+                min={1}
+                value={Number(params.disk_gi ?? 100)}
+                onChange={(e) => setParam("disk_gi", Number(e.target.value))}
+              />
+            </Field>
+            <Field label="Scratch storage">
+              <select
+                className="select"
+                value={String(params.scratch ?? "network")}
+                onChange={(e) => setParam("scratch", e.target.value)}
+              >
+                <option value="network">Persistent network volume</option>
+                <option value="local-nvme">Local NVMe</option>
+              </select>
+            </Field>
+            <div className="inline-note">
+              {params.scratch === "local-nvme"
+                ? "Local data is lost on pod replacement. Save checkpoints to object storage."
+                : "Save checkpoints under /work/checkpoint. The volume survives interruptions and can be used to resume a stopped run."}
+            </div>
+            <Field
+              label="Input prefix"
+              help="Optional object storage location copied to /work/in."
+            >
+              <input
+                className="input"
+                value={String(params.input_prefix ?? "")}
+                onChange={(e) => setParam("input_prefix", e.target.value)}
+                placeholder="s3://your-bucket/input/"
+              />
+            </Field>
+          </Section>
+        )}
+        <div className="form-actions">
+          <Button
+            view="action"
+            size="xl"
+            type="submit"
+            loading={busy}
+            disabled={!model}
+          >
+            Create job
+          </Button>
+          <Button view="outlined" size="xl" onClick={() => setCode(true)}>
+            View configuration
+          </Button>
+          <Button view="flat" size="xl" onClick={() => navigate("/jobs")}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+      <aside className="card summary">
+        <div className="card__head">
+          <h2>Job summary</h2>
+        </div>
+        <div className="card__body">
+          <dl className="kv">
+            <dt>Name</dt>
+            <dd>{name || "Not set"}</dd>
+            <dt>Definition</dt>
+            <dd>{model?.name ?? "Not selected"}</dd>
+            <dt>Region</dt>
+            <dd>{region || "Automatic"}</dd>
+            <dt>Hardware</dt>
+            <dd>
+              {generic
+                ? `${params.gpus ?? 1} GPUs · ${params.cpu ?? 8} CPUs`
+                : (model?.gpu ?? "—")}
+            </dd>
+            <dt>Priority</dt>
+            <dd>{priority}</dd>
+            <dt>Timeout</dt>
+            <dd>{timeout ? fmt.secs(timeout * 3600) : "No deadline"}</dd>
+            <dt>Budget remaining</dt>
+            <dd>
+              {key?.budget != null
+                ? fmt.usd(Math.max(0, key.budget - key.spend))
+                : "No limit"}
+            </dd>
+          </dl>
+          <p className="help" style={{ marginTop: 24 }}>
+            Follow progress, metrics, logs, attempts, and results on the job
+            page after submission.
+          </p>
+        </div>
+      </aside>
+      {code && (
+        <Modal
+          title="Job configuration"
+          onClose={() => setCode(false)}
+          width={720}
+        >
+          <pre className="out">
+            {(() => {
+              try {
+                return JSON.stringify(
+                  { definition: model?.id, ...payload() },
+                  null,
+                  2,
+                );
+              } catch (e) {
+                return (e as Error).message;
+              }
+            })()}
+          </pre>
+        </Modal>
       )}
-    </>
+    </div>
   );
 }
+
 function ParamInput({
   p,
   value,
+  error,
   onChange,
   onFile,
 }: {
   p: ModelParam;
-  value: ParamValue | undefined;
-  onChange: (v: ParamValue) => void;
+  value: unknown;
+  error?: string;
+  onChange: (v: unknown) => void;
   onFile: (f: File | null) => void;
 }) {
-  const label = (p.label ?? p.name) + (p.required ? " *" : "");
+  const label =
+    (p.label ?? p.name.replace(/_/g, " ")) + (p.required ? " *" : "");
+  const common = { label, help: p.help, error };
   if (p.type === "select")
     return (
-      <Field label={label} help={p.help}>
-        <Pick
+      <Field {...common}>
+        <select
+          className="select"
           value={String(value ?? "")}
-          onChange={onChange}
-          options={p.options ?? []}
-          placeholder="Select an option"
-        />
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {p.options?.map((o) => (
+            <option key={o}>{o}</option>
+          ))}
+        </select>
       </Field>
     );
   if (p.type === "boolean")
     return (
-      <Checkbox
-        checked={Boolean(value)}
-        onUpdate={onChange}
-        content={p.label ?? p.name}
-      />
-    );
-  if (p.type === "text")
-    return (
-      <Field label={label} help={p.help}>
-        <Area value={String(value ?? "")} onChange={onChange} rows={4} />
+      <Field {...common}>
+        <input
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => onChange(e.target.checked)}
+        />
       </Field>
     );
   if (p.type === "file")
     return (
-      <Field
-        label={label}
-        help={p.help ?? "Uploaded securely before the job is submitted."}
-      >
+      <Field {...common}>
         <input
           className="input"
           type="file"
+          required={p.required}
           onChange={(e) => {
             const file = e.target.files?.[0] ?? null;
             onFile(file);
@@ -386,16 +537,29 @@ function ParamInput({
         />
       </Field>
     );
+  if (p.type === "text")
+    return (
+      <Field {...common}>
+        <textarea
+          className="textarea mono"
+          required={p.required}
+          value={String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </Field>
+    );
   return (
-    <Field label={label} help={p.help}>
-      <Input
-        value={String(value ?? "")}
+    <Field {...common}>
+      <input
+        className="input"
+        required={p.required}
         type={p.type === "number" ? "number" : "text"}
-        onChange={onChange}
-        controlProps={{
-          required: p.required,
-          step: p.type === "number" ? "any" : undefined,
-        }}
+        value={String(value ?? "")}
+        onChange={(e) =>
+          onChange(
+            p.type === "number" ? Number(e.target.value) : e.target.value,
+          )
+        }
       />
     </Field>
   );

@@ -5,6 +5,8 @@ import type {
   Endpoint,
   FleetInfo,
   InvokeRequest,
+  LogsResponse,
+  MetricsResponse,
   Model,
   ModelSpec,
   Operation,
@@ -12,6 +14,7 @@ import type {
 } from "./types";
 
 const LS = { key: "s2.key", base: "s2.apiBase" };
+export const previewEnabled = import.meta.env.VITE_UI_PREVIEW === "true";
 // Default: same-origin "/api" (nginx in the UI image proxies it to the API service, so no CORS);
 // override with VITE_API_BASE at build time or in Settings.
 export const DEFAULT_API_BASE =
@@ -43,8 +46,10 @@ export async function probeApi(): Promise<{
   reachable: boolean;
   detail: string;
 }> {
+  if (previewEnabled)
+    return { reachable: true, detail: "Local UI preview with sample data" };
   try {
-    const r = await fetch(`${settings.apiBase}/v1/keys/me`, {
+    const r = await fetch(`${settings.apiBase}/v1/models`, {
       headers: authHeaders(),
       signal: AbortSignal.timeout(6000),
     });
@@ -74,13 +79,21 @@ function idem() {
 }
 
 async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (previewEnabled) {
+    const { previewRequest } = await import("./preview");
+    return (await previewRequest(path, init)) as T;
+  }
   const headers: Record<string, string> = authHeaders({
     ...(init.headers as Record<string, string> | undefined),
   });
   if (init.body && !headers["Content-Type"])
     headers["Content-Type"] = "application/json";
   if (init.method && init.method !== "GET") headers["Idempotency-Key"] = idem();
-  const r = await fetch(`${settings.apiBase}${path}`, { ...init, headers });
+  const r = await fetch(`${settings.apiBase}${path}`, {
+    signal: AbortSignal.timeout(30000),
+    ...init,
+    headers,
+  });
   const text = await r.text();
   let body: unknown = text;
   try {
@@ -100,7 +113,11 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
       (body as { detail?: string })?.detail ??
       (body as { message?: string })?.message ??
       `${r.status} ${r.statusText}`;
-    throw new ApiError(r.status, String(msg), body);
+    throw new ApiError(
+      r.status,
+      r.status === 403 ? `Not allowed: ${msg}` : String(msg),
+      body,
+    );
   }
   return body as T;
 }
@@ -114,7 +131,7 @@ function unwrap<T>(b: unknown, ...keys: string[]): T[] {
 }
 
 const real = {
-  fleetInfo: () => http<FleetInfo>("/healthz"),
+  fleetInfo: () => http<FleetInfo>("/v1/fleet"),
   listModels: async () => unwrap<Model>(await http("/v1/models"), "models"),
   getModel: (id: string) => http<Model>(`/v1/models/${encodeURIComponent(id)}`),
   // models defined from a container (admin key): the "New model" form, services/api/models.py
@@ -154,6 +171,10 @@ const real = {
     http<Operation>(`/v1/operations/${encodeURIComponent(id)}:cancel`, {
       method: "POST",
     }),
+  resume: (id: string) =>
+    http<Operation>(`/v1/operations/${encodeURIComponent(id)}:resume`, {
+      method: "POST",
+    }),
   invoke: (model: string, req: InvokeRequest) => {
     // only the documented fields; for run-class models `input` holds the WorkflowTemplate parameters
     const { name, mode, input, region, priority, timeout_s } = req;
@@ -171,6 +192,8 @@ const real = {
     );
   },
   uploadArtifact: async (file: File, region?: string): Promise<string> => {
+    if (previewEnabled)
+      return `preview-file://${encodeURIComponent(file.name)}`;
     const u = await http<{
       uri: string;
       url: string;
@@ -181,7 +204,7 @@ const real = {
       body: JSON.stringify({
         filename: file.name,
         content_type: file.type || "application/octet-stream",
-        region,
+        ...(region ? { region } : {}),
       }),
     });
     const r = await fetch(u.url, {
@@ -201,12 +224,14 @@ const real = {
   },
   listEndpoints: async (region?: string) =>
     unwrap<Endpoint>(
-      await http(`/v1/endpoints${regionQuery(region)}`),
+      await http(
+        `/v1/endpoints${region ? `?region=${encodeURIComponent(region)}` : ""}`,
+      ),
       "endpoints",
     ),
   getEndpoint: (id: string, region?: string) =>
     http<Endpoint>(
-      `/v1/endpoints/${encodeURIComponent(id)}${regionQuery(region)}`,
+      `/v1/endpoints/${encodeURIComponent(id)}${region ? `?region=${encodeURIComponent(region)}` : ""}`,
     ),
   updateEndpoint: (id: string, patch: Partial<Endpoint>, region?: string) => {
     const {
@@ -214,9 +239,11 @@ const real = {
       max_replicas,
       scale_to_zero_after_s,
       target_concurrency,
+      scaling,
+      timeout_s,
     } = patch;
     return http<Endpoint>(
-      `/v1/endpoints/${encodeURIComponent(id)}${regionQuery(region)}`,
+      `/v1/endpoints/${encodeURIComponent(id)}${region ? `?region=${encodeURIComponent(region)}` : ""}`,
       {
         method: "PATCH",
         body: JSON.stringify({
@@ -224,10 +251,33 @@ const real = {
           max_replicas,
           scale_to_zero_after_s,
           target_concurrency,
+          scaling,
+          timeout_s,
         }),
       },
     );
   },
+  metrics: (
+    kind: "endpoints" | "operations",
+    id: string,
+    range: string,
+    region?: string,
+    end?: number,
+  ) =>
+    http<MetricsResponse>(
+      `/v1/${kind}/${encodeURIComponent(id)}/metrics?${new URLSearchParams({ range, ...(region ? { region } : {}), ...(end ? { end: String(end) } : {}) })}`,
+    ),
+  logs: (
+    kind: "endpoints" | "operations",
+    id: string,
+    range: string,
+    search = "",
+    region?: string,
+    end?: number,
+  ) =>
+    http<LogsResponse>(
+      `/v1/${kind}/${encodeURIComponent(id)}/logs?${new URLSearchParams({ range, search, ...(region ? { region } : {}), ...(end ? { end: String(end) } : {}) })}`,
+    ),
   // endpoints are created and deleted as models (createModel/deleteModel); this patches scaling of an existing one
   listKeys: async () => unwrap<ApiKey>(await http("/v1/keys"), "keys"),
   createKey: (input: {
@@ -245,7 +295,4 @@ const real = {
 export type Api = typeof real;
 export function api(): Api {
   return real;
-}
-function regionQuery(region?: string) {
-  return region ? `?region=${encodeURIComponent(region)}` : "";
 }

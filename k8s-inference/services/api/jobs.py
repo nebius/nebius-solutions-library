@@ -67,9 +67,21 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         raise HTTPException(400, f"missing required parameters {missing}")
     values["operation"] = name
     r = _render(job, values)
+    if argument_parameter := job.get("argsParameter"):
+        arguments = values.get(argument_parameter, [])
+        if not isinstance(arguments, list) or len(arguments) > 100 or not all(isinstance(a, str) for a in arguments):
+            raise HTTPException(400, "args must be a list of at most 100 strings")
+        r["args"] = arguments
+    if environment_parameter := job.get("envParameter"):
+        import re
+        environment = values.get(environment_parameter, {})
+        if not isinstance(environment, dict) or len(environment) > 100 or not all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and isinstance(v, str) for k, v in environment.items()):
+            raise HTTPException(400, "env must map valid environment names to string values (at most 100)")
+        r["env"] = {**environment, **(r.get("env") or {})}
     cmd = r["command"]
     if isinstance(cmd, str):
-        cmd = ["/bin/sh", "-c", cmd]
+        # Shell strings still receive typed arguments as literal argv values, not shell syntax.
+        cmd = ["/bin/sh", "-c", cmd + ' "$@"', "--"] if r.get("args") else ["/bin/sh", "-c", cmd]
     gpus = int(r.get("gpu", 0) or 0)
     res = {"requests": {"cpu": str(r.get("cpu", "1")), "memory": str(r.get("memory", "2Gi"))}, "limits": {"memory": str(r.get("memoryLimit", r.get("memory", "2Gi")))}}
     if r.get("cpuLimit"):

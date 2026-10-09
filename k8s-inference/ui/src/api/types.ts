@@ -1,19 +1,28 @@
 // Shapes follow services/api/openapi.yaml (customer API) plus the UI-facing list endpoints.
 
 export type Mode = "sync" | "async" | "run";
-export type Region = string;
-export interface FleetInfo {
-  ok: boolean;
-  region: string;
-  regions: string[];
-  fleet_manager: boolean;
-  gpu_classes?: string[];
+export type Region = "eu-north1" | "eu-south1" | string;
+
+export interface ScalingSpec {
+  min?: number;
+  max?: number;
+  metric?:
+    | "concurrency_utilization"
+    | "requests_per_second"
+    | "concurrency"
+    | "rps";
+  target?: number;
+  utilization_percent?: number;
+  container_concurrency?: number;
+  cooldown_s?: number;
+  window_s?: number;
+  idle_s?: number;
 }
 
 export interface ModelRegionStatus {
   region: Region;
   status: "ready" | "scaled-to-zero" | "deploying" | "unavailable";
-  replicas_ready?: number;
+  replicas_ready?: number | null;
 }
 
 export interface Model {
@@ -51,7 +60,7 @@ export interface ModelSpec {
   served_model?: string;
   gpu?: { count?: number; classes?: string[] };
   resources?: { cpu?: string; memory?: string };
-  scaling?: { min?: number; max?: number; target?: number };
+  scaling?: ScalingSpec;
   timeout_s?: number;
   shm_gib?: number;
   pull_secret?: string;
@@ -137,19 +146,59 @@ export interface Endpoint {
   model: string;
   region: Region;
   url: string;
-  status: "ready" | "scaled-to-zero" | "deploying" | "error";
-  replicas_ready: number;
+  status: "ready" | "scaled-to-zero" | "deploying" | "error" | "unavailable";
+  replicas_ready: number | null;
   min_replicas: number;
   max_replicas: number;
   scale_to_zero_after_s: number;
   target_concurrency?: number;
+  scaling?: ScalingSpec;
+  timeout_s?: number;
   in_flight?: number;
   last_cold_start_s?: number;
   placement?: "RESERVED" | "SPOT" | "ANY";
   gpu?: string;
   created_at?: string;
   protocol?: string; // "openai-chat" | "http-json"
-  managed_by?: "git" | "api"; // git = Argo CD owns it (PATCH reverted, DELETE 403)
+  managed_by?: "git" | "api"; // git = fleet configuration owns it; API mutations are refused
+  image?: string;
+  cpu?: string;
+  memory?: string;
+}
+
+export interface FleetInfo {
+  ok?: boolean;
+  regions: string[];
+  gpu_classes?: string[];
+  fleet_manager: boolean;
+  region: string;
+}
+export interface MetricPanel {
+  id: string;
+  title: string;
+  unit: string;
+  unavailable?: boolean;
+  series: { name: string; points: [number, number | null][] }[];
+}
+export interface MetricsResponse {
+  region: string;
+  start: number;
+  end: number;
+  step: number;
+  panels: MetricPanel[];
+}
+export interface LogLine {
+  timestamp: string;
+  line: string;
+  pod: string;
+  container: string;
+}
+export interface LogsResponse {
+  region: string;
+  start: number;
+  end: number;
+  lines: LogLine[];
+  truncated: boolean;
 }
 
 export interface ApiKey {

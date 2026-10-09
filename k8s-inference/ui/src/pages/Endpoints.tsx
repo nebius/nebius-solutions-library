@@ -1,209 +1,248 @@
 import { useEffect, useState } from "react";
-import { api, ApiError } from "../api/client";
-import { grafanaUrl } from "../config";
-import type { Endpoint } from "../api/types";
+import { ArrowsRotateRight, ChartLine, Play, Plus } from "@gravity-ui/icons";
+import { api } from "../api/client";
+import type { Endpoint, ScalingSpec } from "../api/types";
+import {
+  ScalingFields,
+  endpointScaling,
+  scalingThreshold,
+  scalingValidation,
+  scalingMetricLabel,
+  isRequestRate,
+} from "../components/ScalingFields";
+import { useSession } from "../components/Session";
 import {
   Badge,
-  Empty,
+  Button,
+  CopyButton,
   ErrorBox,
   Field,
+  Icon,
   Loading,
   Modal,
-  Stat,
+  Tabs,
   fmt,
   useAsync,
   useToast,
 } from "../components/ui";
 import {
-  Button,
-  Input,
-  Area,
-  Pick,
-  Search,
+  DetailCard,
+  EmptyList,
   PageHeader,
-  Tabs,
-} from "../components/controls";
-import { useAdmin, useSession } from "../components/Session";
-import { href } from "../router";
-import { endpointPath } from "./Models";
+  ResourceHeader,
+  ResourceName,
+  RowMenu,
+  SearchToolbar,
+  resourcePath,
+  useResourceTab,
+} from "../components/Resource";
+import { ResourceMonitoring } from "../components/LazyMonitoring";
+import { href, navigate, useRoute } from "../router";
 
 export function Endpoints() {
-  const admin = useAdmin();
-  const { fleet } = useSession();
-  const [region, setRegion] = useState("");
-  const [status, setStatus] = useState("all");
-  const [search, setSearch] = useState("");
+  const { admin } = useSession();
   const { data, error, loading, reload } = useAsync(
-    () => api().listEndpoints(region || undefined),
-    [region],
+    () => api().listEndpoints(),
+    [],
     { every: 10000 },
   );
-  const regions = [
-    ...new Set([
-      ...(fleet?.regions ?? []),
-      ...(data ?? []).map((e) => e.region),
-    ]),
-  ];
-  const rows = (data ?? []).filter(
-    (e) =>
-      (status === "all" || status === e.status) &&
-      `${e.name} ${e.model} ${e.id}`
-        .toLowerCase()
-        .includes(search.toLowerCase()),
-  );
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("");
+  const [region, setRegion] = useState("");
+  const modelFilter = useRoute().query.get("model");
+  useEffect(() => {
+    setSearch(modelFilter ?? "");
+  }, [modelFilter]);
+  const rows = (data ?? [])
+    .filter(
+      (e) =>
+        (!search ||
+          `${e.name} ${e.id} ${e.model}`
+            .toLowerCase()
+            .includes(search.toLowerCase())) &&
+        (!status || e.status === status) &&
+        (!region || e.region === region),
+    )
+    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  const reset = () => {
+    setSearch("");
+    setStatus("");
+    setRegion("");
+  };
   return (
     <>
       <PageHeader
         title="Endpoints"
         count={data?.length}
-        description="Deploy inference APIs that scale with demand."
+        create={
+          admin ? { label: "Create endpoint", to: "/endpoints/new" } : undefined
+        }
+      />
+      <SearchToolbar
+        {...{ search, setSearch, status, setStatus, region, setRegion }}
+        statuses={[
+          ["ready", "Running"],
+          ["scaled-to-zero", "Idle"],
+          ["deploying", "Deploying"],
+          ["error", "Error"],
+          ["unavailable", "Unavailable"],
+        ]}
+        regions={[...new Set(data?.map((e) => e.region) ?? [])]}
       >
-        {admin && (
-          <Button primary href={href("/endpoints/new")}>
-            Create endpoint
-          </Button>
-        )}
-      </PageHeader>
-      {error && <ErrorBox msg={error} retry={reload} />}
-      <div className="toolbar">
-        <div className="toolbar__search">
-          <Search
-            value={search}
-            onChange={setSearch}
-            label="Search endpoints"
-          />
-        </div>
-        <Pick
-          value={region}
-          onChange={setRegion}
-          aria-label="Region"
-          placeholder="All regions"
-          options={[{ value: "", label: "All regions" }, ...regions]}
-        />
-        <Pick
-          value={status}
-          onChange={setStatus}
-          aria-label="Endpoint status"
-          options={[
-            { value: "all", label: "All statuses" },
-            { value: "ready", label: "Ready" },
-            { value: "scaled-to-zero", label: "Scaled to zero" },
-            { value: "deploying", label: "Deploying" },
-            { value: "error", label: "Error" },
-          ]}
-        />
-        <span className="toolbar__count">{rows.length} endpoints</span>
-        <Button size="m" onClick={reload}>
-          Refresh
+        <Button
+          view="flat"
+          size="l"
+          aria-label="Refresh endpoints"
+          onClick={reload}
+        >
+          <Icon data={ArrowsRotateRight} />
         </Button>
-      </div>
-      {loading && !data ? (
-        <Loading />
-      ) : (
-        data && (
-          <div className="table-surface tbl-wrap">
+      </SearchToolbar>
+      {error && <ErrorBox msg={error} retry={reload} />}{" "}
+      {loading && !data && <Loading />}
+      {data &&
+        (rows.length ? (
+          <div className="tbl-wrap">
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Name</th>
+                  <th>Name and ID</th>
                   <th>Status</th>
+                  <th>Hardware</th>
                   <th>Region</th>
-                  <th>GPU</th>
-                  <th>Ready replicas</th>
+                  <th>Replicas</th>
                   <th>Created</th>
-                  <th>
-                    <span className="sr-only">Actions</span>
-                  </th>
+                  <th></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {!rows.length && (
-                  <tr>
-                    <td colSpan={7}>
-                      <Empty>
-                        <div className="empty-symbol">↗</div>
-                        <h2>
-                          {search || status !== "all"
-                            ? "No matching endpoints"
-                            : "Deploy your first endpoint"}
-                        </h2>
-                        <p>
-                          {search || status !== "all"
-                            ? "Try changing the search or filters."
-                            : "Serve a model from your container image with automatic scaling."}
-                        </p>
-                        {admin && !search && status === "all" && (
-                          <Button primary href={href("/endpoints/new")}>
-                            Create endpoint
-                          </Button>
-                        )}
-                      </Empty>
-                    </td>
-                  </tr>
-                )}
-                {rows.map((e) => (
-                  <tr key={`${e.region}:${e.id}`}>
-                    <td>
-                      <a
-                        className="strong"
-                        href={href(endpointPath(e.id, e.region))}
-                      >
-                        {e.name}
-                      </a>
-                      <div className="small muted mono">{e.model}</div>
-                    </td>
-                    <td>
-                      <Badge status={e.status} />
-                    </td>
-                    <td>{e.region}</td>
-                    <td>{e.gpu || "—"}</td>
-                    <td>
-                      {e.replicas_ready}
-                      <span className="muted"> / {e.max_replicas}</span>
-                    </td>
-                    <td title={fmt.dt(e.created_at)}>
-                      {fmt.ago(e.created_at)}
-                    </td>
-                    <td>
-                      <Button
-                        size="m"
-                        view="flat"
-                        href={href(endpointPath(e.id, e.region))}
-                      >
-                        Open
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((e) => {
+                  const path = resourcePath("endpoints", e.id, e.region);
+                  return (
+                    <tr key={e.id + e.region}>
+                      <td className="name-cell">
+                        <ResourceName name={e.name} id={e.id} to={path} />
+                      </td>
+                      <td>
+                        <Badge status={e.status} />
+                      </td>
+                      <td>
+                        {e.gpu ?? "—"}
+                        <div className="small muted">
+                          {e.cpu ? `${e.cpu} CPUs · ${e.memory}` : e.model}
+                        </div>
+                      </td>
+                      <td>{e.region}</td>
+                      <td>
+                        {e.replicas_ready ?? "—"}
+                        <div className="small muted">
+                          {e.min_replicas != null
+                            ? `${e.min_replicas}–${e.max_replicas} configured`
+                            : "State unavailable"}
+                        </div>
+                      </td>
+                      <td title={fmt.dt(e.created_at)}>
+                        {fmt.ago(e.created_at)}
+                      </td>
+                      <td>
+                        <Button
+                          view="outlined"
+                          size="l"
+                          href={href(
+                            resourcePath("endpoints", e.id, e.region, "Logs"),
+                          )}
+                        >
+                          View logs
+                        </Button>
+                      </td>
+                      <td>
+                        <RowMenu
+                          actions={[
+                            {
+                              label: "View endpoint",
+                              action: () => navigate(path),
+                            },
+                            {
+                              label: "View metrics",
+                              action: () =>
+                                navigate(
+                                  resourcePath(
+                                    "endpoints",
+                                    e.id,
+                                    e.region,
+                                    "Metrics",
+                                  ),
+                                ),
+                            },
+                            {
+                              label: "Test request",
+                              action: () =>
+                                navigate(
+                                  resourcePath(
+                                    "endpoints",
+                                    e.id,
+                                    e.region,
+                                    "Test request",
+                                  ),
+                                ),
+                            },
+                          ]}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
-        )
-      )}
+        ) : (
+          <EmptyList
+            resource="endpoints"
+            filtered={Boolean(search || status || region)}
+            reset={reset}
+            action={
+              admin && (
+                <Button view="action" size="l" href={href("/endpoints/new")}>
+                  <Icon data={Plus} /> Create endpoint
+                </Button>
+              )
+            }
+          />
+        ))}
     </>
   );
 }
+
+const TABS = [
+  "Overview",
+  "Metrics",
+  "Logs",
+  "Scaling",
+  "Test request",
+  "Settings",
+];
 export function sampleBody(e: Endpoint) {
-  return ["openai", "openai-chat"].includes(e.protocol ?? "")
+  return e.protocol?.startsWith("openai")
     ? {
         messages: [{ role: "user", content: "Say hello in one sentence." }],
         max_tokens: 64,
       }
     : {};
 }
-export function curlFor(e: Endpoint, body: string) {
+export function curlFor(endpoint: Endpoint, body: string) {
   let input: unknown;
   try {
     input = JSON.parse(body);
   } catch {
     return "Enter valid JSON to generate the example.";
   }
-  const json = JSON.stringify({
+  const payload = JSON.stringify({
     mode: "sync",
-    region: e.region,
+    region: endpoint.region,
     input,
   }).replace(/'/g, "'\\''");
-  return `curl -sS '${e.url.replace(/'/g, "'\\''")}' \\\n  -H "Authorization: Bearer $API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
+  return `curl -sS '${endpoint.url.replace(/'/g, "'\\''")}' \\\n  -H "Authorization: Bearer $API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '${payload}'`;
 }
 export function EndpointDetail({
   id,
@@ -212,8 +251,9 @@ export function EndpointDetail({
   id: string;
   region?: string;
 }) {
-  const admin = useAdmin();
+  const { admin } = useSession();
   const toast = useToast();
+  const { tab, setTab } = useResourceTab(TABS);
   const {
     data: e,
     error,
@@ -222,375 +262,468 @@ export function EndpointDetail({
   } = useAsync(() => api().getEndpoint(id, region), [id, region], {
     every: 10000,
   });
-  const [tab, setTab] = useState("overview");
-  const [body, setBody] = useState("");
-  const [output, setOutput] = useState<{
-    status?: number;
-    ms: number;
-    body: unknown;
-    error?: boolean;
-  } | null>(null);
-  const [busy, setBusy] = useState(false);
   const [edit, setEdit] = useState(false);
-  const [scaleBusy, setScaleBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [scale, setScale] = useState<ScalingSpec>({
+    min: 0,
+    max: 1,
+    idle_s: 120,
+    target: 4,
+  });
+  const [timeout, setTimeoutValue] = useState(600);
   const [scaleError, setScaleError] = useState("");
-  const [scale, setScale] = useState({ min: 0, max: 1, idle: 120, conc: 4 });
+  const [remove, setRemove] = useState(false);
   useEffect(() => {
-    if (e) setBody((v) => v || JSON.stringify(sampleBody(e), null, 2));
-  }, [e?.model]);
-  function openScale() {
-    if (!e) return;
-    setScale({
-      min: e.min_replicas,
-      max: e.max_replicas,
-      idle: e.scale_to_zero_after_s,
-      conc: e.target_concurrency ?? 4,
-    });
-    setScaleError("");
-    setEdit(true);
-  }
-  async function send(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (!e) return;
-    setBusy(true);
-    setOutput(null);
-    const t0 = performance.now();
-    try {
-      const input: unknown = JSON.parse(body);
-      if (!input || Array.isArray(input) || typeof input !== "object")
-        throw new Error("Request body must be a JSON object.");
-      const r = await api().invoke(e.model, {
-        mode: "sync",
-        input: input as Record<string, unknown>,
-        region: e.region,
-        timeout_s: 600,
-      });
-      setOutput({
-        status: 200,
-        ms: Math.round(performance.now() - t0),
-        body: "result" in r ? r.result : r,
-      });
-    } catch (err) {
-      setOutput({
-        status: err instanceof ApiError ? err.status : undefined,
-        ms: Math.round(performance.now() - t0),
-        body: (err as Error).message,
-        error: true,
-      });
-    } finally {
-      setBusy(false);
+    if (e && !edit) {
+      setScale(endpointScaling(e));
+      setTimeoutValue(e.timeout_s ?? 600);
     }
-  }
-  async function saveScale(ev: React.FormEvent) {
-    ev.preventDefault();
+  }, [e, edit]);
+  async function saveScale(event: React.FormEvent) {
+    event.preventDefault();
     if (!e) return;
-    if (
-      ![scale.min, scale.max, scale.idle, scale.conc].every(Number.isInteger) ||
-      scale.min < 0 ||
-      scale.max < Math.max(1, scale.min) ||
-      scale.idle < 0 ||
-      scale.conc < 1
-    ) {
-      setScaleError(
-        "Use whole numbers. Maximum must be at least one and no less than minimum; concurrency must be positive.",
-      );
+    if (scalingValidation(scale)) {
+      setScaleError(scalingValidation(scale)!);
       return;
     }
-    setScaleBusy(true);
+    setBusy(true);
     setScaleError("");
     try {
       await api().updateEndpoint(
         id,
         {
-          min_replicas: scale.min,
-          max_replicas: scale.max,
-          scale_to_zero_after_s: scale.idle,
-          target_concurrency: scale.conc,
+          scaling: scale,
+          timeout_s: timeout,
         },
         e.region,
       );
-      toast("Scaling updated");
+      toast("Scaling updated in all deployment regions");
       setEdit(false);
       reload();
     } catch (err) {
       setScaleError((err as Error).message);
     } finally {
-      setScaleBusy(false);
+      setBusy(false);
     }
   }
-  if (error && !e) return <ErrorBox msg={error} retry={reload} />;
+  async function deleteEndpoint() {
+    if (!e) return;
+    setBusy(true);
+    try {
+      await api().deleteModel(e.model);
+      toast("Endpoint deleted");
+      navigate("/endpoints");
+    } catch (err) {
+      toast((err as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (error) return <ErrorBox msg={error} retry={reload} />;
   if (loading && !e) return <Loading />;
   if (!e) return null;
-  const grafana = grafanaUrl(e.region);
-  const canTry = !["grpc", "websocket"].includes(e.protocol ?? "");
+  const editable = admin && e.managed_by === "api";
   return (
     <>
-      <PageHeader
-        title={
+      <ResourceHeader
+        name={e.name}
+        id={e.id}
+        status={<Badge status={e.status} />}
+        created={e.created_at}
+        region={e.region}
+        actions={
           <>
-            {e.name}
-            <Badge status={e.status} />
+            <Button
+              view="normal"
+              size="l"
+              onClick={() => setTab("Test request")}
+            >
+              <Icon data={Play} /> Test request
+            </Button>
+            <Button view="normal" size="l" onClick={() => setTab("Metrics")}>
+              <Icon data={ChartLine} /> Monitoring
+            </Button>
+            <Button
+              view="outlined"
+              size="l"
+              onClick={() =>
+                navigator.clipboard.writeText(e.url).then(
+                  () => toast("Endpoint URL copied"),
+                  () => toast("Could not copy", true),
+                )
+              }
+            >
+              Copy endpoint URL
+            </Button>
+            {editable && (
+              <Button
+                view="outlined"
+                size="l"
+                href={href(`/models/${e.model}`)}
+              >
+                Edit configuration
+              </Button>
+            )}
           </>
         }
-        description={`${e.model} · ${e.region}`}
-      >
-        {grafana && (
-          <Button
-            href={`${grafana}/d/knative-serving?var-service=${encodeURIComponent(e.id)}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Metrics ↗
-          </Button>
-        )}
-        {admin && e.managed_by === "api" && (
-          <Button href={href(`/models/${encodeURIComponent(e.model)}/edit`)}>
-            Edit configuration
-          </Button>
-        )}
-      </PageHeader>
-      {error && <ErrorBox msg={error} retry={reload} />}
-      <Tabs
-        className="resource-tabs"
-        activeTab={tab}
-        onSelectTab={setTab}
-        aria-label="Endpoint details"
-        items={[
-          { id: "overview", title: "Overview" },
-          { id: "configuration", title: "Configuration" },
-          { id: "request", title: "Try it" },
-        ]}
       />
-      {tab === "overview" && (
-        <div className="detail-stack">
-          <div className="stats">
-            <Stat
-              label="Ready replicas"
-              value={`${e.replicas_ready} / ${e.max_replicas}`}
+      <Tabs items={TABS} active={tab} onChange={setTab} />
+      {tab === "Overview" && (
+        <>
+          <div style={{ marginBottom: 32 }}>
+            <ResourceMonitoring
+              key={id + e.region}
+              kind="endpoints"
+              id={id}
+              region={e.region}
+              compact
             />
-            <Stat label="GPU" value={e.gpu || "—"} />
-            <Stat
-              label="Scale to zero after"
-              value={fmt.secs(e.scale_to_zero_after_s)}
-            />
-            {e.in_flight != null && (
-              <Stat label="In-flight requests" value={e.in_flight} />
-            )}
-            {e.last_cold_start_s != null && (
-              <Stat
-                label="Last cold start"
-                value={`${e.last_cold_start_s} s`}
-              />
-            )}
           </div>
-          <section className="card">
-            <div className="card__head">
-              <h2>Endpoint information</h2>
-              <Button size="m" onClick={() => setTab("request")}>
-                Try it
-              </Button>
-            </div>
-            <div className="card__body">
-              <dl className="details-kv">
-                <dt>Endpoint ID</dt>
-                <dd className="mono">{e.id}</dd>
-                <dt>Model</dt>
-                <dd>{e.model}</dd>
+          <div className="overview" style={{ marginBottom: 32 }}>
+            <DetailCard title="Container settings">
+              <dl className="kv">
+                <dt>Image path</dt>
+                <dd>
+                  <code>{e.image ?? e.model}</code>
+                  {e.image && (
+                    <CopyButton value={e.image} label="Copy image path" />
+                  )}
+                </dd>
+                <dt>Protocol</dt>
+                <dd>{e.protocol ?? "HTTP"}</dd>
+                <dt>Endpoint URL</dt>
+                <dd>
+                  {e.url}
+                  <CopyButton value={e.url} label="Copy endpoint URL" />
+                </dd>
+              </dl>
+            </DetailCard>
+            <DetailCard title="Resources">
+              <dl className="kv">
+                <dt>GPU</dt>
+                <dd>{e.gpu ?? "—"}</dd>
+                <dt>CPU / memory</dt>
+                <dd>
+                  {e.cpu ? `${e.cpu} CPUs / ${e.memory}` : "Not reported"}
+                </dd>
                 <dt>Region</dt>
                 <dd>{e.region}</dd>
-                <dt>Protocol</dt>
-                <dd>{e.protocol || "—"}</dd>
-                <dt>Created</dt>
-                <dd>{fmt.dt(e.created_at)}</dd>
-                <dt>API URL</dt>
-                <dd className="mono break-word">{e.url}</dd>
+                <dt>Ready replicas</dt>
+                <dd>{e.replicas_ready ?? "Unknown"}</dd>
               </dl>
-            </div>
-          </section>
-          <section className="card">
-            <div className="card__body">
-              <div className="row row-between">
-                <div>
-                  <h2>Monitoring</h2>
-                  <p className="muted">
-                    {grafana
-                      ? "View live metrics and logs for this endpoint."
-                      : "Monitoring is not configured for this console."}
-                  </p>
-                </div>
-                {grafana && (
-                  <Button
-                    href={`${grafana}/explore?left=${encodeURIComponent(JSON.stringify({ datasource: "Loki", queries: [{ expr: `{app="${e.id}-predictor"}` }] }))}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open logs ↗
-                  </Button>
-                )}
+            </DetailCard>
+            <DetailCard title="Scaling">
+              <dl className="kv">
+                <dt>Replica range</dt>
+                <dd>
+                  {e.min_replicas}–{e.max_replicas}
+                </dd>
+                <dt>Scaling metric</dt>
+                <dd>{scalingMetricLabel(endpointScaling(e))}</dd>
+                <dt>Average demand target</dt>
+                <dd>
+                  {Number(scalingThreshold(endpointScaling(e)).toFixed(2))}{" "}
+                  {isRequestRate(endpointScaling(e))
+                    ? "requests/s"
+                    : "concurrent requests"}
+                </dd>
+                <dt>Idle retention</dt>
+                <dd>{fmt.secs(e.scale_to_zero_after_s)}</dd>
+                <dt>Idle behavior</dt>
+                <dd>
+                  {e.min_replicas === 0
+                    ? "Scale to zero"
+                    : "Keep replicas warm"}
+                </dd>
+              </dl>
+              {editable && (
+                <Button
+                  view="outlined"
+                  size="l"
+                  style={{ marginTop: 20 }}
+                  onClick={() => setTab("Scaling")}
+                >
+                  Edit scaling
+                </Button>
+              )}
+            </DetailCard>
+            <DetailCard title="Access">
+              <dl className="kv">
+                <dt>Authentication</dt>
+                <dd>API key</dd>
+                <dt>Definition</dt>
+                <dd>{e.model}</dd>
+                <dt>Managed by</dt>
+                <dd>
+                  {e.managed_by === "api"
+                    ? "Saved definition"
+                    : "Fleet configuration"}
+                </dd>
+              </dl>
+              <p className="help" style={{ marginTop: 20 }}>
+                Use Test request to send an authenticated call. Idle endpoints
+                wake on the next request.
+              </p>
+            </DetailCard>
+          </div>
+        </>
+      )}
+      {tab === "Metrics" && (
+        <ResourceMonitoring kind="endpoints" id={id} region={e.region} />
+      )}
+      {tab === "Logs" && (
+        <ResourceMonitoring
+          kind="endpoints"
+          id={id}
+          region={e.region}
+          view="logs"
+        />
+      )}
+      {tab === "Test request" && <EndpointTest endpoint={e} />}
+      {tab === "Settings" && (
+        <>
+          <DetailCard title="Configuration">
+            <p>
+              {e.managed_by === "api"
+                ? "Configuration changes apply to every region in this endpoint's saved definition."
+                : "This endpoint is managed by the fleet configuration. Update its source definition to change it."}
+            </p>
+            {editable && (
+              <div className="actions">
+                <Button
+                  view="outlined"
+                  size="l"
+                  onClick={() => setTab("Scaling")}
+                >
+                  Edit scaling
+                </Button>
+                <Button
+                  view="outlined"
+                  size="l"
+                  href={href(`/models/${e.model}`)}
+                >
+                  Edit configuration
+                </Button>
               </div>
+            )}
+          </DetailCard>
+          {editable && (
+            <section className="danger-zone">
+              <h2>Delete endpoint</h2>
+              <p>
+                Remove this endpoint and its saved definition from every
+                deployment region. New requests will no longer be served.
+              </p>
+              <Button
+                view="outlined-danger"
+                size="l"
+                onClick={() => setRemove(true)}
+              >
+                Delete endpoint
+              </Button>
+            </section>
+          )}
+        </>
+      )}
+      {tab === "Scaling" && (
+        <div className="form-layout scaling-layout">
+          <form className="form" onSubmit={saveScale}>
+            <div>
+              <h2>Scaling</h2>
+              <p className="help">
+                Pod replica settings apply to every deployment region and are
+                saved with the endpoint definition.
+              </p>
             </div>
-          </section>
+            {!editable && (
+              <p className="inline-note">
+                {admin
+                  ? "Managed by fleet configuration. Update the source definition to change these settings."
+                  : "An administrator API key is required to change these settings."}
+              </p>
+            )}
+            {scaleError && <ErrorBox msg={scaleError} />}
+            <ScalingFields
+              value={scale}
+              timeout={timeout}
+              advancedOpen
+              disabled={!editable || busy}
+              onChange={(value) => {
+                setScale(value);
+                setEdit(true);
+              }}
+              onTimeoutChange={(value) => {
+                setTimeoutValue(value);
+                setEdit(true);
+              }}
+            />
+            {editable && (
+              <div className="form-actions">
+                <Button
+                  view="action"
+                  size="l"
+                  type="submit"
+                  loading={busy}
+                  disabled={!edit || !!scalingValidation(scale)}
+                >
+                  Save changes
+                </Button>
+                <Button
+                  view="flat"
+                  size="l"
+                  disabled={!edit || busy}
+                  onClick={() => {
+                    setScale(endpointScaling(e));
+                    setTimeoutValue(e.timeout_s ?? 600);
+                    setEdit(false);
+                    setScaleError("");
+                  }}
+                >
+                  Discard changes
+                </Button>
+              </div>
+            )}
+          </form>
+          <aside className="card summary">
+            <div className="card__head">
+              <h2>Scaling behavior</h2>
+            </div>
+            <div className="card__body">
+              <dl className="kv">
+                <dt>Replica range per region</dt>
+                <dd>
+                  {scale.min ?? 0}–{scale.max ?? 1} pods
+                </dd>
+                <dt>Ready replicas in {e.region}</dt>
+                <dd>{e.replicas_ready ?? "Unknown"}</dd>
+                <dt>Average demand target</dt>
+                <dd>
+                  {Number(scalingThreshold(scale).toFixed(2))}{" "}
+                  {isRequestRate(scale) ? "requests/s" : "concurrent requests"}{" "}
+                  per pod
+                </dd>
+                <dt>Hard concurrency limit</dt>
+                <dd>
+                  {scale.container_concurrency
+                    ? `${scale.container_concurrency} per pod`
+                    : "Unlimited"}
+                </dd>
+                <dt>Idle behavior</dt>
+                <dd>
+                  {(scale.min ?? 0) === 0
+                    ? "Scale to zero"
+                    : "Keep minimum replicas warm"}
+                </dd>
+              </dl>
+              <p className="help">
+                Utilization headroom leaves room within each replica. A shared
+                warm GPU buffer reserves capacity across apps and needs a
+                separate pool policy.
+              </p>
+              <p className="help">
+                Disabled controls remain visible for future deployment support.
+                CPU and RAM utilization require resource-metric autoscaler
+                integration and a minimum of one replica.
+              </p>
+            </div>
+          </aside>
         </div>
       )}
-      {tab === "configuration" && (
-        <section className="card">
-          <div className="card__head">
-            <h2>Autoscaling</h2>
-            {admin && (
-              <Button size="m" onClick={openScale}>
-                Edit scaling
-              </Button>
-            )}
-          </div>
-          <div className="card__body form">
-            <dl className="details-kv">
-              <dt>Minimum replicas</dt>
-              <dd>{e.min_replicas}</dd>
-              <dt>Maximum replicas</dt>
-              <dd>{e.max_replicas}</dd>
-              <dt>Target concurrency</dt>
-              <dd>{e.target_concurrency ?? "—"}</dd>
-              <dt>Scale to zero after</dt>
-              <dd>{fmt.secs(e.scale_to_zero_after_s)}</dd>
-              {e.placement && (
-                <>
-                  <dt>Placement</dt>
-                  <dd>{e.placement.toLowerCase()}</dd>
-                </>
-              )}
-              <dt>Configuration source</dt>
-              <dd>
-                {e.managed_by === "api"
-                  ? "Custom model"
-                  : "Deployment configuration"}
-              </dd>
-            </dl>
-            <div className="banner banner--info">
-              {e.managed_by === "git"
-                ? "This endpoint is managed by the deployment. Live scaling changes may be replaced during synchronization."
-                : "Live scaling changes apply to this region. Edit the model configuration to persist replica limits across redeployments."}
-            </div>
-          </div>
-        </section>
-      )}
-      {tab === "request" &&
-        (canTry ? (
-          <div className="grid grid--2">
-            <form className="card" onSubmit={send}>
-              <div className="card__head">
-                <h2>Send a request</h2>
-                <span className="context-tag">POST</span>
-              </div>
-              <div className="card__body form">
-                <Field label="API URL">
-                  <Input value={e.url} mono readOnly />
-                </Field>
-                <Field label="Request body (JSON)">
-                  <Area rows={10} value={body} onChange={setBody} />
-                </Field>
-                {e.status === "scaled-to-zero" && (
-                  <div className="banner banner--info">
-                    The first request waits for a replica to start.
-                  </div>
-                )}
-                <div className="form-actions">
-                  <Button primary type="submit" loading={busy}>
-                    Send request
-                  </Button>
-                </div>
-              </div>
-            </form>
-            <div className="detail-stack">
-              <section className="card">
-                <div className="card__head">
-                  <h2>Code example</h2>
-                </div>
-                <div className="card__body">
-                  <p className="help">
-                    Set API_KEY to your key before running this example.
-                  </p>
-                  <pre className="out">{curlFor(e, body)}</pre>
-                </div>
-              </section>
-              <section className="card">
-                <div className="card__head">
-                  <h2>Response</h2>
-                  {output && (
-                    <span
-                      className={output.error ? "field-error" : "small muted"}
-                    >
-                      {output.status ? `HTTP ${output.status} · ` : ""}
-                      {output.ms} ms
-                    </span>
-                  )}
-                </div>
-                <div className="card__body">
-                  {output ? (
-                    <pre
-                      className="out"
-                      role={output.error ? "alert" : undefined}
-                    >
-                      {typeof output.body === "string"
-                        ? output.body
-                        : JSON.stringify(output.body, null, 2)}
-                    </pre>
-                  ) : (
-                    <p className="muted">Send a request to see the response.</p>
-                  )}
-                </div>
-              </section>
-            </div>
-          </div>
-        ) : (
-          <div className="empty">
-            <h2>Use a {e.protocol} client</h2>
-            <p>
-              The JSON request tester supports HTTP and OpenAI compatible
-              endpoints.
-            </p>
-          </div>
-        ))}
-      {edit && (
+      {remove && (
         <Modal
-          title="Edit scaling"
-          onClose={() => !scaleBusy && setEdit(false)}
+          title="Delete endpoint?"
+          onClose={() => {
+            if (!busy) setRemove(false);
+          }}
         >
-          <form className="form" onSubmit={saveScale}>
-            <div className="form-grid">
-              {(
-                [
-                  ["min", "Minimum replicas"],
-                  ["max", "Maximum replicas"],
-                  ["conc", "Target concurrency"],
-                  ["idle", "Scale to zero after (seconds)"],
-                ] as const
-              ).map(([k, label]) => (
-                <Field key={k} label={label}>
-                  <Input
-                    type="number"
-                    value={scale[k]}
-                    onChange={(v) => setScale({ ...scale, [k]: Number(v) })}
-                    controlProps={{
-                      min: k === "max" || k === "conc" ? 1 : 0,
-                      step: 1,
-                      required: true,
-                    }}
-                  />
-                </Field>
-              ))}
-            </div>
-            {scaleError && <ErrorBox msg={scaleError} />}
-            <div className="dialog-actions">
-              <Button disabled={scaleBusy} onClick={() => setEdit(false)}>
-                Cancel
-              </Button>
-              <Button primary type="submit" loading={scaleBusy}>
-                Save changes
-              </Button>
-            </div>
-          </form>
+          <p>
+            Delete <strong>{e.name}</strong> from every region? This removes its
+            saved definition.
+          </p>
+          <div className="actions">
+            <Button disabled={busy} onClick={() => setRemove(false)}>
+              Keep endpoint
+            </Button>
+            <Button
+              view="outlined-danger"
+              loading={busy}
+              onClick={deleteEndpoint}
+            >
+              Delete endpoint
+            </Button>
+          </div>
         </Modal>
       )}
     </>
+  );
+}
+
+function EndpointTest({ endpoint: e }: { endpoint: Endpoint }) {
+  const [body, setBody] = useState(JSON.stringify(sampleBody(e), null, 2));
+  const [result, setResult] = useState<unknown>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [duration, setDuration] = useState(0);
+  async function send(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      const input = JSON.parse(body);
+      if (!input || Array.isArray(input) || typeof input !== "object")
+        throw new Error("Enter a JSON object.");
+      const start = performance.now();
+      const response = await api().invoke(e.model, {
+        mode: "sync",
+        input,
+        region: e.region,
+        timeout_s: 600,
+      });
+      setDuration(Math.round(performance.now() - start));
+      setResult("result" in response ? response.result : response);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="overview">
+      <DetailCard title="Test request">
+        <form className="form" onSubmit={send}>
+          <Field label="Endpoint URL">
+            <input className="input" value={e.url} readOnly />
+          </Field>
+          <Field label="Request body (JSON)">
+            <textarea
+              className="textarea mono"
+              rows={10}
+              value={body}
+              onChange={(ev) => setBody(ev.target.value)}
+            />
+          </Field>
+          <div className="inline-note">
+            This request uses your API key and counts toward its budget. An idle
+            endpoint may take longer to respond while starting.
+          </div>
+          <Button view="action" size="l" type="submit" loading={busy}>
+            Send request
+          </Button>
+          <CopyButton value={curlFor(e, body)} label="Copy cURL" />
+          {error && <ErrorBox msg={error} />}
+        </form>
+      </DetailCard>
+      <DetailCard title="Response">
+        {result == null ? (
+          <p className="muted">Send a request to see its response here.</p>
+        ) : (
+          <>
+            <p className="muted">Completed in {duration} ms</p>
+            <pre className="out">{JSON.stringify(result, null, 2)}</pre>
+          </>
+        )}
+      </DetailCard>
+    </div>
   );
 }

@@ -142,11 +142,10 @@ def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
 
 def endpoint_status(name: str, ns: str, region: str = REGION) -> dict:
     """Live KServe state for the catalog: ready / scaled-to-zero / deploying / unavailable."""
-    cache_key = f"{region}/{ns}/{name}"
-    hit = _isvc_cache.get(cache_key)
+    hit = _isvc_cache.get(f"{region}/{ns}/{name}")
     if hit and hit[0] > time.time():
         return hit[1]
-    out = {"status": "unavailable", "replicas_ready": 0}
+    out = {"status": "unavailable", "replicas_ready": None}
     try:
         i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
         ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in i.get("status", {}).get("conditions", []))
@@ -155,5 +154,5 @@ def endpoint_status(name: str, ns: str, region: str = REGION) -> dict:
         out = {"status": "ready" if n else ("scaled-to-zero" if ready and not pods else "deploying"), "replicas_ready": n}
     except ApiException:
         pass
-    _isvc_cache[cache_key] = (time.time() + 10, out)
+    _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out

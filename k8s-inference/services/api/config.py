@@ -19,6 +19,9 @@ REGION_API_URLS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_API_URL
 # links into Loki Explore): "<region>=<url>,..."
 PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
 GRAFANA_URLS = dict(kv.split("=", 1) for kv in os.environ.get("GRAFANA_URLS", "").split(",") if "=" in kv)
+# Internal, regional monitoring services. Only the API can query them; browser clients never receive credentials.
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.monitoring.svc:9090").rstrip("/")
+LOKI_URL = os.environ.get("LOKI_URL", "http://loki.monitoring.svc:3100").rstrip("/")
 MODELS_NAMESPACE = os.environ.get("MODELS_NAMESPACE", "models")
 # The API's own namespace: runtime model definitions live there as ConfigMaps `catalog-<id>` (services/api/models.py)
 API_NAMESPACE = os.environ.get("API_NAMESPACE") or (open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
