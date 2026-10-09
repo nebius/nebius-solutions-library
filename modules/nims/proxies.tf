@@ -6,7 +6,7 @@ locals {
       deployment_name       = "nims-proxy"
       service_name          = "nims-gateway"
       base_port             = 8000
-      legacy_order          = ["openfold3", "boltz2", "evo2_40b", "msa_search", "openfold2", "genmol", "molmim", "diffdock", "qwen3-next-80b-a3b-instruct", "proteinmpnn", "rfdiffusion"]
+      legacy_order          = ["openfold3", "boltz2", "evo2_40b", "msa_search", "openfold2", "genmol", "molmim", "diffdock", "qwen3-next-80b-a3b-instruct", "proteinmpnn", "rfdiffusion", "maisi", "vista3d", "alphafold2_multimer", "nemotron_3_nano"]
       extra_upstreams       = ["metadata"]
       proxy_timeout         = "600s"
       proxy_connect_timeout = "10s"

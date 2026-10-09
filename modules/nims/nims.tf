@@ -68,13 +68,16 @@ resource "kubernetes_deployment_v1" "nims" {
             }
           }
 
-          env {
-            name = "NGC_API_KEY"
+          dynamic "env" {
+            for_each = toset(each.value.api_key_env_names)
+            content {
+              name = env.value
 
-            value_from {
-              secret_key_ref {
-                name = kubernetes_secret_v1.ngc_api_key.metadata[0].name
-                key  = "NGC_API_KEY"
+              value_from {
+                secret_key_ref {
+                  name = kubernetes_secret_v1.ngc_api_key.metadata[0].name
+                  key  = "NGC_API_KEY"
+                }
               }
             }
           }
