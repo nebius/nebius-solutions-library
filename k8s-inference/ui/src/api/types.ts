@@ -13,6 +13,7 @@ export interface ScalingSpec {
     | "rps";
   target?: number;
   utilization_percent?: number;
+  buffer?: number; // ready replicas kept above demand while serving (0-8)
   container_concurrency?: number;
   cooldown_s?: number;
   window_s?: number;

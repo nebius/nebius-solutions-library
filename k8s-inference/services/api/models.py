@@ -63,6 +63,7 @@ class ScalingSpec(BaseModel):
     cooldown_s: int | None = Field(default=None, ge=0, le=3600)
     window_s: int | None = Field(default=None, ge=6, le=3600)
     idle_s: int | None = Field(default=None, ge=0, le=3600)
+    buffer: int | None = Field(default=None, ge=0, le=8)   # ready replicas kept above demand while serving (docs/SCHEDULING.md "Scaling buffer")
 # public registries -> the alias the image cache serves them under (terraform.tfvars `images.upstreams`)
 UPSTREAM_ALIAS = {"docker.io": "docker", "registry-1.docker.io": "docker", "index.docker.io": "docker",
                   "nvcr.io": "nvcr", "ghcr.io": "ghcr", "quay.io": "quay", "registry.k8s.io": "k8s"}
@@ -239,6 +240,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             annotations["autoscaling.knative.dev/target-utilization-percentage"] = str(scaling.get("target", 100)) if metric == "concurrency_utilization" else "100"
             if metric == "requests_per_second":
                 runtime["scaling"]["containerConcurrency"] = 0
+        if int(scaling.get("buffer") or 0) > 0:
+            annotations[f"{LABEL}/buffer"] = str(int(scaling["buffer"]))   # the dispatcher holds min-scale at demand + buffer
         if annotations:
             runtime["annotations"] = annotations
         if s.get("args"):

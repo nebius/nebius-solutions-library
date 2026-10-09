@@ -1230,14 +1230,17 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     assert c.put("/v1/models/scaling-demo", json=saved, headers=ADMIN).status_code == 200
     assert north.custom[key]["spec"]["predictor"]["scaleMetric"] == "concurrency"
     assert c.patch("/v1/endpoints/scaling-demo", json=patch, headers=H).status_code == 403
-    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN).status_code == 422
+    r = c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["scaling"]["buffer"] == 1, r.text
+    assert north.custom[key]["metadata"]["annotations"]["serverless2.nebius/buffer"] == "1"
+    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 9}}, headers=ADMIN).status_code == 422
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"window_s": 5}}, headers=ADMIN).status_code == 422
-    assert admin_keys.rows["scaling-demo"]["version"] == 3
+    assert admin_keys.rows["scaling-demo"]["version"] == 4
 
 
 @pytest.mark.parametrize("scaling", [
     {"metric": "cpu_utilization"}, {"metric": "memory_utilization"},
-    {"buffer": 1}, {"evaluation_interval_s": 5}, {"load_balancing": "first-available"},
+    {"buffer": 9}, {"evaluation_interval_s": 5}, {"load_balancing": "first-available"},
     {"window_s": 5}, {"cooldown_s": -1}, {"container_concurrency": 1001},
     {"target": 0}, {"utilization_percent": 101}, {"idle_s": 3601}, {"min": 3, "max": 2},
     {"metric": "concurrency_utilization", "target": 101, "container_concurrency": 200},

@@ -96,7 +96,7 @@ The internal shape mirrors public `nebius.ai.v1` Endpoint and Job plus the
 extensions below. It is what the provider adapter writes into KServe objects and
 Kubernetes Jobs, and it is the gap list for the Serverless and Token Factory teams.
 
-Endpoint extensions: `scaling {min_replicas, max_replicas, target_concurrency,
+Endpoint extensions: `scaling {buffer (ready replicas above demand, 0-8), min_replicas, max_replicas, target_concurrency,
 scale_to_zero_after}`, `fast_start {policy}`, `capacity {pool_ref, placement:
 RESERVED|SPOT|ANY, max_spot_price, region}`, `routing {hostname, private}`,
 `status {replicas_ready, in_flight, last_cold_start, preemption_events}`.

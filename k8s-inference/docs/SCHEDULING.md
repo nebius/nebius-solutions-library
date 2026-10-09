@@ -174,6 +174,30 @@ Decisions are logged (`kubectl -n kueue-system logs deploy/dispatcher`) as
 `<ns>/<workload> profile=... pin=... gpus=N -> [clusters] best=(cluster,
 flavor, price, free)`.
 
+## Scaling buffer: ready replicas above demand (2026-10-09)
+
+`scaling.buffer = N` on an endpoint keeps N ready replicas more than the load needs while the model serves,
+so a burst finds a replica at once instead of waiting for a start. Knative's autoscaler has no additive
+setting (it scales to load over target), so the dispatcher's elected replica adds it
+(`services/dispatcher/buffer.py`, every reconcile cycle, 15 s):
+
+1. For every InferenceService with the annotation `serverless2.nebius/buffer` (the API writes it from
+   `scaling.buffer`), take the revision that carries the traffic (`routingState=active`).
+2. Read demand from the Knative autoscaler's own metrics (`kn_revision_concurrency_stable` over
+   `kn_revision_concurrency_target`, or the request-rate pair for that metric), through the worker API
+   server's service proxy. That is Knative's formula, measured before our floor, so the floor never hides it.
+3. Hold the revision's `autoscaling.knative.dev/min-scale` at demand + N, at most `scaling.max`; at zero
+   demand the floor returns to `scaling.min`, so scale to zero is untouched (the warm spare node covers the
+   first start). A floor is lowered only after the model's cooldown (`scaling.cooldown_s`, at least 60 s).
+4. The annotation goes on the Revision, not the InferenceService: a Revision annotation takes effect at
+   once and creates no rollout (measured on Knative 1.23: desired 2 within one cycle, nothing reverted). A
+   new revision starts from the template and is picked up on the next cycle. The revision carries
+   `serverless2.nebius/buffer-raised-at` while a floor of ours is up; removing the buffer restores the minimum.
+
+Cost: N replicas' GPUs for as long as the model serves. The worker identity of the manager gains read on
+InferenceServices, patch on Revisions and `get` on the autoscaler's service proxy
+(`clusters/common/manifests/fleet-access/multikueue.yaml`).
+
 ## Images: one host, cached per region
 
 Every image reference names the logical host `registry.serverless2.local`

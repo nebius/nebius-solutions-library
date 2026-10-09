@@ -48,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+import buffer
 from kubernetes import client, config
 
 log = logging.getLogger("dispatcher")
@@ -56,6 +57,7 @@ NS = os.environ.get("PRICES_NAMESPACE", "kueue-system")
 FLEET_CM = os.environ.get("FLEET_CONFIGMAP", "fleet-prices")   # charts/fleet: pools.yaml
 SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: spot.json
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
+BUFFER = os.environ.get("BUFFER", "1") == "1"        # ready-replica buffers of endpoints (buffer.py)
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
 ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))   # grace before a volume whose manager Jobs are gone is deleted
 RANK_PORT = int(os.environ.get("RANK_PORT", "8080"))              # GET /v1/rank (the API's class choice at submission), /healthz
@@ -466,6 +468,8 @@ def reconcile(core, custom, batch, dispatch=None):
     SNAPSHOT.update({"clusters": clusters, "spot": spot, "free": dict(free), "aliases": aliases, "at": datetime.now(timezone.utc).isoformat()})
     if not (DISPATCH if dispatch is None else dispatch):
         return
+    if BUFFER:
+        buffer.reconcile_buffers(workers)
     workloads = custom.list_cluster_custom_object(GROUP, VERSION, "workloads").get("items", [])
     for wl in workloads:
         if not pending_multikueue(wl):
