@@ -1,30 +1,26 @@
-#parent_id      = "" # The project-id in this context
-#subnet_id      = "" # Use the command "nebius vpc v1alpha1 network list" to see the subnet id
+parent_id      = "project-u02aad0nig009q3hnm4gda" # The project-id in this context
+subnet_id      = "vpcsubnet-u02en3xntb0pqj9zwb" # Use the command "nebius vpc v1alpha1 network list" to see the subnet id
 
 
 #preset = "16vcpu-64gb"
 #platform = "cpu-d3"
 #preset = "8gpu-128vcpu-1600gb"
-preset   = "1gpu-16vcpu-200gb"
-platform = "gpu-h200-sxm"
+preset   = "8gpu-192vcpu-2768gb"
+platform = "gpu-b300-sxm"
 
 users = [
   {
-    user_name    = "tux",
+    user_name    = "ubuntu",
     ssh_key_path = "~/.ssh/id_rsa.pub"
   },
-  {
-    user_name      = "tux2",
-    ssh_public_key = "<SSH KEY STRING>"
-  }
 ]
 
 public_ip      = true
-instance_count = 2
-preemptible    = false
+instance_count = 1
+preemptible    = true
 
 shared_filesystem_id = ""
 mount_bucket         = ""
-enable_local_disks = false # Only B300 supportes local disk
+enable_local_disks = true # Only B300 supportes local disk
 
-fabric = "fabric-n"
+fabric = "us-north1-a"

@@ -133,13 +133,22 @@ variable "local_disks_mount_mode" {
 }
 
 variable "local_nvme_drives_path" {
-  description = "Mount path for local NVMe drives"
+  description = "Dedicated local disk mount: /scratch, /mnt/<name>, or /srv/<name>"
   type        = string
   default     = "/scratch"
-
   validation {
-    condition     = startswith(var.local_nvme_drives_path, "/")
-    error_message = "Local NVMe drives path must be an absolute path."
+    condition     = can(regex("^/(scratch|mnt/[a-zA-Z0-9_-]+|srv/[a-zA-Z0-9_-]+)$", var.local_nvme_drives_path))
+    error_message = "Use /scratch, /mnt/<name>, or /srv/<name> with a simple directory name."
+  }
+}
+
+variable "local_disks_expected_count" {
+  description = "Expected NVMe device count for this allocation; discovery fails closed on mismatch"
+  type        = number
+  default     = 6
+  validation {
+    condition     = var.local_disks_expected_count > 0 && floor(var.local_disks_expected_count) == var.local_disks_expected_count
+    error_message = "Expected disk count must be a positive integer."
   }
 }
 
@@ -187,4 +196,14 @@ variable "preemptible" {
   description = "Whether the VM should be preemptible"
   type        = bool
   default     = false
+}
+
+variable "local_disks_dependent_services" {
+  description = "Systemd services that must wait for successful NVMe preparation"
+  type        = set(string)
+  default     = []
+  validation {
+    condition     = alltrue([for name in var.local_disks_dependent_services : can(regex("^[a-zA-Z0-9_-]+[.]service$", name)) && name != "local-nvme.service"])
+    error_message = "Use simple service names ending in .service, excluding local-nvme.service."
+  }
 }

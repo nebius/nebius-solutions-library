@@ -134,3 +134,46 @@ fabric = "fabric-6"
 This will create a GPU cluster and add all vms inside there. This gives them the possibility to connect over Infiniband. 
 
 It is not possible to change that for already running instances
+
+
+### B300 local NVMe scratch storage
+
+```hcl
+platform                       = "gpu-b300-sxm"
+preset                         = "8gpu-192vcpu-2768gb"
+enable_local_disks             = true
+local_disks_mount_mode         = "raid0" # or "raw" for individual ext4 mounts
+local_nvme_drives_path         = "/scratch"
+local_disks_expected_count     = 6 # Confirm the device count for your allocation.
+local_disks_dependent_services = ["training.service"] # Use your actual workload services.
+```
+
+Local disks are ephemeral: API stop/start loses their contents. The boot service
+recreates blank storage and mounts it without persisting filesystem UUIDs in
+fstab. It retries discovery and refuses unexpected counts, root backing disks,
+partitions, mixed RAID signatures, unrelated arrays, and conflicting mounts.
+The default count remains six for compatibility; it is not autodetected.
+
+Use a dedicated `/scratch`, `/mnt/<name>`, or `/srv/<name>` directory. Symlink
+paths are rejected. RAID mode mounts one ext4 filesystem; raw mode mounts each
+device at `disk-0`, `disk-1`, etc. Raw indices follow device enumeration and are
+not persistent disk identities. Mount roots use sticky world-writable permissions.
+
+List each workload service in `local_disks_dependent_services` to install
+`Requires=` and `After=` dependencies on `local-nvme.service`. A failed preparation
+then prevents those services from starting. This does not gate arbitrary processes
+or stop services already running when cloud-init first installs the configuration;
+start workloads only after cloud-init completes successfully. On an existing VM,
+stop workloads before updating the service and its dependencies.
+
+Cloud-init changes are intended for newly provisioned VMs; updating Terraform user
+data does not reliably reinstall scripts on an existing VM. For manual migration,
+remove only the old scratch entries from `/etc/fstab` before rebooting, and remove
+only the old scratch ARRAY entry from `/etc/mdadm/mdadm.conf` (rebuild initramfs if
+it contained that entry). Preserve unrelated mounts and arrays. The new script does
+not rewrite either file. Switching between raw and RAID modes requires deliberate
+cleanup of the previous storage; the script refuses to erase existing signatures.
+
+Validate on a disposable B300 VM with first boot, guest reboot, and API stop/start
+before using this for workloads. Terraform rendering checks cannot validate device
+presentation or RAID behavior on the host.
