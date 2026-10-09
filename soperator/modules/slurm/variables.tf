@@ -304,6 +304,17 @@ variable "login_on_worker_nodes" {
   default     = false
 }
 
+variable "populate_jail_node_filter_name" {
+  description = "Node filter used to populate the shared jail on a compatible CPU architecture. Null retains worker placement for login colocation and system placement otherwise."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.populate_jail_node_filter_name == null ? true : contains(["system", "login", "worker"], var.populate_jail_node_filter_name)
+    error_message = "populate_jail_node_filter_name must be system, login, worker, or null."
+  }
+}
+
 variable "login_sshd_config_map_ref_name" {
   description = "Name of configmap with SSHD config, which runs in slurmd container."
   type        = string
