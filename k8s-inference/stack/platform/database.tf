@@ -6,7 +6,7 @@
 locals {
   db           = local.cloud.database
   db_password  = local.secrets.database_password
-  db_url       = { for name, dbname in local.db.databases : name => "postgresql://${local.db.user}:${urlencode(local.db_password)}@${local.db.host}:${local.db.port}/${dbname}?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt" }
+  db_url       = { for name, dbname in local.db.databases : name => "postgresql://${local.db.user}:${urlencode(local.db_password)}@${local.db.host}:${local.db.port}/${dbname}?sslmode=verify-full&sslrootcert=${local.msp_ca_path}" }
   db_namespace = local.role.control ? toset(["api", "litellm"]) : toset([])
 }
 

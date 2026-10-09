@@ -104,7 +104,7 @@ locals {
     }
     # LiteLLM on the managed database (stack/platform/database.tf); UI behind the gateway only.
     litellm = {
-      db           = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", url = "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?sslmode=require&sslaccept=strict&sslcert=/etc/ssl/certs/ca-certificates.crt", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } }
+      db           = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", url = "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?sslmode=require&sslaccept=strict&sslcert=${local.msp_ca_path}", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } }
       volumes      = local.trust_volumes
       volumeMounts = local.trust_mounts
     }
