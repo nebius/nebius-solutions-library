@@ -95,7 +95,7 @@ def test_raise_hold_lower_and_restore():
     custom = FakeCustom([isvc("llm", 1), isvc("idle", 1)], [rev("llm-predictor-00002", "llm"), rev("idle-predictor-00001", "idle")])
     out = b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=1000.0)
     assert out == {"llm-predictor-00002": 3}                       # demand 2 + buffer 1; the idle model keeps min 0
-    assert custom.patches[-1][1] == {b.MIN_ANN: "3", b.RAISED_ANN: "1000"}
+    assert custom.patches[-1][1] == {b.MIN_ANN: "3", b.RAISED_ANN: "1000", b.LOW_ANN: None}
     # demand drops to 0: the first quiet sample only starts the clock, a busy sample in between resets it, and the
     # floor returns to the minimum (our marks go) once demand has stayed low for a whole cooldown
     quiet = METRICS.replace('kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 5.2', 'kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 0')
