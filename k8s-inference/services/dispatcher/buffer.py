@@ -19,6 +19,7 @@ import time
 LABEL = "serverless2.nebius"
 CATALOG_NS, CATALOG_SELECTOR = "api", f"{LABEL}/catalog=runtime"   # the API's per-region model copies (services/api/models.py save)
 RAISED_ANN = f"{LABEL}/buffer-raised-at"    # on the Revision: when we last raised its floor (epoch seconds)
+LOW_ANN = f"{LABEL}/buffer-low-since"       # on the Revision: since when demand has asked for a lower floor
 MIN_ANN = "autoscaling.knative.dev/min-scale"
 COOLDOWN_ANN = "autoscaling.knative.dev/scale-down-delay"
 METRICS_PATH = "/api/v1/namespaces/knative-serving/services/autoscaler:9090/proxy/metrics"
@@ -71,7 +72,7 @@ def reconcile_buffers(workers: dict, now: float | None = None) -> dict:
         try:
             changed[cname] = reconcile_worker(w["custom"], w["core"], now)
         except Exception as e:   # one worker's trouble never stops the others
-            log.warning("buffer: %s: %s", cname, e)
+            log.warning("buffer: %s: %s %s", cname, e, (getattr(e, "body", "") or "")[:200])
     return changed
 
 
@@ -101,16 +102,28 @@ def reconcile_worker(custom, core, now: float) -> dict:
             target = base_min                               # buffer removed, or a revision no longer routed
         current = int(ann.get(MIN_ANN) or base_min)
         if target == current:
+            if LOW_ANN in ann:                              # demand is back: forget the pending lowering
+                _patch(custom, md["name"], {LOW_ANN: None})
             continue
-        cooldown = max(60, _seconds(((by_name.get(model) or {}).get("metadata") or {}).get("annotations", {}).get(COOLDOWN_ANN), 120))
-        if target < current and ours and now - float(ann.get(RAISED_ANN) or 0) < cooldown:
-            continue                                        # lowering waits for the model's cooldown
-        patch = {MIN_ANN: str(target), RAISED_ANN: f"{now:.0f}" if target > base_min else None}
-        custom.patch_namespaced_custom_object("serving.knative.dev", "v1", NAMESPACE, "revisions", md["name"],
-                                              {"metadata": {"annotations": patch}})
+        cooldown = max(120, _seconds(((by_name.get(model) or {}).get("metadata") or {}).get("annotations", {}).get(COOLDOWN_ANN), 120))
+        if target < current and ours:
+            # lowering waits until demand has asked for less for a whole cooldown (one quiet sample never drops the floor)
+            low_since = float(ann.get(LOW_ANN) or 0)
+            if not low_since:
+                _patch(custom, md["name"], {LOW_ANN: f"{now:.0f}"})
+                continue
+            if now - low_since < cooldown:
+                continue
+        patch = {MIN_ANN: str(target), RAISED_ANN: f"{now:.0f}" if target > base_min else None, LOW_ANN: None}
+        _patch(custom, md["name"], patch)
         log.info("buffer: %s/%s min-scale %s -> %s (model %s)", NAMESPACE, md["name"], current, target, model)
         changed[md["name"]] = target
     return changed
+
+
+def _patch(custom, revision: str, annotations: dict):
+    custom.patch_namespaced_custom_object("serving.knative.dev", "v1", NAMESPACE, "revisions", revision,
+                                          {"metadata": {"annotations": annotations}})
 
 
 def model_buffers(core) -> dict:

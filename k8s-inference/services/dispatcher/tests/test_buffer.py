@@ -96,16 +96,23 @@ def test_raise_hold_lower_and_restore():
     out = b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=1000.0)
     assert out == {"llm-predictor-00002": 3}                       # demand 2 + buffer 1; the idle model keeps min 0
     assert custom.patches[-1][1] == {b.MIN_ANN: "3", b.RAISED_ANN: "1000"}
-    # demand drops to 0: inside the cooldown the floor stays, after it the floor returns to the minimum and our mark goes
+    # demand drops to 0: the first quiet sample only starts the clock, a busy sample in between resets it, and the
+    # floor returns to the minimum (our marks go) once demand has stayed low for a whole cooldown
     quiet = METRICS.replace('kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 5.2', 'kn_revision_name="llm-predictor-00002",kn_service_name="llm-predictor"} 0')
     assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1060.0) == {}
-    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1200.0) == {"llm-predictor-00002": 0}
-    assert custom.patches[-1][1] == {b.MIN_ANN: "0", b.RAISED_ANN: None}
+    assert custom.patches[-1][1] == {b.LOW_ANN: "1060"}
+    assert b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=1075.0) == {}        # one busy sample: clock reset
+    assert custom.patches[-1][1] == {b.LOW_ANN: None}
+    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1100.0) == {}
+    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1150.0) == {}        # 50 s low: not yet
+    assert b.reconcile_worker(custom, FakeCore(quiet, BUFFERS), now=1230.0) == {"llm-predictor-00002": 0}
+    assert custom.patches[-1][1] == {b.MIN_ANN: "0", b.RAISED_ANN: None, b.LOW_ANN: None}
 
 
 def test_buffer_removed_restores_the_floor_and_inactive_revisions_are_left_alone():
     BUFFERS.clear()
     custom = FakeCustom([isvc("llm", 0, min_=1)], [rev("llm-predictor-00002", "llm", ann={b.MIN_ANN: "3", b.RAISED_ANN: "1"}),
                                                    rev("llm-predictor-00001", "llm", active=False)])
-    assert b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=5000.0) == {"llm-predictor-00002": 1}
-    assert len(custom.patches) == 1
+    assert b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=5000.0) == {}          # starts the clock
+    assert b.reconcile_worker(custom, FakeCore(METRICS, BUFFERS), now=5200.0) == {"llm-predictor-00002": 1}
+    assert len(custom.patches) == 2

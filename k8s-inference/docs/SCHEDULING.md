@@ -189,7 +189,7 @@ setting (it scales to load over target), so the dispatcher's elected replica add
    server's service proxy. That is Knative's formula, measured before our floor, so the floor never hides it.
 3. Hold the revision's `autoscaling.knative.dev/min-scale` at demand + N, at most `scaling.max`; at zero
    demand the floor returns to `scaling.min`, so scale to zero is untouched (the warm spare node covers the
-   first start). A floor is lowered only after the model's cooldown (`scaling.cooldown_s`, at least 60 s).
+   first start). A floor is lowered only once demand has asked for less for a whole cooldown (`scaling.cooldown_s`, at least 120 s); one quiet sample never drops it.
 4. The annotation goes on the Revision, not the InferenceService: a Revision annotation takes effect at
    once and creates no rollout (measured on Knative 1.23: desired 2 within one cycle, nothing reverted). A
    new revision starts from the template and is picked up on the next cycle. The revision carries
