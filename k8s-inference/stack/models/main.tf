@@ -111,19 +111,6 @@ resource "kubernetes_secret_v1" "ngc" {
 }
 
 # ---------------------------------------------------------------------------
-# Endpoints: one charts/endpoint release per catalog entry deployed on this cluster (catalog mode: the entry
-# is the values file, `cluster` selects its deployments block). Cold starts take minutes: no wait.
-resource "helm_release" "endpoint" {
-  for_each   = local.role.worker ? try(local.endpoints_by_cluster[local.id], {}) : {}
-  name       = each.key
-  namespace  = "models"
-  chart      = "${local.repo}/charts/endpoint"
-  values     = [yamlencode(each.value), yamlencode({ cluster = local.id })]
-  wait       = false
-  depends_on = [helm_release.tenant]
-}
-
-# ---------------------------------------------------------------------------
 # LiteLLM API keys (control cluster): one Job per key POSTs /key/generate with a Terraform-generated key value
 # (idempotent: an existing key is accepted). Values are sensitive outputs.
 locals {
@@ -191,11 +178,20 @@ timeouts { create = "20m" }
 }
 
 # ---------------------------------------------------------------------------
-# Acceptance probe (control cluster, last): a run of `acceptance.model` and a call of `acceptance.endpoint`
-# through the public API with the first tenant key. A failure fails the apply.
+# Acceptance probe (control cluster, last): a run of `acceptance.model` with the first tenant key and, with
+# `acceptance.example_endpoint`, the example model `llm-example` (stack/models/llm-example.json: a stock
+# vLLM container, on the fleet's first GPU class) defined through the API with the first admin key, then
+# called. A failure fails the apply. The example stays as the first model of the console.
 locals {
-  first_key = length(local.keys) > 0 ? sort(keys(local.keys))[0] : null
-  probe_on  = local.f.acceptance.probe && local.role.control && local.first_key != null
+  first_key   = length(local.keys) > 0 ? sort(keys(local.keys))[0] : null
+  admin_keys  = sort([for k, v in local.keys : k if v.admin])
+  first_admin = length(local.admin_keys) > 0 ? local.admin_keys[0] : null
+  probe_on    = local.f.acceptance.probe && local.role.control && local.first_key != null
+  example_on  = local.probe_on && local.f.acceptance.example_endpoint && local.first_admin != null && length(local.gpu_classes) > 0
+  example_spec = merge(jsondecode(file("${path.module}/llm-example.json")), {
+    gpu     = { count = 1, classes = [local.gpu_classes[0]] }
+    regions = sort(distinct([for id, c in local.region_clusters : c.region if length([for pn, p in c.pools : pn if p.gpu_class == local.gpu_classes[0]]) > 0]))
+  })
 }
 
 resource "kubernetes_job_v1" "probe" {
@@ -228,12 +224,15 @@ resource "kubernetes_job_v1" "probe" {
               sleep 10
             done
             [ "$st" = SUCCEEDED ]
-            %{if local.f.acceptance.endpoint != null~}
-            echo "== endpoint ${local.f.acceptance.endpoint}"
-            for i in $(seq 1 20); do
+            %{if local.example_on~}
+            echo "== example model ${local.example_spec.id}: defined through the API (admin key), then called"
+            code=$(curl -s -o /tmp/m -w '%%{http_code}' -X POST -H "Authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' -d "$SPEC" "$API/v1/models" || echo 000)
+            echo "POST /v1/models HTTP $code"; head -c 600 /tmp/m; echo
+            case "$code" in 201) ;; 409) echo "exists already (kept)" ;; *) exit 1 ;; esac
+            for i in $(seq 1 24); do
               code=$(curl -s -o /tmp/e -w '%%{http_code}' --max-time 660 -X POST -H "$H" -H 'content-type: application/json' \
                 -d '{"mode":"sync","input":{"messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":16}}' \
-                "$API/v1/models/${local.f.acceptance.endpoint}:invoke" || echo 000)
+                "$API/v1/models/${local.example_spec.id}:invoke" || echo 000)
               echo "$(date -u +%T) HTTP $code"; [ "$code" = 200 ] && { head -c 400 /tmp/e; echo; exit 0; }
               sleep 30
             done
@@ -248,6 +247,14 @@ resource "kubernetes_job_v1" "probe" {
           env {
             name  = "KEY"
             value = "sk-${random_password.key[local.first_key].result}"
+          }
+          env {
+            name  = "ADMIN_KEY"
+            value = local.first_admin != null ? "sk-${random_password.key[local.first_admin].result}" : ""
+          }
+          env {
+            name  = "SPEC"
+            value = jsonencode(local.example_spec)
           }
         }
       }

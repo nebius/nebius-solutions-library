@@ -11,7 +11,9 @@ kube-prometheus-stack values in `clusters/common/values/kube-prometheus-stack.ya
   (nvidia `dcgm-exporter` chart for GPU metrics, grafana `alloy` chart as the
   log shipper to Loki). Both tolerate the GPU taint.
 - `scrape.yaml`: ServiceMonitors/PodMonitors for Knative, queue-proxy, KServe,
-  Kueue, Argo Workflows, cert-manager, CloudNativePG, Envoy Gateway proxies.
+  Kueue, Argo Workflows, cert-manager, CloudNativePG (reference fleet only;
+  the solution's Nebius Managed PostgreSQL has no in-cluster exporter), Envoy
+  Gateway proxies.
 - `rules.yaml`: recording rules (`serverless2:*`) and alerts (routed to the
   stack's default Alertmanager, receiver `null`).
 - `datasource-loki.yaml`: Loki datasource for Grafana.

@@ -17,9 +17,10 @@ output "tenant_keys" {
   value       = { for tn, t in local.tenants : tn => { for kn, k in t.keys : kn => "sk-${random_password.key["${tn}-${kn}"].result}" } if local.role.control }
 }
 
-output "endpoints" {
-  value = { for mid, e in(local.role.worker ? try(local.endpoints_by_cluster[local.id], {}) : {}) : mid => "https://${mid}-predictor.models.${trimprefix(local.platform.api_url, "https://api.")}" }
+output "example_model" {
+  description = "The acceptance probe's example model, defined through the API (control cluster)."
+  value       = local.example_on ? "${local.example_spec.id}: ${local.platform.api_url}/v1/models/${local.example_spec.id}:invoke (console: ${replace(local.platform.api_url, "https://api.", "https://app.")}/models)" : "disabled"
 }
 
 output "api_url" { value = local.platform.api_url }
-output "probe" { value = local.probe_on ? "acceptance-probe Job in namespace api succeeded (model ${local.f.acceptance.model}${local.f.acceptance.endpoint != null ? ", endpoint ${local.f.acceptance.endpoint}" : ""})" : "disabled" }
+output "probe" { value = local.probe_on ? "acceptance-probe Job in namespace api succeeded (run class ${local.f.acceptance.model}${local.example_on ? ", example model ${local.example_spec.id}" : ""})" : "disabled" }

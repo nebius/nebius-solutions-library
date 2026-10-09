@@ -44,14 +44,49 @@ metadata: { name: serverless2-api-fleet, namespace: kueue-system }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-fleet }
 subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
 ---
+# runtime model copies (services/api/models.py): the control API writes one ConfigMap per API-defined model into
+# this namespace of every region; the regional API serves them from here (docs/API.md "Models")
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-runtime-catalog, namespace: api }
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-runtime-catalog, namespace: api }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-runtime-catalog }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# the model endpoints' certificate of this cluster (clusters/common/manifests/gateway/models-tls.yaml): hostnames follow the models
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-models-certificate, namespace: envoy-gateway-system }
+rules:
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, patch]
+    resourceNames: [models]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-models-certificate, namespace: envoy-gateway-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-models-certificate }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
 # endpoints live only in `models`: read, scale (patch) for admin keys, pods for the replica count
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: { name: serverless2-api-endpoints, namespace: models }
 rules:
   - apiGroups: [serving.kserve.io]
-    resources: [inferenceservices]
-    verbs: [get, list, patch]
+    resources: [inferenceservices, localmodelcaches]
+    verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, patch, create, delete]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
@@ -74,11 +109,12 @@ spec:
       serviceAccountName: api
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.8.2
+          image: registry.serverless2.local/nebius/serverless2/api:0.9.2
           ports: [{ containerPort: 8080 }]
           env:
             - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
             - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
+            - { name: LITELLM_INTERNAL_KEY, valueFrom: { secretKeyRef: { name: litellm-internal, key: key, optional: true } } }   # model groups' key (control cluster only)
             - { name: REGION, value: eu-north1 }
             # placeholders: the platform stage (stack/platform/stage.tf) or the cluster overlay sets the public hostnames
             - { name: PUBLIC_API_URL, value: https://api.example.invalid }

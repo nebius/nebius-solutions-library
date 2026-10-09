@@ -2,7 +2,7 @@
 # One-time, idempotent: the fleet's Terraform state bucket and the identity that reads and writes it
 # (README.md step 1). Everything else of the fleet is Terraform with its state in this bucket.
 #
-#   stack/bootstrap/state-bucket.sh            # reads terraform.tfvars (name, hub project, profile)
+#   stack/bootstrap/state-bucket.sh            # reads terraform.tfvars (name, hub project); Nebius CLI active profile
 #
 # In the hub project: bucket <name>-tfstate (versioning ENABLED), service account and group <name>-tfstate
 # with storage.object-editor on that bucket only (bucket policy), and one S3 access key of the SA written to
@@ -14,9 +14,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TFVARS="${TFVARS:-$ROOT/terraform.tfvars}"
 PLAN=$(cd "$ROOT/stack/config" && terraform init -input=false > /dev/null && echo 'jsonencode(local.plan)' | terraform console -var-file="$TFVARS" | python3 -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read()))))')
 pq() { printf '%s' "$PLAN" | python3 -c "import json,sys; p=json.load(sys.stdin); print($1)"; }
-NAME=$(pq 'p["name"]'); PROFILE=$(pq 'p["profile"]'); BUCKET=$(pq 'p["state"]["bucket"]'); PROJECT=$(pq 'p["clusters"][p["hub_id"]]["project_id"]')
+NAME=$(pq 'p["name"]'); BUCKET=$(pq 'p["state"]["bucket"]'); PROJECT=$(pq 'p["clusters"][p["hub_id"]]["project_id"]')
 CREDS="${STATE_CREDS:-$HOME/.config/$NAME/tfstate.env}"
-n() { nebius --profile "$PROFILE" "$@"; }
+n() { nebius "$@"; }
 find_id() { # <service list args...> <name>
   local name="${*: -1}"; n "${@:1:$#-1}" --parent-id "$PROJECT" --page-size 500 --format json \
     | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((i["metadata"]["id"] for i in d.get("items",[]) if i["metadata"].get("name")==sys.argv[1]),""))' "$name"

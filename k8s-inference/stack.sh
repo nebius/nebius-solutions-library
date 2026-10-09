@@ -22,6 +22,12 @@ TFVARS="${TFVARS:-$ROOT/terraform.tfvars}"
 cmd="${1:-}"; shift || true
 export TF_IN_AUTOMATION=1
 [ "$cmd" = check ] && exec "$ROOT/tools/check.sh" "$@"
+# Authentication, the same way as the library's other solutions: an IAM access token of the Nebius CLI's active
+# profile (`nebius profile activate <name>` to switch), valid 12 hours, read by the Nebius provider from
+# NEBIUS_IAM_TOKEN and passed to the Kubernetes/Helm providers as TF_VAR_iam_token. Set NEBIUS_IAM_TOKEN
+# yourself (CI: a service-account token) to skip the CLI call.
+export NEBIUS_IAM_TOKEN="${NEBIUS_IAM_TOKEN:-$(nebius iam get-access-token)}"
+export TF_VAR_iam_token="$NEBIUS_IAM_TOKEN"
 
 # The plan stack.sh follows (cluster ids, roles, order, state bucket) is derived from the tfvars by the
 # config root (stack/config/locals.tf `plan`), so this script never parses HCL itself.

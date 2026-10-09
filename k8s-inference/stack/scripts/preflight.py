@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Preflight for `./stack.sh preflight`: the plan JSON on stdin (stack/config `local.plan`), the tfvars path as
-argv[1]. Checks, with the Nebius CLI of the fleet's profile, that every GPU pool's platform, preset, driver preset
+argv[1]. Checks, with the Nebius CLI (its active profile), that every GPU pool's platform, preset, driver preset
 and Kubernetes version are accepted by Managed Kubernetes (get-compatibility-matrix) and that the preset exists
 on the platform in the pool's project, and that the state bucket is reachable. Exit 1 on the first set of
 findings; a wrong preset otherwise costs a ten-minute failed apply."""
 import json, subprocess, sys
 
 plan = json.load(sys.stdin)
-profile = plan["profile"]
 tfvars = sys.argv[1]
 
 
 def nebius(*args):
-    r = subprocess.run(["nebius", "--profile", profile, *args, "--format", "json"], capture_output=True, text=True)
+    r = subprocess.run(["nebius", *args, "--format", "json"], capture_output=True, text=True)
     if r.returncode:
         return None, r.stderr.strip()
     return json.loads(r.stdout), None
@@ -63,7 +62,7 @@ for rn, r in regions.items():
 nc = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file={tfvars}"], input="jsonencode(local.catalog_without_fleet_class)",
                     capture_output=True, text=True)
 for mid in (json.loads(json.loads(nc.stdout)) if nc.returncode == 0 and nc.stdout.strip() else []):
-    findings.append(f"catalog {mid}: none of its gpu.classes is a gpu_class of a pool; add a pool of that class or override `gpu.classes` in models.entries")
+    findings.append(f"catalog {mid}: none of its gpu.classes is a gpu_class of a pool; add a pool of that class (the built-in classes of catalog/models)")
 
 b, err = nebius("storage", "bucket", "list", "--parent-id", plan["clusters"][plan["hub_id"]]["project_id"], "--page-size", "500")
 names = [i["metadata"]["name"] for i in (b or {}).get("items", [])]

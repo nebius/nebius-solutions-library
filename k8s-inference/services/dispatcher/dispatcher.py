@@ -32,14 +32,20 @@ charge, and `clusterName` is cleared for finished runs anyway). The admitting cl
 manager Workload (`serverless2.nebius/admitted-cluster`), once, for the API (region of the operation,
 price, where a resume must go) and for this dispatcher's own bookkeeping.
 Patches use the `kueue-admission` field manager (Kueue MultiKueue docs, external dispatcher caveat).
+The same ranking is served over HTTP (`GET /v1/rank?profile=&gpus=&classes=&regions=&pin=`, port RANK_PORT) from
+the last reconcile's snapshot: the API asks it at submission for a run class with per-GPU-class images, renders
+the Job with the best class's image and queues it on that class (docs/SCHEDULING.md "Per-GPU images for runs").
 """
 import base64
 import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 from kubernetes import client, config
@@ -52,6 +58,8 @@ SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: 
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
 ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))   # grace before a volume whose manager Jobs are gone is deleted
+RANK_PORT = int(os.environ.get("RANK_PORT", "8080"))              # GET /v1/rank (the API's class choice at submission), /healthz
+DISPATCH = os.environ.get("DISPATCH", "true").lower() != "false"  # false: only refresh the ranking snapshot (a second, read-only copy)
 LABEL = "serverless2.nebius"
 REGION_LABEL = f"{LABEL}/region"
 CLASSES_ANN = f"{LABEL}/gpu-classes"
@@ -171,6 +179,28 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         return (0 if is_free else 1, price, cap, cname, fname)
 
     return sorted(cands, key=key)
+
+
+SNAPSHOT: dict = {"clusters": {}, "spot": {}, "free": {}, "aliases": {}, "at": None}   # the last reconcile's view, served by /v1/rank
+
+
+def rank_response(snapshot: dict, profile_name: str | None, gpus: int, classes: list | None, regions: list | None,
+                  pin: str | None = None) -> dict:
+    """The /v1/rank answer from a reconcile snapshot: every (cluster, pool) candidate best-first with its GPU class,
+    capacity type, price and whether it is free now; `best` is the first one. The API asks this at submission for a
+    run class with per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class of `best` decides
+    the image, and the run is then queued on that class's profile (it may still move between regions of the class)."""
+    clusters, spot, free, aliases = snapshot["clusters"], snapshot["spot"], snapshot["free"], snapshot["aliases"]
+    names = {v: k for k, v in aliases.items()}
+    prof = profile_from_name(profile_name, clusters, spot)
+    allowed = [aliases.get(r, r) for r in regions] if regions else None
+    ranked = rank(prof, clusters, free, gpus, spot, aliases.get(pin, pin) if pin else None, classes, allowed)
+    out = []
+    for cname, fname, price, is_free in ranked:
+        pool = clusters[cname]["pools"][fname]
+        out.append({"cluster": cname, "region": names.get(cname, cname), "pool": fname, "gpu_class": pool.get("class"),
+                    "capacity": pool.get("capacity", "spot"), "price": price, "free": is_free})
+    return {"profile": prof, "ranked": out, "best": out[0] if out else None, "snapshot_at": snapshot.get("at")}
 
 
 def nominations(ranked: list, already: list, age_s: float) -> list:
@@ -420,6 +450,9 @@ def reconcile(core, custom, batch):
     clusters, spot = load_fleet(core)
     workers, aliases = worker_clients(core, custom)
     free = free_quota(workers)
+    SNAPSHOT.update({"clusters": clusters, "spot": spot, "free": dict(free), "aliases": aliases, "at": datetime.now(timezone.utc).isoformat()})
+    if not DISPATCH:
+        return
     workloads = custom.list_cluster_custom_object(GROUP, VERSION, "workloads").get("items", [])
     for wl in workloads:
         if not pending_multikueue(wl):
@@ -470,6 +503,43 @@ def reconcile(core, custom, batch):
 
 
 
+class RankHandler(BaseHTTPRequestHandler):
+    """GET /v1/rank?profile=prefer-h100&gpus=1&classes=h100,l40s&regions=eu-north1,eu-south1&pin=eu-south1 ; GET /healthz"""
+    def do_GET(self):  # noqa: N802
+        u = urlparse(self.path)
+        if u.path == "/healthz":
+            return self._json(200, {"ok": SNAPSHOT.get("at") is not None, "snapshot_at": SNAPSHOT.get("at")})
+        if u.path != "/v1/rank":
+            return self._json(404, {"error": "not found"})
+        q = parse_qs(u.query)
+        classes = [c for c in q.get("classes", [""])[0].split(",") if c] or None
+        regions = [r for r in q.get("regions", [""])[0].split(",") if r] or None
+        try:
+            gpus = int(q.get("gpus", ["1"])[0])
+        except ValueError:
+            return self._json(400, {"error": "gpus must be an integer"})
+        if SNAPSHOT.get("at") is None:
+            return self._json(503, {"error": "no snapshot yet"})
+        return self._json(200, rank_response(SNAPSHOT, q.get("profile", [None])[0], gpus, classes, regions, q.get("pin", [None])[0]))
+
+    def _json(self, code: int, body: dict):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args):  # quiet
+        return
+
+
+def serve_rank():
+    srv = ThreadingHTTPServer(("0.0.0.0", RANK_PORT), RankHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log.info("rank endpoint on :%d (dispatching=%s)", RANK_PORT, DISPATCH)
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -477,6 +547,7 @@ def main():
     except config.ConfigException:
         config.load_kube_config()
     core, custom, batch = client.CoreV1Api(), client.CustomObjectsApi(), client.BatchV1Api()
+    serve_rank()
     while True:
         try:
             reconcile(core, custom, batch)

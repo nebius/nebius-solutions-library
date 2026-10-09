@@ -18,17 +18,19 @@ id: container-run
 mode: run
 job:
   image: "{{image}}"              # any {{name}} is a parameter (caller's input > region defaults > entry defaults)
+  images: { h100: <image>:h100 }  # optional: one image per GPU class (keys: default or a gpu.classes entry); the class is
+                                  # chosen at submission and the run waits for it (docs/SCHEDULING.md "Per-GPU images for runs")
   command: "{{command}}"          # string -> /bin/sh -c; or a list [bash, -c, "..."]
   args: []                        # optional
   env: { CHECKPOINT_DIR: /work/checkpoint, OPERATION: "{{operation}}" }
   gpu: "{{gpus}}"                 # nvidia.com/gpu request = limit (0 = CPU job)
-  cpu: "8"                        # request; cpuLimit optional (GROMACS runs without: a CFS quota throttles it)
+  cpu: "8"                        # request; cpuLimit optional (many solvers run without one: a CFS quota throttles them)
   memory: 64Gi                    # request = limit (memoryLimit overrides the limit)
   pvcSizeGi: 100                  # the work volume (/work), ReadWriteOnce, regional
   shm: 16Gi                       # /dev/shm emptyDir
   pool: "{{pool}}"                # nodeSelector serverless2.nebius/pool (omit: Kueue's flavor decides)
   imagePullSecret: ngc            # Secret in the tenant namespace
-  graceSeconds: 120               # SIGTERM -> SIGKILL window (checkpoint + partial upload); gromacs 300
+  graceSeconds: 120               # SIGTERM -> SIGKILL window (checkpoint + partial upload); 300 for slow checkpoints
   s3Env: true                     # envFrom Secret `s3` (AWS_* for the tenant bucket) on the main container
   inputs: "{{input_prefix}}"      # default: the input_prefix parameter
   uploadExcludes: "--exclude 'scratch/*'"
@@ -44,12 +46,15 @@ parameters:
 `prefer-<class>` in the tenant namespace, `default` when the entry has no classes), and the whole
 list becomes a `nodeAffinity` on `serverless2.nebius/pool` over every fleet pool of those classes
 (pools from the `fleet-prices` ConfigMap), so a preference queue never falls back to a GPU the
-image does not run on (GROMACS has no sm_89 code: no L40S). A `pool` in the `job` block pins
+image does not run on (an image without sm_89 code: no L40S). A `pool` in the `job` block pins
 instead (regional path only). Images are named through the fleet's logical registry host
 (`registry.serverless2.local/<alias>/<path>`, the same reference in every region: `docs/IMAGES.md`).
+With `job.images` (one image per GPU class) the API chooses the class at submission from the
+dispatcher's ranking, renders that class's image and limits the affinity to that class's pools; the
+operation reports it as `gpu_class` and `image`, and a resume keeps it.
 
 Three run classes ship: `container-run` (any image and command; the generic job class),
-`gromacs` (the reference MD run, `models/gromacs/README.md`), `hello-run` (CPU smoke test).
+`hello-run` (CPU smoke test). Application layers define their own run classes through the model API.
 `parameters` is what the UI shows and what `input` may contain (unknown names, or a missing
 `required` one, are a 400); `deployments.<cluster>.parameters` are per-region defaults the caller
 never sees (pool, in-region image, tuning). `input_prefix` and `output_prefix` are always accepted;
@@ -94,7 +99,7 @@ podFailurePolicy:
 (or kills `main` with 137/143). The rule above does not count it against `backoffLimit`; the Job
 controller starts a replacement pod, which attaches the same PVC (the volume is regional, so the
 replacement lands in the same region by construction). `fetch` sees the `.inputs-fetched` marker
-and skips, `main` finds its checkpoints: GROMACS `-cpi run.cpt`, a training script its
+and skips, `main` finds its checkpoints: a solver's checkpoint file, a training script its
 `$CHECKPOINT_DIR`. The operation shows every attempt (`attempts[]`, status `PREEMPTED` for the
 lost one), billing sums the GPU-seconds of all of them.
 
@@ -306,7 +311,7 @@ errors with backoff for as long as the Job lives (a scaled-to-zero or saturated 
 waited for; any other 4xx is the caller's error: exit 2, which a `FailJob` rule turns into a FAILED
 operation without pod retries). The uploader puts `out/response.json` and `out/call.json` in the
 bucket; `GET /v1/operations/{id}/result` returns the response inline from there. The request body
-names the served model as the endpoint expects it (`qwen` for the Qwen entry, see its `runtime.args`).
+names the served model as the endpoint expects it (`served_model`, injected when the caller omits `model`).
 
 ## Status mapping
 
@@ -337,12 +342,12 @@ for the work volumes of fleet-placed runs.
 | Case | Result |
 |---|---|
 | `hello-run` | QUEUED -> RUNNING -> SUCCEEDED in 58 s; `STATUS.json`, `out/result.json`, `attempts/<pod>.json` in the bucket; PVC deleted by the uploader |
-| `gromacs` 5k steps, H100 spot | SUCCEEDED; run.xtc/edr/log/cpt/gro, topol.tpr uploaded; billed 12 GPU-s = $0.0072 to the key (`/key/update`), PVC released |
+| a GPU run class (molecular dynamics, 5k steps), H100 spot | SUCCEEDED; outputs and checkpoint uploaded; billed 12 GPU-s = $0.0072 to the key (`/key/update`), PVC released |
 | `container-run` checkpoint loop, pod deleted mid-run | replacement pod on the same volume, `FETCH SKIP`, `start at n=9`; Job stayed `Running`, not failed |
 | cancel while running | pod gone 12 s after `:cancel` (SIGTERM reaches `sh` through the shared PID namespace); operation CANCELLED, attempt CANCELLED, resumable |
 | `:resume` of the cancelled loop | `<id>-r1` on the same PVC, `start at n=37`, SUCCEEDED, `out/done.txt` under `operations/<id>-r1/`, PVC released; the PVC had both Jobs as owners |
-| `async` Qwen call | SUCCEEDED in 155 s (cold start waited for by `call.sh`), response inline from `out/response.json`; `model` must be `qwen` (a wrong name is a 404: FAILED at once) |
-| endpoint preempts a run | the Qwen endpoint scaling up preempted the GROMACS pod 2 s after `main` ended: Job `Complete`, pod gone, attempt record from the bucket is the only history |
+| `async` call to an OpenAI endpoint | SUCCEEDED in 155 s (cold start waited for by `call.sh`), response inline from `out/response.json`; a wrong `model` name is a 404: FAILED at once |
+| endpoint preempts a run | an endpoint scaling up preempted the run's pod 2 s after `main` ended: Job `Complete`, pod gone, attempt record from the bucket is the only history |
 | billing pass | 7 runs billed once, idempotent on the second pass, two leftover volumes released |
 
 Two findings changed the design during verification: a pod deleted by preemption leaves no

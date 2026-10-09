@@ -20,6 +20,10 @@ data "kustomization_overlay" "component" {
 }
 
 locals {
+  # The `models` certificate (clusters/common/manifests/gateway/models-tls.yaml): its hostnames and issuer
+  # follow the models defined through the API, which rewrites them; Terraform only creates the placeholder.
+  models_certificate        = "Certificate[/|]envoy-gateway-system[/|]models$"
+  models_certificate_fields = ["spec.dnsNames", "spec.issuerRef", "spec.commonName"]
   manifests_wave = { for w in ["0", "1", "2", "3"] : w => merge([
     for n, a in local.manifest_apps : data.kustomization_overlay.component[n].manifests if tostring(a.wave) == w
   ]...) }
@@ -30,6 +34,7 @@ resource "kubectl_manifest" "wave0" {
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
+  ignore_fields     = can(regex(local.models_certificate, each.key)) ? local.models_certificate_fields : null
   wait              = false
   depends_on        = [kubernetes_namespace_v1.ns]
 }
@@ -39,6 +44,7 @@ resource "kubectl_manifest" "wave1" {
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
+  ignore_fields     = can(regex(local.models_certificate, each.key)) ? local.models_certificate_fields : null
   wait              = false
   depends_on        = [helm_release.wave0, kubectl_manifest.wave0, helm_release.wave1]
 }
@@ -48,6 +54,7 @@ resource "kubectl_manifest" "wave2" {
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
+  ignore_fields     = can(regex(local.models_certificate, each.key)) ? local.models_certificate_fields : null
   wait              = false
   depends_on        = [helm_release.wave2, kubectl_manifest.wave1, helm_release.fleet]
 }
@@ -57,6 +64,7 @@ resource "kubectl_manifest" "wave3" {
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
+  ignore_fields     = can(regex(local.models_certificate, each.key)) ? local.models_certificate_fields : null
   wait              = false
   depends_on        = [helm_release.wave3, kubectl_manifest.wave2, kubernetes_config_map_v1.catalog]
 }
@@ -65,7 +73,8 @@ resource "kubectl_manifest" "wave3" {
 # Extras rendered from this stage's inputs (what the per-cluster overlays added as files).
 locals {
   extras_wave1 = merge(
-    # TLS certificate for every public hostname of this cluster (HTTP-01 through the gateway).
+    # TLS certificate for the public hostnames of this cluster (HTTP-01 through the gateway). The model
+    # endpoints' hostnames are on the `models` certificate the API keeps (gateway/models-tls.yaml).
     {
       certificate = {
         apiVersion = "cert-manager.io/v1", kind = "Certificate"
@@ -74,7 +83,7 @@ locals {
           secretName = "${local.id}-wildcard-tls"
           issuerRef  = { name = local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt", kind = "ClusterIssuer" }
           commonName = local.hostnames.api
-          dnsNames   = distinct(concat(values(local.hostnames), local.model_hosts))
+          dnsNames   = distinct(values(local.hostnames))
           privateKey = { rotationPolicy = "Always" }
         }
       }
@@ -127,31 +136,8 @@ locals {
     } : k => v if local.cluster.weights_filesystem.enabled },
   )
 
-  # Control plane only: Postgres (CNPG) with backups, the console, the billing CronJob, LiteLLM UI route.
+  # Control plane only: the console, the billing CronJob, LiteLLM UI route.
   extras_control = { for k, v in {
-    postgres = {
-      apiVersion = "postgresql.cnpg.io/v1", kind = "Cluster"
-      metadata   = { name = "postgres", namespace = "data" }
-      spec = {
-        instances = 2
-        storage   = { size = "50Gi" }
-        bootstrap = { initdb = { database = "litellm", owner = "litellm", secret = { name = "litellm-db" } } }
-        backup = {
-          retentionPolicy = "14d"
-          barmanObjectStore = {
-            destinationPath = "s3://${local.cloud.hub.backups_bucket}/postgres-${local.id}"
-            endpointURL     = local.cloud.hub.backups_bucket_endpoint
-            s3Credentials   = { accessKeyId = { name = "backup-s3", key = "ACCESS_KEY_ID" }, secretAccessKey = { name = "backup-s3", key = "ACCESS_SECRET_KEY" } }
-            wal             = { compression = "gzip" }, data = { compression = "gzip" }
-          }
-        }
-      }
-    }
-    postgres_backup = {
-      apiVersion = "postgresql.cnpg.io/v1", kind = "ScheduledBackup"
-      metadata   = { name = "postgres-daily", namespace = "data" }
-      spec       = { schedule = "0 15 3 * * *", backupOwnerReference = "self", cluster = { name = "postgres" }, method = "barmanObjectStore", immediate = true }
-    }
     ui_app = {
       apiVersion = "apps/v1", kind = "Deployment"
       metadata   = { name = "ui-app", namespace = "ui-app", labels = { app = "ui-app" } }
@@ -249,17 +235,8 @@ resource "kubectl_manifest" "extras1" {
   depends_on        = [helm_release.wave1, kubectl_manifest.wave1]
 }
 
-resource "kubectl_manifest" "postgres" {
-  for_each          = { for k, v in local.extras_control : k => v if startswith(k, "postgres") }
-  yaml_body         = yamlencode(each.value)
-  server_side_apply = true
-  force_conflicts   = true
-  wait              = false
-  depends_on        = [helm_release.wave2, kubernetes_secret_v1.litellm_db, kubernetes_secret_v1.backup_s3]
-}
-
 resource "kubectl_manifest" "control_extras" {
-  for_each          = { for k, v in local.extras_control : k => v if !startswith(k, "postgres") }
+  for_each          = local.extras_control
   yaml_body         = yamlencode(each.value)
   server_side_apply = true
   force_conflicts   = true

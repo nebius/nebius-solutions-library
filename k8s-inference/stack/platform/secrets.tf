@@ -2,7 +2,7 @@
 # from the environment (secrets.*_env in terraform.tfvars); nothing is read from files in the repository.
 locals {
   # knative-serving: the KnativeServing CR (wave 2) lives there; Argo CD used to create it (CreateNamespace=true).
-  namespaces = concat(["ops", "monitoring", "api", "models", "registry", "spegel", "kueue-system", "knative-serving"], local.role.control ? ["data", "litellm", "ui-app"] : [])
+  namespaces = concat(["ops", "monitoring", "api", "models", "registry", "spegel", "kueue-system", "knative-serving"], local.role.control ? ["litellm", "ui-app"] : [])
 }
 
 # `registry` is also rendered by charts/fleet (release fleet in kueue-system); created here with Helm's
@@ -91,26 +91,6 @@ resource "kubernetes_secret_v1" "litellm_master" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
-resource "kubernetes_secret_v1" "litellm_db" {
-  for_each = local.role.control ? toset(["data", "litellm"]) : toset([])
-  metadata {
-    name      = "litellm-db"
-    namespace = each.key
-  }
-  data       = { username = "litellm", password = local.secrets.litellm_db_password }
-  depends_on = [kubernetes_namespace_v1.ns]
-}
-
-resource "kubernetes_secret_v1" "backup_s3" {
-  count = local.role.control ? 1 : 0
-  metadata {
-    name      = "backup-s3"
-    namespace = "data"
-  }
-  data       = { ACCESS_KEY_ID = local.secrets.backups_s3.access_key_id, ACCESS_SECRET_KEY = local.secrets.backups_s3.secret }
-  depends_on = [kubernetes_namespace_v1.ns]
-}
-
 # NGC: pull Secret and API key in the models namespace (NIM images, seed-weights), when a key is given.
 resource "kubernetes_secret_v1" "ngc_pull" {
   count = local.ngc_key != "" && local.role.worker ? 1 : 0
@@ -148,7 +128,6 @@ resource "kubernetes_secret_v1" "hf_token" {
 data "external" "registry_key" {
   program = ["bash", "${path.module}/../scripts/registry-static-key.sh"]
   query = {
-    profile = local.f.nebius_profile
     project = local.hub_project
     sa_id   = local.cloud.clusters[local.hub_id].ops_service_account_id
     name    = "${local.name}-image-cache"

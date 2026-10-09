@@ -1,0 +1,16 @@
+# TLS for the model endpoints of this cluster (<model>-predictor.models.<gateway domain>): one certificate
+# whose hostnames follow the models defined through the API. The fleet's API (services/api/models.py)
+# owns `spec.dnsNames`, `spec.issuerRef` and `spec.commonName` of this object: it rewrites them with
+# server-side apply whenever an endpoint is created or deleted on this cluster (ACME HTTP-01 per hostname
+# through the external Gateway, like acme.yaml). What is here is only the placeholder before the first model:
+# a self-signed certificate for a name nobody calls, so the listener's second certificateRef resolves.
+# Argo CD (clusters/fleet/root) and Terraform (stack/platform/manifests.tf) ignore the three fields.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: models, namespace: envoy-gateway-system }
+spec:
+  secretName: models-tls
+  issuerRef: { name: selfsigned, kind: ClusterIssuer }
+  commonName: models.example.invalid
+  dnsNames: [models.example.invalid]
+  privateKey: { rotationPolicy: Always }

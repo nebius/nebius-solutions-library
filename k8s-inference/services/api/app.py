@@ -1,18 +1,29 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
 import time, urllib.parse, uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
-import artifacts, billing, catalog, jobs, kube
+import logging
+import artifacts, billing, catalog, db, jobs, kube, models, placement as placing
+log = logging.getLogger("api")
 import endpoints as ep
 from auth import Principal, check_budget, check_model, forget, principal
-from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
+from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.8.2")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """The control API owns the fleet database schema (services/api/db.py MIGRATIONS), applied at startup."""
+    if db.enabled():
+        log.info("database schema version %s", db.migrate())
+    yield
+
+
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.9.2", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -77,6 +88,116 @@ def list_models(p: Principal = Depends(principal)):
     return [_public(m) for m in catalog.all_models().values()]
 
 
+class ModelSpec(BaseModel):
+    model_config = {"extra": "allow"}   # the spec of services/api/models.py; reserved fields pass through
+    id: str
+    kind: str = "endpoint"
+    image: str | None = None
+
+
+def _runtime_or_409(mid: str) -> dict:
+    m = catalog.get(mid)
+    if m and m.get("managed_by") != "api":
+        raise HTTPException(409, f"model {mid} is a built-in class of the solution ({m.get('managed_by')}); it cannot be changed through the API")
+    return m
+
+
+def _writes_here():
+    """Model definitions are written where the fleet database is: the control API (DATABASE_URL)."""
+    if not db.enabled():
+        hint = f" ({PUBLIC_API_URL})" if PUBLIC_API_URL else ""
+        raise HTTPException(409, f"this API ({REGION}) has no model database; define models on the fleet's API{hint}")
+
+
+def _deploy(entry: dict, after: dict, result: dict):
+    """Render the endpoint on every cluster of its `deployments`, put its hostname on the region's certificate
+    and register its LiteLLM group there. `after` is the runtime catalog as it will be after this write."""
+    if entry["mode"] == "run":
+        return
+    for cid in entry["deployments"]:
+        region = kube.cluster_region(cid)
+        if region not in kube.regions():
+            raise HTTPException(400, f"regions: no connection to {region} from this API (REGION_KUBECONFIGS)")
+        result["applied"][cid] = models.apply(entry, cid, region)
+        models.sync_certificate(region, after)
+        if (w := models.litellm_group_upsert(entry, cid, region)):
+            result.setdefault("warnings", []).append(w)
+
+
+def _undeploy(entry: dict, clusters: list[str], after: dict):
+    if entry.get("mode") == "run":
+        return
+    for cid in clusters:
+        region = kube.cluster_region(cid)
+        models.delete_rendered(entry, cid, region)
+        models.sync_certificate(region, after)
+        models.litellm_group_delete(entry["id"], cid)
+
+
+def _write_model(spec: dict, p: Principal, replace: bool) -> dict:
+    """Create or replace a model: validate, render its endpoint on the clusters of its regions, store it (with
+    history) and refresh the regions' read-only copies."""
+    _writes_here()
+    entry = models.to_entry(spec, managed_by="api")
+    mid = entry["id"]
+    existing = catalog.get(mid)
+    if existing and not replace:
+        raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
+    if existing:
+        _runtime_or_409(mid)
+    result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(entry["deployments"]), "applied": {}}
+    runtime = models.list_runtime()
+    before, after = runtime.get(mid) or {}, {**runtime, mid: entry}
+    _deploy(entry, after, result)
+    _undeploy(before, [c for c in (before.get("deployments") or {}) if c not in entry["deployments"]], after)   # left a region
+    row = models.persist(entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"))
+    catalog.invalidate()
+    result.update({"version": row.get("version"), "model": catalog.to_public(catalog.get(mid))})
+    return result
+
+
+@app.post("/v1/models", status_code=201)
+def create_model(req: ModelSpec, p: Principal = Depends(principal)):
+    """Define a model from a container (an endpoint or a job class): the console's "New model" form. Admin
+    keys, on the fleet's API (the control cluster, where the database is). services/api/models.py."""
+    admin(p)
+    return _write_model(req.model_dump(), p, replace=False)
+
+
+@app.put("/v1/models/{model}")
+def replace_model(model: str, req: ModelSpec, p: Principal = Depends(principal)):
+    admin(p)
+    spec = req.model_dump()
+    if spec.get("id") != model:
+        raise HTTPException(400, "id in the body must match the path")
+    return _write_model(spec, p, replace=True)
+
+
+@app.delete("/v1/models/{model}", status_code=204)
+def delete_model(model: str, p: Principal = Depends(principal)):
+    admin(p)
+    _writes_here()
+    m = _runtime_or_409(model)
+    if not m:
+        raise HTTPException(404, f"model {model} not found")
+    runtime = models.list_runtime()
+    raw = runtime.pop(model, None)
+    if raw:
+        _undeploy(raw, list(raw.get("deployments") or {}), runtime)
+    models.unpersist(model, by=p.info.get("key_alias") or p.info.get("key_name"))
+    catalog.invalidate()
+
+
+@app.get("/v1/models/{model}/history")
+def model_history(model: str, p: Principal = Depends(principal)):
+    """Every version of a model's definition (who changed what, when): the `models_history` table."""
+    admin(p)
+    _writes_here()
+    if not db.get_model(model) and not db.history(model):
+        raise HTTPException(404, f"model {model} not found")
+    return db.history(model)
+
+
 @app.get("/v1/models/{model}")
 def get_model(model: str, p: Principal = Depends(principal)):
     return _public(_model(model))
@@ -123,7 +244,8 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
         defaults = catalog.region_params(m, region)
         defaults.setdefault("output_prefix", output_prefix)
-        job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key))
+        job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
+                             gpu_class=_class_for(m, req, region))
     created_job, created = jobs.create(p.namespace, job, region, secret)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
 
@@ -156,7 +278,25 @@ def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: in
     defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
     defaults.setdefault("output_prefix", f"s3://{bucket}/operations/{name}")
     return jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults,
-                          billing.key_hash(p.key), placement=placement)
+                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region))
+
+
+def _class_for(m: dict, req: InvokeRequest, region: str | None) -> str | None:
+    """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
+    runs"): the dispatcher's best candidate among the model's classes and regions (the caller's region when
+    given). None for a class with one image: Kueue may then switch class at queue time as before."""
+    if not jobs.class_images(m):
+        return None
+    gpus = (m.get("job") or {}).get("gpu", 1)
+    try:
+        gpus = int(gpus)
+    except (TypeError, ValueError):           # a parameter placeholder: one GPU for the ranking
+        gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
+    pools = kube.fleet().get("pools") or {}
+    available = sorted({p.get("gpu_class") for p in pools.values() if p.get("gpu_class")}) or None
+    cls, how = placing.choose_class(m, region, gpus, available)
+    log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
+    return cls
 
 
 async def _forward(model: str, req: InvokeRequest, p: Principal, idempotency_key: str | None, base: str):

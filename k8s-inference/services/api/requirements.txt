@@ -5,3 +5,5 @@ kubernetes==36.0.3
 boto3==1.43.108
 pyyaml==6.0.3
 pydantic==2.13.5
+psycopg[binary]==3.3.3
+psycopg-pool==3.3.0

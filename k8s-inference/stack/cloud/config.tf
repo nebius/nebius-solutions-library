@@ -49,6 +49,5 @@ locals {
   catalog                     = module.config.catalog
   catalog_without_fleet_class = module.config.catalog_without_fleet_class
   catalog_by_cluster          = module.config.catalog_by_cluster
-  endpoints_by_cluster        = module.config.endpoints_by_cluster
   prepull_by_cluster          = module.config.prepull_by_cluster
 }

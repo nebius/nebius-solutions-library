@@ -78,7 +78,7 @@ export function NewJob({ initialModel }: { initialModel?: string }) {
           {step === 0 && (
             <div className="section">
               <h2>Name and source</h2>
-              <Field label="Name" help="Lowercase letters, digits and dashes."><input className="input" value={f.name} onChange={(e) => set("name", e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))} placeholder="gromacs-1ns" /></Field>
+              <Field label="Name" help="Lowercase letters, digits and dashes."><input className="input" value={f.name} onChange={(e) => set("name", e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))} placeholder="my-job-1" /></Field>
               <div className="radio-cards">
                 <div className={`radio-card ${f.source === "catalog" ? "active" : ""}`} onClick={() => set("source", "catalog")}><strong>From the model catalog</strong><small>Image, protocol and resources come from the onboarded model.</small></div>
                 <div className={`radio-card ${f.source === "image" ? "active" : ""}`} onClick={() => set("source", "image")}><strong>Bring your own image</strong><small>Any container; you set command, args and environment.</small></div>

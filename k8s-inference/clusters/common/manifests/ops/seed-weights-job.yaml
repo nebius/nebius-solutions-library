@@ -12,9 +12,9 @@
 #   SEED_POOL   GPU pool whose nodes have the filesystem (serverless2.nebius/pool)
 #   SEED_UID    owner of the seeded files (NIM images run as 1000)
 #
-#   SEED_PATH=qwen2-5-0-5b SEED_SOURCE=hf SEED_REF=Qwen/Qwen2.5-0.5B-Instruct SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=h100-spot-1x SEED_UID=1000 \
+#   SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=h100-spot-1x SEED_UID=1000 \
 #     envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <hub> -n ops create -f -
-#   SEED_PATH=diffdock SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/nim/mit/diffdock:2.2.0 SEED_POOL=h100-spot-1x SEED_UID=1000 \
+#   SEED_PATH=<model> SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/<org>/<nim-image>:<tag> SEED_POOL=h100-spot-1x SEED_UID=1000 \
 #     envsubst < ... | kubectl -n ops create -f -        # NGC_API_KEY from Secret ops/ngc-api-key, pull Secret ops/ngc
 apiVersion: batch/v1
 kind: Job

@@ -53,6 +53,38 @@ the profile from the manager ClusterQueue name. "If the GPU type is busy use
 another one; wait if all are busy" is Kueue's flavor fungibility inside a
 cluster and the dispatcher's ranking across clusters.
 
+## Per-GPU images for runs
+
+A run class may ship one image per GPU class, for builds that are tuned for a GPU:
+
+```yaml
+gpu: { count: 1, classes: [l40s, h100] }          # preferred first
+job:
+  images:                                          # one image per class; keys = `default` or a class above
+    default: registry.serverless2.local/nebius/my-model:1.0
+    h100:    registry.serverless2.local/nebius/my-model:1.0-h100
+    l40s:    registry.serverless2.local/nebius/my-model:1.0-l40s
+```
+
+Kueue picks the pool at admission and a Job's image cannot change afterwards (see "Not possible"
+below), so for such a class the GPU class is chosen **at submission** (option A of
+`docs/DESIGN-REVIEW-2026-10-09.md`): the API asks the dispatcher's ranking (`GET /v1/rank`: the
+class preference, reserved before on-demand before spot, price, free capacity now, the caller's
+region as a pin when given), renders the Job with the best class's image, limits its node affinity
+to that class's pools and queues it on that class's profile (`prefer-<class>`). The operation and
+every attempt record carry the class (`gpu_class`, plus the image under `image`). The run may still
+move between regions of its class while it waits (MultiKueue), and a resume keeps the class: the
+checkpoints were written by that image. If the dispatcher is unreachable at submission, the
+preferred class that has a pool is taken and a warning is logged.
+
+The trade-off, by design: a run with per-class images waits for its class instead of switching
+class while queued. A class with one image keeps today's behaviour (free class switching at queue
+time). The documented follow-up "A+" re-renders a run that has not started after N minutes for the
+next class in its preference list (cancel the gated Job, render again with the next class's image,
+record the switch as an attempt, switch only downward in the list and at most a bounded number of
+times); it is not built, because it adds a control loop with retry semantics for a situation that
+has not hurt yet. `services/api/placement.py`, `services/dispatcher` (`rank_response`).
+
 ## Cross-cluster dispatch (`services/dispatcher`)
 
 Kueue MultiKueue in external-dispatcher mode (`multiKueue.dispatcherName:
@@ -193,9 +225,11 @@ image changed, logs `No matching Workload; restoring pod templates according
 to existent Workload` and deletes the pod (Kueue `jobframework.
 EquivalentToWorkload` compares the pod template including images; Workload
 pod sets are immutable once quota is reserved). The same holds for Jobs.
-Therefore per-GPU image tags are a render-time feature (pinned pool), and a
-Kueue-placed workload needs one image that runs on every pool its profile
-allows. Kyverno was removed again; nothing of it remains on the hub.
+Therefore per-GPU image tags are decided before the Job exists: for endpoints
+by the pinned pool (`images.<pool>`), for runs by the class chosen at submission
+("Per-GPU images for runs" above). A Kueue-placed workload with one image must
+run on every pool its profile allows. Kyverno was removed again; nothing of it
+remains on the hub.
 
 ## Terraform solution (2026-10-08): tenant inputs
 

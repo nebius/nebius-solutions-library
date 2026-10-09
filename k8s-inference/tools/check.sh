@@ -75,6 +75,27 @@ EOF
       helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null && echo "   ok charts/endpoint $(basename "$f" .yaml)"
     done
   done
+  step "example model (stack/models/llm-example.json): the API's spec -> entry -> charts/endpoint, for the example's first GPU class"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
+import json, subprocess, sys
+tmp, root = sys.argv[1], sys.argv[2]
+fleet = json.load(open(f"{tmp}/fleet.json")); plan = json.load(open(f"{tmp}/plan.json"))
+# the pools the way the API reads them from fleet-prices (charts/fleet pools.yaml): region id, pool, GPU class, capacity
+pools = {f"{r['id']}-{pn}": {"region": r["id"], "pool": pn, "gpu_class": p["gpu_class"], "capacity": p["capacity"]["type"]}
+         for rn, r in fleet["regions"].items() for pn, p in r["pools"].items()}
+classes = sorted({p["gpu_class"] for p in pools.values() if p.get("gpu_class")})
+spec = dict(json.load(open(f"{root}/stack/models/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
+json.dump(pools, open(f"{tmp}/pools.json", "w"))
+r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "entry", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
+if r.returncode: print(r.stderr); sys.exit(1)
+open(f"{tmp}/llm-example.yaml", "w").write(r.stdout)
+import yaml; e = yaml.safe_load(r.stdout)
+print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
+json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
+EOF
+  for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
+    helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null && echo "   ok charts/endpoint llm-example $cid"
+  done
   step "kustomize build: every shared manifest base"
   for d in "$ROOT"/clusters/common/manifests/*/; do
     [ -f "$d/kustomization.yaml" ] || continue

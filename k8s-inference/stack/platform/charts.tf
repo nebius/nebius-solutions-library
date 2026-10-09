@@ -95,7 +95,7 @@ resource "helm_release" "wave3" {
   values           = local.helm_values[each.key]
   wait             = true
   timeout          = 900
-  depends_on       = [helm_release.wave2, kubectl_manifest.wave2, kubectl_manifest.postgres]
+  depends_on       = [helm_release.wave2, kubectl_manifest.wave2, kubernetes_job_v1.database_init, kubernetes_secret_v1.litellm_db]
 }
 
 # charts/fleet: Kueue flavors and queues, MultiKueue manager objects, prices ConfigMap, image cache config

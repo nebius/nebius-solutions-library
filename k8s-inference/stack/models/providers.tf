@@ -39,38 +39,24 @@ data "terraform_remote_state" "worker_models" {
 }
 
 locals {
-  cloud     = data.terraform_remote_state.cloud.outputs
-  platform  = data.terraform_remote_state.platform.outputs
-  cluster   = local.cloud.clusters[var.target]
-  role      = local.roles[var.target]
-  exec_args = ["mk8s", "v1", "cluster", "get-token", "--profile", local.f.nebius_profile, "--format", "json"]
+  cloud    = data.terraform_remote_state.cloud.outputs
+  platform = data.terraform_remote_state.platform.outputs
+  cluster  = local.cloud.clusters[var.target]
+  role     = local.roles[var.target]
 }
 
-provider "nebius" {
-  profile = {
-    name            = local.f.nebius_profile
-    no_browser_open = true
-  }
-}
+provider "nebius" {} # NEBIUS_IAM_TOKEN from the environment (stack.sh exports it)
 
 provider "kubernetes" {
   host                   = local.cluster.endpoint
   cluster_ca_certificate = local.cluster.cluster_ca_certificate
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "nebius"
-    args        = local.exec_args
-  }
+  token                  = var.iam_token
 }
 
 provider "helm" {
   kubernetes = {
     host                   = local.cluster.endpoint
     cluster_ca_certificate = local.cluster.cluster_ca_certificate
-    exec = {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "nebius"
-      args        = local.exec_args
-    }
+    token                  = var.iam_token
   }
 }

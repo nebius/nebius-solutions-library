@@ -35,6 +35,35 @@ def gpu_classes(model: dict) -> list[str]:
     return list(model.get("gpu_classes") or [])
 
 
+def class_images(model: dict) -> dict | None:
+    """`job.images`: one image per GPU class (`{default: ..., h100: ..., l40s: ...}`) for a run class whose image is
+    optimised per GPU (docs/SCHEDULING.md "Per-GPU images for runs"); None when the class has one image. Keys must
+    be `default` or one of the entry's `gpu.classes`; `default` or `job.image` must exist (`job.image` is the default
+    when `default` is absent). A misconfigured entry is a 500 at submission, never a silently wrong image."""
+    job = model.get("job") or {}
+    images = job.get("images")
+    if not images:
+        return None
+    if not isinstance(images, dict) or not all(isinstance(v, str) and v for v in images.values()):
+        raise HTTPException(500, f"model {model.get('name')}: job.images must map GPU classes to image references")
+    bad = sorted(set(images) - {"default"} - set(gpu_classes(model)))
+    if bad:
+        raise HTTPException(500, f"model {model.get('name')}: job.images names classes {bad} that are not in gpu.classes {gpu_classes(model)}")
+    out = dict(images)
+    out.setdefault("default", job.get("image"))
+    if not out["default"]:
+        raise HTTPException(500, f"model {model.get('name')}: job.images needs a `default` image or job.image")
+    return out
+
+
+def image_for_class(model: dict, gpu_class: str | None) -> str | None:
+    """The image a run uses on `gpu_class`: the class's entry of `job.images`, else its default, else `job.image`."""
+    images = class_images(model)
+    if not images:
+        return (model.get("job") or {}).get("image")
+    return images.get(gpu_class or "", images["default"])
+
+
 def _render(value, params: dict):
     """Substitute {{name}} in strings, recursively; a token without a value is a 400."""
     if isinstance(value, str):
@@ -53,12 +82,14 @@ def _render(value, params: dict):
 
 
 def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, label: str | None, inp: dict, idem: str | None,
-          priority: str | None, key_hash: str | None, profile: str = KUEUE_QUEUE) -> dict:
+          priority: str | None, key_hash: str | None, profile: str = KUEUE_QUEUE, gpu_class: str | None = None) -> dict:
     labels = {f"{LABEL}/tenant": tenant, f"{LABEL}/model": model, f"{LABEL}/mode": mode, f"{LABEL}/profile": profile,
               "kueue.x-k8s.io/queue-name": profile,
               "kueue.x-k8s.io/priority-class": "bulk-backfill" if priority == "low" else KUEUE_PRIORITY}
     if region:                        # pinned: the regional path always, the fleet path for explicit regions and resumes
         labels[f"{LABEL}/region"] = region
+    if gpu_class:                     # the class chosen at submission (per-class images): the pods carry it, a resume keeps it
+        labels[f"{LABEL}/gpu-class"] = gpu_class
     if priority:
         labels[f"{LABEL}/priority"] = priority
     ann = {f"{LABEL}/input": json.dumps(inp)[:60000]}
@@ -72,9 +103,9 @@ def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, lab
 
 
 def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None, excludes: str = "", gpus: int = 0,
-              placement: dict | None = None) -> dict:
+              placement: dict | None = None, gpu_class: str | None = None) -> dict:
     env = [{"name": "OPERATION", "value": name}, {"name": "OUTPUT_PREFIX", "value": output_prefix}, {"name": "MAIN_CONTAINER", "value": "main"},
-           {"name": "GPUS", "value": str(gpus)},
+           {"name": "GPUS", "value": str(gpus)}, {"name": "GPU_CLASS", "value": gpu_class or ""},
            {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
            {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}}]
     if pvc:
@@ -89,7 +120,7 @@ def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None
 
 # Hardening of every rendered pod (docs/SECURITY-PREREVIEW.md F1): no privilege escalation, no capabilities, the
 # runtime's default seccomp profile. The runner containers (fetch, uploader, call) run as the image's uid 10001;
-# the model container keeps the image's user unless the job class sets `runAsNonRoot` (GROMACS/NIM images are root).
+# the model container keeps the image's user unless the job class sets `runAsNonRoot` (many model images run as root).
 # Together with Pod Security Admission `baseline` on the tenant namespaces (charts/tenant) this is what the API
 # can promise: it never renders a privileged pod.
 CONTAINER_HARDENING = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},

@@ -9,7 +9,6 @@ output "ui_url" { value = local.role.control ? "https://${local.hostnames.app}" 
 output "litellm_url" { value = local.role.control ? "https://${local.hostnames.litellm}" : null }
 output "tenant_namespace_prefix" { value = "tenant-" }
 output "kueue_namespace" { value = "kueue-system" }
-output "model_hosts" { value = local.model_hosts }
 
 output "multikueue_kubeconfig" {
   sensitive = true

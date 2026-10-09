@@ -89,8 +89,7 @@ How a request is checked:
 What is not policed: the cluster-local routes (`*.models.svc.cluster.local`
 through `serverless2-internal`), which is how LiteLLM pass-through routes and
 the customer API (and therefore the console's try-it box) reach the models;
-they authenticated the caller already. Routes outside `models` (the S2 spike
-`s2-qwen-predictor.spikes…`) are not covered; the API/UI/operator hosts keep
+they authenticated the caller already. Routes outside `models` are not covered; the API/UI/operator hosts keep
 their own logins.
 
 ### WebSocket (live STT) and keys
@@ -116,8 +115,8 @@ control plane on the hub:
 
 | Record | Value | Serves |
 |---|---|---|
-| `*.eu-north1.<domain>` A | `<hub ip>` | `nemotron-speech-en-0-6b.eu-north1.<domain>`, `diffdock.eu-north1.<domain>`, … |
-| `*.eu-south1.<domain>` A | `<region ip>` | `nemotron-speech-en-0-6b.eu-south1.<domain>` |
+| `*.eu-north1.<domain>` A | `<hub ip>` | `<model>.eu-north1.<domain>` for every endpoint of the region |
+| `*.eu-south1.<domain>` A | `<region ip>` | `<model>.eu-south1.<domain>` |
 | `api`, `app`, `litellm`, `argo`, `argocd`, `grafana` `.<domain>` A | `<control ip>` | customer API, console, operator UIs |
 
 Changes, all in git, per cluster:
@@ -179,9 +178,8 @@ interactive `coldStartClass` first) that runs `sh -c echo pulled` and a
 joins, before the first endpoint pod is scheduled there; rendering reads
 `catalog/models/*.yaml`, so onboarding a model re-renders the DaemonSets
 (`python3 spikes/S15-edge/render.py`). Measured head start and before/after
-cold starts: `spikes/S15-edge/RESULT.md`. DiffDock's NGC weights are not
-cached by this (see RESULT: LocalModelCache needs the NIM cache in object
-storage first).
+cold starts: `spikes/S15-edge/RESULT.md`. NIM model caches are not covered by this
+(LocalModelCache needs the cache in object storage first).
 
 ## Terraform solution (2026-10-08): `edge` inputs
 

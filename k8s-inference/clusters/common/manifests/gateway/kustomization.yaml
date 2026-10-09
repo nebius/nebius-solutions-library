@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - gateway.yaml
   - acme.yaml
+  - models-tls.yaml
   - redis.yaml
   - ratelimit.yaml
 patches:

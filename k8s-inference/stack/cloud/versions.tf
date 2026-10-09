@@ -12,9 +12,6 @@ terraform {
   }
 }
 
-provider "nebius" {
-  profile = {
-    name            = var.fleet.nebius_profile
-    no_browser_open = true
-  }
-}
+# Authentication: NEBIUS_IAM_TOKEN in the environment (`nebius iam get-access-token`; stack.sh exports it),
+# the same way as the library's other solutions. No CLI profile is named anywhere in the configuration.
+provider "nebius" {}

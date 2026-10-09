@@ -115,9 +115,6 @@ output "catalog_by_cluster" {
   value = local.catalog_by_cluster
 }
 
-output "endpoints_by_cluster" {
-  value = local.endpoints_by_cluster
-}
 
 output "prepull_by_cluster" {
   value = local.prepull_by_cluster

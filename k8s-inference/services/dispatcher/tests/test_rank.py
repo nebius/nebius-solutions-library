@@ -91,7 +91,7 @@ REGISTRIES = {"hub": "cr.eu-north1.nebius.cloud/e00exampleexampleex", "eu-south1
 TEMPLATE = {"metadata": {"annotations": {"serverless2.nebius/gpu-classes": "h100,rtx-pro-6000", "serverless2.nebius/regions": "eu-north1,eu-south1",
                                          "serverless2.nebius/pvc-size-gi": "50"}},
             "spec": {"initContainers": [{"name": "fetch", "image": "registry.serverless2.local/nebius/serverless2/jobs:0.1.3"}],
-                     "containers": [{"name": "main", "image": "registry.serverless2.local/nebius/gromacs:2026.4"},
+                     "containers": [{"name": "main", "image": "registry.serverless2.local/nebius/batch-example:1.0"},
                                     {"name": "uploader", "image": "registry.serverless2.local/nebius/serverless2/jobs:0.1.3"}],
                      "volumes": [{"name": "work", "persistentVolumeClaim": {"claimName": "op-1-work"}}]}}
 

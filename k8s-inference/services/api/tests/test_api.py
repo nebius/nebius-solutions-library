@@ -2,7 +2,7 @@
 import copy, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-os.environ["CATALOG_DIRS"] = os.path.join(ROOT, "catalog", "models")
+os.environ["CATALOG_DIRS"] = os.path.join(ROOT, "catalog", "models") + ":" + os.path.join(os.path.dirname(__file__), "catalog")   # platform classes + generic endpoint/run-class fixtures
 os.environ["PUBLIC_API_URL"] = "https://api.example"
 os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"   # async endpoint calls go through the gateway (docs/JOBS.md)
 import pytest, yaml
@@ -11,7 +11,7 @@ from kubernetes.client.rest import ApiException
 import app as appmod, auth, catalog, jobs, kube
 
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
-            "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/models/qwen/chat"]}}
+            "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]}}
 L = "serverless2.nebius"
 FLEET = {"pools": {"hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100"},
                    "hub-l40s-ondemand-1x": {"region": "hub", "pool": "l40s-ondemand-1x", "gpu_class": "l40s"},
@@ -38,11 +38,26 @@ class FakeCluster:
         from types import SimpleNamespace
         return SimpleNamespace(metadata=SimpleNamespace(annotations={}))
 
-    def __getattribute__(self, name):   # swallow the _request_timeout kwarg the retry helper adds
+    def __getattribute__(self, name):   # swallow the _request_timeout kwarg the retry helper adds (and server-side apply kwargs)
         attr = object.__getattribute__(self, name)
         if callable(attr) and "_namespace" in name:
-            return lambda *a, **kw: attr(*a, **{k: v for k, v in kw.items() if k != "_request_timeout"})
+            return lambda *a, **kw: attr(*a, **{k: v for k, v in kw.items() if k not in ("_request_timeout", "field_manager", "force", "_content_type")})
         return attr
+
+    # configmaps (runtime model catalog, services/api/models.py)
+    def list_namespaced_config_map(self, ns, label_selector=""):
+        cms = getattr(self, "configmaps", {})
+        return Items([v for (n, name), v in cms.items() if n == ns])
+
+    def patch_namespaced_config_map(self, name, ns, body):
+        self.__dict__.setdefault("configmaps", {})[(ns, name)] = copy.deepcopy(body)
+        return body
+
+    def delete_namespaced_config_map(self, name, ns):
+        cms = self.__dict__.setdefault("configmaps", {})
+        if (ns, name) not in cms:
+            raise ApiException(status=404, reason="NotFound")
+        del cms[(ns, name)]
 
     # batch
     def create_namespaced_job(self, ns, body):
@@ -123,6 +138,9 @@ class FakeCluster:
         return {"items": [o for (n, p, _), o in self.custom.items() if n == ns and p == plural and all(o["metadata"].get("labels", {}).get(k) == v for k, v in want.items())]}
 
     def patch_namespaced_custom_object(self, group, version, ns, plural, name, body):
+        if (ns, plural, name) not in self.custom and body.get("kind"):   # server-side apply creates
+            self.custom[(ns, plural, name)] = copy.deepcopy(body)
+            return body
         o = self.custom[(ns, plural, name)]
         o["spec"].update(body.get("spec", {}))
         o["metadata"].setdefault("annotations", {}).update((body.get("metadata") or {}).get("annotations") or {})
@@ -155,6 +173,7 @@ def cluster(monkeypatch):
     monkeypatch.setattr(kube, "api", lambda region="eu-north1": fake)
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1"])
     monkeypatch.setattr(kube, "fleet", lambda: FLEET)
+    monkeypatch.setattr(kube, "cluster_region", lambda c: "eu-north1" if c == "hub" else c)
     return fake
 
 
@@ -186,15 +205,16 @@ def test_catalog_one_schema():
     assert s["regions"] == ["eu-north1"]          # paused deployments are not regions
     # the committed catalog: endpoints and run classes in one directory
     ids = set(catalog.all_models())
-    assert {"gromacs", "hello-run", "container-run", "nemotron-speech-en-0-6b", "qwen2-5-0-5b", "diffdock"} <= ids
-    g = catalog.get("gromacs")
+    assert {"batch-example", "hello-run", "container-run", "ws-example", "llm-example", "http-example"} <= ids
+    g = catalog.get("batch-example")
     assert g["mode"] == "run" and g["regions"] == ["eu-north1", "eu-south1"] and g["job"]["image"].startswith("registry.serverless2.local/nebius/") and g["job"]["gpu"] == 1
 
 
 def test_catalog_entries_are_renderable_or_run_classes():
     """Every entry either has a runtime (rendered by the models ApplicationSet through charts/endpoint) or is a run class with a job block."""
-    for f in os.listdir(os.environ["CATALOG_DIRS"]):
-        doc = yaml.safe_load(open(os.path.join(os.environ["CATALOG_DIRS"], f)))
+    for d in os.environ["CATALOG_DIRS"].split(":"):
+      for f in os.listdir(d):
+        doc = yaml.safe_load(open(os.path.join(d, f)))
         assert doc.get("id"), f
         assert doc.get("runtime") or (doc.get("mode") == "run" and doc.get("job", {}).get("image") and doc["job"].get("command")), f
 
@@ -205,9 +225,9 @@ def test_auth(client):
     assert c.get("/v1/models", headers={"Authorization": "Bearer sk-bad"}).status_code == 401
     r = c.get("/v1/keys/me", headers=H)
     assert r.status_code == 200 and r.json()["tenant"] == "demo" and r.json()["status"] == "active"
-    assert {"qwen2-5-0-5b", "gromacs", "hello-run"} <= {m["id"] for m in c.get("/v1/models", headers=H).json()}
+    assert {"llm-example", "batch-example", "hello-run"} <= {m["id"] for m in c.get("/v1/models", headers=H).json()}
     assert c.get("/v1/models/nope", headers=H).status_code == 404
-    assert c.get("/v1/models/qwen2-5-0-5b", headers=H).json()["regions"][0]["status"] == "scaled-to-zero"
+    assert c.get("/v1/models/llm-example", headers=H).json()["regions"][0]["status"] == "scaled-to-zero"
 
 
 def _main(job):
@@ -217,8 +237,8 @@ def _main(job):
 def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     c, fake = client
     body = {"name": "t", "input": {"nsteps": "1000", "input_prefix": "s3://serverless2-demo-eu-north1/inputs/x"}}
-    r1 = c.post("/v1/models/gromacs:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
-    r2 = c.post("/v1/models/gromacs:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
+    r1 = c.post("/v1/models/batch-example:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
+    r2 = c.post("/v1/models/batch-example:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
     assert (r1.status_code, r2.status_code) == (202, 200) and r1.json()["id"] == r2.json()["id"]
     op = r1.json()
     assert op["status"] == "QUEUED" and op["mode"] == "run" and op["region"] == "eu-north1" and op["resumable"] is False and op["attempts"] == []
@@ -235,8 +255,8 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     assert pod_spec["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"][0] == \
         {"key": f"{L}/pool", "operator": "In", "values": ["h100-spot-1x", "rtx6000-spot-1x"]}
     main = _main(job)
-    assert main["image"].startswith("registry.serverless2.local/nebius/gromacs:") and main["resources"]["limits"]["nvidia.com/gpu"] == "1" and "cpu" not in main["resources"]["limits"]
-    assert "nsteps[[:space:]]*=).*/\\1 1000/" in main["command"][2] and "GMX_NB_MIN_CI=\"16000\"" in main["command"][2] and "{{" not in main["command"][2]
+    assert main["image"].startswith("registry.serverless2.local/nebius/batch-example:") and main["resources"]["limits"]["nvidia.com/gpu"] == "1" and "cpu" not in main["resources"]["limits"]
+    assert "steps[[:space:]]*=).*/\\1 1000/" in main["command"][2] and "EXAMPLE_THREADS=\"16\"" in main["command"][2] and "{{" not in main["command"][2]
     names = [x["name"] for x in pod_spec["containers"]]
     assert names == ["main", "uploader"] and pod_spec["initContainers"][0]["name"] == "fetch"
     env = {e["name"]: e.get("value") for e in pod_spec["initContainers"][0]["env"]}
@@ -250,10 +270,10 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     import billing
     assert job["metadata"]["annotations"][f"{L}/key"] == billing.key_hash("sk-good") and "sk-good" not in json.dumps(job)
     # validation
-    assert c.post("/v1/models/gromacs:invoke", json={"input": {}, "region": "us-central1"}, headers=H).status_code == 400
-    assert c.post("/v1/models/gromacs:invoke", json={"input": {"bogus": 1}}, headers=H).status_code == 400
-    assert c.post("/v1/models/gromacs:invoke", json={"input": {}}, headers=H).status_code == 400          # input_prefix is required
-    assert c.post("/v1/models/gromacs:invoke", json={"mode": "sync"}, headers=H).status_code == 400
+    assert c.post("/v1/models/batch-example:invoke", json={"input": {}, "region": "us-central1"}, headers=H).status_code == 400
+    assert c.post("/v1/models/batch-example:invoke", json={"input": {"bogus": 1}}, headers=H).status_code == 400
+    assert c.post("/v1/models/batch-example:invoke", json={"input": {}}, headers=H).status_code == 400          # input_prefix is required
+    assert c.post("/v1/models/batch-example:invoke", json={"mode": "sync"}, headers=H).status_code == 400
     assert c.get(f"/v1/operations/{op['id']}/result", headers=H).status_code == 409
     assert c.get("/v1/operations/op-missing", headers=H).status_code == 404
     assert c.post("/v1/operations/op-missing:resume", headers=H).status_code == 404
@@ -267,11 +287,11 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-south1"])
     monkeypatch.setattr(kube, "batch", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
     monkeypatch.setattr(kube, "core", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
-    rs = c.post("/v1/models/gromacs:invoke", json={"input": {"input_prefix": "s3://x/in"}, "region": "eu-south1"}, headers=H)
+    rs = c.post("/v1/models/batch-example:invoke", json={"input": {"input_prefix": "s3://x/in"}, "region": "eu-south1"}, headers=H)
     assert rs.status_code == 202 and rs.json()["region"] == "eu-south1" and ("tenant-demo", rs.json()["id"]) in south.jobs
     sj = south.jobs[("tenant-demo", rs.json()["id"])]
-    assert _main(sj)["image"] == "registry.serverless2.local/nebius/gromacs:2026.4-cuda12.8-sm90-120"
-    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.6"
+    assert _main(sj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
+    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.7"
     assert sj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     g = c.get(f"/v1/operations/{rs.json()['id']}", headers=H)
     assert g.status_code == 200 and g.json()["region"] == "eu-south1"
@@ -302,13 +322,13 @@ def test_cancel_queued_deletes_and_running_stops(client):
 
 def test_async_builds_endpoint_call_job(client, monkeypatch):
     c, fake = client
-    monkeypatch.setitem(catalog.get("qwen2-5-0-5b"), "litellm_route", "/models/qwen/chat")
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
+    monkeypatch.setitem(catalog.get("llm-example"), "litellm_route", "/models/llm/chat")
+    r = c.post("/v1/models/llm-example:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
     assert r.status_code == 202 and r.json()["mode"] == "async"
     job = fake.jobs[("tenant-demo", r.json()["id"])]
     main = _main(job)
     env = {e["name"]: e for e in main["env"]}
-    assert main["command"] == ["/usr/local/bin/call.sh"] and env["URL"]["value"].endswith("/models/qwen/chat") and json.loads(env["REQUEST_BODY"]["value"]) == {"messages": [], "model": "qwen"}   # served model injected (catalog --model_name)
+    assert main["command"] == ["/usr/local/bin/call.sh"] and env["URL"]["value"].endswith("/models/llm/chat") and json.loads(env["REQUEST_BODY"]["value"]) == {"messages": [], "model": "llm"}   # served model injected (catalog --model_name)
     assert env["AUTH_HEADER"]["valueFrom"]["secretKeyRef"]["name"] == f"{r.json()['id']}-auth" and "sk-good" not in json.dumps(job)
     secret = fake.secrets[("tenant-demo", f"{r.json()['id']}-auth")]
     assert secret["stringData"]["authorization"] == "Bearer sk-good" and secret["metadata"]["ownerReferences"][0]["kind"] == "Job"
@@ -327,13 +347,13 @@ def test_async_direct_model_goes_through_the_gateway_with_the_key(client):
     the caller's key, never at the predictor Service; the connection is routed to the gateway's in-cluster
     Service (pods cannot hairpin to the public IP) while the TLS name stays the public hostname."""
     c, fake = client
-    assert "litellm_route" not in catalog.get("qwen2-5-0-5b")
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
+    assert "litellm_route" not in catalog.get("llm-example")
+    r = c.post("/v1/models/llm-example:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
     assert r.status_code == 202
     job = fake.jobs[("tenant-demo", r.json()["id"])]
     env = {e["name"]: e for e in _main(job)["env"]}
-    assert env["URL"]["value"] == "https://qwen2-5-0-5b-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
-    assert env["CONNECT_TO"]["value"] == "qwen2-5-0-5b-predictor.models.203.0.113.10.sslip.io:443:knative-external.envoy-gateway-system.svc:443"
+    assert env["URL"]["value"] == "https://llm-example-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
+    assert env["CONNECT_TO"]["value"] == "llm-example-predictor.models.203.0.113.10.sslip.io:443:knative-external.envoy-gateway-system.svc:443"
     assert "svc.cluster.local" not in json.dumps(job)
     assert fake.secrets[("tenant-demo", f"{r.json()['id']}-auth")]["stringData"]["authorization"] == "Bearer sk-good"
 
@@ -342,7 +362,7 @@ def test_rendered_pods_are_hardened(client):
     """F1 hardening: every container drops all capabilities, forbids privilege escalation and uses the runtime
     seccomp profile; runner containers are non-root uid 10001; the model container keeps the image's user."""
     c, fake = client
-    r = c.post("/v1/models/gromacs:invoke", json={"input": {"input_prefix": "s3://b/in"}}, headers=H)
+    r = c.post("/v1/models/batch-example:invoke", json={"input": {"input_prefix": "s3://b/in"}}, headers=H)
     assert r.status_code == 202
     spec = fake.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["spec"]
     assert spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"} and spec["securityContext"]["fsGroup"] == 10001
@@ -351,18 +371,18 @@ def test_rendered_pods_are_hardened(client):
         assert sc["allowPrivilegeEscalation"] is False and sc["capabilities"] == {"drop": ["ALL"]} and sc["seccompProfile"] == {"type": "RuntimeDefault"}
     by_name = {ctn["name"]: ctn["securityContext"] for ctn in spec["initContainers"] + spec["containers"]}
     assert by_name["fetch"]["runAsUser"] == 10001 and by_name["uploader"]["runAsNonRoot"] is True
-    assert "runAsNonRoot" not in by_name["main"]          # the GROMACS image runs as its own user
-    ra = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
+    assert "runAsNonRoot" not in by_name["main"]          # the model image keeps its own user
+    ra = c.post("/v1/models/llm-example:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
     aspec = fake.jobs[("tenant-demo", ra.json()["id"])]["spec"]["template"]["spec"]
     assert all(ctn["securityContext"]["capabilities"] == {"drop": ["ALL"]} for ctn in aspec["containers"])
 
 
 def test_render_and_build_run(cluster):
-    m = catalog.get("gromacs")
-    assert m["regions"] == ["eu-north1", "eu-south1"] and catalog.region_params(m, "eu-south1") == {"nb_min_ci": "16000"} == catalog.fleet_params(m)
+    m = catalog.get("batch-example")
+    assert m["regions"] == ["eu-north1", "eu-south1"] and catalog.region_params(m, "eu-south1") == {"threads": "16"} == catalog.fleet_params(m)
     job = jobs.build_run("op-x", m, {"nsteps": "50000", "input_prefix": "s3://b/in"}, "demo", None, None, 3600, "low", "eu-south1", catalog.region_params(m, "eu-south1") | {"output_prefix": "s3://b/operations/op-x"})
     assert job["metadata"]["labels"][f"{L}/region"] == "eu-south1" and job["metadata"]["labels"]["kueue.x-k8s.io/priority-class"] == "bulk-backfill"
-    assert job["spec"]["activeDeadlineSeconds"] == 3600 and "-nstlist 200" in _main(job)["command"][2]
+    assert job["spec"]["activeDeadlineSeconds"] == 3600 and "--batch-size 200" in _main(job)["command"][2]
     op = jobs.normalise(job)
     assert op["region"] == "eu-south1" and op["logs_url"] is None and op["priority"] == "low" and op["timeout_s"] == 3600
     from fastapi import HTTPException
@@ -383,11 +403,11 @@ def test_render_and_build_run(cluster):
         assert jobs.logs_url("tenant-demo", "op-c", "eu-north1").startswith("https://grafana.example/explore?orgId=1&left=")
     finally:
         jobs.GRAFANA_URLS.clear()
-    assert jobs.op_name("demo", "gromacs", "k") == jobs.op_name("demo", "gromacs", "k") != jobs.op_name("demo", "gromacs", "k2")
+    assert jobs.op_name("demo", "batch-example", "k") == jobs.op_name("demo", "batch-example", "k") != jobs.op_name("demo", "batch-example", "k2")
 
 
 def test_normalise_status_and_attempts():
-    job = {"metadata": {"name": "op-1", "namespace": "tenant-demo", "labels": {f"{L}/model": "gromacs", f"{L}/mode": "run", f"{L}/tenant": "demo", f"{L}/region": "eu-north1"},
+    job = {"metadata": {"name": "op-1", "namespace": "tenant-demo", "labels": {f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo", f"{L}/region": "eu-north1"},
                         "annotations": {f"{L}/input": '{"nsteps": "5"}', f"{L}/pvc": "op-1-work"}, "creationTimestamp": "2026-10-05T18:49:23Z"},
            "spec": {}, "status": {"startTime": "2026-10-05T18:49:23Z", "completionTime": "2026-10-05T19:10:47Z", "conditions": [{"type": "Complete", "status": "True"}]},
            "_pods": [pod("op-1", "Failed", "2026-10-05T18:49:23Z", "2026-10-05T18:57:29Z", 137, disrupted=True),
@@ -423,7 +443,7 @@ def test_normalise_status_and_attempts():
 
 def test_resume_reuses_the_volume_in_the_same_region(client):
     c, fake = client
-    r = c.post("/v1/models/gromacs:invoke", json={"input": {"input_prefix": "s3://b/in", "nsteps": 7}}, headers=H)
+    r = c.post("/v1/models/batch-example:invoke", json={"input": {"input_prefix": "s3://b/in", "nsteps": 7}}, headers=H)
     oid = r.json()["id"]
     assert c.post(f"/v1/operations/{oid}:resume", headers=H).status_code == 409        # still queued
     job = fake.jobs[("tenant-demo", oid)]
@@ -454,7 +474,7 @@ def test_resume_reuses_the_volume_in_the_same_region(client):
     r = c.post(f"/v1/operations/{oid}:resume", headers=H)
     assert r.status_code == 409 and "volume" in r.json()["detail"]
     # only run operations resume
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"mode": "async", "input": {}}, headers=H)
+    r = c.post("/v1/models/llm-example:invoke", json={"mode": "async", "input": {}}, headers=H)
     fake.jobs[("tenant-demo", r.json()["id"])]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
     assert c.post(f"/v1/operations/{r.json()['id']}:resume", headers=H).status_code == 400
 
@@ -474,14 +494,14 @@ def test_sync_proxies_to_the_predictor(client, monkeypatch):
         async def post(self, url, json=None, headers=None):
             calls.append((url, headers)); return R()
     monkeypatch.setattr(appmod.httpx, "AsyncClient", FakeClient)
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"input": {"messages": []}}, headers=H)
+    r = c.post("/v1/models/llm-example:invoke", json={"input": {"messages": []}}, headers=H)
     assert r.status_code == 200 and r.json()["result"]["choices"]
-    assert calls[0][0] == "http://qwen2-5-0-5b-predictor.models.svc.cluster.local/openai/v1/chat/completions" and calls[0][1] == {}
+    assert calls[0][0] == "http://llm-example-predictor.models.svc.cluster.local/openai/v1/chat/completions" and calls[0][1] == {}
     # with a LiteLLM pass-through route the caller's key goes along and the per-call price is reported
-    monkeypatch.setitem(catalog.get("qwen2-5-0-5b"), "litellm_route", "/models/qwen/chat")
-    monkeypatch.setitem(catalog.get("qwen2-5-0-5b"), "price_per_call", 0.05)
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json={"input": {"messages": []}}, headers=H)
-    assert r.json()["operation"]["cost"] == 0.05 and calls[-1][0].endswith("/models/qwen/chat") and calls[-1][1]["Authorization"] == "Bearer sk-good"
+    monkeypatch.setitem(catalog.get("llm-example"), "litellm_route", "/models/llm/chat")
+    monkeypatch.setitem(catalog.get("llm-example"), "price_per_call", 0.05)
+    r = c.post("/v1/models/llm-example:invoke", json={"input": {"messages": []}}, headers=H)
+    assert r.json()["operation"]["cost"] == 0.05 and calls[-1][0].endswith("/models/llm/chat") and calls[-1][1]["Authorization"] == "Bearer sk-good"
 
 
 def test_sync_for_another_region_is_forwarded_to_that_regions_api(client, monkeypatch):
@@ -502,15 +522,15 @@ def test_sync_for_another_region_is_forwarded_to_that_regions_api(client, monkey
             calls.append((url, json, headers)); return R()
     monkeypatch.setattr(appmod.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(appmod, "REGION", "control")   # as on the control cluster (HUB_REGION=eu-north1 maps deployments.hub there)
-    monkeypatch.setitem(catalog.get("qwen2-5-0-5b"), "regions", ["eu-north1"])
+    monkeypatch.setitem(catalog.get("llm-example"), "regions", ["eu-north1"])
     body = {"input": {"messages": []}, "region": "eu-north1"}
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json=body, headers=H)
+    r = c.post("/v1/models/llm-example:invoke", json=body, headers=H)
     assert r.status_code == 400 and "eu-north1" in r.json()["detail"] and not calls
     monkeypatch.setattr(appmod, "REGION_API_URLS", {"eu-north1": "https://api.hub.example"})
-    r = c.post("/v1/models/qwen2-5-0-5b:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
+    r = c.post("/v1/models/llm-example:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
     assert r.status_code == 402 and r.json() == {"detail": "budget exceeded"}
     url, sent, headers = calls[0]
-    assert url == "https://api.hub.example/v1/models/qwen2-5-0-5b:invoke"
+    assert url == "https://api.hub.example/v1/models/llm-example:invoke"
     assert sent["input"] == {"messages": []} and sent["region"] == "eu-north1"
     assert headers == {"Authorization": "Bearer sk-good", "Idempotency-Key": "k1"}
 
@@ -521,18 +541,18 @@ ADMIN_INFO = {**KEY_INFO, "metadata": {**KEY_INFO["metadata"], "role": "admin"}}
 def test_endpoints_read_and_scale_only(client, monkeypatch):
     import endpoints as ep
     c, fake = client
-    isvc = {"metadata": {"name": "qwen2-5-0-5b", "namespace": "models", "creationTimestamp": "2026-10-05T20:00:00Z",
+    isvc = {"metadata": {"name": "llm-example", "namespace": "models", "creationTimestamp": "2026-10-05T20:00:00Z",
                          "annotations": {"autoscaling.knative.dev/scale-to-zero-pod-retention-period": "2m"}},
             "spec": {"predictor": {"minReplicas": 0, "maxReplicas": 1, "scaleTarget": 4}}}
-    pub = ep.to_public(catalog.get("qwen2-5-0-5b"), isvc)
-    assert pub["id"] == "qwen2-5-0-5b" and pub["scale_to_zero_after_s"] == 120 and pub["managed_by"] == "git"
-    assert pub["url"] == "https://api.example/v1/models/qwen2-5-0-5b:invoke"
+    pub = ep.to_public(catalog.get("llm-example"), isvc)
+    assert pub["id"] == "llm-example" and pub["scale_to_zero_after_s"] == 120 and pub["managed_by"] == "git"
+    assert pub["url"] == "https://api.example/v1/models/llm-example:invoke"
     assert ep.scaling_patch({"min_replicas": 1, "scale_to_zero_after_s": 300}) == {
         "spec": {"predictor": {"minReplicas": 1}}, "metadata": {"annotations": {"autoscaling.knative.dev/scale-to-zero-pod-retention-period": "300s"}}}
     # no create/delete routes any more: endpoints are git-only
-    assert c.post("/v1/endpoints", json={"model": "qwen2-5-0-5b"}, headers=H).status_code == 405
-    assert c.delete("/v1/endpoints/qwen2-5-0-5b", headers=H).status_code == 405
-    assert c.patch("/v1/endpoints/qwen2-5-0-5b", json={"min_replicas": 1}, headers=H).status_code == 403   # admin only
+    assert c.post("/v1/endpoints", json={"model": "llm-example"}, headers=H).status_code == 405
+    assert c.delete("/v1/endpoints/llm-example", headers=H).status_code == 405
+    assert c.patch("/v1/endpoints/llm-example", json={"min_replicas": 1}, headers=H).status_code == 403   # admin only
     assert c.get("/v1/endpoints", headers=H).status_code == 200
 
 
@@ -554,7 +574,7 @@ def test_admin_routes_need_admin_role(client, monkeypatch):
     monkeypatch.setattr(appmod, "_litellm", fake_litellm)
     r = c.post("/v1/keys", json={"alias": "ci", "budget": 5, "expires_days": 7}, headers=H)
     assert r.status_code == 201 and r.json()["key"] == "sk-newkey1234" and r.json()["alias"] == "demo-ci"
-    assert calls[-1][2]["json"]["metadata"] == {"tenant": "demo", "allowed_passthrough_routes": ["/models/qwen/chat"]} and calls[-1][2]["json"]["duration"] == "7d"
+    assert calls[-1][2]["json"]["metadata"] == {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]} and calls[-1][2]["json"]["duration"] == "7d"
     assert [k["alias"] for k in c.get("/v1/keys", headers=H).json()] == ["demo-ci"]
     assert c.delete("/v1/keys/demo-ci", headers=H).status_code == 204 and calls[-1][1] == "/key/delete"
     assert c.delete("/v1/keys/other", headers=H).status_code == 404
@@ -563,7 +583,7 @@ def test_admin_routes_need_admin_role(client, monkeypatch):
 def test_billing_once(cluster, monkeypatch):
     """The CronJob entry point bills finished, unbilled runs exactly once (annotation guard), no claim protocol."""
     import asyncio, billing
-    done = {"metadata": {"name": "op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "gromacs", f"{L}/mode": "run", f"{L}/tenant": "demo"},
+    done = {"metadata": {"name": "op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo"},
                          "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work"}},
             "spec": {}, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}
     cluster.jobs[("tenant-demo", "op-b")] = done
@@ -572,11 +592,11 @@ def test_billing_once(cluster, monkeypatch):
                      pod("op-b", "Succeeded", "2026-10-05T18:30:00Z", "2026-10-05T19:00:00Z", 0)]
     monkeypatch.setattr(billing.artifacts, "attempt_records", lambda ns, op, region, prefix=None: [
         {"operation": "op-b", "pod": "op-b-suc", "status": "succeeded", "gpus": 1, "started_at": "2026-10-05T18:30:00Z", "ended_at": "2026-10-05T19:00:00Z"}])   # duplicate of a live pod: not double counted
-    running = {"metadata": {"name": "op-r", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "gromacs", f"{L}/mode": "run"}, "annotations": {f"{L}/key": "deadbeef"}},
+    running = {"metadata": {"name": "op-r", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run"}, "annotations": {f"{L}/key": "deadbeef"}},
                "spec": {}, "status": {"startTime": "x"}}
     cluster.jobs[("tenant-demo", "op-r")] = running
     done["_pods"] = cluster.pods
-    assert billing.cost_of(done, catalog.get("gromacs")) == (3600.0, 1.6)
+    assert billing.cost_of(done, catalog.get("batch-example")) == (3600.0, 1.6)
     spent = []
 
     async def fake_add(token, usd):
@@ -653,18 +673,18 @@ def test_fleet_manager_path(client, monkeypatch):
     monkeypatch.setattr(appmod, "FLEET_MANAGER", True)
     monkeypatch.setattr(appmod.artifacts, "storage", lambda ns, region="control": {"bucket": f"serverless2-demo-{'eu-north1' if region == 'control' else region}"})
     # inputs must sit in the fleet (hub-region) bucket
-    r = c.post("/v1/models/gromacs:invoke", json={"input": {"input_prefix": "s3://serverless2-demo-eu-south1/in"}}, headers=H)
+    r = c.post("/v1/models/batch-example:invoke", json={"input": {"input_prefix": "s3://serverless2-demo-eu-south1/in"}}, headers=H)
     assert r.status_code == 400 and "fleet bucket" in r.json()["detail"]
     # a required parameter the fleet defaults cannot supply is the caller's error
     r = c.post("/v1/models/container-run:invoke", json={"input": {"command": "x"}}, headers=H)
     assert r.status_code == 400 and "image" in r.json()["detail"]
-    # gromacs through the fleet: one fleet-wide image reference (the logical registry host, docs/IMAGES.md), so the
+    # a GPU run class through the fleet: one fleet-wide image reference (the logical registry host, docs/IMAGES.md), so the
     # run stays unpinned and MultiKueue + the dispatcher place it at queue time (re-nominating while it waits)
-    rg = c.post("/v1/models/gromacs:invoke", json={"input": {"input_prefix": "s3://serverless2-demo-eu-north1/in"}}, headers=H)
+    rg = c.post("/v1/models/batch-example:invoke", json={"input": {"input_prefix": "s3://serverless2-demo-eu-north1/in"}}, headers=H)
     assert rg.status_code == 202 and rg.json()["profile"] == "prefer-rtx-pro-6000" and rg.json()["region"] is None
     gj = control.jobs[("tenant-demo", rg.json()["id"])]
     assert gj["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in gj["metadata"]["labels"]
-    assert _main(gj)["image"] == "registry.serverless2.local/nebius/gromacs:2026.4-cuda12.8-sm90-120" and 'GMX_NB_MIN_CI="16000"' in _main(gj)["command"][2]
+    assert _main(gj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120" and 'EXAMPLE_THREADS="16"' in _main(gj)["command"][2]
     assert gj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     r = c.post("/v1/models/container-run:invoke", json={"name": "t", "input": {"image": "nvcr.io/nvidia/cuda:12.8.0-base-ubuntu22.04", "command": "nvidia-smi"}}, headers=H)
     assert r.status_code == 202
@@ -673,14 +693,14 @@ def test_fleet_manager_path(client, monkeypatch):
     job = control.jobs[("tenant-demo", op["id"])]
     assert job["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in job["metadata"]["labels"]
     assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "prefer-h100"
-    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.6"
+    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.7"
     tmpl = job["spec"]["template"]["metadata"]["annotations"]
     assert tmpl[f"{L}/gpu-classes"] == "h100,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
     assert not control.pvcs and ("tenant-demo", op["id"]) not in hub.jobs                  # no volume on the manager
     up = {e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][1]["env"]}
     assert up["OUTPUT_PREFIX"] == f"s3://serverless2-demo-eu-north1/operations/{op['id']}"
     # an explicit region pins (label) and applies that region's defaults, still through the manager
-    rp = c.post("/v1/models/gromacs:invoke", json={"region": "eu-south1", "input": {"input_prefix": "s3://serverless2-demo-eu-north1/in"}}, headers=H)
+    rp = c.post("/v1/models/batch-example:invoke", json={"region": "eu-south1", "input": {"input_prefix": "s3://serverless2-demo-eu-north1/in"}}, headers=H)
     assert rp.status_code == 202 and rp.json()["region"] == "eu-south1"
     pj = control.jobs[("tenant-demo", rp.json()["id"])]
     assert pj["metadata"]["labels"][f"{L}/region"] == "eu-south1" and pj["spec"]["managedBy"] and _main(pj)["image"].startswith("registry.serverless2.local/nebius/")
@@ -903,3 +923,212 @@ def test_multinode_status_cancel_and_resume(client, monkeypatch):
     job, _ = jobs.find("tenant-demo", op["id"])
     gpu_s, usd = billing.cost_of(job, catalog.get("distributed-run"), [], "eu-north1")
     assert gpu_s == 2 * 1800 * 8 and usd == round(gpu_s / 3600 * 2.15, 6)
+
+
+# ---- runtime models: a container becomes an endpoint or a job class through the API ---------------------
+ADMIN = {"Authorization": "Bearer sk-admin"}
+
+
+class FakeDB:
+    """services/api/db.py in memory: the models table and its history."""
+    def __init__(self):
+        self.rows, self.hist = {}, []
+
+    def enabled(self): return True
+
+    def list_models(self): return dict(sorted(self.rows.items()))
+
+    def get_model(self, mid): return self.rows.get(mid)
+
+    def upsert_model(self, entry, spec, by, managed_by="api"):
+        version = self.rows[entry["id"]]["version"] + 1 if entry["id"] in self.rows else 1
+        self.rows[entry["id"]] = {"id": entry["id"], "kind": spec.get("kind", "endpoint"), "spec": copy.deepcopy(spec), "entry": copy.deepcopy(entry),
+                                  "version": version, "managed_by": managed_by, "updated_by": by}
+        self.hist.append({"version": version, "action": "create" if version == 1 else "update", "by": by, "at": "now", "spec": copy.deepcopy(spec), "id": entry["id"]})
+        return self.rows[entry["id"]]
+
+    def delete_model(self, mid, by):
+        if mid not in self.rows:
+            return False
+        self.hist.append({"version": self.rows[mid]["version"] + 1, "action": "delete", "by": by, "at": "now", "spec": self.rows[mid]["spec"], "id": mid})
+        del self.rows[mid]
+        return True
+
+    def history(self, mid, limit=50): return [h for h in reversed(self.hist) if h["id"] == mid][:limit]
+
+
+@pytest.fixture
+def admin_keys(monkeypatch):
+    """sk-admin is an admin key of tenant demo, every other key a plain user key; this API is the fleet's
+    (control) API: it has the model database."""
+    async def fake_info(key):
+        return dict(ADMIN_INFO) if key == "sk-admin" else dict(KEY_INFO)
+    monkeypatch.setattr(auth, "key_info", fake_info)
+    import db, models as m
+    monkeypatch.setattr(m, "CHART_DIR", os.path.join(ROOT, "charts", "endpoint"))
+    fdb = FakeDB()
+    for name in ("enabled", "list_models", "get_model", "upsert_model", "delete_model", "history"):
+        monkeypatch.setattr(db, name, getattr(fdb, name))
+    monkeypatch.setattr(m, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io", "eu-south1": "203.0.113.20.sslip.io"})
+    auth.forget("sk-admin"); auth.forget("sk-good")
+    catalog.invalidate()
+    return fdb
+
+
+def test_normalise_image_maps_public_registries_to_the_cache_host():
+    import models as m
+    assert m.normalise_image("vllm/vllm-openai:v0.11.0") == "registry.serverless2.local/docker/vllm/vllm-openai:v0.11.0"
+    assert m.normalise_image("busybox:1.36") == "registry.serverless2.local/docker/library/busybox:1.36"
+    assert m.normalise_image("nvcr.io/example/http-example:1.0.0") == "registry.serverless2.local/nvcr/example/http-example:1.0.0"
+    assert m.normalise_image("ghcr.io/org/app:1") == "registry.serverless2.local/ghcr/org/app:1"
+    assert m.normalise_image("registry.serverless2.local/nebius/x:1") == "registry.serverless2.local/nebius/x:1"
+    assert m.normalise_image("cr.example.com/team/private:1") == "cr.example.com/team/private:1"   # unknown registry: direct pull
+    assert m.normalise_image("{{image}}") == "{{image}}"
+
+
+def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
+    c, fake = client
+    fdb = admin_keys
+    # the fleet's API also reaches eu-south1: it gets a read-only copy of every definition
+    south = FakeCluster()
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-south1"])
+    monkeypatch.setattr(kube, "core", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
+    monkeypatch.setattr(kube, "api", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
+    groups = []
+    import httpx
+    class FakeLLM:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, url, json=None, headers=None):
+            groups.append((url.rsplit("/", 1)[1], json)); return httpx.Response(200, json={})
+    import models as m
+    monkeypatch.setattr(m, "LITELLM_MASTER_KEY", "sk-master")
+    monkeypatch.setattr(m, "LITELLM_INTERNAL_KEY", "sk-platform-internal")
+    monkeypatch.setattr(httpx, "Client", FakeLLM)
+    spec = {"id": "my-llm", "kind": "endpoint", "image": "vllm/vllm-openai:v0.11.0", "args": ["--model", "example-org/small-chat-model"],
+            "port": 8000, "protocol": "openai", "health_path": "/health", "served_model": "example-org/small-chat-model",
+            "gpu": {"count": 1, "classes": ["h100"]}, "scaling": {"min": 0, "max": 2}, "env": {"HF_HOME": "/weights"},
+            "weights": {"path": "my-llm"}, "images": {"default": "ignored-when-image-is-set"}}
+    assert c.post("/v1/models", json=spec, headers=H).status_code == 403          # user key
+    r = c.post("/v1/models", json=spec, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["regions"] == ["hub"] and body["model"]["managed_by"] == "api" and body["model"]["protocol"] == "openai"
+    isvc = fake.custom[("models", "inferenceservices", "my-llm")]
+    cont = isvc["spec"]["predictor"]["containers"][0]
+    assert cont["image"] == "registry.serverless2.local/docker/vllm/vllm-openai:v0.11.0"
+    assert cont["args"] == ["--model", "example-org/small-chat-model"] and isvc["spec"]["predictor"]["maxReplicas"] == 2
+    assert isvc["spec"]["predictor"]["nodeSelector"]["serverless2.nebius/pool"] == "h100-spot-1x"
+    row = fdb.rows["my-llm"]
+    assert row["version"] == 1 and row["managed_by"] == "api" and row["updated_by"] == "tenant-demo" and row["entry"]["runtime"]["port"] == 8000
+    assert "configmaps" not in fake.__dict__                                   # the control API's source is the database ...
+    cm = south.configmaps[("api", "catalog-my-llm")]                           # ... every other region holds a copy
+    assert cm["metadata"]["labels"]["serverless2.nebius/catalog"] == "runtime" and "runtime:" in cm["data"]["entry.yaml"]
+    # the OpenAI endpoint is a LiteLLM model group whose deployment is the gateway hostname of its region
+    assert groups[-1][0] == "new" and groups[-1][1]["litellm_params"]["api_base"] == "https://my-llm-predictor.models.203.0.113.10.sslip.io/v1"
+    assert groups[-1][1]["model_info"]["id"] == "my-llm--hub" and body["version"] == 1
+    # the group calls the gateway hostname as the platform-internal key (the edge requires a LiteLLM key)
+    assert groups[-1][1]["litellm_params"]["api_key"] == "sk-platform-internal" and "warnings" not in body
+    # the hostname is on the region's model certificate (ACME), issued through the gateway
+    cert = fake.custom[("envoy-gateway-system", "certificates", "models")]["spec"]
+    assert cert["dnsNames"] == ["my-llm-predictor.models.203.0.113.10.sslip.io"] and cert["issuerRef"]["name"] == "letsencrypt"
+    assert ("envoy-gateway-system", "certificates", "models") not in south.custom      # nothing deployed there
+    # it is a model like any other now, with the served model name injected on calls
+    got = c.get("/v1/models/my-llm", headers=H).json()
+    assert got["modes"] == ["sync", "async"] and got["spec"]["image"] == "vllm/vllm-openai:v0.11.0"
+    assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 409          # exists; PUT replaces
+    spec["scaling"] = {"min": 1, "max": 3}
+    r = c.put("/v1/models/my-llm", json=spec, headers=ADMIN)
+    assert r.status_code == 200 and fake.custom[("models", "inferenceservices", "my-llm")]["spec"]["predictor"]["minReplicas"] == 1
+    assert r.json()["version"] == 2 and fdb.rows["my-llm"]["version"] == 2
+    hist = c.get("/v1/models/my-llm/history", headers=ADMIN).json()
+    assert [h["action"] for h in hist] == ["update", "create"] and hist[0]["spec"]["scaling"] == {"min": 1, "max": 3}
+    assert c.get("/v1/models/my-llm/history", headers=H).status_code == 403
+    assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
+    assert ("models", "inferenceservices", "my-llm") not in fake.custom and ("api", "catalog-my-llm") not in south.configmaps
+    assert "my-llm" not in fdb.rows and groups[-1] == ("delete", {"id": "my-llm--hub"})
+    cert = fake.custom[("envoy-gateway-system", "certificates", "models")]["spec"]          # back to the placeholder
+    assert cert["dnsNames"] == ["models.example.invalid"] and cert["issuerRef"]["name"] == "selfsigned"
+    assert c.get("/v1/models/my-llm", headers=H).status_code == 404
+    assert c.get("/v1/models/my-llm/history", headers=ADMIN).json()[0]["action"] == "delete"
+
+
+def test_model_group_needs_the_internal_key(client, admin_keys, monkeypatch, caplog):
+    """Without LITELLM_INTERNAL_KEY the endpoint is deployed but no LiteLLM group is registered: a warning in the
+    response and the log, never a call with a dummy key the edge would reject."""
+    c, fake = client
+    calls = []
+    import httpx
+    class FakeLLM:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, url, json=None, headers=None):
+            calls.append(url); return httpx.Response(200, json={})
+    import models as m
+    monkeypatch.setattr(m, "LITELLM_MASTER_KEY", "sk-master")
+    monkeypatch.setattr(m, "LITELLM_INTERNAL_KEY", "")
+    monkeypatch.setattr(httpx, "Client", FakeLLM)
+    spec = {"id": "my-llm", "kind": "endpoint", "image": "vllm/vllm-openai:v0.11.0", "port": 8000, "protocol": "openai",
+            "gpu": {"count": 1, "classes": ["h100"]}}
+    with caplog.at_level("WARNING", logger="api"):
+        r = c.post("/v1/models", json=spec, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    assert ("models", "inferenceservices", "my-llm") in fake.custom                 # the endpoint itself is there
+    assert calls == [] and any("LITELLM_INTERNAL_KEY" in w for w in r.json()["warnings"])
+    assert any("LITELLM_INTERNAL_KEY" in rec.getMessage() for rec in caplog.records)
+    assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
+
+
+def test_regional_api_serves_copies_and_refuses_writes(client, admin_keys, monkeypatch):
+    """A regional API has no database: it lists the ConfigMap copies the control API wrote and answers writes with 409."""
+    c, fake = client
+    import db, models as m
+    monkeypatch.setattr(db, "enabled", lambda: False)
+    catalog.invalidate()
+    entry = m.to_entry({"id": "copied", "kind": "job", "image": "busybox", "command": "echo hi"})
+    m.save(entry)                                        # what the control API does into this cluster
+    catalog.invalidate()
+    got = c.get("/v1/models/copied", headers=H).json()
+    assert got["managed_by"] == "api" and got["default_mode"] == "run"
+    r = c.post("/v1/models", json={"id": "x", "image": "busybox"}, headers=ADMIN)
+    assert r.status_code == 409 and "api.example" in r.json()["detail"]
+    assert c.delete("/v1/models/copied", headers=ADMIN).status_code == 409
+
+
+def test_create_job_class_and_run_it(client, admin_keys):
+    c, fake = client
+    spec = {"id": "my-trainer", "kind": "job", "image": "ghcr.io/org/trainer:1.2", "command": "python train.py --out $OUTPUT_DIR",
+            "gpu": {"count": 1, "classes": ["h100"]}, "cpu": "8", "memory": "32Gi", "disk_gi": 100,
+            "parameters": [{"name": "epochs", "type": "number", "default": 1}]}
+    r = c.post("/v1/models", json=spec, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    got = c.get("/v1/models/my-trainer", headers=H).json()
+    assert got["default_mode"] == "run" and got["parameters"][0]["name"] == "epochs" and got["managed_by"] == "api"
+    r = c.post("/v1/models/my-trainer:invoke", json={"mode": "run", "input": {"epochs": 2}}, headers=H)
+    assert r.status_code == 202, r.text
+    job = fake.jobs[("tenant-demo", r.json()["id"])]
+    main = _main(job)
+    assert main["image"] == "registry.serverless2.local/ghcr/org/trainer:1.2"
+    assert main["resources"]["limits"]["nvidia.com/gpu"] == "1" or main["resources"]["limits"]["nvidia.com/gpu"] == 1
+
+
+def test_bundled_and_terraform_models_are_read_only(client, admin_keys):
+    c, fake = client
+    assert c.delete("/v1/models/hello-run", headers=ADMIN).status_code == 409
+    r = c.put("/v1/models/hello-run", json={"id": "hello-run", "kind": "job", "image": "busybox"}, headers=ADMIN)
+    assert r.status_code == 409
+
+
+def test_model_spec_validation(client, admin_keys):
+    c, fake = client
+    assert c.post("/v1/models", json={"id": "Bad Id", "image": "x"}, headers=ADMIN).status_code == 400
+    assert c.post("/v1/models", json={"id": "no-image"}, headers=ADMIN).status_code == 400
+    assert c.post("/v1/models", json={"id": "no-class", "image": "x", "gpu": {"classes": ["b300"]}}, headers=ADMIN).status_code == 400
+    # no GPU class: a CPU endpoint on the region's system pool (the endpoint chart needs a pool)
+    r = c.post("/v1/models", json={"id": "cpu-echo", "kind": "endpoint", "image": "x", "port": 80, "protocol": "http",
+                                   "gpu": {"count": 0, "classes": []}, "regions": ["eu-north1"]}, headers=ADMIN)
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["entry"]["deployments"]["eu-north1"]["pool"] == "system"
+    assert c.post("/v1/models", json={"id": "bad-proto", "image": "x", "protocol": "ftp"}, headers=ADMIN).status_code == 400

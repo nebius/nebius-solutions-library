@@ -22,8 +22,7 @@ locals {
     } : {}, local.f.argocd.enabled && local.role.control ? {
     argocd = "argocd.${local.host}"
   } : {})
-  model_hosts = [for mid, e in try(local.endpoints_by_cluster[local.id], {}) : "${mid}-predictor.models.${local.host}"]
-  api_urls    = { for cid, c in local.cloud.clusters : c.region => "https://api.${local.host_of[cid]}" if local.roles[cid].worker }
+  api_urls = { for cid, c in local.cloud.clusters : c.region => "https://api.${local.host_of[cid]}" if local.roles[cid].worker }
   grafana_urls = join(",", concat(
     [for cid, c in local.cloud.clusters : "${c.region}=https://grafana.${local.host_of[cid]}" if local.roles[cid].worker],
     local.dedicated ? ["control=https://grafana.${local.control_host}"] : []
@@ -38,7 +37,9 @@ locals {
   # Chart list: clusters/common/apps/*.yaml (the same files the optional Argo CD mode reads).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
   # Components this stage renders itself from templates (control-only manifests) or not at all.
-  apps_skip = ["postgres", "ui-app", "fleet-access", "api-agent"]
+  # (cloudnative-pg and postgres are the reference fleet's in-cluster database until it migrates to the
+  # managed one; the solution uses Nebius Managed PostgreSQL, stack/cloud/database.tf.)
+  apps_skip = ["postgres", "cloudnative-pg", "ui-app", "fleet-access", "api-agent"]
   apps = { for n, a in local.apps_all : n => a if !contains(local.apps_skip, n) && (
     a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control)
   ) }
@@ -71,8 +72,8 @@ locals {
       ] } } }
     )
     loki = { loki = { limits_config = { retention_period = "${local.f.observability.loki_retention_days * 24}h" } } }
-    # LiteLLM UI behind the gateway only; admin routes are internal (the API talks in-cluster).
-    litellm = {}
+    # LiteLLM on the managed database (stack/platform/database.tf); UI behind the gateway only.
+    litellm = { db = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } } }
   }
   fleet_values = {
     cluster = local.id
@@ -90,7 +91,16 @@ locals {
     { name = "RUNNER_IMAGE", value = local.image.jobs },
     { name = "HUB_REGION", value = local.hub_region },
   ]
-  api_env = concat(local.api_env_common, local.role.manager ? [
+  # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
+  api_env_control = [for e in [
+    { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
+    { name = "LITELLM_INTERNAL_KEY", valueFrom = { secretKeyRef = { name = "litellm-internal", key = "key" } } }, # the model groups' key (litellm-internal.tf)
+    { name = "IMAGES_HOST", value = local.images_host },
+    { name = "IMAGES_SOURCE", value = local.cloud.hub.registry },
+    { name = "ENDPOINT_DOMAINS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=${local.host_of[cid]}"]) },
+    { name = "ACME_ISSUER", value = local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt" }, # the model endpoints' certificate (gateway/models-tls.yaml)
+  ] : e if local.role.control]
+  api_env = concat(local.api_env_common, local.api_env_control, local.role.manager ? [
     { name = "REGION", value = "control" },
     { name = "REGION_KUBECONFIGS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=/etc/kubeconfigs/${c.region}"]) },
     { name = "REGION_API_URLS", value = join(",", [for r, u in local.api_urls : "${r}=${u}"]) },

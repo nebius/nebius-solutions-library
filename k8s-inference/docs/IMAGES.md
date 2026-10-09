@@ -32,8 +32,8 @@ upstream (fleet.yaml `images.upstreams`, plus `nebius` = `images.source`):
 | reference | comes from |
 |---|---|
 | `registry.serverless2.local/nebius/serverless2/api:0.7.1` | `<images.source>/serverless2/api:0.7.1` (our builds) |
-| `registry.serverless2.local/nebius/gromacs:2026.4-cuda12.8-sm90-120` | `<images.source>/gromacs:...` |
-| `registry.serverless2.local/nvcr/nim/mit/diffdock:2.2.0` | `nvcr.io/nim/mit/diffdock:2.2.0` (NGC key in the cache, no pull Secret on pods) |
+| `registry.serverless2.local/nebius/my-model:1.0` | `<images.source>/my-model:1.0` (your own images) |
+| `registry.serverless2.local/nvcr/<org>/<image>:<tag>` | `nvcr.io/<org>/<image>:<tag>` (NGC key in the cache, no pull Secret on pods) |
 | `registry.serverless2.local/docker/library/busybox:1.36` | Docker Hub official image |
 | `registry.serverless2.local/docker/kserve/huggingfaceserver:v0.20.0-gpu` | Docker Hub |
 | `registry.serverless2.local/ghcr/<org>/<repo>:<tag>` | ghcr.io |
@@ -129,7 +129,7 @@ the kubelet's pull back-off for minutes (measured 2026-10-07, hub H100 pool).
 
 A fresh GPU node pulls its first workload image before the `node-config`
 DaemonSet has restarted containerd (one failed pull, retried by the kubelet
-about 10 s later: measured 2 min 5 s from node creation to a running GROMACS
+about 10 s later: measured 2 min 5 s from node creation to a running job
 container; with several pods landing at once the kubelet's pull back-off
 stretched that to minutes on 2026-10-07). Since 2026-10-07 the same drop-in is
 written by cloud-init in the GPU node-group template (`infra/cluster/main.tf`,
@@ -162,10 +162,10 @@ runcmd:
 |---|---|
 | `docker/library/busybox:1.36` (2 MB), cold (Zot fetched it from Docker Hub) | 0.9 s |
 | `nebius/serverless2/jobs:0.1.3` (44 MB; 0.1.4 since 2026-10-08), cold (from the source registry) | 2.4 s hub, 4.6 s eu-south1 |
-| `nebius/gromacs:2026.4-cuda12.8-sm90-120` (518 MB), cold, hub | 20.9 s |
+| a 518 MB solver image, cold, hub | 20.9 s |
 | same, eu-south1 GPU node, cache warm (Zot sync from the hub registry took 12 s before) | 29 s first node, 7.8 s re-pull |
-| same, fresh eu-south1 spot node (GROMACS run), cache warm | 12.3 s |
-| `nvcr/nim/mit/diffdock:2.2.0` (16.4 GB), cold: Zot fetches from NGC | 9 min 38 s sync; containerd's first request ends `NotFound` at that moment, the kubelet's retry pulls from the cache |
+| same, fresh eu-south1 spot node (a run landing there), cache warm | 12.3 s |
+| a 16.4 GB NIM image, cold: Zot fetches from NGC | 9 min 38 s sync; containerd's first request ends `NotFound` at that moment, the kubelet's retry pulls from the cache |
 | same, second GPU node of the cluster (cache + Spegel peer) | 3 min 27 s |
 
 ## Pitfalls found on the way

@@ -1,8 +1,0 @@
-name: postgres
-component: postgres
-namespace: data
-wave: '2'
-hubOnly: 'true'
-placement: control
-kind: manifests
-manifestsPath: manifests/postgres

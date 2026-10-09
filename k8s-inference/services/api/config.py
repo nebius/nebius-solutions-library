@@ -3,6 +3,10 @@ import os
 
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.litellm.svc:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
+# The platform-internal LiteLLM key (Secret api/litellm-internal, control cluster): the api_key of the model
+# groups the API registers for OpenAI endpoints, so LiteLLM passes the edge key check on their gateway
+# hostnames. Optional: without it no group is registered (the endpoint still answers through the API).
+LITELLM_INTERNAL_KEY = os.environ.get("LITELLM_INTERNAL_KEY", "")
 CATALOG_DIRS = os.environ.get("CATALOG_DIRS", "/app/catalog/models").split(":")
 REGION = os.environ.get("REGION", "eu-north1")                      # the region this API runs in (in-cluster client)
 HUB_REGION = os.environ.get("HUB_REGION", REGION)                   # the region the catalog's `deployments.hub` means (control cluster: eu-north1)
@@ -16,13 +20,31 @@ REGION_API_URLS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_API_URL
 PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
 GRAFANA_URLS = dict(kv.split("=", 1) for kv in os.environ.get("GRAFANA_URLS", "").split(",") if "=" in kv)
 MODELS_NAMESPACE = os.environ.get("MODELS_NAMESPACE", "models")
+# The API's own namespace: runtime model definitions live there as ConfigMaps `catalog-<id>` (services/api/models.py)
+API_NAMESPACE = os.environ.get("API_NAMESPACE") or (open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
+                                                     if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/namespace") else "api")
+CHART_DIR = os.environ.get("CHART_DIR", "/app/charts/endpoint")   # charts/endpoint, rendered by `helm template` for runtime endpoints
+IMAGES_HOST = os.environ.get("IMAGES_HOST", "registry.serverless2.local")   # the logical registry host (terraform.tfvars images.host)
+IMAGES_SOURCE = os.environ.get("IMAGES_SOURCE", "")                         # the fleet's own registry (images.source), alias `nebius`
+# TLS of the model endpoints' hostnames: the fleet's API rewrites Certificate envoy-gateway-system/models of a cluster
+# (clusters/common/manifests/gateway/models-tls.yaml) with the hostnames of the endpoints deployed there, issued by
+# ACME_ISSUER (letsencrypt | letsencrypt-staging); without endpoints it goes back to the self-signed placeholder.
+ACME_ISSUER = os.environ.get("ACME_ISSUER", "letsencrypt")
+GATEWAY_NAMESPACE = os.environ.get("GATEWAY_NAMESPACE", "envoy-gateway-system")
+MODELS_CERTIFICATE = "models"
+# Gateway domain of every region ("<region>=<domain>,..."): the LiteLLM api_base of an endpoint deployed there (control API)
+ENDPOINT_DOMAINS = dict(kv.split("=", 1) for kv in os.environ.get("ENDPOINT_DOMAINS", "").split(",") if "=" in kv)
 TENANT_NS_PREFIX = os.environ.get("TENANT_NS_PREFIX", "tenant-")
 STORAGE_SECRET = os.environ.get("STORAGE_SECRET", "tenant-storage")
 S3_ENV_SECRET = os.environ.get("S3_ENV_SECRET", "s3")                # AWS_* env for the runner containers (tenant namespace)
 EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")            # job ServiceAccount in the tenant namespace (charts/tenant)
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
-RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.6")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.7")
+# the cost dispatcher's ranking (services/dispatcher `GET /v1/rank`, Service kueue-system/dispatcher): asked at submission
+# for a run class with per-GPU-class images (`job.images`), docs/SCHEDULING.md "Per-GPU images for runs"
+DISPATCHER_URL = os.environ.get("DISPATCHER_URL", "http://dispatcher.kueue-system.svc:80").rstrip("/")
+RANK_TIMEOUT_S = float(os.environ.get("RANK_TIMEOUT_S", "3"))
 # External domain of this cluster's endpoints (the Knative domain, e.g. <gateway ip>.sslip.io): async endpoint calls
 # from tenant Jobs go through the gateway (TLS, key check, rate limit) as https://<model>-predictor.<ns>.<domain>,
 # never to the predictor Service (docs/SECURITY-PREREVIEW.md F2). Empty = no async calls to direct endpoints.

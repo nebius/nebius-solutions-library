@@ -22,7 +22,7 @@ module "cluster" {
 
 # ---------------------------------------------------------------------------
 # Operations identity, one per project: the ops CronJobs (stopped spot node recovery), the price feed, the
-# CNPG backups and the image cache's registry credential run as it. `editor` on the project is enough.
+# cost export and the image cache's registry credential run as it. `editor` on the project is enough.
 resource "nebius_iam_v1_service_account" "ops" {
   for_each    = toset(local.projects)
   parent_id   = each.key
@@ -81,8 +81,8 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Hub project: the registry the platform images are pushed to (images.source default) and the backups
-# bucket (Postgres base backups + WAL, daily cost reports) with its policy for the ops group.
+# Hub project: the registry the platform images are pushed to (images.source default) and the reports
+# bucket (daily cost reports; named `backups` for history) with its policy for the ops group.
 resource "nebius_registry_v1_registry" "images" {
   count     = local.f.images.source == null ? 1 : 0
   parent_id = local.hub_project
@@ -98,11 +98,10 @@ resource "terraform_data" "empty_registry" {
   input = {
     script   = "${path.module}/../scripts/empty-registry.sh"
     registry = nebius_registry_v1_registry.images[0].id
-    profile  = local.f.nebius_profile
   }
   provisioner "local-exec" {
     when    = destroy
-    command = "${self.input.script} ${self.input.registry} ${self.input.profile}"
+    command = "${self.input.script} ${self.input.registry}"
   }
 }
 
@@ -136,7 +135,7 @@ resource "terraform_data" "empty_backups" {
   }
 }
 
-# S3 access key of the hub ops SA: CNPG backups and the cost export write with it.
+# S3 access key of the hub ops SA: the cost export writes with it.
 resource "nebius_iam_v2_access_key" "backups" {
   parent_id            = local.hub_project
   name                 = "${local.f.name}-backups"
@@ -149,10 +148,6 @@ resource "nebius_iam_v2_access_key" "backups" {
 # Secrets generated once, installed by the platform stage.
 resource "random_password" "litellm_master" {
   length  = 48
-  special = false
-}
-resource "random_password" "litellm_db" {
-  length  = 32
   special = false
 }
 resource "random_password" "grafana_admin" {

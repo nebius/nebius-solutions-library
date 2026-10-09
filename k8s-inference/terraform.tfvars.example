@@ -10,7 +10,6 @@
 
 fleet = {
   name           = "inference"      # prefix of every cloud resource; 2-23 lowercase chars, digits, dashes
-  nebius_profile = "default"        # `nebius profile list`; needs editor on every project below
   labels         = { owner = "platform-team" }
   protect_data   = true             # weights filesystems and tenant buckets refuse `destroy` (README "Destroying")
   # kubernetes_version = "1.35"
@@ -142,7 +141,7 @@ fleet = {
       lifecycle_days = 90                  # run outputs expire after N days (0 = keep)
       keys = {
         default = { budget_usd = 100 }
-        # admin = { budget_usd = 1000, admin = true }
+        admin   = { budget_usd = 1000, admin = true } # defines models (console, POST /v1/models); the acceptance probe uses it
       }
       # gpu_quota         = 4             # GPUs the tenant may hold at once (null = share the fleet queues)
       # fair_share_weight = 2             # Kueue weighted fair sharing when the fleet is full
@@ -151,31 +150,17 @@ fleet = {
     }
   }
 
-  # Models: ids from the bundled catalog (catalog/models/*.yaml) to deploy, plus your own entries in the same
-  # schema. An entry with a bundled id extends the bundled one (top-level keys replace), so re-homing a
-  # bundled class to your regions is one line. `deployments.hub` is an alias for the hub cluster;
-  # deployments naming a cluster that is not in `regions` are ignored.
-  models = {
-    enabled = ["hello-run", "container-run", "gromacs", "qwen2-5-0-5b"]
-    entries = {
-      hello-run     = { deployments = { hub = {}, eu-west2 = {} } }
-      container-run = { deployments = { hub = { price_per_gpu_hour = 2.15 }, eu-west2 = { price_per_gpu_hour = 0.99 } } }
-      # my-llm = {
-      #   id = "my-llm", displayName = "My LLM", task = "text-generation", mode = "sync", protocol = "openai"
-      #   gpu     = { count = 1, memoryGiB = 40, classes = ["h100"] }
-      #   runtime = {
-      #     image = "registry.serverless2.local/docker/kserve/huggingfaceserver:v0.20.0-gpu", port = 8080
-      #     args = ["--model_id=org/model"], resources = { gpu = 1, cpu = "8", memory = "32Gi" }
-      #     scaling = { minReplicas = 0, maxReplicas = 2 }
-      #   }
-      #   deployments = { hub = { pool = "h100-spot-1x" } }
-      # }
-    }
-  }
+  # Models are not defined here. A model is a container you describe after the apply, in the console
+  # ("New model") or with `POST /v1/models` on the fleet's API (docs/API.md); it is kept in the fleet
+  # database and deployed in every region you name. The platform ships only its generic run classes
+  # (catalog/models: hello-run, container-run, distributed-run), on every GPU region.
 
-  # After the models stage: a probe Job runs `model` (a run class) and, when set, calls `endpoint` (a sync
-  # model) through the public API with the first tenant key; a failure fails the apply.
-  acceptance = { probe = true, model = "hello-run", endpoint = "qwen2-5-0-5b" }
+  # After the models stage: a probe Job runs `model` (a run class) with the first tenant key and, with
+  # `example_endpoint`, creates `llm-example` (a stock vLLM container with a small public chat model,
+  # stack/models/llm-example.json: swap the `--model` argument for any model you like; on the fleet's
+  # first GPU class) through the API with the first admin key and calls it; a failure fails the apply.
+  # The example stays as the first model of the console (delete it there when you do not want it).
+  acceptance = { probe = true, model = "hello-run", example_endpoint = true }
 
   # argocd = { enabled = true }            # optional operator UI on the control cluster; deploys nothing
 }

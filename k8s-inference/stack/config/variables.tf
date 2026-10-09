@@ -9,9 +9,7 @@ variable "fleet" {
   type = object({
     schema_version = optional(number, 1)
     # Prefix of every cloud resource (clusters, service accounts, buckets, registry): <name>-<cluster id>-...
-    name = string
-    # Nebius CLI profile used by the Terraform provider and by kubectl/helm (exec credential plugin).
-    nebius_profile     = optional(string, "default")
+    name               = string
     kubernetes_version = optional(string, "1.35")
     labels             = optional(map(string), {})
     # Weights filesystems and tenant buckets refuse `terraform destroy` while true (README "Destroying").
@@ -35,7 +33,7 @@ variable "fleet" {
       endpoint = optional(string) # default https://storage.<region>.nebius.cloud
     }), {})
 
-    # Control plane: API, LiteLLM + Postgres, UI, Kueue MultiKueue manager, cost dispatcher, central Grafana.
+    # Control plane: API, LiteLLM, UI, Kueue MultiKueue manager, cost dispatcher, central Grafana, the managed database.
     # dedicated = true (default): its own CPU-only cluster in `project_id`/`subnet_id` (region `region`), the
     # fleet can span N regions. dedicated = false: single-cluster mode, the control-plane services run on
     # the hub region's system pool, jobs are admitted locally (no MultiKueue); exactly one region is
@@ -54,6 +52,18 @@ variable "fleet" {
       # able to reach it from where you run it (your NAT egress, VPN).
       allowed_cidrs        = optional(list(string), [])
       image_cache_size_gib = optional(number, 100)
+      # The fleet database: Nebius Managed Service for PostgreSQL in this project and region, databases
+      # `platform` (model definitions, the API) and `litellm` (keys, budgets, spend). Backups are the
+      # service's (retention below). The service exists in eu-north1, eu-west1, eu-west2, me-west1,
+      # us-central1 and uk-south1 (docs.nebius.com/postgresql): the control plane must be in one of them.
+      database = optional(object({
+        platform            = optional(string, "cpu-e2")
+        preset              = optional(string, "2vcpu-8gb")
+        disk_gib            = optional(number, 64)
+        hosts               = optional(number, 1)
+        backup_retention    = optional(string, "14d")
+        backup_window_start = optional(string, "03:00:00")
+      }), {})
     })
 
     # GPU regions (Kueue workers). Key = Nebius region name (eu-north1, eu-south1, ...). `id` is the short
@@ -150,9 +160,9 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.8.2")
-        dispatcher = optional(string, "0.1.7")
-        jobs       = optional(string, "0.1.4")
+        api        = optional(string, "0.9.2")
+        dispatcher = optional(string, "0.1.8")
+        jobs       = optional(string, "0.1.7")
         ops        = optional(string, "0.1.10")
         ui         = optional(string, "0.2.3")
       }), {})
@@ -235,21 +245,19 @@ variable "fleet" {
       })), { default = {} })
     })), {})
 
-    # Models. `enabled`: ids from the bundled catalog (catalog/models/*.yaml) to deploy; null = all of them.
-    # `entries`: your own catalog entries (same schema as the bundled files, as HCL), merged on top.
-    # Each entry's `deployments.<cluster id>` says where it runs (endpoints) or may run (run classes).
-    models = optional(object({
-      enabled = optional(list(string))
-      entries = optional(any, {})
-    }), {})
+    # Models are NOT defined here. The platform ships its generic classes (catalog/models: hello-run,
+    # container-run, distributed-run) on every GPU region; every model is a container defined at runtime
+    # through the API (`POST /v1/models`, the console's "New model" form; README "Deploy a model") and
+    # stored in the fleet database.
 
-    # After the models stage: a probe Job on the control cluster runs `model` (a run class) and, when set,
-    # calls `endpoint` (a sync model) through the public API with the first tenant key; a failure fails the
-    # apply.
+    # After the models stage: a probe Job on the control cluster runs `model` (a built-in run class) and,
+    # when `example_endpoint` is true, creates the example endpoint `llm-example` (a stock vLLM container
+    # with a small model, on the fleet's first GPU class) through the API with the first admin key and calls
+    # it; a failure fails the apply. The example stays as the first model of the console (delete it there).
     acceptance = optional(object({
-      probe    = optional(bool, true)
-      model    = optional(string, "hello-run")
-      endpoint = optional(string)
+      probe            = optional(bool, true)
+      model            = optional(string, "hello-run")
+      example_endpoint = optional(bool, true) # needs a tenant key with admin = true
     }), {})
 
     # Optional add-on: Argo CD on the control cluster (operator UI only; nothing is deployed through it).
@@ -271,6 +279,14 @@ variable "fleet" {
     # no certificate is ever issued: port 443 stays dark on every cluster (measured on a fresh fleet, 2026-10-08).
     condition     = var.fleet.edge.mode != "public" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.fleet.edge.acme.email)) && !can(regex("@(example\\.(com|net|org)|.*\\.(test|invalid|localhost))$", var.fleet.edge.acme.email))
     error_message = "edge.acme.email: a real mailbox for the Let's Encrypt account (renewal and incident mail); example.com, .test and .invalid are refused by the ACME server and leave the gateway without a certificate."
+  }
+  validation {
+    condition     = !var.fleet.acceptance.example_endpoint || !var.fleet.acceptance.probe || anytrue(flatten([for tn, t in var.fleet.tenants : [for kn, k in t.keys : k.admin]]))
+    error_message = "acceptance.example_endpoint defines the example model through the API, which needs a tenant key with admin = true (or set example_endpoint = false)."
+  }
+  validation {
+    condition     = contains(["eu-north1", "eu-west1", "eu-west2", "me-west1", "us-central1", "uk-south1"], var.fleet.control_plane.region)
+    error_message = "control_plane.region: the fleet database is Nebius Managed PostgreSQL, which exists in eu-north1, eu-west1, eu-west2, me-west1, us-central1 and uk-south1 only (docs.nebius.com/postgresql)."
   }
   validation {
     condition     = var.fleet.control_plane.dedicated || length(var.fleet.regions) == 1

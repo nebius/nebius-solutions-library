@@ -15,7 +15,6 @@ __pycache__/
 __pycache__/
 dist/
 *.log
-models/gromacs/baseline/
 *_override.tf
 .claude/
 

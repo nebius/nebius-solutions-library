@@ -44,8 +44,8 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   ended=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.finishedAt // empty')
   node=$(field '.spec.nodeName // empty')
   mkdir -p /work/attempts
-  printf '{"operation":"%s","pod":"%s","node":"%s","status":"%s","exit_code":%s,"gpus":%s,"started_at":"%s","ended_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$node" "$1" "${EXIT:-null}" "${GPUS:-0}" "$started" "${ended:-$(date -u +%FT%TZ)}" > "/work/attempts/$POD_NAME.json"
+  printf '{"operation":"%s","pod":"%s","node":"%s","status":"%s","exit_code":%s,"gpus":%s,"gpu_class":"%s","started_at":"%s","ended_at":"%s"}\n' \
+    "$OPERATION" "$POD_NAME" "$node" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "${ended:-$(date -u +%FT%TZ)}" > "/work/attempts/$POD_NAME.json"
 }
 
 upload() {   # $1 = status

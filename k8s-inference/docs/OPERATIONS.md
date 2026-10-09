@@ -24,7 +24,7 @@ below are NEW and project-scoped.
 | api-agent kubeconfig per region (control cluster secret `api/region-kubeconfigs`, keys eu-north1 and eu-south1) | CronJob `ops/rotate-api-agent-token` (control cluster since 2026-10-07; `services/ops/bin/rotate-api-agent-token.sh`): mk8s cluster token of the region's ops SA -> TokenRequest for `api/api-agent` (48 h) -> Secret patch | daily 03:10 UTC | 48 h; the API rebuilds a region client when the mounted file changes (`services/api/kube.py`), no restart |
 | fleet credentials for the workers: Argo CD cluster Secrets `argocd/hub`, `argocd/eu-south1` and MultiKueue kubeconfigs `kueue-system/multikueue-<cluster>` (control cluster) | CronJob `ops/rotate-fleet-tokens` (control cluster; `services/ops/bin/rotate-fleet-tokens.sh`): same path, TokenRequest for `kube-system/argocd-manager` and `kueue-system/multikueue` (48 h) -> Secret patches; first run by hand after `bootstrap.sh register` | daily 03:20 UTC | 48 h; Argo CD and Kueue re-read the Secrets |
 | ops SA auth keys (`ops/nebius-sa`, control cluster and hub also `ops/nebius-sa-eu-south1`) | CronJob `ops/rotate-nebius-keys` on each cluster (`rotate-nebius-keys.sh`): new key with the current key, Secret patch, other keys of that SA older than 7 days deleted | Mondays 04:20 UTC | until retired (one rotation of overlap) |
-| CNPG backup S3 key (`data/backup-s3`) | same CronJob on the control cluster (`BACKUP_S3_SECRET`): new access key, Secret patch, older keys deleted | weekly | CNPG re-reads the Secret at the next backup |
+| CNPG backup S3 key (`data/backup-s3`; reference fleet only, until its migration to the managed PostgreSQL, "Database" below) | same CronJob on the control cluster (`BACKUP_S3_SECRET`): new access key, Secret patch, older keys deleted | weekly | CNPG re-reads the Secret at the next backup |
 | local copies `infra/state/<cluster>/ops/*.sa.json` | not rotated: they are only needed to re-create the Secrets; after the first rotation they are stale and the live Secret is the source (`kubectl -n ops get secret nebius-sa -o jsonpath='{.data.<region>\.json}' | base64 -d`) | | |
 | LiteLLM master key | manual: `kubectl -n litellm create secret generic litellm-master` with a new value, mirror it to `api/litellm-master`, restart `litellm` and `api`; tenant keys are unaffected | | |
 | tenant S3 keys | Terraform (`infra/tenant`): `terraform taint 'module.<region>[0].nebius_iam_v2_access_key.tenant[0]'` then `python -m onboarding create-tenant <name>` rewrites the Secrets | on demand | |
@@ -89,13 +89,12 @@ crash never takes the path down:
 | API | `clusters/hub/apps/manifests/api/api.yaml` (2 replicas, since 0.3) | active/active |
 | Kueue controller | `clusters/common/values/kueue.yaml` (`controllerManager.replicas: 2`) | leader election |
 | Knative Serving (activator, autoscaler, controller, webhook) | `clusters/common/manifests/knative/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
-| CloudNativePG `data/postgres` | 2 instances since S13 | primary + replica, automatic failover |
+| Fleet database | Nebius Managed PostgreSQL (`control_plane.database.hosts`, 1 by default; the service's failover with 2); reference fleet: CloudNativePG `data/postgres`, 2 instances, until its migration | the service's |
 | edge-auth | 2 replicas since S15 | active/active |
 
 Single replicas on purpose (not in the request path, reconcile-only; an outage
 delays changes, not traffic): KServe controller (the chart has no replica
-knob), JobSet, cert-manager, Knative operator, CNPG operator, Argo CD, Loki,
-Prometheus/Grafana. Capacity: the two system nodes (8 vCPU / 32 GiB each) carry
+knob), JobSet, cert-manager, Knative operator, Argo CD, Loki, Prometheus/Grafana. Capacity: the two system nodes (8 vCPU / 32 GiB each) carry
 the second replicas with the requests the charts set (all small); `kubectl
 describe node` on both system nodes should stay below 70 % requested CPU.
 
@@ -177,14 +176,14 @@ applied by Argo CD; variables in its header):
 
 ```
 # HuggingFace repo into the HF cache layout
-SEED_PATH=qwen2-5-0-5b SEED_SOURCE=hf SEED_REF=Qwen/Qwen2.5-0.5B-Instruct SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=h100-spot-1x SEED_UID=1000 \
+SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=h100-spot-1x SEED_UID=1000 \
   envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <hub> -n ops create -f -
 # NIM image: runs the image's download-to-cache with NGC_API_KEY (Secret ops/ngc-api-key; pull Secret ops/ngc)
-SEED_PATH=diffdock SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/nim/mit/diffdock:2.2.0 SEED_POOL=h100-spot-1x SEED_UID=1000 \
+SEED_PATH=<model> SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/<org>/<nim-image>:<tag> SEED_POOL=h100-spot-1x SEED_UID=1000 \
   envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <hub> -n ops create -f -
 # a bucket prefix (SEED_SOURCE=s3 SEED_REF=s3://bucket/prefix SEED_IMAGE=amazon/aws-cli:2.22.35), or any command in any image (SEED_SOURCE=cmd)
 # eu-south1: same template, the region's GPU pool and context
-SEED_PATH=qwen2-5-0-5b SEED_SOURCE=hf SEED_REF=Qwen/Qwen2.5-0.5B-Instruct SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=rtx6000-spot-1x SEED_UID=1000 \
+SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=rtx6000-spot-1x SEED_UID=1000 \
   envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <eu-south1> -n ops create -f -
 ```
 
@@ -194,10 +193,10 @@ on emptyDir, re-downloaded every start):
 
 | Model | Cache on the shared filesystem | Cold start before | Cold start after | Warm |
 |---|---|---|---|---|
-| DiffDock (NIM, 2.7 GB cache) | `/mnt/weights/diffdock` | 250 s | **28.2 s, 27.4 s** | 1.8 s |
-| Qwen2.5 0.5B (vLLM, 953 MB HF cache) | `/mnt/weights/qwen2-5-0-5b` | 152-262 s | **137.7 s** (553 s when the pool first had to add a node: ~5 min node + image, then vLLM init) | 0.3-0.9 s |
+| a NIM endpoint (2.7 GB cache) | `/mnt/weights/<model>` | 250 s | **28.2 s, 27.4 s** | 1.8 s |
+| a 0.5B-parameter chat model (vLLM, 953 MB HF cache) | `/mnt/weights/<model>` | 152-262 s | **137.7 s** (553 s when the pool first had to add a node: ~5 min node + image, then vLLM init) | 0.3-0.9 s |
 
-DiffDock's cold start is now the image start plus NIM init; Qwen's is
+The NIM's cold start is now the image start plus its init; the chat model's is
 dominated by vLLM/torch initialisation, not the download. The first start
 after enabling the block seeded both directories itself (no seed job was
 run).
@@ -208,142 +207,95 @@ Private HF repos: Secret `ops/hf-token` (key `HF_TOKEN`). Changing
 `weights_filesystem` (size, mount path) is a node-group template change and
 rolls the GPU pools (max_surge 1); growing the filesystem is in place.
 
-## Backups and restore
+## Database
+
+The fleet database is a Nebius Managed Service for PostgreSQL cluster, not something that runs in a
+cluster: `<fleet>-db` in the control plane's project and region, created by the cloud stage
+(`stack/cloud/database.tf`), PostgreSQL 16 with the session-mode pooler, one host of platform `cpu-e2`
+preset `2vcpu-8gb` with 64 GiB network-ssd by default (`control_plane.database` in the tfvars: `platform`,
+`preset`, `disk_gib`, `hosts`, `backup_retention`, `backup_window_start`). It has no public access; the
+control cluster's nodes reach its private endpoint through the VPC of the control subnet. Cost: tens of
+USD per month, see the Nebius price list.
+
+Two databases on it:
+
+| Database | Holds | Owner |
+|---|---|---|
+| `platform` (the bootstrap database) | table `models` (id, kind, spec, rendered entry, version, managed_by, created/updated by and at) and `models_history` (every write); `schema_version` | the control API, the only writer (`services/api/db.py`) |
+| `litellm` | API keys, budgets, spend (LiteLLM's own schema) | LiteLLM (`db.useExisting` in the chart values); created once by the Job `litellm/database-init` of the platform stage |
+
+Connection data lives in Kubernetes Secrets written by the platform stage (`stack/platform/database.tf`):
+`database` in the namespaces `api` and `litellm` (keys `host`, `port`, `user`, `password`, `platform_url`,
+`litellm_url`) and `litellm-db` in `litellm` (`username`, `password`, read by the LiteLLM chart). The
+control API gets `DATABASE_URL` from `api/database` key `platform_url`; regional APIs have no database.
+The password is `random_password.database` of the cloud stage (output `secrets.database_password`).
+
+**The platform-internal LiteLLM key** (`api/litellm-internal`, alias `platform-internal`; docs/API.md "Model
+groups"): the key the model groups of API-defined OpenAI endpoints call the gateway with. Created by the
+platform stage (`stack/platform/litellm-internal.tf`: value in the Secret, registered in LiteLLM by the Job
+`litellm/key-platform-internal`) or, on the dev fleet, by `infra/bootstrap/cluster-secrets.sh` with
+`LITELLM_URL=https://litellm.<control host>` set. Rotation, by hand: generate a new value, `POST
+/key/generate` it with the master key (same alias is fine, aliases are not unique), replace the Secret,
+restart the API (`kubectl -n api rollout restart deployment/api`), re-save every OpenAI model once
+(`PUT /v1/models/<id>` with its current spec, which re-registers the group with the new key), then `POST
+/key/delete` the old key. A compromised key only lets its holder call the endpoints through the edge; it has
+no budget of its own, so delete and rotate it, do not just block it.
+
+**Backups and point-in-time restore** are the service's: a daily backup in the window starting at
+`backup_window_start` (03:00 UTC by default), kept for `backup_retention` (14 days by default), with
+continuous WAL for point-in-time recovery inside that window. Nothing runs in the cluster for it.
+
+```
+nebius msp postgresql v1alpha1 backup list --parent-id <control project id>          # the backups of the project
+nebius msp postgresql v1alpha1 cluster get-for-backup --id <cluster id>              # the configuration to restore with
+nebius msp postgresql v1alpha1 cluster restore --parent-id <control project id> --network-id <vpc network id> \
+  --backup-id <backup id> --recovery-time 2026-10-09T10:00:00Z --name <fleet>-db-restored ...   # a NEW cluster from a backup (PITR)
+```
+
+The Nebius console (Managed PostgreSQL, the cluster, "Backups") offers the same. A restore creates a new
+cluster; to switch the fleet to it, point `platform_url`/`litellm_url` (the `database` Secrets) and the
+LiteLLM values at the new endpoint, or import the restored cluster into the Terraform state in place of the
+old one. The cluster id and endpoint are in `./stack.sh output cloud` (`database`).
+
+**A psql shell** (one-off pod on the control cluster, image through the fleet's image cache host, environment
+from Secret `api/database`):
+
+```
+IMAGES=<images.host of the tfvars>   # the fleet's logical registry host, registry.serverless2.local by default (docs/IMAGES.md)
+kubectl -n api run psql --rm -it --restart=Never --image=$IMAGES/docker/library/postgres:16-alpine \
+  --env="PLATFORM_URL=$(kubectl -n api get secret database -o jsonpath='{.data.platform_url}' | base64 -d)" \
+  -- sh -c 'psql "$PLATFORM_URL"'
+# \dt                                   tables: models, models_history, schema_version
+# select id, kind, version, updated_by, updated_at from models order by id;
+# select id, version, action, "by", at from models_history order by at desc limit 20;
+```
+
+Use `litellm_url` for the LiteLLM database. The managed endpoint requires TLS (`sslmode=require` is in the
+URLs).
+
+**Schema migrations** are applied by the control API at start (`services/api/db.py` `MIGRATIONS`, one SQL
+block per version, recorded in `schema_version`; `migrate()` applies the ones that are missing, in a
+transaction each). A new migration is a new list entry; a rollout of the API applies it; nothing to run by
+hand. The API logs the schema version at start.
+
+**Sizing and HA**: one host is enough for the platform's writes (model definitions change rarely; LiteLLM
+writes a spend row per call). `control_plane.database.hosts = 2` adds a replica with the service's
+failover; `disk_gib` grows in place. Changing `preset` restarts the host.
+
+**Reference fleet until its migration**: `serverless2-control` still runs CloudNativePG (`data/postgres`,
+daily `ScheduledBackup` to `s3://serverless2-backups-eu-north1/postgres-control/`, 14 days; restore drill of
+2026-10-06: a fresh base backup restores in about 4 minutes) because the tenant quota `msp.postgres.count`
+is used up (10 of 10). The migration runbook is `infra/migrations/2026-10-managed-postgres.md`; the CNPG
+backup, restore and drill recipes are in the git history of this file. The Terraform solution skips the
+`postgres` and `cloudnative-pg` apps (`stack/platform/stage.tf` `apps_skip`). Owner decision 2026-10-09:
+no in-cluster fallback.
+
+Other data:
 
 | Data | Mechanism | Where | Retention |
 |---|---|---|---|
-| CloudNativePG `data/postgres` (the one database: LiteLLM keys, spend, logs) | `spec.backup.barmanObjectStore` (WAL archiving, gzip) + `ScheduledBackup data/postgres-daily` at 03:15 UTC | `s3://serverless2-backups-eu-north1/postgres/postgres/{base,wals}/` | 14 d (`retentionPolicy`) |
 | Operations (run and endpoint-call Jobs) | the Jobs themselves (`ttlSecondsAfterFinished` 90 d) plus `STATUS.json`, `attempts/` and outputs under `operations/<id>/` in the tenant bucket | tenant bucket (lifecycle rule `lifecycleDays`) | 90 d |
 | Tenant buckets, model caches, PVCs | none (object storage is durable; caches are rebuilt) | | |
-
-Take a backup now:
-
-```
-kubectl -n data apply -f - <<'EOF'
-apiVersion: postgresql.cnpg.io/v1
-kind: Backup
-metadata: { name: postgres-manual, namespace: data }
-spec: { cluster: { name: postgres }, method: barmanObjectStore }
-EOF
-```
-
-Restore CNPG (latest or point-in-time) into a NEW cluster, then point LiteLLM
-at it (`db.endpoint` in `clusters/common/values/litellm.yaml`):
-
-```
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata: { name: postgres-restored, namespace: data }
-spec:
-  instances: 2
-  storage: { size: 50Gi }
-  bootstrap:
-    recovery:
-      source: postgres
-      # recoveryTarget: { targetTime: "2026-10-05 21:30:00+00" }   # optional PITR
-  externalClusters:
-    - name: postgres
-      barmanObjectStore:
-        destinationPath: s3://serverless2-backups-eu-north1/postgres
-        endpointURL: https://storage.eu-north1.nebius.cloud
-        s3Credentials:
-          accessKeyId: { name: backup-s3, key: ACCESS_KEY_ID }
-          secretAccessKey: { name: backup-s3, key: ACCESS_SECRET_KEY }
-        wal: { compression: gzip }
-```
-
-### LiteLLM on CloudNativePG: one-time migration (2026-10 leanness review, item 3)
-
-LiteLLM used the chart's standalone Bitnami Postgres (`litellm/litellm-postgresql`) next to an
-unused CNPG cluster. The litellm Application now sets `db.useExisting: true`, `db.endpoint:
-postgres-rw.data.svc.cluster.local`, `db.secret.name: litellm-db`, `db.deployStandalone: false`.
-Order of operations after the change is merged (keys are unavailable for the minutes between
-steps 3 and 5; the edge ext-auth and the API cache decisions for 30 s):
-
-```
-# 0. preconditions: the CNPG role/db exist (bootstrap.sh initdb: database litellm, owner litellm) and the
-#    credentials Secret is in the litellm namespace (bootstrap.sh copies data/litellm-db -> litellm/litellm-db)
-kubectl -n litellm get secret litellm-db || kubectl -n data get secret litellm-db -o json \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); d["metadata"]={"name":"litellm-db","namespace":"litellm"}; print(json.dumps(d))' | kubectl apply -f -
-# 1. pause Argo CD auto-sync of the litellm app (so the chart does not switch before the data is copied)
-kubectl -n argocd patch app litellm --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
-# 2. dump from the Bitnami Postgres and restore into CNPG (both reachable in-cluster; the postgres:16 image has both tools)
-kubectl -n litellm run pgmigrate --rm -i --restart=Never --image=postgres:16 \
-  --env=SRC_PW="$(kubectl -n litellm get secret litellm-dbcredentials -o jsonpath='{.data.password}' | base64 -d)" \
-  --env=DST_PW="$(kubectl -n litellm get secret litellm-db -o jsonpath='{.data.password}' | base64 -d)" -- sh -c '
-  PGPASSWORD=$SRC_PW pg_dump -Fc -h litellm-postgresql.litellm.svc -U litellm litellm > /tmp/l.dump &&
-  PGPASSWORD=$DST_PW pg_restore --no-owner --role=litellm -h postgres-rw.data.svc -U litellm -d litellm /tmp/l.dump &&
-  PGPASSWORD=$DST_PW psql -h postgres-rw.data.svc -U litellm -d litellm -c "select count(*) from \"LiteLLM_VerificationToken\""'
-# 3. switch: sync the app (new Deployment env, no StatefulSet); the schema-migration Job runs against CNPG
-kubectl -n argocd patch app litellm --type merge -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
-kubectl -n litellm rollout status deploy/litellm
-# 4. verify: every demo key still answers /key/info, the API and the edge auth still accept them
-for k in infra/state/hub/tenants/*.litellm-key; do curl -sS -o /dev/null -w "$k %{http_code}\n" -H "Authorization: Bearer $(cat $k)" http://127.0.0.1:14000/key/info; done
-# 5. clean up the Bitnami leftovers once step 4 passed (Argo CD prunes the StatefulSet; the PVC stays)
-kubectl -n litellm delete pvc data-litellm-postgresql-0 secret litellm-postgresql litellm-dbcredentials backup-s3
-```
-
-Rollback (before step 5): restore the Bitnami values in `clusters/common/values/litellm.yaml` (drop the `db:` block),
-push, sync; the old PVC still holds the data. A pre-migration `pg_dump` is in the
-backups bucket under `litellm/` from the last run of the (now removed) `litellm-pgdump` CronJob.
-
-
-### Restore drill (readiness gap 9): run after every change to the backup path
-
-Repeatable procedure (about 3 minutes); the scratch cluster is deleted at the end.
-
-```
-# 1. fresh base backup (the drill restores "latest")
-kubectl -n data apply -f - <<'EOF'
-apiVersion: postgresql.cnpg.io/v1
-kind: Backup
-metadata: { name: postgres-drill-$(date -u +%Y%m%d), namespace: data }
-spec: { cluster: { name: postgres }, method: barmanObjectStore }
-EOF
-kubectl -n data get backup -w        # phase: completed
-# 2. scratch cluster recovering from the object store (1 instance, 20 Gi)
-kubectl -n data apply -f - <<'EOF'
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata: { name: postgres-restore-test, namespace: data, labels: { serverless2.nebius/drill: restore } }
-spec:
-  instances: 1
-  storage: { size: 20Gi }
-  bootstrap: { recovery: { source: postgres } }
-  externalClusters:
-    - name: postgres
-      barmanObjectStore:
-        destinationPath: s3://serverless2-backups-eu-north1/postgres
-        endpointURL: https://storage.eu-north1.nebius.cloud
-        s3Credentials:
-          accessKeyId: { name: backup-s3, key: ACCESS_KEY_ID }
-          secretAccessKey: { name: backup-s3, key: ACCESS_SECRET_KEY }
-        wal: { compression: gzip }
-        data: { compression: gzip }
-EOF
-kubectl -n data get cluster postgres-restore-test -w     # readyInstances 1
-# 3. compare
-Q='select (select count(*) from "LiteLLM_VerificationToken"), (select count(*) from "LiteLLM_SpendLogs"), (select count(*) from information_schema.tables where table_schema='"'"'public'"'"')'
-kubectl -n data exec postgres-1 -c postgres -- psql -U postgres -d litellm -At -c "$Q"
-kubectl -n data exec postgres-restore-test-1 -c postgres -- psql -U postgres -d litellm -At -c "$Q"
-# 4. clean up
-kubectl -n data delete cluster postgres-restore-test
-```
-
-Result 2026-10-06 15:04 UTC: backup `postgres-drill-20261006` (id
-20261006T145956, WAL 0x19-0x1A) completed in 20 s; the scratch cluster was
-ready 4 min 15 s after apply; live vs restored `7|28|0|91` (keys, spend logs,
-users, tables) identical; `pg_is_in_recovery() = f` (promoted); scratch
-cluster deleted.
-
-Finding from the first attempt: the two base backups taken before 2026-10-06
-15:05 UTC (`20261005T213026`, `20261006T031500`) are **not restorable**: they
-need WAL segments 5-7 and the archive only holds segments from 7 onwards
-(archiving to this path started 13:28 UTC; Postgres marks 1-6 `.done`, so an
-earlier archive destination or a reconfiguration swallowed them). The retention
-policy expires them in 14 days; every backup after the drill backup is covered
-by a continuous WAL chain. The drill is the only thing that catches this, hence
-"after every change to the backup path".
 
 ## Tenant isolation
 
@@ -389,7 +341,7 @@ Secret `tenant-storage`; defined in `clusters/common/manifests/api-agent`)
 bound per tenant namespace by the RoleBinding `charts/tenant` renders; Role
 `serverless2-api-endpoints` in `models` (inferenceservices get/list/patch,
 pods); read-only Roles `serverless2-api-templates` in the template namespaces
-(`api`, `gromacs`); one ClusterRole to list tenant namespaces (billing).
+(`api`); one ClusterRole to list tenant namespaces (billing).
 
 ### Tenants (`tenants/<name>.yaml`, `infra/tenant`, `charts/tenant`)
 
@@ -448,7 +400,6 @@ for ctx in <hub> <eu-south1>; do
   kubectl --context $ctx delete crd $(kubectl --context $ctx get crd -o name | grep argoproj.io | grep -v -E 'applications|applicationsets|appprojects' | sed 's#.*/##')
   kubectl --context $ctx delete clusterrole,clusterrolebinding -l app.kubernetes.io/instance=argo-workflows
   kubectl --context $ctx delete clusterrole,clusterrolebinding argo-ui-operator   # the old UI login (hub only)
-  kubectl --context $ctx delete ns gromacs --wait=false                           # the hand-applied v1 run class
 done
 ```
 
@@ -566,7 +517,7 @@ endpoint pods, and a pool has a maximum (`max_nodes` per pool in
 pool maximum minus the GPUs held by endpoints with a warm floor
 (`autoscaling.knative.dev/min-scale` >= 1 in the catalog)**. Today: hub
 `h100-spot-1x` max 8, no warm endpoint, quota 8; eu-south1 `rtx6000-spot-1x`
-max 4, one warm endpoint (nemotron-speech), quota 3. Both live in
+max 4, one warm endpoint, quota 3. Both live in
 `clusters/<cluster>/apps/overlays/scheduling/pool.yaml` and must change
 together with the tfvars. Cold endpoints (min-scale 0) borrow a GPU only while
 they serve; an admitted run can wait Pending for one scale-to-zero period
@@ -630,7 +581,8 @@ ahead of the spot one in the ClusterQueue (flavor order = preference).
 ```
 kubectl -n argocd get app                                   # all Synced/Healthy
 kubectl -n ops get cronjob; kubectl -n ops logs -l app=recover-stopped-nodes --tail=3
-kubectl -n data get backup | tail -3; kubectl -n api get job | tail -3   # CNPG backups; billing CronJob runs
+kubectl -n api get job | tail -3                              # billing CronJob runs
+nebius msp postgresql v1alpha1 backup list --parent-id <control project id> | head   # the managed database's backups (reference fleet until its migration: kubectl -n data get backup)
 kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
 ```
 
@@ -639,9 +591,11 @@ kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
 There are no rotation CronJobs in the library form: every credential is a Terraform resource.
 `./stack.sh tf cloud -- apply -replace=random_password.litellm_master` (then `apply platform` on every
 cluster) rotates the LiteLLM master key; `-replace='nebius_iam_v1_auth_public_key.ops["<project>"]'` the
-ops service-account key; on a worker `./stack.sh tf platform <id> -- apply
--replace='kubernetes_secret_v1.sa_token["multikueue"]'` (then `apply platform control`) the MultiKueue
-token; the cache's registry static key: delete `stack/.secrets/<name>-registry-key.json`, re-apply
+ops service-account key; `-replace=random_password.database` the fleet database's password (check the
+plan first: the managed cluster's bootstrap user must update in place, not be replaced; then `apply
+platform control` rewrites the `database` Secrets and restart `api` and `litellm`); on a worker
+`./stack.sh tf platform <id> -- apply -replace='kubernetes_secret_v1.sa_token["multikueue"]'` (then
+`apply platform control`) the MultiKueue token; the cache's registry static key: delete `stack/.secrets/<name>-registry-key.json`, re-apply
 platform on every cluster, retire the old key with `nebius iam static-key delete`. Take-over by another
 operator: the tfvars, a key for the state bucket (`stack/bootstrap/state-bucket.sh` with their profile),
 `./stack.sh plan` must show no changes. `recover-stopped-nodes` still runs on every worker.

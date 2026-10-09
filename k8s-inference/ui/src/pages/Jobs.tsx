@@ -80,7 +80,7 @@ export function JobDetail({ id }: { id: string }) {
       <div className="page-head">
         <div>
           <div className="row"><h1>{op.name ?? op.id}</h1><Badge status={op.status} /></div>
-          <p className="mono small">{op.id} · {op.model} · {op.mode} · {op.region}</p>
+          <p className="mono small">{op.id} · {op.model} · {op.mode} · {op.region}{op.gpu_class ? ` · ${op.gpu_class}` : ""}</p>
         </div>
         <div className="actions">
           {op.logs_url && <a className="btn" href={op.logs_url} target="_blank" rel="noreferrer">Logs</a>}

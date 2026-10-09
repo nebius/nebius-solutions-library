@@ -7,12 +7,15 @@ the models stage of the Terraform solution (`stack/models`), or the `models`
 ApplicationSet of the reference fleet, renders `charts/endpoint` in catalog mode
 with the entry as its values file, once per cluster named in its
 `deployments` (and not `paused`). Nothing is rendered into the repository. Run-class
-entries (`mode: run`, no runtime) carry a `job` block (image, command, GPUs,
-CPU, memory, work volume size, `scratch: network | local-nvme`; `{{name}}` placeholders) that the API renders into
+entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
+class, command, GPUs, CPU, memory, work volume size, `scratch: network | local-nvme`; `{{name}}`
+placeholders; `docs/SCHEDULING.md` "Per-GPU images for runs") that the API renders into
 one Kubernetes Job per operation (`docs/JOBS.md`), list the `parameters` the UI
 offers, and carry `deployments.<cluster>.parameters` (pool, image, tuning) plus
-`price_per_gpu_hour` for billing. `container-run` is the generic class (any
-image and command), `gromacs` the reference, `hello-run` the CPU smoke test.
+`price_per_gpu_hour` for billing. `container-run` is the generic single-node class (any image and command),
+`distributed-run` the multi-node one, `hello-run` the CPU smoke test. The platform ships only these;
+models are an input (`terraform.tfvars` `models`, or `POST /v1/models`), see README.md "Deploy a model".
+Worked examples of an application layer's models live in `examples/scientific-ai` of the source repository.
 
 ## Catalog entry
 
@@ -92,7 +95,7 @@ deployments:                   # one key per cluster directory; values override 
 - The `kserve/huggingfaceserver:v0.20.0` tag is CPU-only torch; use `-gpu`.
 - Containers whose entrypoint is `bash -c script` ignore SIGTERM; Knative sets
   the grace period to the revision `timeout`, so such pods hold their GPU for
-  the whole timeout after scale-to-zero (DiffDock NIM: run `start_server`
+  the whole timeout after scale-to-zero (NIM images: run their server
   as PID 1 via `command`). Keep `timeout` as low as the longest request allows.
 - Every new revision starts one pod while the old one is still up; on 1-GPU
   spot nodes roll out spec changes while the model is at zero, and delete a

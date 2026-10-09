@@ -159,3 +159,6 @@ pre.out { margin: 0; padding: 12px 14px; background: #0f2233; color: #d8e4eb; bo
 .muted { color: var(--text-muted); } .small { font-size: 12px; }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--nebius-violet); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* model form (Models page): two columns of fields, one on narrow screens */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px 16px; }

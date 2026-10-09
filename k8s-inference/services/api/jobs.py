@@ -27,17 +27,30 @@ from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_G
                     MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC)
 from resilience import retry
 from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, RUNNER_SECURITY_CONTEXT, TOKEN, _job_shell, _meta,
-                    _pod_failure_policy, _render, _uploader, gpu_classes, op_name, profile_of)
+                    _pod_failure_policy, _render, _uploader, class_images, gpu_classes, image_for_class, op_name, profile_of)
 from status import (PHASE, RECORD_STATUS, _attempts, _gpus, _main_state, _secs, _ts, finished, gpu_seconds, is_jobset, is_manager_job,
                     is_mirror, logs_url, normalise)
 
 def build_run(name: str, model: dict, params: dict, tenant: str, label: str | None, idem: str | None, timeout_s: int | None,
               priority: str | None, region: str | None = REGION, defaults: dict | None = None, key_hash: str | None = None,
-              pvc: str | None = None, placement: dict | None = None) -> dict:
+              pvc: str | None = None, placement: dict | None = None, gpu_class: str | None = None) -> dict:
     """Render the catalog entry's `job` block with the parameters (caller's input over the region's
     defaults over the entry's defaults) into a Job; the per-operation PVC is `<name>-work` unless a
-    resume passes the original run's. region None = fleet placement (the dispatcher picks the worker)."""
-    job = model.get("job") or {}
+    resume passes the original run's. region None = fleet placement (the dispatcher picks the worker).
+    `gpu_class`: the class chosen at submission for a run class with per-class images (`job.images`,
+    placement.choose_class): that class's image, a node affinity over that class's pools only, and the
+    class's profile queue; a run with one image keeps switching class at queue time."""
+    job = dict(model.get("job") or {})
+    images = class_images(model)
+    if images:
+        if not gpu_class:
+            raise HTTPException(500, f"model {model['name']} has per-class images; the GPU class must be chosen at submission")
+        if gpu_class not in gpu_classes(model):
+            raise HTTPException(400, f"GPU class {gpu_class!r} is not one of {gpu_classes(model)} for model {model['name']}")
+        job["image"] = image_for_class(model, gpu_class)
+        job.pop("images", None)
+    else:
+        gpu_class = None
     if not job.get("image") or not job.get("command"):
         raise HTTPException(500, f"model {model['name']} has no job.image/job.command")
     declared = {p["name"]: p.get("default") for p in model.get("parameters", [])}
@@ -93,7 +106,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
            # shared PID namespace: the command's shell is not PID 1, so SIGTERM (preemption, cancel) actually
            # terminates `sh -c ...` commands instead of being ignored until the grace period's SIGKILL
            "shareProcessNamespace": True,
-           "initContainers": [fetch], "containers": [main, _uploader(name, region, values["output_prefix"], None if local_nvme else pvc, r.get("uploadExcludes", ""), gpus, placement)],
+           "initContainers": [fetch], "containers": [main, _uploader(name, region, values["output_prefix"], None if local_nvme else pvc, r.get("uploadExcludes", ""), gpus, placement, gpu_class)],
            "volumes": [{"name": "work", "emptyDir": {"sizeLimit": f"{r.get('pvcSizeGi', JOB_PVC_SIZE_GI)}Gi"}} if local_nvme else {"name": "work", "persistentVolumeClaim": {"claimName": pvc}},
                        {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": r.get("shm", "8Gi")}}]}
     if gpus:
@@ -103,8 +116,9 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         pod["nodeSelector"] = {f"{LABEL}/pool": r["pool"]}
     elif gpus and gpu_classes(model):
         # the preference queue may fall back to another GPU class; keep it to the classes the image runs on
-        # (Kueue assigns only flavors whose node labels satisfy the affinity, docs/SCHEDULING.md)
-        pools = kube.class_pools(gpu_classes(model))
+        # (Kueue assigns only flavors whose node labels satisfy the affinity, docs/SCHEDULING.md). With per-class
+        # images the image is the chosen class's, so only that class's pools qualify.
+        pools = kube.class_pools([gpu_class] if gpu_class else gpu_classes(model))
         if pools:
             terms.append({"key": f"{LABEL}/pool", "operator": "In", "values": pools})
     if local_nvme:
@@ -113,9 +127,13 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}}}
     if r.get("imagePullSecret"):
         pod["imagePullSecrets"] = [{"name": r["imagePullSecret"]}]
-    profile = (placement or {}).get("profile") or profile_of(model)
-    meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile)
+    profile = f"prefer-{gpu_class}" if gpu_class else ((placement or {}).get("profile") or profile_of(model))
+    if gpu_class and placement:
+        placement = {**placement, "profile": profile, "classes": [gpu_class]}   # the dispatcher keeps the run on this class
+    meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class)
     meta["annotations"][f"{LABEL}/scratch"] = scratch
+    if gpu_class:
+        meta["annotations"][f"{LABEL}/image"] = job["image"]
     nodes = int(r.get("nodes", 1) or 1)
     if nodes > 1:
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
@@ -589,8 +607,10 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
     pl = dict(placement or {})
     if is_manager_job(orig):
         pl["manager"] = True
+    # a run with per-class images keeps the class it was submitted with (its checkpoints were written by that image)
     job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, op["timeout_s"],
-                    labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc, placement=pl or None)
+                    labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc, placement=pl or None,
+                    gpu_class=labels.get(f"{LABEL}/gpu-class") or (gpu_classes(model)[0] if class_images(model) else None))
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     if is_jobset(job):          # the shared checkpoint directory is keyed by the root operation
         for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:

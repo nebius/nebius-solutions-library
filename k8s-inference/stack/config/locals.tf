@@ -87,7 +87,6 @@ locals {
   # Plan the wrapper reads (stack.sh evaluates `local.plan` with `terraform console`).
   plan = {
     name       = local.f.name
-    profile    = local.f.nebius_profile
     hub_region = local.hub_region
     hub_id     = local.hub_id
     control_id = local.control_id
@@ -101,17 +100,16 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Model catalog: the bundled entries (catalog/models/*.yaml, filtered by models.enabled) merged with the
-# tfvars entries (models.entries, HCL in the same schema). An entry whose id matches a bundled one extends it:
-# its top-level keys replace the bundled ones (give only `deployments` to re-home a bundled class to your
-# regions). `deployments.hub` is an alias for the hub cluster.
+# Built-in classes: the bundled entries (catalog/models/*.yaml: hello-run, container-run, distributed-run),
+# deployed on every GPU region. Models themselves are defined at runtime through the API and live in the
+# fleet database (services/api/models.py); nothing model-specific is in the tfvars.
 locals {
   catalog_dir     = "${path.module}/../../catalog/models"
   bundled_catalog = { for f in fileset(local.catalog_dir, "*.yaml") : yamldecode(file("${local.catalog_dir}/${f}")).id => yamldecode(file("${local.catalog_dir}/${f}")) }
-  catalog_enabled = { for id, e in local.bundled_catalog : id => e if local.f.models.enabled == null || contains(local.f.models.enabled, id) }
-  catalog_raw = merge(local.catalog_enabled, { for id, e in local.f.models.entries :
-    coalesce(try(e.id, null), id) => merge(try(local.bundled_catalog[coalesce(try(e.id, null), id)], {}), e)
-  })
+  catalog_enabled = local.bundled_catalog
+  catalog_raw = { for id, e in local.bundled_catalog : id => merge(e, {
+    deployments = { for cid, c in local.region_clusters : cid => try(e.deployments[cid], try(e.deployments["hub"], {})) }
+  }) }
   # gpu.classes are filtered to the classes the fleet's pools declare (order kept): the API names the Kueue
   # queue after the first class, and that queue only exists for fleet classes. An entry left without a class
   # (none of its classes is in the fleet) keeps the bundled list and will not be admitted: preflight warns.
@@ -124,7 +122,6 @@ locals {
   # Per cluster: the entries that run or may run there.
   catalog_by_cluster = { for id in local.cluster_ids : id => { for mid, e in local.catalog : mid => e if contains(keys(e.deployments), id) } }
   # Endpoint entries (a runtime block) per worker cluster, run classes (mode run / async) are the rest.
-  endpoints_by_cluster = { for id, es in local.catalog_by_cluster : id => { for mid, e in es : mid => e if can(e.runtime) && try(e.deployments[id].paused, false) != true } }
   # Images to pre-pull per worker cluster (endpoints and run classes with a fixed image).
   prepull_by_cluster = { for id, es in local.catalog_by_cluster : id => [for mid, e in es : { name = mid, image = try(e.runtime.image, e.job.image) } if can(e.runtime.image) || (can(e.job.image) && !can(regex("{{", try(e.job.image, ""))))] }
 }

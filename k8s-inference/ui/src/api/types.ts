@@ -10,7 +10,7 @@ export interface ModelRegionStatus {
 }
 
 export interface Model {
-  id: string;                 // e.g. "gromacs", "nemotron-stt", "qwen"
+  id: string;                 // e.g. "container-run", "llm-example"
   name: string;
   description?: string;
   modes: Mode[];
@@ -23,6 +23,42 @@ export interface Model {
   protocol?: string;          // "openai-chat", "http-json", "argo-workflow"
   cold_start_s?: number;
   parameters?: ModelParam[];  // input parameters shown in the wizard
+  managed_by?: "api" | "terraform" | "catalog";   // api: defined through POST /v1/models (editable here)
+  spec?: ModelSpec;           // the definition behind an api-managed model, for the edit form
+}
+
+// A model as the "New model" form and terraform.tfvars `models` define it (services/api/models.py).
+// Reserved for later: `images` (per GPU class), `routing`.
+export interface ModelSpec {
+  id: string;
+  kind: "endpoint" | "job";
+  image: string;
+  images?: Record<string, string>;
+  command?: string | string[];
+  args?: string[];
+  env?: Record<string, string>;
+  port?: number;
+  protocol?: "http" | "openai" | "websocket" | "grpc";
+  path?: string;
+  health_path?: string;
+  served_model?: string;
+  gpu?: { count?: number; classes?: string[] };
+  resources?: { cpu?: string; memory?: string };
+  scaling?: { min?: number; max?: number; target?: number };
+  timeout_s?: number;
+  shm_gib?: number;
+  pull_secret?: string;
+  weights?: { path?: string; mount_path?: string; env?: Record<string, string> };
+  regions?: string[];
+  display_name?: string;
+  description?: string;
+  cpu?: string;
+  memory?: string;
+  disk_gi?: number;
+  grace_seconds?: number;
+  scratch?: "network" | "local-nvme";
+  parameters?: ModelParam[];
+  routing?: Record<string, unknown>;
 }
 
 export interface ModelParam {
@@ -44,6 +80,7 @@ export interface Attempt {
   ended_at?: string;
   status: OperationStatus | string;
   node?: string;
+  gpu_class?: string;         // the GPU class the attempt ran on (per-class images)
   reason?: string;            // e.g. "preempted: spot reclaimed"
   resumed_from_checkpoint?: string;
 }
@@ -55,6 +92,8 @@ export interface Operation {
   mode: Mode;
   status: OperationStatus;
   region: Region;
+  gpu_class?: string;         // run classes with per-GPU-class images: the class chosen at submission
+  image?: string;             // the image that class got
   priority?: "low" | "normal" | "high" | string;
   queue_position?: number;
   created_at: string;

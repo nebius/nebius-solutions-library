@@ -1,4 +1,5 @@
-# Identity the hub customer API uses to submit and read operation Jobs in THIS cluster.
+# Identity the fleet's customer API uses to submit and read operation Jobs in THIS cluster, and to deploy
+# the models defined through it (services/api/models.py: endpoints in `models`, catalog ConfigMaps in `api`).
 # Cluster-wide it may only read namespaces; everything else is granted per
 # tenant namespace by a RoleBinding to `serverless2-api-tenant` that onboarding creates.
 # Credentials are never static: `python -m onboarding bootstrap --region <region>` seeds a 48 h
@@ -24,4 +25,52 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: { name: serverless2-api-agent-read }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-agent-read }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+# Models defined through the fleet's API or terraform.tfvars are rendered on this cluster by the control
+# cluster's API (services/api/models.py): endpoints in `models`, the catalog copy in `api`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-models, namespace: models }
+rules:
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices, localmodelcaches]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-models, namespace: models }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-models }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-catalog, namespace: api }
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-catalog, namespace: api }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-catalog }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-models-certificate, namespace: envoy-gateway-system }
+rules:
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, patch]
+    resourceNames: [models]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-models-certificate, namespace: envoy-gateway-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-models-certificate }
 subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]

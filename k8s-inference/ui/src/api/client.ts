@@ -1,7 +1,7 @@
 // Customer API client. Bearer = LiteLLM virtual key pasted at login.
 // Paths follow services/api/openapi.yaml (the API serves the same spec at /openapi.json).
 import type {
-  ApiKey, Endpoint, InvokeRequest, Model, Operation, OperationResult,
+  ApiKey, Endpoint, InvokeRequest, Model, ModelSpec, Operation, OperationResult,
 } from "./types";
 
 const LS = { key: "s2.key", base: "s2.apiBase" };
@@ -64,6 +64,10 @@ function unwrap<T>(b: unknown, ...keys: string[]): T[] {
 const real = {
   listModels: async () => unwrap<Model>(await http("/v1/models"), "models"),
   getModel: (id: string) => http<Model>(`/v1/models/${encodeURIComponent(id)}`),
+  // models defined from a container (admin key): the "New model" form, services/api/models.py
+  createModel: (spec: ModelSpec) => http<{ id: string; model: Model }>(`/v1/models`, { method: "POST", body: JSON.stringify(spec) }),
+  updateModel: (id: string, spec: ModelSpec) => http<{ id: string; model: Model }>(`/v1/models/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(spec) }),
+  deleteModel: (id: string) => http<void>(`/v1/models/${encodeURIComponent(id)}`, { method: "DELETE" }),
   listOperations: async () => unwrap<Operation>(await http("/v1/operations?limit=100"), "operations"),
   getOperation: (id: string) => http<Operation>(`/v1/operations/${encodeURIComponent(id)}`),
   getResult: async (id: string) => {
@@ -89,7 +93,7 @@ const real = {
     const { min_replicas, max_replicas, scale_to_zero_after_s, target_concurrency } = patch;
     return http<Endpoint>(`/v1/endpoints/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ min_replicas, max_replicas, scale_to_zero_after_s, target_concurrency }) });
   },
-  // endpoints are created and deleted in git (catalog/models + charts/endpoint through Argo CD), not through the API
+  // endpoints are created and deleted as models (createModel/deleteModel); this patches scaling of an existing one
   listKeys: async () => unwrap<ApiKey>(await http("/v1/keys"), "keys"),
   createKey: (input: { alias: string; budget: number; models: string[]; expires_days?: number }) => http<ApiKey>(`/v1/keys`, { method: "POST", body: JSON.stringify(input) }),
   deleteKey: (alias: string) => http<void>(`/v1/keys/${encodeURIComponent(alias)}`, { method: "DELETE" }),

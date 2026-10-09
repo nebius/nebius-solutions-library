@@ -19,6 +19,13 @@ spec:
             parentRefs:
               - { group: gateway.networking.k8s.io, kind: Gateway, name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
 ---
+# Placeholder issuer of the `models` certificate (models-tls.yaml) until the first model endpoint exists.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: { name: selfsigned }
+spec:
+  selfSigned: {}
+---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata: { name: letsencrypt-staging }     # for tests of the solver path; browsers do not trust it

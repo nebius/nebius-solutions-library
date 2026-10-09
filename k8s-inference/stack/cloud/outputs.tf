@@ -15,7 +15,7 @@ output "clusters" {
     weights_filesystem     = c.weights_filesystem
     gpu_node_group_ids     = module.cluster[id].gpu_node_group_ids
     ops_service_account_id = nebius_iam_v1_service_account.ops[c.project_id].id
-    kubeconfig_command     = "nebius mk8s cluster get-credentials --id ${module.cluster[id].cluster_id} --external --profile ${local.f.nebius_profile}"
+    kubeconfig_command     = "nebius mk8s cluster get-credentials --id ${module.cluster[id].cluster_id} --external"
   } }
 }
 
@@ -41,7 +41,7 @@ output "secrets" {
       secret        = nebius_iam_v2_access_key.backups.status.secret
     }
     litellm_master_key     = "sk-${random_password.litellm_master.result}"
-    litellm_db_password    = random_password.litellm_db.result
+    database_password      = random_password.database.result # the managed PostgreSQL user (database.tf)
     grafana_admin_password = random_password.grafana_admin.result
   }
 }

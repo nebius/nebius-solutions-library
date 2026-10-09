@@ -18,45 +18,31 @@ data "terraform_remote_state" "cloud" {
 }
 
 locals {
-  cloud     = data.terraform_remote_state.cloud.outputs
-  cluster   = local.cloud.clusters[var.target]
-  role      = local.roles[var.target]
-  secrets   = local.cloud.secrets
-  exec_args = ["mk8s", "v1", "cluster", "get-token", "--profile", local.f.nebius_profile, "--format", "json"]
+  cloud   = data.terraform_remote_state.cloud.outputs
+  cluster = local.cloud.clusters[var.target]
+  role    = local.roles[var.target]
+  secrets = local.cloud.secrets
   kubeconfig = yamlencode({
     apiVersion = "v1", kind = "Config", "current-context" = var.target
     clusters   = [{ name = var.target, cluster = { server = local.cluster.endpoint, "certificate-authority-data" = base64encode(local.cluster.cluster_ca_certificate) } }]
-    users      = [{ name = var.target, user = { exec = { apiVersion = "client.authentication.k8s.io/v1beta1", command = "nebius", args = local.exec_args, interactiveMode = "Never", provideClusterInfo = false } } }]
+    users      = [{ name = var.target, user = { token = var.iam_token } }]
     contexts   = [{ name = var.target, context = { cluster = var.target, user = var.target } }]
   })
 }
 
-provider "nebius" {
-  profile = {
-    name            = local.f.nebius_profile
-    no_browser_open = true
-  }
-}
+provider "nebius" {} # NEBIUS_IAM_TOKEN from the environment (stack.sh exports it)
 
 provider "kubernetes" {
   host                   = local.cluster.endpoint
   cluster_ca_certificate = local.cluster.cluster_ca_certificate
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "nebius"
-    args        = local.exec_args
-  }
+  token                  = var.iam_token
 }
 
 provider "helm" {
   kubernetes = {
     host                   = local.cluster.endpoint
     cluster_ca_certificate = local.cluster.cluster_ca_certificate
-    exec = {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "nebius"
-      args        = local.exec_args
-    }
+    token                  = var.iam_token
   }
 }
 
@@ -65,11 +51,7 @@ provider "kubectl" {
   cluster_ca_certificate = local.cluster.cluster_ca_certificate
   load_config_file       = false
   apply_retry_count      = 5
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "nebius"
-    args        = local.exec_args
-  }
+  token                  = var.iam_token
 }
 
 provider "kustomization" {

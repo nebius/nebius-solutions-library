@@ -49,6 +49,12 @@ locals {
   catalog                     = module.config.catalog
   catalog_without_fleet_class = module.config.catalog_without_fleet_class
   catalog_by_cluster          = module.config.catalog_by_cluster
-  endpoints_by_cluster        = module.config.endpoints_by_cluster
   prepull_by_cluster          = module.config.prepull_by_cluster
+}
+
+# The Nebius IAM access token (12 h) for the Kubernetes and Helm providers of this cluster; stack.sh sets
+# TF_VAR_iam_token from NEBIUS_IAM_TOKEN (`nebius iam get-access-token`), exactly as k8s-training does.
+variable "iam_token" {
+  type      = string
+  sensitive = true
 }

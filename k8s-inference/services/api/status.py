@@ -64,12 +64,14 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         seen.add(p["metadata"]["name"])
         out.append({"started_at": term.get("startedAt") or run.get("startedAt") or st.get("startTime"),
                     "ended_at": term.get("finishedAt"), "status": s, "node": p["spec"].get("nodeName"),
+                    "gpu_class": (p["metadata"].get("labels") or {}).get(f"{LABEL}/gpu-class") or None,
                     "reason": reason if s != "SUCCEEDED" else None, "exit_code": term.get("exitCode"), "_gpus": _gpus(p)})
     for r in records or []:
         if r.get("pod") in seen or (name and r.get("operation") not in (None, name)):
             continue
         out.append({"started_at": r.get("started_at") or None, "ended_at": r.get("ended_at") or None,
                     "status": RECORD_STATUS.get(r.get("status"), "FAILED"), "node": r.get("node") or None,
+                    "gpu_class": r.get("gpu_class") or None,
                     "reason": "pod deleted (preempted)" if r.get("status") == "interrupted" else None,
                     "exit_code": r.get("exit_code"), "_gpus": int(r.get("gpus") or 0)})
     out.sort(key=lambda a: a["started_at"] or "")
@@ -143,6 +145,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "duration_s": _secs(st.get("startTime"), ended), "timeout_s": sp.get("activeDeadlineSeconds") if sp.get("activeDeadlineSeconds") != 1 else None,
             "attempts": attempts, "logs_url": logs_url(md.get("namespace", ""), md["name"], region),
             "error": error, "input": inp, "resumed_from": ann.get(f"{LABEL}/resumed-from"),
+            "gpu_class": labels.get(f"{LABEL}/gpu-class"), "image": ann.get(f"{LABEL}/image"),
             "resumable": status in ("FAILED", "CANCELLED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,

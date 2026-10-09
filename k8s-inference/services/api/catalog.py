@@ -29,6 +29,7 @@ def normalise(doc: dict) -> dict:
     eps = {k: v for k, v in (m.get("endpoints") or {}).items() if k not in ("ready", "live", "metrics")}
     m["name"] = m["id"]
     m["display_name"] = m.get("displayName", m["id"])
+    m.setdefault("managed_by", "catalog")      # catalog (bundled file, read-only) | api (services/api/models.py, the fleet database)
     m.setdefault("k8s_name", m["id"].replace(".", "-"))
     m.setdefault("mode", "sync")
     m.setdefault("modes", ["run"] if m["mode"] == "run" else ["sync", "async"])
@@ -59,15 +60,38 @@ def normalise(doc: dict) -> dict:
         m["endpoint_external_host"] = f"https://{m['k8s_name']}-predictor.{m['namespace']}.{ENDPOINT_DOMAIN}"
     if m["mode"] == "run":
         m["job"] = dict(m.get("job") or {})          # image, command, gpu, cpu, memory, ... (docs/JOBS.md)
+        images = m["job"].get("images")              # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs")
+        if isinstance(images, dict) and images.get("default") and not m["job"].get("image"):
+            m["job"]["image"] = images["default"]
         m["protocol"] = m.get("protocol") or "kubernetes-job"
     return m
+
+
+_runtime: dict = {"until": 0.0, "models": {}}
+RUNTIME_TTL_S = 5.0
+
+
+def runtime_models(force: bool = False) -> dict:
+    """Entries defined through the API (services/api/models.py: the fleet database on the control API, ConfigMap copies
+    in the regions), re-read every few seconds or after a write."""
+    import time
+    if force or _runtime["until"] < time.time():
+        import models as runtime_store
+        _runtime["models"] = {mid: normalise(e) for mid, e in runtime_store.list_runtime().items()}
+        _runtime["until"] = time.time() + RUNTIME_TTL_S
+    return _runtime["models"]
+
+
+def invalidate():
+    _runtime["until"] = 0.0
 
 
 def all_models() -> dict:
     key = tuple(sorted((f, os.path.getmtime(f)) for d in CATALOG_DIRS for f in glob.glob(os.path.join(d, "*.yaml"))))
     if _cache["mtime"] != key:
         _cache["models"], _cache["mtime"] = _load(), key
-    return _cache["models"]
+    # file entries (the bundled classes, Terraform's catalog) win over a runtime entry of the same id
+    return {**runtime_models(), **_cache["models"]}
 
 
 def get(name: str) -> dict | None:
@@ -97,6 +121,6 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "modes": m["modes"], "default_mode": m["mode"], "gpu": m.get("gpu", "none"), "price": price,
         "price_per_call": m.get("price_per_call"), "image": m.get("image"), "protocol": m.get("protocol"),
         "cold_start_s": m.get("cold_start_s"), "cold_start_class": m.get("cold_start_class"), "parameters": m.get("parameters", []),
-        "endpoints": m.get("endpoints"), "task": m.get("task"),
+        "endpoints": m.get("endpoints"), "task": m.get("task"), "managed_by": m.get("managed_by", "catalog"), "spec": m.get("spec"),
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
     }

@@ -59,7 +59,10 @@ spec:
         certificateRefs:
           - group: ""
             kind: Secret
-            name: hub-wildcard-tls
+            name: hub-wildcard-tls    # the cluster's public hostnames (api, app, grafana, ...), set per cluster
+          - group: ""
+            kind: Secret
+            name: models-tls          # the model endpoints' hostnames, kept by the fleet's API (models-tls.yaml)
       allowedRoutes:
         namespaces: { from: All }
 ---

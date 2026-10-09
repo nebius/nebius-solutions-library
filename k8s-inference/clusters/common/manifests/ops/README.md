@@ -3,7 +3,8 @@
 Shared base for both clusters (Argo CD Application `ops`, wave 2, from
 `clusters/common/apps/ops.yaml`); the per-cluster overlay in
 `clusters/<cluster>/apps/overlays/ops/` patches project, node group and
-registry and, on the hub, adds the CNPG ScheduledBackup. Runbook: `docs/OPERATIONS.md`; numbers:
+registry and, on the hub, adds the CNPG ScheduledBackup (reference fleet only: the Terraform solution uses
+a Nebius Managed PostgreSQL whose backups are the service's, `docs/OPERATIONS.md` "Database"). Runbook: `docs/OPERATIONS.md`; numbers:
 `spikes/S13-ops/RESULT.md`. Image: `services/ops` (Nebius CLI, crane, jq, curl),
 tag pinned here.
 
@@ -11,7 +12,7 @@ tag pinned here.
 |---|---|
 | `namespace.yaml` | namespace `ops`; Secret `nebius-sa` (SA key, created with kubectl, never in git) |
 | `recover-stopped-nodes.yaml` | CronJob, every 2 min: `instance start` for STOPPED VMs of the spot node groups, delete on start failure |
-| hub overlay `backups.yaml` | CNPG ScheduledBackup for `data/postgres` (barman to the backups bucket); LiteLLM runs on that cluster, so this is the one backup |
+| hub overlay `backups.yaml` | CNPG ScheduledBackup for `data/postgres` (barman to the backups bucket); LiteLLM runs on that cluster, so this is the one backup. Reference fleet only, until its migration to the managed PostgreSQL (`infra/migrations/2026-10-managed-postgres.md`); not rendered by the Terraform solution |
 | `tenant-isolation.yaml` | CiliumClusterwideNetworkPolicy for every namespace labeled `serverless2.nebius/tenant`; the per-namespace `tenant-local` policy comes from `charts/tenant` |
 
 API RBAC lives with the API (`clusters/hub/apps/manifests/api/api.yaml`).

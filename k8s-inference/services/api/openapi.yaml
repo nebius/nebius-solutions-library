@@ -20,13 +20,31 @@ security: [{ bearer: [] }]
 paths:
   /v1/models:
     get:
-      summary: List catalog models
+      summary: List models (the bundled classes and the models defined through the API; the fleet database on the control API, read-only copies in the regions)
       responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Model" } } } } } }
+    post:
+      summary: Define a model from a container (admin key). An endpoint (always-on, scales to zero) or a job class. The image may be a plain public reference; it is pulled through the fleet's image cache.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelSpec" } } } }
+      responses: { "201": { description: created and, for endpoints, deployed in every region of the spec }, "400": { $ref: "#/components/responses/Error" }, "409": { description: the id exists (PUT replaces it), the model is a built-in class, or this is a regional API (models are written on the fleet's API, the control cluster) } }
   /v1/models/{model}:
     get:
       summary: Get one model
       parameters: [{ $ref: "#/components/parameters/model" }]
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Model" } } } }, "404": { $ref: "#/components/responses/Error" } }
+    put:
+      summary: Replace a model defined through this API (admin key); endpoints roll to the new definition
+      parameters: [{ $ref: "#/components/parameters/model" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelSpec" } } } }
+      responses: { "200": { description: replaced; the new version is in the history }, "409": { description: a built-in class, or a regional API } }
+    delete:
+      summary: Delete a model defined through this API (admin key); its endpoints are removed from every region
+      parameters: [{ $ref: "#/components/parameters/model" }]
+      responses: { "204": { description: deleted; the last version stays in the history }, "404": { $ref: "#/components/responses/Error" }, "409": { description: a built-in class, or a regional API } }
+  /v1/models/{model}/history:
+    get:
+      summary: "Every version of a model defined through the API (admin key, fleet API): action, who, when, the spec"
+      parameters: [{ $ref: "#/components/parameters/model" }]
+      responses: { "200": { description: newest first, content: { application/json: { schema: { type: array, items: { type: object, properties: { version: { type: integer }, action: { type: string, enum: [create, update, delete] }, by: { type: string }, at: { type: string }, spec: { $ref: "#/components/schemas/ModelSpec" } } } } } } }, "404": { $ref: "#/components/responses/Error" } }
   /v1/models/{model}:invoke:
     post:
       summary: Invoke a model
@@ -143,6 +161,40 @@ components:
   responses:
     Error: { description: error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
+    ModelSpec:
+      description: A model as the console form defines it (services/api/models.py); kept in the fleet database with its history. Reserved for later, accepted and stored, not acted on yet - `images` (image per GPU class), `deployments.<region>.variants`, `routing`.
+      type: object
+      required: [id, image]
+      properties:
+        id: { type: string, description: "lowercase letters, digits and dashes; the model name in the API, the console and LiteLLM" }
+        kind: { type: string, enum: [endpoint, job], default: endpoint }
+        image: { type: string, description: "any registry (vllm/vllm-openai:v0.11.0, nvcr.io/nim/..., your own); pulled through the fleet's image cache" }
+        images: { type: object, description: "reserved: image per GPU class, {default: ..., h100: ...}", additionalProperties: { type: string } }
+        command: { description: "entrypoint command: a list, or a string run by /bin/sh -c", oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+        args: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        port: { type: integer, default: 8080, description: "endpoints: the container port" }
+        protocol: { type: string, enum: [http, openai, websocket, grpc], default: http }
+        path: { type: string, description: "endpoints: the request path the API forwards to (default by protocol: /v1/chat/completions for openai, / otherwise)" }
+        health_path: { type: string, description: "endpoints: readiness probe path" }
+        served_model: { type: string, description: "openai endpoints: the model name the server expects in requests; injected when callers omit it" }
+        gpu: { type: object, properties: { count: { type: integer, default: 1 }, classes: { type: array, items: { type: string }, description: "GPU classes of the fleet, preferred first (h100, h200, b300, l40s, rtx-pro-6000, ...)" } } }
+        resources: { type: object, properties: { cpu: { type: string, default: "4" }, memory: { type: string, default: 16Gi } } }
+        scaling: { type: object, properties: { min: { type: integer, default: 0, description: "0 = scale to zero" }, max: { type: integer, default: 1 }, target: { type: integer, default: 4, description: "concurrent requests per replica" } } }
+        timeout_s: { type: integer, default: 600 }
+        shm_gib: { type: integer, default: 1 }
+        pull_secret: { type: string, description: "name of an image pull Secret in the models namespace (private registries)" }
+        weights: { type: object, description: "a directory on the region's shared weights filesystem, mounted into the container", properties: { path: { type: string }, mount_path: { type: string, default: /weights }, env: { type: object, additionalProperties: { type: string } } } }
+        regions: { type: array, items: { type: string }, description: "where the endpoint runs / the job may run; default: every region with a pool of a listed class" }
+        display_name: { type: string }
+        description: { type: string }
+        cpu: { type: string, description: "jobs: CPU per run" }
+        memory: { type: string, description: "jobs: memory per run" }
+        disk_gi: { type: integer, description: "jobs: size of the per-run work volume" }
+        grace_seconds: { type: integer, description: "jobs: seconds after SIGTERM to checkpoint" }
+        scratch: { type: string, enum: [network, local-nvme] }
+        parameters: { type: array, items: { type: object }, description: "jobs: input parameters the console form offers ({name, type, label, default})" }
+        routing: { type: object, description: "reserved" }
     Error:
       type: object
       properties: { detail: { type: string } }
@@ -152,7 +204,7 @@ components:
       type: object
       required: [id, name, modes, default_mode, regions]
       properties:
-        id: { type: string, description: catalog name, e.g. gromacs, s2-qwen }
+        id: { type: string, description: model id, e.g. llm-example, batch-example }
         name: { type: string }
         description: { type: string }
         modes: { type: array, items: { $ref: "#/components/schemas/Mode" } }
@@ -200,6 +252,7 @@ components:
         ended_at: { type: string, format: date-time }
         status: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, PREEMPTED] }
         node: { type: string, description: node name }
+        gpu_class: { type: [string, "null"], description: "the GPU class the attempt ran on (run classes with per-class images)" }
         reason: { type: string }
         exit_code: { type: integer }
     Operation:
@@ -222,6 +275,8 @@ components:
         duration_s: { type: number }
         timeout_s: { type: integer }
         attempts: { type: array, items: { $ref: "#/components/schemas/Attempt" } }
+        gpu_class: { type: [string, "null"], description: "run classes with one image per GPU class: the class chosen at submission (the run waits for it; a resume keeps it)" }
+        image: { type: [string, "null"], description: "the image that class got" }
         logs_url: { type: string, description: Grafana Explore (Loki) query over the operation's pods }
         error: { type: string }
         input: { type: object, additionalProperties: true }
@@ -278,7 +333,7 @@ components:
         gpu: { type: string }
         protocol: { type: string }
         created_at: { type: string }
-        managed_by: { type: string, enum: [git, api] }
+        managed_by: { type: string, enum: [catalog, api], description: "catalog: a built-in class of the solution (read-only); api: defined through POST /v1/models" }
     ApiKey:
       type: object
       properties:
