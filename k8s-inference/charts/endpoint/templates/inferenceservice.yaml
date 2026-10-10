@@ -29,14 +29,25 @@ spec:
     timeout: {{ $v.timeout }}
     {{- /* Pod labels (KServe copies them to the Knative revision and its pods):
            Kueue queue + priority when queue.name is set. */}}
-    {{- if or $v.queue.name $v.queue.priorityClass }}
+    {{- $pm := default (dict) $v.podMetadata }}
+    {{- if or $v.queue.name $v.queue.priorityClass $pm.labels }}
     labels:
+      {{- with $pm.labels }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- with $v.queue.name }}
       kueue.x-k8s.io/queue-name: {{ . }}
       {{- end }}
       {{- with $v.queue.priorityClass }}
       kueue.x-k8s.io/priority-class: {{ . }}
       {{- end }}
+    {{- end }}
+    {{- with $pm.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- if ne $v.automountServiceAccountToken nil }}
+    automountServiceAccountToken: {{ $v.automountServiceAccountToken }}
     {{- end }}
     {{- with $v.priorityClassName }}
     priorityClassName: {{ . }}

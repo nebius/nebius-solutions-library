@@ -72,3 +72,32 @@ exact image, weights, configuration, GPU and driver/kernel tuple passed capture,
 fresh-pod restore and result-correctness tests. The add-on must cold-start when
 a snapshot is missing/incompatible and recover failed restores without starting
 a competing model process or scaler.
+
+API-managed model definitions accept optional, static `pod_metadata`:
+
+```json
+{"pod_metadata":{"labels":{"example.org/startup-profile":"qualified-science"},
+ "annotations":{"example.org/qualification":"evidence/model-immutable.json"}}}
+```
+
+Use the label and annotation keys documented by the chosen add-on. The API saves
+them in the model definition; endpoint rendering puts them on the KServe
+predictor, and Job/JobSet rendering puts them on the actual pod template, including
+MultiKueue manager templates. Existing queue, placement and serving metadata are
+reserved. Only an administrator can change the definition; invocation inputs
+cannot select or replace the profile. Removing the field removes the opt-in on
+future templates. The API supports the field; dedicated console controls remain
+a separate integration step.
+
+For an endpoint whose model process does not use the Kubernetes API, an
+administrator can also set `automount_service_account_token: false`. It renders
+the predictor's supported `automountServiceAccountToken` field; omitting it keeps
+the previous Kubernetes default. This setting is rejected for run classes because
+their existing uploader and execution helpers require service-account access.
+
+These settings do not prepare an opaque process for capture,
+remove model credentials, create checkpoint artifacts,
+qualify scientific outputs or override the add-on's compatibility checks.
+Request-dependent run commands/work mounts and credential-bearing model
+containers still require an isolated, request-free initialization adapter. Verify
+the actual Knative/Kueue consumer path before claiming an accelerated endpoint.

@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube
+from pod_metadata import normalise as normalise_pod_metadata
 from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, REGION
 from resilience import retry
 
@@ -144,6 +145,8 @@ def pool_for(cid: str, classes: list[str], count: int = 1) -> str | None:
 
 def validate(spec: dict) -> dict:
     s = dict(spec or {})
+    if "pod_metadata" in s:
+        s["pod_metadata"] = normalise_pod_metadata(s["pod_metadata"])
     secrets = s.get("env_secrets", [])
     if not isinstance(secrets, list) or any(not isinstance(name, str) or len(name) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", name) for name in secrets):
         raise HTTPException(400, "env_secrets: a list of Kubernetes Secret names in the workload namespace")
@@ -153,6 +156,9 @@ def validate(spec: dict) -> dict:
     kind = s.get("kind", "endpoint")
     if kind not in ("endpoint", "job"):
         raise HTTPException(400, "kind: endpoint | job")
+    if "automount_service_account_token" in s:
+        if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
+            raise HTTPException(400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token")
     if not s.get("image") and not (s.get("images") or {}).get("default"):
         raise HTTPException(400, "image is required (or images.default)")
     gpu = s.get("gpu") or {}
@@ -205,6 +211,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         "id": mid, "displayName": s.get("display_name") or mid, "description": s.get("description", ""),
         "task": s.get("task", "custom"), "managed_by": managed_by, "spec": s,
     }
+    if s.get("pod_metadata"):
+        entry["podMetadata"] = s["pod_metadata"]
     for k in RESERVED:
         if k in s:
             entry[k] = s[k]
@@ -228,6 +236,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "timeout": int(s.get("timeout_s", 600)),
             "shm": {"enabled": True, "size": f"{int(s.get('shm_gib', 1))}Gi"},
         }
+        if "automount_service_account_token" in s:
+            runtime["automountServiceAccountToken"] = s["automount_service_account_token"]
         annotations = {}
         for key, annotation, suffix in (
             ("utilization_percent", "target-utilization-percentage", ""),

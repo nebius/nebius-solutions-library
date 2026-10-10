@@ -12,6 +12,7 @@ Nothing here talks to Kubernetes; jobs.py does."""
 import hashlib, json, re, uuid
 from fastapi import HTTPException
 from config import JOB_BACKOFF_LIMIT, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, RUNNER_IMAGE, S3_ENV_SECRET
+from pod_metadata import normalise as normalise_pod_metadata
 
 TOKEN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 PRIORITY_CLASS = {"high": "serverless2-batch-priority", "low": "serverless2-batch", None: "serverless2-batch", "normal": "serverless2-batch"}
@@ -137,12 +138,14 @@ def _pod_failure_policy() -> dict:
     ]}
 
 
-def _job_shell(name: str, meta: dict, pod_spec: dict, timeout_s: int | None, placement: dict | None = None) -> dict:
+def _job_shell(name: str, meta: dict, pod_spec: dict, timeout_s: int | None, placement: dict | None = None,
+               pod_metadata: dict | None = None) -> dict:
     """placement (fleet path): {manager: bool, classes: [...], regions: [...]}; the pod template carries what
     the dispatcher needs (it sees the Workload's pod template, not the Job): allowed GPU classes and regions,
     work volume size."""
-    tmpl_meta = {"labels": {k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}
-    ann = {}
+    extra = normalise_pod_metadata(pod_metadata)
+    tmpl_meta = {"labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}}
+    ann = dict(extra.get("annotations", {}))
     if meta["annotations"].get(f"{LABEL}/pvc-size-gi"):
         ann[f"{LABEL}/pvc-size-gi"] = meta["annotations"][f"{LABEL}/pvc-size-gi"]
     if placement and placement.get("classes"):

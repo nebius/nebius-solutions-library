@@ -5,6 +5,8 @@ name: ""                 # InferenceService name (required)
 namespace: models
 labels: {}               # extra metadata labels
 annotations: {}          # extra metadata annotations (Knative autoscaling annotations go here)
+podMetadata: {}          # optional static pod labels/annotations for an external qualified add-on
+automountServiceAccountToken: null # preserve Kubernetes defaults unless explicitly configured
 
 image: ""                # required, prefer a digest
 imagePullSecrets: []     # e.g. [ngc]

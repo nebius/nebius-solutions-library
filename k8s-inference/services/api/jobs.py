@@ -30,6 +30,7 @@ from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_G
                     INFINIBAND_CLAIM_TEMPLATE, INFINIBAND_ENV, JOBSET_GROUP, JOBSET_NAME_LABEL, JOBSET_PLURAL, JOBSET_VERSION,
                     MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC)
 from resilience import retry
+from pod_metadata import normalise as normalise_pod_metadata
 from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, RUNNER_SECURITY_CONTEXT, TOKEN, _job_shell, _meta,
                     _pod_failure_policy, _render, _uploader, class_images, gpu_classes, image_for_class, op_name, profile_of)
 from status import (PHASE, RECORD_STATUS, _attempts, _gpus, _main_state, _secs, _ts, finished, gpu_seconds, is_jobset, is_manager_job,
@@ -177,7 +178,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
-    return _job_shell(name, meta, pod, timeout_s, placement)
+    return _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -259,8 +260,9 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
         main["resources"]["claims"] = [{"name": "ib"}]
     pod["subdomain"] = name
-    tmpl_meta = {"labels": {k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}
-    ann = {}
+    extra = normalise_pod_metadata(model.get("podMetadata"))
+    tmpl_meta = {"labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}}
+    ann = dict(extra.get("annotations", {}))
     if placement and placement.get("classes"):
         ann[f"{LABEL}/gpu-classes"] = ",".join(placement["classes"])
     if placement and placement.get("regions"):
