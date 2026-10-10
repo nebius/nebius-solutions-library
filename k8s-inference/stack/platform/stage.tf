@@ -66,6 +66,11 @@ locals {
       driver = { version = local.f.gpu_operator.driver_version, kernelModuleType = local.f.gpu_operator.kernel_module }
       gds    = { enabled = local.f.gpu_operator.gds }
     }
+    # with the operator the driver lives in a container and the `nvidia` RuntimeClass (created by the operator) injects it;
+    # a pod that only relies on the node's default runtime can be created before the toolkit has made nvidia the default
+    # (the exporter then crash-loops on "Cannot init NVML library"), so the fleet's exporters name the class explicitly
+    dcgm-exporter      = local.f.gpu_operator.enabled ? { runtimeClassName = "nvidia" } : {}
+    dcgm-exporter-l40s = local.f.gpu_operator.enabled ? { runtimeClassName = "nvidia" } : {}
     # warm spare nodes per pool (docs/FLEET.md "Warm spare nodes"): one pause Deployment per pool with warm_nodes > 0,
     # every pod sized to a whole node (the preset's GPU count) so one spare is one node
     overprovisioner = { deployments = [for pn, p in try(local.clusters[local.id].pools, {}) : {
