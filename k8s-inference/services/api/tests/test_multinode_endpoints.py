@@ -98,3 +98,30 @@ def test_chart_renders_a_leaderworkerset_behind_a_predictor_route():
     assert route["spec"]["hostnames"] == ["kimi-k3-predictor.models.195.242.0.1.sslip.io"]
     assert route["metadata"]["labels"]["serving.knative.dev/route"] == "kimi-k3-predictor"     # the SecurityPolicy's selector
     assert docs[("Service", "kimi-k3-predictor")]["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
+
+
+def test_leaderworkerset_reads_use_the_namespace_before_the_plural(monkeypatch):
+    calls = []
+
+    class Custom:
+        def get_namespaced_custom_object(self, group, version, namespace, plural, name):
+            calls.append((group, version, namespace, plural, name))
+            return {"kind": "LeaderWorkerSet", "spec": {"replicas": 0}, "metadata": {"annotations": {}}}
+
+        def patch_namespaced_custom_object(self, group, version, namespace, plural, name, body):
+            calls.append((group, version, namespace, plural, name))
+            return {}
+
+    class Core:
+        def list_namespaced_pod(self, ns, label_selector=None):
+            class R: items = []
+            return R()
+
+    monkeypatch.setattr(kube, "api", lambda region=None: Custom())
+    monkeypatch.setattr(kube, "core", lambda region=None: Core())
+    kube._isvc_cache.clear()
+    assert kube.lws("kimi-k3", "models", "us-central1")["spec"]["replicas"] == 0
+    assert kube.endpoint_status("kimi-k3", "models", "us-central1", nodes=2)["status"] == "scaled-to-zero"
+    kube._last_stamp.clear()
+    kube.stamp_last_request("kimi-k3", "models", "us-central1")
+    assert calls and all(c == ("leaderworkerset.x-k8s.io", "v1", "models", "leaderworkersets", "kimi-k3") for c in calls)

@@ -163,10 +163,16 @@ LWS = ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets")
 LAST_REQUEST_ANNOTATION = f"{LABEL}/last-request-at"
 
 
+def _lws_get(region: str, ns: str, name: str) -> dict:
+    """get_namespaced_custom_object takes (group, version, namespace, plural, name): the namespace before the plural
+    (swapped on 2026-10-10, the API server answered Forbidden for the namespace "leaderworkersets")."""
+    return retry(api(region).get_namespaced_custom_object, LWS[0], LWS[1], ns, LWS[2], name)
+
+
 def lws(name: str, ns: str, region: str = REGION) -> dict | None:
     """The LeaderWorkerSet of a multi-node endpoint (services/api/models.py `nodes`), None when absent."""
     try:
-        return retry(api(region).get_namespaced_custom_object, *LWS, ns, name)
+        return _lws_get(region, ns, name)
     except ApiException as e:
         if e.status == 404:
             return None
@@ -198,7 +204,7 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
     out = {"status": "unavailable", "replicas_ready": None}
     try:
         if nodes > 1:
-            i = retry(api(region).get_namespaced_custom_object, *LWS, ns, name)
+            i = _lws_get(region, ns, name)
             pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}").items
             leaders = [p for p in pods if p.metadata.labels.get("leaderworkerset.sigs.k8s.io/worker-index") == "0"]
             n = sum(1 for p in leaders if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
@@ -232,7 +238,7 @@ def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_
     _last_stamp[name] = now
     body = {"metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}}
     try:
-        api(region).patch_namespaced_custom_object(*LWS, ns, name, body)
+        api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
     except ApiException:
         pass
 
