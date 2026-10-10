@@ -11,9 +11,12 @@ locals {
   host_of = { for cid, c in local.cloud.clusters : cid => (
     local.f.edge.domain == null ? "${c.gateway_ip}.sslip.io" : "${cid}.${local.f.edge.domain}"
   ) }
-  host               = local.host_of[local.id]
-  control_host       = local.host_of[local.control_id]
-  certificate_issuer = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt")
+  host         = local.host_of[local.id]
+  control_host = local.host_of[local.control_id]
+  # a GPU region's gateway: the fleet CA (edge.regional_certificates) unless the cluster also carries the control
+  # plane (single-cluster mode: its hostnames are public); the control cluster: ACME; internal mode: the private CA
+  fleet_ca_here      = local.f.edge.mode != "internal" && local.f.edge.regional_certificates == "fleet-ca" && local.role.worker && !local.role.control
+  certificate_issuer = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.fleet_ca_here ? "fleet-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt"))
   hostnames = merge({
     api     = "api.${local.host}"
     grafana = "grafana.${local.host}"
@@ -107,6 +110,8 @@ locals {
       db           = { useExisting = true, deployStandalone = false, endpoint = "${local.cloud.database.host}:${local.cloud.database.port}", database = "litellm", url = "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST)/$(DATABASE_NAME)?sslmode=require&sslaccept=strict&sslcert=${local.msp_ca_path}", secret = { name = "litellm-db", usernameKey = "username", passwordKey = "password" } }
       volumes      = local.trust_volumes
       volumeMounts = local.trust_mounts
+      # the model endpoints behind the regional gateways carry fleet-CA certificates; no public HTTPS is needed
+      envVars = { SSL_CERT_FILE = local.trust_bundle_path, LITELLM_LOCAL_MODEL_COST_MAP = "True" }
     }
   }
   fleet_values = {
@@ -124,10 +129,7 @@ locals {
     { name = "CATALOG_DIRS", value = "/etc/catalog" },
     { name = "RUNNER_IMAGE", value = local.image.jobs },
     { name = "HUB_REGION", value = local.hub_region },
-    ], local.f.trust_bundle_pem == null ? [] : [
-    # the API's own HTTPS clients (regional forwards, LiteLLM) trust the mounted bundle, not only libpq/Prisma
-    { name = "SSL_CERT_FILE", value = "/etc/ssl/certs/ca-certificates.crt" },
-  ])
+  ]) # the API's HTTPS clients trust the system roots plus every CA under /etc/ssl/msp (services/api/config.py)
   # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
   api_env_control = [for e in [
     { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },

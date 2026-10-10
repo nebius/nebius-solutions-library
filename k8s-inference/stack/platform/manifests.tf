@@ -89,6 +89,13 @@ locals {
       }
     },
     { for k, v in {
+      fleet_ca_issuer = {
+        apiVersion = "cert-manager.io/v1", kind = "ClusterIssuer"
+        metadata   = { name = "fleet-ca" }
+        spec       = { ca = { secretName = "fleet-ca" } }
+      }
+    } : k => v if local.fleet_ca_here },
+    { for k, v in {
       private_issuer = {
         apiVersion = "cert-manager.io/v1", kind = "ClusterIssuer"
         metadata   = { name = local.certificate_issuer }
@@ -220,13 +227,12 @@ locals {
                   { name = "BILLING_DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "litellm_url" } } },
                   { name = "CATALOG_DIRS", value = "/etc/catalog" },
                   { name = "HUB_REGION", value = local.hub_region },
-                  ], local.f.trust_bundle_pem == null ? [] : [{ name = "SSL_CERT_FILE", value = "/etc/ssl/certs/ca-certificates.crt" }],
-                  local.dedicated ? [
-                    { name = "REGION", value = "control" },
-                    { name = "REGION_KUBECONFIGS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=/etc/kubeconfigs/${c.region}"]) },
-                    { name = "FLEET_MANAGER", value = "true" },
-                    ] : [
-                    { name = "REGION", value = local.region },
+                  ], local.dedicated ? [
+                  { name = "REGION", value = "control" },
+                  { name = "REGION_KUBECONFIGS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=/etc/kubeconfigs/${c.region}"]) },
+                  { name = "FLEET_MANAGER", value = "true" },
+                  ] : [
+                  { name = "REGION", value = local.region },
                 ])
                 volumeMounts = concat([{ name = "kubeconfigs", mountPath = "/etc/kubeconfigs", readOnly = true }, { name = "catalog", mountPath = "/etc/catalog", readOnly = true }], local.trust_mounts)
                 resources    = { requests = { cpu = "50m", memory = "128Mi" }, limits = { cpu = "500m", memory = "256Mi" } }

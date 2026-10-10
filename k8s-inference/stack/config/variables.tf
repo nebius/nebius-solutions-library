@@ -183,7 +183,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.10.7")
+        api        = optional(string, "0.10.8")
         dispatcher = optional(string, "0.2.6")
         jobs       = optional(string, "0.1.10")
         ops        = optional(string, "0.1.11")
@@ -224,6 +224,12 @@ variable "fleet" {
       private_ca_secret = optional(string) # cert-manager namespace; tls.crt + tls.key
       source_cidrs      = optional(list(string), [])
       ip_certificate    = optional(bool, false)
+      # Certificates of the GPU regions' gateways: "fleet-ca" (default) issues them from a CA the cloud stage
+      # generates (no public reachability of a regional gateway needed; the control plane and LiteLLM trust it;
+      # a browser on a regional Grafana sees a warning), "acme" asks Let's Encrypt per region (HTTP-01 through
+      # the gateway, so port 80 of every regional gateway must answer the internet). The control cluster's
+      # public hostnames always use ACME in `public` mode.
+      regional_certificates = optional(string, "fleet-ca")
       acme = optional(object({
         email   = optional(string, "")
         staging = optional(bool, false)
@@ -381,6 +387,10 @@ variable "fleet" {
     error_message = "edge.mode is public | internal; edge.domain is a DNS name (lowercase)."
   }
 
+  validation {
+    condition     = contains(["fleet-ca", "acme"], var.fleet.edge.regional_certificates)
+    error_message = "edge.regional_certificates is fleet-ca or acme."
+  }
   validation {
     condition     = var.fleet.edge.mode != "internal" || (var.fleet.edge.domain != null && var.fleet.edge.private_ca_secret != null && var.fleet.trust_bundle_pem != null)
     error_message = "Internal gateways require edge.domain, edge.private_ca_secret and trust_bundle_pem; public ACME cannot issue private gateway certificates."

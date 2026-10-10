@@ -27,3 +27,17 @@ Tenant policies permit gateway/API access and the existing artifact path, while 
 Validate policy attachment, an allowed key, another model's key, an exhausted key, a blocked key, a WebSocket handshake and an untrusted certificate on a test fleet. Check both regional and control API paths. Gateway proxy replicas and disruption budgets are configured in the shared gateway manifests; test node-drain behavior against the customer's availability requirement.
 
 Image pre-pull, Zot/Spegel caching and shared weights remain independent of gateway policy; see `IMAGES.md` and `charts/endpoint/README.md`.
+
+## Certificates of the GPU regions: the fleet CA (2026-10-10)
+
+The control cluster's public hostnames (`api`, `app`, `grafana`, `litellm`) get Let's Encrypt certificates
+through ACME HTTP-01 on its gateway. The GPU regions' gateways (`api.<region>`, `grafana.<region>`, the model
+endpoints) get theirs from the **fleet CA** by default (`edge.regional_certificates = "fleet-ca"`): the cloud
+stage generates a CA key pair, the platform stage installs it as cert-manager's `fleet-ca` ClusterIssuer on
+every GPU region and puts the CA certificate into the `trust` ConfigMap, the API merges it with the system
+roots (`services/api/config.py`) and LiteLLM reads the bundle through `SSL_CERT_FILE`. Nothing in the fleet
+then depends on a regional gateway being reachable from the public internet, which an ACME challenge needs:
+two regions added on 2026-10-10 (eu-west1, eu-north2) answered on port 80 only from inside Nebius, Let's
+Encrypt timed out, and the control plane could not forward to them over HTTPS. A browser on a regional
+Grafana sees a certificate warning (operator use); the console and the API talk to the control cluster
+only. `edge.regional_certificates = "acme"` restores per-region Let's Encrypt where the gateways are public.

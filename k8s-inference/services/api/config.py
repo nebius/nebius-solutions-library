@@ -89,3 +89,32 @@ JOB_PVC_SIZE_GI = int(os.environ.get("JOB_PVC_SIZE_GI", "50"))
 SYNC_TIMEOUT_S = int(os.environ.get("SYNC_TIMEOUT_S", "600"))
 AUTH_CACHE_S = int(os.environ.get("AUTH_CACHE_S", "30"))
 LABEL = "serverless2.nebius"
+
+
+def _trust_file() -> None:
+    """HTTPS clients (httpx) trust the system roots plus every CA the platform mounts under /etc/ssl/msp (the Nebius
+    MSP CA for the managed database, the fleet CA of the regional gateways, a private bundle): one file, set as
+    SSL_CERT_FILE before any client is built. Public roots stay, so public endpoints (Let's Encrypt hostnames of
+    the control cluster, the Nebius APIs) keep working."""
+    import glob
+    extra = sorted(glob.glob("/etc/ssl/msp/*.pem"))
+    if not extra or os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+        roots = [certifi.where(), "/etc/ssl/certs/ca-certificates.crt"]
+    except ImportError:
+        roots = ["/etc/ssl/certs/ca-certificates.crt"]
+    parts = []
+    for f in roots + extra:
+        try:
+            parts.append(open(f).read().strip())
+        except OSError:
+            continue
+    path = "/tmp/trust.pem"
+    with open(path, "w") as out:
+        out.write("\n".join(parts) + "\n")
+    os.environ["SSL_CERT_FILE"] = path
+
+
+_trust_file()

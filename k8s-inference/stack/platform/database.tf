@@ -82,7 +82,7 @@ resource "kubernetes_job_v1" "database_init" {
             content {
               name       = volume_mount.value.name
               mount_path = volume_mount.value.mountPath
-              sub_path   = volume_mount.value.subPath
+              sub_path   = lookup(volume_mount.value, "subPath", null)
               read_only  = true
             }
           }
