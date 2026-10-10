@@ -24,7 +24,10 @@
     - { name: NCCL_SOCKET_IFNAME, value: eth0 }
     - { name: UCX_NET_DEVICES, value: eth0 }
     {{- else }}
+    {{- /* Ethernet between the nodes: NCCL must not try the InfiniBand transport (the nodes carry Mellanox NICs, the pod
+           holds none: "unhandled system error" at communicator setup on B300, 2026-10-10) */}}
     - { name: NCCL_SOCKET_IFNAME, value: eth0 }
+    - { name: NCCL_IB_DISABLE, value: "1" }
     {{- end }}
     {{- with $v.env }}
     {{- toYaml . | nindent 4 }}

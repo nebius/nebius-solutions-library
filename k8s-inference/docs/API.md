@@ -109,6 +109,14 @@ and `LWS_WORKER_INDEX`, so vLLM's multi-node recipe works unchanged:
  "scaling": {"min": 0, "idle_s": 1800}, "regions": ["us-central1"]}
 ```
 
+The example above is vLLM's Ray-based pipeline-parallel recipe; the stock `vllm/vllm-openai` image ships no Ray,
+so without a custom image use vLLM's Ray-free data-parallel mode instead (one full copy of the model per node,
+tensor-parallel inside the node; the leader serves, the workers run `--headless`): leader
+`vllm serve ... --tensor-parallel-size 8 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-address $(hostname -i) --data-parallel-rpc-port 13345 --port 8000`,
+workers `... --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-start-rank $LWS_WORKER_INDEX --headless`
+(verified with Kimi K3 on two B300 nodes, 2026-10-10). Over Ethernet the pods get `NCCL_IB_DISABLE=1`: the nodes
+carry Mellanox NICs the pod does not hold, and NCCL's InfiniBand transport fails with "unhandled system error" otherwise.
+
 Placement: the pool whose preset has exactly `gpu.count` GPUs per node, reserved before on-demand before spot;
 `interconnect` `none` (default) prefers plain pools and runs NCCL over Ethernet, which is right for pipeline
 parallelism and lets the pool scale from zero; `preferred` takes an InfiniBand pool when the region has one,

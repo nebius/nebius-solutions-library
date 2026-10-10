@@ -92,6 +92,7 @@ def test_chart_renders_a_leaderworkerset_behind_a_predictor_route():
     assert leader["containers"][0]["command"][2].startswith("vllm serve") and worker["containers"][0]["command"][2].startswith("ray start")
     env = {v["name"]: v.get("value") for v in leader["containers"][0]["env"]}
     assert env["NNODES"] == "2" and env["GPUS_PER_NODE"] == "8" and env["WORLD_SIZE"] == "16" and env["MASTER_ADDR"] == "kimi-k3-0.kimi-k3" and env["HF_HOME"] == "/weights"
+    assert env["NCCL_IB_DISABLE"] == "1"                                                          # Ethernet: no InfiniBand transport
     assert "readinessProbe" in leader["containers"][0] and "readinessProbe" not in worker["containers"][0]
     assert "resourceClaims" not in leader                                                        # Ethernet: no DRA claim
     route = docs[("HTTPRoute", "kimi-k3-predictor")]
