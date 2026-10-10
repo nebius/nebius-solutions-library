@@ -166,3 +166,18 @@ def test_unreachable_endpoint_state_does_not_invent_zero_replicas(monkeypatch):
     monkeypatch.setattr(kube, "api", lambda region: Unreachable())
     monkeypatch.setattr(kube, "_isvc_cache", {})
     assert kube.endpoint_status("example", "example-ns") == {"status": "unavailable", "replicas_ready": None}
+
+
+def test_monitoring_of_a_retired_region_says_so(monkeypatch):
+    """An operation that ran in a region that left the fleet: 410 with the explanation, not a connection error."""
+    import asyncio
+    import app as appmod
+    import kube
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-north2"])
+    monkeypatch.setattr(appmod, "REGION_API_URLS", {"eu-north2": "https://api.example.invalid"})
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(appmod._remote_monitoring(None, "eu-west1", "/v1/operations/x/metrics", {}))
+    assert e.value.status_code == 410 and "no longer part of this fleet" in e.value.detail
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(appmod._remote_monitoring(None, "eu-north1", "/v1/operations/x/metrics", {}))
+    assert e.value.status_code == 503

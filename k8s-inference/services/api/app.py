@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.1", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.2", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -699,6 +699,11 @@ async def _remote_monitoring(p: Principal, region: str, path: str, params: dict)
     cfg.refresh_trust()
     url = REGION_API_URLS.get(region)
     if not url:
+        if region not in kube.regions():
+            # a region that left the fleet (its cluster, Prometheus and Loki with it): the operation's record stays,
+            # its metrics and logs are gone; the attempt records and outputs in the tenant bucket remain (/result)
+            raise HTTPException(410, f"Region {region} is no longer part of this fleet: the metrics and logs of this operation lived "
+                                     f"on its cluster and are gone. Its attempt records and outputs in the bucket are still there (result).")
         raise HTTPException(503, "Monitoring for this region is not connected to the fleet API.")
     try:
         async with httpx.AsyncClient(timeout=15) as client:
