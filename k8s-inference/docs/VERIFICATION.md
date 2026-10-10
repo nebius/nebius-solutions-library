@@ -12,6 +12,27 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Multi-node endpoints, trillion-parameter models on demand, Boltz-2 (2026-10-10 13:30-16:00 UTC, the same test fleet)
+
+Three endpoints defined through the model API (nothing in Terraform but their pools): NVIDIA's Boltz-2 NIM on one
+H100, DeepSeek V4-Pro (1.6T, FP4 experts) on one whole B300 node, Kimi K3 (2.8T, MXFP4) as the first multi-node
+endpoint on two whole B300 nodes (docs/API.md "Multi-node endpoints": a LeaderWorkerSet behind a predictor-named
+Service and route). Weights seeded onto the regional shared filesystems with the ops seed job (865 GB in 32 min,
+1.56 TB in 38 min from Hugging Face, about 1 GB/s each).
+
+| Check | Result |
+|---|---|
+| Boltz-2 NIM (`nvcr.io/nim/mit/boltz2:1.10.0`, NGC pull secret and key from the platform's `secrets`) | first start on the warm H100 spare: pod created 14:13:1x, "Application startup complete" 14:16:03 (the NIM fetched its model into the shared cache meanwhile), Ready after about 3 min; an insulin-chain structure prediction through `:invoke` (1 recycling step, 20 sampling steps) answered in 6.8 s with an mmCIF structure and a confidence score |
+| DeepSeek V4-Pro on one B300 (vLLM 0.31.0, TP 8, FP8 KV cache) | first attempt with vLLM's default loader read the safetensors shards at about 170 MB/s from the shared filesystem (one shard at a time: 75 s per 13 GB shard) and Knative's 30-min progress deadline killed it; with `--load-format runai_streamer` (32 streams) the 806 GB loaded in **2 min 37 s (about 5 GB/s)**, then torch.compile and CUDA-graph capture took about 25 min; pod created 15:17:23, Ready 15:47:46: **start-up 30 min 23 s** (`startup_s` 1823 in the API and console); chat completions answer in 1.8-3.5 s; the model answers with `reasoning` first (reasoning parser), so the example request asks for 1024 tokens |
+| Shared filesystem read rate (B300 node, 20 x 13 GB shards) | 8 parallel readers about 2.6 GB/s, 16 about 2.1 GB/s; a parallel copy of 92 GiB to the node's local NVMe at 1.6 GiB/s: the filesystem scales with readers, sequential loaders do not |
+| Knative progress deadline | raised from 1800 s to 3600 s (clusters/common/manifests/knative): a trillion-parameter model on a cold node needs the hour |
+| On-demand GPU capacity | the tenant's on-demand B300 quota in eu-west2 is 0 (`Quota limit exceeded ... compute.instance.gpu.b300`, node creation failed) and us-central1 had no 8-GPU B200 hosts free (`NotEnoughResources: VM schedule timeout`) for on-demand or spot; both big endpoints therefore run on a dedicated spot pool of whole B300 nodes in eu-west2 (`b300-llm-spot-8x`, 3 nodes), the on-demand pools were removed from the test fleet until the quotas are raised |
+| Endpoint placement | a 1-GPU model must not boot an 8-GPU on-demand node: pools are ordered reserved first, then the smallest fitting preset, then on-demand before spot (was capacity type first); a multi-node endpoint takes only pools whose preset has exactly its GPUs per node |
+| Memory request on a whole node | 2400 GiB did not fit next to a seed job on a B300 node (2768 GB preset); 2000 GiB does, and the weights stream through to the GPUs |
+| Kimi K3 on two B300 nodes (the first multi-node endpoint) | LeaderWorkerSet of two whole-node pods on `b300-llm-spot-8x`; vLLM 0.31.0 in Ray-free data-parallel mode (one full copy per node, TP 8 inside, the worker `--headless`), NCCL over Ethernet with `NCCL_IB_DISABLE=1`, bf16 KV cache, custom all-reduce off, weights by the Run:ai streamer (1.56 TB per node in about 7 min); pod created 19:45:58, leader Ready 20:09:22: **start-up 23 min 24 s** (`startup_s` 1404), status read from the LeaderWorkerSet and its leader pod, first chat completion (400 tokens) in 20.5 s. Four failed starts on the way, each a definition fix: the stock image has no Ray (pipeline-parallel recipe); NCCL's InfiniBand transport fails on nodes with Mellanox NICs the pod does not hold ("unhandled system error"; now the chart's default for Ethernet); Kimi K3 with `--kv-cache-dtype fp8` asserts "requires an fp8 prefill query" because the FlashAttention MLA prefill backend keeps a bf16 query whatever `use_prefill_query_quantization` says (vllm/models/kimi_k3/nvidia/mla.py); a peer-memory CUDA error at graph capture followed from that failure, not from the hardware (no Xid, no ECC errors) |
+| Example requests | every endpoint definition carries `example` (a valid request body); the console's Test request tab and `GET /v1/endpoints` show it |
+| Operations of a region that left the fleet | eu-west1's five operations were removed from the manager; monitoring of such an operation answers 410 "no longer part of this fleet" instead of a connection error |
+
 ## GPU drivers from the NVIDIA GPU Operator (2026-10-10 11:30-12:15 UTC, the same test fleet)
 
 The fleet moved from the Managed Kubernetes driver image (preset `cuda13.0`) to the NVIDIA GPU Operator with the
