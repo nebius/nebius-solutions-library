@@ -125,3 +125,17 @@ def test_leaderworkerset_reads_use_the_namespace_before_the_plural(monkeypatch):
     kube._last_stamp.clear()
     kube.stamp_last_request("kimi-k3", "models", "us-central1")
     assert calls and all(c == ("leaderworkerset.x-k8s.io", "v1", "models", "leaderworkersets", "kimi-k3") for c in calls)
+
+
+def test_example_request_travels_with_the_definition():
+    import endpoints as ep
+    import catalog
+    spec = {**SPEC, "nodes": 1, "gpu": {"count": 1, "classes": ["b200"]}, "example": {"messages": [{"role": "user", "content": "hi"}]}}
+    e = models.to_entry(spec)
+    assert e["example"] == spec["example"]
+    m = catalog.normalise(e)
+    assert catalog.to_public(m)["example"] == spec["example"]
+    pub = ep.to_public(m, {"kind": "InferenceService", "metadata": {}, "spec": {"predictor": {}}}, "us-central1")
+    assert pub["example"] == spec["example"]
+    with pytest.raises(HTTPException):
+        models.to_entry({**spec, "example": "not an object"})

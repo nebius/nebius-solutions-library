@@ -113,6 +113,10 @@ export function DefinitionEditor({
           regions: [],
         },
   );
+  const [example, setExample] = useState(
+    initial?.example ? JSON.stringify(initial.example, null, 2) : "",
+  );
+  const [exampleError, setExampleError] = useState("");
   const [env, setEnv] = useState(
     Object.entries(f.env ?? {})
       .map(([k, v]) => `${k}=${v}`)
@@ -167,6 +171,21 @@ export function DefinitionEditor({
       args: args.split("\n").filter((a) => a.trim()),
       regions: f.regions?.length ? f.regions : undefined,
     };
+    if (example.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(example);
+      } catch {
+        setExampleError("Not valid JSON");
+        throw new Error("Example request must be valid JSON.");
+      }
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        setExampleError("Must be a JSON object");
+        throw new Error("Example request must be a JSON object.");
+      }
+      setExampleError("");
+      out.example = parsed as Record<string, unknown>;
+    } else delete out.example;
     if (images.trim()) {
       const parsed = JSON.parse(images);
       if (
@@ -722,6 +741,19 @@ export function DefinitionEditor({
                     value={f.health_path ?? ""}
                     onChange={(e) => set({ health_path: e.target.value })}
                     placeholder="/health"
+                  />
+                </Field>
+                <Field
+                  label="Example request (JSON)"
+                  help="A valid request body for this endpoint; pre-filled in the Test request tab"
+                  error={exampleError}
+                >
+                  <textarea
+                    className="input"
+                    rows={4}
+                    value={example}
+                    onChange={(e) => setExample(e.target.value)}
+                    placeholder={'{"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 64}'}
                   />
                 </Field>
                 {(f.nodes ?? 1) > 1 && (

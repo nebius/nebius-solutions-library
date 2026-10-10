@@ -78,6 +78,7 @@ export interface ModelSpec {
   nodes?: number;
   worker_command?: string | string[];
   interconnect?: "none" | "preferred" | "required";
+  example?: Record<string, unknown>; // a valid request body, shown in the Test request tab
   cpu?: string;
   memory?: string;
   disk_gi?: number;
@@ -179,6 +180,7 @@ export interface Endpoint {
   started_at?: string;
   ready_at?: string;
   last_request_at?: string;
+  example?: Record<string, unknown> | null; // the definition's example request body
 }
 
 export interface FleetPool {

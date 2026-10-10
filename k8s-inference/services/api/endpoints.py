@@ -50,7 +50,7 @@ def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
             "scaling": scaling, "timeout_s": pred.get("timeout", 600),
             "image": container.get("image"), "cpu": resources.get("cpu"), "memory": resources.get("memory"),
             "nodes": 1, "startup_s": st.get("startup_s"), "started_at": st.get("started_at"), "ready_at": st.get("ready_at"),
-            "created_at": md.get("creationTimestamp"),
+            "example": m.get("example"), "created_at": md.get("creationTimestamp"),
             # the model's record says who owns it (api: defined through POST /v1/models, editable in the console; git: a
             # built-in class); nothing on the InferenceService carries that (the console disabled every endpoint's
             # scaling controls, 2026-10-10)
@@ -79,4 +79,4 @@ def _lws_public(m: dict, obj: dict, region: str) -> dict:
             "target_concurrency": None, "gpu": m.get("gpu"), "protocol": m.get("protocol"),
             "scaling": scaling, "timeout_s": int((m.get("spec") or {}).get("timeout_s") or 600),
             "image": container.get("image"), "cpu": resources.get("cpu"), "memory": resources.get("memory"),
-            "created_at": md.get("creationTimestamp"), "managed_by": "api" if m.get("managed_by") == "api" else "git"}
+            "example": m.get("example"), "created_at": md.get("creationTimestamp"), "managed_by": "api" if m.get("managed_by") == "api" else "git"}

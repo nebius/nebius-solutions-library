@@ -239,6 +239,9 @@ const TABS = [
   "Settings",
 ];
 export function sampleBody(e: Endpoint) {
+  // the definition's own example first (services/api/models.py `example`), else a body by protocol
+  if (e.example && typeof e.example === "object" && Object.keys(e.example).length)
+    return e.example;
   return e.protocol?.startsWith("openai")
     ? {
         messages: [{ role: "user", content: "Say hello in one sentence." }],

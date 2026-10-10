@@ -21,6 +21,8 @@ A model definition ("spec") is the shape of the console form:
      # pipeline parallel over Ethernet, is the default); scaling.min 1 | 0 starts and stops it, scaling.idle_s stops
      # it after that many seconds without a request (the control API's reconcile loop), no autoscaling in between
      "nodes": 2, "worker_command": "...", "interconnect": "none",
+     # a valid request body for the endpoint (the console's "Test request" tab, GET /v1/models `example`)
+     "example": {"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 64},
      # jobs only
      "cpu": "4", "memory": "16Gi", "disk_gi": 50, "grace_seconds": 300, "scratch": "network" | "local-nvme",
      "parameters": [{"name": "...", "type": "string", "default": "..."}]}
@@ -169,6 +171,8 @@ def validate(spec: dict) -> dict:
     kind = s.get("kind", "endpoint")
     if kind not in ("endpoint", "job"):
         raise HTTPException(400, "kind: endpoint | job")
+    if "example" in s and s["example"] is not None and not isinstance(s["example"], dict):
+        raise HTTPException(400, "example: a JSON object, a valid request body of the endpoint")
     if "automount_service_account_token" in s:
         if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
             raise HTTPException(400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token")
@@ -240,6 +244,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
     }
     if s.get("pod_metadata"):
         entry["podMetadata"] = s["pod_metadata"]
+    if isinstance(s.get("example"), dict):
+        entry["example"] = s["example"]
     for k in RESERVED:
         if k in s:
             entry[k] = s[k]

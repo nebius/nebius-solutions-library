@@ -123,5 +123,6 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "price_per_call": m.get("price_per_call"), "image": m.get("image"), "protocol": m.get("protocol"),
         "cold_start_s": m.get("cold_start_s"), "cold_start_class": m.get("cold_start_class"), "parameters": m.get("parameters", []),
         "endpoints": m.get("endpoints"), "task": m.get("task"), "managed_by": m.get("managed_by", "catalog"), "spec": m.get("spec"),
+        "example": m.get("example"),      # a valid request body (the console's "Test request" tab)
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
     }
