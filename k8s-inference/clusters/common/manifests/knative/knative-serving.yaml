@@ -65,7 +65,7 @@ spec:
       revision-timeout-seconds: "600"
       max-revision-timeout-seconds: "3600"
     deployment:
-      progress-deadline: "1800s"
+      progress-deadline: "3600s"   # a trillion-parameter model on a cold node: boot, drivers, image and weights take up to an hour (2026-10-10)
       # the logical registry host resolves only on the nodes (containerd hosts.toml, docs/IMAGES.md), not in the
       # cluster network: Knative keeps the reference as written (pin digests in the catalog where it matters)
       registries-skipping-tag-resolving: "registry.serverless2.local,nvcr.io"
