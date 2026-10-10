@@ -25,6 +25,23 @@ variable "fleet" {
     # The region whose project holds the registry, the backups bucket and the tenants' primary buckets.
     # Default: the control plane's region when it is also a GPU region, else the first region (sorted).
     hub_region = optional(string)
+    # GPU drivers on the nodes. Default: the Managed Kubernetes node image with the driver preset of each pool
+    # (pools.<name>.driver_preset). enabled = true: the node groups are created WITHOUT a driver preset and the
+    # NVIDIA GPU Operator (Nebius marketplace chart, clusters/common/apps/gpu-operator.yaml) installs the driver,
+    # the container toolkit, the device plugin and GPU feature discovery on every GPU node; the fleet's own
+    # nvidia-device-plugin release is then not installed. driver_version = the driver the operator installs
+    # (an image tag of the marketplace driver image; 580.173.02 is what the cuda13.0 preset ships on 2026-10);
+    # kernel_module = open | proprietary | auto (GPUDirect Storage needs the open modules); gds = GPUDirect
+    # Storage (the nvidia-fs module next to the driver). network_operator: the NVIDIA Network Operator (DOCA
+    # drivers) is installed first on clusters with an InfiniBand or B200 pool, as the Nebius documentation
+    # requires (null = that rule, true/false = always/never). docs/FLEET.md "GPU drivers".
+    gpu_operator = optional(object({
+      enabled          = optional(bool, false)
+      driver_version   = optional(string, "580.173.02")
+      kernel_module    = optional(string, "open")
+      gds              = optional(bool, true)
+      network_operator = optional(bool)
+    }), {})
 
     # Terraform state: one Object Storage bucket in the hub project (stack/bootstrap/state-bucket.sh creates
     # it); stack.sh passes bucket/endpoint to `terraform init`. Credentials: AWS_ACCESS_KEY_ID/SECRET env.
@@ -301,6 +318,10 @@ variable "fleet" {
 
   })
 
+  validation {
+    condition     = contains(["open", "proprietary", "auto"], var.fleet.gpu_operator.kernel_module) && (!var.fleet.gpu_operator.gds || var.fleet.gpu_operator.kernel_module != "proprietary")
+    error_message = "gpu_operator.kernel_module is open, proprietary or auto; GPUDirect Storage (gds) needs the open kernel modules."
+  }
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,22}$", var.fleet.name))
     error_message = "fleet.name: lowercase letters, digits and dashes, 2-23 characters (it prefixes cloud resource names)."

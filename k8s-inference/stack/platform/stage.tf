@@ -38,9 +38,20 @@ locals {
 
   # Chart list: clusters/common/apps/*.yaml (one shared release inventory).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
+  # Releases that depend on the fleet definition: the GPU Operator (and the Network Operator before it, on clusters
+  # with an InfiniBand or B200 pool) replace the fleet's nvidia-device-plugin release when gpu_operator.enabled
+  # (docs/FLEET.md "GPU drivers"); every other release is installed by placement alone.
+  cluster_pools    = try(local.clusters[local.id].pools, {})
+  network_operator = coalesce(local.f.gpu_operator.network_operator, anytrue([for pn, p in local.cluster_pools : p.interconnect == "infiniband" || startswith(p.platform, "gpu-b200")]))
+  app_enabled = {
+    gpu-operator         = local.f.gpu_operator.enabled
+    network-operator     = local.f.gpu_operator.enabled && local.network_operator
+    nvidia-device-plugin = !local.f.gpu_operator.enabled
+  }
   # Components this stage renders itself from templates (control-only manifests) or not at all.
   apps = { for n, a in local.apps_all : n => a if(
-    a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control)
+    (a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control))
+    && lookup(local.app_enabled, n, true)
   ) }
   helm_apps      = { for n, a in local.apps : n => a if a.kind == "helm" }
   manifest_apps  = { for n, a in local.apps : n => a if a.kind == "manifests" }
@@ -50,6 +61,11 @@ locals {
   gpu_prices = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
   values_override = {
     kueue = local.role.manager ? yamldecode(file("${local.repo}/clusters/control/values/kueue.yaml")) : {}
+    # the driver the operator installs (terraform.tfvars gpu_operator); the rest is clusters/common/values/gpu-operator.yaml
+    gpu-operator = {
+      driver = { version = local.f.gpu_operator.driver_version, kernelModuleType = local.f.gpu_operator.kernel_module }
+      gds    = { enabled = local.f.gpu_operator.gds }
+    }
     # warm spare nodes per pool (docs/FLEET.md "Warm spare nodes"): one pause Deployment per pool with warm_nodes > 0,
     # every pod sized to a whole node (the preset's GPU count) so one spare is one node
     overprovisioner = { deployments = [for pn, p in try(local.clusters[local.id].pools, {}) : {

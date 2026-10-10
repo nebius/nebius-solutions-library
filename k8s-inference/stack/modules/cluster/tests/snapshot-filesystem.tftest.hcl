@@ -76,3 +76,44 @@ run "shared_store_survives_gpu_scale_to_zero" {
     error_message = "Opt-in system mounting must not modify unrelated batch CPU nodes."
   }
 }
+
+run "gpu_operator_leaves_the_driver_preset_out" {
+  command = plan
+  variables {
+    gpu_operator = true
+    gpu_pools = {
+      gpu = {
+        platform      = "gpu-h100-sxm", preset = "1gpu-16vcpu-200gb", gpu_class = "h100"
+        capacity      = { type = "on-demand", reservation_ids = [] }
+        min_nodes     = 0, max_nodes = 1, endpoint_floor_gpus = 0
+        driver_preset = "cuda13.0", boot_disk_gib = 512
+        local_nvme    = false, local_nvme_mode = "kubelet-ephemeral"
+        interconnect  = "none", labels = {}
+      }
+      ib = {
+        platform      = "gpu-h100-sxm", preset = "8gpu-128vcpu-1600gb", gpu_class = "h100"
+        capacity      = { type = "on-demand", reservation_ids = [] }
+        min_nodes     = 0, max_nodes = 2, endpoint_floor_gpus = 0
+        driver_preset = "cuda13.0", boot_disk_gib = 512
+        local_nvme    = false, local_nvme_mode = "kubelet-ephemeral"
+        interconnect  = "infiniband", infiniband_fabric = "fabric-2", labels = {}
+      }
+    }
+  }
+  assert {
+    condition     = length(local.gpu_settings["gpu"]) == 0
+    error_message = "With the GPU Operator a plain pool has no gpu_settings at all (no driver preset, no DRA)."
+  }
+  assert {
+    condition     = local.gpu_settings["ib"] == { dra = true }
+    error_message = "With the GPU Operator an InfiniBand pool keeps DRA and drops the driver preset."
+  }
+}
+
+run "default_keeps_the_driver_preset" {
+  command = plan
+  assert {
+    condition     = local.gpu_settings["gpu"] == { drivers_preset = "cuda13.0" }
+    error_message = "Without the GPU Operator the pool's driver preset is on the node group."
+  }
+}

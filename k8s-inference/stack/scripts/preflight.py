@@ -24,6 +24,8 @@ out = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file
 if out.returncode:
     print(out.stderr); sys.exit(1)
 regions = json.loads(json.loads(out.stdout))
+operator = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file={tfvars}"], input="var.fleet.gpu_operator.enabled",
+                          capture_output=True, text=True).stdout.strip() == "true"
 k8s = subprocess.run(["terraform", "-chdir=stack/config", "console", f"-var-file={tfvars}"], input="var.fleet.kubernetes_version",
                      capture_output=True, text=True).stdout.strip().strip('"')
 
@@ -45,8 +47,9 @@ for rn, r in regions.items():
         m, err = matrix_cache[plat]
         if err:
             findings.append(f"{rn}/{pn}: compatibility matrix for {plat}/{k8s}: {err[:120]}"); continue
-        ok = any(drv == it.get("drivers_preset") and plat in it.get("compatible_platforms", [])
-                 for v in m.get("versions", []) if v.get("kubernetes_version") == k8s for it in v.get("items", []))
+        # with the GPU Operator (gpu_operator.enabled) the nodes carry no driver preset: nothing to match in the matrix
+        ok = operator or any(drv == it.get("drivers_preset") and plat in it.get("compatible_platforms", [])
+                             for v in m.get("versions", []) if v.get("kubernetes_version") == k8s for it in v.get("items", []))
         if not ok:
             findings.append(f"{rn}/{pn}: driver preset {drv} is not compatible with {plat} on Kubernetes {k8s}")
         # docs.nebius.com/compute/storage/local-disks (2026-10-08): local SSD only on gpu-b300-sxm / 8gpu-192vcpu-2768gb

@@ -64,6 +64,12 @@ variable "gpu_pools" {
   default = {}
 }
 
+variable "gpu_operator" {
+  description = "GPU node groups without a Managed Kubernetes driver preset: the NVIDIA GPU Operator installs the driver (terraform.tfvars gpu_operator.enabled)."
+  type        = bool
+  default     = false
+}
+
 variable "cpu_pools" {
   description = "CPU-only node groups for batch work without a GPU; the shape of `regions.*.cpu_pools` in terraform.tfvars."
   type = map(object({

@@ -250,6 +250,35 @@ nothing refills the spare. A spare serves every model whose GPU class and count 
 that region. It is not an extra application replica (see `scaling.min` for that), and InfiniBand pools do
 not take it (the autoscaler never adds InfiniBand nodes; keep `min_nodes` there).
 
+### GPU drivers: the node image or the NVIDIA GPU Operator (2026-10-10)
+
+Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tfvars`:
+
+| | Managed Kubernetes node image (default) | NVIDIA GPU Operator (`gpu_operator.enabled = true`) |
+|---|---|---|
+| Node group | `gpu_settings.drivers_preset = pools.<name>.driver_preset` (`cuda13.0`) | no `drivers_preset` (`dra = true` stays on InfiniBand pools) |
+| Driver, toolkit | baked into the Nebius image (`nebius.com/driverful=true`, `nebius.com/nvidia_driver_version`) | driver container (`nvidia-driver-daemonset`, one NVIDIADriver resource per platform from the Nebius chart), container toolkit sets the `nvidia` runtime |
+| Device plugin, GFD, NFD | the fleet's `nvidia-device-plugin` release (`clusters/common/apps/nvidia-device-plugin.yaml`) | the operator's (`gpu-operator.yaml`, namespace `nvidia-gpu-operator`); the fleet release is not installed |
+| RDMA / InfiniBand | OFED in the image, DraNet (Managed Kubernetes) advertises the NICs | NVIDIA Network Operator (`network-operator.yaml`, DOCA driver container) installed first on clusters with an InfiniBand or B200 pool (`gpu_operator.network_operator` overrides the rule), DraNet unchanged |
+| Driver version | whatever the preset ships (580.173.02 on 2026-10) | `gpu_operator.driver_version` (an image tag of the marketplace driver image: `crane ls cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/image/driver`) |
+| Kernel modules, GDS | the image's | `gpu_operator.kernel_module` (open, proprietary, auto) and `gpu_operator.gds` (GPUDirect Storage: the `nvidia-fs` module built next to the driver, needs the open modules) |
+| MIG | no (the node device plugin has no MIG manager) | the operator's MIG manager (`nvidia.com/mig.config` node label) |
+| DCGM metrics | the fleet's `dcgm-exporter` release | the same (the operator's exporter stays off) |
+
+Why one would switch: a driver version other than the preset's, GPUDirect Storage, MIG profiles or any other
+operator feature, and one driver stack that is the same on every platform. Why one would not: the node image is
+ready at boot, the operator's driver container compiles and loads the module after the node joins (about
+three to five minutes on a cold node, during which the node has no `nvidia.com/gpu` and the scale-from-zero of a
+model or run takes that much longer); a warm spare (`warm_nodes`) absorbs that.
+
+How a change rolls out: `./stack.sh apply platform <id>` installs the operators (the operands only touch nodes
+without the Nebius driver image, so running nodes are unaffected) and removes the fleet's device-plugin release,
+then `./stack.sh apply cloud` updates every GPU node group without a driver preset and Managed Kubernetes
+recreates the nodes with its deployment strategy (one at a time, drained first); each new node is taken by the
+operator. The order matters: with the operator installed second, the first driverless nodes would wait for it.
+Nodes with `dra = true` (InfiniBand pools) lose their `nvidia.com/gpu` the moment the fleet's device plugin is
+removed and get it back when they are recreated; plan the change for a quiet hour on those pools.
+
 ### Local NVMe: which platform/preset combinations have it (2026-10-08)
 
 Nebius exposes host NVMe to Managed Kubernetes nodes through the node-group template

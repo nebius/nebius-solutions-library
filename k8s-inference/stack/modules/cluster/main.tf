@@ -121,10 +121,12 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     # Only GPU workloads (with a matching toleration) land on GPU pools, so idle GPU nodes scale to zero.
     taints    = [{ key = "nvidia.com/gpu", value = "present", effect = "NO_SCHEDULE" }]
     boot_disk = { size_gibibytes = each.value.boot_disk_gib, type = "NETWORK_SSD" }
-    # dra (InfiniBand pools): Managed Kubernetes advertises the nodes' RDMA NICs through its DraNet DaemonSet (the
-    # `nebius.com/dranet-rdma-capable` label, ResourceSlices for DeviceClass ib.networking.nebius.ai) and disables its
-    # own legacy NVIDIA device plugin (the fleet runs the nvidia-device-plugin chart); multi-node runs claim the NICs.
-    gpu_settings = merge({ drivers_preset = each.value.driver_preset }, each.value.interconnect == "infiniband" ? { dra = true } : {})
+    # drivers_preset: the node image with the pool's driver preset; omitted when the GPU Operator installs the
+    # drivers (var.gpu_operator, docs/FLEET.md "GPU drivers"). dra (InfiniBand pools): Managed Kubernetes advertises
+    # the nodes' RDMA NICs through its DraNet DaemonSet (the `nebius.com/dranet-rdma-capable` label, ResourceSlices
+    # for DeviceClass ib.networking.nebius.ai) and disables its own legacy NVIDIA device plugin (the fleet runs the
+    # nvidia-device-plugin chart or the operator's); multi-node runs claim the NICs.
+    gpu_settings = length(local.gpu_settings[each.key]) > 0 ? local.gpu_settings[each.key] : null
     gpu_cluster  = each.value.interconnect == "infiniband" ? { id = nebius_compute_v1_gpu_cluster.ib[each.key].id } : null
     # Host-local NVMe of the preset: passed through and, in kubelet-ephemeral mode, formatted by Managed
     # Kubernetes as the kubelet's ephemeral storage (emptyDir, image layers); raw = devices left untouched.
@@ -276,6 +278,10 @@ locals {
     "[host.\"http://127.0.0.1:${var.image_cache.node_port}\"]",
     "  capabilities = [\"pull\", \"resolve\"]",
   ])
+  gpu_settings = { for pn, p in var.gpu_pools : pn => merge(
+    var.gpu_operator ? {} : { drivers_preset = p.driver_preset },
+    p.interconnect == "infiniband" ? { dra = true } : {}
+  ) }
   gpu_cloud_init = join("\n", concat(
     [
       "#cloud-config",

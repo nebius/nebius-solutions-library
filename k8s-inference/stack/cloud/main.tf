@@ -13,6 +13,7 @@ module "cluster" {
   control_plane_allowed_cidrs = each.value.allowed_cidrs
   system_pool                 = each.value.system_pool
   gpu_pools                   = each.value.pools
+  gpu_operator                = local.f.gpu_operator.enabled
   cpu_pools                   = try(each.value.cpu_pools, {})
   weights_filesystem          = each.value.weights_filesystem
   protect_data                = local.f.protect_data

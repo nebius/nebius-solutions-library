@@ -1,0 +1,10 @@
+# Helm values for the gpu-operator Application (worker clusters, when terraform.tfvars gpu_operator.enabled); version
+# pinned in clusters/common/apps/gpu-operator.yaml. driver.version, driver.kernelModuleType and gds.enabled are set
+# per fleet by stack/platform/stage.tf from terraform.tfvars `gpu_operator`. The chart's Nebius defaults stay: images
+# from the marketplace registry, one NVIDIADriver resource per platform (nebius.nvidiaDriverCRDPatch) with host-MOFED
+# GPUDirect RDMA on the H100/H200/B200/B300 platforms, the uvm_disable_hmm kernel parameter, tolerations for the
+# nvidia.com/gpu taint on every operand (daemonsets.tolerations).
+# The fleet runs its own DCGM exporter (clusters/common/apps/dcgm-exporter.yaml: pod labels, ServiceMonitor, the L40S
+# profiling workaround); the operator's stays off so no node exports its GPUs twice.
+dcgmExporter:
+  enabled: false
