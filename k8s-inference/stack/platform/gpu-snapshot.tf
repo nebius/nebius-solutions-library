@@ -9,15 +9,17 @@ locals {
       enabled      = true
       hostPath     = "/mnt/weights/gpu-snapshot"
       capacity     = "${local.clusters[var.target].weights_filesystem.size_gib}Gi"
-      nodeSelector = { "serverless2.nebius/snapshot-store" = "true" }
+      nodeSelector = local.snapshot_config.storage_node_selector
     }
     snapshot = {
       image = {
         agent    = { repository = "${local.images_host}/ghcr/ai-dynamo/snapshot/agent" }
         operator = { repository = "${local.images_host}/ghcr/ai-dynamo/snapshot/operator" }
       }
-      daemonset = { nodeSelector = { "serverless2.nebius/snapshot-store" = "true" } }
-      operator  = { nodeSelector = { "serverless2.nebius/pool" = "system", "serverless2.nebius/snapshot-store" = "true" } }
+      daemonset = { nodeSelector = local.snapshot_config.storage_node_selector }
+      operator = { nodeSelector = merge(local.snapshot_config.storage_node_selector, {
+        "serverless2.nebius/pool" = "system", "serverless2.nebius/snapshot-store" = "true"
+      }) }
     }
   }
 }
@@ -45,6 +47,12 @@ resource "kubernetes_namespace_v1" "gpu_snapshot" {
     precondition {
       condition     = can(yamldecode(local.snapshot_config.values_yaml))
       error_message = "gpu_snapshot.values_yaml must be valid YAML."
+    }
+    precondition {
+      condition = length(local.snapshot_config.storage_node_selector) > 0 && alltrue([
+        for key, value in local.snapshot_config.storage_node_selector : key != "" && try(trimspace(value) != "", false)
+      ])
+      error_message = "GPU Snapshot requires a nonempty attested storage selector without null labels."
     }
     precondition {
       condition     = local.snapshot_config.chart != ""

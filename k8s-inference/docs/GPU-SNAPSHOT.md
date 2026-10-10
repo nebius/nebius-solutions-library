@@ -54,6 +54,13 @@ before qualification, preferably while the pool is at zero. This explicitly
 qualifies the agent node set without rolling unrelated warm GPU pools. A backend
 may instead use a separately probed shared-filesystem selector.
 
+Set `gpu_snapshot.storage_node_selector` to that attested selector when reusing
+already-mounted GPU nodes, for example `{ "topology.kubernetes.io/region" = "eu-west2" }`
+after every selected mount is verified. Its default is the explicit
+`serverless2.nebius/snapshot-store=true` label. CPU operators additionally require
+the system pool's mount-attestation label. Avoid null label overrides: Helm
+provider merging can retain them and produce a different manifest from CLI rendering.
+
 The shared checkpoint directory is root-owned at `/mnt/weights/gpu-snapshot`,
 separate from weights and customer operation checkpoints. Node labels attest
 the shared mount on CPU operator nodes so cleanup/status remain available

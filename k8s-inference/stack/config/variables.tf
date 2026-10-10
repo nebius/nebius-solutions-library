@@ -97,10 +97,11 @@ variable "fleet" {
         namespace = optional(string, "gpu-snapshot-system")
         # A packaged local chart, or repository + chart + version. The backend
         # lives separately; this library does not publish its implementation.
-        chart       = optional(string, "")
-        repository  = optional(string)
-        version     = optional(string)
-        values_yaml = optional(string, "{}")
+        chart                 = optional(string, "")
+        repository            = optional(string)
+        version               = optional(string)
+        values_yaml           = optional(string, "{}")
+        storage_node_selector = optional(map(string), { "serverless2.nebius/snapshot-store" = "true" })
       }), {})
       image_cache_size_gib = optional(number) # default images.cache.size_gib
       # GPU node pools. capacity.type: spot (max_price caps the USD per GPU-hour, null follows the spot
