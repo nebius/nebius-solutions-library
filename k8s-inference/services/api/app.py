@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.12", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.0", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -231,9 +231,49 @@ def reconcile_models() -> dict:
     return results
 
 
+def idle_shutdown() -> list[str]:
+    """Multi-node endpoints (`nodes` > 1) with scaling.min 1 and scaling.idle_s: stopped (scaling.min written to 0 in
+    the fleet database, history entry "idle shutdown") once no request reached them for idle_s seconds, counted from
+    the later of the last request (the regional API stamps the LeaderWorkerSet on every authorized call) and the
+    moment the leader became Ready. Returns the ids stopped. Control API only."""
+    if not db.enabled():
+        return []
+    stopped = []
+    now = datetime.now(timezone.utc)
+    for m in list(catalog.all_models().values()):
+        spec = m.get("spec") or {}
+        sc = spec.get("scaling") or {}
+        if m.get("managed_by") != "api" or int(m.get("nodes") or 1) <= 1 or int(sc.get("min") or 0) < 1 or not sc.get("idle_s"):
+            continue
+        try:
+            busy = False
+            for cid in m.get("deployments") or {}:
+                region = kube.cluster_region(cid)
+                st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
+                marks = [st.get(k) for k in ("ready_at", "last_request_at") if st.get(k)]
+                if st["status"] != "ready" or not marks:
+                    busy = True                      # starting, or no Ready pod yet: nothing to measure
+                    continue
+                last = max(datetime.fromisoformat(x.replace("Z", "+00:00")) for x in marks)
+                if (now - last).total_seconds() < int(sc["idle_s"]):
+                    busy = True
+            if busy:
+                continue
+            new_spec = {**spec, "scaling": {**sc, "min": 0}}
+            entry = models.to_entry(new_spec, managed_by="api")
+            db.upsert_model(entry, new_spec, by="idle-shutdown", create_only=False)
+            catalog.invalidate()
+            stopped.append(m["name"])
+            log.info("idle shutdown: %s stopped after %ss without a request", m["name"], sc["idle_s"])
+        except Exception:
+            log.exception("idle shutdown check failed for %s", m["name"])
+    return stopped
+
+
 async def _reconcile_loop():
     while True:
         try:
+            await asyncio.to_thread(idle_shutdown)
             await asyncio.to_thread(reconcile_models)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -325,6 +365,8 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     m = _model(model)
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
+    if int(m.get("nodes") or 1) > 1:
+        kube.stamp_last_request(m["k8s_name"], m["namespace"])       # the control API's idle shutdown reads it
     return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
 
 
@@ -448,6 +490,12 @@ async def _forward(model: str, req: InvokeRequest, p: Principal, idempotency_key
 async def _sync(m: dict, req: InvokeRequest, p: Principal):
     """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget,
     spend and the per-call price are enforced there), else straight to the predictor."""
+    if int(m.get("nodes") or 1) > 1:
+        st = kube.endpoint_status(m["k8s_name"], m["namespace"], nodes=int(m["nodes"]))
+        if st["status"] != "ready":
+            raise HTTPException(503, f"endpoint {m['name']} is {st['status']} ({m['nodes']} nodes): a multi-node endpoint is started with "
+                                     f"PATCH /v1/endpoints/{m['k8s_name']} {{\"scaling\": {{\"min\": 1}}}} (or the console's Start button) and takes "
+                                     f"minutes to load; it stops again after scaling.idle_s without a request")
     if m.get("litellm_route"):
         url, headers = LITELLM_URL + m["litellm_route"], {"Authorization": f"Bearer {p.key}"}
     else:
@@ -562,6 +610,15 @@ def admin(p: Principal = Depends(principal)) -> Principal:
     return p
 
 
+def _deployed(m: dict, region: str) -> dict | None:
+    """The deployed object of an endpoint in a region: the KServe InferenceService, or the LeaderWorkerSet of a
+    multi-node endpoint (services/api/models.py `nodes`)."""
+    name, ns = m["k8s_name"], m["namespace"]
+    if int(m.get("nodes") or 1) > 1:
+        return kube.lws(name, ns) if region == REGION else kube.lws(name, ns, region)
+    return kube.isvc(name, ns) if region == REGION else kube.isvc(name, ns, region)
+
+
 def _endpoint_model(eid: str) -> dict:
     for m in catalog.all_models().values():
         if m["k8s_name"] == eid and m["mode"] != "run":
@@ -585,7 +642,7 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
             if region not in m["regions"]:
                 continue
             try:
-                i = kube.isvc(m["k8s_name"], m["namespace"]) if region == REGION else kube.isvc(m["k8s_name"], m["namespace"], region)
+                i = _deployed(m, region)
                 if i:
                     out.append(ep.to_public(m, i, region))
             except (HTTPException, ApiException):
@@ -600,7 +657,7 @@ def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(prin
     m = _endpoint_model(id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
-    i = (kube.isvc(m["k8s_name"], m["namespace"]) if region == REGION else kube.isvc(m["k8s_name"], m["namespace"], region)) or {}
+    i = _deployed(m, region) or {}
     if not i:
         raise HTTPException(404, f"endpoint {id} not deployed in {region}")
     return ep.to_public(m, i, region)

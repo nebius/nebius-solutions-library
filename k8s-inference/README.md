@@ -18,6 +18,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Endpoints that scale to zero, with a warm floor if you want one, and warm spare nodes per pool (`warm_nodes`) that any model can start on without an instance boot | KServe on Knative, one `InferenceService` per model and region; placeholder pods of negative priority hold the spares |
 | Queued endpoint calls and long jobs that survive spot preemption | Kubernetes Jobs with a checkpoint volume; Kueue admits them, `docs/JOBS.md` |
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
+| Multi-node endpoints: one model served from N whole nodes (`nodes` in the definition), started and stopped explicitly, stopped when idle | LeaderWorkerSet behind the same gateway route, authorization and LiteLLM entry as a one-pod endpoint; `docs/API.md`, "Multi-node endpoints" |
 | N regions, one queue | Kueue MultiKueue on a control cluster; a dispatcher sends each job to the cheapest free pool of the GPU class the model prefers, `docs/SCHEDULING.md` |
 | Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; `docs/IMAGES.md` |
 | Tenants | a namespace per cluster, a bucket and identity per region, API keys with budgets, Pod Security baseline, optional GPU quota and image allow-list |
@@ -195,7 +196,8 @@ platform ("Day 2" below).
 - Local NVMe exists only on the 8-GPU B300 preset today (`docs/FLEET.md`, "Local NVMe"); other presets
   reject `local_nvme = true`.
 - InfiniBand pools need 8-GPU presets and at least one node up (`min_nodes >= 1`), and all pods of one
-  multi-node run land in one pool. `docs/JOBS.md`, "Multi-node runs".
+  multi-node run land in one pool. `docs/JOBS.md`, "Multi-node runs". A multi-node endpoint on InfiniBand needs the
+  pool's `min_nodes` at its node count; over Ethernet (`interconnect: none`, the default) it scales from zero.
 - A node scaled from zero advertises about 80% of its boot disk minus 32 GiB as ephemeral storage. Size
   `boot_disk_gib` for the largest emptyDir a pod asks for, or keep `min_nodes >= 1`.
 - Reserved pools roll with zero surge; a full reservation cannot surge.

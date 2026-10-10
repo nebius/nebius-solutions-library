@@ -49,6 +49,7 @@ def normalise(doc: dict) -> dict:
         m["price_per_call"] = price.get("usd") if price.get("unit") == "call" else None
     m["gpu"] = f"{gpu.get('count', 1)}x {'/'.join(gpu.get('classes', []))}" if isinstance(gpu, dict) and gpu else (gpu or "none")
     m["gpu_classes"] = list(gpu.get("classes") or []) if isinstance(gpu, dict) else []    # preferred first (scheduling profile)
+    m["nodes"] = int(m.get("nodes") or rt.get("nodes") or 1)       # > 1: a multi-node endpoint (LeaderWorkerSet, services/api/models.py)
     m["cold_start_class"] = m.get("coldStartClass")
     dep = {(k if k != "hub" else HUB_REGION): (v or {}) for k, v in (m.get("deployments") or {"hub": {}}).items() if not (v or {}).get("paused")}
     m["deployments"] = dep

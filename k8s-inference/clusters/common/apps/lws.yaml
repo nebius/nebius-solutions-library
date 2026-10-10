@@ -1,0 +1,14 @@
+# LeaderWorkerSet (Kubernetes SIG, registry.k8s.io): the replica groups of multi-node endpoints, one model served by
+# N whole nodes (services/api/models.py `nodes`, charts/endpoint/templates/leaderworkerset.yaml, docs/API.md
+# "Multi-node endpoints"). CRD-bearing: wave 0. The chart's defaults; the controller runs on the system nodes.
+name: lws
+component: lws
+namespace: lws-system
+wave: '0'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: registry.k8s.io/lws/charts
+chart: lws
+version: v0.11.1
+helmValues: 'true'

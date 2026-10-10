@@ -1,4 +1,6 @@
 {{- $v := include "endpoint.values" . | fromYaml -}}
+{{- /* one pod per replica (KServe on Knative); several whole nodes per replica: leaderworkerset.yaml */ -}}
+{{- if le (int (default 1 $v.nodes)) 1 }}
 {{- $r := $v.resources -}}
 {{- $w := default (dict) (default (dict) $v.weights).sharedFilesystem -}}
 {{- $wenv := default (dict) (default (dict) $v.weights).env -}}
@@ -202,3 +204,4 @@ spec:
           claimName: {{ $v.name }}-{{ .name }}
       {{- end }}
     {{- end }}
+{{- end }}

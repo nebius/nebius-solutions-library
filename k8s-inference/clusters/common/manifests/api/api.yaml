@@ -93,6 +93,15 @@ rules:
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints
+  - apiGroups: [leaderworkerset.x-k8s.io]          # multi-node endpoints (`nodes` > 1): the replica group, its leader Service
+    resources: [leaderworkersets]                   # and the route to the gateway; the last-request stamp (idle shutdown)
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [patch, create, delete]
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [get, list, patch, create, delete]

@@ -8,7 +8,7 @@ locals {
     sharedFilesystem = {
       enabled      = true
       hostPath     = "/mnt/weights/gpu-snapshot"
-      capacity     = "${local.clusters[var.target].weights_filesystem.size_gib}Gi"
+      capacity     = "${local.snapshot_config.checkpoints_gib}Gi"
       nodeSelector = local.snapshot_config.storage_node_selector
     }
     snapshot = {

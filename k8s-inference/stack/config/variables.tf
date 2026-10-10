@@ -120,6 +120,10 @@ variable "fleet" {
         version               = optional(string)
         values_yaml           = optional(string, "{}")
         storage_node_selector = optional(map(string), { "serverless2.nebius/snapshot-store" = "true" })
+        # nominal capacity of the checkpoint claim on the shared filesystem (a static volume: the number is
+        # bookkeeping, the filesystem's real size applies, and a bound claim cannot be resized, so it does
+        # NOT follow weights_filesystem.size_gib; 2026-10-10: growing the filesystem broke the release)
+        checkpoints_gib = optional(number, 256)
       }), {})
       image_cache_size_gib = optional(number) # default images.cache.size_gib
       # GPU node pools. capacity.type: spot (max_price caps the USD per GPU-hour, null follows the spot
@@ -201,11 +205,11 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.10.12")
+        api        = optional(string, "0.11.0")
         dispatcher = optional(string, "0.2.6")
         jobs       = optional(string, "0.1.10")
         ops        = optional(string, "0.1.11")
-        ui         = optional(string, "0.5.4")
+        ui         = optional(string, "0.6.0")
       }), {})
     }), {})
 

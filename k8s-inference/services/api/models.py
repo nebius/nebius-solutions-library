@@ -14,6 +14,13 @@ A model definition ("spec") is the shape of the console form:
      "weights": {"path": "my-llm", "mount_path": "/weights", "env": {"HF_HOME": "/weights"}},
      "regions": ["eu-north1"],                                 # default: every region with a pool of a class
      "display_name": "...", "description": "...",
+     # endpoints on several whole nodes (one model served by N nodes, e.g. tensor x pipeline parallel): nodes > 1
+     # renders a LeaderWorkerSet instead of a KServe InferenceService (docs/API.md "Multi-node endpoints"):
+     # gpu.count is the GPUs per node (a whole-node preset), `command` runs on the leader, `worker_command` on the
+     # others, `interconnect` none | preferred | required (InfiniBand pools cannot scale from zero, so `none`,
+     # pipeline parallel over Ethernet, is the default); scaling.min 1 | 0 starts and stops it, scaling.idle_s stops
+     # it after that many seconds without a request (the control API's reconcile loop), no autoscaling in between
+     "nodes": 2, "worker_command": "...", "interconnect": "none",
      # jobs only
      "cpu": "4", "memory": "16Gi", "disk_gi": 50, "grace_seconds": 300, "scratch": "network" | "local-nvme",
      "parameters": [{"name": "...", "type": "string", "default": "..."}]}
@@ -37,7 +44,7 @@ from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube
 from pod_metadata import normalise as normalise_pod_metadata
-from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, REGION
+from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION
 from resilience import retry
 
 log = logging.getLogger("api")
@@ -126,18 +133,24 @@ def regions_for(classes: list[str], wanted: list[str] | None) -> list[str]:
     return sorted(cid for cid, pools in have.items() if not classes or any(p.get("gpu_class") in classes for p in pools))
 
 
-def pool_for(cid: str, classes: list[str], count: int = 1) -> str | None:
+def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, interconnect: str = "none") -> str | None:
     """The pool an endpoint of these classes is pinned to on a cluster: the first class that has a pool there
     whose nodes carry at least `count` GPUs (an 8-GPU replica never fits a 1-GPU preset); among those, reserved
-    before on-demand before spot (the fleet's capacity order: a reservation is paid for whether it serves or not),
-    then the smallest fitting preset (fewer idle GPUs on the node), plain pools before InfiniBand ones (those nodes
-    are for multi-node runs), then by name."""
+    pools first (a reservation is paid for whether it serves or not), then the smallest fitting preset (a 1-GPU
+    model must not boot an 8-GPU on-demand node, 2026-10-10), then on-demand before spot, plain pools before
+    InfiniBand ones (those nodes are for multi-node runs), then by name. A multi-node endpoint (`nodes` > 1) takes
+    whole nodes: only pools whose preset has exactly `count` GPUs; `interconnect` required = InfiniBand pools only,
+    preferred = those first."""
     order = {"reserved": 0, "on_demand": 1, "spot": 2}
     pools = [p for p in kube.fleet()["pools"].values() if (p.get("region") or REGION) == cid]
+    whole = int(nodes) > 1
     for c in classes:
-        cands = sorted((p for p in pools if p.get("gpu_class") == c and int(p.get("gpus_per_node") or 1) >= max(int(count), 1)),
-                       key=lambda p: (order.get(p.get("capacity"), 9), int(p.get("gpus_per_node") or 1),
-                                      (p.get("interconnect") or "none") != "none", p["pool"]))
+        cands = [p for p in pools if p.get("gpu_class") == c and (int(p.get("gpus_per_node") or 1) == int(count) if whole else int(p.get("gpus_per_node") or 1) >= max(int(count), 1))]
+        if whole and interconnect == "required":
+            cands = [p for p in cands if (p.get("interconnect") or "none") == "infiniband"]
+        ib_first = whole and interconnect == "preferred"
+        cands.sort(key=lambda p: (p.get("capacity") != "reserved", int(p.get("gpus_per_node") or 1), order.get(p.get("capacity"), 9),
+                                  ((p.get("interconnect") or "none") == "none") if ib_first else ((p.get("interconnect") or "none") != "none"), p["pool"]))
         if cands:
             return cands[0]["pool"]
     return None
@@ -190,6 +203,20 @@ def validate(spec: dict) -> dict:
                 scaling["container_concurrency"] = 0  # request-rate mode has no concurrency cap
             scaling.setdefault("window_s", 30)
         s["scaling"] = scaling
+        nodes = s.get("nodes", 1)
+        if not isinstance(nodes, int) or nodes < 1 or nodes > MULTINODE_MAX_NODES:
+            raise HTTPException(400, f"nodes: an integer from 1 to {MULTINODE_MAX_NODES}")
+        if nodes > 1:
+            if not (gpu.get("classes") and int(gpu.get("count") or 0) >= 1):
+                raise HTTPException(400, "nodes > 1: gpu.count (GPUs per node, a whole-node preset) and gpu.classes are required")
+            if s.get("interconnect", "none") not in ("none", "preferred", "required"):
+                raise HTTPException(400, "interconnect: none | preferred | required")
+            if scaling.get("max", 1) != max(scaling.get("min", 0), 1):
+                scaling["max"] = max(scaling.get("min", 0), 1)   # replica groups of whole nodes do not autoscale: max = running count
+            if scaling.get("buffer"):
+                raise HTTPException(400, "scaling.buffer: not for multi-node endpoints (their replicas are started and stopped explicitly)")
+            if "worker_command" in s and not _command(s["worker_command"]):
+                raise HTTPException(400, "worker_command: a string or a list")
     classes = list(gpu.get("classes") or [])
     fleet_classes = sorted({p.get("gpu_class") for p in kube.fleet()["pools"].values() if p.get("gpu_class")})
     if classes and fleet_classes and not any(c in fleet_classes for c in classes):
@@ -268,14 +295,32 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         if w:
             runtime["weights"] = {"sharedFilesystem": {"enabled": True, "path": w.get("path", mid), "mountPath": w.get("mount_path", "/weights")},
                                   "env": dict(w.get("env") or {})}
+        nodes, interconnect = int(s.get("nodes", 1)), s.get("interconnect", "none")
+        deployments = {r: ({"pool": p} if (p := (pool_for(r, classes, count, nodes, interconnect) if classes else "system")) else {}) for r in regions}
+        if nodes > 1:
+            # charts/endpoint/templates/leaderworkerset.yaml: one replica group of `nodes` pods, the leader serves
+            runtime["nodes"] = nodes
+            runtime["interconnect"] = interconnect
+            if (wc := _command(s.get("worker_command"))):
+                runtime["workerCommand"] = wc
+            if scaling.get("idle_s") is not None:
+                runtime["idleSeconds"] = int(scaling["idle_s"])
+            for r, d in deployments.items():
+                if not d.get("pool"):
+                    raise HTTPException(400, f"nodes: no pool in {r} whose preset has {count} GPUs per node for classes {classes}"
+                                        + (" with InfiniBand" if interconnect == "required" else ""))
+                pool = next((p for p in kube.fleet()["pools"].values() if p.get("pool") == d["pool"]), {})
+                if (pool.get("interconnect") or "none") == "infiniband" and interconnect != "none":
+                    d["ibDevices"] = kube.ib_devices_per_node([d["pool"]])     # DRA claim of every fabric NIC (docs/JOBS.md)
         entry.update({
             "mode": "sync", "protocol": protocol, "port": port,
             "endpoints": {"chat" if protocol == "openai" else "invoke": path, **({"ready": s["health_path"]} if s.get("health_path") else {})},
             "gpu": {"count": count, "classes": classes} if classes else "none",
             "servedModel": s.get("served_model"),
             "runtime": runtime,
+            **({"nodes": nodes} if nodes > 1 else {}),
             # no GPU class: the endpoint runs on the region's system pool (CPU nodes, label serverless2.nebius/pool=system)
-            "deployments": {r: ({"pool": p} if (p := (pool_for(r, classes, count) if classes else "system")) else {}) for r in regions},
+            "deployments": deployments,
         })
         if not entry["servedModel"]:
             entry.pop("servedModel")
@@ -362,7 +407,10 @@ def copy_regions() -> list[str]:
 
 PLURALS = {"InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservices"),
            "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
-           "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches")}
+           "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches"),
+           # multi-node endpoints (runtime.nodes > 1): the replica group, its leader Service's route to the gateway
+           "LeaderWorkerSet": ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets"),
+           "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes")}
 
 
 def render(entry: dict, cluster: str) -> list[dict]:
@@ -371,7 +419,9 @@ def render(entry: dict, cluster: str) -> list[dict]:
         yaml.safe_dump(entry, f, sort_keys=False)
         values = f.name
     try:
-        r = subprocess.run(["helm", "template", entry["id"], CHART_DIR, "-f", values, "--set", f"cluster={cluster}"],
+        # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
+        r = subprocess.run(["helm", "template", entry["id"], CHART_DIR, "-f", values, "--set", f"cluster={cluster}",
+                            "--set", f"domain={endpoint_domain(kube.cluster_region(cluster))}", "--set", f"ibClaimTemplate={INFINIBAND_CLAIM_TEMPLATE}"],
                            capture_output=True, text=True, timeout=60)
     finally:
         os.unlink(values)
@@ -392,6 +442,9 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
                   field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
         elif kind == "PersistentVolumeClaim":
             retry(kube.core(region).patch_namespaced_persistent_volume_claim, name, ns, doc,
+                  field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
+        elif kind == "Service":
+            retry(kube.core(region).patch_namespaced_service, name, ns, doc,
                   field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
         else:
             raise HTTPException(500, f"endpoint chart rendered an unexpected kind {kind}")
@@ -418,6 +471,8 @@ def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str
                 retry(kube.api(region).delete_namespaced_custom_object, g, v, ns, plural, name)
             elif kind == "PersistentVolumeClaim":
                 retry(kube.core(region).delete_namespaced_persistent_volume_claim, name, ns)
+            elif kind == "Service":
+                retry(kube.core(region).delete_namespaced_service, name, ns)
         except ApiException as e:
             if e.status != 404:
                 raise HTTPException(502, f"{kind} {name}: {e.reason}")

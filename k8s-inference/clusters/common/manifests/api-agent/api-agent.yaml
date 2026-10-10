@@ -45,6 +45,15 @@ rules:
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [leaderworkerset.x-k8s.io]      # multi-node endpoints (`nodes` > 1): the replica group, its leader
+    resources: [leaderworkersets]               # Service and the route to the gateway
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [create, patch, delete]
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [get, list, create, patch, delete]

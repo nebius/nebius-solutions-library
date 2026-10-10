@@ -456,7 +456,11 @@ export function DefinitionEditor({
               </select>
             </Field>
             {Boolean(f.gpu?.count) && (
-              <Field label="GPUs per replica">
+              <Field
+                label={
+                  (f.nodes ?? 1) > 1 ? "GPUs per node" : "GPUs per replica"
+                }
+              >
                 <input
                   className="input"
                   type="number"
@@ -467,6 +471,42 @@ export function DefinitionEditor({
                     set({ gpu: { ...f.gpu, count: Number(e.target.value) } })
                   }
                 />
+              </Field>
+            )}
+            {!isJob && Boolean(f.gpu?.count) && (
+              <Field
+                label="Nodes"
+                help="More than one: the model runs on this many whole nodes at once (tensor x pipeline parallel); started and stopped explicitly, no autoscaling"
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={64}
+                  value={f.nodes ?? 1}
+                  onChange={(e) => set({ nodes: Number(e.target.value) })}
+                />
+              </Field>
+            )}
+            {!isJob && (f.nodes ?? 1) > 1 && (
+              <Field
+                label="Interconnect"
+                help="none: pipeline parallel over Ethernet (pools scale from zero); required: InfiniBand pools only (keep min_nodes there)"
+              >
+                <select
+                  className="input"
+                  value={f.interconnect ?? "none"}
+                  onChange={(e) =>
+                    set({
+                      interconnect: e.target
+                        .value as ModelSpec["interconnect"],
+                    })
+                  }
+                >
+                  <option value="none">none (Ethernet)</option>
+                  <option value="preferred">preferred</option>
+                  <option value="required">required (InfiniBand)</option>
+                </select>
               </Field>
             )}
           </div>
@@ -684,6 +724,25 @@ export function DefinitionEditor({
                     placeholder="/health"
                   />
                 </Field>
+                {(f.nodes ?? 1) > 1 && (
+                  <Field
+                    label="Worker command"
+                    help="Runs on every node but the leader (the leader runs Command and serves the port); LWS_LEADER_ADDRESS, NODE_RANK, NNODES, GPUS_PER_NODE, MASTER_ADDR are set"
+                  >
+                    <textarea
+                      className="input"
+                      rows={2}
+                      value={
+                        typeof f.worker_command === "string"
+                          ? f.worker_command
+                          : (f.worker_command ?? []).join(" ")
+                      }
+                      onChange={(e) =>
+                        set({ worker_command: e.target.value || undefined })
+                      }
+                    />
+                  </Field>
+                )}
                 <Field label="Shared weights path">
                   <input
                     className="input"

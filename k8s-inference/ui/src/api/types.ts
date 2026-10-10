@@ -73,6 +73,11 @@ export interface ModelSpec {
   regions?: string[];
   display_name?: string;
   description?: string;
+  // endpoints on several whole nodes (LeaderWorkerSet): gpu.count = GPUs per node, command on the leader,
+  // worker_command on the others; scaling.min 1/0 starts/stops, scaling.idle_s stops after that many idle seconds
+  nodes?: number;
+  worker_command?: string | string[];
+  interconnect?: "none" | "preferred" | "required";
   cpu?: string;
   memory?: string;
   disk_gi?: number;
@@ -167,6 +172,13 @@ export interface Endpoint {
   image?: string;
   cpu?: string;
   memory?: string;
+  nodes?: number; // > 1: a multi-node endpoint (one replica group of this many whole nodes)
+  interconnect?: string;
+  pods_ready?: number | null;
+  startup_s?: number | null; // newest pod: created -> Ready (node boot, driver, image pull and model load included)
+  started_at?: string;
+  ready_at?: string;
+  last_request_at?: string;
 }
 
 export interface FleetPool {

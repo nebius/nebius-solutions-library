@@ -19,6 +19,8 @@ def scaling_patch(sc: dict) -> dict:
 
 
 def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
+    if isvc.get("kind") == "LeaderWorkerSet" or int(m.get("nodes") or 1) > 1:
+        return _lws_public(m, isvc, region)
     pred, md = isvc.get("spec", {}).get("predictor", {}), isvc.get("metadata", {})
     st = kube.endpoint_status(m["k8s_name"], m["namespace"]) if region == REGION else kube.endpoint_status(m["k8s_name"], m["namespace"], region)
     containers = pred.get("containers") or []
@@ -47,8 +49,34 @@ def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
             "target_concurrency": pred.get("scaleTarget"), "gpu": m.get("gpu"), "protocol": m.get("protocol"),
             "scaling": scaling, "timeout_s": pred.get("timeout", 600),
             "image": container.get("image"), "cpu": resources.get("cpu"), "memory": resources.get("memory"),
+            "nodes": 1, "startup_s": st.get("startup_s"), "started_at": st.get("started_at"), "ready_at": st.get("ready_at"),
             "created_at": md.get("creationTimestamp"),
             # the model's record says who owns it (api: defined through POST /v1/models, editable in the console; git: a
             # built-in class); nothing on the InferenceService carries that (the console disabled every endpoint's
             # scaling controls, 2026-10-10)
             "managed_by": "api" if m.get("managed_by") == "api" else "git"}
+
+
+def _lws_public(m: dict, obj: dict, region: str) -> dict:
+    """A multi-node endpoint (services/api/models.py `nodes`): one LeaderWorkerSet replica group of `nodes` pods;
+    `replicas` 1 or 0 is started or stopped, there is no autoscaling in between, `idle_s` stops it (control API)."""
+    md, spec = obj.get("metadata", {}), obj.get("spec", {})
+    nodes = int((md.get("annotations") or {}).get("serverless2.nebius/nodes") or m.get("nodes") or spec.get("leaderWorkerTemplate", {}).get("size") or 1)
+    st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=nodes)
+    leader = (spec.get("leaderWorkerTemplate", {}).get("leaderTemplate") or {}).get("spec", {})
+    containers = leader.get("containers") or []
+    container = containers[0] if containers else {}
+    resources = container.get("resources", {}).get("requests", {})
+    saved = (m.get("spec") or {}).get("scaling") or {}
+    idle = int((md.get("annotations") or {}).get("serverless2.nebius/idle-s") or saved.get("idle_s") or 0)
+    scaling = {"min": int(spec.get("replicas", 0)), "max": max(int(spec.get("replicas", 0)), 1), "metric": "none", "idle_s": idle}
+    return {"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": region,
+            "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke", "status": "error" if st["status"] == "unavailable" else st["status"],
+            "replicas_ready": st["replicas_ready"], "min_replicas": scaling["min"], "max_replicas": scaling["max"],
+            "nodes": nodes, "interconnect": (md.get("annotations") or {}).get("serverless2.nebius/interconnect", "none"),
+            "pods_ready": st.get("pods_ready"), "startup_s": st.get("startup_s"), "started_at": st.get("started_at"), "ready_at": st.get("ready_at"),
+            "last_request_at": st.get("last_request_at"), "scale_to_zero_after_s": idle,
+            "target_concurrency": None, "gpu": m.get("gpu"), "protocol": m.get("protocol"),
+            "scaling": scaling, "timeout_s": int((m.get("spec") or {}).get("timeout_s") or 600),
+            "image": container.get("image"), "cpu": resources.get("cpu"), "memory": resources.get("memory"),
+            "created_at": md.get("creationTimestamp"), "managed_by": "api" if m.get("managed_by") == "api" else "git"}

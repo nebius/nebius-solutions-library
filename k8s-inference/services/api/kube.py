@@ -159,22 +159,82 @@ def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
         raise HTTPException(502, f"kserve: {e.reason}")
 
 
-def endpoint_status(name: str, ns: str, region: str = REGION) -> dict:
-    """Live KServe state for the catalog: ready / scaled-to-zero / deploying / unavailable."""
+LWS = ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets")
+LAST_REQUEST_ANNOTATION = f"{LABEL}/last-request-at"
+
+
+def lws(name: str, ns: str, region: str = REGION) -> dict | None:
+    """The LeaderWorkerSet of a multi-node endpoint (services/api/models.py `nodes`), None when absent."""
+    try:
+        return retry(api(region).get_namespaced_custom_object, *LWS, ns, name)
+    except ApiException as e:
+        if e.status == 404:
+            return None
+        raise HTTPException(502, f"leaderworkerset: {e.reason}")
+
+
+def _startup(pods: list) -> dict:
+    """Start-up timing of the newest pod of an endpoint: created -> Ready (the node's boot, driver, image pull and
+    model load are all inside it). Absent until a pod is Ready."""
+    pods = [p for p in pods if getattr(getattr(p, "metadata", None), "creation_timestamp", None)]
+    newest = max(pods, key=lambda p: p.metadata.creation_timestamp) if pods else None
+    if not newest:
+        return {}
+    ready = next((c for c in (newest.status.conditions or []) if c.type == "Ready" and c.status == "True"), None)
+    out = {"started_at": newest.metadata.creation_timestamp.isoformat().replace("+00:00", "Z")}
+    if ready and ready.last_transition_time:
+        out["ready_at"] = ready.last_transition_time.isoformat().replace("+00:00", "Z")
+        out["startup_s"] = round((ready.last_transition_time - newest.metadata.creation_timestamp).total_seconds())
+    return out
+
+
+def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) -> dict:
+    """Live state for the catalog: ready / scaled-to-zero / deploying / unavailable, the ready replicas and the
+    start-up timing of the newest pod. KServe InferenceService (one pod per replica) or, for `nodes` > 1, the
+    LeaderWorkerSet whose leader pods serve (a replica is ready when its leader is)."""
     hit = _isvc_cache.get(f"{region}/{ns}/{name}")
     if hit and hit[0] > time.time():
         return hit[1]
     out = {"status": "unavailable", "replicas_ready": None}
     try:
-        i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
-        ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in i.get("status", {}).get("conditions", []))
-        pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
-        n = sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
-        out = {"status": "ready" if n else ("scaled-to-zero" if ready and not pods else "deploying"), "replicas_ready": n}
+        if nodes > 1:
+            i = retry(api(region).get_namespaced_custom_object, *LWS, ns, name)
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}").items
+            leaders = [p for p in pods if p.metadata.labels.get("leaderworkerset.sigs.k8s.io/worker-index") == "0"]
+            n = sum(1 for p in leaders if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
+            stopped = int(i.get("spec", {}).get("replicas", 0)) == 0
+            out = {"status": "ready" if n else ("scaled-to-zero" if stopped and not pods else "deploying"), "replicas_ready": n,
+                   "nodes": nodes, "pods_ready": sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))),
+                   **_startup(leaders)}
+            if (last := (i.get("metadata", {}).get("annotations") or {}).get(LAST_REQUEST_ANNOTATION)):
+                out["last_request_at"] = last
+        else:
+            i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
+            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in i.get("status", {}).get("conditions", []))
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
+            n = sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
+            out = {"status": "ready" if n else ("scaled-to-zero" if ready and not pods else "deploying"), "replicas_ready": n, **_startup(pods)}
     except ApiException:
         pass
     _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out
+
+
+_last_stamp: dict[str, float] = {}
+
+
+def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_interval_s: int = 60) -> None:
+    """Record on a multi-node endpoint's LeaderWorkerSet that it was called now (annotation, at most once a minute):
+    the control API's idle shutdown reads it (services/api/app.py idle_shutdown). Cheap and best-effort."""
+    now = time.time()
+    if _last_stamp.get(name, 0) + min_interval_s > now:
+        return
+    _last_stamp[name] = now
+    body = {"metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}}
+    try:
+        api(region).patch_namespaced_custom_object(*LWS, ns, name, body)
+    except ApiException:
+        pass
 
 
 def pool_usage(cluster: str, pool: str) -> dict:

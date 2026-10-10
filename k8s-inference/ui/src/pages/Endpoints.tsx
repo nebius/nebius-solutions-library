@@ -136,10 +136,26 @@ export function Endpoints() {
                       <td>{e.region}</td>
                       <td>
                         {e.replicas_ready ?? "—"}
+                        {(e.nodes ?? 1) > 1 && (
+                          <span className="small muted">
+                            {" "}
+                            × {e.nodes} nodes
+                          </span>
+                        )}
                         <div className="small muted">
                           {e.min_replicas != null
-                            ? `${e.min_replicas}–${e.max_replicas} configured`
+                            ? (e.nodes ?? 1) > 1
+                              ? e.min_replicas
+                                ? "started"
+                                : "stopped"
+                              : `${e.min_replicas}–${e.max_replicas} configured`
                             : "State unavailable"}
+                          {e.startup_s != null && (
+                            <span title={`started ${fmt.dt(e.started_at)}, ready ${fmt.dt(e.ready_at)}`}>
+                              {" "}
+                              · last start-up {fmt.secs(e.startup_s)}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td title={fmt.dt(e.created_at)}>
@@ -306,6 +322,21 @@ export function EndpointDetail({
       setBusy(false);
     }
   }
+  async function startStop(min: 0 | 1) {
+    // a multi-node endpoint runs its replica group of whole nodes while scaling.min is 1 (no autoscaling);
+    // the platform stops it after scaling.idle_s without a request
+    if (!e) return;
+    setBusy(true);
+    try {
+      await api().updateEndpoint(id, { scaling: { min, max: 1 } }, e.region);
+      toast(min ? "Starting: the nodes boot and the model loads, usually 10-20 minutes" : "Stopping");
+      reload();
+    } catch (err) {
+      toast((err as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function deleteEndpoint() {
     if (!e) return;
     setBusy(true);
@@ -333,6 +364,16 @@ export function EndpointDetail({
         region={e.region}
         actions={
           <>
+            {(e.nodes ?? 1) > 1 && editable && (
+              <Button
+                view="action"
+                size="l"
+                disabled={busy}
+                onClick={() => startStop(e.min_replicas ? 0 : 1)}
+              >
+                {e.min_replicas ? "Stop" : "Start"}
+              </Button>
+            )}
             <Button
               view="normal"
               size="l"
@@ -409,7 +450,31 @@ export function EndpointDetail({
                 <dt>Region</dt>
                 <dd>{e.region}</dd>
                 <dt>Ready replicas</dt>
-                <dd>{e.replicas_ready ?? "Unknown"}</dd>
+                <dd>
+                  {e.replicas_ready ?? "Unknown"}
+                  {(e.nodes ?? 1) > 1 &&
+                    ` (${e.pods_ready ?? 0} of ${e.nodes} node pods ready)`}
+                </dd>
+                {(e.nodes ?? 1) > 1 && (
+                  <>
+                    <dt>Nodes per replica</dt>
+                    <dd>
+                      {e.nodes} whole nodes, interconnect {e.interconnect}
+                    </dd>
+                  </>
+                )}
+                <dt>Last start-up</dt>
+                <dd title={e.started_at ? `started ${fmt.dt(e.started_at)}, ready ${fmt.dt(e.ready_at)}` : undefined}>
+                  {e.startup_s != null
+                    ? `${fmt.secs(e.startup_s)} (pod created to Ready: node boot, driver, image, weights)`
+                    : "No pod has become ready yet"}
+                </dd>
+                {e.last_request_at && (
+                  <>
+                    <dt>Last request</dt>
+                    <dd>{fmt.ago(e.last_request_at)}</dd>
+                  </>
+                )}
               </dl>
             </DetailCard>
             <DetailCard title="Scaling">

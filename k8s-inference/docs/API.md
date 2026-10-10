@@ -90,6 +90,45 @@ The acceptance probe of the models stage uses this path: with `acceptance.exampl
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as
 the first model of the console.
 
+## Multi-node endpoints
+
+An endpoint definition with `nodes` > 1 serves one model from that many whole nodes at once (tensor-parallel inside
+a node, pipeline- or expert-parallel across them): the platform renders a LeaderWorkerSet (Kubernetes SIG) instead
+of a KServe InferenceService. `gpu.count` is the GPUs per node and must be a whole-node preset of the class
+(`8` on H100/H200/B200/B300); `command` runs on the leader, which serves `port`, `worker_command` on the other
+nodes; every pod gets `NNODES`, `GPUS_PER_NODE`, `WORLD_SIZE`, `NODE_RANK`, `MASTER_ADDR` (the leader's hostname),
+`MASTER_PORT` and `NCCL_SOCKET_IFNAME` next to the LeaderWorkerSet's own `LWS_LEADER_ADDRESS`, `LWS_GROUP_SIZE`
+and `LWS_WORKER_INDEX`, so vLLM's multi-node recipe works unchanged:
+
+```json
+{"id": "kimi-k3", "kind": "endpoint", "image": "vllm/vllm-openai:v0.31.0", "protocol": "openai", "port": 8000,
+ "nodes": 2, "gpu": {"count": 8, "classes": ["b200"]}, "resources": {"cpu": "120", "memory": "1500Gi"}, "shm_gib": 32,
+ "command": "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$LWS_GROUP_SIZE; vllm serve /weights/... --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray",
+ "worker_command": "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$LWS_LEADER_ADDRESS",
+ "health_path": "/health", "weights": {"path": "kimi-k3", "env": {"HF_HOME": "/weights"}},
+ "scaling": {"min": 0, "idle_s": 1800}, "regions": ["us-central1"]}
+```
+
+Placement: the pool whose preset has exactly `gpu.count` GPUs per node, reserved before on-demand before spot;
+`interconnect` `none` (default) prefers plain pools and runs NCCL over Ethernet, which is right for pipeline
+parallelism and lets the pool scale from zero; `preferred` takes an InfiniBand pool when the region has one,
+`required` only those, and the pods then claim every fabric NIC through DRA. The cluster autoscaler never adds
+InfiniBand nodes, so an InfiniBand multi-node endpoint needs the pool's `min_nodes` set to its node count.
+
+Start and stop, no autoscaling in between: `scaling.min` 1 starts the replica group (the nodes boot, the drivers
+install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; the console's Start/Stop button
+and `PATCH /v1/endpoints/{id} {"scaling": {"min": 1}}` do that. `scaling.idle_s` stops it after that many seconds
+without a request, measured by the control API's reconcile loop from the later of the last authorized request (the
+regional API stamps the LeaderWorkerSet) and the moment the leader became Ready; the stop is a normal definition
+write (history entry by `idle-shutdown`). A call to a stopped or starting multi-node endpoint gets 503 with that
+explanation. The Service and the gateway route of the leader carry a KServe predictor's name
+(`<id>-predictor.models.<domain>`), so authorization, the certificate, LiteLLM and `:invoke` are the same as for
+a one-pod endpoint.
+
+Start-up time: every endpoint (both kinds) reports `startup_s`, `started_at` and `ready_at` of its newest pod
+(`GET /v1/endpoints`): pod created to Ready, which includes a cold node's boot and driver install, the image pull
+and the model load; the console shows it as "Last start-up", the Endpoints dashboard as a table by model.
+
 ## Internal substrate shape (documented, not served)
 
 The internal shape mirrors public `nebius.ai.v1` Endpoint and Job plus the

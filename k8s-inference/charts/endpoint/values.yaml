@@ -83,3 +83,19 @@ weights:
     prepare: true          # init container: mkdir -p and chmod 1777 of the directory (busybox)
     prepareImage: registry.serverless2.local/docker/library/busybox:1.36
   env: {}                  # extra NAME: value env vars for the runtime, e.g. HF_HOME: /weights
+# Multi-node endpoints (nodes > 1, docs/API.md "Multi-node endpoints"): a LeaderWorkerSet of `nodes` pods on whole nodes
+# (resources.gpu = the preset's GPUs) instead of the InferenceService; the leader runs `command` and serves `port`,
+# the workers run `workerCommand`; every pod gets NNODES, GPUS_PER_NODE, WORLD_SIZE, NODE_RANK, MASTER_ADDR (the
+# leader) and MASTER_PORT next to the LeaderWorkerSet's own LWS_* variables. scaling.minReplicas = replica groups
+# (0 stops, 1 runs); maxReplicas is not used. A Service and an HTTPRoute named <name>-predictor on the gateway
+# (hostname <name>-predictor.<namespace>.<domain>) keep the shape of a KServe endpoint, so the SecurityPolicy, the
+# certificate and LiteLLM registration are the same.
+nodes: 1
+workerCommand: []          # the workers' command (default: the leader's)
+interconnect: none         # none | preferred | required (the API picks the pool; ibDevices is set when it is an InfiniBand pool)
+ibDevices: 0               # fabric NICs claimed per pod through DRA (ResourceClaimTemplate <ibClaimTemplate>-<n>)
+ibClaimTemplate: ib
+idleSeconds: 0             # informational on the object; the control API stops the group after this many idle seconds
+domain: ""                 # the gateway's endpoint domain of the cluster (the API sets it)
+gatewayName: serverless2-external
+gatewayNamespace: envoy-gateway-system

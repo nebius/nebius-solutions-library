@@ -124,7 +124,7 @@ prometheus:
 kube-state-metrics:
   metricLabelsAllowlist:
     - nodes=[serverless2.nebius/pool,serverless2.nebius/capacity,nvidia.com/gpu.product]
-    - pods=[serving.kserve.io/inferenceservice,job-name,kueue.x-k8s.io/queue-name,serverless2.nebius/tenant]
+    - pods=[serving.kserve.io/inferenceservice,job-name,kueue.x-k8s.io/queue-name,serverless2.nebius/tenant,serverless2.nebius/model,serverless2.nebius/role]
   rbac:
     extraRules:
       - apiGroups: [serving.kserve.io]
