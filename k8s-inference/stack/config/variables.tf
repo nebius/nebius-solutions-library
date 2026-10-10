@@ -33,8 +33,9 @@ variable "fleet" {
     # (an image tag of the marketplace driver image; 580.173.02 is what the cuda13.0 preset ships on 2026-10);
     # kernel_module = open | proprietary | auto (GPUDirect Storage needs the open modules); gds = GPUDirect
     # Storage (the nvidia-fs module next to the driver). network_operator: the NVIDIA Network Operator (DOCA
-    # drivers) is installed first on clusters with an InfiniBand or B200 pool, as the Nebius documentation
-    # requires (null = that rule, true/false = always/never). docs/FLEET.md "GPU drivers".
+    # drivers for the nodes' Mellanox NICs) is installed before the GPU Operator on every worker cluster (the
+    # Nebius driver profiles wait for it on any node with such a NIC: InfiniBand pools, B200/B300 nodes); false
+    # leaves it out on a fleet whose nodes have no Mellanox NIC. docs/FLEET.md "GPU drivers".
     gpu_operator = optional(object({
       enabled          = optional(bool, false)
       driver_version   = optional(string, "580.173.02")

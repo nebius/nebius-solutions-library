@@ -38,11 +38,12 @@ locals {
 
   # Chart list: clusters/common/apps/*.yaml (one shared release inventory).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
-  # Releases that depend on the fleet definition: the GPU Operator (and the Network Operator before it, on clusters
-  # with an InfiniBand or B200 pool) replace the fleet's nvidia-device-plugin release when gpu_operator.enabled
-  # (docs/FLEET.md "GPU drivers"); every other release is installed by placement alone.
-  cluster_pools    = try(local.clusters[local.id].pools, {})
-  network_operator = coalesce(local.f.gpu_operator.network_operator, anytrue([for pn, p in local.cluster_pools : p.interconnect == "infiniband" || startswith(p.platform, "gpu-b200")]))
+  # Releases that depend on the fleet definition: the GPU Operator and, before it, the Network Operator replace the
+  # fleet's nvidia-device-plugin release when gpu_operator.enabled (docs/FLEET.md "GPU drivers"); every other release
+  # is installed by placement alone. The Network Operator goes wherever the GPU Operator goes unless
+  # gpu_operator.network_operator = false: the Nebius driver profiles of every SXM platform wait for MOFED on nodes
+  # with a Mellanox NIC (2026-10-10: a B300 node without InfiniBand waited forever without it).
+  network_operator = coalesce(local.f.gpu_operator.network_operator, true)
   app_enabled = {
     gpu-operator         = local.f.gpu_operator.enabled
     network-operator     = local.f.gpu_operator.enabled && local.network_operator

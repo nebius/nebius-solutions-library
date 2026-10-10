@@ -32,7 +32,7 @@ fleet = {
   # Every region is a project of its own (one project = one region on Nebius) with its own subnet.
   # GPU drivers: the Managed Kubernetes node image by default (pools.<name>.driver_preset, cuda13.0). Alternatively
   # the NVIDIA GPU Operator installs the driver (plus toolkit, device plugin, feature discovery, GDRCopy) on nodes
-  # created without a preset; the Network Operator precedes it on InfiniBand/B200 clusters (docs/FLEET.md "GPU drivers").
+  # created without a preset, the Network Operator (DOCA drivers) before it (docs/FLEET.md "GPU drivers").
   # gpu_operator = { enabled = true, driver_version = "580.173.02", kernel_module = "open", gds = true }
 
   regions = {

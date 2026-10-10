@@ -2,8 +2,7 @@
 # build of the operator installs the driver, the container toolkit, the device plugin, GPU feature discovery, node
 # feature discovery, the MIG manager and GDRCopy on every GPU node that carries no Managed Kubernetes driver image
 # (its NFD worker and operands skip nodes labelled nebius.com/driverful=true). Installed on the worker clusters
-# instead of the nvidia-device-plugin release; the Network Operator (network-operator.yaml) precedes it on clusters
-# with an InfiniBand or B200 pool. The driver version, kernel module flavour and GPUDirect Storage come from
+# instead of the nvidia-device-plugin release; the Network Operator (network-operator.yaml) precedes it. The driver version, kernel module flavour and GPUDirect Storage come from
 # terraform.tfvars (stack/platform/stage.tf values_override); everything else is the chart's default.
 name: gpu-operator
 component: gpu-operator

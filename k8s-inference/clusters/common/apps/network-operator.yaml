@@ -1,7 +1,8 @@
 # NVIDIA Network Operator (Nebius marketplace build): the DOCA/OFED drivers for the nodes' Mellanox NICs, installed
-# BEFORE the GPU Operator (wave 0, the order the Nebius documentation requires) on clusters with an InfiniBand or
-# B200 pool when the fleet runs the GPU Operator (terraform.tfvars gpu_operator, stack/platform/stage.tf
-# app_enabled); nodes with the Managed Kubernetes driver image carry the drivers already and are left alone.
+# BEFORE the GPU Operator (wave 0, the order the Nebius documentation requires) on every worker cluster when the
+# fleet runs the GPU Operator (terraform.tfvars gpu_operator, stack/platform/stage.tf app_enabled; the driver pod of
+# a node with a Mellanox NIC waits for it, verified on a B300 node without InfiniBand on 2026-10-10); nodes with the
+# Managed Kubernetes driver image carry the drivers already and are left alone.
 name: network-operator
 component: network-operator
 namespace: nvidia-network-operator
