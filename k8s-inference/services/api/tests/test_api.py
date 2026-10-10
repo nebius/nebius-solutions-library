@@ -1412,3 +1412,14 @@ def test_endpoint_of_an_api_model_is_api_managed(client, admin_keys, monkeypatch
     r = c.get("/v1/endpoints/owned?region=eu-north1", headers=H)
     assert r.status_code == 200, r.text
     assert r.json()["managed_by"] == "api"
+
+
+def test_fleet_live_lists_pools_and_clusters(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr(kube, "pool_usage", lambda cluster, pool: {"nodes_ready": 1, "gpus_total": 1, "gpus_used": 0})
+    monkeypatch.setattr(kube, "cluster_summary", lambda region: {"reachable": True, "nodes_ready": 3, "gpu_nodes_ready": 1, "kubernetes_version": "v1.35.7"})
+    r = c.get("/v1/fleet?live=true", headers=H)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["pools"] and d["pools"][0]["nodes_ready"] == 1
+    assert d["clusters"] and d["clusters"][0]["kubernetes_version"] == "v1.35.7" and d["clusters"][0]["reachable"]

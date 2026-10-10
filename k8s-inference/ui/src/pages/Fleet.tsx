@@ -19,12 +19,50 @@ export function Fleet() {
         <div>
           <h1>Fleet</h1>
           <p>
-            The GPU pools Terraform manages, per region, and what is up right now. Pools scale from zero
-            and back; a warm spare node shows as a ready node with no GPU in use.
+            The clusters and GPU pools Terraform manages, per region, and what is up right now. Pools scale
+            from zero and back; a warm spare node shows as a ready node with no GPU in use.
           </p>
         </div>
       </div>
       {loading && !data && <Loading />}
+      {data?.clusters && data.clusters.length > 0 && (
+        <div className="card tbl-wrap" style={{ marginBottom: 16 }}>
+          <h2 style={{ margin: "12px 16px" }}>Clusters</h2>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Cluster</th>
+                <th>Region</th>
+                <th>Project</th>
+                <th>Roles</th>
+                <th>Kubernetes</th>
+                <th>Nodes ready</th>
+                <th>GPU nodes</th>
+                <th>API</th>
+                <th>Grafana</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.clusters.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <strong>{c.id}</strong>
+                    {!c.reachable && <div className="small muted">unreachable from the control plane</div>}
+                  </td>
+                  <td>{c.region}</td>
+                  <td className="small">{c.project ?? "—"}</td>
+                  <td>{c.roles.join(", ")}</td>
+                  <td>{c.kubernetes_version ?? "—"}</td>
+                  <td>{c.nodes_ready ?? "—"}</td>
+                  <td>{c.gpu_nodes_ready ?? "—"}</td>
+                  <td>{c.api_url ? <a href={c.api_url + "/healthz"} target="_blank" rel="noreferrer">API</a> : "—"}</td>
+                  <td>{c.grafana_url ? <a href={c.grafana_url} target="_blank" rel="noreferrer">Grafana</a> : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {data && pools.length === 0 && <Empty>No GPU pools in this fleet.</Empty>}
       {regions.map((region) => (
         <div className="card tbl-wrap" key={region} style={{ marginBottom: 16 }}>

@@ -13,7 +13,7 @@ import artifacts, billing, catalog, config as cfg, db, jobs, kube, models, monit
 log = logging.getLogger("api")
 import endpoints as ep
 from auth import Principal, allows_model, check_budget, check_model, forget, principal
-from config import FLEET_MANAGER, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
+from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
 
 def check_placeholders() -> None:
@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.11", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.12", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -134,6 +134,19 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
     if live:
         for entry in out["pools"]:
             entry.update(kube.pool_usage(entry["cluster"], entry["pool"]))
+        # the clusters: this one (the control plane when it is the fleet manager) and every region it reaches
+        by_cluster = {pool.get("region"): pool for pool in pools}
+        clusters = []
+        for region in kube.regions():
+            cid = next((cid for cid, pool in by_cluster.items() if kube.cluster_region(cid) == region), region)
+            pool = by_cluster.get(cid) or {}
+            control = region == REGION and FLEET_MANAGER
+            clusters.append({"id": "control" if control else cid, "region": "control" if control and region == "control" else region,
+                             "project": pool.get("project"), "roles": ["control", "manager"] if control else ["worker"],
+                             "api_url": PUBLIC_API_URL if region == REGION else REGION_API_URLS.get(region),
+                             "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
+                             **kube.cluster_summary(region)})
+        out["clusters"] = clusters
     return out
 
 

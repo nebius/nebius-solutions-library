@@ -197,3 +197,15 @@ def pool_usage(cluster: str, pool: str) -> dict:
     except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
         used = None
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
+
+
+def cluster_summary(region: str) -> dict:
+    """One cluster of the fleet for the fleet page: Kubernetes version, ready nodes (system and GPU), reachability."""
+    try:
+        nodes = retry(core(region).list_node).items
+    except Exception:  # noqa: BLE001 - an unreachable cluster shows as such
+        return {"reachable": False, "nodes_ready": None, "gpu_nodes_ready": None, "kubernetes_version": None}
+    ready = [n for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))]
+    gpu = [n for n in ready if (n.metadata.labels or {}).get(f"{LABEL}/pool") and (n.metadata.labels or {}).get(f"{LABEL}/pool") != "system"]
+    version = next((n.status.node_info.kubelet_version for n in nodes if n.status and n.status.node_info), None)
+    return {"reachable": True, "nodes_ready": len(ready), "gpu_nodes_ready": len(gpu), "kubernetes_version": version}

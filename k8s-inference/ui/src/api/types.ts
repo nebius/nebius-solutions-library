@@ -186,6 +186,18 @@ export interface FleetPool {
   gpus_total?: number | null;
   gpus_used?: number | null;
 }
+export interface FleetCluster {
+  id: string;
+  region: string;
+  project?: string | null;
+  roles: string[];
+  api_url?: string | null;
+  grafana_url?: string | null;
+  reachable: boolean;
+  nodes_ready?: number | null;
+  gpu_nodes_ready?: number | null;
+  kubernetes_version?: string | null;
+}
 export interface FleetInfo {
   ok?: boolean;
   regions: string[];
@@ -193,6 +205,7 @@ export interface FleetInfo {
   fleet_manager: boolean;
   region: string;
   pools?: FleetPool[];
+  clusters?: FleetCluster[];
 }
 export interface MetricPanel {
   id: string;
