@@ -94,15 +94,26 @@ AUTH_CACHE_S = int(os.environ.get("AUTH_CACHE_S", "30"))
 LABEL = "serverless2.nebius"
 
 
-def _trust_file() -> None:
+_trust_state: dict = {"stamp": None}
+
+
+def _trust_file(refresh: bool = False) -> None:
     """HTTPS clients (httpx) trust the system roots plus every CA the platform mounts under /etc/ssl/msp (the Nebius
     MSP CA for the managed database, the fleet CA of the regional gateways, a private bundle): one file, set as
     SSL_CERT_FILE before any client is built. Public roots stay, so public endpoints (Let's Encrypt hostnames of
-    the control cluster, the Nebius APIs) keep working."""
+    the control cluster, the Nebius APIs) keep working. `refresh=True` rebuilds the file when the mounted CAs
+    changed (a ConfigMap update reaches the pod without a restart; httpx reads the file per client)."""
     import glob
     extra = sorted(glob.glob("/etc/ssl/msp/*.pem"))
-    if not extra or os.environ.get("SSL_CERT_FILE"):
+    if not extra:
         return
+    stamp = tuple((f, os.path.getmtime(f), os.path.getsize(f)) for f in extra)
+    if refresh:
+        if stamp == _trust_state["stamp"]:
+            return
+    elif os.environ.get("SSL_CERT_FILE"):
+        return
+    _trust_state["stamp"] = stamp
     try:
         import certifi
         roots = [certifi.where(), "/etc/ssl/certs/ca-certificates.crt"]
@@ -118,6 +129,14 @@ def _trust_file() -> None:
     with open(path, "w") as out:
         out.write("\n".join(parts) + "\n")
     os.environ["SSL_CERT_FILE"] = path
+
+
+def refresh_trust() -> None:
+    """Called before an outbound HTTPS call to another cluster: picks up a rotated CA without a restart."""
+    try:
+        _trust_file(refresh=True)
+    except OSError:
+        pass
 
 
 _trust_file()

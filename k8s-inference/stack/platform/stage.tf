@@ -112,6 +112,8 @@ locals {
       volumeMounts = local.trust_mounts
       # the model endpoints behind the regional gateways carry fleet-CA certificates; no public HTTPS is needed
       envVars = { SSL_CERT_FILE = local.trust_bundle_path, LITELLM_LOCAL_MODEL_COST_MAP = "True" }
+      # a changed trust bundle restarts LiteLLM (its HTTPS clients load the CAs once)
+      podAnnotations = { "serverless2.nebius/trust-sha" = substr(sha256(join("", values(local.trust_data))), 0, 16) }
     }
   }
   fleet_values = {

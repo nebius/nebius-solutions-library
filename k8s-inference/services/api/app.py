@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.10", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.11", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -412,6 +412,7 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None) -> str | None:
 
 
 async def _forward(model: str, req: InvokeRequest, p: Principal, idempotency_key: str | None, base: str):
+    cfg.refresh_trust()
     """Same request to the regional API (which validates the key, serves the endpoint and bills); the
     answer is returned as is. Covers the UI and clients that only know the control API's hostname."""
     headers = {"Authorization": f"Bearer {p.key}"}
@@ -625,6 +626,7 @@ def _endpoint_region(m: dict, region: str | None) -> str:
 
 
 async def _remote_monitoring(p: Principal, region: str, path: str, params: dict):
+    cfg.refresh_trust()
     url = REGION_API_URLS.get(region)
     if not url:
         raise HTTPException(503, "Monitoring for this region is not connected to the fleet API.")

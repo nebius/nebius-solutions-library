@@ -41,3 +41,10 @@ two regions added on 2026-10-10 (eu-west1, eu-north2) answered on port 80 only f
 Encrypt timed out, and the control plane could not forward to them over HTTPS. A browser on a regional
 Grafana sees a certificate warning (operator use); the console and the API talk to the control cluster
 only. `edge.regional_certificates = "acme"` restores per-region Let's Encrypt where the gateways are public.
+
+Rotation: when the fleet CA changes (a new fleet, or the cloud state rewritten from another checkout), the
+platform stage re-issues every region's leaf certificates (`terraform_data.reissue_on_ca_change`), LiteLLM
+restarts on the changed bundle, and the API rebuilds its trust file before each cross-cluster call. Apply the
+control cluster first, then the regions. One rule for operators: every `./stack.sh apply` of one fleet must run
+from the same checkout at the same commit; an older copy of the stack silently drops resources it does not know
+(the fleet CA on 2026-10-10).

@@ -42,3 +42,23 @@ resource "kubernetes_secret_v1" "fleet_ca" {
   data       = { "tls.crt" = local.cloud.fleet_ca.cert, "tls.key" = local.cloud.fleet_ca.key }
   depends_on = [helm_release.wave0]
 }
+
+# When the fleet CA changes (regenerated, or the cloud state rewritten by an older checkout, seen 2026-10-10), the
+# leaf certificates cert-manager issued from the previous CA stay valid for their holders but no longer match the
+# trust bundle: this re-issues them (cert-manager recreates a deleted TLS Secret at once) on every CA change.
+resource "terraform_data" "reissue_on_ca_change" {
+  count = local.fleet_ca_here ? 1 : 0
+  input = {
+    ca_sha  = sha256(local.cloud.fleet_ca.cert)
+    script  = "${path.module}/../scripts/kube.sh"
+    server  = local.cluster.endpoint
+    ca      = local.cluster.cluster_ca_certificate
+    secrets = "${local.id}-wildcard-tls models-tls"
+  }
+  triggers_replace = [sha256(local.cloud.fleet_ca.cert)]
+  provisioner "local-exec" {
+    command     = "${self.input.script} -n envoy-gateway-system delete secret ${self.input.secrets} --ignore-not-found"
+    environment = { KUBE_SERVER = self.input.server, KUBE_CA = self.input.ca }
+  }
+  depends_on = [kubernetes_secret_v1.fleet_ca, kubectl_manifest.wave3]
+}

@@ -118,7 +118,7 @@ spec:
       serviceAccountName: api
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.10.10
+          image: registry.serverless2.local/nebius/serverless2/api:0.10.11
           ports: [{ containerPort: 8080 }]
           env:
             - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
