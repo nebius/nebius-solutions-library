@@ -20,6 +20,9 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get, list]
+  - apiGroups: [""]                 # the fleet page: ready nodes per pool and the GPUs their pods hold
+    resources: [nodes, pods]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

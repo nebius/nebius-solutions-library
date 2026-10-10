@@ -132,6 +132,7 @@ function unwrap<T>(b: unknown, ...keys: string[]): T[] {
 
 const real = {
   fleetInfo: () => http<FleetInfo>("/v1/fleet"),
+  fleetLive: () => http<FleetInfo>("/v1/fleet?live=true"),
   listModels: async () => unwrap<Model>(await http("/v1/models"), "models"),
   getModel: (id: string) => http<Model>(`/v1/models/${encodeURIComponent(id)}`),
   // models defined from a container (admin key): the "New model" form, services/api/models.py

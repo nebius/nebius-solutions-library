@@ -7,6 +7,7 @@ import { DefinitionForm } from "./pages/DefinitionForm";
 import { Endpoints, EndpointDetail } from "./pages/Endpoints";
 import { Jobs, JobDetail } from "./pages/Jobs";
 import { Keys } from "./pages/Keys";
+import { Fleet } from "./pages/Fleet";
 import { Login } from "./pages/Login";
 import { Models } from "./pages/Models";
 import { NewJob } from "./pages/NewJob";
@@ -73,6 +74,10 @@ export default function App() {
     case "keys":
       page = <Keys />;
       crumbs = [{ label: "API keys" }];
+      break;
+    case "fleet":
+      page = <Fleet />;
+      crumbs = [{ label: "Fleet" }];
       break;
     case "settings":
       page = <Settings onChange={rerender} />;

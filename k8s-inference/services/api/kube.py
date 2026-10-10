@@ -175,3 +175,25 @@ def endpoint_status(name: str, ns: str, region: str = REGION) -> dict:
         pass
     _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out
+
+
+def pool_usage(cluster: str, pool: str) -> dict:
+    """Ready nodes of a pool and the GPUs their pods hold (the fleet page): nodes by the pool label, GPU requests of
+    the running pods on them (every namespace this identity may list; a tenant's pods are its runs, `models` the
+    endpoints and the warm-spare placeholders). Unreachable: {"nodes_ready": None}."""
+    region = cluster_region(cluster)
+    try:
+        nodes = retry(core(region).list_node, label_selector=f"{LABEL}/pool={pool}").items
+    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as unknown, never fails the page
+        return {"nodes_ready": None, "gpus_total": None, "gpus_used": None}
+    names = {n.metadata.name for n in nodes}
+    ready = sum(1 for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or [])))
+    total = sum(int((n.status.allocatable or {}).get("nvidia.com/gpu", 0)) for n in nodes)
+    used = 0
+    try:
+        for pod in retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items:
+            if pod.spec.node_name in names:
+                used += sum(int((c.resources.requests or {}).get("nvidia.com/gpu", 0)) for c in pod.spec.containers if c.resources)
+    except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
+        used = None
+    return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}

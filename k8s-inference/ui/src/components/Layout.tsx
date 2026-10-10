@@ -20,6 +20,7 @@ const NAV = [
 ] as const;
 const MANAGE = [
   ["/keys", "API keys", Key],
+  ["/fleet", "Fleet", Cube],
   ["/settings", "Settings", Gear],
 ] as const;
 

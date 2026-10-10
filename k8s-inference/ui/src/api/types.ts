@@ -169,12 +169,30 @@ export interface Endpoint {
   memory?: string;
 }
 
+export interface FleetPool {
+  region: string;
+  cluster?: string;
+  pool: string;
+  gpu_class: string;
+  platform?: string;
+  preset?: string;
+  gpus_per_node: number;
+  capacity: "spot" | "on_demand" | "reserved";
+  usd_per_gpu_hour?: number;
+  max_nodes?: number;
+  interconnect?: string;
+  local_nvme?: boolean;
+  nodes_ready?: number | null;
+  gpus_total?: number | null;
+  gpus_used?: number | null;
+}
 export interface FleetInfo {
   ok?: boolean;
   regions: string[];
   gpu_classes?: string[];
   fleet_manager: boolean;
   region: string;
+  pools?: FleetPool[];
 }
 export interface MetricPanel {
   id: string;

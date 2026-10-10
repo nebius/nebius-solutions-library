@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.8", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.9", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -118,12 +118,23 @@ def healthz():
 
 
 @app.get("/v1/fleet")
-def fleet_info(p: Principal = Depends(principal)):
+def fleet_info(live: bool = False, p: Principal = Depends(principal)):
+    """The fleet as Terraform shaped it (pools per region, GPU class, preset, capacity type, price) and, with
+    `live=true`, what is up right now: ready nodes per pool and the GPUs their pods hold (the console's Fleet page)."""
     pools = list(kube.fleet().get("pools", {}).values())
     regions = sorted({kube.cluster_region(pool["region"]) for pool in pools if pool.get("region")}
                      | {r for m in catalog.all_models().values() for r in m.get("regions", [])})
-    return {"regions": regions, "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
-            "fleet_manager": FLEET_MANAGER, "region": REGION}
+    out = {"regions": regions, "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
+           "fleet_manager": FLEET_MANAGER, "region": REGION,
+           "pools": [{"region": kube.cluster_region(pool.get("region") or REGION), "cluster": pool.get("region"), "pool": pool.get("pool"),
+                      "gpu_class": pool.get("gpu_class"), "platform": pool.get("platform"), "preset": pool.get("preset"),
+                      "gpus_per_node": int(pool.get("gpus_per_node") or 1), "capacity": pool.get("capacity"),
+                      "usd_per_gpu_hour": pool.get("usd_per_gpu_hour"), "max_nodes": pool.get("max_nodes"),
+                      "interconnect": pool.get("interconnect"), "local_nvme": bool(pool.get("local_nvme"))} for pool in pools]}
+    if live:
+        for entry in out["pools"]:
+            entry.update(kube.pool_usage(entry["cluster"], entry["pool"]))
+    return out
 
 
 @app.get("/v1/models")
