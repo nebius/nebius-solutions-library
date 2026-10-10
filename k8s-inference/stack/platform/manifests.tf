@@ -186,7 +186,10 @@ locals {
       apiVersion = "gateway.networking.k8s.io/v1", kind = "HTTPRoute", metadata = { name = "ui-app", namespace = "ui-app" }
       spec = {
         parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
-        hostnames  = [try(local.hostnames.app, "")], rules = [{ backendRefs = [{ name = "ui-app", port = 80 }] }]
+        hostnames  = [try(local.hostnames.app, "")]
+        # the console proxies model calls to the API: a sync call waits for a cold start, like the API route (Envoy's
+        # default is 15 s: the console got 504 on every cold start, measured 2026-10-10)
+        rules = [{ backendRefs = [{ name = "ui-app", port = 80 }], timeouts = { request = "630s", backendRequest = "630s" } }]
       }
     }
     litellm_route = {
