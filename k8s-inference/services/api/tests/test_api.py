@@ -1371,3 +1371,19 @@ def test_cancel_keeps_the_record_when_the_worker_copy_is_already_gone(client):
     assert fake.custom[("tenant-demo", "workloads", "jobset-op-z-ghi")]["spec"]["active"] is False
     assert ("tenant-demo", "jobsets", "op-z") in fake.custom
     assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"
+
+
+def test_monitoring_of_a_finished_run_falls_back_to_this_region(client, monkeypatch):
+    """A worker's Job is deleted when the run completes; the regional API still serves its metrics and logs from
+    Prometheus and Loki, scoped to the caller's namespace (the console showed "not available", 2026-10-10)."""
+    import re as _re
+    from fastapi import HTTPException
+    from auth import Principal
+    monkeypatch.setattr(appmod, "FLEET_MANAGER", False)
+    p = Principal(key="k", tenant="demo", info={})
+    assert appmod._monitored(p, "op-container-run-deadbeef") == (appmod.REGION, "run")
+    with pytest.raises(HTTPException):
+        appmod._monitored(p, "not-an-operation")
+    import monitoring
+    sel = monitoring.selectors({"namespace": "tenant-demo", "job": _re.escape("op-container-run-deadbeef") + "(-.*)?"}, {"job"})
+    assert sel.startswith('{namespace="tenant-demo",job=~"')

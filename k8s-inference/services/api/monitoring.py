@@ -95,7 +95,10 @@ async def logs(kind: str, namespace: str, name: str, region: str, period: str,
     if kind == "jobset":
         # Indexed child Jobs of a JobSet share its name as their prefix.
         labels["job"] = re.escape(name) + "-.*"
-    query = selectors(labels, {"job"} if kind == "jobset" else None)
+    elif kind == "run":
+        # the Job is gone (a completed run): a Job of that name or the child Jobs of a JobSet of that name
+        labels["job"] = re.escape(name) + "(-.*)?"
+    query = selectors(labels, {"job"} if kind in ("jobset", "run") else None)
     if search:
         query += " |= " + json.dumps(search)  # LogQL string literal, never executable query syntax
     async with httpx.AsyncClient(timeout=8) as client:

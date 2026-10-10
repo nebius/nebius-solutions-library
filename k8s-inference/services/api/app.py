@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import asyncio, time, urllib.parse, uuid
+import asyncio, re, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
+import re
 import artifacts, billing, catalog, config as cfg, db, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
@@ -44,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.3", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.10.4", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -653,9 +654,26 @@ async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", s
     return await monitoring.logs("endpoint", m["namespace"], m["k8s_name"], region, range, search, limit, end)
 
 
+def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
+    """(region, kind) of an operation for its metrics and logs. A worker's Job is deleted when the run completes
+    (MultiKueue), so a regional API may no longer hold it while Prometheus and Loki still do: the fleet API has
+    verified ownership before forwarding, and every query is scoped to the caller's own namespace anyway, so a
+    missing Job means "this region, either kind" rather than 404 (the console showed "not available" for every
+    finished run, 2026-10-10)."""
+    try:
+        job, region = jobs.find(p.namespace, id)
+    except HTTPException as e:
+        if e.status_code == 404 and not FLEET_MANAGER and re.fullmatch(r"op-[a-z0-9-]{3,80}", id):
+            return REGION, "run"                            # absent here: completed; the queries stay in p.namespace
+        raise
+    if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
+        raise HTTPException(404, f"operation {id}: not found")    # someone else's run is never served
+    return region, "jobset" if jobs.is_jobset(job) else "job"
+
+
 @app.get("/v1/operations/{id}/metrics")
 async def operation_metrics(id: str, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)):
-    job, region = _owned(p, id)
+    region, _ = _monitored(p, id)
     monitoring.window(range, end)
     if region and region != REGION:
         return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/metrics", {"range": range, "end": end})
@@ -665,12 +683,12 @@ async def operation_metrics(id: str, range: str = "1h", end: float | None = None
 @app.get("/v1/operations/{id}/logs")
 async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
                          limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
-    job, region = _owned(p, id)
+    region, kind = _monitored(p, id)
     monitoring.window(range, end)
     if region and region != REGION:
         return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/logs",
                                         {"range": range, "search": search, "limit": limit, "end": end})
-    return await monitoring.logs("jobset" if jobs.is_jobset(job) else "job", p.namespace, id, region or REGION, range, search, limit, end)
+    return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 
 async def _litellm(method: str, path: str, **kw):
