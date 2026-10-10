@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "object"
+    },
+    "annotations": {
+      "type": "object"
+    },
+    "image": {
+      "type": "string"
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "command": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "protocol": {
+      "type": "string",
+      "enum": [
+        "http",
+        "websocket",
+        "openai",
+        "grpc"
+      ]
+    },
+    "workingDir": {
+      "type": "string"
+    },
+    "resources": {
+      "type": "object",
+      "required": [
+        "gpu",
+        "cpu",
+        "memory"
+      ],
+      "properties": {
+        "gpu": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "cpu": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "memory": {
+          "type": "string"
+        },
+        "cpuRequest": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "memoryRequest": {
+          "type": "string"
+        },
+        "ephemeralStorage": {
+          "type": "string"
+        }
+      }
+    },
+    "pool": {
+      "type": "string"
+    },
+    "nodeSelector": {
+      "type": "object"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "scaling": {
+      "type": "object",
+      "required": [
+        "minReplicas",
+        "maxReplicas",
+        "target"
+      ],
+      "properties": {
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "metric": {
+          "type": "string",
+          "enum": [
+            "concurrency",
+            "rps"
+          ]
+        },
+        "target": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "containerConcurrency": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scaleToZeroRetention": {
+          "type": "string"
+        }
+      }
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "priorityClassName": {
+      "type": "string"
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "queue": {
+      "type": "object",
+      "properties": {
+        "priorityClass": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "weights": {
+      "type": "object",
+      "properties": {
+        "sharedFilesystem": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "claimName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]*$"
+            },
+            "mountPath": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "readOnly": {
+              "type": "boolean"
+            },
+            "prepare": {
+              "type": "boolean"
+            },
+            "prepareImage": {
+              "type": "string"
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "shm": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "size": {
+          "type": "string"
+        }
+      }
+    },
+    "volumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "mountPath",
+          "sizeLimit"
+        ]
+      }
+    },
+    "persistentVolumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "mountPath",
+          "size"
+        ]
+      }
+    },
+    "readinessProbe": {
+      "type": "object"
+    },
+    "livenessProbe": {
+      "type": "object"
+    },
+    "securityContext": {
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "type": "object"
+    },
+    "localModelCache": {
+      "type": "object"
+    },
+    "runtime": {
+      "type": "object"
+    },
+    "deployments": {
+      "type": "object"
+    },
+    "cluster": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "envFrom": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "if": {
+    "required": [
+      "runtime"
+    ]
+  },
+  "then": {
+    "required": [
+      "id",
+      "runtime",
+      "cluster"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "runtime": {
+        "type": "object",
+        "required": [
+          "image",
+          "port",
+          "resources",
+          "scaling"
+        ]
+      },
+      "deployments": {
+        "type": "object"
+      },
+      "cluster": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "else": {
+    "required": [
+      "name",
+      "image",
+      "pool",
+      "port",
+      "resources",
+      "scaling"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+      },
+      "image": {
+        "type": "string",
+        "minLength": 1
+      },
+      "pool": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "additionalProperties": true
+}

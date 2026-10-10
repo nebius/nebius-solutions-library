@@ -1,0 +1,30 @@
+# Helm values for the envoy-gateway Application (both clusters); version pinned in clusters/common/apps/envoy-gateway.yaml.
+# Global rate limiting (per API key, cluster-wide) needs the Envoy rate-limit service with a Redis backend;
+# the chart deploys the service when this block is set. Redis: clusters/common/manifests/gateway/redis.yaml.
+# Control plane HA (readiness item 1): two controller replicas with leader election; the data-plane
+# proxies (knative-external/knative-internal) are sized in clusters/common/manifests/gateway/envoyproxy-ha.yaml.
+config:
+  envoyGateway:
+    gateway:
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    provider:
+      type: Kubernetes
+    logging:
+      level:
+        default: info
+    rateLimit:
+      backend:
+        type: Redis
+        redis:
+          url: ratelimit-redis.envoy-gateway-system.svc.cluster.local:6379
+deployment:
+  replicas: 2
+  pod:
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels: { control-plane: envoy-gateway }
+podDisruptionBudget:
+  minAvailable: 1

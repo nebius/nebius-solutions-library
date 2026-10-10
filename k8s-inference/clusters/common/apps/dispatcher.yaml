@@ -1,0 +1,13 @@
+# Cost-aware MultiKueue dispatcher + spot price feed (services/dispatcher, docs/SCHEDULING.md): control cluster
+# only (clusters/control/apps/overlays/dispatcher), whose Kueue carries `multiKueue.dispatcherName:
+# serverless2.nebius/cost-dispatcher` (clusters/control/values/kueue.yaml). Reads the fleet-prices ConfigMap
+# rendered by charts/fleet; the price-feed CronJob needs Secret kueue-system/price-feed-nebius-sa (an SA key of
+# any fleet project, copied by clusters/control/apps/bootstrap.sh; never in git).
+name: dispatcher
+component: dispatcher
+namespace: kueue-system
+wave: '2'
+hubOnly: 'true'
+placement: control
+kind: manifests
+manifestsPath: overlays/dispatcher

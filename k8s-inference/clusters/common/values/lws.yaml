@@ -1,0 +1,3 @@
+# Helm values for the lws Application (worker clusters); version pinned in clusters/common/apps/lws.yaml. The chart's
+# defaults (one controller replica, webhook on 9443 with its own certificate).
+{}

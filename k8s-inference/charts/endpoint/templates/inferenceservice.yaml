@@ -1,0 +1,207 @@
+{{- $v := include "endpoint.values" . | fromYaml -}}
+{{- /* one pod per replica (KServe on Knative); several whole nodes per replica: leaderworkerset.yaml */ -}}
+{{- if le (int (default 1 $v.nodes)) 1 }}
+{{- $r := $v.resources -}}
+{{- $w := default (dict) (default (dict) $v.weights).sharedFilesystem -}}
+{{- $wenv := default (dict) (default (dict) $v.weights).env -}}
+{{- $wdir := default $v.name $w.path -}}
+{{- $wclaim := default "weights-shared" $w.claimName -}}
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ required "name is required" $v.name }}
+  namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
+  annotations:
+    serving.kserve.io/deploymentMode: Knative
+    autoscaling.knative.dev/scale-to-zero-pod-retention-period: {{ $v.scaling.scaleToZeroRetention | quote }}
+    {{- with $v.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  predictor:
+    minReplicas: {{ $v.scaling.minReplicas }}
+    maxReplicas: {{ $v.scaling.maxReplicas }}
+    scaleMetric: {{ $v.scaling.metric }}
+    scaleTarget: {{ $v.scaling.target }}
+    {{- if $v.scaling.containerConcurrency }}
+    containerConcurrency: {{ $v.scaling.containerConcurrency }}
+    {{- end }}
+    timeout: {{ $v.timeout }}
+    {{- /* Pod labels (KServe copies them to the Knative revision and its pods):
+           Kueue queue + priority when queue.name is set. */}}
+    {{- $pm := default (dict) $v.podMetadata }}
+    {{- if or $v.queue.name $v.queue.priorityClass $pm.labels }}
+    labels:
+      {{- with $pm.labels }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with $v.queue.name }}
+      kueue.x-k8s.io/queue-name: {{ . }}
+      {{- end }}
+      {{- with $v.queue.priorityClass }}
+      kueue.x-k8s.io/priority-class: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- with $pm.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- if ne $v.automountServiceAccountToken nil }}
+    automountServiceAccountToken: {{ $v.automountServiceAccountToken }}
+    {{- end }}
+    {{- with $v.priorityClassName }}
+    priorityClassName: {{ . }}
+    {{- end }}
+    {{- with $v.imagePullSecrets }}
+    imagePullSecrets:
+      {{- range . }}
+      - name: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- if or (not $v.queue.name) $v.nodeSelector }}
+    nodeSelector:
+      {{- if not $v.queue.name }}
+      serverless2.nebius/pool: {{ required "pool is required (or queue.name for Kueue placement)" $v.pool }}
+      {{- end }}
+      {{- with $v.nodeSelector }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+    {{- end }}
+    {{- with $v.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $v.securityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- if and $w.enabled $w.prepare }}
+    initContainers:
+      - name: weights-prepare   # the model's directory on the shared filesystem is created root-owned; make it writable for the runtime user
+        image: {{ $w.prepareImage }}
+        command: [sh, -c, "mkdir -p /weights-root/{{ $wdir }} && chmod 1777 /weights-root/{{ $wdir }}"]
+        securityContext: { runAsUser: 0 }
+        volumeMounts:
+          - { name: weights, mountPath: /weights-root }
+        resources:
+          requests: { cpu: 10m, memory: 16Mi }
+          limits: { cpu: 100m, memory: 64Mi }
+    {{- end }}
+    containers:
+      - name: kserve-container
+        {{- /* Per-pool image: when the endpoint is pinned to a pool, `images.<pool>` overrides `image`
+               (docs/SCHEDULING.md: the pool is only known at render time when it is pinned). */}}
+        {{- if and (not $v.queue.name) $v.pool (hasKey $v.images $v.pool) }}
+        image: {{ index $v.images $v.pool }}
+        {{- else }}
+        image: {{ required "image is required" $v.image }}
+        {{- end }}
+        {{- with $v.command }}
+        command: {{ toJson . }}
+        {{- end }}
+        {{- with $v.args }}
+        args: {{ toJson . }}
+        {{- end }}
+        {{- with $v.workingDir }}
+        workingDir: {{ . }}
+        {{- end }}
+        {{- if or $v.env $wenv }}
+        env:
+          {{- with $v.env }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+          {{- range $k, $val := $wenv }}
+          - { name: {{ $k | quote }}, value: {{ $val | quote }} }
+          {{- end }}
+        {{- end }}
+        {{- with $v.envFrom }}
+        envFrom:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        ports:
+          - containerPort: {{ $v.port }}
+            protocol: TCP
+        resources:
+          limits:
+            nvidia.com/gpu: {{ $r.gpu | quote }}
+            cpu: {{ $r.cpu | quote }}
+            memory: {{ $r.memory }}
+            {{- with $r.ephemeralStorage }}
+            ephemeral-storage: {{ . }}
+            {{- end }}
+          requests:
+            nvidia.com/gpu: {{ $r.gpu | quote }}
+            cpu: {{ default $r.cpu $r.cpuRequest | quote }}
+            memory: {{ default $r.memory $r.memoryRequest }}
+            {{- with $r.ephemeralStorage }}
+            ephemeral-storage: {{ . }}
+            {{- end }}
+        {{- with $v.readinessProbe }}
+        readinessProbe:
+          httpGet:
+            path: {{ .path }}
+            port: {{ default $v.port .port }}
+          {{- with .periodSeconds }}
+          periodSeconds: {{ . }}
+          {{- end }}
+          {{- with .failureThreshold }}
+          failureThreshold: {{ . }}
+          {{- end }}
+        {{- end }}
+        {{- with $v.livenessProbe }}
+        livenessProbe:
+          httpGet:
+            path: {{ .path }}
+            port: {{ default $v.port .port }}
+          periodSeconds: {{ default 15 .periodSeconds }}
+          failureThreshold: {{ default 4 .failureThreshold }}
+          {{- with .initialDelaySeconds }}
+          initialDelaySeconds: {{ . }}
+          {{- end }}
+        {{- end }}
+        {{- with $v.containerSecurityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if or $v.shm.enabled $v.volumes $v.persistentVolumes $w.enabled }}
+        volumeMounts:
+          {{- if $v.shm.enabled }}
+          - { name: shm, mountPath: /dev/shm }
+          {{- end }}
+          {{- if $w.enabled }}
+          - { name: weights, mountPath: {{ default "/weights" $w.mountPath }}, subPath: {{ $wdir | quote }}, readOnly: {{ default false $w.readOnly }} }
+          {{- end }}
+          {{- range $v.volumes }}
+          - { name: {{ .name }}, mountPath: {{ .mountPath }} }
+          {{- end }}
+          {{- range $v.persistentVolumes }}
+          - { name: {{ .name }}, mountPath: {{ .mountPath }} }
+          {{- end }}
+        {{- end }}
+    {{- if or $v.shm.enabled $v.volumes $v.persistentVolumes $w.enabled }}
+    volumes:
+      {{- if $v.shm.enabled }}
+      - name: shm
+        emptyDir: { medium: Memory, sizeLimit: {{ $v.shm.size }} }
+      {{- end }}
+      {{- if $w.enabled }}
+      - name: weights              # region shared filesystem (Terraform weights_filesystem) through the cluster PVC; subPath <path>
+        persistentVolumeClaim: { claimName: {{ $wclaim | quote }} }
+      {{- end }}
+      {{- range $v.volumes }}
+      - name: {{ .name }}
+        emptyDir:
+          sizeLimit: {{ .sizeLimit }}
+          {{- with .medium }}
+          medium: {{ . }}
+          {{- end }}
+      {{- end }}
+      {{- range $v.persistentVolumes }}
+      - name: {{ .name }}
+        persistentVolumeClaim:
+          claimName: {{ $v.name }}-{{ .name }}
+      {{- end }}
+    {{- end }}
+{{- end }}

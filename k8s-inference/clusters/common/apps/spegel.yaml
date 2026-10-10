@@ -1,0 +1,15 @@
+# Spegel (CNCF sandbox): peer-to-peer image distribution between the nodes of a cluster and the writer of the
+# containerd mirror configuration (docs/IMAGES.md). On every node it writes /etc/containerd/certs.d/<registry>/
+# hosts.toml: Spegel peers first, then the cluster's Zot cache (clusters/common/values/spegel.yaml). The chart is
+# an OCI artifact consumed directly by the Terraform Helm provider.
+name: spegel
+component: spegel
+namespace: spegel
+wave: '0'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: ghcr.io/spegel-org/helm-charts
+chart: spegel
+version: 0.7.4
+helmValues: 'true'

@@ -1,0 +1,229 @@
+{{- define "endpoint.lws.container" -}}
+{{- $v := .v }}{{ $r := .v.resources }}{{ $w := .w }}{{ $wenv := .wenv }}{{ $wdir := .wdir }}{{ $ib := .ib }}
+- name: endpoint
+  image: {{ required "image is required" $v.image }}
+  {{- with .command }}
+  command: {{ toJson . }}
+  {{- end }}
+  {{- with $v.args }}
+  args: {{ toJson . }}
+  {{- end }}
+  {{- with $v.workingDir }}
+  workingDir: {{ . }}
+  {{- end }}
+  env:
+    - name: NODE_RANK
+      valueFrom: { fieldRef: { fieldPath: "metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']" } }
+    - { name: NNODES, value: {{ .nodes | quote }} }
+    - { name: GPUS_PER_NODE, value: {{ $r.gpu | quote }} }
+    - { name: WORLD_SIZE, value: {{ mul .nodes (int $r.gpu) | quote }} }
+    - { name: MASTER_ADDR, value: {{ printf "%s-0.%s" $v.name $v.name | quote }} }
+    - { name: MASTER_PORT, value: "29500" }
+    {{- if gt $ib 0 }}
+    - { name: NCCL_IB_HCA, value: mlx5 }
+    - { name: NCCL_SOCKET_IFNAME, value: eth0 }
+    - { name: UCX_NET_DEVICES, value: eth0 }
+    {{- else }}
+    {{- /* Ethernet between the nodes: NCCL must not try the InfiniBand transport (the nodes carry Mellanox NICs, the pod
+           holds none: "unhandled system error" at communicator setup on B300, 2026-10-10) */}}
+    - { name: NCCL_SOCKET_IFNAME, value: eth0 }
+    - { name: NCCL_IB_DISABLE, value: "1" }
+    {{- end }}
+    {{- with $v.env }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- range $k, $val := $wenv }}
+    - { name: {{ $k | quote }}, value: {{ $val | quote }} }
+    {{- end }}
+  {{- with $v.envFrom }}
+  envFrom:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - containerPort: {{ $v.port }}
+      protocol: TCP
+  resources:
+    limits:
+      nvidia.com/gpu: {{ $r.gpu | quote }}
+      cpu: {{ $r.cpu | quote }}
+      memory: {{ $r.memory }}
+      {{- with $r.ephemeralStorage }}
+      ephemeral-storage: {{ . }}
+      {{- end }}
+    requests:
+      nvidia.com/gpu: {{ $r.gpu | quote }}
+      cpu: {{ default $r.cpu $r.cpuRequest | quote }}
+      memory: {{ default $r.memory $r.memoryRequest }}
+      {{- with $r.ephemeralStorage }}
+      ephemeral-storage: {{ . }}
+      {{- end }}
+    {{- if gt $ib 0 }}
+    claims: [{ name: ib }]
+    {{- end }}
+  {{- if and .leader $v.readinessProbe }}
+  readinessProbe:
+    httpGet:
+      path: {{ $v.readinessProbe.path }}
+      port: {{ default $v.port $v.readinessProbe.port }}
+    periodSeconds: {{ default 10 $v.readinessProbe.periodSeconds }}
+    failureThreshold: {{ default 3 $v.readinessProbe.failureThreshold }}
+  {{- end }}
+  {{- with $v.containerSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  volumeMounts:
+    {{- if $v.shm.enabled }}
+    - { name: shm, mountPath: /dev/shm }
+    {{- end }}
+    {{- if $w.enabled }}
+    - { name: weights, mountPath: {{ default "/weights" $w.mountPath }}, subPath: {{ $wdir | quote }}, readOnly: {{ default false $w.readOnly }} }
+    {{- end }}
+    {{- range $v.volumes }}
+    - { name: {{ .name }}, mountPath: {{ .mountPath }} }
+    {{- end }}
+{{- end }}
+{{- define "endpoint.lws.podspec" -}}
+{{- $v := .v }}{{ $w := .w }}{{ $wdir := .wdir }}{{ $wclaim := .wclaim }}{{ $ib := .ib }}
+{{- if ne $v.automountServiceAccountToken nil }}
+automountServiceAccountToken: {{ $v.automountServiceAccountToken }}
+{{- end }}
+{{- with $v.priorityClassName }}
+priorityClassName: {{ . }}
+{{- end }}
+{{- with $v.imagePullSecrets }}
+imagePullSecrets:
+  {{- range . }}
+  - name: {{ . }}
+  {{- end }}
+{{- end }}
+nodeSelector:
+  serverless2.nebius/pool: {{ required "pool is required" $v.pool }}
+  {{- with $v.nodeSelector }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- with $v.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $v.securityContext }}
+securityContext:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- if gt $ib 0 }}
+resourceClaims:
+  - { name: ib, resourceClaimTemplateName: {{ printf "%s-%d" (default "ib" $v.ibClaimTemplate) $ib | quote }} }
+{{- end }}
+{{- if and $w.enabled $w.prepare }}
+initContainers:
+  - name: weights-prepare
+    image: {{ $w.prepareImage }}
+    command: [sh, -c, "mkdir -p /weights-root/{{ $wdir }} && chmod 1777 /weights-root/{{ $wdir }}"]
+    securityContext: { runAsUser: 0 }
+    volumeMounts:
+      - { name: weights, mountPath: /weights-root }
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { cpu: 100m, memory: 64Mi }
+{{- end }}
+containers:
+  {{- include "endpoint.lws.container" (dict "v" $v "w" $w "wenv" .wenv "wdir" $wdir "ib" $ib "nodes" .nodes "leader" .leader "command" .command) | nindent 2 }}
+volumes:
+  {{- if $v.shm.enabled }}
+  - name: shm
+    emptyDir: { medium: Memory, sizeLimit: {{ $v.shm.size }} }
+  {{- end }}
+  {{- if $w.enabled }}
+  - name: weights
+    persistentVolumeClaim: { claimName: {{ $wclaim | quote }} }
+  {{- end }}
+  {{- range $v.volumes }}
+  - name: {{ .name }}
+    emptyDir:
+      sizeLimit: {{ .sizeLimit }}
+      {{- with .medium }}
+      medium: {{ . }}
+      {{- end }}
+  {{- end }}
+{{- end }}
+{{- $v := include "endpoint.values" . | fromYaml -}}
+{{- $nodes := int (default 1 $v.nodes) -}}
+{{- if gt $nodes 1 }}
+{{- $r := $v.resources -}}
+{{- $w := default (dict) (default (dict) $v.weights).sharedFilesystem -}}
+{{- $wenv := default (dict) (default (dict) $v.weights).env -}}
+{{- $wdir := default $v.name $w.path -}}
+{{- $wclaim := default "weights-shared" $w.claimName -}}
+{{- $ib := int (default 0 $v.ibDevices) -}}
+{{- $podLabels := dict "app.kubernetes.io/name" $v.name "app.kubernetes.io/part-of" "serverless2" "serverless2.nebius/model" $v.name "serverless2.nebius/protocol" (default "http" $v.protocol) -}}
+{{- $common := dict "v" $v "w" $w "wenv" $wenv "wdir" $wdir "wclaim" $wclaim "ib" $ib "nodes" $nodes }}
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: {{ required "name is required" $v.name }}
+  namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
+  annotations:
+    serverless2.nebius/nodes: {{ $nodes | quote }}
+    serverless2.nebius/interconnect: {{ default "none" $v.interconnect | quote }}
+    serverless2.nebius/idle-s: {{ default 0 $v.idleSeconds | quote }}
+    {{- with $v.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ $v.scaling.minReplicas }}
+  startupPolicy: LeaderCreated
+  leaderWorkerTemplate:
+    size: {{ $nodes }}
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          {{- toYaml $podLabels | nindent 10 }}
+          serverless2.nebius/role: leader
+      spec:
+        {{- include "endpoint.lws.podspec" (merge (dict "leader" true "command" $v.command) $common) | nindent 8 }}
+    workerTemplate:
+      metadata:
+        labels:
+          {{- toYaml $podLabels | nindent 10 }}
+          serverless2.nebius/role: worker
+      spec:
+        {{- include "endpoint.lws.podspec" (merge (dict "leader" false "command" (default $v.command $v.workerCommand)) $common) | nindent 8 }}
+---
+# the leader serves: the Service and the gateway route carry a KServe predictor's name and labels, so the endpoint's
+# SecurityPolicy (authorization.yaml), certificate and LiteLLM entry are the same as for a one-pod endpoint
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $v.name }}-predictor
+  namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    leaderworkerset.sigs.k8s.io/name: {{ $v.name }}
+    leaderworkerset.sigs.k8s.io/worker-index: "0"
+  ports:
+    - { name: http, port: 80, targetPort: {{ $v.port }}, protocol: TCP }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $v.name }}-predictor
+  namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
+    serving.knative.dev/route: {{ $v.name }}-predictor
+spec:
+  parentRefs:
+    - { group: gateway.networking.k8s.io, kind: Gateway, name: {{ $v.gatewayName }}, namespace: {{ $v.gatewayNamespace }} }
+  hostnames:
+    - {{ printf "%s-predictor.%s.%s" $v.name $v.namespace (required "domain is required for a multi-node endpoint" $v.domain) | quote }}
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: / } }]
+      backendRefs: [{ group: "", kind: Service, name: {{ $v.name }}-predictor, port: 80 }]
+      timeouts: { request: 0s }
+{{- end }}

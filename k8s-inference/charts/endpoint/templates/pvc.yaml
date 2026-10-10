@@ -1,0 +1,19 @@
+{{- $v := include "endpoint.values" . | fromYaml -}}
+{{- range $v.persistentVolumes }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $v.name }}-{{ .name }}
+  namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" $ | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .size }}
+{{- end }}

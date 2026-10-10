@@ -1,0 +1,14 @@
+# The NVIDIA device plugin and GPU feature discovery for nodes with the Managed Kubernetes driver image (the default,
+# pools.<name>.driver_preset). Not installed when the fleet runs the GPU Operator (terraform.tfvars
+# gpu_operator.enabled: gpu-operator.yaml brings its own device plugin, GFD and NFD; stack/platform/stage.tf app_enabled).
+name: nvidia-device-plugin
+component: nvidia-device-plugin
+namespace: nvidia-device-plugin
+wave: '0'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: https://nvidia.github.io/k8s-device-plugin
+chart: nvidia-device-plugin
+version: 0.20.1
+helmValues: 'true'

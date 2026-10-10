@@ -1,0 +1,12 @@
+{{- $v := include "endpoint.values" . | fromYaml -}}
+{{- if $v.localModelCache.enabled }}
+apiVersion: serving.kserve.io/v1alpha1
+kind: LocalModelCache
+metadata:
+  name: {{ $v.name }}
+spec:
+  sourceModelUri: {{ required "localModelCache.storageUri" $v.localModelCache.storageUri }}
+  modelSize: {{ $v.localModelCache.size }}
+  nodeGroups:
+    {{- toYaml $v.localModelCache.nodeGroups | nindent 4 }}
+{{- end }}

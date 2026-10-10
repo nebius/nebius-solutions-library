@@ -1,0 +1,5 @@
+# Scoped worker identity used by MultiKueue.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - multikueue.yaml

@@ -1,0 +1,24 @@
+*.tfstate*
+.terraform/
+kubeconfig*
+*.secret.*
+node_modules/
+.terraform.lock.hcl
+.venv-api/
+__pycache__/
+
+# tooling output and customer inputs stay out of git
+.playwright-cli/
+.pytest_cache/
+__pycache__/
+dist/
+*.log
+*_override.tf
+.claude/
+
+# library solution: the only per-fleet file; the example is committed
+terraform.tfvars
+stack/**/.terraform*/
+stack/_schema/
+stack/.secrets/
+.terraform-check/

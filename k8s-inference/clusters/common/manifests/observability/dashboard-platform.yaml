@@ -1,0 +1,1370 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: serverless2-dashboard-platform
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    serverless2.nebius/generated-by: spikes/S14-observability/gen_dashboards.py
+data:
+  serverless2-platform.json: |
+    {
+     "uid": "s2-platform",
+     "title": "Serverless 2.0 / Platform",
+     "description": "Pools, nodes, GPUs, scheduling pressure and the SLO numbers for this cluster.",
+     "tags": [
+      "serverless2"
+     ],
+     "timezone": "utc",
+     "editable": true,
+     "graphTooltip": 1,
+     "refresh": "30s",
+     "schemaVersion": 39,
+     "version": 1,
+     "time": {
+      "from": "now-6h",
+      "to": "now"
+     },
+     "templating": {
+      "list": []
+     },
+     "panels": [
+      {
+       "id": 1,
+       "type": "row",
+       "title": "Pools and nodes",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 2,
+       "type": "stat",
+       "title": "Nodes per pool",
+       "description": "Node objects per spot pool (serverless2.nebius/pool label). Preempted spot VMs keep their Node for a while.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:nodes:count_by_pool",
+         "legendFormat": "{{pool}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 3,
+       "type": "stat",
+       "title": "Ready GPU nodes",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:nodes_ready:count_by_pool) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 4,
+        "h": 4
+       }
+      },
+      {
+       "id": 4,
+       "type": "stat",
+       "title": "Allocatable GPUs",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_allocatable:by_pool) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 10,
+        "y": 1,
+        "w": 4,
+        "h": 4
+       }
+      },
+      {
+       "id": 5,
+       "type": "stat",
+       "title": "GPUs requested by running pods",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:pod_gpu_requests:running) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "purple",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 14,
+        "y": 1,
+        "w": 5,
+        "h": 4
+       }
+      },
+      {
+       "id": 6,
+       "type": "stat",
+       "title": "GPU pods pending",
+       "description": "Pending includes pods gated by Kueue (waiting for quota) and pods waiting for a node.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_pods_pending:count) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           },
+           {
+            "color": "orange",
+            "value": 1
+           },
+           {
+            "color": "red",
+            "value": 3
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 19,
+        "y": 1,
+        "w": 5,
+        "h": 4
+       }
+      },
+      {
+       "id": 7,
+       "type": "timeseries",
+       "title": "Nodes per pool",
+       "description": "Spot pools scale 0..N through the managed node-group autoscaler. Steps are scale events.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:nodes:count_by_pool",
+         "legendFormat": "{{pool}}"
+        },
+        {
+         "refId": "B",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:nodes_ready:count_by_pool",
+         "legendFormat": "{{pool}} ready"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 15,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 8,
+       "type": "timeseries",
+       "title": "GPU capacity vs demand",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_allocatable:by_pool)",
+         "legendFormat": "allocatable GPUs"
+        },
+        {
+         "refId": "B",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:pod_gpu_requests:running)",
+         "legendFormat": "requested by running pods"
+        },
+        {
+         "refId": "C",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_pods_pending:count) or vector(0)",
+         "legendFormat": "GPU pods pending"
+        },
+        {
+         "refId": "D",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_pods_unschedulable:count) or vector(0)",
+         "legendFormat": "GPU pods unschedulable"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 5,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": [
+         {
+          "matcher": {
+           "id": "byName",
+           "options": "GPU pods unschedulable"
+          },
+          "properties": [
+           {
+            "id": "color",
+            "value": {
+             "mode": "fixed",
+             "fixedColor": "red"
+            }
+           }
+          ]
+         }
+        ]
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 9,
+       "type": "table",
+       "title": "Nodes",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:node_pool:info * on (node) group_left() kube_node_created * 1000",
+         "legendFormat": "",
+         "instant": true,
+         "range": false,
+         "format": "table"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "align": "auto",
+          "filterable": true
+         }
+        },
+        "overrides": [
+         {
+          "matcher": {
+           "id": "byName",
+           "options": "created"
+          },
+          "properties": [
+           {
+            "id": "unit",
+            "value": "dateTimeAsIso"
+           }
+          ]
+         }
+        ]
+       },
+       "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+         "show": false
+        }
+       },
+       "transformations": [
+        {
+         "id": "organize",
+         "options": {
+          "excludeByName": {
+           "Time": true,
+           "__name__": true,
+           "job": true,
+           "instance": true
+          },
+          "renameByName": {
+           "Value": "created"
+          }
+         }
+        }
+       ],
+       "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 10,
+       "type": "state-timeline",
+       "title": "Node Ready",
+       "description": "green = Ready; red = NotReady (spot preemption shows here first)",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "kube_node_status_condition{condition=\"Ready\",status=\"true\"}",
+         "legendFormat": "{{node}}"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "fillOpacity": 70,
+          "lineWidth": 0
+         },
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "red",
+            "value": null
+           },
+           {
+            "color": "green",
+            "value": 1
+           }
+          ]
+         },
+         "mappings": []
+        },
+        "overrides": []
+       },
+       "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+         "showLegend": false
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 11,
+       "type": "timeseries",
+       "title": "Pool size changes (scale events)",
+       "description": "Count of node-count changes per interval (up or down).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (pool) (changes(serverless2:nodes:count_by_pool[$__rate_interval]))",
+         "legendFormat": "{{pool}}"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 60,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 6
+       }
+      },
+      {
+       "id": 12,
+       "type": "timeseries",
+       "title": "Node joins",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(changes(kube_node_created[$__rate_interval]))",
+         "legendFormat": "new nodes"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 60,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 6
+       }
+      },
+      {
+       "id": 13,
+       "type": "row",
+       "title": "GPU pods",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 14,
+       "type": "timeseries",
+       "title": "GPUs in use by namespace",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:gpu_requests_running:by_pool_namespace",
+         "legendFormat": "{{namespace}} ({{pool}})"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 40,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "normal"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 15,
+       "type": "timeseries",
+       "title": "Pending vs running GPU pods",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "count(serverless2:pod_gpu_requests:running) or vector(0)",
+         "legendFormat": "running"
+        },
+        {
+         "refId": "B",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_pods_pending:count) or vector(0)",
+         "legendFormat": "pending"
+        },
+        {
+         "refId": "C",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:gpu_pods_unschedulable:count) or vector(0)",
+         "legendFormat": "unschedulable"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 10,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 16,
+       "type": "table",
+       "title": "Firing alerts",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "ALERTS{alertstate=\"firing\"}",
+         "legendFormat": "",
+         "instant": true,
+         "range": false,
+         "format": "table"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "align": "auto",
+          "filterable": true
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+         "show": false
+        }
+       },
+       "transformations": [
+        {
+         "id": "organize",
+         "options": {
+          "excludeByName": {
+           "Time": true,
+           "__name__": true,
+           "Value": true,
+           "alertstate": true,
+           "prometheus": true
+          },
+          "renameByName": {}
+         }
+        }
+       ],
+       "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 6
+       }
+      },
+      {
+       "id": 17,
+       "type": "row",
+       "title": "SLO",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 18,
+       "type": "stat",
+       "title": "API availability",
+       "description": "1 - 5xx ratio of the customer API at the gateway (route api/api) over the time range.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "1 - (sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name=\"httproute/api/api/rule/0\",envoy_response_code_class=\"5\"}[$__range])) / clamp_min(sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name=\"httproute/api/api/rule/0\"}[$__range])), 1))",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "percentunit",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "red",
+            "value": null
+           },
+           {
+            "color": "orange",
+            "value": 0.98
+           },
+           {
+            "color": "green",
+            "value": 0.995
+           }
+          ]
+         },
+         "decimals": 3
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 19,
+       "type": "stat",
+       "title": "API p95 latency",
+       "description": "Upstream request time p95 at the gateway for the API route.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "histogram_quantile(0.95, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=\"httproute/api/api/rule/0\"}[$__range])))",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "ms",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 6,
+        "y": 43,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 20,
+       "type": "stat",
+       "title": "Endpoint cold start p95",
+       "description": "p95 of predictor pod created -> Ready over the pods present (scheduling + image pull + model load).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "quantile(0.95, max by (namespace, pod) ((kube_pod_status_ready_time - on (namespace, pod) kube_pod_created) and on (namespace, pod) kube_pod_labels{label_serving_kserve_io_inferenceservice!=\"\"})) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "s",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "purple",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 43,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 21,
+       "type": "stat",
+       "title": "Run queue wait p95",
+       "description": "Kueue admission wait p95 over the range (quota or GPU capacity wait before a run starts).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "histogram_quantile(0.95, sum by (le) (rate(kueue_admission_wait_time_seconds_bucket[$__range]))) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "s",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "orange",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 18,
+        "y": 43,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 22,
+       "type": "timeseries",
+       "title": "API 5xx ratio",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=\"httproute/api/api/rule/0\",envoy_response_code_class=\"5\"}[$__rate_interval])) / clamp_min(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=\"httproute/api/api/rule/0\"}[$__rate_interval])), 0.001)",
+         "legendFormat": "5xx ratio"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 10,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          },
+          "thresholdsStyle": {
+           "mode": "line"
+          }
+         },
+         "unit": "percentunit",
+         "min": 0,
+         "max": 1,
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           },
+           {
+            "color": "red",
+            "value": 0.02
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 8,
+        "h": 6
+       }
+      },
+      {
+       "id": 23,
+       "type": "timeseries",
+       "title": "Node Ready flips (preemptions and joins)",
+       "description": "Each spot preemption shows as a Ready -> NotReady flip; each join as NotReady -> Ready.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(changes(kube_node_status_condition{condition=\"Ready\",status=\"true\"}[$__rate_interval]))",
+         "legendFormat": "flips"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 60,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 8,
+        "y": 47,
+        "w": 8,
+        "h": 6
+       }
+      }
+     ],
+     "links": [
+      {
+       "title": "Serverless 2.0 dashboards",
+       "type": "dashboards",
+       "tags": [
+        "serverless2"
+       ],
+       "asDropdown": true,
+       "includeVars": false,
+       "keepTime": true
+      }
+     ]
+    }

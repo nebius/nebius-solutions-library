@@ -1,0 +1,41 @@
+# Refreshes spot.json in the spot-prices ConfigMap (created on first run) from the Nebius price calculator every
+# 10 minutes (`nebius billing v1alpha1 calculator estimate`, preemptible-priority 1 = current spot price). Needs an SA
+# key (Secret ops/nebius-sa, copied here as kueue-system/price-feed-nebius-sa by bootstrap; any SA of the
+# project can read prices).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: price-feed
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: dispatcher
+          restartPolicy: Never
+          securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+          containers:
+            - name: price-feed
+              image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.6
+              args: ["/app/price_feed.py"]
+              env:
+                - { name: PRICES_NAMESPACE, value: kueue-system }
+                - { name: FLEET_CONFIGMAP, value: fleet-prices }
+                - { name: SPOT_CONFIGMAP, value: spot-prices }
+                - { name: NEBIUS_IAM_TOKEN_FILE, value: "" }
+                - { name: HOME, value: /tmp }
+              volumeMounts:
+                - { name: nebius-sa, mountPath: /etc/nebius, readOnly: true }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumes:
+            - name: nebius-sa
+              secret: { secretName: price-feed-nebius-sa, optional: true }

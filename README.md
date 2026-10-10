@@ -24,6 +24,33 @@ For those who prefer containerized environments, our Kubernetes solution include
 
 Our SLURM solutions offer a streamlined approach for users who prefer traditional HPC environments. These solutions include ready-to-use images pre-configured with NVIDIA drivers and are ideal for those looking to take advantage of SLURM’s robust job scheduling capabilities.  Similar to our Kubernetes offerings, the SLURM solutions are optimized for InfiniBand connectivity, ensuring peak performance and efficiency in data transfer and communication between nodes.
 
+<!-- k8s-inference:start -->
+### Inference
+
+[Kubernetes inference fleet](./k8s-inference/README.md)
+
+A multi-region GPU inference platform on Managed Kubernetes from one `terraform.tfvars`: a CPU control cluster, one cluster per GPU region, spot, on-demand and reserved pools (InfiniBand optional), one API for models with always-on endpoints that scale to zero, queued endpoint calls and long jobs with checkpoint resume, multi-node jobs, a per-region image cache for fast cold starts, tenants with API keys and budgets, and observability with cost reporting. Any container is a model; the platform ships none. Everything inside the clusters is an upstream Helm chart or a small manifest.
+
+**Nebius Serverless AI or this solution?**
+
+| Question | Nebius Serverless AI (the managed service) | This solution (your own fleet) |
+|---|---|---|
+| What is it? | A service in the Nebius console: you give it a container, Nebius runs it. Nothing to install or operate. | A platform Terraform brings up inside your own Nebius projects: Kubernetes clusters, GPU pools, queues, one API. You (or your platform team) run it. |
+| How long until the first call? | Minutes. | About 45 minutes, then minutes per model. |
+| How do I define a model? | A form: image, command, GPU, scaling, environment. | A container description with the same kind of fields (image, args, port, protocol, GPU class, scaling, regions). |
+| What runs? | Always-on containers behind an HTTP endpoint that scale to zero. | The same endpoints, plus queued calls and long jobs with checkpoints that survive spot preemption, plus multi-node jobs over InfiniBand. |
+| Which GPUs? | One platform and preset per endpoint. | A preferred GPU class with fallbacks per model; spot, on-demand and reserved pools, in several regions, the cheapest free one wins. |
+| Who are the users? | You and your Nebius project members. | Your tenants: namespaces, API keys with budgets and model allow-lists, GPU quotas, rate limits. |
+| Where do the data and the network live? | In the service. | In your projects, your subnets, your buckets, behind your source-IP allow-lists; private gateways are an option. |
+| What do I pay for? | Usage, per the service's price list. | The nodes of your clusters (idle GPU pools scale to zero) plus a small control plane; cost reports per key and per run. |
+| Operations? | None. | Grafana, Prometheus, Loki, OpenCost, backups and spot recovery are installed; upgrades and incidents are yours. |
+| Pick it when... | You want one or a few models online quickly and do not want to run anything. | You run a platform for several teams or customers, mix online and batch work, need placement control, reserved capacity, private networking or your own observability, and are fine operating Kubernetes. |
+
+The two are not exclusive: a team can start on Serverless AI and move to this fleet when it needs
+queues, tenants or multi-node jobs; a model is a container plus a few knobs in both. Check the
+Serverless AI documentation for its limits of the day; this table compares the shapes of the two offerings.
+
+<!-- k8s-inference:end -->
 ### Network
 
 [Wireguard](./wireguard/README.md)

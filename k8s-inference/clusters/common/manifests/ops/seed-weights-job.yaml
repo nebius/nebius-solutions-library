@@ -1,0 +1,94 @@
+# Pre-fill a model's weights on the region's shared filesystem (Terraform `weights_filesystem`, mounted on
+# every GPU node at /mnt/weights; charts/endpoint `weights.sharedFilesystem`). A catalog entry that declares
+# `weights.sharedFilesystem: {path: <dir>}` gets `<hostPath>/<dir>` mounted; this Job fills that directory
+# ahead of the first endpoint start so every cold start is warm. A plain Job template, submitted explicitly by the operator:
+# fill the variables and create it on the region's cluster (docs/OPERATIONS.md "Model weights").
+#
+#   SEED_PATH   subdirectory under the filesystem mount (catalog weights.sharedFilesystem.path)
+#   SEED_SOURCE hf | ngc | s3 | cmd
+#   SEED_REF    hf: repo id; s3: s3://bucket/prefix; cmd: the command; ngc: unused
+#   SEED_REV    hf revision (main)
+#   SEED_IMAGE  python:3.12-slim for hf, amazon/aws-cli:2.22.35 for s3, the NIM image for ngc, any image for cmd
+#   SEED_POOL   GPU pool whose nodes have the filesystem (serverless2.nebius/pool)
+#   SEED_UID    owner of the seeded files (NIM images run as 1000)
+#
+#   SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=h100-spot-1x SEED_UID=1000 \
+#     envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <hub> -n ops create -f -
+#   SEED_PATH=<model> SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/<org>/<nim-image>:<tag> SEED_POOL=h100-spot-1x SEED_UID=1000 \
+#     envsubst < ... | kubectl -n ops create -f -        # NGC_API_KEY from Secret ops/ngc-api-key, pull Secret ops/ngc
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: seed-weights-
+  namespace: ops
+  labels: { app: seed-weights }
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 14400
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: { app: seed-weights }
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        serverless2.nebius/pool: "${SEED_POOL}"
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      imagePullSecrets:
+        - name: ngc                      # copy of models/ngc into ops; optional otherwise (a missing Secret is ignored)
+      volumes:
+        - name: weights
+          hostPath: { path: "/mnt/weights/${SEED_PATH}", type: DirectoryOrCreate }
+      containers:
+        - name: seed
+          image: "${SEED_IMAGE}"
+          command: [sh, -c]
+          args:
+            - |
+              set -euo pipefail
+              cd /weights
+              case "${SEED_SOURCE}" in
+                hf)
+                  pip install -q --no-cache-dir "huggingface_hub[hf_transfer]>=0.26" >/dev/null
+                  export HF_HOME=/weights HF_HUB_CACHE=/weights/hub HF_HUB_ENABLE_HF_TRANSFER=1
+                  python - <<'PY'
+              import os
+              from huggingface_hub import snapshot_download
+              p = snapshot_download(os.environ["SEED_REF"], revision=os.environ.get("SEED_REV") or "main", token=os.environ.get("HF_TOKEN") or None)
+              print("seeded", p)
+              PY
+                  ;;
+                ngc)
+                  # NIM images download their profile into NIM_CACHE_PATH on start; `download-to-cache` is the
+                  # NIM CLI for exactly that and exists in every NIM image.
+                  export NIM_CACHE_PATH=/weights
+                  download-to-cache 2>&1 | tail -n 20 || { echo "download-to-cache failed or missing; start the endpoint once instead"; exit 1; }
+                  ;;
+                s3)
+                  aws s3 sync "${SEED_REF}" /weights --no-progress
+                  ;;
+                cmd)
+                  sh -c "${SEED_REF}"
+                  ;;
+                *) echo "unknown source ${SEED_SOURCE}"; exit 2;;
+              esac
+              chown -R "${SEED_UID}" /weights 2>/dev/null || true
+              du -sh /weights; find /weights -type f | wc -l
+          env:
+            - { name: SEED_REF, value: "${SEED_REF}" }
+            - { name: SEED_REV, value: "${SEED_REV}" }
+            - name: NGC_API_KEY
+              valueFrom: { secretKeyRef: { name: ngc-api-key, key: NGC_API_KEY, optional: true } }
+            - name: HF_TOKEN
+              valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } }
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: backup-s3, key: AWS_ACCESS_KEY_ID, optional: true } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: backup-s3, key: AWS_SECRET_ACCESS_KEY, optional: true } }
+            - name: AWS_ENDPOINT_URL
+              valueFrom: { secretKeyRef: { name: backup-s3, key: AWS_ENDPOINT_URL, optional: true } }
+          volumeMounts: [{ name: weights, mountPath: /weights }]
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { cpu: "8", memory: 16Gi }

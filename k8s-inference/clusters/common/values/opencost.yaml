@@ -1,0 +1,54 @@
+# Helm values for the opencost Application (every cluster); version pinned in clusters/common/apps/opencost.yaml.
+# OpenCost reads the stack Prometheus and prices nodes with a custom Nebius price list (CPU/RAM per vCPU-h and GiB-h from
+# docs.nebius.com/compute/resources/pricing); the GPU price per GPU-hour and the cluster id are per cluster in
+# clusters/<cluster>/values/opencost.yaml (the numbers of fleet.yaml prices); spot prices apply to nodes labelled
+# serverless2.nebius/capacity=spot. The allocation API feeds the daily cost report and the Grafana OpenCost dashboards.
+opencost:
+  prometheus:
+    internal:
+      enabled: true
+      serviceName: kube-prometheus-stack-prometheus
+      namespaceName: monitoring
+      port: 9090
+  customPricing:
+    enabled: true
+    createConfigmap: true
+    provider: custom
+    costModel:
+      description: Nebius AI Cloud list prices (USD per hour); the GPU price is patched per cluster overlay
+      CPU: 0.012
+      spotCPU: 0.006
+      RAM: 0.0032
+      spotRAM: 0.0016
+      GPU: 1.8
+      spotGPU: 0.95
+      storage: 0.00014
+      zoneNetworkEgress: 0.0
+      regionNetworkEgress: 0.0
+      internetNetworkEgress: 0.015
+  exporter:
+    defaultClusterId: serverless2
+    extraEnv:
+      SPOT_LABEL: serverless2.nebius/capacity
+      SPOT_LABEL_VALUE: spot
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  metrics:
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack
+  ui:
+    enabled: true
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi

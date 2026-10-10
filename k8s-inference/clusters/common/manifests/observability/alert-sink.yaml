@@ -1,0 +1,70 @@
+# In-cluster alert receiver (gap 9: alert delivery). Alertmanager posts every alert group here (receivers
+# `platform`, `sink`, `heartbeat`); the pod logs one JSON line per notification, so delivery is provable from
+# `kubectl -n monitoring logs deploy/alert-sink` and from Loki (Logs dashboard, namespace monitoring) without
+# any external system. It is the only receiver (no Slack webhook for now, owner decision 2026-10-07; see
+# docs/OBSERVABILITY.md "Alert delivery" for adding an external one).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-sink
+  namespace: monitoring
+data:
+  sink.py: |
+    import json, time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("content-length") or 0)
+            body = self.rfile.read(n)
+            try:
+                d = json.loads(body)
+                alerts = [{"alertname": a.get("labels", {}).get("alertname"), "severity": a.get("labels", {}).get("severity"),
+                           "status": a.get("status"), "summary": a.get("annotations", {}).get("summary")} for a in d.get("alerts", [])]
+                line = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "path": self.path, "receiver": d.get("receiver"),
+                        "status": d.get("status"), "alerts": alerts}
+            except Exception as e:
+                line = {"path": self.path, "error": str(e), "raw": body[:500].decode("utf-8", "replace")}
+            print(json.dumps(line), flush=True)
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b"alert-sink ok\n")
+        def log_message(self, *a): pass
+    HTTPServer(("", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: monitoring
+  labels: { app.kubernetes.io/name: alert-sink, app.kubernetes.io/part-of: serverless2 }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app.kubernetes.io/name: alert-sink } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: alert-sink, app.kubernetes.io/part-of: serverless2 }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: sink
+          image: python:3.12-alpine
+          command: [python3, -u, /app/sink.py]
+          ports: [{ containerPort: 8080, name: http }]
+          readinessProbe: { httpGet: { path: /, port: http }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: app, mountPath: /app }]
+      volumes:
+        - name: app
+          configMap: { name: alert-sink }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-sink
+  namespace: monitoring
+spec:
+  selector: { app.kubernetes.io/name: alert-sink }
+  ports: [{ name: http, port: 8080, targetPort: http }]

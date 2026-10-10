@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatcher
+  labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
+spec:
+  replicas: 2                      # Kubernetes client leader election; both serve ranking snapshots
+  selector:
+    matchLabels: { app.kubernetes.io/name: dispatcher }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
+    spec:
+      serviceAccountName: dispatcher
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: dispatcher
+          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.6
+          args: ["/app/dispatcher.py"]
+          ports: [{ name: http, containerPort: 8080 }]   # GET /v1/rank (the API's pre-placement query), /healthz
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 36 }
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 15, failureThreshold: 8 }
+          env:
+            - { name: INTERVAL_S, value: "15" }
+            - { name: RENOMINATE_AFTER_S, value: "300" }
+            - { name: PRICES_NAMESPACE, value: kueue-system }
+            - { name: FLEET_CONFIGMAP, value: fleet-prices }
+            - { name: SPOT_CONFIGMAP, value: spot-prices }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+# The ranking as a service for the API (services/api: DISPATCHER_URL): where would a run with this profile,
+# GPU count, GPU classes and regions go now? Asked before rendering a run whose images are per-region.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatcher
+  labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
+spec:
+  selector: { app.kubernetes.io/name: dispatcher }
+  ports: [{ name: http, port: 80, targetPort: http }]

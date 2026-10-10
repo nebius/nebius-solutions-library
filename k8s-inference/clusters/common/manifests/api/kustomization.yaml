@@ -1,0 +1,5 @@
+# Shared base for the `api` component; clusters/<cluster>/apps/overlays/api/ patches region and hostnames.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - api.yaml

@@ -1,0 +1,14 @@
+# charts/fleet values. Terraform passes the fleet definition (the `fleet:` key) plus
+# clusters/<cluster>/values/fleet.yaml, and `cluster` = the cluster id (control, or a region's cluster id).
+cluster: ""
+fleet: {}            # the whole `fleet:` document of fleet.yaml
+cohort: serverless2  # root cohort shared with the tenant queues (charts/tenant)
+namespaces:
+  kueue: kueue-system
+  models: models
+prepull:
+  enabled: true
+  imagePullSecrets: []   # images come through the regional cache (fleet.images), no pull secret needed
+  images: []         # per cluster (clusters/<cluster>/values/fleet.yaml): [{name: <model>, image: <ref>}]
+multikueue:
+  secretPrefix: multikueue-   # kubeconfig Secrets `kueue-system/multikueue-<region id>` on the control cluster

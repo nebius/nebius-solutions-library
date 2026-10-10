@@ -1,0 +1,16 @@
+# Queue-level priorities for the run class (both clusters). The GPU pool flavor and the shared `default`
+# ClusterQueue are per cluster: clusters/<cluster>/apps/overlays/scheduling/pool.yaml. Per-tenant ClusterQueues
+# (same cohort, nominal quota 0, borrowingLimit = per-tenant cap on the shared pool) come from charts/tenant.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: customer-batch
+value: 1000
+description: "Customer-facing run-class work; ordered first and may evict bulk-backfill within the queue."
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: bulk-backfill
+value: 100
+description: "Backfill / bulk runs; last in the queue, first to be evicted by customer-batch."

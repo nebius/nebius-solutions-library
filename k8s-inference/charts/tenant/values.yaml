@@ -1,0 +1,30 @@
+# One file per tenant under tenants/<name>.yaml overrides these; `cluster` selects the entry of
+# `clusters` to render (python -m onboarding create-tenant passes --set cluster=<cluster> and -f fleet.yaml,
+# whose GPU classes name the scheduling-profile LocalQueues).
+name: ""                       # tenant name; namespace tenant-<name>
+cluster: hub                   # key of `clusters` below
+apiSubjects:                   # API identities bound to ClusterRole serverless2-api-tenant in the namespace
+  - { kind: ServiceAccount, name: api, namespace: api }          # this cluster's API
+  - { kind: ServiceAccount, name: api-agent, namespace: api }    # the control cluster's API, on a worker
+runnerServiceAccount: job-runner   # ServiceAccount of the run pods (EXECUTOR_SA on the API)
+legacyRunnerServiceAccount: argo-workflow   # the name API < 0.6 renders into its Jobs; same Role. Set "" once every API runs 0.6+
+profiles: []                   # extra LocalQueue names (profiles) besides `default` and `prefer-<class>` from fleet.yaml
+# Multi-node runs (docs/JOBS.md "Multi-node runs"). infiniband: the tenant may run jobs with `interconnect: required`
+# (a DRA ResourceClaimTemplate for the node's InfiniBand NICs is rendered; the namespace stays under PSA baseline,
+# no capability needed, docs/JOBS.md). sharedScratch: the RWX checkpoint claim on the cluster's weights filesystem (rendered where
+# fleet.yaml enables the filesystem; `checkpoints: shared` mounts it under /work/checkpoint).
+infiniband: false
+infinibandClaimTemplate: ib          # ResourceClaimTemplates ib-<n> for every n in infinibandClaimCounts
+infinibandClaimCounts: [8, 4]       # NICs per node: 8 on H100/H200/B200/B300 full nodes, 4 on GB300
+infinibandDeviceClass: ib.networking.nebius.ai
+sharedScratch: { claim: scratch-shared, size: 1Ti }
+fleet: {}                      # fleet.yaml `fleet:` document (GPU classes -> prefer-<class> queues); passed by onboarding
+clusters:                      # keyed by cluster id: the models stage passes this cluster's entry (stack/models/main.tf), a
+                               # tenants/<name>.yaml of the reference fleet all of them. The entries below are placeholders.
+  control:                     # the MultiKueue manager: namespace, profile queues and the API binding only (no pods run here)
+    region: ""
+    manager: true
+  hub:                         # a worker: its region, the tenant bucket there and that bucket's S3 host (bucket status)
+    region: ""
+    bucket: ""                 # <fleet>-<name>-<region>
+    endpoint: ""               # storage.<region>.nebius.cloud, from the bucket's status.domain_name

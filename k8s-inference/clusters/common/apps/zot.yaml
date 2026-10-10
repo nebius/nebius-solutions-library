@@ -1,0 +1,16 @@
+# Zot (CNCF) as the per-cluster image pull-through cache (docs/IMAGES.md): one instance per cluster on the system
+# pool, configuration rendered by charts/fleet from fleet.yaml `images` (ConfigMap registry/zot-config), cache on
+# a network-ssd PVC, reachable from every node's containerd as http://127.0.0.1:<fleet images.cache.node_port>
+# (NodePort on the loopback address, written into hosts.toml by Spegel). Secret registry/zot-sync-credentials
+# (never in git) holds the upstream logins.
+name: zot
+component: zot
+namespace: registry
+wave: '1'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: https://zotregistry.dev/helm-charts
+chart: zot
+version: 0.1.128
+helmValues: 'true'

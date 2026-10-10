@@ -1,0 +1,11 @@
+name: dcgm-exporter-l40s
+component: dcgm-exporter-l40s
+namespace: monitoring-l40s
+wave: '2'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: https://nvidia.github.io/dcgm-exporter/helm-charts
+chart: dcgm-exporter
+version: 4.8.4
+helmValues: 'true'

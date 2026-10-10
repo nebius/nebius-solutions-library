@@ -1,0 +1,6 @@
+# Helm values for the network-operator Application (worker clusters, when terraform.tfvars gpu_operator.enabled); version pinned in clusters/common/apps/network-operator.yaml. The chart's
+# Nebius defaults are kept: a NicClusterPolicy with the DOCA driver container (doca3.1.0-25.07) on every node with a
+# Mellanox NIC, no SR-IOV, no secondary networks (the RDMA NICs of InfiniBand pools are claimed through DRA, the
+# Managed Kubernetes DraNet DaemonSet; docs/JOBS.md "Multi-node runs"). Node feature discovery comes from the GPU
+# Operator's release (nfd.enabled is false here).
+{}

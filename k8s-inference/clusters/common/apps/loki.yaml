@@ -1,0 +1,11 @@
+name: loki
+component: loki
+namespace: monitoring
+wave: '1'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: https://grafana.github.io/helm-charts
+chart: loki
+version: 7.3.0
+helmValues: 'true'

@@ -1,0 +1,1222 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: serverless2-dashboard-cost
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    serverless2.nebius/generated-by: spikes/S14-observability/gen_dashboards.py
+data:
+  serverless2-cost.json: |
+    {
+     "uid": "s2-cost",
+     "title": "Serverless 2.0 / Cost",
+     "description": "GPU-hours paid (nodes) and used (pod requests) per pool, namespace, endpoint and run, priced with the variables at the top; LiteLLM spend per key.",
+     "tags": [
+      "serverless2"
+     ],
+     "timezone": "utc",
+     "editable": true,
+     "graphTooltip": 1,
+     "refresh": "1m",
+     "schemaVersion": 39,
+     "version": 1,
+     "time": {
+      "from": "now-24h",
+      "to": "now"
+     },
+     "templating": {
+      "list": [
+       {
+        "name": "price_h100_spot",
+        "label": "H100 spot $/GPU-h",
+        "type": "textbox",
+        "query": "2.15",
+        "description": "Hub pool h100-spot-1x: spot price cap",
+        "current": {
+         "selected": false,
+         "text": "2.15",
+         "value": "2.15"
+        },
+        "options": [
+         {
+          "selected": true,
+          "text": "2.15",
+          "value": "2.15"
+         }
+        ]
+       },
+       {
+        "name": "price_rtx_spot",
+        "label": "RTX PRO 6000 spot $/GPU-h",
+        "type": "textbox",
+        "query": "0.79",
+        "description": "eu-south1 pool rtx6000-spot-1x: spot list price (from)",
+        "current": {
+         "selected": false,
+         "text": "0.79",
+         "value": "0.79"
+        },
+        "options": [
+         {
+          "selected": true,
+          "text": "0.79",
+          "value": "0.79"
+         }
+        ]
+       },
+       {
+        "name": "price_h100_ondemand",
+        "label": "H100 on-demand $/GPU-h",
+        "type": "textbox",
+        "query": "3.85",
+        "description": "",
+        "current": {
+         "selected": false,
+         "text": "3.85",
+         "value": "3.85"
+        },
+        "options": [
+         {
+          "selected": true,
+          "text": "3.85",
+          "value": "3.85"
+         }
+        ]
+       },
+       {
+        "name": "price_rtx_ondemand",
+        "label": "RTX PRO 6000 on-demand $/GPU-h",
+        "type": "textbox",
+        "query": "1.80",
+        "description": "",
+        "current": {
+         "selected": false,
+         "text": "1.80",
+         "value": "1.80"
+        },
+        "options": [
+         {
+          "selected": true,
+          "text": "1.80",
+          "value": "1.80"
+         }
+        ]
+       }
+      ]
+     },
+     "panels": [
+      {
+       "id": 75,
+       "type": "row",
+       "title": "GPU-hours and cost for the selected time range (1 GPU per node in both pools)",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 76,
+       "type": "stat",
+       "title": "Paid GPU-hours per pool",
+       "description": "Node-hours of the GPU pools in the time range = what the provider bills (nodes exist whether or not a pod uses the GPU).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (pool) (sum_over_time(serverless2:nodes:count_by_pool{pool!=\"system\"}[$__range:1m])) / 60",
+         "legendFormat": "{{pool}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 77,
+       "type": "stat",
+       "title": "Cost at spot price",
+       "description": "Paid GPU-hours x spot price per pool (variables at the top: H100 spot cap, RTX PRO 6000 spot list).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "((sum(sum_over_time(serverless2:nodes:count_by_pool{pool=\"h100-spot-1x\"}[$__range:1m]) / 60) or vector(0)) * $price_h100_spot) + ((sum(sum_over_time(serverless2:nodes:count_by_pool{pool=\"rtx6000-spot-1x\"}[$__range:1m]) / 60) or vector(0)) * $price_rtx_spot)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 78,
+       "type": "stat",
+       "title": "Same at on-demand price",
+       "description": "What the same node-hours would cost on-demand (variables price_*_ondemand).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "((sum(sum_over_time(serverless2:nodes:count_by_pool{pool=\"h100-spot-1x\"}[$__range:1m]) / 60) or vector(0)) * $price_h100_ondemand) + ((sum(sum_over_time(serverless2:nodes:count_by_pool{pool=\"rtx6000-spot-1x\"}[$__range:1m]) / 60) or vector(0)) * $price_rtx_ondemand)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "orange",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 79,
+       "type": "stat",
+       "title": "Burn rate now",
+       "description": "Current nodes x spot price, in $ per hour.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "((sum(serverless2:nodes:count_by_pool{pool=\"h100-spot-1x\"}) or vector(0)) * $price_h100_spot) + ((sum(serverless2:nodes:count_by_pool{pool=\"rtx6000-spot-1x\"}) or vector(0)) * $price_rtx_spot)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "purple",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 80,
+       "type": "stat",
+       "title": "Used GPU-hours (pod requests)",
+       "description": "GPU-hours actually requested by Running pods (endpoints + runs).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(sum_over_time(serverless2:pod_gpu_requests:running[$__range:1m])) / 60 or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 81,
+       "type": "stat",
+       "title": "Utilisation (used / paid)",
+       "description": "Share of paid node-hours that had a GPU pod running. Idle time = scale-down delay + cold-start gaps + stuck preempted nodes.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "(sum(sum_over_time(serverless2:pod_gpu_requests:running[$__range:1m])) or vector(0)) / clamp_min(sum(sum_over_time(serverless2:nodes:count_by_pool{pool!=\"system\"}[$__range:1m])), 1)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "percentunit",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "red",
+            "value": null
+           },
+           {
+            "color": "orange",
+            "value": 0.5
+           },
+           {
+            "color": "green",
+            "value": 0.8
+           }
+          ]
+         },
+         "decimals": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 6,
+        "y": 5,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 82,
+       "type": "stat",
+       "title": "Mean DCGM utilisation of busy GPUs",
+       "description": "Average SM utilisation while a pod held the GPU (0 for an idle endpoint replica).",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "avg(avg_over_time(DCGM_FI_DEV_GPU_UTIL{pod!=\"\"}[$__range])) or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "percent",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "blue",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 83,
+       "type": "stat",
+       "title": "Idle GPU-hours (paid, no pod)",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "(sum(sum_over_time(serverless2:nodes:count_by_pool{pool!=\"system\"}[$__range:1m])) - sum(sum_over_time(serverless2:pod_gpu_requests:running[$__range:1m]))) / 60 or vector(0)",
+         "legendFormat": "",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "color": {
+          "mode": "thresholds"
+         },
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "orange",
+            "value": null
+           }
+          ]
+         },
+         "decimals": 2
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true
+       },
+       "gridPos": {
+        "x": 18,
+        "y": 5,
+        "w": 6,
+        "h": 4
+       }
+      },
+      {
+       "id": 84,
+       "type": "row",
+       "title": "Who used the GPUs",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 85,
+       "type": "bargauge",
+       "title": "GPU-hours per namespace (range)",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (namespace) (sum_over_time(serverless2:gpu_requests_running:by_pool_namespace[$__range:1m])) / 60",
+         "legendFormat": "{{namespace}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "min": 0,
+         "color": {
+          "mode": "continuous-BlYlRd"
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "namePlacement": "left"
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 8,
+        "h": 8
+       }
+      },
+      {
+       "id": 86,
+       "type": "bargauge",
+       "title": "Cost per namespace at spot price",
+       "description": "Used GPU-hours x pool spot price. The difference to 'Cost at spot price' is idle capacity.",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (namespace) ((sum_over_time(serverless2:gpu_requests_running:by_pool_namespace{pool=\"h100-spot-1x\"}[$__range:1m]) / 60) * $price_h100_spot or (sum_over_time(serverless2:gpu_requests_running:by_pool_namespace{pool=\"rtx6000-spot-1x\"}[$__range:1m]) / 60) * $price_rtx_spot)",
+         "legendFormat": "{{namespace}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "min": 0,
+         "color": {
+          "mode": "continuous-BlYlRd"
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "namePlacement": "left"
+       },
+       "gridPos": {
+        "x": 8,
+        "y": 10,
+        "w": 8,
+        "h": 8
+       }
+      },
+      {
+       "id": 87,
+       "type": "bargauge",
+       "title": "GPU-hours per pool and namespace",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (pool, namespace) (sum_over_time(serverless2:gpu_requests_running:by_pool_namespace[$__range:1m])) / 60",
+         "legendFormat": "{{pool}} / {{namespace}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "min": 0,
+         "color": {
+          "mode": "continuous-BlYlRd"
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "namePlacement": "left"
+       },
+       "gridPos": {
+        "x": 16,
+        "y": 10,
+        "w": 8,
+        "h": 8
+       }
+      },
+      {
+       "id": 88,
+       "type": "bargauge",
+       "title": "GPU-hours per endpoint (InferenceService)",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (namespace, inferenceservice) (sum_over_time(serverless2:gpu_requests_running:by_isvc[$__range:1m])) / 60",
+         "legendFormat": "{{namespace}}/{{inferenceservice}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "min": 0,
+         "color": {
+          "mode": "continuous-BlYlRd"
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "namePlacement": "left"
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 89,
+       "type": "bargauge",
+       "title": "GPU-hours per run (Kubernetes Job)",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum by (namespace, workflow) (sum_over_time(serverless2:gpu_requests_running:by_workflow[$__range:1m])) / 60",
+         "legendFormat": "{{namespace}}/{{workflow}}",
+         "instant": true,
+         "range": false
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "h",
+         "min": 0,
+         "color": {
+          "mode": "continuous-BlYlRd"
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "namePlacement": "left"
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 90,
+       "type": "timeseries",
+       "title": "GPUs in use by namespace vs nodes",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "serverless2:gpu_requests_running:by_pool_namespace",
+         "legendFormat": "{{namespace}} ({{pool}})"
+        },
+        {
+         "refId": "B",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "sum(serverless2:nodes:count_by_pool{pool!=\"system\"})",
+         "legendFormat": "GPU nodes (paid)"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 20,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "short",
+         "min": 0
+        },
+        "overrides": [
+         {
+          "matcher": {
+           "id": "byName",
+           "options": "GPU nodes (paid)"
+          },
+          "properties": [
+           {
+            "id": "color",
+            "value": {
+             "mode": "fixed",
+             "fixedColor": "red"
+            }
+           },
+           {
+            "id": "custom.fillOpacity",
+            "value": 0
+           }
+          ]
+         }
+        ]
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 91,
+       "type": "timeseries",
+       "title": "Hourly cost at spot price",
+       "description": "",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "((sum(serverless2:nodes:count_by_pool{pool=\"h100-spot-1x\"}) or vector(0)) * $price_h100_spot) + ((sum(serverless2:nodes:count_by_pool{pool=\"rtx6000-spot-1x\"}) or vector(0)) * $price_rtx_spot)",
+         "legendFormat": "$/h (nodes)"
+        },
+        {
+         "refId": "B",
+         "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+         },
+         "expr": "((sum(serverless2:gpu_requests_running:by_pool_namespace{pool=\"h100-spot-1x\"}) or vector(0)) * $price_h100_spot) + ((sum(serverless2:gpu_requests_running:by_pool_namespace{pool=\"rtx6000-spot-1x\"}) or vector(0)) * $price_rtx_spot)",
+         "legendFormat": "$/h (used)"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 10,
+          "showPoints": "never",
+          "drawStyle": "line",
+          "stacking": {
+           "mode": "none"
+          }
+         },
+         "unit": "currencyUSD",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 92,
+       "type": "row",
+       "title": "LiteLLM spend (control cluster: LiteLLM database datasource)",
+       "collapsed": false,
+       "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+       },
+       "panels": []
+      },
+      {
+       "id": 93,
+       "type": "table",
+       "title": "Spend per API key",
+       "description": "Virtual keys with their accumulated spend (per-call prices from the pass-through routes and model prices).",
+       "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "litellm-postgres"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "litellm-postgres"
+         },
+         "rawSql": "SELECT key_alias AS key, team_id AS team, spend, max_budget AS budget, (metadata->>'tenant') AS tenant FROM \"LiteLLM_VerificationToken\" ORDER BY spend DESC",
+         "rawQuery": true,
+         "editorMode": "code",
+         "format": "table"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "custom": {
+          "align": "auto",
+          "filterable": true
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+         "show": false
+        }
+       },
+       "transformations": [],
+       "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 94,
+       "type": "timeseries",
+       "title": "Spend per hour by model",
+       "description": "",
+       "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "litellm-postgres"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "litellm-postgres"
+         },
+         "rawSql": "SELECT $__timeGroupAlias(\"startTime\", 1h), model AS metric, sum(spend) AS spend FROM \"LiteLLM_SpendLogs\" WHERE $__timeFilter(\"startTime\") GROUP BY 1, 2 ORDER BY 1",
+         "rawQuery": true,
+         "editorMode": "code",
+         "format": "time_series"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "custom": {
+          "lineWidth": 1,
+          "fillOpacity": 60,
+          "showPoints": "never",
+          "drawStyle": "bars",
+          "stacking": {
+           "mode": "normal"
+          }
+         },
+         "unit": "currencyUSD",
+         "min": 0
+        },
+        "overrides": []
+       },
+       "options": {
+        "legend": {
+         "displayMode": "list",
+         "placement": "bottom",
+         "showLegend": true
+        },
+        "tooltip": {
+         "mode": "multi",
+         "sort": "desc"
+        }
+       },
+       "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+       }
+      },
+      {
+       "id": 95,
+       "type": "table",
+       "title": "Recent priced calls",
+       "description": "",
+       "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "litellm-postgres"
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "litellm-postgres"
+         },
+         "rawSql": "SELECT \"startTime\" AS time, model, spend, total_tokens AS tokens, (metadata->>'user_api_key_alias') AS key FROM \"LiteLLM_SpendLogs\" WHERE $__timeFilter(\"startTime\") ORDER BY \"startTime\" DESC LIMIT 100",
+         "rawQuery": true,
+         "editorMode": "code",
+         "format": "table"
+        }
+       ],
+       "fieldConfig": {
+        "defaults": {
+         "unit": "currencyUSD",
+         "custom": {
+          "align": "auto",
+          "filterable": true
+         }
+        },
+        "overrides": []
+       },
+       "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+         "show": false
+        }
+       },
+       "transformations": [],
+       "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 8
+       }
+      }
+     ],
+     "links": [
+      {
+       "title": "Serverless 2.0 dashboards",
+       "type": "dashboards",
+       "tags": [
+        "serverless2"
+       ],
+       "asDropdown": true,
+       "includeVars": false,
+       "keepTime": true
+      }
+     ]
+    }

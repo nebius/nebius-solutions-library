@@ -1,0 +1,31 @@
+# Spegel (clusters/common/apps/spegel.yaml, docs/IMAGES.md). containerd on every node must read per-registry
+# hosts.toml files (config_path = /etc/containerd/certs.d, discard_unpacked_layers = false): the CPU node
+# images ship that, the GPU node images do not; the node-config DaemonSet in this namespace adds it
+# (clusters/common/manifests/node-config). Spegel writes the hosts.toml files.
+spegel:
+  logLevel: INFO
+  # Registries that get a hosts.toml: the fleet's logical host (every catalog/platform image) plus the public
+  # registries other charts pull from directly, so their layers are shared between nodes as well.
+  mirroredRegistries:
+    - https://registry.serverless2.local
+    - https://docker.io
+    - https://ghcr.io
+    - https://quay.io
+    - https://nvcr.io
+    - https://registry.k8s.io
+  # After the peers: the cluster's Zot cache on the node's loopback NodePort (fleet.yaml images.cache.node_port).
+  # Zot answers for registry.serverless2.local/<alias>/...; for the public hosts above it answers 404 and
+  # containerd falls through to the upstream registry.
+  additionalMirrorTargets:
+    - http://127.0.0.1:30500
+  resolveTags: true
+  containerdMirrorAdd: true
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 256Mi }
+serviceMonitor:
+  enabled: true
+grafanaDashboard:
+  enabled: true
+  mode: Sidecar
+  labels: { grafana_dashboard: "1" }

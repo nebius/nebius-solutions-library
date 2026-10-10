@@ -1,0 +1,7 @@
+# Shared base for the `scheduling` component; clusters/<cluster>/apps/overlays/ add the cluster-specific parts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kueue.yaml
+  - namespaces.yaml
+  - priorityclasses.yaml

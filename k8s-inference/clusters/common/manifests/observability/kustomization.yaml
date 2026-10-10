@@ -1,0 +1,15 @@
+# Shared observability base. Native chart releases install Alloy, DCGM and OpenCost; this base owns scrape rules and dashboards.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - alert-sink.yaml
+  - cost-export.yaml
+  - dashboard-cost.yaml
+  - dashboard-endpoints.yaml
+  - dashboard-jobs.yaml
+  - dashboard-logs.yaml
+  - dashboard-platform.yaml
+  - datasource-loki.yaml
+  - rules.yaml
+  - rules-capacity.yaml
+  - scrape.yaml

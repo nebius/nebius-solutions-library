@@ -1,0 +1,15 @@
+# Endpoint SecurityPolicies reuse the API; no separate authentication deployment.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: endpoint-authorization
+  namespace: api
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: models
+  to:
+    - group: ""
+      kind: Service
+      name: api

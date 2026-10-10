@@ -1,0 +1,60 @@
+{{- /*
+Control cluster only: Kueue MultiKueue manager objects (docs/FLEET.md "Cross-region dispatch").
+  MultiKueueCluster <region id>      one per worker cluster; kubeconfig in Secret kueue-system/multikueue-<region id>
+                                      (service account `multikueue` on the worker, created by lane F2; never in git).
+  MultiKueueConfig  <profile>         worker order for the profile: regions with the preferred GPU class first, by
+                                      their cheapest pool of that class, then the others by price. The dispatcher
+                                      (Kueue config `multiKueue.dispatcherName`, lane F4) decides whether that order
+                                      is tried incrementally or all at once.
+  AdmissionCheck    multikueue-<profile>
+*/ -}}
+{{- if include "fleet.isControl" . }}
+{{- $f := .Values.fleet }}
+{{- range $rn, $r := $f.regions }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
+  name: {{ $r.id }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $rn }}
+spec:
+  clusterSource:
+    kubeConfig:
+      locationType: Secret
+      location: {{ $.Values.multikueue.secretPrefix }}{{ $r.id }}
+{{- end }}
+{{- $all := include "fleet.allPools" $f | fromYaml }}
+{{- $profiles := list "" }}
+{{- range $c := include "fleet.classes" $all | fromYamlArray }}{{ $profiles = append $profiles $c }}{{ end }}
+{{- range $prefer := $profiles }}
+{{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: {{ $profile }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+spec:
+  quotaManagement: Manual     # manager quotas mirror fleet.yaml (manager-queues.yaml), not the workers' live state
+  clusters:
+    {{- range $id := include "fleet.orderedRegions" (dict "fleet" $f "prefer" $prefer) | fromYamlArray }}
+    - {{ $id }}
+    {{- end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: multikueue-{{ $profile }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: {{ $profile }}
+{{- end }}
+{{- end }}

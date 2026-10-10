@@ -1,0 +1,38 @@
+{{- /* fleet-prices: USD per GPU-hour per pool (every region on the control cluster, this region's pools on a
+       worker) for the cost-aware dispatcher and the price feed. OpenCost itself keeps one GPU/spot price per
+       cluster (clusters/<cluster>/apps/overlays/observability), set from the same numbers. */ -}}
+{{- $f := .Values.fleet }}
+{{- $all := include "fleet.allPools" $f | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fleet-prices
+  namespace: {{ .Values.namespaces.kueue }}
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+data:
+  pools.yaml: |
+    {{- range $name, $p := $all }}
+    {{- if or (include "fleet.isControl" $) (eq $p.region $.Values.cluster) }}
+    {{ $name }}:
+      region: {{ $p.region }}
+      pool: {{ $p.pool }}
+      gpu_class: {{ $p.gpu_class }}
+      platform: {{ $p.platform }}
+      preset: {{ $p.preset }}
+      project: {{ $p.project }}
+      capacity: {{ (default (dict "type" "on_demand") $p.capacity).type }}
+      usd_per_gpu_hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) }}
+      gpus_per_node: {{ (include "fleet.preset" $p.preset | fromYaml).gpus }}
+      max_nodes: {{ $p.max_nodes }}
+      interconnect: {{ default "none" $p.interconnect }}
+      ib_devices_per_node: {{ include "fleet.ibDevices" $p }}
+      local_nvme: {{ if $p.local_nvme }}true{{ else }}false{{ end }}
+    {{- end }}
+    {{- end }}
+  list.yaml: |
+    {{- range $platform, $pr := $f.prices }}
+    {{- if kindIs "map" $pr }}
+    {{ $platform }}: { on_demand: {{ $pr.on_demand }}, spot: {{ $pr.spot }} }
+    {{- end }}
+    {{- end }}

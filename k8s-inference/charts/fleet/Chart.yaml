@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fleet
+description: Scheduling view of fleet.yaml for one cluster. Worker (regional GPU) clusters get Kueue ResourceFlavors per pool, the `default` ClusterQueue with the pool capacity, one `prefer-<gpu-class>` ClusterQueue per GPU class (preferred class first, reserved before on-demand before spot, then the other classes by price), image pre-pull DaemonSets per pool and the price ConfigMap; the control cluster gets the MultiKueue objects (clusters, configs, admission checks) and the fleet-wide preference queues.
+type: application
+version: 0.1.1
+appVersion: "2"

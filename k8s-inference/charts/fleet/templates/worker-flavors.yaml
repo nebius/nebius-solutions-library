@@ -1,0 +1,34 @@
+{{- /* One Kueue ResourceFlavor per GPU pool of this cluster (name = pool key, as clusters/<cluster>/apps/overlays/scheduling/pool.yaml today). */ -}}
+{{- if not (include "fleet.isControl" .) }}
+{{- $region := include "fleet.region" . | fromYaml }}
+{{- if not $region.r }}{{ fail (printf "cluster %q is not a region id in fleet.yaml" .Values.cluster) }}{{ end }}
+{{- range $pool, $p := $region.r.pools }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $pool }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/gpu-class: {{ $p.gpu_class | quote }}
+    serverless2.nebius/capacity: {{ (default (dict "type" "on_demand") $p.capacity).type | replace "_" "-" | quote }}
+    serverless2.nebius/interconnect: {{ default "none" $p.interconnect | quote }}
+  annotations:
+    serverless2.nebius/platform: {{ $p.platform }}/{{ $p.preset }}
+    serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $.Values.fleet "pool" $p) | quote }}
+spec:
+  nodeLabels:
+    serverless2.nebius/pool: {{ $pool }}
+    {{- if eq (default "none" $p.interconnect) "infiniband" }}
+    serverless2.nebius/interconnect: infiniband
+    {{- end }}
+    {{- if $p.local_nvme }}
+    serverless2.nebius/local-nvme: "true"
+    {{- end }}
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
+{{- end }}
+{{- end }}

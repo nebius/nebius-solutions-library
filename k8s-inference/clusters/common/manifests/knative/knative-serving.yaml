@@ -1,0 +1,71 @@
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec:
+  version: "1.23"
+  high-availability:
+    replicas: 2                 # HA (readiness item 1): activator (scale-from-zero data path), autoscaler, controller, webhook x2
+  ingress:
+    gateway-api:
+      enabled: true
+  config:
+    domain:
+      # Placeholder: the platform stage (stack/platform/stage.tf) or the cluster overlay sets this cluster's
+      # gateway domain (<ip>.sslip.io resolves to the IP without any DNS change, or <cluster>.<domain>).
+      "example.invalid": ""
+    network:
+      ingress-class: gateway-api.ingress.networking.knative.dev
+    gateway:
+      external-gateways: |
+        - class: eg
+          gateway: envoy-gateway-system/serverless2-external
+          service: envoy-gateway-system/knative-external
+          supported-features:
+            - HTTPRouteRequestTimeout
+      local-gateways: |
+        - class: eg
+          gateway: envoy-gateway-system/serverless2-internal
+          service: envoy-gateway-system/knative-internal
+          supported-features:
+            - HTTPRouteRequestTimeout
+    observability:
+      # lane G: Knative 1.23 exports nothing by default (OTel 'none'); Prometheus
+      # endpoints for activator/autoscaler (:9090) and queue-proxy (request metrics)
+      metrics-protocol: prometheus
+      request-metrics-protocol: prometheus
+    autoscaler:
+      enable-scale-to-zero: "true"
+      scale-to-zero-grace-period: "60s"
+    gc:
+      # A revision that never became Ready (bad image, no node for its GPUs) keeps its initial replica, Pending or
+      # crash-looping, and so its GPU request, until the revision is collected: Knative's default keeps 20 old
+      # revisions for 48 h. The platform re-renders a model from its definition (no rollback through revisions),
+      # so inactive revisions are collected after an hour (s2pr2, 2026-10-09). Knative never collects a model's
+      # latest revision: a first revision that never becomes Ready keeps its Pending pod until the model is
+      # changed or deleted.
+      min-non-active-revisions: "0"
+      max-non-active-revisions: "5"
+      retain-since-create-time: "1h"
+      retain-since-last-active-time: "1h"
+    features:
+      kubernetes.podspec-affinity: enabled
+      kubernetes.podspec-nodeselector: enabled
+      kubernetes.podspec-tolerations: enabled
+      kubernetes.podspec-persistent-volume-claim: enabled
+      kubernetes.podspec-persistent-volume-write: enabled
+      kubernetes.podspec-init-containers: enabled
+      kubernetes.podspec-volumes-emptydir: enabled
+      kubernetes.podspec-securitycontext: enabled
+      kubernetes.podspec-priorityclassname: enabled
+      # Model weights on the shared filesystem go through a PVC (persistent-volume-claim + -write above):
+      # Knative's hostPath support only allows read-only mounts, so hostPath is not used.
+    defaults:
+      revision-timeout-seconds: "600"
+      max-revision-timeout-seconds: "3600"
+    deployment:
+      progress-deadline: "3600s"   # a trillion-parameter model on a cold node: boot, drivers, image and weights take up to an hour (2026-10-10)
+      # the logical registry host resolves only on the nodes (containerd hosts.toml, docs/IMAGES.md), not in the
+      # cluster network: Knative keeps the reference as written (pin digests in the catalog where it matters)
+      registries-skipping-tag-resolving: "registry.serverless2.local,nvcr.io"

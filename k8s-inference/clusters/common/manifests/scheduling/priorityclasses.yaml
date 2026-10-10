@@ -1,0 +1,31 @@
+# Pod priorities (kube-scheduler level). Interactive endpoints may preempt
+# run-class pods; run-class pods never preempt anything. Kueue has its own
+# queue-level priorities (WorkloadPriorityClass in kueue.yaml); both are set
+# per workload by the API: PriorityClass = what happens on a full node,
+# WorkloadPriorityClass = order and preemption inside the queue.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: serverless2-interactive
+value: 1000
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: "Interactive endpoints (KServe/Knative). Preempts run-class pods on a full GPU pool."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: serverless2-batch-priority
+value: 500
+preemptionPolicy: Never
+globalDefault: false
+description: "Priority run class (customer-batch). Never preempts; only ordered ahead of serverless2-batch."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: serverless2-batch
+value: 100
+preemptionPolicy: Never
+globalDefault: false
+description: "Default for run-class pods (set by the run WorkflowTemplates). Never preempts; first victim of serverless2-interactive."

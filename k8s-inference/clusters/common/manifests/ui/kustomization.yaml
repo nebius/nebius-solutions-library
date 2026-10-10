@@ -1,0 +1,5 @@
+# Shared base for the `ui` component (operator UI routes); clusters/<cluster>/apps/overlays/ui/ patches hostnames.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - routes.yaml

@@ -1,0 +1,11 @@
+name: opencost
+component: opencost
+namespace: opencost
+wave: '2'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: https://opencost.github.io/opencost-helm-chart
+chart: opencost
+version: 2.5.32
+helmValues: 'true'

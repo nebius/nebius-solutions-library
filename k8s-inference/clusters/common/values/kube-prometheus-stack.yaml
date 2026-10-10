@@ -1,0 +1,149 @@
+# Helm values for the kube-prometheus-stack Application (both clusters unless hubOnly); version pinned in clusters/common/apps/kube-prometheus-stack.yaml
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+# Alerting (production-readiness gap 9): every alert goes to the in-cluster sink (Deployment alert-sink,
+# clusters/common/manifests/observability/alert-sink.yaml, logs the JSON payload: provable delivery without any
+# external system). No external receiver is configured (owner decision 2026-10-07: no Slack webhook for now);
+# docs/OBSERVABILITY.md "Alert delivery" shows how to add one (a slack_configs/webhook_configs entry on the
+# `platform` receiver plus a Secret mounted through alertmanagerSpec.secrets). Severity routing: critical
+# repeats every 4h, warning every 24h, info only to the sink; the Watchdog heartbeat goes to the sink every 24h
+# (end-to-end proof that Prometheus -> Alertmanager -> receiver works).
+alertmanager:
+  alertmanagerSpec:
+    retention: 120h
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 2Gi } }
+  config:
+    global:
+      resolve_timeout: 5m
+    templates:
+      - /etc/alertmanager/config/*.tmpl
+    inhibit_rules:
+      - source_matchers: [severity = critical]
+        target_matchers: [severity =~ "warning|info"]
+        equal: [namespace, alertname]
+      - source_matchers: [severity = warning]
+        target_matchers: [severity = info]
+        equal: [namespace, alertname]
+      - source_matchers: [alertname = InfoInhibitor]
+        target_matchers: [severity = info]
+        equal: [namespace]
+      - target_matchers: [alertname = InfoInhibitor]
+      # a NotReady node explains pending GPU pods, pending Kueue workloads and unready endpoints
+      - source_matchers: [alertname = NodeNotReady]
+        target_matchers: [component =~ "scheduling|kueue|endpoints"]
+    route:
+      receiver: platform
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+      routes:
+        - matchers: [alertname = Watchdog]
+          receiver: heartbeat
+          repeat_interval: 24h
+          group_wait: 0s
+        - matchers: [alertname = InfoInhibitor]
+          receiver: "null"
+        - matchers: [severity = critical]
+          receiver: platform
+          repeat_interval: 4h
+        - matchers: [severity = info]
+          receiver: sink
+    receivers:
+      - name: "null"
+      - name: sink
+        webhook_configs:
+          - url: http://alert-sink.monitoring.svc:8080/alerts
+            send_resolved: true
+      - name: heartbeat
+        webhook_configs:
+          - url: http://alert-sink.monitoring.svc:8080/heartbeat
+            send_resolved: false
+      - name: platform
+        webhook_configs:
+          - url: http://alert-sink.monitoring.svc:8080/alerts
+            send_resolved: true
+grafana:
+  enabled: true
+  # Upstream dashboards by grafana.com id (downloaded at pod start): NVIDIA DCGM exporter dashboard
+  # replaces the hand-made GPU row of the platform dashboard; OpenCost overview/namespace (cost export).
+  # Own dashboards (platform/endpoints/jobs/cost/logs) are ConfigMaps in clusters/common/manifests/observability,
+  # loaded by the sidecar.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: upstream
+          orgId: 1
+          folder: Upstream
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/upstream
+  dashboards:
+    upstream:
+      nvidia-dcgm-exporter:
+        gnetId: 12239
+        revision: 2
+        datasource: Prometheus
+      opencost-overview:
+        gnetId: 22208
+        revision: 8
+        datasource: Prometheus
+      opencost-namespace:
+        gnetId: 22252
+        revision: 8
+        datasource: Prometheus
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    retentionSize: 45GB
+    # persistent TSDB (was emptyDir: every Prometheus restart lost all metrics and the cost history)
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 50Gi } }
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - nodes=[serverless2.nebius/pool,serverless2.nebius/capacity,nvidia.com/gpu.product]
+    - pods=[serving.kserve.io/inferenceservice,job-name,kueue.x-k8s.io/queue-name,serverless2.nebius/tenant,serverless2.nebius/model,serverless2.nebius/role]
+  rbac:
+    extraRules:
+      - apiGroups: [serving.kserve.io]
+        resources: [inferenceservices]
+        verbs: [list, watch]
+  customResourceState:
+    enabled: true
+    config:
+      spec:
+        resources:
+          - groupVersionKind: { group: serving.kserve.io, version: v1beta1, kind: InferenceService }
+            metricNamePrefix: kube_inferenceservice
+            labelsFromPath: { name: [metadata, name], namespace: [metadata, namespace] }
+            metrics:
+              - name: status_condition
+                help: InferenceService status conditions (1 True, 0 False)
+                each:
+                  type: Gauge
+                  gauge:
+                    path: [status, conditions]
+                    labelsFromPath: { type: [type] }
+                    valueFrom: [status]

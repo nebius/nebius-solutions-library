@@ -1,0 +1,72 @@
+{{- /*
+Multi-node runs (docs/JOBS.md "Multi-node runs"), worker clusters only:
+- a DRA ResourceClaimTemplate that hands a pod every InfiniBand NIC of its node (DeviceClass
+  ib.networking.nebius.ai, published by DraNet on Nebius GPU node images), rendered when the tenant may run
+  InfiniBand jobs (`infiniband: true`; no privilege change: the namespace stays under PSA baseline);
+- a shared RWX claim on the cluster's weights filesystem for checkpoints (`checkpoints: shared`), rendered when the
+  region has the filesystem (fleet.yaml `weights_filesystem.enabled`): one static PV per tenant, bound to the
+  claim in the tenant namespace (pods see a PVC, never a hostPath, so PSA baseline holds).
+*/ -}}
+{{- $c := include "tenant.cluster" . | fromYaml -}}
+{{- /* The claim templates exist on the manager too: Kueue there resolves a multi-node run's claim template
+       (DRA accounting) before MultiKueue hands the JobSet to a worker; without them the workload stays
+       "DRAResourcesUnresolved" (s2pr2, 2026-10-09). The scratch volume below is worker-only. */ -}}
+{{- if .Values.infiniband }}
+{{- range $n := .Values.infinibandClaimCounts }}
+---
+# ib-<n>: every one of the node's <n> InfiniBand NICs (Kueue's DRA accounting supports ExactCount only, charged as
+# nebius.ai/infiniband x n; the API picks ib-<ib_devices_per_node> of the pool's platform)
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ $.Values.infinibandClaimTemplate }}-{{ $n }}
+  namespace: {{ include "tenant.ns" $ }}
+spec:
+  spec:
+    devices:
+      requests:
+        - name: ib
+          exactly:
+            deviceClassName: {{ $.Values.infinibandDeviceClass }}
+            allocationMode: ExactCount
+            count: {{ $n }}
+{{- end }}
+{{- end }}
+{{- if not $c.manager }}
+{{- $region := index (default dict (default dict .Values.fleet).regions) $c.region }}
+{{- $fs := default dict (default dict $region).weights_filesystem }}
+{{- if $fs.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: scratch-shared-{{ include "tenant.ns" . }}
+  labels:
+    serverless2.nebius/tenant: {{ .Values.name }}
+spec:
+  capacity:
+    storage: {{ .Values.sharedScratch.size }}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: shared-scratch
+  claimRef:
+    name: {{ .Values.sharedScratch.claim }}
+    namespace: {{ include "tenant.ns" . }}
+  hostPath:
+    path: {{ default "/mnt/weights" $fs.mount_path }}/tenants/{{ .Values.name }}
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.sharedScratch.claim }}
+  namespace: {{ include "tenant.ns" . }}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: shared-scratch
+  volumeName: scratch-shared-{{ include "tenant.ns" . }}
+  resources:
+    requests:
+      storage: {{ .Values.sharedScratch.size }}
+{{- end }}
+{{- end }}

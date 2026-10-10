@@ -1,0 +1,58 @@
+# Helm values for the kueue Application (both clusters unless hubOnly); version pinned in clusters/common/apps/kueue.yaml
+controllerManager:
+  replicas: 2                  # HA (readiness item 1): leader election is on in the config below
+  featureGates:
+    # Multi-node runs claim the node's InfiniBand NICs through DRA (docs/JOBS.md "Multi-node runs"); Kueue charges
+    # them against the logical resource of `resources.deviceClassMappings` below (beta since 0.18).
+    - { name: KueueDRAIntegration, enabled: true }
+  podDisruptionBudget: { enabled: true, minAvailable: 1 }
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels: { control-plane: controller-manager }
+managerConfig:
+  controllerManagerConfigYaml: |-
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    clientConnection:
+      qps: 300
+      burst: 500
+    manageJobsWithoutQueueName: false
+    managedJobsNamespaceSelector:
+      matchLabels:
+        serverless2.nebius/kueue: managed
+    # DRA: a pod's ResourceClaimTemplate for DeviceClass ib.networking.nebius.ai (DraNet, the node's InfiniBand
+    # NICs) is charged as `nebius.ai/infiniband` x count; the fleet chart gives InfiniBand pools that quota
+    # (charts/fleet, `ib_devices_per_node` x max nodes) and 0 to every other pool. ExactCount claims only.
+    resources:
+      deviceClassMappings:
+        - name: nebius.ai/infiniband
+          deviceClassNames: [ib.networking.nebius.ai]
+    # Copied from the job/pod onto the Workload so the dispatcher can read them: region pin (resume in the
+    # same region) and the preference profile. Values are set at Workload creation only (Kueue docs).
+    integrations:
+      frameworks:
+      - batch/job
+      - jobset.x-k8s.io/jobset
+      - pod
+      - deployment        # serving pods (Knative-created predictor Deployments in `models`) admitted per flavor order
+      - statefulset
+      labelKeysToCopy:    # Kueue config: integrations.labelKeysToCopy (top-level is rejected: "unknown field")
+      - serverless2.nebius/region
+      - serverless2.nebius/profile
+    # MultiKueue manager only (control-plane cluster, lane F2): route placement through the cost-aware external
+    # dispatcher (clusters/common/manifests/dispatcher). Any name other than the two built-in dispatchers means
+    # "external". The dispatcher patches status.nominatedClusterNames with the kueue-admission field manager.
+    # multiKueue:
+    #   dispatcherName: serverless2.nebius/cost-dispatcher

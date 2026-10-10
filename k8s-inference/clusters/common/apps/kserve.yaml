@@ -1,0 +1,11 @@
+name: kserve
+component: kserve
+namespace: kserve
+wave: '3'
+hubOnly: 'false'
+placement: worker
+kind: helm
+repoURL: ghcr.io/kserve/charts
+chart: kserve-resources
+version: v0.20.0
+helmValues: 'true'

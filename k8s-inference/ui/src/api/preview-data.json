@@ -1,0 +1,800 @@
+{
+  "fleet": {
+    "regions": [
+      "eu-north1",
+      "eu-south1"
+    ],
+    "gpu_classes": [
+      "h100",
+      "h200",
+      "l40s"
+    ],
+    "fleet_manager": true,
+    "region": "control"
+  },
+  "models": [
+    {
+      "id": "atlas-chat",
+      "name": "atlas-chat",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "default_mode": "sync",
+      "gpu": "1x H100",
+      "price": "$2.15 / GPU-h",
+      "protocol": "openai",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "managed_by": "api",
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "ready"
+        },
+        {
+          "region": "eu-south1",
+          "status": "ready"
+        }
+      ],
+      "spec": {
+        "id": "atlas-chat",
+        "display_name": "atlas-chat",
+        "kind": "endpoint",
+        "image": "vllm/vllm-openai:v0.11.0",
+        "command": "",
+        "port": 8000,
+        "protocol": "openai",
+        "gpu": {
+          "count": 1,
+          "classes": [
+            "h100",
+            "l40s"
+          ]
+        },
+        "resources": {
+          "cpu": "8",
+          "memory": "32Gi"
+        },
+        "regions": [
+          "eu-north1",
+          "eu-south1"
+        ],
+        "scaling": {
+          "min": 0,
+          "max": 4,
+          "target": 80,
+          "idle_s": 120,
+          "metric": "concurrency_utilization",
+          "container_concurrency": 8,
+          "cooldown_s": 10,
+          "window_s": 30
+        },
+        "args": [
+          "--model",
+          "example-org/atlas"
+        ],
+        "env": {}
+      }
+    },
+    {
+      "id": "container-run",
+      "name": "Container job (generic run class)",
+      "description": "Run any container image with a command on 0-8 GPUs; inputs synced from a bucket prefix to /work/in, everything written under /work is uploaded to the operation's output prefix; /work is a per-operation volume that survives spot interruptions (checkpoint under /work/checkpoint, resume automatically or with :resume). Fine-tuning, data processing, custom simulations.",
+      "modes": [
+        "run"
+      ],
+      "default_mode": "run",
+      "gpu": "0-8x h100/rtx-pro-6000/l40s",
+      "price": "$1.6 / gpu-hour",
+      "price_per_call": null,
+      "image": null,
+      "protocol": "kubernetes-job",
+      "cold_start_s": null,
+      "cold_start_class": null,
+      "parameters": [
+        {
+          "name": "scratch",
+          "type": "string",
+          "label": "Scratch storage",
+          "default": "network",
+          "help": "network = per-run network volume (resumes after preemption); local-nvme = host NVMe of the node (fastest, gone with the pod, checkpoint to the bucket yourself)"
+        },
+        {
+          "name": "image",
+          "type": "string",
+          "label": "Container image",
+          "required": true,
+          "help": "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md); any public reference also works"
+        },
+        {
+          "name": "command",
+          "type": "string",
+          "label": "Command",
+          "required": true,
+          "help": "run with /bin/sh -c inside /work; checkpoint under /work/checkpoint, write results under /work/out"
+        },
+        {
+          "name": "args",
+          "type": "text",
+          "label": "Arguments",
+          "default": [],
+          "help": "JSON array of command arguments"
+        },
+        {
+          "name": "env",
+          "type": "text",
+          "label": "Environment variables",
+          "default": {},
+          "help": "JSON object of environment names and string values"
+        },
+        {
+          "name": "gpus",
+          "type": "number",
+          "label": "GPUs",
+          "default": 1
+        },
+        {
+          "name": "cpu",
+          "type": "string",
+          "label": "CPU request",
+          "default": "8"
+        },
+        {
+          "name": "memory",
+          "type": "string",
+          "label": "Memory",
+          "default": "64Gi"
+        },
+        {
+          "name": "disk_gi",
+          "type": "number",
+          "label": "Work volume (GiB)",
+          "default": 100
+        },
+        {
+          "name": "input_prefix",
+          "type": "string",
+          "label": "Input prefix (s3://<tenant bucket>/...)",
+          "default": "",
+          "help": "optional; synced to /work/in before the first attempt"
+        }
+      ],
+      "endpoints": {},
+      "task": "generic",
+      "managed_by": "catalog",
+      "spec": null,
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "ready"
+        },
+        {
+          "region": "eu-south1",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "id": "distributed-run",
+      "name": "Multi-node container job (JobSet; InfiniBand optional)",
+      "description": "Run any container image on N whole GPU nodes at once (one pod per node, torchrun/NCCL conventions, MASTER_ADDR/NODE_RANK/WORLD_SIZE set); optionally only on InfiniBand-connected nodes with the fabric NICs in the pod. Inputs synced from a bucket prefix to /work/in on every node, rank 0 uploads /work/out; any node loss restarts all ranks from the last checkpoint (/work/checkpoint, on the shared filesystem with checkpoints=shared). Large-model pre-training and fine-tuning, multi-node inference benchmarks.",
+      "modes": [
+        "run"
+      ],
+      "default_mode": "run",
+      "gpu": "8x h100/h200/b200/b300",
+      "price": "$2.15 / gpu-hour",
+      "price_per_call": null,
+      "image": null,
+      "protocol": "kubernetes-job",
+      "cold_start_s": null,
+      "cold_start_class": null,
+      "parameters": [
+        {
+          "name": "image",
+          "type": "string",
+          "label": "Container image",
+          "required": true,
+          "help": "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md)"
+        },
+        {
+          "name": "command",
+          "type": "string",
+          "label": "Command",
+          "required": true,
+          "help": "run with /bin/sh -c on every node; use $MASTER_ADDR $MASTER_PORT $NODE_RANK $NNODES $GPUS_PER_NODE $WORLD_SIZE (torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --master_addr=$MASTER_ADDR ...); checkpoint under $CHECKPOINT_DIR, results under /work/out on rank 0"
+        },
+        {
+          "name": "nodes",
+          "type": "number",
+          "label": "Nodes",
+          "default": 2
+        },
+        {
+          "name": "gpus_per_node",
+          "type": "number",
+          "label": "GPUs per node",
+          "default": 8,
+          "help": "a whole node: the pool's preset GPU count"
+        },
+        {
+          "name": "interconnect",
+          "type": "string",
+          "label": "Interconnect",
+          "default": "required",
+          "help": "required (default: InfiniBand pools only, the pod gets every fabric NIC of its node, NCCL_IB_HCA=mlx5) | preferred (InfiniBand when free, else any whole-node pool) | none (NCCL over TCP: explicit opt-in, useless for large models)"
+        },
+        {
+          "name": "checkpoints",
+          "type": "string",
+          "label": "Checkpoints",
+          "default": "local",
+          "help": "local (node scratch, lost on restart) | shared (the tenant's RWX claim on the cluster's shared filesystem: restarts and :resume continue from it)"
+        },
+        {
+          "name": "cpu",
+          "type": "string",
+          "label": "CPU request per node",
+          "default": "96"
+        },
+        {
+          "name": "memory",
+          "type": "string",
+          "label": "Memory per node",
+          "default": "1200Gi"
+        },
+        {
+          "name": "disk_gi",
+          "type": "number",
+          "label": "Scratch per node (GiB)",
+          "default": 500
+        },
+        {
+          "name": "input_prefix",
+          "type": "string",
+          "label": "Input prefix (s3://<tenant bucket>/...)",
+          "default": "",
+          "help": "optional; synced to /work/in on every node before the first attempt"
+        }
+      ],
+      "endpoints": {},
+      "task": "generic",
+      "managed_by": "catalog",
+      "spec": null,
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "id": "hello-run",
+      "name": "Hello (CPU run-class smoke test)",
+      "description": "Writes a result artifact to the tenant bucket; proves the operation and artifact chain without a GPU.",
+      "modes": [
+        "run"
+      ],
+      "default_mode": "run",
+      "gpu": "none",
+      "price": "$0 / call",
+      "price_per_call": 0,
+      "image": null,
+      "protocol": "kubernetes-job",
+      "cold_start_s": null,
+      "cold_start_class": null,
+      "parameters": [
+        {
+          "name": "message",
+          "type": "string",
+          "label": "Message",
+          "default": "hello"
+        },
+        {
+          "name": "seconds",
+          "type": "number",
+          "label": "Seconds to run",
+          "default": 5
+        }
+      ],
+      "endpoints": {},
+      "task": "smoke-test",
+      "managed_by": "catalog",
+      "spec": null,
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "ready"
+        },
+        {
+          "region": "eu-south1",
+          "status": "ready"
+        }
+      ]
+    },
+    {
+      "id": "embedding-api",
+      "name": "embedding-api",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "default_mode": "sync",
+      "gpu": "none",
+      "price": "$2.15 / GPU-h",
+      "protocol": "openai",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "managed_by": "api",
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "ready"
+        }
+      ],
+      "spec": {
+        "id": "embedding-api",
+        "display_name": "embedding-api",
+        "kind": "endpoint",
+        "image": "vllm/vllm-openai:v0.11.0",
+        "command": "",
+        "port": 8000,
+        "protocol": "http",
+        "gpu": {
+          "count": 0,
+          "classes": []
+        },
+        "resources": {
+          "cpu": "4",
+          "memory": "16Gi"
+        },
+        "regions": [
+          "eu-north1"
+        ],
+        "scaling": {
+          "min": 0,
+          "max": 4,
+          "target": 80,
+          "idle_s": 120,
+          "metric": "concurrency_utilization",
+          "container_concurrency": 8,
+          "cooldown_s": 10,
+          "window_s": 30
+        },
+        "args": [
+          "--model",
+          "example-org/atlas"
+        ],
+        "env": {}
+      }
+    },
+    {
+      "id": "vision-workspace",
+      "name": "vision-workspace",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "default_mode": "sync",
+      "gpu": "1x L40S",
+      "price": "$2.15 / GPU-h",
+      "protocol": "openai",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "managed_by": "api",
+      "regions": [
+        {
+          "region": "eu-south1",
+          "status": "deploying"
+        }
+      ],
+      "spec": {
+        "id": "vision-workspace",
+        "display_name": "vision-workspace",
+        "kind": "endpoint",
+        "image": "vllm/vllm-openai:v0.11.0",
+        "command": "",
+        "port": 8000,
+        "protocol": "openai",
+        "gpu": {
+          "count": 1,
+          "classes": [
+            "h100",
+            "l40s"
+          ]
+        },
+        "resources": {
+          "cpu": "8",
+          "memory": "32Gi"
+        },
+        "regions": [
+          "eu-south1"
+        ],
+        "scaling": {
+          "min": 0,
+          "max": 4,
+          "target": 80,
+          "idle_s": 120,
+          "metric": "concurrency_utilization",
+          "container_concurrency": 8,
+          "cooldown_s": 10,
+          "window_s": 30
+        },
+        "args": [
+          "--model",
+          "example-org/atlas"
+        ],
+        "env": {}
+      }
+    },
+    {
+      "id": "research-assistant",
+      "name": "research-assistant",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "default_mode": "sync",
+      "gpu": "1x H100",
+      "price": "$2.15 / GPU-h",
+      "protocol": "openai",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "managed_by": "api",
+      "regions": [
+        {
+          "region": "eu-north1",
+          "status": "error"
+        }
+      ],
+      "spec": {
+        "id": "research-assistant",
+        "display_name": "research-assistant",
+        "kind": "endpoint",
+        "image": "vllm/vllm-openai:v0.11.0",
+        "command": "",
+        "port": 8000,
+        "protocol": "openai",
+        "gpu": {
+          "count": 1,
+          "classes": [
+            "h100",
+            "l40s"
+          ]
+        },
+        "resources": {
+          "cpu": "8",
+          "memory": "32Gi"
+        },
+        "regions": [
+          "eu-north1"
+        ],
+        "scaling": {
+          "min": 0,
+          "max": 4,
+          "target": 80,
+          "idle_s": 120,
+          "metric": "concurrency_utilization",
+          "container_concurrency": 8,
+          "cooldown_s": 10,
+          "window_s": 30
+        },
+        "args": [
+          "--model",
+          "example-org/atlas"
+        ],
+        "env": {}
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "atlas-chat",
+      "name": "atlas-chat",
+      "model": "atlas-chat",
+      "region": "eu-north1",
+      "url": "https://api.example.com/v1/models/atlas-chat:invoke",
+      "status": "ready",
+      "replicas_ready": 1,
+      "min_replicas": 0,
+      "max_replicas": 4,
+      "target_concurrency": 8,
+      "scale_to_zero_after_s": 120,
+      "gpu": "1x H100",
+      "cpu": "8",
+      "memory": "32Gi",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "created_at": "2026-10-09T11:19:31Z",
+      "managed_by": "api",
+      "protocol": "openai",
+      "scaling": {
+        "min": 0,
+        "max": 4,
+        "target": 80,
+        "idle_s": 120,
+        "metric": "concurrency_utilization",
+        "container_concurrency": 8,
+        "cooldown_s": 10,
+        "window_s": 30
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "atlas-chat",
+      "name": "atlas-chat",
+      "model": "atlas-chat",
+      "region": "eu-south1",
+      "url": "https://api.example.com/v1/models/atlas-chat:invoke",
+      "status": "scaled-to-zero",
+      "replicas_ready": 0,
+      "min_replicas": 0,
+      "max_replicas": 4,
+      "target_concurrency": 8,
+      "scale_to_zero_after_s": 120,
+      "gpu": "1x L40S",
+      "cpu": "8",
+      "memory": "32Gi",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "created_at": "2026-10-08T11:19:31Z",
+      "managed_by": "api",
+      "protocol": "openai",
+      "scaling": {
+        "min": 0,
+        "max": 4,
+        "target": 80,
+        "idle_s": 120,
+        "metric": "concurrency_utilization",
+        "container_concurrency": 8,
+        "cooldown_s": 10,
+        "window_s": 30
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "embedding-api",
+      "name": "embedding-api",
+      "model": "embedding-api",
+      "region": "eu-north1",
+      "url": "https://api.example.com/v1/models/embedding-api:invoke",
+      "status": "ready",
+      "replicas_ready": 1,
+      "min_replicas": 0,
+      "max_replicas": 4,
+      "target_concurrency": 8,
+      "scale_to_zero_after_s": 120,
+      "gpu": "CPU",
+      "cpu": "8",
+      "memory": "32Gi",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "created_at": "2026-10-07T11:19:31Z",
+      "managed_by": "api",
+      "protocol": "openai",
+      "scaling": {
+        "min": 0,
+        "max": 4,
+        "target": 80,
+        "idle_s": 120,
+        "metric": "concurrency_utilization",
+        "container_concurrency": 8,
+        "cooldown_s": 10,
+        "window_s": 30
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "vision-workspace",
+      "name": "vision-workspace",
+      "model": "vision-workspace",
+      "region": "eu-south1",
+      "url": "https://api.example.com/v1/models/vision-workspace:invoke",
+      "status": "deploying",
+      "replicas_ready": 0,
+      "min_replicas": 0,
+      "max_replicas": 4,
+      "target_concurrency": 8,
+      "scale_to_zero_after_s": 120,
+      "gpu": "1x L40S",
+      "cpu": "8",
+      "memory": "32Gi",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "created_at": "2026-10-06T11:19:31Z",
+      "managed_by": "api",
+      "protocol": "openai",
+      "scaling": {
+        "min": 0,
+        "max": 4,
+        "target": 80,
+        "idle_s": 120,
+        "metric": "concurrency_utilization",
+        "container_concurrency": 8,
+        "cooldown_s": 10,
+        "window_s": 30
+      },
+      "timeout_s": 600
+    },
+    {
+      "id": "research-assistant",
+      "name": "research-assistant",
+      "model": "research-assistant",
+      "region": "eu-north1",
+      "url": "https://api.example.com/v1/models/research-assistant:invoke",
+      "status": "error",
+      "replicas_ready": 0,
+      "min_replicas": 0,
+      "max_replicas": 4,
+      "target_concurrency": 8,
+      "scale_to_zero_after_s": 120,
+      "gpu": "1x H100",
+      "cpu": "8",
+      "memory": "32Gi",
+      "image": "vllm/vllm-openai:v0.11.0",
+      "created_at": "2026-10-05T11:19:31Z",
+      "managed_by": "api",
+      "protocol": "openai",
+      "scaling": {
+        "min": 0,
+        "max": 4,
+        "target": 80,
+        "idle_s": 120,
+        "metric": "concurrency_utilization",
+        "container_concurrency": 8,
+        "cooldown_s": 10,
+        "window_s": 30
+      },
+      "timeout_s": 600
+    }
+  ],
+  "operations": [
+    {
+      "id": "job-preview-0",
+      "name": "llama-finetune",
+      "model": "container-run",
+      "mode": "run",
+      "status": "RUNNING",
+      "region": "eu-north1",
+      "gpu_class": "h100",
+      "created_at": "2026-10-09T10:19:31Z",
+      "started_at": "2026-10-09T10:24:31Z",
+      "ended_at": null,
+      "priority": "normal",
+      "cost": 2.35,
+      "input": {
+        "image": "example-org/training:latest",
+        "command": "python train.py",
+        "gpus": 1,
+        "cpu": "8",
+        "memory": "64Gi"
+      },
+      "attempts": [
+        {
+          "index": 1,
+          "status": "PREEMPTED",
+          "started_at": "2026-10-09T10:24:31Z",
+          "ended_at": "2026-10-09T10:49:31Z",
+          "node": "gpu-worker-01",
+          "reason": "Worker interrupted; checkpoint saved"
+        },
+        {
+          "index": 2,
+          "status": "RUNNING",
+          "started_at": "2026-10-09T10:50:21Z",
+          "ended_at": null,
+          "node": "gpu-worker-02",
+          "resumed_from_checkpoint": "/work/checkpoint/step-1200"
+        }
+      ]
+    },
+    {
+      "id": "job-preview-1",
+      "name": "dataset-preparation",
+      "model": "container-run",
+      "mode": "run",
+      "status": "QUEUED",
+      "region": "eu-north1",
+      "gpu_class": "h100",
+      "created_at": "2026-10-09T08:19:31Z",
+      "started_at": null,
+      "ended_at": null,
+      "priority": "normal",
+      "cost": 1.25,
+      "input": {
+        "image": "example-org/training:latest",
+        "command": "python train.py",
+        "gpus": 1,
+        "cpu": "8",
+        "memory": "64Gi"
+      },
+      "attempts": []
+    },
+    {
+      "id": "job-preview-2",
+      "name": "evaluation-batch",
+      "model": "container-run",
+      "mode": "run",
+      "status": "SUCCEEDED",
+      "region": "eu-north1",
+      "gpu_class": "h100",
+      "created_at": "2026-10-09T06:19:31Z",
+      "started_at": "2026-10-09T06:24:31Z",
+      "ended_at": "2026-10-09T07:17:31Z",
+      "priority": "normal",
+      "cost": 1.25,
+      "input": {
+        "image": "example-org/training:latest",
+        "command": "python train.py",
+        "gpus": 1,
+        "cpu": "8",
+        "memory": "64Gi"
+      },
+      "attempts": [
+        {
+          "index": 1,
+          "status": "PREEMPTED",
+          "started_at": "2026-10-09T06:24:31Z",
+          "ended_at": "2026-10-09T06:49:31Z",
+          "node": "gpu-worker-01",
+          "reason": "Worker interrupted; checkpoint saved"
+        },
+        {
+          "index": 2,
+          "status": "SUCCEEDED",
+          "started_at": "2026-10-09T06:50:21Z",
+          "ended_at": "2026-10-09T07:17:31Z",
+          "node": "gpu-worker-02",
+          "resumed_from_checkpoint": "/work/checkpoint/step-1200"
+        }
+      ]
+    },
+    {
+      "id": "job-preview-3",
+      "name": "distributed-training",
+      "model": "container-run",
+      "mode": "run",
+      "status": "FAILED",
+      "region": "eu-north1",
+      "gpu_class": "h100",
+      "created_at": "2026-10-09T04:19:31Z",
+      "started_at": "2026-10-09T04:24:31Z",
+      "ended_at": "2026-10-09T05:17:31Z",
+      "priority": "normal",
+      "cost": 1.25,
+      "input": {
+        "image": "example-org/training:latest",
+        "command": "python train.py",
+        "gpus": 1,
+        "cpu": "8",
+        "memory": "64Gi"
+      },
+      "attempts": [
+        {
+          "index": 1,
+          "status": "PREEMPTED",
+          "started_at": "2026-10-09T04:24:31Z",
+          "ended_at": "2026-10-09T04:49:31Z",
+          "node": "gpu-worker-01",
+          "reason": "Worker interrupted; checkpoint saved"
+        },
+        {
+          "index": 2,
+          "status": "FAILED",
+          "started_at": "2026-10-09T04:50:21Z",
+          "ended_at": "2026-10-09T05:17:31Z",
+          "node": "gpu-worker-02",
+          "resumed_from_checkpoint": "/work/checkpoint/step-1200"
+        }
+      ]
+    }
+  ],
+  "keys": [
+    {
+      "id": "preview-admin",
+      "key_preview": "sk-\u2026preview",
+      "alias": "workspace-admin",
+      "tenant": "research-team",
+      "role": "admin",
+      "budget": 100,
+      "spend": 12.4,
+      "status": "active",
+      "models": [],
+      "created_at": "2026-10-08T11:19:31Z",
+      "expires_at": "2027-01-07T11:19:31Z"
+    }
+  ]
+}

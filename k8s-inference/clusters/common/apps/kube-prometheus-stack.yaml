@@ -1,0 +1,11 @@
+name: kube-prometheus-stack
+component: kube-prometheus-stack
+namespace: monitoring
+wave: '1'
+hubOnly: 'false'
+placement: all
+kind: helm
+repoURL: https://prometheus-community.github.io/helm-charts
+chart: kube-prometheus-stack
+version: 91.9.0
+helmValues: 'true'

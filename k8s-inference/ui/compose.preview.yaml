@@ -1,0 +1,8 @@
+name: nebius-serverless-ui-preview
+services:
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.preview
+    ports:
+      - "127.0.0.1:5188:8080"

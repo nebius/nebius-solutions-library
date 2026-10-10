@@ -1,0 +1,6 @@
+# ClusterRole serverless2-api-tenant on its own, so both the api-agent base (workers) and the control cluster's api
+# overlay can include it (kustomize only includes directories from outside its own tree).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - clusterrole.yaml
