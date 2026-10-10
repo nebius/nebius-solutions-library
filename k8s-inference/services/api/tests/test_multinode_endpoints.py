@@ -104,16 +104,16 @@ def test_leaderworkerset_reads_use_the_namespace_before_the_plural(monkeypatch):
     calls = []
 
     class Custom:
-        def get_namespaced_custom_object(self, group, version, namespace, plural, name):
+        def get_namespaced_custom_object(self, group, version, namespace, plural, name, **kw):
             calls.append((group, version, namespace, plural, name))
             return {"kind": "LeaderWorkerSet", "spec": {"replicas": 0}, "metadata": {"annotations": {}}}
 
-        def patch_namespaced_custom_object(self, group, version, namespace, plural, name, body):
+        def patch_namespaced_custom_object(self, group, version, namespace, plural, name, body, **kw):
             calls.append((group, version, namespace, plural, name))
             return {}
 
     class Core:
-        def list_namespaced_pod(self, ns, label_selector=None):
+        def list_namespaced_pod(self, ns, label_selector=None, **kw):
             class R: items = []
             return R()
 
