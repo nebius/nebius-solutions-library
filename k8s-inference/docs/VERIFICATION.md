@@ -12,6 +12,22 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Owner's evaluation round (2026-10-10, the same test fleet)
+
+| Finding (from the console) | Cause | Fix, verified |
+|---|---|---|
+| 504 on a cold start from the console | the console's route had Envoy's 15 s default; the API route waits 630 s | the console route carries the same timeouts; a cold start from the console answers (68 s on the warm node) |
+| "monitoring not available" on every finished run | the worker's Job is deleted at completion (MultiKueue); the regional API answered 404 | metrics and logs of a completed run come from Prometheus and Loki, scoped to the caller's namespace; the console picks the smallest window that covers the run and the rate interval follows the step (a 1-minute job shows series) |
+| 500 on the jobs page | a region being replaced was unreachable; the listing raised on the first failure | an unreachable region is skipped with a warning; listing and lookup stay up |
+| scaling controls disabled on every endpoint | the owner flag came from an InferenceService label nothing set | the flag comes from the model record; every endpoint defined through the API is editable |
+| no fleet view | - | a Fleet page: clusters (region, project, roles, Kubernetes version, nodes, API and Grafana) and pools per region with ready nodes and GPUs in use (`GET /v1/fleet?live=true`) |
+| two regions added day-2 had no HTTPS | their gateways' public IPs answered only from inside Nebius: Let's Encrypt timed out, no certificate, no port 443, the control plane could not forward | GPU regions' gateways and model endpoints carry certificates of a fleet CA the cloud stage generates; the control plane and LiteLLM trust it; leaf certificates re-issue and trust refreshes on a CA change; ACME stays for the control cluster. Verified: four regions with fleet-CA certificates, the control API reaches every region, LiteLLM answers through a region's gateway, run monitoring works for eu-north2 |
+
+Also found on the live fleet: a parallel lane applying from an older checkout rewrote the cloud state (the fleet CA
+vanished once) and left two stale state locks; the platform stage now re-issues certificates on a CA change,
+and the rule is one checkout at HEAD per fleet (`docs/EDGE.md`, the handover). Images at the end of the day:
+api 0.10.12, dispatcher 0.2.6, jobs 0.1.10, ops 0.1.11, ui 0.5.4.
+
 ## Scaling buffer (2026-10-09, late evening, the same test fleet)
 
 `scaling.buffer = 1` on the hub's endpoint (`max 2`, otherwise scale to zero), three request loops for
