@@ -12,6 +12,38 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## GPU drivers from the NVIDIA GPU Operator (2026-10-10 11:30-12:15 UTC, the same test fleet)
+
+The fleet moved from the Managed Kubernetes driver image (preset `cuda13.0`) to the NVIDIA GPU Operator with the
+same driver version, open kernel modules and GPUDirect Storage (`terraform.tfvars` `gpu_operator = { enabled = true,
+driver_version = "580.173.02", kernel_module = "open", gds = true }`, docs/FLEET.md "GPU drivers"). Order of the
+change: `apply platform` on the four worker clusters (Network Operator 25.7.0 in wave 0, GPU Operator v25.10.0 in
+wave 1, the fleet's nvidia-device-plugin release removed; 2-3 min per cluster), then `apply cloud` (six node
+groups updated in place, no replacement; Managed Kubernetes recreated the running nodes one by one, 8-10 min for
+the pools that had nodes), then a second `apply platform` for the exporter fix below.
+
+| Check | Result |
+|---|---|
+| Node without a driver image | Ready 11:41:05; NFD labelled it, the operator's driver pod (driver, nvidia-fs and GDRCopy containers, image `driver:580.173.02-ubuntu24.04` from the marketplace registry) loaded the modules at 11:43:1x; `nvidia.com/gpu` allocatable at 11:43:44: **2 min 40 s from Ready to schedulable**; a warm-spare placeholder moved onto it at once |
+| Driver and modules | `NVRM version: NVIDIA UNIX Open Kernel Module for x86_64 580.173.02` on every node (H100, H200, B200, B300); `lsmod`: `nvidia`, `nvidia_uvm`, `nvidia_modeset`, `nvidia_fs`, `gdrdrv`; `modinfo nvidia` licence `Dual MIT/GPL` (open); GFD labels present (`nvidia.com/cuda.driver-version.full=580.173.02`, `gpu.product`, `mig.capable=true`) |
+| GPUDirect Storage | `/dev/nvidia-fs0..15` on the node and inside a run's container on H100, H200, B200 and B300 |
+| containerd | the toolkit wrote `/etc/containerd/conf.d/99-nvidia.toml` (`default_runtime_name = "nvidia"`, runtimes nvidia/nvidia-cdi/nvidia-legacy, `enable_cdi`) next to the fleet's mirror drop-in through the same `imports` line; the mirror probe pull still passed, memlock unlimited kept |
+| Runs | 1-GPU `container-run` on the hub's new H100 node: SUCCEEDED, 66 s end to end; H200 in eu-north2 from zero nodes: SUCCEEDED, 313 s (the operator's driver build is part of the cold start); B300 in eu-west2: SUCCEEDED, 61 s; B200 in us-central1 from zero: SUCCEEDED, 391 s |
+| InfiniBand pool (`dra = true`, no driver preset) | DraNet still labels the nodes and publishes the RDMA ResourceSlices; the Network Operator's DOCA driver pod (`mofed-ubuntu24.04`) runs on each node, `network.nvidia.com/operator.mofed.wait=false`; 2 x 8 H100 `distributed-run` (PyTorch 25.09, 1 GiB all-reduce on 16 GPUs) SUCCEEDED with `NCCL INFO NET/IB : Made virtual device name=mlx5_0..7 speed=400000` on every rank; IB_BANDWIDTH_PLACEHOLDER |
+| Metrics | the fleet's DCGM exporter on every GPU node under the operator's `nvidia` RuntimeClass; Prometheus holds `DCGM_FI_DEV_GPU_TEMP` for all 18 hub GPUs |
+| Terraform | `plan cloud` clean after the roll (`gpu_settings` omitted, `dra = true` kept on the InfiniBand pool) |
+
+Found and fixed on the way (both in the pull request): the fleet's DCGM exporter pod, created on a fresh node before the
+toolkit had made `nvidia` the default runtime, crash-looped on `Cannot init NVML library` until the pod was recreated;
+in operator mode the exporters now name the `nvidia` RuntimeClass. A B300 node without InfiniBand never got its driver:
+the Nebius driver profile of every SXM platform (`GPU_DIRECT_RDMA_ENABLED`, `USE_HOST_MOFED`) makes the driver
+manager wait for MOFED on any node with a Mellanox NIC (`feature.node.kubernetes.io/pci-15b3.present`), and the Network
+Operator had been installed only on clusters with an InfiniBand or B200 pool, as the Nebius documentation words it; it is
+installed on every worker cluster now (`gpu_operator.network_operator = false` opts out), after which the node was
+schedulable 9 min after the DOCA driver finished building. Side effect of the slower node readiness: while the first
+driverless H100 node built its driver, the warm-spare placeholder was Pending and the cluster autoscaler added a second
+H100 node (both within `max_nodes`); the autoscaler removed it ten minutes later.
+
 ## Owner's evaluation round (2026-10-10, the same test fleet)
 
 | Finding (from the console) | Cause | Fix, verified |

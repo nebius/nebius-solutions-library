@@ -22,6 +22,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; `docs/IMAGES.md` |
 | Tenants | a namespace per cluster, a bucket and identity per region, API keys with budgets, Pod Security baseline, optional GPU quota and image allow-list |
 | Spot, on-demand and reserved capacity | per pool: spot with a price cap, on-demand, or capacity blocks used first |
+| GPU drivers from the node image, or from the NVIDIA GPU Operator (any driver version, open kernel modules, GPUDirect Storage, MIG manager) | `gpu_operator` in `terraform.tfvars`: node groups without a driver preset, the Nebius marketplace builds of the Network and GPU Operators; `docs/FLEET.md`, "GPU drivers" |
 | Operations | Grafana, Prometheus, Loki, Alertmanager, OpenCost with Nebius prices, a managed PostgreSQL with the service's backups, spot-node recovery; `docs/OBSERVABILITY.md`, `docs/OPERATIONS.md` |
 
 ## When to use what: Nebius Serverless AI or this solution
@@ -198,6 +199,9 @@ platform ("Day 2" below).
 - A node scaled from zero advertises about 80% of its boot disk minus 32 GiB as ephemeral storage. Size
   `boot_disk_gib` for the largest emptyDir a pod asks for, or keep `min_nodes >= 1`.
 - Reserved pools roll with zero surge; a full reservation cannot surge.
+- With the GPU Operator a node is schedulable about 2.5 min after it is Ready (the driver container builds and
+  loads the modules; the Network Operator's DOCA driver first on nodes with a Mellanox NIC), so scale-from-zero
+  takes that much longer; a warm spare (`warm_nodes`) hides it. The node image has the driver at boot.
 - Hostnames are `<service>.<ip>.sslip.io` until you set `edge.domain`.
 
 ## Cost
