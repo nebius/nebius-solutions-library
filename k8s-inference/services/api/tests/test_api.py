@@ -1401,3 +1401,14 @@ def test_operations_list_skips_an_unreachable_region(client, monkeypatch):
     monkeypatch.setattr(kube, "batch", lambda region="eu-north1": Dead() if region == "gone" else fake)
     r = c.get("/v1/operations?limit=5", headers=H)
     assert r.status_code == 200, r.text
+
+
+def test_endpoint_of_an_api_model_is_api_managed(client, admin_keys, monkeypatch):
+    c, fake = client
+    monkeypatch.setattr(kube, "isvc", lambda name, ns, region="eu-north1": fake.custom.get((ns, "inferenceservices", name)))
+    r = c.post("/v1/models", json={"id": "owned", "kind": "endpoint", "image": "x", "port": 80, "protocol": "http",
+                                   "gpu": {"count": 0, "classes": []}, "regions": ["eu-north1"]}, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    r = c.get("/v1/endpoints/owned?region=eu-north1", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["managed_by"] == "api"

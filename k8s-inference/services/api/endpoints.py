@@ -47,4 +47,8 @@ def to_public(m: dict, isvc: dict, region: str = REGION) -> dict:
             "target_concurrency": pred.get("scaleTarget"), "gpu": m.get("gpu"), "protocol": m.get("protocol"),
             "scaling": scaling, "timeout_s": pred.get("timeout", 600),
             "image": container.get("image"), "cpu": resources.get("cpu"), "memory": resources.get("memory"),
-            "created_at": md.get("creationTimestamp"), "managed_by": md.get("labels", {}).get(f"{LABEL}/created-by", "git")}
+            "created_at": md.get("creationTimestamp"),
+            # the model's record says who owns it (api: defined through POST /v1/models, editable in the console; git: a
+            # built-in class); nothing on the InferenceService carries that (the console disabled every endpoint's
+            # scaling controls, 2026-10-10)
+            "managed_by": "api" if m.get("managed_by") == "api" else "git"}
