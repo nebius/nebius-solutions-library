@@ -15,12 +15,12 @@ for kind in $kinds; do
 done
 for i in $(seq 1 24); do
   left=0
-  for kind in $kinds; do left=$((left + $(k get "$kind" --all-namespaces -o name 2> /dev/null | wc -l))); done
+  for kind in $kinds; do left=$((left + $( (k get "$kind" --all-namespaces -o name 2> /dev/null || true) | wc -l))); done
   [ "$left" = 0 ] && break
   sleep 5
 done
 for kind in $kinds routes.serving.knative.dev ingresses.networking.internal.knative.dev; do
-  for obj in $(k get "$kind" --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2> /dev/null); do
+  for obj in $(k get "$kind" --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2> /dev/null || true); do
     k patch "$kind" "${obj#*/}" -n "${obj%%/*}" --type=merge -p '{"metadata":{"finalizers":[]}}' > /dev/null 2>&1 || true
   done
 done

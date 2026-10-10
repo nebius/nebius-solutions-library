@@ -407,6 +407,7 @@ export function JobDetail({ id }: { id: string }) {
           id={id}
           region={o.region}
           end={end}
+          start={o.started_at ? Date.parse(o.started_at) / 1000 : undefined}
         />
       )}
       {tab === "Logs" && (
@@ -415,6 +416,7 @@ export function JobDetail({ id }: { id: string }) {
           id={id}
           region={o.region}
           end={end}
+          start={o.started_at ? Date.parse(o.started_at) / 1000 : undefined}
           view="logs"
         />
       )}

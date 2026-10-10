@@ -144,6 +144,7 @@ export default function Monitoring({
   view = "metrics",
   compact = false,
   end,
+  start,
 }: {
   kind: "endpoints" | "operations";
   id: string;
@@ -151,8 +152,13 @@ export default function Monitoring({
   view?: "metrics" | "logs";
   compact?: boolean;
   end?: number;
+  start?: number;
 }) {
-  const [range, setRange] = useState(end ? "24h" : "1h");
+  // a finished run: the smallest range that covers it, so a one-minute job is sampled every 15 s rather than
+  // every 6 min (a 24 h window shows nothing for it)
+  const covering = (seconds: number) =>
+    seconds <= 10 * 60 ? "15m" : seconds <= 50 * 60 ? "1h" : seconds <= 5 * 3600 ? "6h" : seconds <= 20 * 3600 ? "24h" : "7d";
+  const [range, setRange] = useState(end ? (start ? covering(end - start + 120) : "24h") : "1h");
   const [live, setLive] = useState(!end);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
