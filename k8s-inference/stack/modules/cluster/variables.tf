@@ -78,11 +78,12 @@ variable "cpu_pools" {
 }
 
 variable "weights_filesystem" {
-  description = "Shared filesystem for model weights, attached to every GPU node and mounted at /mnt/weights."
+  description = "Shared filesystem at /mnt/weights on GPU nodes; optionally on system nodes for CPU snapshot controllers."
   type = object({
-    enabled  = bool
-    size_gib = number
-    type     = string
+    enabled         = bool
+    size_gib        = number
+    type            = string
+    mount_on_system = optional(bool, false)
   })
 }
 

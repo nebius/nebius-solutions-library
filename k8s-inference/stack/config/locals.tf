@@ -23,7 +23,8 @@ locals {
     subnet_id            = local.f.control_plane.subnet_id
     system_pool          = local.f.control_plane.system_pool
     allowed_cidrs        = local.f.control_plane.allowed_cidrs
-    weights_filesystem   = { enabled = false, size_gib = 0, type = "NETWORK_SSD" }
+    weights_filesystem   = { enabled = false, size_gib = 0, type = "NETWORK_SSD", mount_on_system = false }
+    gpu_snapshot         = { enabled = false, namespace = "gpu-snapshot-system", chart = "", repository = null, version = null, values_yaml = "{}" }
     image_cache_size_gib = local.f.control_plane.image_cache_size_gib
     pools                = {}
     role                 = "control"

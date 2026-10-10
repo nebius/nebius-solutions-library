@@ -60,11 +60,12 @@ resource "nebius_mk8s_v1_node_group" "system" {
     drain_timeout   = "300s"
   }
   template = {
-    metadata             = { labels = { "serverless2.nebius/pool" = "system" } }
+    metadata             = { labels = merge({ "serverless2.nebius/pool" = "system" }, local.snapshot_store_labels) }
     boot_disk            = { size_gibibytes = 128, type = "NETWORK_SSD" }
     network_interfaces   = [{ subnet_id = data.nebius_vpc_v1_subnet.target.id }]
     os                   = "ubuntu24.04"
-    cloud_init_user_data = local.system_cloud_init
+    cloud_init_user_data = local.snapshot_system_cloud_init
+    filesystems          = var.weights_filesystem.mount_on_system ? local.weights_fs_attachment : null
     reservation_policy   = { policy = "FORBID" }
     resources            = { platform = var.system_pool.platform, preset = var.system_pool.preset }
     service_account_id   = nebius_iam_v1_service_account.nodepull.id
@@ -223,6 +224,13 @@ resource "nebius_compute_v1_filesystem" "weights" {
 }
 
 locals {
+  snapshot_store_labels = var.weights_filesystem.enabled && var.weights_filesystem.mount_on_system ? {
+    "serverless2.nebius/snapshot-store" = "true"
+  } : {}
+  # Create a dedicated root-owned directory only after a successful shared mount.
+  snapshot_fs_runcmd = var.weights_filesystem.enabled && var.weights_filesystem.mount_on_system ? [
+    " - [sh, -ec, 'mountpoint -q /mnt/weights && mkdir -p /mnt/weights/gpu-snapshot && chmod 0700 /mnt/weights/gpu-snapshot']",
+  ] : []
   weights_fs_id = var.weights_filesystem.enabled ? (var.protect_data ? nebius_compute_v1_filesystem.weights_protected[0].id : nebius_compute_v1_filesystem.weights[0].id) : null
   weights_fs_attachment = var.weights_filesystem.enabled ? [{
     attach_mode         = "READ_WRITE"
@@ -246,6 +254,10 @@ locals {
     "runcmd:",
     " - sysctl --system",
   ])
+  snapshot_system_cloud_init = join("\n", concat(
+    [local.system_cloud_init],
+    var.weights_filesystem.mount_on_system ? concat(local.weights_fs_runcmd, local.snapshot_fs_runcmd) : [],
+  ))
 
   # GPU pools: containerd reads the image cache's mirror files (hosts.toml) only with `config_path` set, which
   # the GPU node image lacks, and the first pulls of a fresh node happen before Spegel has written them.

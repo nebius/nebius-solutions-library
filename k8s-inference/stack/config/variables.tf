@@ -85,6 +85,22 @@ variable "fleet" {
         enabled  = optional(bool, false)
         size_gib = optional(number, 1024)
         type     = optional(string, "NETWORK_SSD")
+        # CPU snapshot operator must retain storage access when GPUs scale to zero.
+        # Off by default; enabling rolls only the system pool at cloud apply.
+        mount_on_system = optional(bool, false)
+      }), {})
+      # Preview startup snapshots. Defaults leave every existing workload alone.
+      # Custom values use the portable charts/gpu-snapshot schema; credentials
+      # belong in Secrets, never this field. The namespace is Terraform-owned.
+      gpu_snapshot = optional(object({
+        enabled   = optional(bool, false)
+        namespace = optional(string, "gpu-snapshot-system")
+        # A packaged local chart, or repository + chart + version. The backend
+        # lives separately; this library does not publish its implementation.
+        chart       = optional(string, "")
+        repository  = optional(string)
+        version     = optional(string)
+        values_yaml = optional(string, "{}")
       }), {})
       image_cache_size_gib = optional(number) # default images.cache.size_gib
       # GPU node pools. capacity.type: spot (max_price caps the USD per GPU-hour, null follows the spot

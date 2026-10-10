@@ -113,6 +113,9 @@ EOF
 check_tests() {
   step "tests: API and dispatcher"
   (cd "$ROOT" && "$PYTHON" -m pytest -q services/api/tests services/dispatcher)
+  step "tests: filesystem attachment and GPU scale-to-zero storage"
+  tf stack/modules/cluster init -backend=false -input=false > /dev/null
+  tf stack/modules/cluster test -no-color
 }
 
 case "$part" in
