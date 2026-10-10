@@ -19,7 +19,11 @@ host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the re
 import json
 from fastapi import HTTPException
 from kubernetes import client
+import logging
+import urllib3
 from kubernetes.client.rest import ApiException
+
+log = logging.getLogger("api.jobs")
 import kube
 from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_GI, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL,
                     ENDPOINT_CONNECT_TO, LITELLM_URL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION, RUNNER_IMAGE, S3_ENV_SECRET,
@@ -503,6 +507,8 @@ def find(ns: str, name: str) -> tuple[dict, str]:
         except HTTPException as e:
             if e.status_code != 404:
                 raise
+        except (urllib3.exceptions.HTTPError, OSError) as e:
+            log.warning("operation %s: region %s unreachable, skipped: %s", name, r, str(e)[:160])
     raise HTTPException(404, f"operation {name}: not found")
 
 
@@ -519,6 +525,11 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int) -> list[dict]:
             if e.status in (403, 404):          # tenant not onboarded in that region
                 continue
             raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
+        except (urllib3.exceptions.HTTPError, OSError) as e:
+            # a region that cannot be reached (gone, or its endpoint down) must not hide every other region's
+            # operations (the console showed 500 for every tenant while a region was being replaced, 2026-10-10)
+            log.warning("operations: region %s unreachable, skipped: %s", r, str(e)[:160])
+            continue
         for p in pods:
             labels = p["metadata"].get("labels", {})
             by_job.setdefault((r, labels.get(JOBSET_NAME_LABEL) or labels.get("job-name", "")), []).append(p)

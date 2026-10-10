@@ -1387,3 +1387,17 @@ def test_monitoring_of_a_finished_run_falls_back_to_this_region(client, monkeypa
     import monitoring
     sel = monitoring.selectors({"namespace": "tenant-demo", "job": _re.escape("op-container-run-deadbeef") + "(-.*)?"}, {"job"})
     assert sel.startswith('{namespace="tenant-demo",job=~"')
+
+
+def test_operations_list_skips_an_unreachable_region(client, monkeypatch):
+    """A region whose API server cannot be reached is skipped with a warning; the other regions' runs still list."""
+    import urllib3
+    c, fake = client
+    class Dead:
+        api_client = fake.api_client
+        def list_namespaced_job(self, *a, **k):
+            raise urllib3.exceptions.MaxRetryError(None, "https://dead", "connection refused")
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "gone"])
+    monkeypatch.setattr(kube, "batch", lambda region="eu-north1": Dead() if region == "gone" else fake)
+    r = c.get("/v1/operations?limit=5", headers=H)
+    assert r.status_code == 200, r.text
