@@ -45,6 +45,10 @@ workloads and plan this before qualification or while the relevant pool is idle.
 and privileged because a checkpoint node agent needs host/runtime access; tenant
 namespace policies remain unchanged.
 
+The release has no dependency on serving platform waves. An explicitly targeted
+snapshot plan can install or upgrade only its namespace and Helm release while
+another owner manages unrelated platform drift.
+
 For each selected GPU pool, add `labels = { "serverless2.nebius/snapshot-store" = "true" }`
 before qualification, preferably while the pool is at zero. This explicitly
 qualifies the agent node set without rolling unrelated warm GPU pools. A backend

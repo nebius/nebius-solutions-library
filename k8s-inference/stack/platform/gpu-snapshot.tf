@@ -62,7 +62,8 @@ resource "helm_release" "gpu_snapshot" {
   version    = local.snapshot_config.version
   values = [yamlencode(local.snapshot_defaults), local.snapshot_config.values_yaml,
   yamlencode({ namespace = { create = false } })]
-  wait       = true
-  timeout    = 900
-  depends_on = [helm_release.wave3]
+  wait    = true
+  timeout = 900
+  # This add-on is self-contained. Do not pull unrelated serving chart changes
+  # into an isolated snapshot install through an explicit platform-wave edge.
 }
