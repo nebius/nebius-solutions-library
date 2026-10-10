@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube
-from config import ACME_ISSUER, API_NAMESPACE, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, REGION
+from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, REGION
 from resilience import retry
 
 log = logging.getLogger("api")
@@ -426,13 +426,13 @@ def endpoint_host(entry: dict, region: str) -> str:
 
 def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
     """Rewrite the `models` certificate of a region: one hostname per endpoint deployed on a cluster of that
-    region (ACME_ISSUER), or the placeholder when there is none. Returns the hostnames."""
+    region (MODELS_ISSUER: the regions' issuer, fleet-ca by default), or the placeholder when there is none. Returns the hostnames."""
     domain = endpoint_domain(region)
     if not domain:
         return []
     hosts = sorted(endpoint_host(e, region) for e in entries.values()
                    if e.get("mode") != "run" and e.get("runtime") and any(kube.cluster_region(c) == region for c in (e.get("deployments") or {})))
-    spec = ({"issuerRef": {"name": ACME_ISSUER, "kind": "ClusterIssuer"}, "commonName": hosts[0], "dnsNames": hosts} if hosts
+    spec = ({"issuerRef": {"name": MODELS_ISSUER, "kind": "ClusterIssuer"}, "commonName": hosts[0], "dnsNames": hosts} if hosts
             else {"issuerRef": {"name": "selfsigned", "kind": "ClusterIssuer"}, "commonName": "models.example.invalid", "dnsNames": ["models.example.invalid"]})
     body = {"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
             "metadata": {"name": MODELS_CERTIFICATE, "namespace": GATEWAY_NAMESPACE}, "spec": spec}

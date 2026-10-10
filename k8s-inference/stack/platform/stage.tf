@@ -138,6 +138,8 @@ locals {
     { name = "IMAGES_SOURCE", value = local.cloud.hub.registry },
     { name = "ENDPOINT_DOMAINS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=${local.host_of[cid]}"]) },
     { name = "ACME_ISSUER", value = local.certificate_issuer },
+    # the `models` certificates of the GPU regions are written by the control API: their issuer, not the control's
+    { name = "MODELS_ISSUER", value = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.f.edge.regional_certificates == "fleet-ca" && local.dedicated ? "fleet-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt")) },
   ] : e if local.role.control]
   api_env = concat(local.api_env_common, local.api_env_control, local.role.manager ? [
     { name = "REGION", value = "control" },

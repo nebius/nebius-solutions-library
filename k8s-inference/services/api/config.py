@@ -33,6 +33,9 @@ IMAGES_SOURCE = os.environ.get("IMAGES_SOURCE", "")                         # th
 # (clusters/common/manifests/gateway/models-tls.yaml) with the hostnames of the endpoints deployed there, issued by
 # ACME_ISSUER (letsencrypt | letsencrypt-staging); without endpoints it goes back to the self-signed placeholder.
 ACME_ISSUER = os.environ.get("ACME_ISSUER", "letsencrypt")
+# the issuer of the GPU regions' `models` certificates, written by the control API (fleet-ca by default: the
+# regions' gateways carry fleet-CA certificates; the control cluster's own hostnames use ACME)
+MODELS_ISSUER = os.environ.get("MODELS_ISSUER") or ACME_ISSUER
 GATEWAY_NAMESPACE = os.environ.get("GATEWAY_NAMESPACE", "envoy-gateway-system")
 MODELS_CERTIFICATE = "models"
 # Gateway domain of every region ("<region>=<domain>,..."): the LiteLLM api_base of an endpoint deployed there (control API)
