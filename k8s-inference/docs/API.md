@@ -50,7 +50,7 @@ shape of the console's "New model" form: a container plus a few knobs.
 {"id": "my-llm", "kind": "endpoint",
  "image": "vllm/vllm-openai:v0.11.0", "args": ["--model", "<org>/<model>", "--port", "8000"],
  "env": {"HF_HOME": "/weights"}, "port": 8000, "protocol": "openai", "served_model": "<org>/<model>",
- "gpu": {"count": 1, "classes": ["h100", "l40s"]}, "scaling": {"min": 0, "max": 2, "target": 4},
+ "gpu": {"count": 1, "classes": ["h100", "l40s"]}, "scaling": {"min": 0, "max": 2, "container_concurrency": 4},
  "regions": ["eu-north1"], "weights": {"path": "my-llm", "mount_path": "/weights"}}
 ```
 
@@ -58,6 +58,21 @@ shape of the console's "New model" form: a container plus a few knobs.
 preferred first; `regions` defaults to every region with a pool of one of the classes; `kind: job`
 defines a run class instead (`cpu`, `memory`, `disk_gi`, `scratch`, `parameters`). The full field list is
 the module docstring of `services/api/models.py`; the schema is `Model` in `services/api/openapi.yaml`.
+
+### Scaling
+
+`scaling` is one vocabulary (`ScalingSpec` in `openapi.yaml`), the same on a model definition, on
+`GET /v1/endpoints` and on `PATCH /v1/endpoints/{id}`: `min` and `max` replicas per region;
+`metric: concurrency_utilization` (the default) scales on `target` percent (1-100, default 100) of
+`container_concurrency`, the hard per-replica request limit (1-1000, default 1); `metric: requests_per_second`
+scales on `target` requests/s per replica (default 5) with no concurrency limit; `cooldown_s` delays scale-down,
+`window_s` (6-300, default 30) is the metrics averaging window, `idle_s` keeps the last replica after the decision
+to scale to zero, `buffer` keeps ready replicas above demand (docs/SCHEDULING.md). The API writes the complete
+policy back, so a read never has to guess a default. Rendering onto Knative: `concurrency_utilization` is the
+`concurrency` metric with `container_concurrency` as the scale target and `target` as its utilization percentage;
+`requests_per_second` is the `rps` metric at 100 % with `containerConcurrency` 0. Definitions stored under the raw
+Knative names the API accepted before 0.11.12 (`metric: concurrency | rps`, `utilization_percent`) are read in this
+vocabulary (`services/api/models.py` `native_scaling`).
 
 What happens on a write: the definition goes into the fleet database (table `models`: id, kind, spec, the
 rendered entry, version, `managed_by`, created/updated by and at) and every write into `models_history`;

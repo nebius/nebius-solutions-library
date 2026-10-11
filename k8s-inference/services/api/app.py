@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.11", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.12", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -353,10 +353,8 @@ def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None =
     """Commit desired state and history, then attempt its durable reconciliation."""
     _writes_here()
     entry = models.to_entry(spec, managed_by="api")
-    if entry.get("spec", {}).get("scaling", {}).get("metric") in ("concurrency_utilization", "requests_per_second"):
-        # Store the same policy we render: discard obsolete utilization factors and
-        # retain the normalized units/defaults, including unlimited RPS concurrency.
-        spec = {**spec, "scaling": entry["spec"]["scaling"]}
+    if "scaling" in entry["spec"]:
+        spec = {**spec, "scaling": entry["spec"]["scaling"]}   # store the complete policy that was rendered (models.validate)
     mid = entry["id"]
     existing = catalog.get(mid)
     if existing and not replace:
@@ -891,11 +889,13 @@ def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: 
     spec = {**m["spec"], "scaling": {**m["spec"].get("scaling", {})}}
     if req.scaling is not None:
         spec["scaling"].update(req.scaling.model_dump(exclude_none=True))
-    if req.target_concurrency is not None and spec["scaling"].get("metric") in ("concurrency_utilization", "requests_per_second"):
-        raise HTTPException(422, "Use scaling.target for metric-specific targets; target_concurrency is only valid for legacy raw policies.")
     if req.timeout_s is not None:
         spec["timeout_s"] = req.timeout_s
-    for key, target in (("min_replicas", "min"), ("max_replicas", "max"), ("target_concurrency", "target"), ("scale_to_zero_after_s", "idle_s")):
+    # target_concurrency is the per-replica scale target the endpoint reports (Knative's scaleTarget): the replica
+    # concurrency limit under concurrency_utilization, the requests/s target under requests_per_second
+    rate = spec["scaling"].get("metric") == "requests_per_second"
+    for key, target in (("min_replicas", "min"), ("max_replicas", "max"), ("scale_to_zero_after_s", "idle_s"),
+                        ("target_concurrency", "target" if rate else "container_concurrency")):
         if (value := getattr(req, key)) is not None:
             spec["scaling"][target] = value
     if spec["scaling"].get("min", 0) > spec["scaling"].get("max", 1):

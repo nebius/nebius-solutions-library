@@ -66,16 +66,17 @@ DATA_PATH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")   # 
 
 
 class ScalingSpec(BaseModel):
-    """Knative KPA controls supported by the pinned endpoint deployment."""
+    """The scaling vocabulary of an endpoint (docs/API.md "Scaling"), rendered onto Knative's KPA by `to_entry`:
+    `concurrency_utilization` scales on `target` percent of `container_concurrency` (the per-replica request limit),
+    `requests_per_second` on `target` requests/s per replica with no concurrency limit."""
     model_config = ConfigDict(extra="forbid")
     min: int | None = Field(default=None, ge=0)
     max: int | None = Field(default=None, ge=1)
-    metric: Literal["concurrency_utilization", "requests_per_second", "concurrency", "rps"] | None = None
+    metric: Literal["concurrency_utilization", "requests_per_second"] | None = None
     target: int | None = Field(default=None, ge=1)
-    utilization_percent: int | None = Field(default=None, ge=1, le=100)
     container_concurrency: int | None = Field(default=None, ge=0, le=1000)
     cooldown_s: int | None = Field(default=None, ge=0, le=3600)
-    window_s: int | None = Field(default=None, ge=6, le=3600)
+    window_s: int | None = Field(default=None, ge=6, le=300)
     idle_s: int | None = Field(default=None, ge=0, le=3600)
     buffer: int | None = Field(default=None, ge=0, le=8)   # ready replicas kept above demand while serving (docs/SCHEDULING.md "Scaling buffer")
 # public registries -> the alias the image cache serves them under (terraform.tfvars `images.upstreams`)
@@ -163,6 +164,36 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
     return None
 
 
+# The raw Knative vocabulary this API accepted before 0.11.12: `metric: concurrency | rps` with a raw per-replica
+# scale target and a separate `utilization_percent`; a block without a metric meant raw concurrency. Definitions
+# written then are still in the fleet database and in the regional ConfigMap copies.
+RAW_METRICS = {"concurrency": "concurrency_utilization", "rps": "requests_per_second"}
+
+
+def native_scaling(scaling: dict, stored: bool = False) -> dict:
+    """The ONE place that reads a scaling block written in the raw Knative vocabulary (RAW_METRICS) and returns the
+    native ScalingSpec policy that renders the same Knative scale target: raw concurrency T at U % becomes replica
+    concurrency T with target U % (T is then also the hard per-replica limit, as for every native policy); raw rps T at
+    U % becomes T x U / 100 requests/s. Native blocks pass through unchanged. `stored`: a block read back from the fleet
+    database or a ConfigMap copy, where a missing metric meant raw concurrency; every definition written since carries
+    its metric, so new input without one is native (`validate` fills the native defaults)."""
+    sc = dict(scaling or {})
+    metric = sc.get("metric")
+    if metric not in RAW_METRICS and not (metric is None and (stored or "utilization_percent" in sc)):
+        return sc
+    try:
+        target, utilization = int(sc.get("target") or 4), int(sc.pop("utilization_percent", None) or 70)   # the raw defaults
+    except (TypeError, ValueError):
+        return sc                                                      # ScalingSpec reports the bad value
+    if RAW_METRICS.get(metric) == "requests_per_second":
+        sc.update(metric="requests_per_second", target=max(1, round(target * utilization / 100)), container_concurrency=0)
+    else:
+        sc.update(metric="concurrency_utilization", target=utilization, container_concurrency=target)
+    if isinstance(sc.get("window_s"), int) and sc["window_s"] > 300:
+        sc["window_s"] = 300                                           # the raw window went up to 3600 s; native is 6-300 s
+    return sc
+
+
 def validate(spec: dict) -> dict:
     s = dict(spec or {})
     if "pod_metadata" in s:
@@ -196,25 +227,22 @@ def validate(spec: dict) -> dict:
         if not isinstance(s.get("port", 8080), int):
             raise HTTPException(400, "port: an integer")
         try:
-            scaling = ScalingSpec.model_validate(s.get("scaling") or {}).model_dump(exclude_none=True)
+            scaling = ScalingSpec.model_validate(native_scaling(s.get("scaling") or {})).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(400, f"scaling: {exc.errors()[0]['msg']}") from exc
         if scaling.get("min", 0) > scaling.get("max", 1):
             raise HTTPException(400, "Minimum replicas cannot exceed maximum replicas.")
-        metric = scaling.get("metric", "concurrency")
-        if metric in ("concurrency_utilization", "requests_per_second"):
-            if scaling.get("window_s", 30) > 300:
-                raise HTTPException(400, "Evaluation interval must be between 6 and 300 seconds.")
-            scaling.pop("utilization_percent", None)  # target has metric-specific units
-            if metric == "concurrency_utilization":
-                target = scaling.setdefault("target", 100)
-                concurrency = scaling.setdefault("container_concurrency", 1)
-                if target > 100 or concurrency < 1:
-                    raise HTTPException(400, "Concurrency target must be 1–100%; replica concurrency must be at least 1.")
-            else:
-                scaling.setdefault("target", 5)
-                scaling["container_concurrency"] = 0  # request-rate mode has no concurrency cap
-            scaling.setdefault("window_s", 30)
+        # the stored policy is complete: metric, target and limit are explicit, so a later partial update or a
+        # reader never has to guess a default
+        if scaling.setdefault("metric", "concurrency_utilization") == "concurrency_utilization":
+            target = scaling.setdefault("target", 100)
+            concurrency = scaling.setdefault("container_concurrency", 1)
+            if target > 100 or concurrency < 1:
+                raise HTTPException(400, "Concurrency target must be 1–100%; replica concurrency must be at least 1.")
+        else:
+            scaling.setdefault("target", 5)
+            scaling["container_concurrency"] = 0  # request-rate mode has no concurrency cap
+        scaling.setdefault("window_s", 30)
         s["scaling"] = scaling
         nodes = s.get("nodes", 1)
         if not isinstance(nodes, int) or nodes < 1 or nodes > MULTINODE_MAX_NODES:
@@ -263,37 +291,26 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         path = s.get("path") or PROTOCOL_PATH[protocol]
         port = int(s.get("port", 8080))
         scaling = s.get("scaling") or {}
-        metric = scaling.get("metric", "concurrency")
-        concurrency = int(scaling.get("container_concurrency", 1 if metric == "concurrency_utilization" else 0))
-        native_metric = "concurrency" if metric == "concurrency_utilization" else "rps" if metric == "requests_per_second" else metric
-        native_target = concurrency if metric == "concurrency_utilization" else int(scaling.get("target", 5 if metric == "requests_per_second" else 4))
+        # Knative: `concurrency_utilization` is the concurrency metric with the replica limit as the scale target and
+        # the percentage as its utilization; `requests_per_second` is the rps metric at 100 % with no concurrency limit
+        rate = scaling.get("metric") == "requests_per_second"
+        concurrency = int(scaling.get("container_concurrency", 0 if rate else 1))
         res = s.get("resources") or {}
         runtime: dict = {
             "image": image, "port": port, "protocol": protocol,
             "resources": {"gpu": count, "cpu": str(res.get("cpu", "4")), "memory": str(res.get("memory", "16Gi"))},
             "scaling": {"minReplicas": int(scaling.get("min", 0)), "maxReplicas": int(scaling.get("max", 1)),
-                        "metric": native_metric, "target": native_target,
-                        **({"containerConcurrency": concurrency} if "container_concurrency" in scaling or metric == "concurrency_utilization" else {}),
+                        "metric": "rps" if rate else "concurrency", "target": int(scaling.get("target", 5)) if rate else concurrency,
+                        "containerConcurrency": concurrency,
                         **({"scaleToZeroRetention": f"{int(scaling['idle_s'])}s"} if scaling.get("idle_s") is not None else {})},
             "timeout": int(s.get("timeout_s", 600)),
             "shm": {"enabled": True, "size": f"{int(s.get('shm_gib', 1))}Gi"},
         }
         if "automount_service_account_token" in s:
             runtime["automountServiceAccountToken"] = s["automount_service_account_token"]
-        annotations = {}
-        for key, annotation, suffix in (
-            ("utilization_percent", "target-utilization-percentage", ""),
-            ("cooldown_s", "scale-down-delay", "s"),
-            ("window_s", "window", "s"),
-        ):
-            if key in scaling:
-                annotations[f"autoscaling.knative.dev/{annotation}"] = f"{scaling[key]}{suffix}"
-        if metric in ("concurrency_utilization", "requests_per_second"):
-            annotations["autoscaling.knative.dev/target-utilization-percentage"] = str(scaling.get("target", 100)) if metric == "concurrency_utilization" else "100"
-            if metric == "requests_per_second":
-                runtime["scaling"]["containerConcurrency"] = 0
-        if annotations:
-            runtime["annotations"] = annotations
+        annotations = {f"autoscaling.knative.dev/{a}": f"{scaling[k]}s" for k, a in (("cooldown_s", "scale-down-delay"), ("window_s", "window")) if k in scaling}
+        annotations["autoscaling.knative.dev/target-utilization-percentage"] = "100" if rate else str(scaling.get("target", 100))
+        runtime["annotations"] = annotations
         if s.get("args"):
             runtime["args"] = [str(a) for a in s["args"]]
         if (cmd := _command(s.get("command"))):
@@ -380,7 +397,7 @@ def list_runtime(region: str = REGION) -> dict[str, dict]:
     """Runtime catalog entries: {id: entry}. On the control API from the database; on a regional API (or
     for another region) from that cluster's ConfigMap copies."""
     if region == REGION and db.enabled():
-        return {mid: {**row["entry"], "version": row["version"]} for mid, row in db.list_models().items()}
+        return {mid: _stored({**row["entry"], "version": row["version"]}) for mid, row in db.list_models().items()}
     out = {}
     try:
         cms = retry(kube.core(region).list_namespaced_config_map, API_NAMESPACE, label_selector=f"{CATALOG_LABEL}=runtime")
@@ -393,8 +410,18 @@ def list_runtime(region: str = REGION) -> dict[str, dict]:
         except yaml.YAMLError:
             continue
         if e.get("id"):
-            out[e["id"]] = e
+            out[e["id"]] = _stored(e)
     return out
+
+
+def _stored(entry: dict) -> dict:
+    """A stored entry as the API serves it: an endpoint definition written under the raw Knative vocabulary reads in
+    the native one (`native_scaling`), so its public shape, a partial update and the idle shutdown all see one
+    vocabulary. The entry's rendered `runtime` is untouched: the reconciler re-applies it as it was rendered."""
+    spec = entry.get("spec") or {}
+    if spec.get("kind", "endpoint") == "endpoint" and isinstance(spec.get("scaling"), dict):
+        entry = {**entry, "spec": {**spec, "scaling": native_scaling(spec["scaling"], stored=True)}}
+    return entry
 
 
 def save(entry: dict, region: str = REGION):

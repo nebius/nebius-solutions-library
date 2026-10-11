@@ -6,13 +6,8 @@ export type Region = "eu-north1" | "eu-south1" | string;
 export interface ScalingSpec {
   min?: number;
   max?: number;
-  metric?:
-    | "concurrency_utilization"
-    | "requests_per_second"
-    | "concurrency"
-    | "rps";
-  target?: number;
-  utilization_percent?: number;
+  metric?: "concurrency_utilization" | "requests_per_second";
+  target?: number; // percent of container_concurrency, or requests/s per replica
   buffer?: number; // ready replicas kept above demand while serving (0-8)
   container_concurrency?: number;
   cooldown_s?: number;

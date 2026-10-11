@@ -1138,7 +1138,8 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     assert r.status_code == 200 and fake.custom[("models", "inferenceservices", "my-llm")]["spec"]["predictor"]["minReplicas"] == 1
     assert r.json()["version"] == 2 and fdb.rows["my-llm"]["version"] == 2
     hist = c.get("/v1/models/my-llm/history", headers=ADMIN).json()
-    assert [h["action"] for h in hist] == ["update", "create"] and hist[0]["spec"]["scaling"] == {"min": 1, "max": 3}
+    assert [h["action"] for h in hist] == ["update", "create"]
+    assert hist[0]["spec"]["scaling"] == {"min": 1, "max": 3, "metric": "concurrency_utilization", "target": 100, "container_concurrency": 1, "window_s": 30}   # the complete policy is stored
     assert c.get("/v1/models/my-llm/history", headers=H).status_code == 403
     assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
     assert ("models", "inferenceservices", "my-llm") not in fake.custom and ("api", "catalog-my-llm") not in south.configmaps
@@ -1252,8 +1253,7 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     monkeypatch.setattr(kube, "core", lambda region="eu-north1": regional[region])
     monkeypatch.setattr(kube, "api", lambda region="eu-north1": regional[region])
     monkeypatch.setattr(kube, "isvc", lambda name, ns, region="eu-north1": regional[region].custom.get((ns, "inferenceservices", name)))
-    scaling = {"min": 0, "max": 4, "metric": "rps", "target": 100,
-               "utilization_percent": 80, "container_concurrency": 12,
+    scaling = {"min": 0, "max": 4, "metric": "requests_per_second", "target": 100,
                "cooldown_s": 30, "window_s": 20, "idle_s": 180}
     spec = {"id": "scaling-demo", "image": "nginx:latest", "kind": "endpoint",
             "port": 80, "scaling": scaling, "regions": ["eu-north1", "eu-south1"]}
@@ -1264,21 +1264,23 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
         isvc = fake.custom[key]
         pred, annotations = isvc["spec"]["predictor"], isvc["metadata"]["annotations"]
         assert pred["scaleMetric"] == "rps" and pred["scaleTarget"] == 100
-        assert pred["containerConcurrency"] == 12
-        assert annotations["autoscaling.knative.dev/target-utilization-percentage"] == "80"
+        assert pred.get("containerConcurrency", 0) == 0                    # a request-rate policy has no concurrency limit
+        assert annotations["autoscaling.knative.dev/target-utilization-percentage"] == "100"
         assert annotations["autoscaling.knative.dev/scale-down-delay"] == "30s"
         assert annotations["autoscaling.knative.dev/window"] == "20s"
-    patch = {"scaling": {"metric": "concurrency", "target": 8, "container_concurrency": 0,
+    saved = {**scaling, "container_concurrency": 0}                        # the API stores the complete policy
+    assert c.get("/v1/models/scaling-demo", headers=ADMIN).json()["spec"]["scaling"] == saved
+    patch = {"scaling": {"metric": "concurrency_utilization", "target": 80, "container_concurrency": 8,
                          "cooldown_s": 0, "window_s": 60}, "timeout_s": 120}
     r = c.patch("/v1/endpoints/scaling-demo?region=eu-north1", json=patch, headers=ADMIN)
     assert r.status_code == 200, r.text
-    assert r.json()["scaling"] == {**scaling, **patch["scaling"]}
-    assert r.json()["timeout_s"] == 120
-    assert admin_keys.rows["scaling-demo"]["spec"]["scaling"] == {**scaling, **patch["scaling"]}
+    assert r.json()["scaling"] == {**saved, **patch["scaling"]}
+    assert r.json()["timeout_s"] == 120 and r.json()["target_concurrency"] == 8
+    assert admin_keys.rows["scaling-demo"]["spec"]["scaling"] == {**saved, **patch["scaling"]}
     for fake in (north, south):
-        pred = fake.custom[key]["spec"]["predictor"]
-        assert pred["scaleMetric"] == "concurrency" and pred["scaleTarget"] == 8
-        assert pred.get("containerConcurrency", 0) == 0 and pred["timeout"] == 120
+        pred, annotations = fake.custom[key]["spec"]["predictor"], fake.custom[key]["metadata"]["annotations"]
+        assert pred["scaleMetric"] == "concurrency" and pred["scaleTarget"] == 8 and pred["containerConcurrency"] == 8
+        assert annotations["autoscaling.knative.dev/target-utilization-percentage"] == "80" and pred["timeout"] == 120
     # A subsequent full definition edit preserves the saved scaling policy.
     saved = c.get("/v1/models/scaling-demo", headers=ADMIN).json()["spec"]
     saved["description"] = "Updated after scaling"
@@ -1291,14 +1293,46 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     assert admin_keys.rows["scaling-demo"]["spec"]["scaling"]["buffer"] == 1
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 9}}, headers=ADMIN).status_code == 422
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"window_s": 5}}, headers=ADMIN).status_code == 422
+    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"metric": "rps"}}, headers=ADMIN).status_code == 422   # not a public name
     assert admin_keys.rows["scaling-demo"]["version"] == 4
+
+
+def test_stored_raw_knative_scaling_reads_as_native(client, admin_keys, monkeypatch):
+    """Definitions written before 0.11.12 carry the raw Knative vocabulary (`metric: concurrency | rps`,
+    `utilization_percent`, or no metric at all, which meant raw concurrency). They are read in the native vocabulary
+    (models.py `native_scaling`): the public shape, a partial update and the re-render all see one vocabulary."""
+    c, fake = client
+    monkeypatch.setattr(kube, "isvc", lambda name, ns, region=None: fake.custom.get((ns, "inferenceservices", name)))
+    for mid, raw, native in (
+        ("raw-rps", {"min": 0, "max": 2, "metric": "rps", "target": 10, "utilization_percent": 50, "window_s": 600},
+         {"min": 0, "max": 2, "metric": "requests_per_second", "target": 5, "container_concurrency": 0, "window_s": 300}),
+        ("raw-default", {"min": 0, "max": 1, "idle_s": 1800},                   # no metric: raw concurrency 4 at Knative's 70 %
+         {"min": 0, "max": 1, "idle_s": 1800, "metric": "concurrency_utilization", "target": 70, "container_concurrency": 4}),
+    ):
+        assert c.post("/v1/models", json={"id": mid, "image": "nginx", "regions": ["eu-north1"]}, headers=ADMIN).status_code == 201
+        admin_keys.rows[mid]["spec"]["scaling"] = dict(raw)                   # as an older release stored it
+        admin_keys.rows[mid]["entry"]["spec"]["scaling"] = dict(raw)
+        appmod.catalog.invalidate()
+        assert c.get(f"/v1/models/{mid}", headers=ADMIN).json()["spec"]["scaling"] == native
+        r = c.patch(f"/v1/endpoints/{mid}", json={"scaling": {"cooldown_s": 15}}, headers=ADMIN)
+        assert r.status_code == 200, r.text
+        public = r.json()["scaling"]                                         # the saved policy over what Knative reports
+        assert {k: public[k] for k in native} == native and public["cooldown_s"] == 15
+        assert admin_keys.rows[mid]["spec"]["scaling"] == {"window_s": 30, **native, "cooldown_s": 15}   # stored complete
+        pred = fake.custom[("models", "inferenceservices", mid)]["spec"]["predictor"]
+        annotations = fake.custom[("models", "inferenceservices", mid)]["metadata"]["annotations"]
+        if mid == "raw-rps":
+            assert pred["scaleMetric"] == "rps" and pred["scaleTarget"] == 5 and annotations["autoscaling.knative.dev/target-utilization-percentage"] == "100"
+        else:   # the same Knative scale target as before, now also the per-replica limit
+            assert pred["scaleMetric"] == "concurrency" and pred["scaleTarget"] == 4 and pred["containerConcurrency"] == 4
+            assert annotations["autoscaling.knative.dev/target-utilization-percentage"] == "70"
 
 
 @pytest.mark.parametrize("scaling", [
     {"metric": "cpu_utilization"}, {"metric": "memory_utilization"},
     {"buffer": 9}, {"evaluation_interval_s": 5}, {"load_balancing": "first-available"},
     {"window_s": 5}, {"cooldown_s": -1}, {"container_concurrency": 1001},
-    {"target": 0}, {"utilization_percent": 101}, {"idle_s": 3601}, {"min": 3, "max": 2},
+    {"target": 0}, {"window_s": 301}, {"idle_s": 3601}, {"min": 3, "max": 2},
     {"metric": "concurrency_utilization", "target": 101, "container_concurrency": 200},
     {"metric": "concurrency_utilization", "container_concurrency": 0},
     {"metric": "requests_per_second", "window_s": 301},
@@ -1319,8 +1353,7 @@ def test_scaling_metric_units_and_partial_updates(client, admin_keys, monkeypatc
                                                  native_target, native_util, native_concurrency):
     c, fake = client
     monkeypatch.setattr(kube, "isvc", lambda name, ns, region=None: fake.custom.get((ns, "inferenceservices", name)))
-    policy = {"metric": metric, "target": target, "container_concurrency": concurrency,
-              "utilization_percent": 70}  # obsolete factor must not discount the new target
+    policy = {"metric": metric, "target": target, "container_concurrency": concurrency}
     r = c.post("/v1/models", json={"id": "metric-units", "image": "nginx", "scaling": policy,
                                  "regions": ["eu-north1"]}, headers=ADMIN)
     assert r.status_code == 201, r.text
@@ -1335,11 +1368,11 @@ def test_scaling_metric_units_and_partial_updates(client, admin_keys, monkeypatc
     assert response.status_code == 200, response.text
     public = response.json()["scaling"]
     assert public["metric"] == metric and public["target"] == target
-    assert "utilization_percent" not in public
-    assert "utilization_percent" not in admin_keys.rows["metric-units"]["spec"]["scaling"]
-    version = admin_keys.rows["metric-units"]["version"]
-    assert c.patch("/v1/endpoints/metric-units", json={"target_concurrency": 50}, headers=ADMIN).status_code == 422
-    assert admin_keys.rows["metric-units"]["version"] == version
+    assert response.json()["target_concurrency"] == native_target
+    # target_concurrency is the reported per-replica scale target: the concurrency limit, or the requests/s target
+    r = c.patch("/v1/endpoints/metric-units", json={"target_concurrency": 50}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["target_concurrency"] == 50, r.text
+    assert admin_keys.rows["metric-units"]["spec"]["scaling"]["target" if metric == "requests_per_second" else "container_concurrency"] == 50
     if metric == "concurrency_utilization":
         # A partial target change uses the saved concurrency rather than a default of one.
         r = c.patch("/v1/endpoints/metric-units", json={"scaling": {"target": 70}}, headers=ADMIN)

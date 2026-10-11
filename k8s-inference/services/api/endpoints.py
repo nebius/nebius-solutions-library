@@ -33,21 +33,18 @@ def to_public(m: dict, obj: dict, region: str = REGION) -> dict:
     container = containers[0] if containers else {}
     resources = container.get("resources", {}).get("requests", {})
     annotations = md.get("annotations") or {}
+    # the native vocabulary read back from Knative's fields (models.py `to_entry` is the inverse); an API-managed
+    # definition's saved policy wins, it carries what is not rendered (`buffer`) and what Knative defaults silently
+    rate = pred.get("scaleMetric") == "rps"
+    utilization = int(float(annotations.get("autoscaling.knative.dev/target-utilization-percentage", 70)))
     scaling = {"min": pred.get("minReplicas", 0), "max": pred.get("maxReplicas", 1),
-               "metric": pred.get("scaleMetric", "concurrency"), "target": pred.get("scaleTarget", 4),
-               "container_concurrency": pred.get("containerConcurrency", 0),
-               "utilization_percent": float(annotations.get("autoscaling.knative.dev/target-utilization-percentage", 70)),
+               "metric": "requests_per_second" if rate else "concurrency_utilization",
+               "target": pred.get("scaleTarget", 5) if rate else utilization,
+               "container_concurrency": 0 if rate else pred.get("containerConcurrency") or pred.get("scaleTarget", 1),
                "cooldown_s": _secs(annotations.get("autoscaling.knative.dev/scale-down-delay", "0s")),
                "window_s": _secs(annotations.get("autoscaling.knative.dev/window", "60s")),
-               "idle_s": _secs(annotations.get("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "2m"))}
-    if int(((m.get("spec") or {}).get("scaling") or {}).get("buffer") or 0) > 0:   # held by the dispatcher (buffer.py), not rendered
-        scaling["buffer"] = int(m["spec"]["scaling"]["buffer"])
-    saved_metric = (m.get("spec") or {}).get("scaling", {}).get("metric")
-    if saved_metric in ("concurrency_utilization", "requests_per_second"):
-        scaling["metric"] = saved_metric
-        if saved_metric == "concurrency_utilization":
-            scaling["target"] = scaling["utilization_percent"]
-        scaling.pop("utilization_percent", None)
+               "idle_s": _secs(annotations.get("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "2m")),
+               **((m.get("spec") or {}).get("scaling") or {})}
     return {**_base(m, md, st), "region": region, "nodes": 1,
             "min_replicas": pred.get("minReplicas", 0), "max_replicas": pred.get("maxReplicas", 1),
             "scale_to_zero_after_s": _secs(annotations.get("autoscaling.knative.dev/scale-to-zero-pod-retention-period", "2m")),

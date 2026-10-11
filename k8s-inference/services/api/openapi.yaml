@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.11
+  version: 0.11.12
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
     Auth: `Authorization: Bearer <LiteLLM virtual key>` on every request; the
@@ -183,7 +183,7 @@ paths:
               properties:
                 min_replicas: { type: integer, minimum: 0 }
                 max_replicas: { type: integer, minimum: 1 }
-                target_concurrency: { type: integer, minimum: 1 }
+                target_concurrency: { type: integer, minimum: 1, description: "The per-replica scale target the endpoint reports: scaling.container_concurrency under concurrency_utilization, scaling.target under requests_per_second" }
                 scale_to_zero_after_s: { type: integer, minimum: 0 }
                 scaling: { $ref: "#/components/schemas/ScalingSpec" }
                 timeout_s: { type: integer, minimum: 1, maximum: 600 }
@@ -435,12 +435,11 @@ components:
       properties:
         min: { type: integer, minimum: 0, default: 0, description: "Pod floor per region; 0 enables scale to zero" }
         max: { type: integer, minimum: 1, default: 1 }
-        metric: { type: string, enum: [concurrency_utilization, requests_per_second, concurrency, rps], description: "New metric names use Cerebrium target definitions; concurrency and rps retain legacy raw Knative semantics" }
-        target: { type: integer, minimum: 1, description: "Concurrency utilization: 1–100 percent of replica concurrency (default 100); requests_per_second: direct requests/s per replica (default 5). Legacy metrics retain raw targets. Fractional effective concurrency is supported down to 0.01 by the pinned Knative 1.23 runtime." }
-        utilization_percent: { type: integer, minimum: 1, maximum: 100, description: "Legacy raw metric policies only; defaults to 70. Removed when a new metric is selected." }
-        container_concurrency: { type: integer, minimum: 0, maximum: 1000, description: "Hard concurrent-request limit per pod. concurrency_utilization requires at least 1 (default 1); requests_per_second sets 0 (unlimited). Legacy modes preserve the existing value." }
+        metric: { type: string, enum: [concurrency_utilization, requests_per_second], default: concurrency_utilization, description: "How demand is measured per replica: concurrency_utilization scales on a percentage of container_concurrency, requests_per_second on a request rate" }
+        target: { type: integer, minimum: 1, description: "concurrency_utilization: 1–100 percent of container_concurrency (default 100); requests_per_second: requests/s per replica (default 5). The effective concurrency target may be fractional (replica concurrency 1 at 70 % is 0.7; Knative 1.23 supports down to 0.01)." }
+        container_concurrency: { type: integer, minimum: 0, maximum: 1000, description: "Hard concurrent-request limit per replica. concurrency_utilization requires at least 1 (default 1); requests_per_second has no limit (always 0)." }
         cooldown_s: { type: integer, minimum: 0, maximum: 3600, default: 0, description: "Delay before scale-down; does not block scale-up" }
-        window_s: { type: integer, minimum: 6, maximum: 3600, description: "Evaluation interval: metrics averaging window. New metric modes use 6–300 seconds (default 30); legacy policies retain 6–3600 seconds (default 60). The internal autoscaler tick is separate." }
+        window_s: { type: integer, minimum: 6, maximum: 300, default: 30, description: "Evaluation interval: the metrics averaging window in seconds. The internal autoscaler tick is separate." }
         idle_s: { type: integer, minimum: 0, maximum: 3600, default: 120, description: "Retention of the last pod after the decision to scale to zero" }
     Endpoint:
       type: object
@@ -456,7 +455,7 @@ components:
         min_replicas: { type: integer }
         max_replicas: { type: integer }
         scale_to_zero_after_s: { type: integer }
-        target_concurrency: { type: integer }
+        target_concurrency: { type: [integer, "null"], description: "The per-replica scale target (scaling.container_concurrency or, for requests_per_second, scaling.target); null for a multi-node endpoint" }
         scaling: { $ref: "#/components/schemas/ScalingSpec" }
         timeout_s: { type: integer }
         placement: { type: [string, "null"], enum: [RESERVED, SPOT, ANY, null] }
