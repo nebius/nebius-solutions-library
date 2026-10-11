@@ -112,7 +112,9 @@ profiles, the regions' OIDC issuers). `POST /v1/operations/{id}:resume` takes an
 `{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution` and their lifecycle
 (`root_operation_id`, `attempt_id`, `epoch`, `revision`, `cluster`, `image_digest`, `export_state`, `result_ref`,
 `checkpoint_ref`; docs/JOBS.md "Attempts and finalization"); `GET /v1/operations/{id}?since=<revision>` answers 304
-while nothing changed; `POST /v1/operations/{id}:export` retries a failed export without rerunning the simulation.
+while nothing changed; `POST /v1/operations/{id}:export` retries a failed export without rerunning the simulation;
+`POST /v1/operations/{id}:resume` with an `Idempotency-Key` header replays one continuation; a handle that capacity
+fallback superseded resolves to its successor (`requested_id` names the handle used).
 
 ## Multi-node endpoints
 

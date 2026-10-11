@@ -137,6 +137,14 @@ def test_epoch_fencing_in_the_database(database):
     with pytest.raises(HTTPException) as e:        # the old pod comes back after a partition: it cannot finalize
         attempts.record("eu-north1", "tenant-demo", "op-x-a", {"operation": "op-x", "status": "succeeded", "export": "succeeded"})
     assert e.value.status_code == 409
+    with pytest.raises(HTTPException) as e:        # nor publish a checkpoint pointer
+        attempts.record("eu-north1", "tenant-demo", "op-x-a", {"operation": "op-x", "status": "started", "checkpoint_ref": "app://stale", "checkpoint_generation": 9})
+    assert e.value.status_code == 409
+    live = attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "started", "checkpoint_ref": "app://ckpt/4", "checkpoint_generation": 4, "gpus": 1})
+    assert live["checkpoint_generation"] == 4 and live["status"] == "started"
+    assert attempts.latest_checkpoint("op-x") == {"checkpoint_ref": "app://ckpt/4", "generation": 4, "epoch": 2, "attempt_id": "op-x-b"}
+    attempts.mark_successor("op-x", "op-x-r1")
+    assert attempts.successor_of("op-x") == "op-x-r1"
     rows = attempts.for_operation("op-x")
     assert [r["pod"] for r in rows] == ["op-x-a", "op-x-b"] and rows[1]["revision"] > rows[0]["revision"]
     attempts.mark_cancelled("op-x")

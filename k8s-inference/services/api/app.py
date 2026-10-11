@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.9", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.10", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -313,7 +313,7 @@ def fallback_switch() -> list[str]:
         for job in items:
             ann = job["metadata"].get("annotations") or {}
             wait = ann.get(f"{cfg.LABEL}/fallback-wait-s")
-            if wait is None or not jobs.is_manager_job(job) or jobs.finished(job):
+            if wait is None or not jobs.is_manager_job(job) or jobs.finished(job) or ann.get(f"{cfg.LABEL}/successor"):
                 continue
             created = datetime.fromisoformat(str(job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
             if (now - created).total_seconds() < int(wait):
@@ -621,11 +621,32 @@ def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le
     return [jobs.normalise(j, _price(j)) for j in jobs.list_ops(p.namespace, p.tenant, model, limit)]
 
 
-def _owned(p: Principal, id: str) -> tuple[dict, str]:
-    job, region = jobs.find(p.namespace, id)
-    if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
-        raise HTTPException(404, f"operation {id}: not found")
-    return job, region
+def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
+    """The operation's Job. A handle that capacity fallback superseded resolves to its current successor (the
+    original stays readable, docs/SCHEDULING.md); an operation whose Job expired is served from its durable rows."""
+    current = id
+    for _ in range(16):
+        try:
+            job, region = jobs.find(p.namespace, current)
+        except HTTPException as e:
+            if e.status_code != 404 or not attempts.enabled():
+                raise
+            nxt = attempts.successor_of(current)
+            if follow and nxt and nxt != current:
+                current = nxt
+                continue
+            synthetic = attempts.synthesize(current, p.tenant)
+            if synthetic is None:
+                raise
+            return {"_synthetic": synthetic, "metadata": {"name": current, "labels": {"serverless2.nebius/tenant": p.tenant, "serverless2.nebius/mode": "run"}, "annotations": {}}}, synthetic.get("region")
+        if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
+            raise HTTPException(404, f"operation {id}: not found")
+        nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor")
+        if follow and nxt and nxt != current:
+            current = nxt
+            continue
+        return job, region
+    raise HTTPException(502, f"operation {id}: successor chain too long")
 
 
 def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list, str]:
@@ -639,14 +660,21 @@ def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list
 
 
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
-    records, root = _records(p, job, id, region)
+    if job.get("_synthetic"):
+        return job["_synthetic"]
+    name = job["metadata"]["name"]
+    records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
-    op.update(attempts.lifecycle(id, root, records))
-    if op["status"] == "EXPORT_FAILED" and attempts.enabled():
+    op.update(attempts.lifecycle(name, root, records))
+    if name != id:
+        op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
+    if op["status"] in ("EXPORT_FAILED", "FINALIZING") and attempts.enabled():
         # a transfer-only retry (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md "Attempts and finalization")
-        done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{id}-x") and (r.get("export_state") or r.get("export")) == "succeeded"]
+        done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{name}-x")
+                and ((r.get("export_state") or r.get("export")) == "succeeded" or (r.get("result_ref") and r["status"] == "succeeded"))]
         if done:
-            op.update({"status": "SUCCEEDED", "export_state": "succeeded", "exported_by": done[-1]["operation"], "error": None})
+            op.update({"status": "SUCCEEDED", "export_state": done[-1].get("export_state") or "succeeded", "exported_by": done[-1]["operation"],
+                       "result_ref": op.get("result_ref") or done[-1].get("result_ref"), "error": None})
     return op
 
 
@@ -683,10 +711,10 @@ def export_again(id: str, p: Principal = Depends(principal)):
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
     orig, region = _owned(p, id)
     op = _operation(p, orig, id, region)
-    if op["status"] != "EXPORT_FAILED":
-        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED run is exported again")
+    if op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
+        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again")
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
-    job, created = jobs.export_again(p.namespace, id, _home(orig), m, catalog.region_params(m, region) if region else {})
+    job, created = jobs.export_again(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region else {})
     return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
 
 
@@ -720,15 +748,19 @@ def _home(job: dict) -> str:
 @app.post("/v1/operations/{id}:cancel")
 def cancel(id: str, p: Principal = Depends(principal)):
     job, _ = _owned(p, id)
-    attempts.mark_cancelled(id)       # a late "succeeded" from the cancelled attempt is refused from now on
-    op = jobs.normalise(jobs.cancel(p.namespace, id, _home(job)))
+    if job.get("_synthetic"):
+        raise HTTPException(409, f"operation {id} is over; nothing to cancel")
+    current = job["metadata"]["name"]
+    attempts.mark_cancelled(current)       # a late "succeeded" from the cancelled attempt is refused from now on
+    op = jobs.normalise(jobs.cancel(p.namespace, current, _home(job)))
     if op["status"] in ("QUEUED", "RUNNING"):
         op["status"] = "CANCELLED"   # the Job controller converges within seconds (pods get SIGTERM)
     return op
 
 
 @app.post("/v1/operations/{id}:resume")
-def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(principal)):
+def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(principal),
+           idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
     """A new operation `<id>-r<n>` in the same region on the same work volume (checkpoints); for a
     FAILED or CANCELLED run whose volume still exists (docs/JOBS.md). Preemptions resume on their own.
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
@@ -739,13 +771,15 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
     req = req or ResumeRequest()
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
         raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
-    if req.gpu_class and not req.checkpoint_ref:
-        raise HTTPException(400, "another gpu_class needs a checkpoint_ref: the work volume's checkpoints belong to the original class")
+    root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    pointer = (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref") if attempts.enabled() and not req.checkpoint_ref else None
+    if req.gpu_class and not req.checkpoint_ref and not pointer:
+        raise HTTPException(400, "another gpu_class needs a checkpoint_ref (none was acknowledged for this run): the work volume's checkpoints belong to the original class")
     placement = {"profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]} if jobs.is_manager_job(orig) else None
     if req.gpu_class and placement:
         placement["classes"] = [req.gpu_class]
-    job, created = jobs.resume(p.namespace, id, _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref else {}, placement,
-                               checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class)
+    job, created = jobs.resume(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {}, placement,
+                               checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class, idem=idempotency_key, pointer=pointer)
     ex = jobs.normalise(job).get("execution")
     if ex and ex.get("private_input_ref"):
         root = job["metadata"]["annotations"].get("serverless2.nebius/resumed-from") or id

@@ -730,16 +730,26 @@ def switch_class(ns: str, name: str, region: str, model: dict, defaults: dict, n
                     labels.get(f"{LABEL}/priority"), None, d, ann.get(f"{LABEL}/key"), placement=placement, gpu_class=next_class, ex=ex)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     job["metadata"]["annotations"][f"{LABEL}/fallback"] = f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
+    created, was_created = create(ns, job, region)
+    # the original stays as a readable handle that names its successor (status SUPERSEDED): its Workload is
+    # deactivated so Kueue never admits it, and the fleet database keeps the link past the Job's lifetime
     try:
-        retry(kube.batch(region).delete_namespaced_job, name, ns, propagation_policy="Background")
+        kube.deactivate_workload(ns, md.get("uid", ""), region)
+    except Exception as e:  # noqa: BLE001 - the Job is suspended below either way
+        log.warning("fallback: deactivate workload of %s/%s: %s", ns, name, e)
+    try:
+        retry(kube.batch(region).patch_namespaced_job, name, ns, {"metadata": {"annotations": {f"{LABEL}/successor": new}}, "spec": {"suspend": True}})
     except ApiException as e:
         if e.status != 404:
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    return create(ns, job, region)
+    import attempts
+    attempts.mark_successor(name, new)
+    return created, was_created
 
 
 def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placement: dict | None = None,
-           checkpoint_ref: str | None = None, gpu_class: str | None = None) -> tuple[dict, bool]:
+           checkpoint_ref: str | None = None, gpu_class: str | None = None, idem: str | None = None,
+           pointer: str | None = None) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
     original PVC (same region: the volume is regional), linked through the resumed-from annotation.
     Rendering anew (rather than copying the finished Job's spec) leaves behind everything the Job
@@ -762,6 +772,18 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
     except ValueError:
         ex = None
+    if not checkpoint_ref and pointer and not is_jobset(orig):
+        # no explicit checkpoint: the newest acknowledged pointer of the chain stands in when the volume is gone or the
+        # caller wants another class (docs/JOBS.md "Attempts and finalization")
+        volume_ok = False
+        if pvc and worker:
+            try:
+                retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
+                volume_ok = True
+            except ApiException:
+                volume_ok = False
+        if gpu_class or not volume_ok:
+            checkpoint_ref = pointer
     if checkpoint_ref:
         # a portable checkpoint (docs/JOBS.md "Execution options"): the application restores it from its own storage, so
         # the new attempt needs neither the old volume nor the old region: a fresh volume where the fleet places it
@@ -781,8 +803,14 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         except ApiException as e:
             raise HTTPException(409 if e.status == 404 else 502, f"checkpoint volume {pvc} is gone (successful runs release it); submit a new run")
     root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + sum(1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root)
-    new = f"{root}-r{n}"
+    if idem:
+        # one continuation per (tenant, source operation, intent): the same key replays the same operation (`create`
+        # returns it; a different input under the same key is 409), concurrent replays collide on the Job name
+        import hashlib
+        new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
+    else:
+        n = 1 + sum(1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root)
+        new = f"{root}-r{n}"
     out = output_prefix(orig) or ""
     d = dict(defaults)
     d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else f"operations/{new}"
@@ -795,6 +823,8 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
                     labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc, placement=pl or None,
                     gpu_class=gpu_class or labels.get(f"{LABEL}/gpu-class") or (gpu_classes(model)[0] if class_images(model) else None), ex=ex)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    if idem:
+        job["metadata"]["annotations"][f"{LABEL}/idempotency-key"] = idem
     if is_jobset(job):          # the shared checkpoint directory is keyed by the root operation
         for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:
             for m in c.get("volumeMounts", []):

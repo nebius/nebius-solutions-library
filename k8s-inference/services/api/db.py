@@ -78,6 +78,11 @@ create table if not exists operation_marks (
     revision    bigserial
 );
 """,
+    # 4: live checkpoint pointers and successor operations (capacity fallback keeps the original handle)
+    """
+    alter table attempts add column if not exists checkpoint_generation int;
+    alter table operation_marks add column if not exists successor text;
+    """,
 ]
 
 _pool = None

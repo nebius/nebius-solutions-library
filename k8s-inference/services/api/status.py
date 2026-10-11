@@ -24,6 +24,7 @@ def is_mirror(job: dict) -> bool:
 
 
 PHASE = {"Pending": "QUEUED", "Running": "RUNNING", "Succeeded": "SUCCEEDED", "Failed": "FAILED", "Unknown": "QUEUED"}
+FINALIZING_GRACE_S = 600      # a completed run without a delivery record is FINALIZING this long, then EXPORT_FAILED
 
 
 def _main_state(pod: dict) -> dict:
@@ -132,16 +133,27 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     conds = {c.get("type"): c for c in (st.get("conditions") or []) if c.get("status") == "True"}
     attempts = [{k: v for k, v in a.items() if not k.startswith("_")} for a in _attempts(job.get("_pods", []), records, md.get("name"))]
     error = None
-    if "Complete" in conds or "SuccessCriteriaMet" in conds:
+    if ann.get(f"{LABEL}/successor"):
+        status = "SUPERSEDED"       # capacity fallback moved the run: the successor is the live operation (docs/SCHEDULING.md)
+    elif "Complete" in conds or "SuccessCriteriaMet" in conds:
         status = "SUCCEEDED"
         # delivery, not exit code: a verified export (managed I/O) or the application's finalization record
         # (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization") must be on record
         last = next((a for a in reversed(attempts) if a["status"] == "SUCCEEDED"), None)
         execution = _json(ann.get(f"{LABEL}/execution")) or {}
+        done_at = _ts(st.get("completionTime"))
+        age = (datetime.now(timezone.utc) - done_at).total_seconds() if done_at else None
         if last and last.get("export_state") == "failed":
             status, error = "EXPORT_FAILED", "export failed after a successful run; the volume is kept (POST /v1/operations/<id>:export retries the transfer)"
         elif last and execution.get("io_mode") == "application" and last.get("export_state") is not None and not last.get("result_ref"):
             status, error = "EXPORT_FAILED", "the run ended without a finalization record (RESULT.json): its results are not confirmed"
+        elif labels.get(f"{LABEL}/mode") == "run" and (not last or last.get("export_state") is None):
+            # exit 0 without a delivery record is not delivered: the uploader may still be exporting or posting
+            # (FINALIZING), after the grace period the delivery is unconfirmed (docs/JOBS.md "Attempts and finalization")
+            if age is not None and age > FINALIZING_GRACE_S:
+                status, error = "EXPORT_FAILED", "no delivery record for the successful run: its export or finalization was not confirmed (volume kept if the uploader could not acknowledge)"
+            else:
+                status = "FINALIZING"
     elif "Failed" in conds or "FailureTarget" in conds:
         status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
     elif ann.get(f"{LABEL}/cancelled"):
@@ -180,6 +192,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "execution": _json(ann.get(f"{LABEL}/execution")),
             "reason": (job.get("_reason") if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback"),
+            "successor": ann.get(f"{LABEL}/successor"),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
             "interconnect": ann.get(f"{LABEL}/interconnect"),
             "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,

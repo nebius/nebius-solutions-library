@@ -14,7 +14,7 @@
 set -uo pipefail
 # UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
 # attempt record is kept under /work/attempts (the run moves its own data).
-MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"
+MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"; ACK=""; CKPT_SEEN=""
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token; TOKEN=$(cat "$TOKEN_FILE"); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
@@ -50,24 +50,49 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   image=$(field '.spec.containers[]? | select(.name==$m) | .image // empty')
   digest=$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')
   # the application's finalization record (docs/JOBS.md "Attempts and finalization"): RESULT.json next to the
-  # outputs names the committed result and checkpoint; without it an application-managed run is not delivered
-  result=""; ckpt=""
+  # outputs names the committed result and checkpoint; without it an application-managed run is not delivered.
+  # CHECKPOINT.json ({"checkpoint_ref": ..., "generation": N}) is the live pointer the application publishes while it
+  # runs; the acknowledged pointer is written back to CHECKPOINT.ack.json
+  local result="" ckpt="" gen=""
   if [ -f /work/RESULT.json ]; then
     result=$(jq -r '.result_ref // empty' /work/RESULT.json 2>/dev/null); ckpt=$(jq -r '.checkpoint_ref // empty' /work/RESULT.json 2>/dev/null)
+  fi
+  if [ -z "$ckpt" ] && [ -f /work/CHECKPOINT.json ]; then
+    ckpt=$(jq -r '.checkpoint_ref // empty' /work/CHECKPOINT.json 2>/dev/null); gen=$(jq -r '.generation // empty' /work/CHECKPOINT.json 2>/dev/null)
   fi
   mkdir -p /work/attempts
   [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
   jq -cn --arg op "$OPERATION" --arg pod "$POD_NAME" --arg node "$node" --arg pool "$pool" --arg st "$1" --argjson exit "${EXIT:-null}" \
     --argjson gpus "${GPUS:-0}" --arg cls "${GPU_CLASS:-}" --arg s "$started" --arg e "$ended" --arg img "$image" --arg dg "$digest" \
-    --arg exp "${EXPORT:-}" --arg res "$result" --arg ck "$ckpt" --arg mode "$([ "$MODE" = record ] && echo application || echo managed)" \
+    --arg exp "${EXPORT:-}" --arg res "$result" --arg ck "$ckpt" --arg gen "$gen" --arg mode "$([ "$MODE" = record ] && echo application || echo managed)" \
     '{operation:$op,pod:$pod,node:$node,pool:$pool,status:$st,exit_code:$exit,gpus:$gpus,gpu_class:$cls,started_at:$s,ended_at:$e,
       image:$img,image_digest:$dg,io_mode:$mode} + (if $exp != "" then {export:$exp} else {} end)
-      + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)' > "/work/attempts/$POD_NAME.json"
-  # the durable copy: the fleet API keeps attempts in its database (fenced by epoch; a stale pod gets 409), best effort
+      + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)
+      + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "/work/attempts/$POD_NAME.json"
+  # the durable copy: the fleet API keeps attempts in its database (fenced by epoch; a stale pod gets 409). A terminal
+  # record is retried; ACK holds the last HTTP status (200 = acknowledged; the work volume is released only then)
+  ACK=""
   if [ -n "${API_URL:-}" ]; then
-    curl -sS -m 20 -o /dev/null -w "attempt record $1 -> API %{http_code}\n" -X POST "$API_URL/internal/attempts" \
-      -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@/work/attempts/$POD_NAME.json" 2>&1 || true
+    local tries=1; [ "$1" = started ] || tries=4
+    for i in $(seq 1 $tries); do
+      ACK=$(curl -sS -m 20 -o /work/attempts/.ack.json -w "%{http_code}" -X POST "$API_URL/internal/attempts" \
+        -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@/work/attempts/$POD_NAME.json" 2>/dev/null || echo 000)
+      echo "attempt record $1 -> API $ACK"
+      case "$ACK" in 200|409) break ;; esac
+      [ "$i" -lt "$tries" ] && { sleep 20 & wait $!; }
+    done
+    if [ "$ACK" = 200 ] && [ -n "$gen" ]; then
+      jq -c --arg g "$gen" '{generation:($g|tonumber), epoch:.epoch, checkpoint_ref:.checkpoint_ref, revision:.revision, acknowledged_at:(now|todate)}' \
+        /work/attempts/.ack.json > /work/CHECKPOINT.ack.json.tmp 2>/dev/null && mv /work/CHECKPOINT.ack.json.tmp /work/CHECKPOINT.ack.json
+    fi
   fi
+}
+
+checkpoint_changed() {   # the application published a new checkpoint pointer (CHECKPOINT.json content changed)
+  [ -f /work/CHECKPOINT.json ] || return 1
+  local now; now=$(cat /work/CHECKPOINT.json 2>/dev/null | tr -d '\n')
+  [ "$now" != "$CKPT_SEEN" ] || return 1
+  CKPT_SEEN="$now"; return 0
 }
 
 upload() {   # $1 = status
@@ -119,6 +144,7 @@ while true; do
       [ "$MODE" = record ] || aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
     fi
     SEEN=1; gone=0
+    checkpoint_changed && record started     # the live pointer, fenced and acknowledged through the API
   elif [ "$SEEN" = 1 ]; then
     gone=$((gone + 1))                        # main's processes are gone; the kubelet can take a while to post the exit code
     if [ "$gone" -ge "${EXIT_CODE_POLLS:-40}" ]; then
@@ -131,9 +157,16 @@ while true; do
 done
 if [ "$EXIT" = "0" ]; then
   upload succeeded
-  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$EXPORT" != failed ]; then
+  # the work volume goes only once delivery is durable: the export verified (managed) or RESULT.json present
+  # (application), and the API acknowledged the final record when there is an API (else the bucket record stands)
+  delivered=false
+  if [ "$MODE" = record ]; then [ -f /work/RESULT.json ] && delivered=true; else [ "$EXPORT" = succeeded ] && delivered=true; fi
+  if [ -n "${API_URL:-}" ] && [ "$ACK" != 200 ]; then delivered=false; fi
+  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$delivered" = true ]; then
     curl -sS -o /dev/null -w "pvc delete %{http_code}\n" --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE \
       "$API/api/v1/namespaces/$POD_NAMESPACE/persistentvolumeclaims/$PVC_NAME"
+  elif [ -n "${PVC_NAME:-}" ]; then
+    echo "volume $PVC_NAME kept: delivery not acknowledged (export=$EXPORT ack=$ACK result=$([ -f /work/RESULT.json ] && echo yes || echo no)); POST /v1/operations/$OPERATION:export retries the delivery"
   fi
 elif [ -z "$EXIT" ]; then
   upload interrupted

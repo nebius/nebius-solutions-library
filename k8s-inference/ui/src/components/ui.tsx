@@ -75,6 +75,9 @@ const tone: Record<string, string> = {
   ADMITTED: "info",
   QUEUED: "info",
   PREEMPTED: "warning",
+  FINALIZING: "info",
+  EXPORT_FAILED: "danger",
+  SUPERSEDED: "",
   FAILED: "danger",
   CANCELLED: "",
   ready: "success",
@@ -99,6 +102,9 @@ export function Badge({
     "scaled-to-zero": "Idle",
     SUCCEEDED: "Completed",
     PREEMPTED: "Recovering",
+    FINALIZING: "Finalizing",
+    EXPORT_FAILED: "Export failed",
+    SUPERSEDED: "Moved",
   };
   return (
     <span className={`badge ${t ? "badge--" + t : ""}`}>

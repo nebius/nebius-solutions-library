@@ -462,7 +462,7 @@ def test_normalise_status_and_attempts():
            "spec": {}, "status": {"startTime": "2026-10-05T18:49:23Z", "completionTime": "2026-10-05T19:10:47Z", "conditions": [{"type": "Complete", "status": "True"}]},
            "_pods": [pod("op-1", "Failed", "2026-10-05T18:49:23Z", "2026-10-05T18:57:29Z", 137, disrupted=True),
                      pod("op-1", "Succeeded", "2026-10-05T18:57:29Z", "2026-10-05T19:10:37Z", 0)]}
-    op = jobs.normalise(job, 2.0)
+    op = jobs.normalise(job, 2.0, [{"operation": "op-1", "pod": "op-1-suc", "status": "succeeded", "export": "succeeded", "gpus": 1}])   # delivery on record
     assert op["status"] == "SUCCEEDED" and op["duration_s"] == 1284.0 and op["cost"] == 2.0 and op["input"] == {"nsteps": "5"} and op["resumable"] is False
     assert [a["status"] for a in op["attempts"]] == ["PREEMPTED", "SUCCEEDED"] and op["attempts"][0]["reason"] == "node is being drained" and op["attempts"][0]["exit_code"] == 137
     assert jobs.gpu_seconds(job) == 486.0 + 788.0
@@ -657,7 +657,7 @@ def test_billing_once(cluster, monkeypatch):
     cluster.pods += [pod("op-b", "Failed", "2026-10-05T18:00:00Z", "2026-10-05T18:30:00Z", 137),        # preempted attempt: billed too
                      pod("op-b", "Succeeded", "2026-10-05T18:30:00Z", "2026-10-05T19:00:00Z", 0)]
     monkeypatch.setattr(billing.artifacts, "attempt_records", lambda ns, op, region, prefix=None: [
-        {"operation": "op-b", "pod": "op-b-suc", "status": "succeeded", "gpus": 1, "started_at": "2026-10-05T18:30:00Z", "ended_at": "2026-10-05T19:00:00Z"}])   # duplicate of a live pod: not double counted
+        {"operation": "op-b", "pod": "op-b-suc", "status": "succeeded", "export": "succeeded", "gpus": 1, "started_at": "2026-10-05T18:30:00Z", "ended_at": "2026-10-05T19:00:00Z"}])   # duplicate of a live pod: not double counted
     running = {"metadata": {"name": "op-r", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run"}, "annotations": {f"{L}/key": "deadbeef"}},
                "spec": {}, "status": {"startTime": "x"}}
     cluster.jobs[("tenant-demo", "op-r")] = running

@@ -257,9 +257,11 @@ A run that names `execution.placement.gpu_preference` and `fallback_wait_s` (doc
 rendered for the first class of its preference (that class's image, `prefer-<class>` queue, the class's pools as
 affinity). The control API's reconcile loop (every 15 s) looks at fleet runs that are still unplaced (no worker
 admitted their Workload) after the wait bound and moves each to the next class of its preference
-(`jobs.switch_class`): the queued manager Job is deleted (nothing ran) and `<root>-r<n>` is created for the next
-class with the remaining preference, carrying `serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s
-without capacity"), which the operation reports as `reason` and `resumed_from`. The last class of the preference
+(`jobs.switch_class`): `<root>-r<n>` is created for the next class with the remaining preference, carrying
+`serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s without capacity"), which the operation reports as
+`reason` and `resumed_from`; the original Job stays as a readable handle (status `SUPERSEDED`, its Workload
+deactivated and the Job suspended so it never admits), names its `successor`, and `GET /v1/operations/<original>`
+returns the successor's state with `requested_id`; the fleet database keeps the link past the Job's lifetime. The last class of the preference
 keeps waiting (Kueue reports why: `reason` carries the Workload's own condition message while an operation is
 QUEUED). Capacity that becomes free in a worse class is never taken silently: the preference order is the caller's.
 

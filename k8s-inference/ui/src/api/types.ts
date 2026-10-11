@@ -104,6 +104,9 @@ export type OperationStatus =
   | "RUNNING"
   | "PREEMPTED"
   | "SUCCEEDED"
+  | "FINALIZING" // the run ended, its delivery is not acknowledged yet
+  | "EXPORT_FAILED" // the run succeeded, its delivery did not (volume kept; export again)
+  | "SUPERSEDED" // capacity fallback moved the run; `successor` is the live operation
   | "FAILED"
   | "CANCELLED";
 

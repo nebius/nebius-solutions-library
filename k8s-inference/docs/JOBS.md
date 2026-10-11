@@ -308,10 +308,28 @@ newest is refused (409), as is a success after `:cancel`. A worker that returns 
 cannot finalize the operation its replacement owns. This fences the platform's own state; it does not revoke an
 external storage credential the old worker still holds (the provider's expiry or an online check does that).
 
-Delivery, not exit code: a run's `SUCCEEDED` needs more than `main` exiting 0. With managed I/O the uploader's export
+Live checkpoint pointers: while it runs, the application may write `/work/CHECKPOINT.json`
+(`{"checkpoint_ref": "...", "generation": N}`, opaque to the platform) after it committed a checkpoint to its own
+storage. The uploader notices the change within its poll interval, records the pointer through the same
+authenticated, epoch-fenced path, and writes the acknowledgement to `/work/CHECKPOINT.ack.json` (`generation`,
+`epoch`, `revision`, `acknowledged_at`) for the application to read. A pod that was replaced cannot publish (409).
+`POST :resume` without `checkpoint_ref` uses the newest acknowledged pointer of the chain when the caller asks for
+another class or the volume is gone (an abrupt node loss), so a run recovers on a fresh volume elsewhere. The
+operation reports `checkpoint_ref` and `checkpoint_generation`.
+
+Idempotent resume: `POST :resume` with an `Idempotency-Key` header creates one continuation per (source operation,
+key); a replay returns it (200), the same key with different input is 409, concurrent replays collide on the Job
+name. Without the header a new `<root>-r<n>` is created each time.
+
+Delivery, not exit code: a run's `SUCCEEDED` needs more than `main` exiting 0. A completed run without any
+delivery record is `FINALIZING` (the uploader may still be exporting or posting) for ten minutes, then
+`EXPORT_FAILED`: a missing record is never success. With managed I/O the uploader's export
 must be verified (the sync succeeded and a second, size-only pass finds nothing left), its `STATUS.json` is published
 last, and the work volume is released only then; otherwise the operation is `EXPORT_FAILED`, the volume is kept, and
-`POST /v1/operations/<id>:export` runs the transfer again on that volume without the simulation (`<id>-x<n>`). With
+`POST /v1/operations/<id>:export` runs the transfer again on that volume without the simulation (`<id>-x<n>`). The
+uploader releases the work volume only once delivery is durable: the export verified or RESULT.json present, and the
+API's acknowledgement of the final record (it retries the record four times); without that acknowledgement the
+volume stays, the operation shows FINALIZING/EXPORT_FAILED and `:export` re-delivers without recompute. With
 application-managed I/O the application writes `/work/RESULT.json` (`{"result_ref": "...", "checkpoint_ref": "..."}`)
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.
@@ -393,7 +411,9 @@ names the served model as the endpoint expects it (`served_model`, injected when
 ## Status mapping
 
 `EXPORT_FAILED`: the run itself succeeded, its delivery did not (see "Attempts and finalization"); resumable and
-exportable again.
+exportable again. `FINALIZING`: the run ended, its delivery record is not on record yet. `SUPERSEDED`: capacity
+fallback moved the run; the operation's `successor` is live, and reading the original handle returns the successor
+(with `requested_id`). An operation whose Job object expired is still served from its durable attempt rows.
 
 
 | Job | Operation |

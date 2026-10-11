@@ -128,7 +128,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.11.9
+          image: registry.serverless2.local/nebius/serverless2/api:0.11.10
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
           ports: [{ containerPort: 8080 }]
           env:
