@@ -63,11 +63,9 @@ The endpoint Scaling tab and creation/edit forms use the definitions in
 
 New UI policies default to concurrency utilization, target 100%, replica
 concurrency 1, cooldown 10 seconds, and evaluation interval 30 seconds. Changing
-metric resets the target to its unit-appropriate default. Existing definitions
-using `concurrency`, `rps`, or an omitted metric retain their raw Knative target
-and utilization factor. The UI labels these as existing policies; it never
-reinterprets a concurrent-request count as a percentage. Selecting a new metric
-explicitly replaces that policy. Deploy the updated UI and API together.
+metric resets the target to its unit-appropriate default. This is the only
+scaling vocabulary of the API (docs/API.md "Scaling"); definitions stored under
+the earlier raw Knative names are read in it by the API.
 
 Checked deployment versions: KServe **v0.20.0**, Knative Serving **1.23** (operator
 v1.23.1 bundles Serving v1.23.0), and Envoy Gateway **v1.6.0**. These findings come
@@ -76,12 +74,12 @@ from repository and versioned upstream source inspection, without a live cluster
 | Control | Current support and mapping |
 | --- | --- |
 | Min / max replicas | Editable pod bounds, **separate per regional deployment**. Unlike Cerebrium's app-wide bounds, a maximum of 4 across two regions permits up to 8 pods. Changes persist in the saved definition and reconcile each region. |
-| Concurrency utilization | New metric ID maps to native `concurrency`; native `scaleTarget` and `containerConcurrency` both use replica concurrency, while `target-utilization-percentage` uses the UI's percentage target. |
+| Concurrency utilization | Maps to Knative's `concurrency` metric; `scaleTarget` and `containerConcurrency` both use replica concurrency, while `target-utilization-percentage` uses the UI's percentage target. |
 | Fractional concurrency | Supported. Knative 1.23 uses `TargetMin = 0.01`, so replica concurrency 1 and target 70% correctly yield **0.7** requests per replica. The UI shows that fraction without rounding it up to 1. |
-| Requests per second | New metric ID maps to native `rps`; native target is the requested rate, utilization annotation is explicitly **100%**, and container concurrency is **0** (unlimited). No extra percentage discount. |
-| Replica concurrency | Editable hard simultaneous-request cap for concurrency utilization, 1–1000. Disabled in the new RPS mode because no concurrency cap is enforced there. Legacy modes preserve their existing limits. |
+| Requests per second | Maps to Knative's `rps` metric; the scale target is the requested rate, the utilization annotation is explicitly **100%**, and container concurrency is **0** (unlimited). No extra percentage discount. |
+| Replica concurrency | Editable hard simultaneous-request cap for concurrency utilization, 1–1000. Disabled in RPS mode because no concurrency cap is enforced there. |
 | Cooldown period | `cooldown_s` → `autoscaling.knative.dev/scale-down-delay`, 0–3600 seconds. Reduced demand must persist before scale-down; scale-up remains available. Actual timing also depends on averaging and termination. |
-| Evaluation interval | The reference term means the **metrics averaging window**. `window_s` → `autoscaling.knative.dev/window`, 6–300 seconds, default 30 for new policies. Legacy windows retain their wider 6–3600-second runtime range. Knative's separate internal 2-second tick is not this setting; panic/burst handling can react sooner. |
+| Evaluation interval | The reference term means the **metrics averaging window**. `window_s` → `autoscaling.knative.dev/window`, 6–300 seconds, default 30. Knative's separate internal 2-second tick is not this setting; panic/burst handling can react sooner. |
 | Response grace period | One editable duration maps to predictor `timeout`; KServe sets request and first-response timeouts, and Knative sets pod `terminationGracePeriodSeconds` to the same duration. Supported here: 1–600 seconds. HTTP timeout does not itself terminate work inside the container; the app needs cancellation and SIGTERM handling. The API invocation timeout and 630-second gateway limit need alignment before longer values can be supported. |
 | Idle retention | `idle_s` retains the last pod after deciding to scale to zero, separately from cooldown and evaluation interval. |
 

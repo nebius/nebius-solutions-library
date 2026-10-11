@@ -16,53 +16,36 @@ export function endpointScaling(endpoint: Endpoint): ScalingSpec {
   return {
     min: endpoint.min_replicas,
     max: endpoint.max_replicas,
-    target: endpoint.target_concurrency ?? 4,
     idle_s: endpoint.scale_to_zero_after_s,
     ...endpoint.scaling,
   };
 }
 
 export function isRequestRate(scaling: ScalingSpec) {
-  return scaling.metric === "requests_per_second" || scaling.metric === "rps";
+  return scaling.metric === "requests_per_second";
 }
 
 export function scalingMetricLabel(scaling: ScalingSpec) {
-  if (scaling.metric === "concurrency_utilization")
-    return "Concurrency utilization";
-  if (scaling.metric === "requests_per_second") return "Requests per second";
   return isRequestRate(scaling)
-    ? "Request rate (existing policy)"
-    : "Concurrent requests (existing policy)";
+    ? "Requests per second"
+    : "Concurrency utilization";
 }
 
 export function scalingThreshold(scaling: ScalingSpec) {
-  if (scaling.metric === "concurrency_utilization")
-    return (
-      ((scaling.container_concurrency ?? 1) * (scaling.target ?? 100)) / 100
-    );
-  if (scaling.metric === "requests_per_second") return scaling.target ?? 5;
-  // Preserve the meaning of existing Knative policies; never reinterpret counts as percentages.
-  const hardLimit = scaling.container_concurrency ?? 0;
-  const target = scaling.target ?? 4;
-  const capacity =
-    isRequestRate(scaling) || !hardLimit ? target : Math.min(target, hardLimit);
-  return Math.max(0.01, (capacity * (scaling.utilization_percent ?? 70)) / 100);
+  if (isRequestRate(scaling)) return scaling.target ?? 5;
+  return ((scaling.container_concurrency ?? 1) * (scaling.target ?? 100)) / 100;
 }
 
 export function scalingValidation(value: ScalingSpec): string | undefined {
   if ((value.min ?? 0) > (value.max ?? 1))
     return "Minimum replicas cannot exceed maximum replicas.";
-  if (value.metric === "concurrency_utilization") {
+  if (!isRequestRate(value)) {
     if ((value.target ?? 100) > 100 || (value.target ?? 100) < 1)
       return "Concurrency utilization target must be between 1% and 100%.";
     if ((value.container_concurrency ?? 1) < 1)
       return "Concurrency utilization requires a replica concurrency of at least 1.";
   }
-  if (
-    (value.metric === "concurrency_utilization" ||
-      value.metric === "requests_per_second") &&
-    (value.window_s ?? 30) > 300
-  )
+  if ((value.window_s ?? 30) > 300)
     return "Evaluation interval must be between 6 and 300 seconds.";
 }
 
@@ -83,8 +66,7 @@ export function ScalingFields({
   advancedOpen?: boolean;
   error?: string;
 }) {
-  const metric = value.metric ?? "concurrency";
-  const legacy = metric === "concurrency" || metric === "rps";
+  const metric = value.metric ?? "concurrency_utilization";
   const rate = isRequestRate(value);
   const set = (patch: Partial<ScalingSpec>) => onChange({ ...value, ...patch });
   const issue = error || scalingValidation(value);
@@ -114,9 +96,8 @@ export function ScalingFields({
     );
   }
   function changeMetric(next: ScalingSpec["metric"]) {
-    const { utilization_percent: _oldUtilization, ...rest } = value;
     onChange({
-      ...rest,
+      ...value,
       metric: next,
       target: next === "requests_per_second" ? 5 : 100,
       container_concurrency:
@@ -168,47 +149,29 @@ export function ScalingFields({
           <option value="memory_utilization" disabled>
             Memory utilization — unavailable
           </option>
-          {legacy && (
-            <option value={metric}>{scalingMetricLabel(value)}</option>
-          )}
         </select>
       </Field>
-      {legacy && (
-        <p className="inline-note">
-          This existing policy uses Knative’s raw target and utilization factor.
-          Its values are preserved. Choose a metric above to use the new target
-          definitions.
-        </p>
-      )}
       <div className="row">
         {number(
-          legacy
-            ? "Raw scaling target"
-            : rate
-              ? "Scaling target (requests/s)"
-              : "Scaling target (%)",
+          rate ? "Scaling target (requests/s)" : "Scaling target (%)",
           "target",
-          legacy ? 4 : rate ? 5 : 100,
+          rate ? 5 : 100,
           1,
-          !legacy && !rate ? 100 : undefined,
-          legacy
-            ? "Existing runtime capacity target before its utilization factor."
-            : rate
-              ? "Average requests per second per replica. A target of 5 means 5 requests/s."
-              : "Percentage of replica concurrency, averaged across replicas. 200 concurrent slots × 80% = 160 requests per replica.",
+          rate ? undefined : 100,
+          rate
+            ? "Average requests per second per replica. A target of 5 means 5 requests/s."
+            : "Percentage of replica concurrency, averaged across replicas. 200 concurrent slots × 80% = 160 requests per replica.",
         )}
         {number(
           "Replica concurrency",
           "container_concurrency",
-          legacy ? 0 : rate ? 0 : 1,
-          legacy || rate ? 0 : 1,
+          rate ? 0 : 1,
+          rate ? 0 : 1,
           1000,
-          !legacy && rate
+          rate
             ? "Not enforced by requests-per-second scaling. Concurrency is unlimited in this mode."
-            : legacy
-              ? "Existing hard concurrent-request limit per pod. 0 means unlimited."
-              : "Maximum simultaneous requests per replica. Excess requests wait for available capacity.",
-          !legacy && rate,
+            : "Maximum simultaneous requests per replica. Excess requests wait for available capacity.",
+          rate,
         )}
       </div>
       <div className="inline-note" aria-live="polite">
@@ -217,10 +180,7 @@ export function ScalingFields({
           {Number(scalingThreshold(value).toFixed(2))}{" "}
           {rate ? "requests/s" : "concurrent requests"} per replica
         </strong>
-        .
-        {!legacy && !rate && (
-          <> {100 - (value.target ?? 100)}% concurrency headroom.</>
-        )}{" "}
+        .{!rate && <> {100 - (value.target ?? 100)}% concurrency headroom.</>}{" "}
         Replica bounds still apply.
       </div>
       {issue && (
@@ -228,7 +188,7 @@ export function ScalingFields({
           {issue}
         </p>
       )}
-      {!legacy && rate && (
+      {rate && (
         <p className="help">
           This metric does not enforce a concurrency limit. Most GPU workloads
           should use concurrency utilization.
@@ -237,20 +197,11 @@ export function ScalingFields({
       <details className="scaling-advanced" open={advancedOpen || undefined}>
         <summary>Advanced scaling</summary>
         <div className="form">
-          {legacy &&
-            number(
-              "Existing utilization factor (%)",
-              "utilization_percent",
-              70,
-              1,
-              100,
-              "Retained for compatibility with the existing policy. New metrics use a single target with metric-specific units.",
-            )}
           <div className="row">
             {number(
               "Cooldown period (seconds)",
               "cooldown_s",
-              legacy ? 0 : 10,
+              10,
               0,
               3600,
               "Reduced demand must persist for this period before scaling down. Scale-up can proceed immediately.",
@@ -258,10 +209,10 @@ export function ScalingFields({
             {number(
               "Evaluation interval (seconds)",
               "window_s",
-              legacy ? 60 : 30,
+              30,
               6,
-              legacy ? 3600 : 300,
-              "Metrics averaging window before scaling decisions. New policies use 6–300 seconds, default 30. Burst handling can react sooner.",
+              300,
+              "Metrics averaging window before scaling decisions, 6–300 seconds, default 30. Burst handling can react sooner.",
             )}
           </div>
           <Field
