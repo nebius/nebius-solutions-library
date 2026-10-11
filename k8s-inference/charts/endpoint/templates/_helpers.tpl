@@ -15,7 +15,11 @@ Effective values. Two input layouts:
   {{- $_ := unset $over "price_per_gpu_hour" -}}
   {{- $_ := unset $over "parameters" -}}
   {{- $v = mergeOverwrite (deepCopy (omit .Values "runtime" "deployments" "cluster" "id" "task" "mode" "displayName" "description" "source" "protocol" "port" "endpoints" "gpu" "concurrency" "coldStartClass" "price" "scaleToZero" "parameters" "workflow_template")) (deepCopy .Values.runtime) $over -}}
-  {{- $_ := set $v "name" (required "catalog entry needs id" .Values.id) -}}
+  {{- /* variants (docs/API.md "Variants"): the API renders one object set per variant, --set variantName=<id>-<variant>;
+       the first variant keeps the model's id as its name */ -}}
+  {{- $_ := set $v "name" (default (required "catalog entry needs id" .Values.id) .Values.variantName) -}}
+  {{- $_ := set $v "modelId" .Values.id -}}
+  {{- $_ := set $v "variant" (default "" .Values.variant) -}}
   {{- $_ := set $v "namespace" (default "models" .Values.namespace) -}}
   {{- $_ := set $v "labels" (merge (dict "serverless2.nebius/task" (default "" .Values.task) "serverless2.nebius/mode" (default "" .Values.mode) "serverless2.nebius/cluster" $cluster) (default (dict) $v.labels)) -}}
 {{- else -}}
@@ -28,7 +32,10 @@ Effective values. Two input layouts:
 {{- $v := include "endpoint.values" . | fromYaml -}}
 app.kubernetes.io/name: {{ $v.name }}
 app.kubernetes.io/part-of: serverless2
-serverless2.nebius/model: {{ $v.name }}
+serverless2.nebius/model: {{ default $v.name $v.modelId }}
+{{- with $v.variant }}
+serverless2.nebius/variant: {{ . }}
+{{- end }}
 serverless2.nebius/protocol: {{ $v.protocol }}
 {{- with $v.queue.priorityClass }}
 kueue.x-k8s.io/priority-class: {{ . }}

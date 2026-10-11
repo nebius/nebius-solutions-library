@@ -126,6 +126,12 @@ export function DefinitionEditor({
   const [images, setImages] = useState(
     Object.keys(f.images ?? {}).length ? JSON.stringify(f.images, null, 2) : "",
   );
+  // variants and routing (docs/API.md "Variants"): {deployments: {<region>: {variants: [...]}}, routing: {...}}
+  const [variants, setVariants] = useState(
+    f.deployments || f.routing
+      ? JSON.stringify({ deployments: f.deployments, routing: f.routing }, null, 2)
+      : "",
+  );
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
@@ -199,6 +205,21 @@ export function DefinitionEditor({
         );
       out.images = parsed;
     } else delete out.images;
+    if (variants.trim()) {
+      const parsed = JSON.parse(variants) as {
+        deployments?: Record<string, unknown>;
+        routing?: Record<string, unknown>;
+      };
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object")
+        throw new Error("Variants must be a JSON object with deployments and routing.");
+      if (parsed.deployments) out.deployments = parsed.deployments;
+      else delete out.deployments;
+      if (parsed.routing) out.routing = parsed.routing;
+      else delete out.routing;
+    } else {
+      delete out.deployments;
+      delete out.routing;
+    }
     if (isJob) {
       delete out.resources;
       delete out.port;
@@ -808,6 +829,17 @@ export function DefinitionEditor({
                 value={images}
                 onChange={(e) => setImages(e.target.value)}
                 rows={4}
+              />
+            </Field>
+            <Field
+              label="Variants and routing"
+              help='Optional JSON: {"deployments": {"<region>": {"variants": [{"name": "reserved", "pool": "...", "min": 1, "max": 2}, ...]}}, "routing": {"field": "tier", "map": {"fast": "reserved"}, "default": "priority"}}.'
+            >
+              <textarea
+                className="textarea mono"
+                value={variants}
+                onChange={(e) => setVariants(e.target.value)}
+                rows={5}
               />
             </Field>
             <Field label="Description">

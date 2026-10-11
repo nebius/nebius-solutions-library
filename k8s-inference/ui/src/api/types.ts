@@ -86,6 +86,7 @@ export interface ModelSpec {
   scratch?: "network" | "local-nvme";
   parameters?: ModelParam[];
   routing?: Record<string, unknown>;
+  deployments?: Record<string, unknown>; // variants per region (docs/API.md "Variants")
 }
 
 export interface ModelParam {

@@ -109,6 +109,28 @@ def _model(name: str) -> dict:
     return m
 
 
+def _variant_for(m: dict, inp, cluster: str) -> dict:
+    """Which variant of an endpoint answers a request (docs/API.md "Variants"): the one the model's `routing`
+    field selects, else the first variant in priority order that has a ready replica, else the first (its cold
+    start is the request's)."""
+    vs = models.variants(m, cluster)
+    if len(vs) == 1:
+        return vs[0]
+    routing = m.get("routing") or {}
+    value = inp
+    for part in (routing.get("field") or "").split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    target = (routing.get("map") or {}).get(str(value)) if value is not None else None
+    if target is None and routing.get("default") not in (None, "priority"):
+        target = routing["default"]
+    if target:
+        return next((v for v in vs if v["name"] == target), vs[0])
+    for v in vs:
+        if (kube.endpoint_status(v["object"], m["namespace"]).get("replicas_ready") or 0) > 0:
+            return v
+    return vs[0]
+
+
 def _public(m: dict, p: Principal | None = None) -> dict:
     if p is not None and (p.info.get("metadata") or {}).get("role") != "admin":
         m = {**m, "spec": None}  # container configuration belongs to fleet administrators
@@ -215,7 +237,7 @@ def _undeploy(entry: dict, clusters: list[str], after: dict):
         region = kube.cluster_region(cid)
         models.delete_rendered(entry, cid, region)
         models.sync_certificate(region, after)
-        if (warning := models.litellm_group_delete(entry["id"], cid)):
+        if (warning := models.litellm_group_delete(entry["id"], cid, [v["name"] for v in models.variants(entry, cid)[1:]])):
             raise RuntimeError(warning)
 
 
@@ -429,9 +451,9 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
     p = await principal(key)
-    check_model(p, model)
+    m = catalog.get(model) or _endpoint_model(model)
+    check_model(p, m["name"])
     check_budget(p)
-    m = _model(model)
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
     if int(m.get("nodes") or 1) > 1:
@@ -587,7 +609,9 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal):
     if m.get("litellm_route"):
         url, headers = LITELLM_URL + m["litellm_route"], {"Authorization": f"Bearer {p.key}"}
     else:
-        url, headers = m["endpoint_host"] + m["endpoint_path"], {}
+        v = _variant_for(m, req.input, models.cluster_id())
+        host = m["endpoint_host"] if v["object"] == m["k8s_name"] else f"http://{v['object']}-predictor.{m['namespace']}.svc.cluster.local"
+        url, headers = host + m["endpoint_path"], {}
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
@@ -838,10 +862,32 @@ def _deployed(m: dict, region: str) -> dict | None:
 
 
 def _endpoint_model(eid: str) -> dict:
+    """The model behind an endpoint object name: the model's own, or one of its variants' (`<id>-<variant>`)."""
     for m in catalog.all_models().values():
-        if m["k8s_name"] == eid and m["mode"] != "run":
+        if m["mode"] == "run":
+            continue
+        if m["k8s_name"] == eid or any(v["object"] == eid for c in (m.get("deployments") or {}) for v in models.variants(m, c)):
             return m
     raise HTTPException(404, f"endpoint {eid} not found")
+
+
+def _variants_public(m: dict, region: str) -> list[dict]:
+    """The variants of an endpoint on a region's cluster with their live state (one line each)."""
+    cid = next((c for c in (m.get("deployments") or {}) if kube.cluster_region(c) == region), None)
+    if cid is None:
+        return []
+    vs = models.variants(m, cid)
+    if len(vs) == 1:
+        return []
+    out = []
+    for v in vs:
+        try:
+            st = kube.endpoint_status(v["object"], m["namespace"], region)
+        except (HTTPException, ApiException):
+            st = {"status": "unavailable", "replicas_ready": None}
+        out.append({"name": v["name"], "id": v["object"], "pool": v.get("pool"), "min": v.get("min"), "max": v.get("max"), "image": v.get("image"),
+                    "status": st.get("status"), "replicas_ready": st.get("replicas_ready")})
+    return out
 
 
 @app.get("/v1/endpoints")
@@ -862,7 +908,7 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
             try:
                 i = _deployed(m, region)
                 if i:
-                    out.append(ep.to_public(m, i, region))
+                    out.append({**ep.to_public(m, i, region), **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {})})
             except (HTTPException, ApiException):
                 out.append({"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": region,
                             "status": "unavailable", "replicas_ready": None, "gpu": m.get("gpu"),
@@ -878,7 +924,7 @@ def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(prin
     i = _deployed(m, region) or {}
     if not i:
         raise HTTPException(404, f"endpoint {id} not deployed in {region}")
-    return ep.to_public(m, i, region)
+    return {**ep.to_public(m, i, region), **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {})}
 
 
 @app.patch("/v1/endpoints/{id}")

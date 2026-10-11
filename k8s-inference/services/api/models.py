@@ -30,11 +30,12 @@ A model definition ("spec") is the shape of the console form:
      "data": {"path": "refdb/uniref", "mount_path": "/data", "readonly": true},
      "parameters": [{"name": "...", "type": "string", "default": "..."}]}
 
-Reserved for later, accepted and stored but not acted on yet (so adding them is not a breaking change):
-`images` (per GPU class: {"default": ..., "h100": ...}), `deployments.<region>.variants` (several
-deployments of one model in a region, e.g. a warm floor on reserved GPUs plus scale-to-zero on spot, behind
-one model name), `routing` (request field -> variant). The LiteLLM model group is already one entry per
-model, so variants can be added by configuration.
+Variants and routing (docs/API.md "Variants"): `images` (per GPU class: {"default": ..., "h100": ...}; an
+endpoint's deployment takes the image of its pool's class), `deployments.<region>.variants` (several deployments
+of one model in a region behind one name, in priority order: e.g. a warm floor on reserved GPUs plus scale-to-zero
+on spot; each variant is its own Knative service `<id>-<variant>`, the first keeps the id), `routing`
+({field, map, default}: a request field picks a variant, else the first ready one in priority order). LiteLLM's
+model group lists every variant of every cluster as a deployment with its priority (`order`).
 
 `to_entry` turns a spec into the catalog entry the rest of the API and `charts/endpoint` understand
 (catalog/README.md); the entry is stored next to the spec (database row on the control API, ConfigMap copy
@@ -61,7 +62,9 @@ FIELD_MANAGER = "serverless2-api"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 PROTOCOLS = ("http", "openai", "websocket", "grpc")
 PROTOCOL_PATH = {"openai": "/v1/chat/completions", "http": "/", "websocket": "/", "grpc": "/"}
-RESERVED = ("images", "routing")            # stored, not acted on
+RESERVED = ("images", "routing")            # carried on the entry as given (validated below)
+VARIANT_RE = re.compile(r"^[a-z][a-z0-9-]{0,20}$")
+MAX_VARIANTS = 8
 DATA_PATH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")   # a relative directory, no parent references
 
 
@@ -234,8 +237,63 @@ def validate(spec: dict) -> dict:
     fleet_classes = sorted({p.get("gpu_class") for p in kube.fleet()["pools"].values() if p.get("gpu_class")})
     if classes and fleet_classes and not any(c in fleet_classes for c in classes):
         raise HTTPException(400, f"gpu.classes {classes}: none exists in this fleet (classes: {fleet_classes})")
+    images = s.get("images")
+    if images is not None and (not isinstance(images, dict) or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in images.items())):
+        raise HTTPException(400, "images: {\"default\": <image>, \"<gpu class>\": <image>, ...}")
+    _validate_variants(s, kind)
     s["kind"] = kind
     return s
+
+
+def _validate_variants(s: dict, kind: str) -> None:
+    """`deployments.<region>.variants` and `routing` of an endpoint (docs/API.md "Variants")."""
+    deployments, routing = s.get("deployments"), s.get("routing")
+    if deployments is None and routing is None:
+        return
+    if kind != "endpoint":
+        raise HTTPException(400, "deployments.variants and routing: endpoints only")
+    pools = kube.fleet()["pools"]
+    names: set[str] = set()
+    if deployments is not None:
+        if not isinstance(deployments, dict) or not deployments:
+            raise HTTPException(400, "deployments: {<region>: {variants: [{name, pool, min, max, image}]}}")
+        for region, d in deployments.items():
+            cid = regions_for([], [region])[0]
+            variants = (d or {}).get("variants") if isinstance(d, dict) else None
+            if not isinstance(variants, list) or not variants or len(variants) > MAX_VARIANTS:
+                raise HTTPException(400, f"deployments.{region}.variants: a list of 1 to {MAX_VARIANTS} variants")
+            seen = set()
+            for i, v in enumerate(variants):
+                if not isinstance(v, dict) or not v.get("pool"):
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}]: needs a pool")
+                name = str(v.get("name") or ("primary" if i == 0 else f"v{i}"))
+                if not VARIANT_RE.match(name) or name in seen:
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}].name: a unique DNS-style label, {name!r} is not")
+                seen.add(name); names.add(name)
+                pool = next((p for p in pools.values() if p.get("pool") == v["pool"] and (p.get("region") or REGION) == cid), None)
+                if pool is None:
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}].pool: {v['pool']} is not a pool of {region}")
+                if pool.get("tenant"):
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}].pool: {v['pool']} is dedicated to a tenant")
+                for k in ("min", "max"):
+                    if k in v and (not isinstance(v[k], int) or v[k] < 0):
+                        raise HTTPException(400, f"deployments.{region}.variants[{i}].{k}: a non-negative integer")
+                if v.get("min", 0) > v.get("max", 1):
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}]: min exceeds max")
+                if "image" in v and (not isinstance(v["image"], str) or not v["image"]):
+                    raise HTTPException(400, f"deployments.{region}.variants[{i}].image: a non-empty image reference")
+                v["name"] = name
+    if routing is not None:
+        if not isinstance(routing, dict) or not isinstance(routing.get("field"), str) or not routing["field"]:
+            raise HTTPException(400, "routing: {field: <request field, dotted>, map: {<value>: <variant>}, default: priority | <variant>}")
+        mapping = routing.get("map") or {}
+        if not isinstance(mapping, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in mapping.items()):
+            raise HTTPException(400, "routing.map: {<value>: <variant name>}")
+        targets = set(mapping.values()) | ({routing["default"]} if routing.get("default") not in (None, "priority") else set())
+        unknown = sorted(t for t in targets if t not in names)
+        if unknown:
+            raise HTTPException(400, f"routing: variants {unknown} are not defined in deployments.<region>.variants")
+        routing.setdefault("default", "priority")
 
 
 def to_entry(spec: dict, managed_by: str = "api") -> dict:
@@ -313,7 +371,23 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         nodes, interconnect = int(s.get("nodes", 1)), s.get("interconnect", "none")
         if nodes > 1 and not s.get("regions"):      # by default every region that has a whole-node pool of the class
             regions = [r for r in regions if pool_for(r, classes, count, nodes, interconnect)]
+        explicit = s.get("deployments") or {}
+        if explicit and not s.get("regions"):       # variants name their regions
+            regions = [regions_for([], [r])[0] for r in explicit]
         deployments = {r: ({"pool": p} if (p := (pool_for(r, classes, count, nodes, interconnect) if classes else "system")) else {}) for r in regions}
+        pool_class = {p["pool"]: p.get("gpu_class") for p in kube.fleet()["pools"].values()}
+        images = s.get("images") or {}
+        for r, d in deployments.items():
+            spec_region = next((k for k in explicit if regions_for([], [k])[0] == r), None)
+            variants = (explicit.get(spec_region) or {}).get("variants") if spec_region else None
+            if variants:
+                d["pool"] = variants[0]["pool"]
+                d["variants"] = [{"name": v["name"], "pool": v["pool"], "min": int(v.get("min", 0)), "max": int(v.get("max", 1)),
+                                  "image": normalise_image(v.get("image") or images.get(pool_class.get(v["pool"]) or "") or s.get("image") or images.get("default"))}
+                                 for v in variants]
+                d["image"] = d["variants"][0]["image"]
+            elif d.get("pool") and images.get(pool_class.get(d["pool"]) or ""):
+                d["image"] = normalise_image(images[pool_class[d["pool"]]])      # the class's own image for this deployment
         if nodes > 1:
             # charts/endpoint/templates/leaderworkerset.yaml: one replica group of `nodes` pods, the leader serves
             runtime["nodes"] = nodes
@@ -335,6 +409,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "gpu": {"count": count, "classes": classes} if classes else "none",
             "servedModel": s.get("served_model"),
             "runtime": runtime,
+            **({"routing": s["routing"]} if s.get("routing") else {}),
             **({"nodes": nodes} if nodes > 1 else {}),
             # no GPU class: the endpoint runs on the region's system pool (CPU nodes, label serverless2.nebius/pool=system)
             "deployments": deployments,
@@ -434,21 +509,59 @@ PLURALS = {"InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservic
            "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes")}
 
 
+def variants(entry: dict, cluster: str) -> list[dict]:
+    """The deployments of an endpoint on a cluster in priority order: [{name, object, pool, min, max, image}]; a
+    plain deployment is one variant named "primary" under the model's own name (docs/API.md "Variants")."""
+    deps = entry.get("deployments") or {}
+    d = deps.get(cluster) or deps.get(kube.cluster_region(cluster)) or {}      # entries store cluster ids, normalised ones region names
+    vs = d.get("variants") or [{"name": "primary", "pool": d.get("pool"), "min": None, "max": None, "image": d.get("image")}]
+    return [{**v, "object": entry["id"] if i == 0 else f"{entry['id']}-{v['name']}"} for i, v in enumerate(vs)]
+
+
+def variant_names(entry: dict) -> list[str]:
+    return sorted({v["name"] for c in (entry.get("deployments") or {}) for v in variants(entry, c)})
+
+
+def _variant_entry(entry: dict, cluster: str, v: dict) -> dict:
+    """The entry as the chart sees it for one variant: the cluster's deployment carries the variant's pool, image
+    and replica bounds (the chart merges deployments.<cluster> over runtime)."""
+    e = dict(entry)
+    over = dict((entry.get("deployments") or {}).get(cluster) or {})
+    over.pop("variants", None)
+    over["pool"] = v.get("pool") or over.get("pool")
+    if v.get("image"):
+        over["image"] = v["image"]
+    scaling = {}
+    if v.get("min") is not None:
+        scaling["minReplicas"] = int(v["min"])
+    if v.get("max") is not None:
+        scaling["maxReplicas"] = int(v["max"])
+    if scaling:
+        over["scaling"] = scaling
+    e["deployments"] = {**(entry.get("deployments") or {}), cluster: over}
+    return e
+
+
 def render(entry: dict, cluster: str) -> list[dict]:
-    """`helm template` of charts/endpoint in catalog mode for one cluster: the rendered objects."""
-    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-        yaml.safe_dump(entry, f, sort_keys=False)
-        values = f.name
-    try:
-        # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
-        r = subprocess.run(["helm", "template", entry["id"], CHART_DIR, "-f", values, "--set", f"cluster={cluster}",
-                            "--set", f"domain={endpoint_domain(kube.cluster_region(cluster))}", "--set", f"ibClaimTemplate={INFINIBAND_CLAIM_TEMPLATE}"],
-                           capture_output=True, text=True, timeout=60)
-    finally:
-        os.unlink(values)
-    if r.returncode:
-        raise HTTPException(400, f"endpoint chart: {r.stderr.strip()[-400:]}")
-    return [d for d in yaml.safe_load_all(r.stdout) if d]
+    """`helm template` of charts/endpoint in catalog mode for one cluster, once per variant: the rendered objects."""
+    out: list[dict] = []
+    for v in variants(entry, cluster):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            yaml.safe_dump(_variant_entry(entry, cluster, v), f, sort_keys=False)
+            values = f.name
+        try:
+            # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
+            cmd = ["helm", "template", v["object"], CHART_DIR, "-f", values, "--set", f"cluster={cluster}",
+                   "--set", f"domain={endpoint_domain(kube.cluster_region(cluster))}", "--set", f"ibClaimTemplate={INFINIBAND_CLAIM_TEMPLATE}"]
+            if v["object"] != entry["id"]:
+                cmd += ["--set", f"variantName={v['object']}", "--set", f"variant={v['name']}"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        finally:
+            os.unlink(values)
+        if r.returncode:
+            raise HTTPException(400, f"endpoint chart ({v['object']}): {r.stderr.strip()[-400:]}")
+        out += [d for d in yaml.safe_load_all(r.stdout) if d]
+    return out
 
 
 def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
@@ -483,7 +596,7 @@ def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str
         if kind == "SecurityPolicy":
             routes = retry(kube.api(region).list_namespaced_custom_object,
                            "gateway.networking.k8s.io", "v1", ns, "httproutes",
-                           label_selector=f"serving.knative.dev/route={entry['id']}-predictor")
+                           label_selector=f"serving.knative.dev/route={name.removesuffix('-authorization')}-predictor")
             if routes.get("items"):
                 raise HTTPException(503, "waiting for predictor routes to be removed; authorization retained")
         try:
@@ -506,8 +619,14 @@ def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str
 # certificateRef of the https listener. Terraform creates the self-signed placeholder and ignores the
 # three fields below; the API owns them (server-side apply, its own field manager).
 
-def endpoint_host(entry: dict, region: str) -> str:
-    return f"{entry['id']}-predictor.{entry.get('namespace', MODELS_NAMESPACE)}.{endpoint_domain(region)}"
+def endpoint_host(entry: dict, region: str, obj: str | None = None) -> str:
+    return f"{obj or entry['id']}-predictor.{entry.get('namespace', MODELS_NAMESPACE)}.{endpoint_domain(region)}"
+
+
+def variant_hosts(entry: dict, region: str) -> list[str]:
+    """The gateway hostnames of every variant of an endpoint deployed on the clusters of a region."""
+    return [endpoint_host(entry, region, v["object"]) for c in (entry.get("deployments") or {}) if kube.cluster_region(c) == region
+            for v in variants(entry, c)]
 
 
 def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
@@ -516,8 +635,7 @@ def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
     domain = endpoint_domain(region)
     if not domain:
         return []
-    hosts = sorted(endpoint_host(e, region) for e in entries.values()
-                   if e.get("mode") != "run" and e.get("runtime") and any(kube.cluster_region(c) == region for c in (e.get("deployments") or {})))
+    hosts = sorted({h for e in entries.values() if e.get("mode") != "run" and e.get("runtime") for h in variant_hosts(e, region)})
     spec = ({"issuerRef": {"name": MODELS_ISSUER, "kind": "ClusterIssuer"}, "commonName": hosts[0], "dnsNames": hosts} if hosts
             else {"issuerRef": {"name": "selfsigned", "kind": "ClusterIssuer"}, "commonName": "models.example.invalid", "dnsNames": ["models.example.invalid"]})
     body = {"apiVersion": "cert-manager.io/v1", "kind": "Certificate",
@@ -555,33 +673,40 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
     import httpx
     mid = entry["id"]
     served = entry.get("servedModel") or mid
-    api_base = f"https://{endpoint_host(entry, region)}/v1"
-    # the platform-internal key is what the edge on the models hostnames sees; LiteLLM has already applied the
-    # caller's own key (budget, rate limit, spend) before it routes to the group
-    body = {"model_name": mid, "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": LITELLM_INTERNAL_KEY},
-            "model_info": {"id": f"{mid}--{cluster}", "cluster": cluster}}
     try:
         with httpx.Client(timeout=20) as c:
             headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-            r = c.patch(f"{LITELLM_URL}/model/{mid}--{cluster}/update", json=body, headers=headers)
-            if r.status_code == 404:
-                r = c.post(f"{LITELLM_URL}/model/new", json=body, headers=headers)
-        if r.status_code >= 300:
-            return f"litellm model reconciliation {r.status_code}: {r.text[:160]}"
+            # one LiteLLM deployment per variant, `order` = its priority (LiteLLM tries lower orders first: the warm
+            # reserved variant before the spot overflow); the first variant keeps the id of the single-deployment days
+            for i, v in enumerate(variants(entry, cluster)):
+                api_base = f"https://{endpoint_host(entry, region, v['object'])}/v1"
+                did = f"{mid}--{cluster}" if i == 0 else f"{mid}--{cluster}--{v['name']}"
+                # the platform-internal key is what the edge on the models hostnames sees; LiteLLM has already applied
+                # the caller's own key (budget, rate limit, spend) before it routes to the group
+                body = {"model_name": mid, "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": LITELLM_INTERNAL_KEY, "order": i + 1},
+                        "model_info": {"id": did, "cluster": cluster, "variant": v["name"]}}
+                r = c.patch(f"{LITELLM_URL}/model/{did}/update", json=body, headers=headers)
+                if r.status_code == 404:
+                    r = c.post(f"{LITELLM_URL}/model/new", json=body, headers=headers)
+                if r.status_code >= 300:
+                    return f"litellm model reconciliation {r.status_code}: {r.text[:160]}"
     except Exception as e:  # noqa: BLE001 - the endpoint works without the LiteLLM group
         return f"litellm unreachable: {e}"
     return None
 
 
-def litellm_group_delete(mid: str, cluster: str) -> str | None:
+def litellm_group_delete(mid: str, cluster: str, names: list[str] | None = None) -> str | None:
+    """Remove the cluster's deployments of a model from LiteLLM: the first variant's id and one per further variant."""
     if not LITELLM_MASTER_KEY:
         return None
     import httpx
+    ids = [f"{mid}--{cluster}"] + [f"{mid}--{cluster}--{n}" for n in (names or [])]      # names: the further variants
     try:
         with httpx.Client(timeout=20) as c:
-            r = c.post(f"{LITELLM_URL}/model/delete", json={"id": f"{mid}--{cluster}"}, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
-        if r.status_code >= 300 and r.status_code != 404:
-            return f"litellm /model/delete {r.status_code}: {r.text[:160]}"
+            for did in ids:
+                r = c.post(f"{LITELLM_URL}/model/delete", json={"id": did}, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
+                if r.status_code >= 300 and r.status_code != 404:
+                    return f"litellm /model/delete {r.status_code}: {r.text[:160]}"
     except Exception as e:  # noqa: BLE001
         return f"litellm unreachable: {e}"
     return None

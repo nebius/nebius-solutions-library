@@ -101,6 +101,33 @@ Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB i
 of any vLLM endpoint whose weights live on the filesystem, and `VLLM_CACHE_ROOT=/weights/vllm-cache` in its env so
 the torch.compile cache survives a restart (the first start of a trillion-parameter model spends about 25 min there).
 
+## Variants
+
+One endpoint may run as several deployments in a region behind its one name, in priority order: a warm floor on
+reserved GPUs and scale-to-zero overflow on spot, a cheaper class for budget requests. In the model definition:
+
+```json
+{"id": "chat", "kind": "endpoint", "protocol": "openai", "image": "vllm/vllm-openai:v0.31.0",
+ "images": {"l40s": "vllm/vllm-openai:v0.31.0-l40s"},
+ "gpu": {"count": 1, "classes": ["h100", "l40s"]},
+ "deployments": {"eu-north1": {"variants": [
+     {"name": "reserved", "pool": "h100-reserved-1x", "min": 1, "max": 2},
+     {"name": "spot",     "pool": "h100-spot-1x",     "min": 0, "max": 4},
+     {"name": "cheap",    "pool": "l40s-spot-1x",     "min": 0, "max": 2}]}},
+ "routing": {"field": "tier", "map": {"fast": "reserved", "budget": "cheap"}, "default": "priority"}}
+```
+
+Each variant is its own Knative service: the first keeps the model's name (`chat`), the others are
+`<id>-<variant>` (`chat-spot`, `chat-cheap`), each with its pool, replica bounds and image (`variant.image`, else
+`images.<class of the pool>`, else the model's image). All of them carry the model's labels, hostname certificate
+and authorizer. A request through `:invoke` goes to the variant that `routing.field` selects (`map` maps the field's
+value, dotted paths allowed), else to the `default` variant, else (`priority`) to the first variant with a ready
+replica, else to the first one. Through LiteLLM the model group lists every variant of every cluster as a deployment
+with its priority (`order`), so the OpenAI route tries the warm floor before the overflow. `GET /v1/endpoints` reports
+`variants` (name, object id, pool, bounds, image, live state) and `routing`. `images` alone (no variants) gives a
+plain deployment the image of its pool's GPU class. Regions named under `deployments` define where the endpoint
+runs; a region without variants keeps the automatic pool choice.
+
 ## Bindings and execution options (runs)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the

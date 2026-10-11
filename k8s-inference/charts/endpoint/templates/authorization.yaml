@@ -19,7 +19,7 @@ spec:
     timeout: 10s
     headersToExtAuth: [authorization, sec-websocket-protocol]
     http:
-      path: /internal/authorize/{{ $v.name }}
+      path: /internal/authorize/{{ default $v.name $v.modelId }}
       backendRefs:
         - group: ""
           kind: Service
