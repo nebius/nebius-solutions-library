@@ -50,7 +50,7 @@ from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube, render_endpoint
 from pod_metadata import normalise as normalise_pod_metadata
-from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION
+from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION, ROUTER_KEY
 from resilience import retry
 
 log = logging.getLogger("api")
@@ -647,8 +647,8 @@ def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
 
 # ---- LiteLLM: one model group per OpenAI endpoint ------------------------------------------------------
 # A model defined here is also a LiteLLM model (`model_name` = the model id) whose deployment is the endpoint's
-# gateway hostname, so tenant keys can call it through LiteLLM's /v1/chat/completions with their budget and
-# spend accounting, and so a second deployment of the same model (a reserved-GPU variant, another region) is
+# gateway hostname, so tenant keys (mirrored into LiteLLM by services/api/keys.py) can call it through LiteLLM's
+# /v1/chat/completions with LiteLLM's own budget and spend accounting, and so a second deployment of the same model (a reserved-GPU variant, another region) is
 # one more entry of the same group, added by configuration (LiteLLM routes and fails over inside a group).
 
 def endpoint_domain(region: str) -> str:
@@ -663,10 +663,10 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
     domain = endpoint_domain(region)
     if entry.get("protocol") != "openai" or not LITELLM_MASTER_KEY or not domain:
         return None
-    if not LITELLM_INTERNAL_KEY:
-        # the group would call the gateway hostname, where the edge requires a LiteLLM key (docs/API.md "Model groups")
-        log.warning("model %s: LITELLM_INTERNAL_KEY is not set (Secret api/litellm-internal); LiteLLM group not registered", entry["id"])
-        return f"LiteLLM group not registered for {entry['id']}: LITELLM_INTERNAL_KEY is not set (the endpoint still answers through this API)"
+    if not ROUTER_KEY:
+        # the group would call the gateway hostname, where the edge requires a key of the fleet (docs/API.md "Model groups")
+        log.warning("model %s: ROUTER_KEY is not set (Secret api/router-key); LiteLLM group not registered", entry["id"])
+        return f"LiteLLM group not registered for {entry['id']}: ROUTER_KEY is not set (the endpoint still answers through this API)"
     import httpx
     mid = entry["id"]
     served = entry.get("servedModel") or mid
@@ -678,9 +678,9 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
             for i, v in enumerate(variants(entry, cluster)):
                 api_base = f"https://{endpoint_host(entry, region, v['object'])}/v1"
                 did = f"{mid}--{cluster}" if i == 0 else f"{mid}--{cluster}--{v['name']}"
-                # the platform-internal key is what the edge on the models hostnames sees; LiteLLM has already applied
-                # the caller's own key (budget, rate limit, spend) before it routes to the group
-                body = {"model_name": mid, "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": LITELLM_INTERNAL_KEY, "order": i + 1},
+                # the router key is what the edge on the models hostnames sees (role `router`: no budget, not billed);
+                # LiteLLM has already applied the caller's own key (budget, rate limit, spend) before it routes to the group
+                body = {"model_name": mid, "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": ROUTER_KEY, "order": i + 1},
                         "model_info": {"id": did, "cluster": cluster, "variant": v["name"]}}
                 r = c.patch(f"{LITELLM_URL}/model/{did}/update", json=body, headers=headers)
                 if r.status_code == 404:

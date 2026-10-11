@@ -105,7 +105,7 @@ def test_litellm_model_retry_updates_existing_deployment_without_deleting(monkey
             calls.append(("post", url)); raise AssertionError("existing models must update in place")
     monkeypatch.setattr(httpx, "Client", Proxy)
     monkeypatch.setattr(models, "LITELLM_MASTER_KEY", "sk-test")
-    monkeypatch.setattr(models, "LITELLM_INTERNAL_KEY", "sk-internal")
+    monkeypatch.setattr(models, "ROUTER_KEY", "sk-router")
     monkeypatch.setattr(models, "ENDPOINT_DOMAINS", {"eu-north1": "example.org"})
     entry = {"id": "my-model", "namespace": "models", "protocol": "openai"}
     assert models.litellm_group_upsert(entry, "hub", "eu-north1") is None

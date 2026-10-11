@@ -1,21 +1,19 @@
-"""GPU accounting: an idempotent ledger and atomic LiteLLM spend increment in its existing database.
+"""GPU accounting: the idempotent charge ledger and the key's spend in the fleet database (services/api/keys.py).
 
-The Job annotation is a receipt, not the deduplication mechanism. The pinned LiteLLM schema and its
-database-authoritative budget checks are part of this integration contract (docs/OPERATIONS.md).
+The Job annotation is a receipt, not the deduplication mechanism: `charges` is unique per (region, Job UID).
+Only the control cluster runs this (CronJob api/billing); it has DATABASE_URL. Endpoint calls that enter
+through LiteLLM are accounted by LiteLLM on its own record of the key; `:invoke` calls are accounted here.
 """
-import asyncio, hashlib, json, logging, os, sys
+import asyncio, json, logging, sys
 from kubernetes.client.rest import ApiException
-import artifacts, attempts, catalog, execution, jobs, kube
+import artifacts, attempts, catalog, db, execution, jobs, keys, kube
 from config import LABEL
 from resilience import retry
 from status import _attempts, _secs
 
 log = logging.getLogger("billing")
 BILLED, KEY = f"{LABEL}/billed", f"{LABEL}/key"
-
-
-def key_hash(key: str) -> str:
-    return hashlib.sha256(key.encode()).hexdigest()   # LiteLLM's token hash; usable with /key/info and /key/update
+key_hash = keys.key_hash      # the Job carries the key's sha256, never the key
 
 
 def cost_of(job: dict, model: dict | None, records: list | None = None, region: str | None = None) -> tuple[float, float]:
@@ -46,30 +44,13 @@ def cost_of(job: dict, model: dict | None, records: list | None = None, region: 
     return gpu_s, round(usd, 6)
 
 
-def record_spend(token: str, usd: float, operation: str, gpu_s: float) -> float:
-    import psycopg
-    url = os.environ.get("BILLING_DATABASE_URL")
-    if not url:
-        raise RuntimeError("BILLING_DATABASE_URL is required; GPU accounting fails closed")
-    with psycopg.connect(url) as c:
-        c.execute("select pg_advisory_xact_lock(1229003)")
-        c.execute("""create table if not exists serverless_gpu_charges (
-            operation text primary key, token text not null, gpu_seconds double precision not null,
-            usd double precision not null, charged_at timestamptz not null default now())""")
-        inserted = c.execute("""insert into serverless_gpu_charges (operation, token, gpu_seconds, usd)
-            values (%s, %s, %s, %s) on conflict do nothing returning operation""", (operation, token, gpu_s, usd)).fetchone()
-        if inserted:
-            row = c.execute('UPDATE "LiteLLM_VerificationToken" SET spend = spend + %s, total_spend = total_spend + %s WHERE token = %s RETURNING spend', (usd, usd, token)).fetchone()
-            if row is None:
-                raise ValueError("billing key does not exist; transaction rolled back")
-            return float(row[0])
-        receipt = c.execute("select token, gpu_seconds, usd from serverless_gpu_charges where operation = %s", (operation,)).fetchone()
-        if receipt[0] != token:
-            raise ValueError("operation already belongs to another billing key")
-        return float(c.execute('SELECT spend FROM "LiteLLM_VerificationToken" WHERE token = %s', (token,)).fetchone()[0])
+def record_spend(token: str, usd: float, operation: str, gpu_s: float) -> float | None:
+    if not db.enabled():
+        raise RuntimeError("DATABASE_URL is required; GPU accounting fails closed")
+    return keys.add_spend(token, usd, operation, gpu_s)
 
 
-async def add_spend(token: str, usd: float, operation: str, gpu_s: float) -> float:
+async def add_spend(token: str, usd: float, operation: str, gpu_s: float) -> float | None:
     return await asyncio.to_thread(record_spend, token, usd, operation, gpu_s)
 
 

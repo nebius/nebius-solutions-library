@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.15
+  version: 0.11.16
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
-    Auth: `Authorization: Bearer <LiteLLM virtual key>` on every request; the
-    key's metadata names the tenant (namespace `tenant-<name>`, bucket
+    Auth: `Authorization: Bearer <API key>` on every request (keys in the fleet
+    database, docs/API.md "Keys"); the key names the tenant (namespace `tenant-<name>`, bucket
     `serverless2-<name>-<region>`). `Idempotency-Key` on mutating calls maps to a
     deterministic operation id; a repeat returns the existing operation (200).
     Operation ids are Kubernetes Job names inside the tenant namespace (docs/JOBS.md). The control
@@ -214,7 +214,7 @@ paths:
     get: { summary: Liveness, security: [], responses: { "200": { description: ok } } }
 components:
   securitySchemes:
-    bearer: { type: http, scheme: bearer, description: LiteLLM virtual key }
+    bearer: { type: http, scheme: bearer, description: API key of a tenant (fleet database; docs/API.md "Keys") }
   parameters:
     region: { name: region, in: query, schema: { type: string }, description: Endpoint deployment region }
     range: { name: range, in: query, schema: { type: string, enum: [15m, 1h, 6h, 24h, 7d], default: 1h } }
@@ -395,7 +395,7 @@ components:
         logs_url: { type: string, description: Grafana Explore (Loki) query over the operation's pods }
         error: { type: string }
         input: { type: object, additionalProperties: true }
-        cost: { type: number, description: "sync/async: the model's price per call; run: GPU-seconds x deployments.<region>.price_per_gpu_hour, written to the key's LiteLLM spend within a minute of completion" }
+        cost: { type: number, description: "sync/async: the model's price per call; run: GPU-seconds x deployments.<region>.price_per_gpu_hour, charged to the key's spend in the fleet database within two minutes of completion" }
         gpu_seconds: { type: number, description: run only, main container running time x GPUs summed over all attempts }
         tenant: { type: string }
     Artifact:

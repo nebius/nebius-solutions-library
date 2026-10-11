@@ -9,13 +9,12 @@ from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
 import re
-import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs, kube, models, monitoring, placement as placing
+import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs, keys, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
-from auth import Principal, allows_model, check_budget, check_model, forget, principal
-from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
-from resilience import retry_http
+from auth import Principal, _principal, allows_model, check_budget, check_model, forget, forget_hash, principal
+from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 
 def check_placeholders() -> None:
     """Refuse to start with a manifest placeholder (clusters/common/manifests/api/api.yaml carries
@@ -27,18 +26,37 @@ def check_placeholders() -> None:
         raise RuntimeError(f"placeholder hostnames in {', '.join(bad)}: set them per cluster (stack/platform/stage.tf)")
 
 
+async def _import_keys() -> None:
+    """Keys LiteLLM still holds alone (a fleet upgraded from the LiteLLM-keyed releases) come into the fleet database
+    once; LiteLLM may still be starting with us, so this retries for a while. Until it succeeds, auth.key_info falls
+    back to LiteLLM per key."""
+    for attempt in range(30):
+        try:
+            log.info("imported %s key(s) from LiteLLM", await asyncio.to_thread(keys.import_litellm))
+            return
+        except Exception as e:  # noqa: BLE001 - LiteLLM not up yet, or unreachable
+            log.warning("key import from LiteLLM failed (attempt %s): %s", attempt + 1, e)
+            await asyncio.sleep(min(60, 5 * (attempt + 1)))
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """The control API owns the fleet database schema (services/api/db.py MIGRATIONS), applied at startup."""
+    """The control API owns the fleet database schema (services/api/db.py MIGRATIONS), applied at startup; it also
+    holds the keys (services/api/keys.py): the router key of this fleet, and every key LiteLLM held before."""
     check_placeholders()
+    tasks = []
     if db.enabled():
         log.info("database schema version %s", db.migrate())
-        log.info("queued %s model(s) for a re-render after start", db.requeue_all())
-    task = asyncio.create_task(_reconcile_loop()) if db.enabled() else None
+        if cfg.ROUTER_KEY:
+            keys.ensure_router(cfg.ROUTER_KEY)
+        else:
+            log.warning("ROUTER_KEY is not set: LiteLLM model groups are not registered")
+        log.info("queued %s model(s) for a re-render after start", db.requeue_all())   # re-registers every LiteLLM group with the router key
+        tasks = [asyncio.create_task(_import_keys()), asyncio.create_task(_reconcile_loop())]
     try:
         yield
     finally:
-        if task:
+        for task in tasks:
             task.cancel()
             try:
                 await task
@@ -46,7 +64,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.15", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.16", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -454,7 +472,7 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
             if not token and (protocol.startswith("bearer.") or protocol.startswith("sk-")):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
-    p = await principal(key)
+    p = await _principal(key, allow_router=True)       # LiteLLM's deployments call here with the fleet's router key
     m = catalog.get(model) or _endpoint_model(model)
     check_model(p, m["name"])
     check_budget(p)
@@ -463,6 +481,16 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     if int(m.get("nodes") or 1) > 1:
         kube.stamp_last_request(m["k8s_name"], m["namespace"])       # the control API's idle shutdown reads it
     return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
+
+
+@app.get("/internal/keys/me", include_in_schema=False)
+async def key_record(authorization: str = Header(default="")):
+    """A regional API's key lookup (services/api/auth.py): the record of the calling key itself, as stored, before
+    the expiry, block and role checks the caller applies. Routed through the gateway for this path only."""
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer key")
+    from auth import key_info
+    return await key_info(authorization[7:].strip())
 
 
 @app.get("/v1/keys/me")
@@ -1046,14 +1074,6 @@ async def operation_logs(id: str, range: str = "1h", search: str = Query("", max
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 
-async def _litellm(method: str, path: str, **kw):
-    async with httpx.AsyncClient(timeout=20) as c:
-        r = await retry_http(lambda: c.request(method, LITELLM_URL + path, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}, **kw))
-    if r.status_code >= 300:
-        raise HTTPException(502, f"litellm {path}: {r.status_code} {r.text[:200]}")
-    return r.json()
-
-
 def _key_public(i: dict, tenant: str) -> dict:
     exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
     return {"id": i.get("key_alias"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"), "tenant": tenant, "budget": i.get("max_budget"),
@@ -1061,53 +1081,42 @@ def _key_public(i: dict, tenant: str) -> dict:
             "status": "exhausted" if exhausted else "active", "role": (i.get("metadata") or {}).get("role", "user")}
 
 
+def _fleet_only() -> None:
+    if not db.enabled():
+        raise HTTPException(409, f"keys are managed on the fleet API{' (' + cfg.CONTROL_API_URL + ')' if cfg.CONTROL_API_URL else ''}")
+
+
 @app.get("/v1/keys")
-async def list_keys(p: Principal = Depends(admin)):
-    data = await _litellm("GET", "/key/list", params={"return_full_object": "true", "size": 100})
-    return [_key_public(k, p.tenant) for k in data.get("keys", []) if isinstance(k, dict) and (k.get("metadata") or {}).get("tenant") == p.tenant]
+def list_keys(p: Principal = Depends(admin)):
+    _fleet_only()
+    return [_key_public(k, p.tenant) for k in keys.list_tenant(p.tenant)]
 
 
 @app.post("/v1/keys", status_code=201)
-async def create_key(req: KeyRequest, p: Principal = Depends(admin)):
-    meta = {"tenant": p.tenant, "allowed_passthrough_routes": (p.info.get("metadata") or {}).get("allowed_passthrough_routes", [])}
-    body = {"key_alias": f"{p.tenant}-{req.alias}", "max_budget": req.budget, "models": req.models, "metadata": meta}
-    if req.expires_days:
-        body["duration"] = f"{req.expires_days}d"
-    k = await _litellm("POST", "/key/generate", json=body)
-    out = _key_public({**body, "key_name": "sk-..." + k["key"][-4:], "spend": 0, "created_at": k.get("created_at")}, p.tenant)
-    out["key"] = k["key"]
-    return out
+def create_key(req: KeyRequest, p: Principal = Depends(admin)):
+    """A user key of the admin's tenant (alias `<tenant>-<alias>`), with the admin key's pass-through routes; the
+    value is returned once and mirrored into LiteLLM (services/api/keys.py)."""
+    _fleet_only()
+    meta = {"allowed_passthrough_routes": (p.info.get("metadata") or {}).get("allowed_passthrough_routes", [])}
+    value, i = keys.create(p.tenant, f"{p.tenant}-{req.alias}", req.budget, req.models, req.expires_days, metadata=meta, by=p.info.get("key_alias"))
+    return {**_key_public(i, p.tenant), "key": value}
 
 
 @app.patch("/v1/keys/{alias}")
-async def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
-    """Change a key's budget, allowed models or expiry (LiteLLM `/key/update` on the key's token hash; the spend ledger
-    is untouched, docs/RELIABILITY.md)."""
-    data = await _litellm("GET", "/key/list", params={"return_full_object": "true", "size": 100})
-    mine = [k for k in data.get("keys", []) if isinstance(k, dict) and (k.get("metadata") or {}).get("tenant") == p.tenant]
-    k = next((x for x in mine if x.get("key_alias") == alias), None)
-    if not k:
-        raise HTTPException(404, f"key {alias} not found")
-    if not k.get("token"):
-        raise HTTPException(502, "key service returned no token hash for the key")
-    body: dict = {"key": k["token"]}
-    if req.budget is not None:
-        body["max_budget"] = req.budget
-    if req.models is not None:
-        body["models"] = req.models
-    if req.expires_days is not None:
-        body["duration"] = f"{req.expires_days}d" if req.expires_days else None
-    if len(body) == 1:
+def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
+    """Change a key's budget, allowed models or expiry; the spend ledger is untouched (docs/RELIABILITY.md)."""
+    _fleet_only()
+    if req.budget is None and req.models is None and req.expires_days is None:
         raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
-    await _litellm("POST", "/key/update", json=body)
-    forget(k.get("key") or "")              # a cached principal would keep the old budget for AUTH_CACHE_S
-    updated = await _litellm("GET", "/key/list", params={"return_full_object": "true", "size": 100})
-    row = next((x for x in updated.get("keys", []) if isinstance(x, dict) and x.get("key_alias") == alias), None) or {**k, **body}
-    return _key_public(row, p.tenant)
+    i = keys.update(p.tenant, alias, req.budget, req.models, req.expires_days)
+    if i is None:
+        raise HTTPException(404, f"key {alias} not found")
+    forget_hash(i["token"])                  # a cached principal would keep the old budget for AUTH_CACHE_S
+    return _key_public(i, p.tenant)
 
 
 @app.delete("/v1/keys/{alias}", status_code=204)
-async def revoke_key(alias: str, p: Principal = Depends(admin)):
-    if not any(k["alias"] == alias for k in await list_keys(p)):
+def revoke_key(alias: str, p: Principal = Depends(admin)):
+    _fleet_only()
+    if not keys.revoke(p.tenant, alias):
         raise HTTPException(404, f"key {alias} not found")
-    await _litellm("POST", "/key/delete", json={"key_aliases": [alias]})

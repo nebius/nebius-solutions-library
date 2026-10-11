@@ -1,4 +1,5 @@
-"""The fleet database (Nebius Managed PostgreSQL, database `platform`): model definitions with their history.
+"""The fleet database (Nebius Managed PostgreSQL, database `platform`): model definitions with their history,
+API keys and the GPU charge ledger (services/api/keys.py).
 
 Only the control API has `DATABASE_URL` (the platform stage puts it in Secret api/database); it is the single
 writer. Regional APIs have no database: they serve the read-only copies the control API writes into their
@@ -82,6 +83,34 @@ create table if not exists operation_marks (
     """
     alter table attempts add column if not exists checkpoint_generation int;
     alter table operation_marks add column if not exists successor text;
+    """,
+    # 5: API keys and the GPU charge ledger (services/api/keys.py): the fleet database is the source of truth for a
+    # key's tenant, role, budget, spend, models, expiry and block flag; only the sha256 of a key value is stored
+    """
+    create table if not exists keys (
+        hash        text primary key,
+        alias       text not null,
+        tenant      text not null,
+        role        text not null default 'user',
+        models      jsonb not null default '[]',
+        budget      numeric,
+        spend       numeric not null default 0,
+        expires     timestamptz,
+        blocked     boolean not null default false,
+        preview     text,
+        metadata    jsonb not null default '{}',
+        created_at  timestamptz not null default now(),
+        created_by  text,
+        updated_at  timestamptz not null default now(),
+        unique (tenant, alias)
+    );
+    create table if not exists charges (
+        operation   text primary key,
+        key_hash    text not null,
+        gpu_seconds double precision not null,
+        usd         numeric not null,
+        at          timestamptz not null default now()
+    );
     """,
 ]
 

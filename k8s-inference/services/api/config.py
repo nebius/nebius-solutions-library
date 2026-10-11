@@ -3,10 +3,13 @@ import os
 
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.litellm.svc:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
-# The platform-internal LiteLLM key (Secret api/litellm-internal, control cluster): the api_key of the model
-# groups the API registers for OpenAI endpoints, so LiteLLM passes the edge key check on their gateway
-# hostnames. Optional: without it no group is registered (the endpoint still answers through the API).
-LITELLM_INTERNAL_KEY = os.environ.get("LITELLM_INTERNAL_KEY", "")
+# The per-fleet router key (Secret api/router-key, control cluster; services/api/keys.py `ensure_router`): the
+# api_key of the model groups the API registers in LiteLLM, so LiteLLM's deployments pass the gateway's key check
+# on the endpoints' hostnames without a second budget check (role `router`, never billed). Optional: without it
+# no group is registered (the endpoint still answers through the API).
+ROUTER_KEY = os.environ.get("ROUTER_KEY", "")
+# A regional API has no fleet database: it asks the control API for a key (GET /internal/keys/me, the caller's own key)
+CONTROL_API_URL = os.environ.get("CONTROL_API_URL", "").rstrip("/")
 CATALOG_DIRS = os.environ.get("CATALOG_DIRS", "/app/catalog/models").split(":")
 REGION = os.environ.get("REGION", "control")                        # the region this API runs in (in-cluster client); `control` on the fleet manager
 HUB_REGION = os.environ.get("HUB_REGION", REGION)                   # the region the catalog's `deployments.hub` means (the manager sets it)

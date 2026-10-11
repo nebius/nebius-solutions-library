@@ -1,10 +1,14 @@
-"""Bearer key -> tenant, via LiteLLM /key/info with the master key (cached)."""
-import hashlib, time
+"""Bearer key -> Principal. The fleet database answers (hash lookup, cached AUTH_CACHE_S); a regional API has no
+database and asks the control API (GET /internal/keys/me with the caller's own key); LiteLLM's /key/info with the
+master key stays as a read-only fallback for a key the database does not hold yet (keys.import_litellm runs
+once at the control API's start)."""
+import asyncio, time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import httpx
 from fastapi import Header, HTTPException
-from config import AUTH_CACHE_S, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
+import db, keys
+from config import AUTH_CACHE_S, CONTROL_API_URL, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
 
 _cache: dict[str, tuple[float, dict]] = {}
 
@@ -19,41 +23,63 @@ class Principal:
     def namespace(self) -> str:
         return f"{TENANT_NS_PREFIX}{self.tenant}"
 
+    @property
+    def role(self) -> str:
+        return (self.info.get("metadata") or {}).get("role") or "user"
+
     def public(self) -> dict:
         i = self.info
         exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
         return {"id": i.get("token") or i.get("key_name"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"),
                 "tenant": self.tenant, "budget": i.get("max_budget"), "spend": i.get("spend", 0), "models": i.get("models", []),
                 "created_at": i.get("created_at"), "expires_at": i.get("expires"),
-                "status": "exhausted" if exhausted else "active", "role": (i.get("metadata") or {}).get("role", "user")}
+                "status": "exhausted" if exhausted else "active", "role": self.role}
 
 
-async def key_info(key: str) -> dict:
-    h = hashlib.sha256(key.encode()).hexdigest()
-    now = time.time()
-    hit = _cache.get(h)
-    if hit and hit[0] > now:
-        return hit[1]
+async def _fetch(url: str, headers: dict, params: dict | None = None) -> dict | None:
+    """GET a key service: its JSON, None for a key it does not know, 503 when it is down (fail closed)."""
     from resilience import retry_http
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await retry_http(lambda: c.get(f"{LITELLM_URL}/key/info", params={"key": key}, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}))
+            r = await retry_http(lambda: c.get(url, params=params, headers=headers))
     except httpx.HTTPError as e:
         raise HTTPException(503, f"key service unavailable: {type(e).__name__}")
     if r.status_code >= 500:
         raise HTTPException(503, "key service unavailable")
     if r.status_code != 200:
+        return None
+    return r.json()
+
+
+async def key_info(key: str) -> dict:
+    h = keys.key_hash(key)
+    now = time.time()
+    hit = _cache.get(h)
+    if hit and hit[0] > now:
+        return hit[1]
+    info = None
+    if db.enabled():
+        info = await asyncio.to_thread(keys.info, h)
+    elif CONTROL_API_URL:
+        info = await _fetch(f"{CONTROL_API_URL}/internal/keys/me", {"Authorization": f"Bearer {key}"})
+    if info is None and LITELLM_MASTER_KEY:        # not imported yet: LiteLLM's record, read-only
+        data = await _fetch(f"{LITELLM_URL}/key/info", {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}, params={"key": key})
+        info = (data or {}).get("info") if data else None
+    if info is None:
         raise HTTPException(401, "invalid API key")
-    info = r.json().get("info") or {}
     _cache[h] = (now + AUTH_CACHE_S, info)
     return info
 
 
 def forget(key: str) -> None:
-    _cache.pop(hashlib.sha256(key.encode()).hexdigest(), None)
+    _cache.pop(keys.key_hash(key), None)
 
 
-async def principal(authorization: str = Header(default="")) -> Principal:
+def forget_hash(h: str) -> None:
+    _cache.pop(h, None)
+
+
+async def _principal(authorization: str, allow_router: bool = False) -> Principal:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer key")
     key = authorization[7:].strip()
@@ -64,10 +90,17 @@ async def principal(authorization: str = Header(default="")) -> Principal:
         expiry = datetime.fromisoformat(info["expires"].replace("Z", "+00:00"))
         if (expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)) <= datetime.now(timezone.utc):
             raise HTTPException(403, "key expired")
-    tenant = (info.get("metadata") or {}).get("tenant")
-    if not tenant:
+    meta = info.get("metadata") or {}
+    if not meta.get("tenant"):
         raise HTTPException(403, "key is not bound to a tenant")
-    return Principal(key=key, tenant=tenant, info=info)
+    if meta.get("role") == keys.ROUTER["role"] and not allow_router:
+        # LiteLLM's deployments carry it to the endpoints' gateway hostnames; it defines nothing, runs nothing, sees no tenant
+        raise HTTPException(403, "the router key is accepted at the model gateway only")
+    return Principal(key=key, tenant=meta["tenant"], info=info)
+
+
+async def principal(authorization: str = Header(default="")) -> Principal:
+    return await _principal(authorization)
 
 
 def check_budget(p: Principal) -> None:

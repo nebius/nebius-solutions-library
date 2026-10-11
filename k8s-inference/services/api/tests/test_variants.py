@@ -93,7 +93,7 @@ def test_hostnames_and_litellm_deployments_follow_the_variants(monkeypatch):
         def post(self, url, json=None, headers=None): calls.append(("post", url, json)); return R(200)
     import httpx
     monkeypatch.setattr(httpx, "Client", C)
-    monkeypatch.setattr(models, "LITELLM_MASTER_KEY", "m"); monkeypatch.setattr(models, "LITELLM_INTERNAL_KEY", "i"); monkeypatch.setattr(models, "LITELLM_URL", "http://litellm")
+    monkeypatch.setattr(models, "LITELLM_MASTER_KEY", "m"); monkeypatch.setattr(models, "ROUTER_KEY", "i"); monkeypatch.setattr(models, "LITELLM_URL", "http://litellm")
     assert models.litellm_group_upsert(e, "hub", "eu-north1") is None
     posted = [c[2] for c in calls if c[0] == "post"]
     assert [p["model_info"]["id"] for p in posted] == ["chat--hub", "chat--hub--spot", "chat--hub--cheap"]

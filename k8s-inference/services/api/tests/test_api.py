@@ -612,38 +612,162 @@ def test_endpoints_read_and_scale_only(client, monkeypatch):
     assert c.get("/v1/endpoints", headers=H).status_code == 200
 
 
-def test_admin_routes_need_admin_role(client, monkeypatch):
+class FakeKeys:
+    """services/api/keys.py in memory (the routes' view: tenant-scoped aliases, info dicts in the Principal shape)."""
+    def __init__(self):
+        self.rows, self.calls = {}, []
+
+    def _info(self, h):
+        r = self.rows[h]
+        return {"token": h, "key_name": r["preview"], "key_alias": r["alias"], "max_budget": r["budget"], "spend": r["spend"], "models": r["models"],
+                "expires": r["expires"], "blocked": False, "created_at": "now", "metadata": {"tenant": r["tenant"], "role": r["role"], **r["metadata"]}}
+
+    def info(self, h): return self._info(h) if h in self.rows else None
+    def list_tenant(self, tenant): return [self._info(h) for h, r in sorted(self.rows.items()) if r["tenant"] == tenant]
+
+    def create(self, tenant, alias, budget=None, models=None, expires_days=None, role="user", metadata=None, by=None, value=None):
+        self.calls.append(("create", alias))
+        value = value or "sk-newkey1234"
+        import keys
+        h = keys.key_hash(value)
+        self.rows[h] = {"alias": alias, "tenant": tenant, "role": role, "budget": budget, "spend": 0, "models": list(models or []),
+                        "expires": f"{expires_days}d" if expires_days else None, "preview": keys.preview(value), "metadata": metadata or {}}
+        return value, self._info(h)
+
+    def update(self, tenant, alias, budget=None, models=None, expires_days=None):
+        self.calls.append(("update", alias, budget, models, expires_days))
+        for h, r in self.rows.items():
+            if r["tenant"] == tenant and r["alias"] == alias:
+                if budget is not None: r["budget"] = budget
+                if models is not None: r["models"] = models
+                if expires_days is not None: r["expires"] = f"{expires_days}d" if expires_days else None
+                return self._info(h)
+        return None
+
+    def revoke(self, tenant, alias):
+        self.calls.append(("revoke", alias))
+        for h, r in list(self.rows.items()):
+            if r["tenant"] == tenant and r["alias"] == alias:
+                del self.rows[h]; return True
+        return False
+
+
+@pytest.fixture
+def fake_keys(monkeypatch):
+    import keys, db
+    fk = FakeKeys()
+    for name in ("info", "list_tenant", "create", "update", "revoke"):
+        monkeypatch.setattr(keys, name, getattr(fk, name))
+    monkeypatch.setattr(db, "enabled", lambda: True)          # the fleet API: it has the database
+    return fk
+
+
+def test_admin_routes_need_admin_role(client, fake_keys, monkeypatch):
     c, _ = client
     assert c.post("/v1/keys", json={"alias": "x"}, headers=H).status_code == 403
 
     async def fake_info(key):
         return dict(ADMIN_INFO)
     monkeypatch.setattr(auth, "key_info", fake_info)
-    calls = []
-
-    async def fake_litellm(method, path, **kw):
-        calls.append((method, path, kw))
-        if path == "/key/generate":
-            return {"key": "sk-newkey1234", "created_at": "now"}
-        if path == "/key/update":
-            return {}
-        return {"keys": [{"key_alias": "demo-ci", "key_name": "sk-...1234", "token": "hash-ci", "spend": 0, "max_budget": 5, "metadata": {"tenant": "demo"}},
-                         {"key_alias": "other", "token": "hash-other", "metadata": {"tenant": "other"}}]}
-    monkeypatch.setattr(appmod, "_litellm", fake_litellm)
+    fake_keys.create("other", "other-x", 1)                                       # another tenant's key: never listed, never found
     r = c.post("/v1/keys", json={"alias": "ci", "budget": 5, "expires_days": 7}, headers=H)
     assert r.status_code == 201 and r.json()["key"] == "sk-newkey1234" and r.json()["alias"] == "demo-ci"
-    assert calls[-1][2]["json"]["metadata"] == {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]} and calls[-1][2]["json"]["duration"] == "7d"
+    assert r.json()["key_preview"] == "sk-...1234" and r.json()["budget"] == 5 and r.json()["status"] == "active" and r.json()["role"] == "user"
+    row = next(x for x in fake_keys.rows.values() if x["alias"] == "demo-ci")
+    assert row["metadata"] == {"allowed_passthrough_routes": ["/models/llm/chat"]} and row["expires"] == "7d"   # the admin key's routes go along
     assert [k["alias"] for k in c.get("/v1/keys", headers=H).json()] == ["demo-ci"]
-    # editing: budget, models and expiry on the key's token hash; another tenant's key is not found; empty patch refused
+    # editing: budget, models and expiry; another tenant's key is not found; empty patch refused
     r = c.patch("/v1/keys/demo-ci", json={"budget": 50, "models": ["llm-example"], "expires_days": 30}, headers=H)
     assert r.status_code == 200, r.text
-    upd = next(x for x in calls if x[1] == "/key/update")
-    assert upd[2]["json"] == {"key": "hash-ci", "max_budget": 50, "models": ["llm-example"], "duration": "30d"}
-    assert c.patch("/v1/keys/other", json={"budget": 1}, headers=H).status_code == 404
+    assert r.json()["budget"] == 50 and r.json()["models"] == ["llm-example"] and ("update", "demo-ci", 50, ["llm-example"], 30) in fake_keys.calls
+    assert c.patch("/v1/keys/other-x", json={"budget": 1}, headers=H).status_code == 404
     assert c.patch("/v1/keys/demo-ci", json={}, headers=H).status_code == 400
     assert c.patch("/v1/keys/demo-ci", json={"budget": -1}, headers=H).status_code == 422
-    assert c.delete("/v1/keys/demo-ci", headers=H).status_code == 204 and calls[-1][1] == "/key/delete"
-    assert c.delete("/v1/keys/other", headers=H).status_code == 404
+    assert c.delete("/v1/keys/demo-ci", headers=H).status_code == 204 and fake_keys.calls[-1] == ("revoke", "demo-ci")
+    assert c.delete("/v1/keys/other-x", headers=H).status_code == 404
+    assert c.get("/v1/keys", headers=H).json() == []
+
+
+def test_key_management_is_the_fleet_apis(client, monkeypatch):
+    """A regional API has no database: key management answers 409 with the fleet API's URL."""
+    c, _ = client
+    import db
+    monkeypatch.setattr(db, "enabled", lambda: False)
+    monkeypatch.setattr(appmod.cfg, "CONTROL_API_URL", "https://api.control.example")
+
+    async def fake_info(key):
+        return dict(ADMIN_INFO)
+    monkeypatch.setattr(auth, "key_info", fake_info)
+    r = c.get("/v1/keys", headers=H)
+    assert r.status_code == 409 and "https://api.control.example" in r.json()["detail"]
+
+
+def test_key_lookup_database_control_api_and_litellm_fallback(monkeypatch):
+    """auth.key_info: the fleet database first (hash lookup); a regional API asks the control API; LiteLLM's
+    /key/info answers for a key neither holds yet. Unknown everywhere: 401; a key service down: 503."""
+    import asyncio, db, keys
+    import httpx
+    from fastapi import HTTPException
+    auth._cache.clear()
+    store = {keys.key_hash("sk-db"): {"key_alias": "demo-db", "metadata": {"tenant": "demo"}}}
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    monkeypatch.setattr(keys, "info", lambda h: store.get(h))
+    monkeypatch.setattr(auth, "LITELLM_MASTER_KEY", "sk-master")
+    seen = []
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, params=None, headers=None):
+            seen.append(url)
+            if url.endswith("/key/info"):
+                if params["key"] == "sk-legacy":
+                    return httpx.Response(200, json={"info": {"key_alias": "demo-legacy", "metadata": {"tenant": "demo"}}})
+                return httpx.Response(401, json={})
+            if url.endswith("/internal/keys/me"):
+                if headers["Authorization"] == "Bearer sk-down":
+                    return httpx.Response(503, json={})
+                return httpx.Response(200, json={"key_alias": "demo-remote", "metadata": {"tenant": "demo"}}) if headers["Authorization"] == "Bearer sk-remote" else httpx.Response(401, json={})
+            raise AssertionError(url)
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    assert asyncio.run(auth.key_info("sk-db"))["key_alias"] == "demo-db" and seen == []               # the database answered
+    assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy"                          # not imported yet: LiteLLM, read-only
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(auth.key_info("sk-nope"))
+    assert e.value.status_code == 401
+    assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy" and seen.count("http://litellm.litellm.svc:4000/key/info") == 2   # cached
+    # a regional API: no database, the control API
+    monkeypatch.setattr(db, "enabled", lambda: False)
+    monkeypatch.setattr(auth, "CONTROL_API_URL", "https://api.control.example")
+    assert asyncio.run(auth.key_info("sk-remote"))["key_alias"] == "demo-remote" and seen[-1] == "https://api.control.example/internal/keys/me"
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(auth.key_info("sk-down"))
+    assert e.value.status_code == 503
+    auth._cache.clear()
+
+
+def test_router_key_is_accepted_at_the_gateway_only(client, monkeypatch):
+    """LiteLLM's deployments call the endpoints' hostnames with the fleet's router key: the authorize hook lets it
+    through (every model, no budget), the API routes refuse it, and it is never billed (no :invoke)."""
+    c, _ = client
+    monkeypatch.setattr(kube, "stamp_last_request", lambda *a, **k: None)
+
+    async def fake_info(key):
+        if key == "sk-router":
+            return {"token": "h-router", "key_alias": "router", "max_budget": None, "spend": 0, "models": [], "metadata": {"tenant": "platform", "role": "router"}}
+        return dict(KEY_INFO)
+    monkeypatch.setattr(auth, "key_info", fake_info)
+    R = {"Authorization": "Bearer sk-router"}
+    assert c.get("/v1/models", headers=R).status_code == 403
+    assert c.post("/v1/models/batch-example:invoke", json={"mode": "run"}, headers=R).status_code == 403
+    r = c.post("/internal/authorize/llm-example/v1/chat/completions", headers=R)
+    assert r.status_code == 200 and r.headers["x-serverless2-tenant"] == "platform" and r.headers["x-serverless2-key-alias"] == "router"
+    assert c.post("/internal/authorize/llm-example", headers=H).status_code == 200                       # tenant keys as before
+    # the regional lookup route: the record itself, before the checks (a blocked or router key included)
+    r = c.get("/internal/keys/me", headers=R)
+    assert r.status_code == 200 and r.json()["metadata"]["role"] == "router"
+    assert c.get("/internal/keys/me").status_code == 401
 
 
 def test_billing_once(cluster, monkeypatch):
@@ -1098,7 +1222,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
             groups.append((url.rsplit("/", 1)[1], json)); return httpx.Response(200, json={})
     import models as m
     monkeypatch.setattr(m, "LITELLM_MASTER_KEY", "sk-master")
-    monkeypatch.setattr(m, "LITELLM_INTERNAL_KEY", "sk-platform-internal")
+    monkeypatch.setattr(m, "ROUTER_KEY", "sk-router")
     monkeypatch.setattr(httpx, "Client", FakeLLM)
     spec = {"id": "my-llm", "kind": "endpoint", "image": "vllm/vllm-openai:v0.11.0", "args": ["--model", "example-org/small-chat-model"],
             "port": 8000, "protocol": "openai", "health_path": "/health", "served_model": "example-org/small-chat-model",
@@ -1122,8 +1246,8 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     # the OpenAI endpoint is a LiteLLM model group whose deployment is the gateway hostname of its region
     assert groups[-1][0] == "new" and groups[-1][1]["litellm_params"]["api_base"] == "https://my-llm-predictor.models.203.0.113.10.sslip.io/v1"
     assert groups[-1][1]["model_info"]["id"] == "my-llm--hub" and body["version"] == 1
-    # the group calls the gateway hostname as the platform-internal key (the edge requires a LiteLLM key)
-    assert groups[-1][1]["litellm_params"]["api_key"] == "sk-platform-internal" and "warnings" not in body
+    # the group calls the gateway hostname as the fleet's router key (the edge requires a key of the fleet; role router: not billed)
+    assert groups[-1][1]["litellm_params"]["api_key"] == "sk-router" and "warnings" not in body
     # the hostname is on the region's model certificate (ACME), issued through the gateway
     cert = fake.custom[("envoy-gateway-system", "certificates", "models")]["spec"]
     assert cert["dnsNames"] == ["my-llm-predictor.models.203.0.113.10.sslip.io"] and cert["issuerRef"]["name"] == "letsencrypt"
@@ -1149,8 +1273,8 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     assert c.get("/v1/models/my-llm/history", headers=ADMIN).json()[0]["action"] == "delete"
 
 
-def test_model_group_needs_the_internal_key(client, admin_keys, monkeypatch, caplog):
-    """Without LITELLM_INTERNAL_KEY the endpoint is deployed but no LiteLLM group is registered: a warning in the
+def test_model_group_needs_the_router_key(client, admin_keys, monkeypatch, caplog):
+    """Without ROUTER_KEY the endpoint is deployed but no LiteLLM group is registered: a warning in the
     response and the log, never a call with a dummy key the edge would reject."""
     c, fake = client
     calls = []
@@ -1163,7 +1287,7 @@ def test_model_group_needs_the_internal_key(client, admin_keys, monkeypatch, cap
             calls.append(url); return httpx.Response(200, json={})
     import models as m
     monkeypatch.setattr(m, "LITELLM_MASTER_KEY", "sk-master")
-    monkeypatch.setattr(m, "LITELLM_INTERNAL_KEY", "")
+    monkeypatch.setattr(m, "ROUTER_KEY", "")
     monkeypatch.setattr(httpx, "Client", FakeLLM)
     spec = {"id": "my-llm", "kind": "endpoint", "image": "vllm/vllm-openai:v0.11.0", "port": 8000, "protocol": "openai",
             "gpu": {"count": 1, "classes": ["h100"]}}
@@ -1171,8 +1295,8 @@ def test_model_group_needs_the_internal_key(client, admin_keys, monkeypatch, cap
         r = c.post("/v1/models", json=spec, headers=ADMIN)
     assert r.status_code == 201, r.text
     assert ("models", "inferenceservices", "my-llm") in fake.custom                 # the endpoint itself is there
-    assert calls == [] and any("LITELLM_INTERNAL_KEY" in w for w in r.json()["warnings"])
-    assert any("LITELLM_INTERNAL_KEY" in rec.getMessage() for rec in caplog.records)
+    assert calls == [] and any("ROUTER_KEY" in w for w in r.json()["warnings"])
+    assert any("ROUTER_KEY" in rec.getMessage() for rec in caplog.records)
     assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
 
 
