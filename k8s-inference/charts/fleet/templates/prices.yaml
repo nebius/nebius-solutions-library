@@ -24,7 +24,12 @@ data:
       capacity: {{ (default (dict "type" "on_demand") $p.capacity).type }}
       usd_per_gpu_hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) }}
       gpus_per_node: {{ (include "fleet.preset" $p.preset | fromYaml).gpus }}
+      min_nodes: {{ default 0 $p.min_nodes }}
       max_nodes: {{ $p.max_nodes }}
+      {{- /* the pool's node group (platform stage, from the cloud state): the dispatcher moves an InfiniBand pool's floor with it */}}
+      {{- with $p.node_group_id }}
+      node_group_id: {{ . }}
+      {{- end }}
       interconnect: {{ default "none" $p.interconnect }}
       ib_devices_per_node: {{ include "fleet.ibDevices" $p }}
       local_nvme: {{ if $p.local_nvme }}true{{ else }}false{{ end }}

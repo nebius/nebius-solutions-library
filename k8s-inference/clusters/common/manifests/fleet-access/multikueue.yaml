@@ -47,6 +47,11 @@ rules:
     resources: [services/proxy]
     resourceNames: [autoscaler, "autoscaler:9090"]
     verbs: [get]
+  # InfiniBand pool floors (services/dispatcher/infiniband.py): started multi-node endpoints hold whole nodes of an
+  # InfiniBand pool too; the Workloads of multi-node runs are covered by the rule above
+  - apiGroups: [leaderworkerset.x-k8s.io]
+    resources: [leaderworkersets]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

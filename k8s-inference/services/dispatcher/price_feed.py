@@ -9,10 +9,11 @@ first run; runtime-owned, outside Terraform). Reserved pools are not priced (mar
 import json
 import logging
 import os
-import subprocess
 
 import yaml
 from kubernetes import client, config
+
+import nebius_cli
 
 log = logging.getLogger("price-feed")
 NS = os.environ.get("PRICES_NAMESPACE", "kueue-system")
@@ -21,7 +22,7 @@ SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")
 
 
 def estimate(project: str, platform: str, preset: str, spot: bool):
-    cmd = ["nebius", "billing", "v1alpha1", "calculator", "estimate", "--format", "json",
+    cmd = ["billing", "v1alpha1", "calculator", "estimate", "--format", "json",
            "--resource-spec-compute-instance-spec-parent-id", project,
            "--resource-spec-compute-instance-spec-resources-platform", platform,
            "--resource-spec-compute-instance-spec-resources-preset", preset]
@@ -31,7 +32,8 @@ def estimate(project: str, platform: str, preset: str, spot: bool):
         cmd += ["--resource-spec-compute-instance-spec-preemptible-on-preemption", "STOP",
                 "--resource-spec-compute-instance-spec-follows-spot-price"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True).stdout
+        # the calculator is tenant-wide: any mounted region key's profile may ask (nebius_cli.login in main)
+        out = nebius_cli.run(cmd, timeout=60).stdout
         return float(json.loads(out)["hourly_cost"]["general"]["total"]["cost"])
     except Exception as e:
         log.warning("estimate %s/%s/%s spot=%s failed: %s", project, platform, preset, spot, e)
@@ -45,6 +47,7 @@ def main():
     except config.ConfigException:
         config.load_kube_config()
     core = client.CoreV1Api()
+    nebius_cli.login()
     pools = yaml.safe_load((core.read_namespaced_config_map(FLEET_CM, NS).data or {}).get("pools.yaml", "") or "") or {}
     prices = {}
     for _, p in pools.items():

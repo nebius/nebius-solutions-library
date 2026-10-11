@@ -225,10 +225,12 @@ scale-up (`pod didn't trigger scale-up: cannot allocate all claims`, measured on
 2026-10-08; GKE documents the same rule for DRA node pools). It does not grow from one node either:
 the autoscaler's simulation of a new node copies the devices without their attributes and the
 DeviceClass selector fails (`"DynamicResources" filter plugin: class ib.networking.nebius.ai: selector #0:
-CEL runtime error: no such key: ifName`, measured on test fleet, 2026-10-09 with one node in the pool). An
-InfiniBand pool therefore keeps `min_nodes` at the node count of the largest run it must take
-(`min_nodes >= 1` is what the tfvars validation enforces; the operator sets the real floor). Reserved
-pools (the usual home of a 16-node job) are fixed-size anyway.
+CEL runtime error: no such key: ifName`, measured on test fleet, 2026-10-09 with one node in the pool). The
+dispatcher therefore moves the pool's floor itself (docs/SCHEDULING.md "InfiniBand pools grow on demand"):
+while a multi-node run waits for or holds an InfiniBand pool, the node group's minimum is raised to the run's
+node count through the Nebius API (within `max_nodes`), and it returns to the fleet's `min_nodes` ten minutes
+after the last such run. Submitting a run is all it takes; the nodes boot after admission (a few minutes, the
+usual start of a scaled-from-zero pool). Reserved pools (the usual home of a 16-node job) are fixed-size anyway.
 
 ### Limits of multi-node runs
 
@@ -240,7 +242,7 @@ measurements in docs/VERIFICATION.md):
 |---|---|
 | All pods of one run land in **one pool = one GPU cluster = one InfiniBand fabric**. No cross-pool, cross-region or mixed-platform runs. | A Nebius GPU cluster lives in one fabric of one region and one project; nodes outside it have no InfiniBand path to it (Nebius isolates GPU clusters with InfiniBand partition keys: nodes of different GPU clusters cannot talk over the fabric even on the same physical fabric). The API pins the JobSet to the pools of the model's classes that have the fabric; Kueue admits the whole pod set on one flavor. |
 | **8-GPU presets only.** | GPU clusters accept only full-node presets (`8gpu-*`); the renderer, the solution's tfvars validation and the Nebius API refuse others. One pod takes one whole node. |
-| **`min_nodes` = the largest run's node count** on an InfiniBand pool (the autoscaler never adds InfiniBand nodes). | The cluster autoscaler templates an empty node group without DRA ResourceSlices (`cannot allocate all claims`, measured 2026-10-08), and from one node its simulated devices carry no attributes, so the DeviceClass selector errors (`CEL runtime error: no such key: ifName`, measured 2026-10-09): no scale-up either way. Reserved pools are fixed-size anyway. |
+| **The pool's floor follows the run, not the autoscaler** (the autoscaler never adds InfiniBand nodes): the dispatcher raises the node group's minimum to the largest waiting or running multi-node run's node count, within `max_nodes`, and restores `min_nodes` after an idle period; `terraform plan` shows the raised floor as drift meanwhile. | The cluster autoscaler templates an empty node group without DRA ResourceSlices (`cannot allocate all claims`, measured 2026-10-08), and from one node its simulated devices carry no attributes, so the DeviceClass selector errors (`CEL runtime error: no such key: ifName`, measured 2026-10-09): no scale-up either way. docs/SCHEDULING.md "InfiniBand pools grow on demand". Reserved pools are fixed-size anyway. |
 | **NIC claims are ExactCount: 8 per node (4 on GB300).** | Kueue's DRA accounting (0.20) supports ExactCount claims only; the tenant's `ib-8` / `ib-4` templates hand the pod every NIC of its node (the pod has the whole node anyway). |
 | **Size of one run**: `nodes <= MULTINODE_MAX_NODES` (64 by default), a node group holds at most 100 nodes, and a fabric has limited GPU capacity. | Nebius publishes no fixed maximum per GPU cluster; "each fabric has limited GPU capacity" and a GPU cluster is bounded by the quota of its project and the free capacity of its fabric. A 16-node run needs 16 nodes in ONE pool (one node group, one GPU cluster): size `max_nodes` (and the reservation) accordingly; the Kueue quota of the pool is `ib_devices_per_node x max_nodes` NICs. |
 | **Spot preemption = restart-all** from the last checkpoint; after `maxRestarts` (3) the run is FAILED. | A partial rank set cannot continue an NCCL job. Use `checkpoints: shared` so the restart (and a `:resume`) continues from the shared filesystem; `local` checkpoints die with the pod. Reserved or on-demand pools avoid the restarts. |

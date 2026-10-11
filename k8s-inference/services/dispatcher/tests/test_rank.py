@@ -210,9 +210,11 @@ def test_price_feed_quotes_spot_as_follow_price_not_priority(monkeypatch):
             stdout = '{"hourly_cost": {"general": {"total": {"cost": "7.92"}}}}'
         return R()
 
-    monkeypatch.setattr(price_feed.subprocess, "run", fake_run)
+    monkeypatch.setattr(price_feed.nebius_cli.subprocess, "run", fake_run)   # the CLI runs through nebius_cli.run
+    monkeypatch.setattr(price_feed.nebius_cli, "_profiles", {"eu-north1": "sa-eu-north1"})
     assert price_feed.estimate("project-x", "gpu-b300-sxm", "8gpu-192vcpu-2768gb", True) == 7.92
     cmd = seen["cmd"]
+    assert cmd[:3] == ["nebius", "--profile", "sa-eu-north1"]     # as the mounted region identity
     assert "--resource-spec-compute-instance-spec-follows-spot-price" in cmd
     assert cmd[cmd.index("--resource-spec-compute-instance-spec-preemptible-on-preemption") + 1] == "STOP"
     assert not any("priority" in a for a in cmd)   # deprecated since 2026-05-11, the CLI rejects it

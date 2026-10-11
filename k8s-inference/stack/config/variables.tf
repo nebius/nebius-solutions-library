@@ -207,7 +207,7 @@ variable "fleet" {
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
         api        = optional(string, "0.11.11")
-        dispatcher = optional(string, "0.2.7")
+        dispatcher = optional(string, "0.2.8")
         jobs       = optional(string, "0.1.14")
         ops        = optional(string, "0.1.11")
         ui         = optional(string, "0.6.2")
@@ -405,7 +405,7 @@ variable "fleet" {
       && (p.interconnect != "infiniband" || (p.infiniband_fabric != null && can(regex("^(8gpu-|4gpu-)", p.preset))))
       && (p.interconnect == "infiniband" || p.infiniband_fabric == null)
     ])])
-    error_message = "pools: interconnect is none | infiniband; infiniband needs infiniband_fabric (the region's fabric name) and a full-node preset (8gpu-*, or 4gpu-* on gpu-gb300). The autoscaler never adds InfiniBand nodes (DRA): set min_nodes to the node count of the largest multi-node run before submitting it, 0 when idle (docs/FLEET.md)."
+    error_message = "pools: interconnect is none | infiniband; infiniband needs infiniband_fabric (the region's fabric name) and a full-node preset (8gpu-*, or 4gpu-* on gpu-gb300). The autoscaler never adds InfiniBand nodes (DRA): the dispatcher raises the pool's floor to a waiting multi-node run's node count and restores min_nodes afterwards; max_nodes bounds it (docs/SCHEDULING.md)."
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in merge(r.pools, r.cpu_pools) : can(regex("^[a-z0-9-]+$", pn))]) && alltrue([for pn, p in r.pools : can(regex("^[a-z0-9-]+$", p.gpu_class))])])
@@ -425,7 +425,7 @@ variable "fleet" {
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.pools : p.warm_nodes >= 0 && p.warm_nodes <= p.max_nodes && (p.warm_nodes == 0 || p.interconnect != "infiniband")])])
-    error_message = "pools: warm_nodes is between 0 and max_nodes, and 0 on an InfiniBand pool (the autoscaler never adds InfiniBand nodes; use min_nodes there)."
+    error_message = "pools: warm_nodes is between 0 and max_nodes, and 0 on an InfiniBand pool (the autoscaler never adds InfiniBand nodes; the dispatcher moves min_nodes there, docs/SCHEDULING.md)."
   }
   validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.pools : contains(keys(var.fleet.prices), p.platform)])])

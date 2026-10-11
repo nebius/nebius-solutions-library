@@ -196,9 +196,11 @@ platform ("Day 2" below).
 
 - Local NVMe exists only on the 8-GPU B300 preset today (`docs/FLEET.md`, "Local NVMe"); other presets
   reject `local_nvme = true`.
-- InfiniBand pools need 8-GPU presets and at least one node up (`min_nodes >= 1`), and all pods of one
-  multi-node run land in one pool. `docs/JOBS.md`, "Multi-node runs". A multi-node endpoint on InfiniBand needs the
-  pool's `min_nodes` at its node count; over Ethernet (`interconnect: none`, the default) it scales from zero.
+- InfiniBand pools need 8-GPU presets, and all pods of one multi-node run land in one pool. The autoscaler
+  never adds InfiniBand nodes; the dispatcher raises the pool's floor to a waiting multi-node run's or started
+  multi-node endpoint's node count (within `max_nodes`) and restores `min_nodes` afterwards, which shows as
+  Terraform drift meanwhile. `docs/JOBS.md`, "Multi-node runs"; `docs/SCHEDULING.md`, "InfiniBand pools grow on
+  demand". Over Ethernet (`interconnect: none`, the default for endpoints) a pool scales from zero on its own.
 - A node scaled from zero advertises about 80% of its boot disk minus 32 GiB as ephemeral storage. Size
   `boot_disk_gib` for the largest emptyDir a pod asks for, or keep `min_nodes >= 1`.
 - Reserved pools roll with zero surge; a full reservation cannot surge.

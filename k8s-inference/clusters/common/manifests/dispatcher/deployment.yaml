@@ -15,7 +15,7 @@ spec:
       securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: dispatcher
-          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.6
+          image: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.8
           args: ["/app/dispatcher.py"]
           ports: [{ name: http, containerPort: 8080 }]   # GET /v1/rank (the API's pre-placement query), /healthz
           startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 36 }
@@ -27,10 +27,22 @@ spec:
             - { name: PRICES_NAMESPACE, value: kueue-system }
             - { name: FLEET_CONFIGMAP, value: fleet-prices }
             - { name: SPOT_CONFIGMAP, value: spot-prices }
+            # InfiniBand pool floors (infiniband.py): an InfiniBand pool's min_nodes follows the multi-node runs that wait
+            # for it, through the Nebius API as the region's ops identity (one key per region under /etc/nebius), and
+            # returns to the fleet's value RESTORE_AFTER_S after the last such run; INFINIBAND=0 switches it off
+            - { name: INFINIBAND, value: "1" }
+            - { name: RESTORE_AFTER_S, value: "600" }
+            - { name: INFINIBAND_CONFIGMAP, value: infiniband-pools }
+            - { name: HOME, value: /tmp }     # the CLI's profiles (nebius_cli.py) live under $HOME
+          volumeMounts:
+            - { name: nebius-sa, mountPath: /etc/nebius, readOnly: true }
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { cpu: 500m, memory: 256Mi }
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumes:
+        - name: nebius-sa                     # <region>.json per GPU region (stack/platform/secrets.tf); without it the floors stay manual
+          secret: { secretName: price-feed-nebius-sa, optional: true }
 ---
 # The ranking as a service for the API (services/api: DISPATCHER_URL): where would a run with this profile,
 # GPU count, GPU classes and regions go now? Asked before rendering a run whose images are per-region.

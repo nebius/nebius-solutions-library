@@ -43,13 +43,17 @@ resource "kubernetes_secret_v1" "nebius_sa" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
+# The dispatcher and its price feed (control cluster): the ops identity of every GPU region's project, one
+# `<region>.json` per region as in the ops image (the dispatcher raises an InfiniBand pool's floor in the region's
+# project while a multi-node run waits for it, docs/SCHEDULING.md "InfiniBand pools grow on demand"; the price
+# calculator accepts any of them).
 resource "kubernetes_secret_v1" "price_feed_sa" {
   count = local.role.manager ? 1 : 0
   metadata {
     name      = "price-feed-nebius-sa"
     namespace = "kueue-system"
   }
-  data       = { "${local.region}.json" = local.secrets.ops_credentials[local.cluster.project_id] }
+  data       = { for cid, c in local.region_clusters : "${c.region}.json" => local.secrets.ops_credentials[c.project_id] }
   depends_on = [kubernetes_namespace_v1.ns]
 }
 

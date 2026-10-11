@@ -10,7 +10,7 @@ dispatcher of our own (`services/dispatcher`, about 260 lines plus a 65-line pri
 |---|---|---|
 | In a cluster: which pool (GPU class, spot/reserved) | Kueue ResourceFlavors in ClusterQueue order, `flavorFungibility` | Kueue 0.20 |
 | Across clusters: which region/cluster | Kueue MultiKueue with an external dispatcher that ranks clusters by preference, free quota and live price | Kueue MultiKueue + `services/dispatcher` |
-| Nodes | node-group autoscaler per pool (0..max from `fleet.yaml`) | Nebius mk8s |
+| Nodes | node-group autoscaler per pool (0..max from `fleet.yaml`); InfiniBand pools: the dispatcher moves the pool's floor for multi-node runs (below) | Nebius mk8s + `services/dispatcher` |
 
 ## What a model declares
 
@@ -198,6 +198,59 @@ setting (it scales to load over target), so the dispatcher's elected replica add
 Cost: N replicas' GPUs for as long as the model serves. The worker identity of the manager gains read on
 InferenceServices and the model copies, patch on Revisions and `get` on the autoscaler's service proxy
 (`clusters/common/manifests/fleet-access/multikueue.yaml`).
+
+## InfiniBand pools grow on demand (2026-10-11)
+
+The Nebius cluster autoscaler never adds an InfiniBand node: it simulates the new node without the DRA
+attributes of its RDMA NICs, so a pod that claims them never triggers a scale-up, from zero or from one
+(`cannot allocate all claims`, `CEL runtime error: no such key: ifName`; docs/JOBS.md "Multi-node runs").
+Until now an operator raised the pool's `min_nodes` in `terraform.tfvars` and applied the cloud stage before
+every multi-node run. The dispatcher's elected replica does it now (`services/dispatcher/infiniband.py`, every
+reconcile cycle, 15 s), per worker cluster:
+
+1. **Demand** per InfiniBand pool = the largest node count any one multi-node run or endpoint needs there now.
+   Runs: the worker's Kueue Workloads whose pod template requires the node label
+   `serverless2.nebius/interconnect=infiniband` (what `interconnect: required` renders), pending or admitted and
+   not finished; `nodes` = the pod set's count; the pool = Kueue's flavor assignment once quota is reserved, before
+   that the InfiniBand pool of the template's `serverless2.nebius/pool` affinity that Kueue takes first (reserved,
+   on-demand, spot, then price). A `preferred` run counts once Kueue has put it on an InfiniBand flavor. Endpoints:
+   LeaderWorkerSets (docs/API.md "Multi-node endpoints") with `replicas > 0` whose pods pin an InfiniBand pool
+   (`size x replicas` nodes). Every run holds whole nodes of its own and nothing else grows the pool, so the floor
+   serves the biggest one; smaller ones queue behind it in Kueue as before.
+2. **The floor** = max(the fleet's `min_nodes`, demand), never above `max_nodes`: a run that needs more nodes than
+   the pool has can never fit there (logged once, nothing changed; a bigger `max_nodes` is a fleet change). A raise
+   is applied at once: `nebius mk8s node-group update --id <node group> --patch --autoscaling-min-node-count N`
+   as the region's ops identity (the platform stage mounts one `<region>.json` key per GPU region into the
+   dispatcher, Secret `kueue-system/price-feed-nebius-sa`; `nebius_cli.py` turns each into the profile
+   `sa-<region>` exactly as the ops image does). Managed Kubernetes then boots the nodes, DraNet publishes their
+   NICs and Kueue's admitted pods bind; nothing in the run changes. A lower waits until demand has stayed below
+   the floor for `RESTORE_AFTER_S` (600 s): a restart-all after a preemption finds its nodes still there, and a
+   run that follows another reuses them instead of waiting for a boot.
+3. **State**: what the dispatcher set is kept in the ConfigMap `kueue-system/infiniband-pools` (`state.json`,
+   created on first use, runtime-owned), so a restarted dispatcher still restores the fleet's value when the pool
+   goes idle; while every pool is at its fleet value the state is empty.
+
+What it needs from the fleet document: `charts/fleet` renders `min_nodes` and the pool's `node_group_id` into
+`fleet-prices` (the platform stage adds the ids from the cloud state; a pool the cloud stage has not applied yet
+has none and is left alone), and the worker identity of the manager may list LeaderWorkerSets
+(`clusters/common/manifests/fleet-access/multikueue.yaml`). `INFINIBAND=0` on the Deployment switches the whole
+step off; pools without `interconnect: infiniband` are never touched, whatever runs on them.
+
+**Terraform drift, accepted by design.** While a run waits or runs, the node group's `autoscaling.min_node_count`
+differs from `terraform.tfvars`: `terraform plan` of the cloud stage shows the pool's floor going back to
+`min_nodes`, and an `apply` in that window lowers it (running pods keep their nodes; the autoscaler removes idle
+ones, and the dispatcher raises the floor again on its next cycle if the run still waits). Once no multi-node
+run has needed the pool for `RESTORE_AFTER_S`, the dispatcher restores the configured value and the plan is clean
+again. Apply the cloud stage in a quiet hour on InfiniBand pools, or read the state ConfigMap first:
+
+```sh
+kubectl -n kueue-system get cm infiniband-pools -o jsonpath='{.data.state\.json}'     # {} = every pool at its fleet value
+kubectl -n kueue-system logs deploy/dispatcher | grep min_nodes                        # every change, with its reason
+```
+
+Not covered: single-cluster mode (`control_plane.dedicated = false` runs no dispatcher: set `min_nodes` by hand
+there), and the quota side (the pool's Kueue quota is `max_nodes` x GPUs already, so a run is admitted before
+its nodes exist; that is what makes the floor move).
 
 ## Images: one host, cached per region
 

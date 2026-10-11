@@ -49,6 +49,8 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 import buffer
+import infiniband
+import nebius_cli
 from kubernetes import client, config
 
 log = logging.getLogger("dispatcher")
@@ -58,6 +60,7 @@ FLEET_CM = os.environ.get("FLEET_CONFIGMAP", "fleet-prices")   # charts/fleet: p
 SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: spot.json
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
 BUFFER = os.environ.get("BUFFER", "1") == "1"        # ready-replica buffers of endpoints (buffer.py)
+INFINIBAND = os.environ.get("INFINIBAND", "1") == "1"   # InfiniBand pool floors for multi-node runs (infiniband.py)
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
 ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))   # grace before a volume whose manager Jobs are gone is deleted
 RANK_PORT = int(os.environ.get("RANK_PORT", "8080"))              # GET /v1/rank (the API's class choice at submission), /healthz
@@ -478,6 +481,11 @@ def reconcile(core, custom, batch, dispatch=None):
         return
     if BUFFER:
         buffer.reconcile_buffers(workers)
+    if INFINIBAND:
+        try:   # its own failures (a worker down, the CLI) must not stop the dispatch below
+            infiniband.reconcile(core, workers, clusters, aliases)
+        except Exception as e:  # noqa: BLE001
+            log.exception("infiniband pools: %s", e)
     workloads = custom.list_cluster_custom_object(GROUP, VERSION, "workloads").get("items", [])
     for wl in workloads:
         if not pending_multikueue(wl):
@@ -575,6 +583,8 @@ def main():
     except config.ConfigException:
         config.load_kube_config()
     core, custom, batch = client.CoreV1Api(), client.CustomObjectsApi(), client.BatchV1Api()
+    if INFINIBAND:
+        nebius_cli.login()      # one CLI profile per mounted region key (the node-group updates of infiniband.py)
     # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs.
     # A replica losing renewal exits immediately, fencing its reconcile loop before another leader starts.
     leading = threading.Event()
