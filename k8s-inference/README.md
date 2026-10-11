@@ -299,6 +299,23 @@ that nobody assumes it does:
 tests, no cloud access), `make preflight`, `make plan`, `make apply`, `make destroy`, `make images`. Every
 target is a script you can also call directly (`./stack.sh`, `tools/check.sh`, `tools/images.sh`).
 
+## Versions
+
+The platform images are tagged `<registry>/serverless2/<component>:<tag>` with the tags of `images.versions` in
+`terraform.tfvars` (defaults in `stack/config/variables.tf`, built by `make images`); the charts carry their own
+`version` in `charts/<chart>/Chart.yaml`. What changed in each: `CHANGELOG.md`.
+
+| Component | Current version |
+|---|---|
+| `services/api` image | 0.11.11 |
+| `services/dispatcher` image | 0.2.7 |
+| `services/jobs` image | 0.1.14 |
+| `services/ops` image | 0.1.11 |
+| `ui` image | 0.6.2 |
+| `charts/endpoint` | 0.1.2 |
+| `charts/fleet` | 0.1.3 |
+| `charts/tenant` | 0.3.0 |
+
 ## License
 
 Apache License 2.0, like the rest of the Nebius Solutions Library (`LICENSE` at the repository root).

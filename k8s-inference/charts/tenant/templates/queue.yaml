@@ -10,6 +10,8 @@ kind: LocalQueue
 metadata:
   name: {{ $profile }}
   namespace: {{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
 spec:
   clusterQueue: {{ $.Values.name }}-{{ $profile }}
 {{- end }}

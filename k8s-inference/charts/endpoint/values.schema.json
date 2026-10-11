@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nebius/nebius-solutions-library/k8s-inference/charts/endpoint/values.schema.json",
+  "title": "charts/endpoint values",
+  "description": "The chart's settings (values.yaml) are declared once as `settings` and apply at the top level (plain layout), under `runtime` and under `deployments.<cluster>` (catalog layout: the API passes a whole catalog entry as the values file plus --set cluster=<id>, domain=<endpoint domain>, ibClaimTemplate=<prefix>, services/api/models.py render()). The top level stays open (no additionalProperties: false) because a catalog entry also carries fields the chart does not read: spec, managed_by, example, version, servedModel, source, endpoints, price, routing, ... (the helper endpoint.values omits them); the typed ones are listed so that a wrong type is still refused.",
+  "type": "object",
+  "allOf": [{ "$ref": "#/$defs/settings" }],
+  "properties": {
+    "cluster": { "type": "string", "description": "catalog layout: the cluster to render for (--set cluster=<id>)" },
+    "id": { "type": "string", "description": "catalog layout: the entry id = InferenceService name" },
+    "task": { "type": "string" },
+    "mode": { "type": "string" },
+    "displayName": { "type": "string" },
+    "description": { "type": "string" },
+    "managed_by": { "type": "string" },
+    "servedModel": { "type": ["string", "null"] },
+    "gpu": { "type": ["object", "string"] },
+    "runtime": { "$ref": "#/$defs/settings", "description": "catalog layout: the chart settings of the entry" },
+    "deployments": {
+      "type": "object",
+      "description": "catalog layout: per-cluster overrides of `runtime` (maps deep-merged, lists replaced); paused, price_per_gpu_hour and parameters are entry fields the chart drops",
+      "additionalProperties": {
+        "allOf": [{ "$ref": "#/$defs/settings" }],
+        "properties": {
+          "paused": { "type": "boolean" },
+          "price_per_gpu_hour": { "type": ["number", "string"] },
+          "parameters": {}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "quantity": { "type": ["string", "integer", "number"] },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "port": { "type": ["integer", "string"] },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "InferenceService name (plain layout; the catalog layout takes `id`)" },
+        "namespace": { "type": "string", "minLength": 1 },
+        "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "podMetadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "automountServiceAccountToken": { "type": ["boolean", "null"] },
+        "image": { "type": "string" },
+        "imagePullSecrets": { "type": "array", "items": { "type": "string" } },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "array", "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } } },
+        "envFrom": { "type": "array", "items": { "type": "object" } },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "protocol": { "type": "string", "enum": ["http", "websocket", "openai", "grpc"] },
+        "workingDir": { "type": "string" },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "gpu": { "type": ["integer", "string"] },
+            "cpu": { "$ref": "#/$defs/quantity" },
+            "memory": { "$ref": "#/$defs/quantity" },
+            "cpuRequest": { "$ref": "#/$defs/quantity" },
+            "memoryRequest": { "$ref": "#/$defs/quantity" },
+            "ephemeralStorage": { "$ref": "#/$defs/quantity" }
+          }
+        },
+        "pool": { "type": "string" },
+        "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+        "tolerations": { "type": "array", "items": { "type": "object" } },
+        "scaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minReplicas": { "type": "integer", "minimum": 0 },
+            "maxReplicas": { "type": "integer", "minimum": 0 },
+            "metric": { "type": "string", "enum": ["concurrency", "rps", "cpu", "memory"] },
+            "target": { "type": "integer", "minimum": 1 },
+            "containerConcurrency": { "type": "integer", "minimum": 0 },
+            "scaleToZeroRetention": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" }
+          }
+        },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "priorityClassName": { "type": "string" },
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "priorityClass": { "type": "string" },
+            "name": { "type": "string" }
+          }
+        },
+        "images": { "type": "object", "additionalProperties": { "type": "string" }, "description": "per-pool image {<pool>: <image>}" },
+        "shm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" }, "size": { "$ref": "#/$defs/quantity" } }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mountPath"],
+            "properties": {
+              "name": { "type": "string" },
+              "mountPath": { "type": "string" },
+              "sizeLimit": { "$ref": "#/$defs/quantity" },
+              "medium": { "type": "string" }
+            }
+          }
+        },
+        "persistentVolumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mountPath", "size"],
+            "properties": {
+              "name": { "type": "string" },
+              "mountPath": { "type": "string" },
+              "size": { "$ref": "#/$defs/quantity" },
+              "storageClass": { "type": "string" }
+            }
+          }
+        },
+        "readinessProbe": { "$ref": "#/$defs/probe" },
+        "livenessProbe": { "$ref": "#/$defs/probe" },
+        "securityContext": { "type": "object" },
+        "containerSecurityContext": { "type": "object" },
+        "localModelCache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "storageUri": { "type": "string" },
+            "nodeGroups": { "type": "array", "items": { "type": "string" } },
+            "size": { "$ref": "#/$defs/quantity" }
+          }
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sharedFilesystem": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "claimName": { "type": "string" },
+                "path": { "type": "string" },
+                "mountPath": { "type": "string" },
+                "readOnly": { "type": "boolean" },
+                "prepare": { "type": "boolean" },
+                "prepareImage": { "type": "string" }
+              }
+            },
+            "env": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "nodes": { "type": "integer", "minimum": 1 },
+        "workerCommand": { "type": "array", "items": { "type": "string" } },
+        "interconnect": { "type": "string", "enum": ["none", "preferred", "required"] },
+        "ibDevices": { "type": "integer", "minimum": 0 },
+        "ibClaimTemplate": { "type": "string" },
+        "idleSeconds": { "type": "integer", "minimum": 0 },
+        "domain": { "type": "string" },
+        "gatewayName": { "type": "string" },
+        "gatewayNamespace": { "type": "string" }
+      }
+    }
+  }
+}

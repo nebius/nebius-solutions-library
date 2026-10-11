@@ -28,9 +28,15 @@ Effective values. Two input layouts:
 {{- $v | toYaml -}}
 {{- end -}}
 
+{{/* Labels of every rendered object: the standard Helm set (name = the endpoint, instance = the release, which the API
+     names after the entry id) plus the serverless2 labels the API and the dispatcher select on (serverless2.nebius/*,
+     the Kueue priority class) and the entry's own labels. Pod selectors (Service, LeaderWorkerSet) do not use these. */}}
 {{- define "endpoint.labels" -}}
 {{- $v := include "endpoint.values" . | fromYaml -}}
 app.kubernetes.io/name: {{ $v.name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/part-of: serverless2
 serverless2.nebius/model: {{ default $v.name $v.modelId }}
 {{- with $v.variant }}

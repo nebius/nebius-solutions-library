@@ -2,5 +2,9 @@ apiVersion: v2
 name: endpoint
 description: One KServe InferenceService (Knative mode) for an explicit model container with GPU, pool placement and scale-to-zero.
 type: application
+kubeVersion: ">= 1.31.0-0"
 version: 0.1.2
 appVersion: "kserve-0.20"
+maintainers:
+  - name: Nebius solutions library
+    url: https://github.com/nebius/nebius-solutions-library

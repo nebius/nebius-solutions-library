@@ -4,6 +4,8 @@ apiVersion: serving.kserve.io/v1alpha1
 kind: LocalModelCache
 metadata:
   name: {{ $v.name }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
 spec:
   sourceModelUri: {{ required "localModelCache.storageUri" $v.localModelCache.storageUri }}
   modelSize: {{ $v.localModelCache.size }}
