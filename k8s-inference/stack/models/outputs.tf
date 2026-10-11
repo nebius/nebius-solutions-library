@@ -12,7 +12,7 @@ output "tenant_storage" {
 }
 
 output "tenant_keys" {
-  description = "LiteLLM API keys per tenant and key name (control cluster)."
+  description = "API keys per tenant and key name (control cluster; in the fleet database, mirrored into LiteLLM)."
   sensitive   = true
   value       = { for tn, t in local.tenants : tn => { for kn, k in t.keys : kn => "sk-${random_password.key["${tn}-${kn}"].result}" } if local.role.control }
 }

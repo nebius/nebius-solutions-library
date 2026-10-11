@@ -222,9 +222,7 @@ locals {
               containers = [{
                 name = "billing", image = local.image.api, command = ["python", "-m", "billing"]
                 env = concat([
-                  { name = "LITELLM_URL", value = local.litellm_url_in_cluster },
-                  { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
-                  { name = "BILLING_DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "litellm_url" } } },
+                  { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } }, # the charge ledger and the keys' spend (services/api/keys.py)
                   { name = "CATALOG_DIRS", value = "/etc/catalog" },
                   { name = "HUB_REGION", value = local.hub_region },
                   ], local.dedicated ? [

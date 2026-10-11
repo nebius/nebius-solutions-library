@@ -120,10 +120,15 @@ resource "kubernetes_secret_v1" "ngc" {
 }
 
 # ---------------------------------------------------------------------------
-# LiteLLM API keys (control cluster): one Job per key POSTs /key/generate with a Terraform-generated key value
-# (idempotent: an existing key is accepted). Values are sensitive outputs.
+# API keys (control cluster): one Job per key of terraform.tfvars writes the key into the fleet database with
+# `python -m keys bootstrap` of the API image (services/api/keys.py: idempotent, the value Terraform generated,
+# mirrored into LiteLLM for its OpenAI route) and so exists before any admin key could mint through the API.
+# Values are sensitive outputs. A `-replace` of a key's random_password rotates it (same alias, spend kept).
 locals {
   keys = local.role.control ? merge([for tn, t in local.tenants : { for kn, k in t.keys : "${tn}-${kn}" => merge(k, { tenant = tn, key = kn }) }]...) : {}
+  # the trust ConfigMap `api/trust` of the platform stage: the managed database's CA (and a private bundle, if any)
+  key_job_mounts = concat([{ name = "trust", path = "/etc/ssl/msp", sub_path = null }],
+  local.f.trust_bundle_pem == null ? [] : [{ name = "trust", path = "/etc/ssl/certs/ca-certificates.crt", sub_path = "ca.pem" }])
 }
 
 resource "random_password" "key" {
@@ -132,11 +137,11 @@ resource "random_password" "key" {
   special  = false
 }
 
-resource "kubernetes_job_v1" "litellm_key" {
+resource "kubernetes_job_v1" "key" {
   for_each = local.keys
   metadata {
     name      = "key-${each.key}"
-    namespace = "litellm"
+    namespace = "api"
   }
   spec {
     backoff_limit = 6
@@ -146,44 +151,60 @@ resource "kubernetes_job_v1" "litellm_key" {
         restart_policy = "OnFailure"
         container {
           name    = "key"
-          image   = "${local.f.images.host}/docker/curlimages/curl:8.10.1"
-          command = ["sh", "-c"]
-          args = [<<-EOT
-            set -eu
-            body='${jsonencode({
-            key      = "sk-${random_password.key[each.key].result}", key_alias = each.key, max_budget = each.value.budget_usd, models = each.value.models,
-            metadata = merge({ tenant = each.value.tenant, allowed_passthrough_routes = each.value.routes }, each.value.admin ? { role = "admin" } : {})
-      })}'
-            for i in $(seq 1 60); do
-              code=$(curl -s -o /tmp/r -w '%%{http_code}' -X POST "$LITELLM/key/generate" -H "Authorization: Bearer $MASTER" -H 'content-type: application/json' -d "$body" || echo 000)
-              case "$code" in
-                200) echo "key ${each.key} created"; exit 0 ;;
-                400|409) if grep -qiE 'exist|duplicate' /tmp/r; then echo "key ${each.key} exists"; exit 0; fi; cat /tmp/r; exit 1 ;;
-                *) echo "attempt $i: HTTP $code"; sleep 10 ;;
-              esac
-            done
-            exit 1
-          EOT
-    ]
-    env {
-      name  = "LITELLM"
-      value = "http://litellm.litellm.svc:4000"
-    }
-    env {
-      name = "MASTER"
-      value_from {
-        secret_key_ref {
-          name = "litellm-master"
-          key  = "masterkey"
+          image   = "${local.images_host}/nebius/serverless2/api:${local.f.images.versions.api}"
+          command = ["python", "-m", "keys", "bootstrap"]
+          env {
+            name  = "KEY"
+            value = "sk-${random_password.key[each.key].result}"
+          }
+          env {
+            name = "KEY_SPEC"
+            value = jsonencode({
+              alias  = each.key, tenant = each.value.tenant, role = each.value.admin ? "admin" : "user",
+              budget = each.value.budget_usd, models = each.value.models, routes = each.value.routes
+            })
+          }
+          env {
+            name = "DATABASE_URL"
+            value_from {
+              secret_key_ref {
+                name = "database"
+                key  = "platform_url"
+              }
+            }
+          }
+          env {
+            name  = "LITELLM_URL"
+            value = "http://litellm.litellm.svc:4000"
+          }
+          env {
+            name = "LITELLM_MASTER_KEY"
+            value_from {
+              secret_key_ref {
+                name = "litellm-master"
+                key  = "masterkey"
+              }
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = local.key_job_mounts
+            content {
+              name       = volume_mount.value.name
+              mount_path = volume_mount.value.path
+              sub_path   = volume_mount.value.sub_path
+              read_only  = true
+            }
+          }
+        }
+        volume {
+          name = "trust"
+          config_map { name = "trust" }
         }
       }
     }
   }
-}
-}
-}
-wait_for_completion = true
-timeouts { create = "20m" }
+  wait_for_completion = true
+  timeouts { create = "20m" }
 }
 
 # ---------------------------------------------------------------------------
@@ -271,5 +292,5 @@ resource "kubernetes_job_v1" "probe" {
   }
   wait_for_completion = true
   timeouts { create = "40m" }
-  depends_on = [kubernetes_job_v1.litellm_key, kubernetes_secret_v1.tenant_storage, data.terraform_remote_state.worker_models]
+  depends_on = [kubernetes_job_v1.key, kubernetes_secret_v1.tenant_storage, data.terraform_remote_state.worker_models]
 }

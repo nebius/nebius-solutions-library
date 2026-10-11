@@ -168,7 +168,7 @@ locals {
   # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
   api_env_control = [for e in [
     { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
-    { name = "LITELLM_INTERNAL_KEY", valueFrom = { secretKeyRef = { name = "litellm-internal", key = "key" } } }, # the model groups' key (litellm-internal.tf)
+    { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
     { name = "IMAGES_HOST", value = local.images_host },
     { name = "IMAGES_SOURCE", value = local.cloud.hub.registry },
     { name = "ENDPOINT_DOMAINS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=${local.host_of[cid]}"]) },
@@ -185,7 +185,8 @@ locals {
     ] : [
     { name = "REGION", value = local.region },
     { name = "REGION_KUBECONFIGS", value = "" },
-    { name = "ENDPOINT_DOMAIN", value = local.host }, # async endpoint calls go through this cluster's gateway (TLS, key check)
+    { name = "ENDPOINT_DOMAIN", value = local.host },                          # async endpoint calls go through this cluster's gateway (TLS, key check)
+    { name = "CONTROL_API_URL", value = "https://api.${local.control_host}" }, # keys live in the fleet database: a worker asks the control API (services/api/auth.py)
   ])
 
   # JSON 6902 patches per manifests component (what clusters/<cluster>/apps/overlays did).

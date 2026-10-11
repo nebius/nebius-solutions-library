@@ -11,7 +11,7 @@ data:
     {
      "uid": "s2-cost",
      "title": "Serverless 2.0 / Cost",
-     "description": "GPU-hours paid (nodes) and used (pod requests) per pool, namespace, endpoint and run, priced with the variables at the top; LiteLLM spend per key.",
+     "description": "GPU-hours paid (nodes) and used (pod requests) per pool, namespace, endpoint and run, priced with the variables at the top; platform spend per key, LiteLLM spend per model.",
      "tags": [
       "serverless2"
      ],
@@ -1059,19 +1059,19 @@ data:
        "id": 93,
        "type": "table",
        "title": "Spend per API key",
-       "description": "Virtual keys with their accumulated spend (per-call prices from the pass-through routes and model prices).",
+       "description": "API keys of the fleet database with their accumulated platform spend (GPU runs charged by the billing CronJob); calls that enter through LiteLLM are accounted in the two panels below.",
        "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "litellm-postgres"
+        "uid": "platform-postgres"
        },
        "targets": [
         {
          "refId": "A",
          "datasource": {
           "type": "grafana-postgresql-datasource",
-          "uid": "litellm-postgres"
+          "uid": "platform-postgres"
          },
-         "rawSql": "SELECT key_alias AS key, team_id AS team, spend, max_budget AS budget, (metadata->>'tenant') AS tenant FROM \"LiteLLM_VerificationToken\" ORDER BY spend DESC",
+         "rawSql": "SELECT alias AS key, tenant, role, spend, budget FROM keys WHERE role <> 'router' ORDER BY spend DESC",
          "rawQuery": true,
          "editorMode": "code",
          "format": "table"
