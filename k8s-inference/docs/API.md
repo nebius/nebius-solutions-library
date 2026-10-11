@@ -18,7 +18,7 @@ POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on th
 POST   /v1/artifacts/uploads         presigned upload URL scoped to the tenant prefix
 GET    /v1/artifacts/{uri}           presigned download of a tenant object
 GET    /v1/endpoints[/{id}]          InferenceServices of catalog models in this region; PATCH scaling (admin key)
-GET/POST /v1/keys, DELETE /v1/keys/{alias}, GET /v1/keys/me   LiteLLM keys of the tenant (admin key for writes)
+GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   LiteLLM keys of the tenant (admin key for writes; PATCH changes budget, allowed models, expiry: the console's Edit button)
 Idempotency-Key header on every mutating call
 ```
 
