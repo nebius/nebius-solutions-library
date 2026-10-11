@@ -7,10 +7,10 @@ resource "local_file" "flux_release_rendered_nodesets" {
     release_name     = "soperator-nodesets"
     cluster_name     = var.name
     apparmor_profile = local.apparmor_profile
+    slurm_node_extra = local.slurm_node_extra
 
     nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
-      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
-      slurm_node_extra  = local.slurm_node_extra_by_nodeset[nodeset.name]
+      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.platform], null)
     })]
     resources = [for i, res in var.node_capacity.worker : {
       cpu_cores = floor(

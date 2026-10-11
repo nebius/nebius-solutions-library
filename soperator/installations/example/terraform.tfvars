@@ -342,6 +342,7 @@ slurm_sssd_ldap_ca_config_map_ref_name = ""
 # - "prod_quick"      - run short GPU health checks. Takes additional ~30 minutes.
 # - "essential"       - skip everything that can be skipped in production.
 # - "skip_all"        - [Don't use in production] run only checks required for cluster initialization.
+# - "testing"         - [Don't use in production] disable scheduled GPU checks for E2E.
 #
 # WARNING: Terraform won't finish until all checks pass successfully, which can require manual retries from inside K8s.
 active_checks_scope = "essential"

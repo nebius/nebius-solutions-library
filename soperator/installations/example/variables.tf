@@ -1980,8 +1980,8 @@ variable "active_checks_scope" {
   description = "Scope of active checks. Defines what active checks should be checked during cluster bootstrap."
   default     = "essential"
   validation {
-    condition     = contains(["prod_quick", "prod_acceptance", "essential", "skip_all"], var.active_checks_scope)
-    error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all."
+    condition     = contains(["prod_quick", "prod_acceptance", "essential", "skip_all", "testing"], var.active_checks_scope)
+    error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all, testing."
   }
 }
 

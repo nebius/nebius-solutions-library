@@ -53,7 +53,7 @@ nodesets:
             format("ThreadsPerCore=%d", nodeset.cpu_topology.threads_per_core),
             resources[i].gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, resources[i].gpus) : "",
           ]))}"
-          dynamic: ${jsonencode(nodeset.slurm_node_extra)}
+          dynamic: ${jsonencode(slurm_node_extra)}
           %{~ if nodeset.gres_config != null && length(nodeset.gres_config) > 0 ~}
           gresConfig:
             %{~ for gres_line in nodeset.gres_config ~}

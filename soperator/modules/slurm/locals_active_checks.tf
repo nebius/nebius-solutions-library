@@ -23,6 +23,30 @@ locals {
       }
     }
 
+    # Run what is relevant in E2E.
+    testing = {
+      ssh-check = {
+        k8sJobSpec = {
+          jobContainer = {
+            env = [{
+              name : "NUM_OF_LOGIN_NODES",
+              value : tostring(var.node_count.login)
+            }]
+          }
+        }
+      }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        suspend          = true
+        runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = true
+      }
+    }
+
     # Skip everything that can be skipped in production.
     essential = {
       ssh-check = {
