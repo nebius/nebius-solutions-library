@@ -140,7 +140,13 @@ locals {
 # values of charts/platform (what the per-cluster JSON patches of the platform stage used to set). Everything here
 # is a function of the tfvars and the cloud facts, so tools/check.sh renders the same objects without a cloud.
 locals {
-  cloud_facts = var.cloud != null ? var.cloud : {
+  # `try` rather than a conditional: the live outputs and the placeholders are objects of different shapes, which a
+  # conditional refuses ("inconsistent conditional result types" on a live plan, 2026-10-11)
+  cloud_facts = {
+    clusters = try(var.cloud.clusters, local.cloud_placeholder.clusters)
+    hub      = try(var.cloud.hub, local.cloud_placeholder.hub)
+  }
+  cloud_placeholder = {
     # TEST-NET-1 addresses and example ids: distinct per cluster, stable across renders (the golden set)
     clusters = { for i, id in local.cluster_ids : id => {
       id                 = id, region = local.clusters[id].region, project_id = local.clusters[id].project_id

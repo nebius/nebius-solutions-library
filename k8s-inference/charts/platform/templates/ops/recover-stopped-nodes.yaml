@@ -44,5 +44,5 @@ spec:
                 limits: { cpu: 500m, memory: 256Mi }
           volumes:
             - name: sa
-              secret: { secretName: nebius-sa, defaultMode: 0440 }
+              secret: { secretName: nebius-sa, defaultMode: 288 }   # 0440: decimal, Terraform's yamldecode reads 0440 as 440
 {{- end }}

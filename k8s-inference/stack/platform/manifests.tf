@@ -17,7 +17,7 @@ locals {
   platform_rendered = [for d in split("\n---\n", "\n${data.helm_template.platform.manifest}") : {
     component = regex("# Source: platform/templates/([^/\n]+)/", d)[0]
     object    = yamldecode(d)
-  } if trimspace(d) != ""]
+  } if length(regexall("(?m)^[^#\n]", d)) > 0] # a chunk of comments only (a template's header before its first ---) is no object
   platform_objects = { for r in local.platform_rendered :
     "${length(split("/", r.object.apiVersion)) > 1 ? split("/", r.object.apiVersion)[0] : "_"}/${r.object.kind}/${try(r.object.metadata.namespace, "_")}/${r.object.metadata.name}" => r
   }
