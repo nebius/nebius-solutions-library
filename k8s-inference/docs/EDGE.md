@@ -12,7 +12,7 @@ Predictor hosts are `<model>-predictor.models.<cluster-domain>`. The API reconci
 
 ## Endpoint authorization
 
-`charts/endpoint` renders a native SecurityPolicy per endpoint. It selects that predictor's external HTTPRoutes and binds the model ID in the ext-auth path `/internal/authorize/<model>`. Envoy appends the original request path and forwards the authorization/WebSocket headers; it does not forward the request body. A ReferenceGrant permits the policy to reference Service `api` in namespace `api`.
+The API renders a native SecurityPolicy per endpoint (`services/api/render_endpoint.py`). It selects that predictor's external HTTPRoutes and binds the model ID in the ext-auth path `/internal/authorize/<model>`. Envoy appends the original request path and forwards the authorization/WebSocket headers; it does not forward the request body. A ReferenceGrant permits the policy to reference Service `api` in namespace `api`.
 
 The API's shared authorizer checks tenant binding, key expiry/blocking, model permissions and budget. It returns only tenant and key-alias headers to the predictor. A misleading forwarded host cannot select another model. Missing/forbidden keys are denied; unavailable authorization fails closed. There is no separate edge-auth deployment, embedded Python ConfigMap or duplicate key cache.
 

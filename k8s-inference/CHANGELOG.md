@@ -7,6 +7,7 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 ## 2026-10-11
 
+- api 0.11.14: endpoints rendered natively (`services/api/render_endpoint.py`) instead of `helm template charts/endpoint` at runtime; helm and the chart leave the API image. `charts/endpoint` stays one release as the reference rendering, with golden tests (`tests/golden/endpoint`) holding the renderer and the chart equal.
 - api 0.11.11: version bump of the image after the integration-gate changes below, no code change.
 - api 0.11.10, jobs 0.1.14: integration gate: one continuation per `Idempotency-Key` on resume; a superseded handle stays readable and resolves to its successor, also after the Job expired; a completed run without a delivery record is `FINALIZING` then `EXPORT_FAILED`, never `SUCCEEDED`; the uploader keeps the work volume until the export (or `RESULT.json`) and the API's acknowledgement are durable; live checkpoint pointers (`CHECKPOINT.json`) recorded and fenced through the uploader and used by a resume without an explicit reference.
 - api 0.11.9, ui 0.6.2: an API key's budget, allowed models and expiry can be edited (`PATCH /v1/keys/{alias}`, console).

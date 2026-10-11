@@ -9,7 +9,7 @@ The dispatcher's elected replica does it instead, every reconcile cycle, per wor
      `serverless2.nebius/interconnect=infiniband`, pending or admitted and not finished (nodes = the pod set's
      count; the pool = Kueue's flavor assignment once quota is reserved, before that the InfiniBand pool the
      template's `serverless2.nebius/pool` affinity allows that Kueue will take first: reserved, on-demand, spot,
-     then price), plus LeaderWorkerSets of multi-node endpoints (charts/endpoint) with replicas > 0 pinned to an
+     then price), plus LeaderWorkerSets of multi-node endpoints (services/api/render_endpoint.py) with replicas > 0 pinned to an
      InfiniBand pool (nodes = size x replicas);
   2. the pool's floor = max(the fleet document's `min_nodes`, demand), never above `max_nodes` (a run that needs
      more nodes than the pool has can never fit there: logged once, nothing changed). Raised at once with
@@ -100,7 +100,7 @@ def workload_demand(wl: dict, pools: dict) -> dict:
 
 
 def lws_demand(obj: dict, pools: dict) -> dict:
-    """{pool: nodes} a started multi-node endpoint (LeaderWorkerSet, charts/endpoint) holds on an InfiniBand pool:
+    """{pool: nodes} a started multi-node endpoint (LeaderWorkerSet, services/api/render_endpoint.py) holds on an InfiniBand pool:
     its pods pin the pool with a nodeSelector; size x replicas whole nodes while replicas > 0."""
     spec = obj.get("spec") or {}
     replicas = int(spec.get("replicas") or 0)

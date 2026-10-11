@@ -76,9 +76,11 @@ protocol, GPU count and classes, scaling, regions, weights; `services/api/models
 catalog entry and:
 
 1. stores spec and entry in table `models` and the write in `models_history` (`GET /v1/models/{id}/history`);
-2. renders the endpoint on every cluster of the model's regions with `charts/endpoint` (`helm template`
-   in the API image, server-side apply through the api-agent identities: Roles
-   `serverless2-api-agent-models` and `serverless2-api-agent-catalog`);
+2. renders the endpoint on every cluster of the model's regions natively (`services/api/render_endpoint.py`:
+   InferenceService or LeaderWorkerSet with its Service and HTTPRoute, SecurityPolicy, claims; server-side
+   apply through the api-agent identities: Roles `serverless2-api-agent-models` and
+   `serverless2-api-agent-catalog`). `charts/endpoint` is the reference rendering of the same objects, kept
+   for one release with golden tests that hold the two equal;
 3. registers an OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway
    hostname under that region's domain (`ENDPOINT_DOMAINS`);
 4. writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of every other region.
@@ -143,9 +145,9 @@ the shared checkpoint directory. `JOBS.md` has the details and the limits.
 |---|---|---|
 | Clusters, nodes, capacity | Nebius Managed Kubernetes, node groups with the autoscaler, spot pricing policies, capacity blocks, GPU clusters for InfiniBand | `stack/modules/cluster` |
 | Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt), ext-auth to LiteLLM | `EDGE.md` |
-| Endpoints | KServe on Knative Serving | `charts/endpoint`, `catalog/models` |
+| Endpoints | KServe on Knative Serving | `services/api/render_endpoint.py` (`charts/endpoint` is the reference rendering), `catalog/models` |
 | Fleet database | Nebius Managed Service for PostgreSQL, databases `platform` and `litellm` | `stack/cloud/database.tf`, `stack/platform/database.tf`; `OPERATIONS.md` "Database" |
-| Model definitions | the control API, `services/api/models.py` and `db.py`, `charts/endpoint` | `POST/PUT/DELETE /v1/models`, history per model, read-only copies per region |
+| Model definitions | the control API, `services/api/models.py`, `render_endpoint.py` and `db.py` | `POST/PUT/DELETE /v1/models`, history per model, read-only copies per region |
 | Keys, budgets, per-call prices | LiteLLM proxy on the fleet database | keys per tenant, pass-through routes with a price |
 | Queued calls and runs | Kubernetes Jobs, JobSet, the 30 MB runner image | `JOBS.md` |
 | Queueing, quotas, priorities, cross-region placement | Kueue with MultiKueue, the cost dispatcher | `SCHEDULING.md` |

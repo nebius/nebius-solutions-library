@@ -1,7 +1,7 @@
 # Tenant namespaces (label serverless2.nebius/kueue: managed) are created by charts/tenant at onboarding
 # and admitted by Kueue (managedJobsNamespaceSelector in the kueue Application). The endpoint namespace
-# (models) is managed too since F4: predictor pods that carry kueue.x-k8s.io/queue-name (charts/endpoint
-# `queue.name`) are admitted by Kueue in the model's preference order and count against the ClusterQueue;
+# (models) is managed too since F4: predictor pods that carry kueue.x-k8s.io/queue-name (the endpoint's
+# `queue.name`, services/api/render_endpoint.py) are admitted by Kueue in the model's preference order and count against the ClusterQueue;
 # pods without the label (manageJobsWithoutQueueName: false) are untouched.
 apiVersion: v1
 kind: Namespace

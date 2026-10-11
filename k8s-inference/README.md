@@ -14,7 +14,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | You get | How it is built |
 |---|---|
 | One API for models: invoke, poll, fetch, cancel, resume | `services/api` behind API keys (LiteLLM) and an Envoy gateway; `docs/API.md` |
-| Any container as a model; the platform ships none | a container description per model, given through the console or `POST /v1/models`, stored in the fleet database and rendered with `charts/endpoint` (KServe) or as a job template |
+| Any container as a model; the platform ships none | a container description per model, given through the console or `POST /v1/models`, stored in the fleet database and rendered by the API as a KServe endpoint or as a job template |
 | Endpoints that scale to zero, with a warm floor if you want one, and warm spare nodes per pool (`warm_nodes`) that any model can start on without an instance boot | KServe on Knative, one `InferenceService` per model and region; placeholder pods of negative priority hold the spares |
 | Queued endpoint calls and long jobs that survive spot preemption | Kubernetes Jobs with a checkpoint volume; Kueue admits them, `docs/JOBS.md` |
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
@@ -172,7 +172,7 @@ platform ("Day 2" below).
   plus a few knobs (image, command and args, env, port, protocol `openai | http | websocket | grpc`, GPU
   count and classes, scaling, regions, weights; the full list is the docstring of `services/api/models.py`).
   The API stores the definition in the fleet database with its history, renders the endpoint on every
-  cluster of the model's regions with `charts/endpoint`, and registers an OpenAI endpoint as a LiteLLM
+  cluster of the model's regions (`services/api/render_endpoint.py`), and registers an OpenAI endpoint as a LiteLLM
   model group. `PUT /v1/models/<id>` changes it, `DELETE` removes it, `GET /v1/models/<id>/history` lists
   the versions. Only the fleet API writes; a regional API answers a write with 409 and the fleet API's URL.
   `docs/API.md` "Models".
@@ -289,7 +289,8 @@ that nobody assumes it does:
 | `stack/cloud`, `stack/platform`, `stack/models` | the three stages; `stack/modules/{cluster,tenant-region}` the reusable modules |
 | `stack/bootstrap`, `stack/scripts` | state bucket bootstrap, preflight, small helpers |
 | `clusters/common/apps`, `clusters/common/values`, `clusters/common/manifests` | the chart list with pinned versions, Helm values, shared manifests |
-| `charts/fleet`, `charts/endpoint`, `charts/tenant` | queues and cache from the fleet definition; one endpoint; one tenant namespace |
+| `charts/fleet`, `charts/tenant` | queues and cache from the fleet definition; one tenant namespace |
+| `charts/endpoint` | the reference rendering of one endpoint; the API renders endpoints natively (`services/api/render_endpoint.py`), the chart stays one release with golden tests holding the two equal |
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
 | `services/api`, `services/dispatcher`, `services/jobs`, `services/ops`, `ui` | the own code: API, dispatcher and price feed, job runner, ops image, console |
 | `tools/` | build or copy the platform images, the quality gate, the library sync |
@@ -309,12 +310,12 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.11 |
+| `services/api` image | 0.11.14 |
 | `services/dispatcher` image | 0.2.7 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |
 | `ui` image | 0.6.2 |
-| `charts/endpoint` | 0.1.2 |
+| `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.14) |
 | `charts/fleet` | 0.1.3 |
 | `charts/tenant` | 0.3.0 |
 

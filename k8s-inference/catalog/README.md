@@ -2,7 +2,7 @@
 
 One file per model in `catalog/models/<id>.yaml`, one schema for endpoints and
 run classes (the API reads this directory; `services/api/catalog.py`).
-Endpoints are defined through the API (`POST /v1/models`), which renders `charts/endpoint` with the
+Endpoints are defined through the API (`POST /v1/models`), which renders the endpoint's objects (`services/api/render_endpoint.py`; `charts/endpoint` is the reference rendering) with the
 entry as its values file, once per cluster named in its `deployments` (and not `paused`); this directory
 holds the built-in run classes only. Nothing is rendered into the repository. Run-class
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
@@ -73,7 +73,7 @@ deployments:                   # one key per cluster directory; values override 
    and `minReplicas: 0` unless the measured cold start is unacceptable for the
    class. Requests may only use `nvidia.com/gpu`, `cpu`, `memory`
    (the Kueue ClusterQueues cover nothing else).
-4. Check rendering locally with `helm template <id> charts/endpoint -f catalog/models/<id>.yaml --set cluster=<cluster>`. Run `make check`, then apply the Terraform models stage through `stack.sh` to deploy bundled entries.
+4. Check rendering locally with `.venv-api/bin/python services/api/models.py render <cluster> < catalog/models/<id>.yaml` (the API's renderer; `helm template <id> charts/endpoint -f catalog/models/<id>.yaml --set cluster=<cluster>` is the reference rendering). Run `make check`, then apply the Terraform models stage through `stack.sh` to deploy bundled entries.
 5. Customer-created models use `POST /v1/models` (admin key) or the UI. The API stores desired state/history before applying this same chart and retrying regional copies; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
 6. Verify a cold and warm request through the predictor's external HTTPS host with a permitted key. OpenAI API-managed models register their LiteLLM group during reconciliation. See `docs/EDGE.md` and `docs/OPERATIONS.md`.
 
