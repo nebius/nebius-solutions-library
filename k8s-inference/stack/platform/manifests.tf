@@ -173,7 +173,7 @@ locals {
                 { name = "API_UPSTREAM", value = "http://api.api.svc.cluster.local:80" },
                 { name = "DNS_RESOLVER", value = data.kubernetes_service_v1.coredns.spec[0].cluster_ip },
                 # served to the browser at /config.json (ui/src/config.ts): the public API and the Grafana of every cluster
-                { name = "PUBLIC_API_URL", value = "https://${local.hostnames.api}" },
+                { name = "PUBLIC_API_URL", value = "https://api.${local.control_host}" }, # the fleet's one API (control); locals are evaluated on every cluster
                 { name = "GRAFANA_URLS", value = local.grafana_urls },
               ]
               resources       = { requests = { cpu = "20m", memory = "32Mi" }, limits = { cpu = "200m", memory = "128Mi" } }
