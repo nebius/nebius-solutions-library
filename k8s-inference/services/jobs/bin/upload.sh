@@ -14,7 +14,7 @@
 set -uo pipefail
 # UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
 # attempt record is kept under /work/attempts (the run moves its own data).
-MODE="${UPLOAD_MODE:-sync}"; EXPORT=""
+MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token; TOKEN=$(cat "$TOKEN_FILE"); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
@@ -71,17 +71,18 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
 }
 
 upload() {   # $1 = status
+  local st="$1"                                 # the positional parameters are replaced below (UPLOAD_EXCLUDES)
   cd /work || return
-  record "$1"
-  if [ "$MODE" = record ]; then EXPORT="n/a"; record "$1"; echo "RECORD $(date -u +%FT%TZ) status=$1 (application-managed I/O: nothing exported)"; return; fi
+  record "$st"
+  if [ "$MODE" = record ]; then EXPORT="n/a"; record "$st"; echo "RECORD $(date -u +%FT%TZ) status=$st (application-managed I/O: nothing exported)"; return; fi
   # multi-node runs (UPLOAD_SCOPE=rank0, docs/JOBS.md): every pod records its attempt, only rank 0 publishes the
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then
-    echo "RECORD $(date -u +%FT%TZ) rank=$NODE_RANK status=$1 -> $OUTPUT_PREFIX/attempts/$POD_NAME.json"
+    echo "RECORD $(date -u +%FT%TZ) rank=$NODE_RANK status=$st -> $OUTPUT_PREFIX/attempts/$POD_NAME.json"
     aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
     return
   fi
-  echo "UPLOAD START $(date -u +%FT%TZ) status=$1 -> $OUTPUT_PREFIX"
+  echo "UPLOAD START $(date -u +%FT%TZ) status=$st -> $OUTPUT_PREFIX"
   # UPLOAD_EXCLUDES is a string of aws filters ("--exclude checkpoint/*", quotes allowed): split it like a shell
   # line with globbing OFF. Unquoted $UPLOAD_EXCLUDES expanded `checkpoint/*` against /work into `checkpoint/hf`,
   # which excludes that one entry and uploads everything below it: a multi-node run with shared checkpoints
@@ -93,11 +94,11 @@ upload() {   # $1 = status
   if [ "$rc" = 0 ] && [ -n "$(aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --dryrun --size-only --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' --exclude 'STATUS.json' "$@" 2>/dev/null | head -n 1)" ]; then rc=99; fi
   set +f
   if [ "$rc" = 0 ]; then EXPORT=succeeded; else EXPORT=failed; echo "UPLOAD FAILED $(date -u +%FT%TZ) rc=$rc: the volume is kept, retry the export (POST /v1/operations/$OPERATION:export)"; fi
-  record "$1"                                   # the record now says how the export went (and reaches the API)
+  record "$st"                                  # the record now says how the export went (and reaches the API)
   aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
   # STATUS.json is published last: its presence with export=succeeded is the durable-delivery marker
   printf '{"operation":"%s","attempt_pod":"%s","status":"%s","export":"%s","exit_code":%s,"finished_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$1" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
+    "$OPERATION" "$POD_NAME" "$st" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
   aws s3 cp STATUS.json "${OUTPUT_PREFIX%/}/STATUS.json" --no-progress 2>&1 | tail -n 1
   echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
@@ -115,7 +116,7 @@ while true; do
       # sends no SIGTERM, measured 2026-10-09 on a B300 spot node) leaves this "started" record, which the
       # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
       record started
-      aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
+      [ "$MODE" = record ] || aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
     fi
     SEEN=1; gone=0
   elif [ "$SEEN" = 1 ]; then
