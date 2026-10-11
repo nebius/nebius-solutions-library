@@ -612,7 +612,7 @@ def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str
 
 
 # ---- TLS: the model endpoints' certificate of a cluster follows the endpoints deployed there ----------------
-# clusters/common/manifests/gateway/models-tls.yaml: Certificate `models` of the gateway namespace, second
+# charts/platform/templates/gateway/models-tls.yaml: Certificate `models` of the gateway namespace, second
 # certificateRef of the https listener. Terraform creates the self-signed placeholder and ignores the
 # three fields below; the API owns them (server-side apply, its own field manager).
 

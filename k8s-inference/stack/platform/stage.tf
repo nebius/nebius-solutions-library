@@ -1,70 +1,32 @@
-# Per-cluster view: hostnames, image references, chart list and the per-component values/patches that
-# are shared by every cluster. Shared manifests and values stay in
-# clusters/common; nothing here is cluster-specific except what is derived from terraform.tfvars.
+# Per-cluster Helm values of the upstream releases and the release list of this cluster. The per-cluster view of
+# the platform itself (hostnames, images, the values of charts/platform) is computed by stack/config
+# (`platform_values`) so that tools/check.sh renders the same objects without a cloud; here only what needs the
+# upstream charts' value shapes or the cloud state's secrets.
 locals {
   repo   = abspath("${path.module}/../..")
   id     = var.target
   region = local.cluster.region
   name   = local.f.name
 
-  # Public hostnames: <service>.<gateway ip>.sslip.io, or <service>.<cluster id>.<domain>.
-  host_of = { for cid, c in local.cloud.clusters : cid => (
-    local.f.edge.domain == null ? "${c.gateway_ip}.sslip.io" : "${cid}.${local.f.edge.domain}"
-  ) }
-  host         = local.host_of[local.id]
-  control_host = local.host_of[local.control_id]
-  # a GPU region's gateway: the fleet CA (edge.regional_certificates) unless the cluster also carries the control
-  # plane (single-cluster mode: its hostnames are public); the control cluster: ACME; internal mode: the private CA
-  fleet_ca_here      = local.f.edge.mode != "internal" && local.f.edge.regional_certificates == "fleet-ca" && local.role.worker && !local.role.control
-  certificate_issuer = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.fleet_ca_here ? "fleet-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt"))
-  hostnames = merge({
-    api     = "api.${local.host}"
-    grafana = "grafana.${local.host}"
-    }, local.role.control ? {
-    app     = "app.${local.host}"
-    litellm = "litellm.${local.host}"
-  } : {})
-  api_urls = { for cid, c in local.cloud.clusters : c.region => "https://api.${local.host_of[cid]}" if local.roles[cid].worker }
-  grafana_urls = join(",", concat(
-    [for cid, c in local.cloud.clusters : "${c.region}=https://grafana.${local.host_of[cid]}" if local.roles[cid].worker],
-    local.dedicated ? ["control=https://grafana.${local.control_host}"] : []
-  ))
-  litellm_url_in_cluster = "http://litellm.litellm.svc:4000"
-  litellm_url            = local.role.control ? local.litellm_url_in_cluster : "https://litellm.${local.control_host}"
-
-  image = { for c, t in local.f.images.versions : c => "${local.images_host}/nebius/serverless2/${c}:${t}" }
-  # The fleet document for the charts (stack/config/locals.tf), with the registry the cloud stage created and, per pool,
-  # the node group the cloud stage created for it: the dispatcher raises an InfiniBand pool's floor through the Nebius
-  # API while a multi-node run waits for its nodes (docs/SCHEDULING.md "InfiniBand pools grow on demand"); null for a
-  # pool the cloud stage has not applied yet (the dispatcher leaves such a pool alone).
+  host               = local.host_of[local.id]
+  hostnames          = local.hostnames_of[local.id]
+  fleet_ca_here      = module.config.fleet_ca_here[local.id]
+  certificate_issuer = module.config.certificate_issuer[local.id]
+  litellm_url        = local.role.control ? local.litellm_url_in_cluster : "https://litellm.${local.control_host}"
+  # The fleet document for the charts (stack/config/locals.tf) with, per pool, the node group the cloud stage created
+  # for it: the dispatcher raises an InfiniBand pool's floor through the Nebius API while a multi-node run waits for
+  # its nodes (docs/SCHEDULING.md "InfiniBand pools grow on demand"); null for a pool the cloud stage has not applied
+  # yet (the dispatcher leaves such a pool alone).
   fleet_doc = merge(local.chart_fleet, {
-    images = merge(local.chart_fleet.images, { source = local.cloud.hub.registry })
     regions = { for rn, r in local.chart_fleet.regions : rn => merge(r, {
       pools = { for pn, p in r.pools : pn => merge(p, { node_group_id = try(local.cloud.clusters[r.id].gpu_node_group_ids[pn], null) }) }
     }) }
   })
 
-  # Chart list: clusters/common/apps/*.yaml (one shared release inventory).
-  apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
-  # Releases that depend on the fleet definition: the GPU Operator and, before it, the Network Operator replace the
-  # fleet's nvidia-device-plugin release when gpu_operator.enabled (docs/FLEET.md "GPU drivers"); every other release
-  # is installed by placement alone. The Network Operator goes wherever the GPU Operator goes unless
-  # gpu_operator.network_operator = false: the Nebius driver profiles of every SXM platform wait for MOFED on nodes
-  # with a Mellanox NIC (2026-10-10: a B300 node without InfiniBand waited forever without it).
-  network_operator = coalesce(local.f.gpu_operator.network_operator, true)
-  app_enabled = {
-    gpu-operator         = local.f.gpu_operator.enabled
-    network-operator     = local.f.gpu_operator.enabled && local.network_operator
-    nvidia-device-plugin = !local.f.gpu_operator.enabled
-  }
-  # Components this stage renders itself from templates (control-only manifests) or not at all.
-  apps = { for n, a in local.apps_all : n => a if(
-    (a.placement == "all" || (a.placement == "worker" && local.role.worker) || (a.placement == "control" && local.role.control))
-    && lookup(local.app_enabled, n, true)
-  ) }
-  helm_apps      = { for n, a in local.apps : n => a if a.kind == "helm" }
-  manifest_apps  = { for n, a in local.apps : n => a if a.kind == "manifests" }
-  manifests_base = { for n, a in local.manifest_apps : n => "../../clusters/common/manifests/${split("/", a.manifestsPath)[1] == "knative-serving" ? "knative" : split("/", a.manifestsPath)[1]}" }
+  # Releases and charts/platform components of this cluster (clusters/common/apps, stack/config `apps_by_cluster`).
+  apps          = module.config.apps_by_cluster[local.id]
+  helm_apps     = { for n, a in local.apps : n => a if a.kind == "helm" }
+  manifest_apps = { for n, a in local.apps : n => a if a.kind == "manifests" }
 
   # Per-cluster Helm values (merged over clusters/common/values/<component>.yaml).
   gpu_prices = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
@@ -150,114 +112,5 @@ locals {
     cluster = local.id
     fleet   = local.fleet_doc
     prepull = { enabled = local.role.worker, images = try(local.prepull_by_cluster[local.id], []) }
-  }
-
-  # API environment (replaces the manifest's list wholesale; the overlays used to patch indices).
-  api_env_common = concat([
-    { name = "LITELLM_URL", value = local.litellm_url },
-    { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
-    { name = "PUBLIC_API_URL", value = "https://${local.hostnames.api}" },
-    { name = "GRAFANA_URLS", value = local.grafana_urls },
-    { name = "CATALOG_DIRS", value = "/etc/catalog" },
-    { name = "RUNNER_IMAGE", value = local.image.jobs },
-    { name = "HUB_REGION", value = local.hub_region },
-    # the OIDC issuer of every GPU region's cluster (docs.nebius.com/kubernetes/networking/oidc-public-endpoint): what a
-    # storage provider trusts for a run's projected workload-identity token (docs/JOBS.md "Execution options")
-    { name = "REGION_OIDC_ISSUERS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=https://oidc.mk8s.api.nebius.cloud/${local.cloud.clusters[cid].cluster_id}"]) },
-  ]) # the API's HTTPS clients trust the system roots plus every CA under /etc/ssl/msp (services/api/config.py)
-  # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
-  api_env_control = [for e in [
-    { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
-    { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
-    { name = "IMAGES_HOST", value = local.images_host },
-    { name = "IMAGES_SOURCE", value = local.cloud.hub.registry },
-    { name = "ENDPOINT_DOMAINS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=${local.host_of[cid]}"]) },
-    { name = "ACME_ISSUER", value = local.certificate_issuer },
-    # the `models` certificates of the GPU regions are written by the control API: their issuer, not the control's
-    { name = "MODELS_ISSUER", value = local.f.edge.mode == "internal" ? "${local.name}-private-ca" : (local.f.edge.regional_certificates == "fleet-ca" && local.dedicated ? "fleet-ca" : (local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt")) },
-  ] : e if local.role.control]
-  api_env = concat(local.api_env_common, local.api_env_control, local.role.manager ? [
-    { name = "REGION", value = "control" },
-    { name = "REGION_KUBECONFIGS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=/etc/kubeconfigs/${c.region}"]) },
-    { name = "REGION_API_URLS", value = join(",", [for r, u in local.api_urls : "${r}=${u}"]) },
-    { name = "FLEET_MANAGER", value = "true" },
-    { name = "S3_ENV_SECRET", value = "s3-fleet" },
-    ] : [
-    { name = "REGION", value = local.region },
-    { name = "REGION_KUBECONFIGS", value = "" },
-    { name = "ENDPOINT_DOMAIN", value = local.host },                          # async endpoint calls go through this cluster's gateway (TLS, key check)
-    { name = "CONTROL_API_URL", value = "https://api.${local.control_host}" }, # keys live in the fleet database: a worker asks the control API (services/api/auth.py)
-  ])
-
-  # JSON 6902 patches per manifests component (what clusters/<cluster>/apps/overlays did).
-  patches = {
-    api = concat([
-      { target = { kind = "Deployment", name = "api", namespace = "api" }, patch = yamlencode(concat([
-        { op = "replace", path = "/spec/template/spec/containers/0/env", value = local.api_env },
-        { op = "replace", path = "/spec/template/spec/containers/0/image", value = local.image.api },
-        { op = "add", path = "/spec/template/spec/volumes/-", value = { name = "catalog", configMap = { name = "catalog" } } },
-        { op = "add", path = "/spec/template/spec/containers/0/volumeMounts/-", value = { name = "catalog", mountPath = "/etc/catalog", readOnly = true } },
-        ], [for v in local.trust_volumes : { op = "add", path = "/spec/template/spec/volumes/-", value = v }],
-      [for v in local.trust_mounts : { op = "add", path = "/spec/template/spec/containers/0/volumeMounts/-", value = v }])) },
-      { target = { kind = "HTTPRoute", name = "api", namespace = "api" }, patch = yamlencode([{ op = "replace", path = "/spec/hostnames/0", value = local.hostnames.api }]) },
-      { target = { kind = "BackendTrafficPolicy", name = "api-rate-limit", namespace = "api" }, patch = yamlencode([{ op = "replace", path = "/spec/rateLimit/global/rules/0/limit/requests", value = local.f.edge.api_rate_limit_per_minute }]) },
-      ], local.role.worker ? [] : [
-      { target = { kind = "Role", name = "serverless2-api-endpoints", namespace = "models" }, patch = yamlencode([{ op = "replace", path = "/metadata/name", value = "serverless2-api-endpoints-unused" }]) },
-    ])
-    edge = []
-    gateway = concat([
-      { target = { kind = "Gateway", name = "serverless2-external", namespace = "envoy-gateway-system" }, patch = yamlencode([
-        { op = "replace", path = "/spec/listeners/1/hostname", value = "*.${local.host}" },
-        { op = "replace", path = "/spec/listeners/1/tls/certificateRefs/0/name", value = "${local.id}-wildcard-tls" },
-      ]) },
-      { target = { kind = "EnvoyProxy", name = "external", namespace = "envoy-gateway-system" }, patch = yamlencode([
-        { op = "add", path = "/spec/provider/kubernetes/envoyService/annotations", value = merge(
-          local.cluster.gateway_allocation_id == null ? {} : { "nebius.com/load-balancer-allocation-id" = local.cluster.gateway_allocation_id },
-          local.f.edge.mode == "internal" ? { "nebius.com/load-balancer-type" = "internal" } : {}
-        ) },
-      ]) },
-      ], local.f.edge.mode == "internal" ? [
-      { target = { kind = "ClusterIssuer", name = "letsencrypt" }, patch = "$patch: delete\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: letsencrypt\n" },
-      { target = { kind = "ClusterIssuer", name = "letsencrypt-staging" }, patch = "$patch: delete\napiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: letsencrypt-staging\n" },
-      ] : local.f.edge.acme.email == "" ? [] : [
-      { target = { kind = "ClusterIssuer", name = "letsencrypt" }, patch = yamlencode([{ op = "add", path = "/spec/acme/email", value = local.f.edge.acme.email }]) },
-      { target = { kind = "ClusterIssuer", name = "letsencrypt-staging" }, patch = yamlencode([{ op = "add", path = "/spec/acme/email", value = local.f.edge.acme.email }]) },
-    ])
-    knative-serving = [
-      { target = { kind = "KnativeServing", name = "knative-serving", namespace = "knative-serving" }, patch = yamlencode([{ op = "replace", path = "/spec/config/domain", value = { (local.host) = "" } }]) },
-    ]
-    observability = [
-      { target = { kind = "CronJob", name = "cost-export", namespace = "monitoring" }, patch = yamlencode(concat([
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/0/value", value = "${local.name}-${local.id}" },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/1/value", value = local.cloud.hub.backups_bucket },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/2/value", value = local.cloud.hub.backups_bucket_endpoint },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/3/value", value = try(local.cloud.hub.backups_bucket_region, local.hub_region) },
-      ], local.f.observability.cost_export ? [] : [{ op = "replace", path = "/spec/suspend", value = true }])) },
-    ]
-    # cost dispatcher + spot price feed (control only): the platform image tag from images.versions
-    dispatcher = [
-      { target = { kind = "Deployment", name = "dispatcher", namespace = "kueue-system" }, patch = yamlencode([{ op = "replace", path = "/spec/template/spec/containers/0/image", value = local.image.dispatcher }]) },
-      { target = { kind = "CronJob", name = "price-feed", namespace = "kueue-system" }, patch = yamlencode([{ op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/image", value = local.image.dispatcher }]) },
-    ]
-    ops = concat([
-      { target = { kind = "CronJob", name = "rotate-nebius-keys", namespace = "ops" }, patch = yamlencode([{ op = "replace", path = "/spec/suspend", value = true }, { op = "replace", path = "/metadata/name", value = "rotate-nebius-keys-unused" }]) },
-      ], local.role.worker ? [
-      { target = { kind = "CronJob", name = "recover-stopped-nodes", namespace = "ops" }, patch = yamlencode([
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/0/value", value = local.cluster.project_id },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/env/2/value", value = local.cluster.cluster_id },
-        { op = "replace", path = "/spec/jobTemplate/spec/template/spec/containers/0/image", value = local.image.ops },
-      ]) },
-      ] : [
-      { target = { kind = "CronJob", name = "recover-stopped-nodes", namespace = "ops" }, patch = yamlencode([{ op = "replace", path = "/spec/suspend", value = true }]) },
-    ])
-    ui = concat([
-      { target = { kind = "HTTPRoute", name = "ui-grafana", namespace = "monitoring" }, patch = yamlencode(concat(
-        [{ op = "replace", path = "/spec/hostnames/0", value = local.hostnames.grafana }],
-        local.f.edge.grafana_public ? [] : [{ op = "replace", path = "/spec/parentRefs/0/name", value = "serverless2-internal" }]
-      )) },
-    ])
-    # node-config bootstraps the mirror configuration itself: its init image stays a public reference
-    node-config = []
-    scheduling  = []
   }
 }

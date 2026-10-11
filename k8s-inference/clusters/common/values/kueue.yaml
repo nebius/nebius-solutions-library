@@ -56,7 +56,7 @@ managerConfig:
       - serverless2.nebius/region
       - serverless2.nebius/profile
     # MultiKueue manager only (control-plane cluster): route placement through the cost-aware external
-    # dispatcher (clusters/common/manifests/dispatcher). Any name other than the two built-in dispatchers means
+    # dispatcher (charts/platform/templates/dispatcher). Any name other than the two built-in dispatchers means
     # "external". The dispatcher patches status.nominatedClusterNames with the kueue-admission field manager.
     # multiKueue:
     #   dispatcherName: serverless2.nebius/cost-dispatcher

@@ -32,7 +32,7 @@ subjects:
 {{- end }}
 # the API (this cluster's, and the control cluster's through its api-agent identity on a worker) manages
 # operation Jobs only in this namespace (ClusterRole serverless2-api-tenant from
-# clusters/common/manifests/api-agent/tenant-clusterrole/clusterrole.yaml)
+# charts/platform/templates/tenant-clusterrole/clusterrole.yaml)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:

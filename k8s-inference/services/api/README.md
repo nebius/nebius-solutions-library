@@ -53,14 +53,14 @@ Deploy: image `<fleet.yaml images.source>/serverless2/api:<tag>` built from the 
 (`docker buildx build --push -f services/api/Dockerfile .`), referenced as
 `registry.serverless2.local/nebius/serverless2/api:<tag>` (docs/IMAGES.md); runner image
 `serverless2/jobs:<tag>` from `services/jobs` the same way (`RUNNER_IMAGE`). Manifests in
-`clusters/common/manifests/api` + per-cluster overlays (Deployment, CronJob,
+`charts/platform/templates/api` + per-cluster overlays (Deployment, CronJob,
 HTTPRoute, rate limit, RBAC), host from `PUBLIC_API_URL`. Secret `api/litellm-master` comes from
 `python -m onboarding bootstrap`.
 
 Tests: `pip install -r services/api/requirements-dev.txt && pytest services/api/tests` (cluster and
 LiteLLM faked). Tenants: the cloud stage (`stack/cloud/tenants.tf`: identity + bucket per region) and the platform
 stage (`stack/platform/tenants.tf`: `charts/tenant` for the Kubernetes objects, Secrets, the keys through `python -m keys bootstrap`
-of this image); `clusters/common/manifests/api-agent` (installed by Terraform per worker) installs the fleet API's identity in each region.
+of this image); `charts/platform/templates/api-agent` (installed by Terraform per worker) installs the fleet API's identity in each region.
 
 Not done: operation history beyond the Jobs' 90-day TTL (finished Jobs are the history; a longer
 record would be a Loki/bucket export); authz is key -> tenant only.

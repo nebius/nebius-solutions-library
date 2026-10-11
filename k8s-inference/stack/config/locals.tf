@@ -53,9 +53,8 @@ locals {
   chart_prices = merge({ for p, v in local.f.prices : p => { on_demand = v.on_demand, spot = v.spot } }, { reserved_marginal = local.f.reserved_marginal_price })
 
   # The fleet document the charts read (charts/fleet, charts/tenant, the API's fleet ConfigMap): the tfvars in
-  # the chart's own shape. `images.source` is the registry the cloud stage created; the platform stage fills
-  # it in from the cloud state, everything else is known from the tfvars alone (tools/check.sh renders the
-  # charts from this document without any cloud access).
+  # the chart's own shape. `images.source` is the registry the cloud stage created (`cloud_facts` below: the cloud
+  # state in the platform stage, a placeholder in tools/check.sh, which renders the charts without any cloud access).
   chart_fleet = {
     name           = local.f.name
     labels         = local.f.labels
@@ -63,7 +62,7 @@ locals {
     capacity_order = local.f.capacity_order
     images = {
       host      = local.images_host
-      source    = coalesce(local.f.images.source, "created-by-the-cloud-stage")
+      source    = local.images_source
       cache     = local.f.images.cache
       upstreams = local.f.images.upstreams
     }
@@ -131,4 +130,148 @@ locals {
   # Endpoint entries (a runtime block) per worker cluster, run classes (mode run / async) are the rest.
   # Images to pre-pull per worker cluster (endpoints and run classes with a fixed image).
   prepull_by_cluster = { for id, es in local.catalog_by_cluster : id => [for mid, e in es : { name = mid, image = try(e.runtime.image, e.job.image) } if can(e.runtime.image) || (can(e.job.image) && !can(regex("{{", try(e.job.image, ""))))] }
+}
+
+# ---------------------------------------------------------------------------
+# Per-cluster view of the platform: the gateway hostnames, the image references, the API's environment and the
+# values of charts/platform (what the per-cluster JSON patches of the platform stage used to set). Everything here
+# is a function of the tfvars and the cloud facts, so tools/check.sh renders the same objects without a cloud.
+locals {
+  cloud_facts = var.cloud != null ? var.cloud : {
+    # TEST-NET-1 addresses and example ids: distinct per cluster, stable across renders (the golden set)
+    clusters = { for i, id in local.cluster_ids : id => {
+      id                 = id, region = local.clusters[id].region, project_id = local.clusters[id].project_id
+      cluster_id         = "mk8scluster-${id}", gateway_ip = "192.0.2.${i + 1}", gateway_allocation_id = "allocation-${id}"
+      gpu_node_group_ids = {}
+    } }
+    hub = {
+      region                  = local.hub_region, id = local.hub_id, project_id = local.hub_project
+      registry                = coalesce(local.f.images.source, "cr.${local.hub_region}.nebius.cloud/registry-example")
+      backups_bucket          = "${local.f.name}-backups"
+      backups_bucket_endpoint = "https://storage.${local.hub_region}.nebius.cloud"
+      backups_bucket_region   = local.hub_region
+      logs_buckets            = { for id in local.cluster_ids : id => "${local.f.name}-logs-${id}" }
+    }
+  }
+  images_source = local.cloud_facts.hub.registry
+  image         = { for c, t in local.f.images.versions : c => "${local.images_host}/nebius/serverless2/${c}:${t}" }
+
+  # Public hostnames: <service>.<gateway ip>.sslip.io, or <service>.<cluster id>.<domain>.
+  host_of      = { for id, c in local.clusters : id => local.f.edge.domain == null ? "${local.cloud_facts.clusters[id].gateway_ip}.sslip.io" : "${id}.${local.f.edge.domain}" }
+  control_host = local.host_of[local.control_id]
+  hostnames_of = { for id, c in local.clusters : id => merge(
+    { api = "api.${local.host_of[id]}", grafana = "grafana.${local.host_of[id]}" },
+    local.roles[id].control ? { app = "app.${local.host_of[id]}", litellm = "litellm.${local.host_of[id]}" } : {}
+  ) }
+  api_urls = { for id, c in local.clusters : c.region => "https://api.${local.host_of[id]}" if local.roles[id].worker }
+  grafana_urls = join(",", concat(
+    [for id in local.cluster_ids : "${local.clusters[id].region}=https://grafana.${local.host_of[id]}" if local.roles[id].worker],
+    local.dedicated ? ["control=https://grafana.${local.control_host}"] : []
+  ))
+  litellm_url_in_cluster = "http://litellm.litellm.svc:4000"
+  # a GPU region's gateway: the fleet CA (edge.regional_certificates) unless the cluster also carries the control
+  # plane (single-cluster mode: its hostnames are public); the control cluster: ACME; internal mode: the private CA
+  acme_issuer   = local.f.edge.acme.staging ? "letsencrypt-staging" : "letsencrypt"
+  fleet_ca_here = { for id, r in local.roles : id => local.f.edge.mode != "internal" && local.f.edge.regional_certificates == "fleet-ca" && r.worker && !r.control }
+  certificate_issuer = { for id, r in local.roles : id => (
+    local.f.edge.mode == "internal" ? "${local.f.name}-private-ca" : (local.fleet_ca_here[id] ? "fleet-ca" : local.acme_issuer)
+  ) }
+  # the `models` certificates of the GPU regions are written by the control API: their issuer, not the control's
+  models_issuer = local.f.edge.mode == "internal" ? "${local.f.name}-private-ca" : (local.f.edge.regional_certificates == "fleet-ca" && local.dedicated ? "fleet-ca" : local.acme_issuer)
+
+  # The CA bundle ConfigMap `trust` (stack/platform/trust.tf) as the API and LiteLLM mount it; a private bundle
+  # (`trust_bundle_pem`) replaces the image's system roots.
+  trust_volumes = [{ name = "trust", configMap = { name = "trust" } }]
+  trust_mounts = concat(
+    [{ name = "trust", mountPath = "/etc/ssl/msp", readOnly = true }],
+    local.f.trust_bundle_pem == null ? [] : [{ name = "trust", mountPath = "/etc/ssl/certs/ca-certificates.crt", subPath = "ca.pem", readOnly = true }],
+  )
+
+  # The API's environment per cluster (services/api/config.py): the whole list, in this order (a reordered env rolls
+  # the Deployment). Every HTTPS client of the API trusts the system roots plus every CA under /etc/ssl/msp.
+  api_env = { for id, r in local.roles : id => concat([
+    { name = "LITELLM_URL", value = r.control ? local.litellm_url_in_cluster : "https://litellm.${local.control_host}" },
+    { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
+    { name = "PUBLIC_API_URL", value = "https://${local.hostnames_of[id].api}" },
+    { name = "GRAFANA_URLS", value = local.grafana_urls },
+    { name = "CATALOG_DIRS", value = "/etc/catalog" },
+    { name = "RUNNER_IMAGE", value = local.image.jobs },
+    { name = "HUB_REGION", value = local.hub_region },
+    # the OIDC issuer of every GPU region's cluster (docs.nebius.com/kubernetes/networking/oidc-public-endpoint): what a
+    # storage provider trusts for a run's projected workload-identity token (docs/JOBS.md "Execution options")
+    { name = "REGION_OIDC_ISSUERS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=https://oidc.mk8s.api.nebius.cloud/${local.cloud_facts.clusters[cid].cluster_id}" if local.roles[cid].worker]) },
+    ], [for e in [
+      # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
+      { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
+      { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
+      { name = "IMAGES_HOST", value = local.images_host },
+      { name = "IMAGES_SOURCE", value = local.images_source },
+      { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
+      { name = "ACME_ISSUER", value = local.certificate_issuer[id] },
+      { name = "MODELS_ISSUER", value = local.models_issuer },
+    ] : e if r.control], r.manager ? [
+    { name = "REGION", value = "control" },
+    { name = "REGION_KUBECONFIGS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=/etc/kubeconfigs/${local.clusters[cid].region}" if local.roles[cid].worker]) },
+    { name = "REGION_API_URLS", value = join(",", [for rg, u in local.api_urls : "${rg}=${u}"]) },
+    { name = "FLEET_MANAGER", value = "true" },
+    { name = "S3_ENV_SECRET", value = "s3-fleet" },
+    ] : [
+    { name = "REGION", value = local.clusters[id].region },
+    { name = "REGION_KUBECONFIGS", value = "" },
+    { name = "ENDPOINT_DOMAIN", value = local.host_of[id] },                   # async endpoint calls go through this cluster's gateway (TLS, key check)
+    { name = "CONTROL_API_URL", value = "https://api.${local.control_host}" }, # keys live in the fleet database: a worker asks the control API (services/api/auth.py)
+  ]) }
+
+  # The release inventory (clusters/common/apps/*.yaml) per cluster: Helm releases and the components of
+  # charts/platform (kind: manifests), by placement. Releases that depend on the fleet definition: the GPU Operator
+  # and, before it, the Network Operator replace the fleet's nvidia-device-plugin release when gpu_operator.enabled
+  # (docs/FLEET.md "GPU drivers"). The Network Operator goes wherever the GPU Operator goes unless
+  # gpu_operator.network_operator = false: the Nebius driver profiles of every SXM platform wait for MOFED on nodes
+  # with a Mellanox NIC (2026-10-10: a B300 node without InfiniBand waited forever without it).
+  apps_dir = "${path.module}/../../clusters/common/apps"
+  apps_all = { for f in fileset(local.apps_dir, "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.apps_dir}/${f}")) }
+  app_enabled = {
+    gpu-operator         = local.f.gpu_operator.enabled
+    network-operator     = local.f.gpu_operator.enabled && coalesce(local.f.gpu_operator.network_operator, true)
+    nvidia-device-plugin = !local.f.gpu_operator.enabled
+  }
+  apps_by_cluster = { for id, r in local.roles : id => { for n, a in local.apps_all : n => a if(
+    (a.placement == "all" || (a.placement == "worker" && r.worker) || (a.placement == "control" && r.control))
+    && lookup(local.app_enabled, n, true)
+  ) } }
+  # The identities of charts/platform are not apps: the worker's api-agent and MultiKueue ServiceAccounts (the
+  # control cluster holds tokens of them) and the tenant ClusterRole, which the control cluster's API needs too.
+  identity_components = { for id, r in local.roles : id => r.worker ? ["api-agent", "fleet-access", "tenant-clusterrole"] : ["tenant-clusterrole"] }
+
+  # charts/platform values per cluster (charts/platform/values.yaml documents them).
+  platform_values = { for id, r in local.roles : id => {
+    cluster    = id
+    role       = r
+    components = merge({ for n, a in local.apps_by_cluster[id] : n => true if a.kind == "manifests" }, { for n in local.identity_components[id] : n => true })
+    host       = local.host_of[id]
+    hostnames  = local.hostnames_of[id]
+    images     = { api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
+    api        = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
+    trust      = { volumes = local.trust_volumes, mounts = local.trust_mounts }
+    gateway = {
+      wildcardSecret = "${id}-wildcard-tls"
+      serviceAnnotations = merge(
+        local.cloud_facts.clusters[id].gateway_allocation_id == null ? {} : { "nebius.com/load-balancer-allocation-id" = local.cloud_facts.clusters[id].gateway_allocation_id },
+        local.f.edge.mode == "internal" ? { "nebius.com/load-balancer-type" = "internal" } : {}
+      )
+      acme = { enabled = local.f.edge.mode != "internal", email = local.f.edge.acme.email }
+    }
+    observability = { costExport = {
+      enabled  = local.f.observability.cost_export
+      cluster  = "${local.f.name}-${id}"
+      bucket   = local.cloud_facts.hub.backups_bucket
+      endpoint = local.cloud_facts.hub.backups_bucket_endpoint
+      region   = try(local.cloud_facts.hub.backups_bucket_region, local.hub_region)
+    } }
+    ops = {
+      recoverStoppedNodes = r.worker ? { enabled = true, projectId = local.clusters[id].project_id, clusterId = local.cloud_facts.clusters[id].cluster_id } : { enabled = false, projectId = "project-example", clusterId = "mk8scluster-example" }
+      rotateKeys          = false
+    }
+    ui = { grafanaPublic = local.f.edge.grafana_public }
+  } }
 }

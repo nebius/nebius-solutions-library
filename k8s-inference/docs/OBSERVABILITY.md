@@ -44,7 +44,7 @@ Enabling details worth knowing:
 - Knative 1.23 exports nothing by default (OTel protocol `none`). The
   KnativeServing CR now carries `config.observability.metrics-protocol:
   prometheus` and `request-metrics-protocol: prometheus`
-  (`clusters/common/manifests/knative/knative-serving.yaml`). Control-plane pods
+  (`charts/platform/templates/knative-serving/knative-serving.yaml`). Control-plane pods
   need a restart to open :9090 after the change; Knative itself rolled the
   revision deployments so new endpoint pods carry the setting (older pods
   show as `down` on :9091 until replaced).
@@ -86,7 +86,7 @@ GPU-hours over a dashboard range are `sum_over_time(rule[$__range:1m]) / 60`
 
 ## Dashboards (ConfigMaps `serverless2-dashboard-*`, tag `serverless2`)
 
-Kept as ConfigMaps in `clusters/common/manifests/observability` (edit the JSON, commit);
+Kept as ConfigMaps in `charts/platform/templates/observability` (edit the JSON, commit);
 never edit the JSON by hand. The platform dashboard no longer carries a GPU
 hardware row: that is the upstream DCGM dashboard in the Grafana folder `Upstream`.
 

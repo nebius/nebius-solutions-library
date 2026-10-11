@@ -5,4 +5,3 @@ wave: '3'
 hubOnly: 'false'
 placement: worker
 kind: manifests
-manifestsPath: overlays/edge

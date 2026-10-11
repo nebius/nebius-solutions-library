@@ -32,7 +32,7 @@ runtime:
 - `queue.name` set: predictor pods carry `kueue.x-k8s.io/queue-name` (KServe
   copies predictor labels to the Knative revision pods), the `models`
   namespace is Kueue-managed (`serverless2.nebius/kueue: managed`,
-  `clusters/common/manifests/scheduling/namespaces.yaml`), so every replica is
+  `charts/platform/templates/scheduling/namespaces.yaml`), so every replica is
   gated at creation, gets quota from the ClusterQueue behind the LocalQueue
   and is released with the pool's `nodeSelector` and tolerations injected.
   The chart renders no pool `nodeSelector` in this mode.
@@ -167,7 +167,7 @@ way a run on a preempted node resumes as described below, from its network
 checkpoint volume; local NVMe scratch (`scratch: local-nvme`) does not
 survive a preemption (docs/FLEET.md "Spot capacity").
 
-Packaging: `clusters/common/manifests/dispatcher` (Deployment, CronJob,
+Packaging: `charts/platform/templates/dispatcher` (Deployment, CronJob,
 RBAC; image `serverless2/dispatcher:0.1.1` from `services/dispatcher/
 Dockerfile`, the ops image's Nebius CLI on `python:3.12-slim`), overlay
 `clusters/control/apps/overlays/dispatcher`, app spec staged in
@@ -212,7 +212,7 @@ reconcile cycle, 15 s), per worker cluster:
 What it needs from the fleet document: `charts/fleet` renders `min_nodes` and the pool's `node_group_id` into
 `fleet-prices` (the platform stage adds the ids from the cloud state; a pool the cloud stage has not applied yet
 has none and is left alone), and the worker identity of the manager may list LeaderWorkerSets
-(`clusters/common/manifests/fleet-access/multikueue.yaml`). `INFINIBAND=0` on the Deployment switches the whole
+(`charts/platform/templates/fleet-access/multikueue.yaml`). `INFINIBAND=0` on the Deployment switches the whole
 step off; pools without `interconnect: infiniband` are never touched, whatever runs on them.
 
 **Terraform drift, accepted by design.** While a run waits or runs, the node group's `autoscaling.min_node_count`

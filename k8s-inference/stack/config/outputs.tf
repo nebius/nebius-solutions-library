@@ -119,3 +119,59 @@ output "catalog_by_cluster" {
 output "prepull_by_cluster" {
   value = local.prepull_by_cluster
 }
+
+output "cloud_facts" {
+  value = local.cloud_facts
+}
+
+output "image" {
+  value = local.image
+}
+
+output "host_of" {
+  value = local.host_of
+}
+
+output "hostnames_of" {
+  value = local.hostnames_of
+}
+
+output "control_host" {
+  value = local.control_host
+}
+
+output "api_urls" {
+  value = local.api_urls
+}
+
+output "grafana_urls" {
+  value = local.grafana_urls
+}
+
+output "litellm_url_in_cluster" {
+  value = local.litellm_url_in_cluster
+}
+
+output "fleet_ca_here" {
+  value = local.fleet_ca_here
+}
+
+output "certificate_issuer" {
+  value = local.certificate_issuer
+}
+
+output "trust_volumes" {
+  value = local.trust_volumes
+}
+
+output "trust_mounts" {
+  value = local.trust_mounts
+}
+
+output "apps_by_cluster" {
+  value = local.apps_by_cluster
+}
+
+output "platform_values" {
+  value = local.platform_values
+}

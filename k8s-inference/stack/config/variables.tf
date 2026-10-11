@@ -466,3 +466,13 @@ variable "fleet" {
     error_message = "edge.ip_certificate needs edge.mode = public."
   }
 }
+
+# What the cloud stage created, as far as the platform's manifests depend on it: the gateway address and
+# allocation of every cluster, the cluster ids, the registry, the backups bucket. The platform stage passes the
+# cloud state's `clusters` and `hub` outputs; without them (tools/check.sh renders the charts for the example
+# with no cloud access) deterministic placeholders stand in (locals.tf `cloud_facts`), so a render is reproducible.
+variable "cloud" {
+  description = "The cloud stage's outputs `clusters` and `hub` (null: placeholders for an offline render)."
+  type        = any
+  default     = null
+}

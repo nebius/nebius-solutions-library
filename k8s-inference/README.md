@@ -291,7 +291,8 @@ that nobody assumes it does:
 | `stack/config` | the schema (`variables.tf` with validations) and the derived view shared by every stage |
 | `stack/cloud`, `stack/platform` | the two stages; `stack/modules/{cluster,tenant-region}` the reusable modules |
 | `stack/bootstrap`, `stack/scripts` | state bucket bootstrap, preflight, small helpers |
-| `clusters/common/apps`, `clusters/common/values`, `clusters/common/manifests` | the chart list with pinned versions, Helm values, shared manifests |
+| `clusters/common/apps`, `clusters/common/values` | the chart list with pinned versions, the Helm values of the upstream charts |
+| `charts/platform` | the platform's own manifests (API, gateway, Knative, observability, ops, scheduling, identities), one component per directory, rendered per cluster from values and applied object by object; its render is held equal to `stack/platform/tests/golden` by `make check` |
 | `charts/fleet`, `charts/tenant` | queues and cache from the fleet definition; one tenant namespace |
 | `charts/endpoint` | the reference rendering of one endpoint; the API renders endpoints natively (`services/api/render_endpoint.py`), the chart stays one release with golden tests holding the two equal |
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
@@ -320,6 +321,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.3 |
+| `charts/platform` | 0.1.0 |
 | `charts/tenant` | 0.3.0 |
 
 ## License

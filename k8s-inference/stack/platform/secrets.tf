@@ -170,17 +170,10 @@ resource "kubernetes_config_map_v1" "catalog" {
 # ---------------------------------------------------------------------------
 # Worker identities the control cluster uses: Kueue MultiKueue (kueue-system/multikueue) and the fleet API
 # (api/api-agent), each with a long-lived ServiceAccount token (no rotation CronJob; rotate with
-# `terraform apply -replace`). Published as sensitive outputs; the control stage reads them.
-data "kustomization_overlay" "identities" {
-  count     = local.role.worker ? 1 : 0
-  resources = ["../../clusters/common/manifests/fleet-access/multikueue.yaml", "../../clusters/common/manifests/api-agent"]
-  kustomize_options {
-    load_restrictor = "none"
-  }
-}
-
+# `terraform apply -replace`). Published as sensitive outputs; the control stage reads them. The objects are the
+# chart's components api-agent, fleet-access and tenant-clusterrole (manifests.tf), applied before the waves.
 resource "kubectl_manifest" "identities" {
-  for_each          = local.role.worker ? data.kustomization_overlay.identities[0].manifests : {}
+  for_each          = { for k, r in local.platform_objects : k => jsonencode(r.object) if local.role.worker && contains(["api-agent", "fleet-access", "tenant-clusterrole"], r.component) }
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
@@ -189,17 +182,9 @@ resource "kubectl_manifest" "identities" {
 }
 
 # Control cluster: the same tenant ClusterRole (the fleet API creates manager Jobs in tenant namespaces and
-# reads `tenant-storage`); workers get it from the api-agent kustomization above.
-data "kustomization_overlay" "tenant_clusterrole" {
-  count     = local.role.control ? 1 : 0
-  resources = ["../../clusters/common/manifests/api-agent/tenant-clusterrole"]
-  kustomize_options {
-    load_restrictor = "none"
-  }
-}
-
+# reads `tenant-storage`); workers get it with the identities above.
 resource "kubectl_manifest" "tenant_clusterrole" {
-  for_each          = local.role.control ? data.kustomization_overlay.tenant_clusterrole[0].manifests : {}
+  for_each          = { for k, r in local.platform_objects : k => jsonencode(r.object) if local.role.control && r.component == "tenant-clusterrole" }
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true

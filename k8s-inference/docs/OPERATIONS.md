@@ -5,7 +5,7 @@ rotation, the API allow-list, high availability, recovery of spot pools, images,
 tenants and their isolation, edge, capacity, patching and the checks after any change.*
 
 Everything operational inside the clusters is rendered by the platform stage from
-`clusters/common/manifests/ops` (the `ops` namespace, the spot-recovery CronJob, the tenant isolation
+`charts/platform/templates/ops` (the `ops` namespace, the spot-recovery CronJob, the tenant isolation
 policy) and runs in the ops image `services/ops` (Nebius CLI, crane, jq, curl). Nothing pre-existing in
 your projects is touched; every identity below is created by the cloud stage and scoped to one project.
 
@@ -78,12 +78,12 @@ PodDisruptionBudget (minAvailable 1), so a node drain or a crash never takes the
 
 | Component | Where it is set | Mode |
 |---|---|---|
-| Envoy proxies `knative-external` / `knative-internal` (every request) | `clusters/common/manifests/gateway/envoyproxy-ha.yaml` (`envoyDeployment.replicas: 2`, `envoyPDB`) | active/active behind the LB / ClusterIP Service |
+| Envoy proxies `knative-external` / `knative-internal` (every request) | `charts/platform/templates/gateway/gateway.yaml` (`envoyDeployment.replicas: 2`, `envoyPDB`) | active/active behind the LB / ClusterIP Service |
 | Envoy Gateway controller | `clusters/common/values/envoy-gateway.yaml` | leader election |
 | LiteLLM proxy (keys, sync/async pass-through) | `clusters/common/values/litellm.yaml` (`replicaCount: 2`) | active/active, state in the managed PostgreSQL |
-| API | `clusters/common/manifests/api/api.yaml` (2 replicas) | active/active |
+| API | `charts/platform/templates/api/api.yaml` (2 replicas) | active/active |
 | Kueue controller | `clusters/common/values/kueue.yaml` (`controllerManager.replicas: 2`) | leader election |
-| Knative Serving (activator, autoscaler, controller, webhook) | `clusters/common/manifests/knative/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
+| Knative Serving (activator, autoscaler, controller, webhook) | `charts/platform/templates/knative-serving/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
 | Fleet database | Nebius Managed PostgreSQL (`control_plane.database.hosts`, 1 by default; the service's failover with 2) | the service's |
 
 Single replicas on purpose (not in the request path, reconcile-only; an outage delays changes, not
@@ -148,15 +148,15 @@ enabling it on a region that already has nodes is a node-group template change t
 of the GPU pools (surge 1, drain 10 min): existing nodes never get the mount, only new ones.
 
 Seed weights before the first start (optional; the first start seeds too), with the Job template
-`clusters/common/manifests/ops/seed-weights-job.yaml` (not applied by the stage; variables in its header):
+`tools/seed-weights-job.yaml` (not applied by the stage; variables in its header):
 
 ```
 # HuggingFace repo into the HF cache layout
 SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=<pool> SEED_UID=1000 \
-  envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
+  envsubst < tools/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
 # NIM image: runs the image's download-to-cache with NGC_API_KEY (Secret ops/ngc-api-key; pull Secret ops/ngc)
 SEED_PATH=<model> SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/<org>/<nim-image>:<tag> SEED_POOL=<pool> SEED_UID=1000 \
-  envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
+  envsubst < tools/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
 # a bucket prefix (SEED_SOURCE=s3 SEED_REF=s3://bucket/prefix SEED_IMAGE=amazon/aws-cli:2.22.35), or any command in any image (SEED_SOURCE=cmd)
 ```
 
@@ -292,8 +292,8 @@ with `policyTypes: [Ingress, Egress]`, ingress from `podSelector: {}`, egress to
 
 ### API RBAC
 
-`clusters/common/manifests/api/api.yaml` holds everything the `api` ServiceAccount may do: ClusterRole
-`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `clusters/common/manifests/api-agent`)
+`charts/platform/templates/api/api.yaml` holds everything the `api` ServiceAccount may do: ClusterRole
+`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `charts/platform/templates/api-agent`)
 bound per tenant namespace by the RoleBinding `charts/tenant` renders; Role `serverless2-api-endpoints` in
 `models` (inferenceservices get/list/patch, pods); read-only Roles `serverless2-api-templates` in the
 template namespaces (`api`); one ClusterRole to list tenant namespaces (billing).
@@ -326,8 +326,8 @@ block (with `protect_data = true` the bucket stays and must be emptied by hand f
 - **Regional API** (`api` on every cluster): the platform stage gives it Secret `api/litellm-master` (a
   copy of the control cluster's) and the tenant RoleBindings that `charts/tenant` renders. It carries no
   region kubeconfigs; sync and async calls for its region are answered there, writes go to the fleet API.
-- **Rate limits** live in `clusters/common/manifests/api/api.yaml` (API route) and
-  `clusters/common/manifests/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
+- **Rate limits** live in `charts/platform/templates/api/api.yaml` (API route) and
+  `charts/platform/templates/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
   service (`envoy-gateway-system`, deployed by the chart when `config.envoyGateway.rateLimit` is set) in
   `ratelimit-redis`. Redis is not persistent: a restart resets the windows; if it is unreachable Envoy
   fails open. Check: `kubectl -n envoy-gateway-system get deploy envoy-ratelimit ratelimit-redis`; test
@@ -343,7 +343,7 @@ managed**; the chart computes it from the two numbers, so they change together i
 (min 0) borrow a GPU only while they serve; an admitted run can wait Pending for one scale-to-zero period
 (60 s grace) in the worst case. Alerts `RunPodPendingLong` (admitted run pods Pending > 10 min) and
 `KueueWorkloadsPendingLong` (quota exhausted > 15 min) in
-`clusters/common/manifests/observability/rules-capacity.yaml`.
+`charts/platform/files/observability/rules-capacity.yaml`.
 
 When a tenant needs more: raise `max_nodes` (`./stack.sh apply`), the quota follows, and if it is a
 sustained need, a reserved (non-spot) pool as a second flavor ahead of the spot one (the preference queues

@@ -1,8 +1,8 @@
 # Helm values for the envoy-gateway Application (both clusters); version pinned in clusters/common/apps/envoy-gateway.yaml.
 # Global rate limiting (per API key, cluster-wide) needs the Envoy rate-limit service with a Redis backend;
-# the chart deploys the service when this block is set. Redis: clusters/common/manifests/gateway/redis.yaml.
+# the chart deploys the service when this block is set. Redis: charts/platform/templates/gateway/redis.yaml.
 # Control plane HA (readiness item 1): two controller replicas with leader election; the data-plane
-# proxies (knative-external/knative-internal) are sized in clusters/common/manifests/gateway/envoyproxy-ha.yaml.
+# proxies (knative-external/knative-internal) are sized in charts/platform/templates/gateway/gateway.yaml.
 config:
   envoyGateway:
     gateway:

@@ -1,12 +1,13 @@
 # Changelog
 
 The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `services/ops`, `ui`; tags in
-`stack/config/variables.tf` `images.versions`) and the charts (`charts/endpoint`, `charts/fleet`, `charts/tenant`;
+`stack/config/variables.tf` `images.versions`) and the charts (`charts/endpoint`, `charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). One line per version, newest first; the current versions are in `README.md`
 "Versions". Dates are the day the version landed on the branch.
 
 ## 2026-10-11
 
+- platform chart 0.1.0: the platform's own manifests (`clusters/common/manifests` until now) as one chart with values in place of the platform stage's per-cluster JSON patches; the render is held equal to the objects the patches produced (`stack/platform/tests/golden`, `make check`), so a live cluster sees no change; the kustomization provider leaves the platform stage.
 - tenant chart 0.3.2: rendered by the platform stage (the models stage is folded into it; tenant buckets are cloud-stage resources; the acceptance probe is `tools/verify.sh`); no template change.
 - api 0.11.16: a model's own `env` entry replaces the platform default of the same name in a multi-node endpoint (kimi-k3 sets `NCCL_IB_DISABLE` itself; server-side apply refused the duplicate); a multi-node run's delivery is rank 0's record (the other ranks record no export).
 - api 0.11.16: one auth layer: API keys, budgets, spend and the GPU charge ledger live in the fleet database (`keys`, `charges`, migration 5, `services/api/keys.py`); every API checks keys there (a regional API through the fleet API's `GET /internal/keys/me`), LiteLLM `/key/info` only as a read-only fallback until the one-time import at the control API's first start; billing writes the platform ledger, never LiteLLM's tables (the pinned-schema contract is gone). LiteLLM stays the OpenAI router: tenant keys are mirrored into it (same value), its model groups call the gateway with the fleet's router key (role `router`, Secret `api/router-key`, `stack/platform/router-key.tf`) instead of the platform-internal key and the second budget check; the models stage writes the tenants' keys with `python -m keys bootstrap` Jobs instead of LiteLLM key Jobs. Key management is on the fleet API.

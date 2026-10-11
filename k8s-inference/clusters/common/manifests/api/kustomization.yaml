@@ -1,5 +1,0 @@
-# The `api` component; the platform stage (stack/platform/stage.tf) patches the cluster-specific parts.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - api.yaml

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # The quality gate, the same locally (`make check`, `./stack.sh check`) and in CI (.github/workflows/k8s-inference.yml).
 # No cloud access: every Terraform stage and module must validate, terraform.tfvars.example must pass the
-# schema validations, every chart and manifest must render for every cluster of the example, and the tests
-# of the API and the dispatcher must pass.
+# schema validations, every chart must render for every cluster of the example (charts/platform equal to its
+# golden set), and the tests of the API and the dispatcher must pass.
 #
 #   tools/check.sh            everything
 #   tools/check.sh terraform | render | tests      one part
+#   UPDATE_GOLDEN=1 tools/check.sh render          after a deliberate manifest change: rewrite stack/platform/tests/golden
 #
 # PYTHON (default python3) runs the tests.
 set -euo pipefail
@@ -45,7 +46,12 @@ check_render() {
   render 'jsonencode(local.chart_fleet)' > "$TMP/fleet.json"
   render 'jsonencode(local.catalog)' > "$TMP/catalog.json"
   render 'jsonencode(local.plan)' > "$TMP/plan.json"
+  render 'jsonencode(local.platform_values)' > "$TMP/platform-values.json"
   clusters=$("$PYTHON" -c 'import json; p=json.load(open("'"$TMP"'/plan.json")); print(" ".join(p["order"]))')
+  "$PYTHON" -c 'import json, sys, yaml
+tmp = sys.argv[1]
+for cid, v in json.load(open(f"{tmp}/platform-values.json")).items():
+    yaml.safe_dump(v, open(f"{tmp}/platform-{cid}.yaml", "w"))' "$TMP"
   "$PYTHON" - "$TMP" <<'EOF'
 import json, sys, yaml
 tmp = sys.argv[1]
@@ -63,6 +69,7 @@ EOF
   first=$(echo "$clusters" | cut -d' ' -f1)
   helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
   helm lint "$ROOT/charts/tenant" -f "$TMP/tenant-$first.yaml" > /dev/null; echo "   ok charts/tenant"
+  helm lint "$ROOT/charts/platform" -f "$TMP/platform-$first.yaml" > /dev/null; echo "   ok charts/platform"
   step "helm template: fleet and tenant charts for every cluster of the example; every deployed entry through the API's renderer and the reference chart"
   for cid in $clusters; do
     helm template fleet "$ROOT/charts/fleet" -f "$TMP/fleet-$cid.yaml" > /dev/null; echo "   ok charts/fleet $cid"
@@ -95,10 +102,19 @@ EOF
     "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$TMP/llm-example.yaml" > /dev/null; echo "   ok render_endpoint llm-example $cid"
     helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint llm-example $cid"
   done
-  step "kustomize build: every shared manifest base"
-  for d in "$ROOT"/clusters/common/manifests/*/; do
-    [ -f "$d/kustomization.yaml" ] || continue
-    kubectl kustomize "$d" > /dev/null; echo "   ok ${d#"$ROOT"/}"
+  # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: the objects
+  # (names, namespaces, labels, every field) and their components (the wave, hence the state address) must be
+  # equal, so that an apply changes nothing on a live cluster. The golden set was first written from the kustomize
+  # bases plus the stage's JSON patches that the chart replaced (2026-10-11); UPDATE_GOLDEN=1 rewrites it from the
+  # chart after a deliberate change, and the diff of the golden files in the review shows exactly what changes.
+  step "charts/platform: the render of every cluster equals its golden set (stack/platform/tests/golden)"
+  for cid in $clusters; do
+    helm template platform "$ROOT/charts/platform" -f "$TMP/platform-$cid.yaml" > "$TMP/platform-$cid.rendered.yaml"
+    if [ "${UPDATE_GOLDEN:-0}" = 1 ]; then
+      "$PYTHON" "$ROOT/stack/platform/tests/render.py" --update "$ROOT/stack/platform/tests/golden/$cid.json" < "$TMP/platform-$cid.rendered.yaml"
+    else
+      "$PYTHON" "$ROOT/stack/platform/tests/render.py" "$ROOT/stack/platform/tests/golden/$cid.json" < "$TMP/platform-$cid.rendered.yaml"
+    fi
   done
 }
 
