@@ -37,20 +37,20 @@ on spot; each variant is its own Knative service `<id>-<variant>`, the first kee
 ({field, map, default}: a request field picks a variant, else the first ready one in priority order). LiteLLM's
 model group lists every variant of every cluster as a deployment with its priority (`order`).
 
-`to_entry` turns a spec into the catalog entry the rest of the API and `charts/endpoint` understand
-(catalog/README.md); the entry is stored next to the spec (database row on the control API, ConfigMap copy
+`to_entry` turns a spec into the catalog entry the rest of the API and the endpoint renderer
+(services/api/render_endpoint.py) understand (catalog/README.md); the entry is stored next to the spec (database row on the control API, ConfigMap copy
 `catalog-<id>` in the `api` namespace of every region). Entries that come from files (the bundled classes)
 are read-only here.
 """
-import json, logging, os, re, subprocess, sys, tempfile, time
+import json, logging, re, sys
 import yaml
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
 from kubernetes.client.rest import ApiException
-import db, kube
+import db, kube, render_endpoint
 from pod_metadata import normalise as normalise_pod_metadata
-from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, CHART_DIR, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION
+from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_INTERNAL_KEY, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION
 from resilience import retry
 
 log = logging.getLogger("api")
@@ -409,7 +409,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             elif d.get("pool") and images.get(pool_class.get(d["pool"]) or ""):
                 d["image"] = normalise_image(images[pool_class[d["pool"]]])      # the class's own image for this deployment
         if nodes > 1:
-            # charts/endpoint/templates/leaderworkerset.yaml: one replica group of `nodes` pods, the leader serves
+            # render_endpoint._leaderworkerset: one replica group of `nodes` pods, the leader serves
             runtime["nodes"] = nodes
             runtime["interconnect"] = interconnect
             if (wc := _command(s.get("worker_command"))):
@@ -531,7 +531,7 @@ def copy_regions() -> list[str]:
     return [r for r in kube.regions() if r != REGION]
 
 
-# ---- rendering: the same chart Terraform uses, applied with server-side apply --------------------------
+# ---- rendering: the endpoint's objects (render_endpoint.py), applied with server-side apply --------------
 
 PLURALS = {"InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservices"),
            "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
@@ -554,46 +554,11 @@ def variant_names(entry: dict) -> list[str]:
     return sorted({v["name"] for c in (entry.get("deployments") or {}) for v in variants(entry, c)})
 
 
-def _variant_entry(entry: dict, cluster: str, v: dict) -> dict:
-    """The entry as the chart sees it for one variant: the cluster's deployment carries the variant's pool, image
-    and replica bounds (the chart merges deployments.<cluster> over runtime)."""
-    e = dict(entry)
-    over = dict((entry.get("deployments") or {}).get(cluster) or {})
-    over.pop("variants", None)
-    over["pool"] = v.get("pool") or over.get("pool")
-    if v.get("image"):
-        over["image"] = v["image"]
-    scaling = {}
-    if v.get("min") is not None:
-        scaling["minReplicas"] = int(v["min"])
-    if v.get("max") is not None:
-        scaling["maxReplicas"] = int(v["max"])
-    if scaling:
-        over["scaling"] = scaling
-    e["deployments"] = {**(entry.get("deployments") or {}), cluster: over}
-    return e
-
-
 def render(entry: dict, cluster: str) -> list[dict]:
-    """`helm template` of charts/endpoint in catalog mode for one cluster, once per variant: the rendered objects."""
-    out: list[dict] = []
-    for v in variants(entry, cluster):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            yaml.safe_dump(_variant_entry(entry, cluster, v), f, sort_keys=False)
-            values = f.name
-        try:
-            # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
-            cmd = ["helm", "template", v["object"], CHART_DIR, "-f", values, "--set", f"cluster={cluster}",
-                   "--set", f"domain={endpoint_domain(kube.cluster_region(cluster))}", "--set", f"ibClaimTemplate={INFINIBAND_CLAIM_TEMPLATE}"]
-            if v["object"] != entry["id"]:
-                cmd += ["--set", f"variantName={v['object']}", "--set", f"variant={v['name']}"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        finally:
-            os.unlink(values)
-        if r.returncode:
-            raise HTTPException(400, f"endpoint chart ({v['object']}): {r.stderr.strip()[-400:]}")
-        out += [d for d in yaml.safe_load_all(r.stdout) if d]
-    return out
+    """The objects of an endpoint on one cluster, once per variant (services/api/render_endpoint.py)."""
+    # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
+    domain = endpoint_domain(kube.cluster_region(cluster))
+    return [doc for v in variants(entry, cluster) for doc in render_endpoint.render(entry, cluster, domain, INFINIBAND_CLAIM_TEMPLATE, v)]
 
 
 def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
@@ -613,7 +578,7 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
             retry(kube.core(region).patch_namespaced_service, name, ns, doc,
                   field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
         else:
-            raise HTTPException(500, f"endpoint chart rendered an unexpected kind {kind}")
+            raise HTTPException(500, f"endpoint renderer produced an unexpected kind {kind}")
         applied.append(f"{kind}/{ns}/{name}")
     return applied
 
@@ -747,8 +712,13 @@ def litellm_group_delete(mid: str, cluster: str, names: list[str] | None = None)
 # ---- offline rendering for the quality gate -----------------------------------------------------------
 if __name__ == "__main__":
     # `python models.py entry --pools <pools.json> < spec.json` prints the catalog entry of a spec against a
-    # given fleet (tools/check.sh renders the example model with charts/endpoint, no cluster needed).
+    # given fleet; `python models.py render <cluster> [--domain <domain>] < entry.yaml` prints the entry's objects
+    # on that cluster (tools/check.sh renders the example model this way, no cluster needed).
     if len(sys.argv) >= 2 and sys.argv[1] == "entry":
         pools = json.load(open(sys.argv[sys.argv.index("--pools") + 1])) if "--pools" in sys.argv else {}
         kube.fleet = lambda: {"pools": pools}
         print(yaml.safe_dump(to_entry(json.load(sys.stdin)), sort_keys=False))
+    elif len(sys.argv) >= 3 and sys.argv[1] == "render":
+        kube.cluster_region = lambda c: c
+        endpoint_domain = lambda region: sys.argv[sys.argv.index("--domain") + 1] if "--domain" in sys.argv else ""   # noqa: E731
+        print(yaml.safe_dump_all(render(yaml.safe_load(sys.stdin) or {}, sys.argv[2]), sort_keys=False))

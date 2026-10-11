@@ -1,0 +1,351 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ib-predictor
+  namespace: models
+  labels:
+    app.kubernetes.io/name: ib
+    app.kubernetes.io/instance: ib
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: endpoint-0.1.3
+    app.kubernetes.io/part-of: serverless2
+    serverless2.nebius/model: ib
+    serverless2.nebius/protocol: openai
+    kueue.x-k8s.io/priority-class: customer-batch
+    serverless2.nebius/cluster: hub
+    serverless2.nebius/mode: sync
+    serverless2.nebius/task: custom
+spec:
+  type: ClusterIP
+  selector:
+    leaderworkerset.sigs.k8s.io/name: ib
+    leaderworkerset.sigs.k8s.io/worker-index: '0'
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ib-predictor
+  namespace: models
+  labels:
+    app.kubernetes.io/name: ib
+    app.kubernetes.io/instance: ib
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: endpoint-0.1.3
+    app.kubernetes.io/part-of: serverless2
+    serverless2.nebius/model: ib
+    serverless2.nebius/protocol: openai
+    kueue.x-k8s.io/priority-class: customer-batch
+    serverless2.nebius/cluster: hub
+    serverless2.nebius/mode: sync
+    serverless2.nebius/task: custom
+    serving.knative.dev/route: ib-predictor
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: serverless2-external
+    namespace: envoy-gateway-system
+  hostnames:
+  - ib-predictor.models.203.0.113.1.sslip.io
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: ''
+      kind: Service
+      name: ib-predictor
+      port: 80
+    timeouts:
+      request: 0s
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: ib
+  namespace: models
+  labels:
+    app.kubernetes.io/name: ib
+    app.kubernetes.io/instance: ib
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: endpoint-0.1.3
+    app.kubernetes.io/part-of: serverless2
+    serverless2.nebius/model: ib
+    serverless2.nebius/protocol: openai
+    kueue.x-k8s.io/priority-class: customer-batch
+    serverless2.nebius/cluster: hub
+    serverless2.nebius/mode: sync
+    serverless2.nebius/task: custom
+  annotations:
+    serverless2.nebius/nodes: '2'
+    serverless2.nebius/interconnect: required
+    serverless2.nebius/idle-s: '0'
+    autoscaling.knative.dev/target-utilization-percentage: '100'
+    autoscaling.knative.dev/window: 30s
+spec:
+  replicas: 1
+  startupPolicy: LeaderCreated
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          app.kubernetes.io/name: ib
+          app.kubernetes.io/part-of: serverless2
+          example.org/startup-profile: qualified-science
+          serverless2.nebius/model: ib
+          serverless2.nebius/protocol: openai
+          serverless2.nebius/role: leader
+        annotations:
+          example.org/qualification: evidence/model-immutable.json
+      spec:
+        automountServiceAccountToken: false
+        imagePullSecrets:
+        - name: ngc
+        nodeSelector:
+          serverless2.nebius/pool: h100-spot-8x-ib
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        resourceClaims:
+        - name: ib
+          resourceClaimTemplateName: ib-8
+        initContainers:
+        - name: weights-prepare
+          image: registry.serverless2.local/docker/library/busybox:1.36
+          command:
+          - sh
+          - -c
+          - mkdir -p /weights-root/kimi-k3 && chmod 1777 /weights-root/kimi-k3
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: weights
+            mountPath: /weights-root
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        containers:
+        - name: endpoint
+          image: registry.serverless2.local/docker/vllm/vllm-openai:v0.31.0
+          command:
+          - /bin/sh
+          - -c
+          - vllm serve /weights/kimi --tensor-parallel-size 8 --pipeline-parallel-size
+            2
+          env:
+          - name: NODE_RANK
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+          - name: NNODES
+            value: '2'
+          - name: GPUS_PER_NODE
+            value: '8'
+          - name: WORLD_SIZE
+            value: '16'
+          - name: MASTER_ADDR
+            value: ib-0.ib
+          - name: MASTER_PORT
+            value: '29500'
+          - name: NCCL_IB_HCA
+            value: mlx5
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: UCX_NET_DEVICES
+            value: eth0
+          - name: HF_HOME
+            value: /weights
+          ports:
+          - containerPort: 8000
+            protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: '8'
+              cpu: '120'
+              memory: 1500Gi
+            requests:
+              nvidia.com/gpu: '8'
+              cpu: '120'
+              memory: 1500Gi
+            claims:
+            - name: ib
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+          volumeMounts:
+          - name: shm
+            mountPath: /dev/shm
+          - name: weights
+            mountPath: /weights
+            subPath: kimi-k3
+            readOnly: false
+        volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: weights
+          persistentVolumeClaim:
+            claimName: weights-shared
+    workerTemplate:
+      metadata:
+        labels:
+          app.kubernetes.io/name: ib
+          app.kubernetes.io/part-of: serverless2
+          example.org/startup-profile: qualified-science
+          serverless2.nebius/model: ib
+          serverless2.nebius/protocol: openai
+          serverless2.nebius/role: worker
+        annotations:
+          example.org/qualification: evidence/model-immutable.json
+      spec:
+        automountServiceAccountToken: false
+        imagePullSecrets:
+        - name: ngc
+        nodeSelector:
+          serverless2.nebius/pool: h100-spot-8x-ib
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        resourceClaims:
+        - name: ib
+          resourceClaimTemplateName: ib-8
+        initContainers:
+        - name: weights-prepare
+          image: registry.serverless2.local/docker/library/busybox:1.36
+          command:
+          - sh
+          - -c
+          - mkdir -p /weights-root/kimi-k3 && chmod 1777 /weights-root/kimi-k3
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: weights
+            mountPath: /weights-root
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        containers:
+        - name: endpoint
+          image: registry.serverless2.local/docker/vllm/vllm-openai:v0.31.0
+          command:
+          - /bin/sh
+          - -c
+          - ray start --address=$LWS_LEADER_ADDRESS:6379 --block
+          env:
+          - name: NODE_RANK
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']
+          - name: NNODES
+            value: '2'
+          - name: GPUS_PER_NODE
+            value: '8'
+          - name: WORLD_SIZE
+            value: '16'
+          - name: MASTER_ADDR
+            value: ib-0.ib
+          - name: MASTER_PORT
+            value: '29500'
+          - name: NCCL_IB_HCA
+            value: mlx5
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: UCX_NET_DEVICES
+            value: eth0
+          - name: HF_HOME
+            value: /weights
+          ports:
+          - containerPort: 8000
+            protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: '8'
+              cpu: '120'
+              memory: 1500Gi
+            requests:
+              nvidia.com/gpu: '8'
+              cpu: '120'
+              memory: 1500Gi
+            claims:
+            - name: ib
+          volumeMounts:
+          - name: shm
+            mountPath: /dev/shm
+          - name: weights
+            mountPath: /weights
+            subPath: kimi-k3
+            readOnly: false
+        volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: weights
+          persistentVolumeClaim:
+            claimName: weights-shared
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ib-authorization
+  namespace: models
+  labels:
+    app.kubernetes.io/name: ib
+    app.kubernetes.io/instance: ib
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: endpoint-0.1.3
+    app.kubernetes.io/part-of: serverless2
+    serverless2.nebius/model: ib
+    serverless2.nebius/protocol: openai
+    kueue.x-k8s.io/priority-class: customer-batch
+    serverless2.nebius/cluster: hub
+    serverless2.nebius/mode: sync
+    serverless2.nebius/task: custom
+spec:
+  targetSelectors:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    matchLabels:
+      serving.knative.dev/route: ib-predictor
+    matchExpressions:
+    - key: networking.knative.dev/visibility
+      operator: NotIn
+      values:
+      - cluster-local
+  extAuth:
+    failOpen: false
+    timeout: 10s
+    headersToExtAuth:
+    - authorization
+    - sec-websocket-protocol
+    http:
+      path: /internal/authorize/ib
+      backendRefs:
+      - group: ''
+        kind: Service
+        name: api
+        namespace: api
+        port: 80
+      headersToBackend:
+      - x-serverless2-tenant
+      - x-serverless2-key-alias

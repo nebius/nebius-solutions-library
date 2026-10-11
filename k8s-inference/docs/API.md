@@ -76,7 +76,8 @@ vocabulary (`services/api/models.py` `native_scaling`).
 
 What happens on a write: the definition goes into the fleet database (table `models`: id, kind, spec, the
 rendered entry, version, `managed_by`, created/updated by and at) and every write into `models_history`;
-the API renders the endpoint on every cluster of the model's regions with `charts/endpoint`, registers an
+the API renders the endpoint on every cluster of the model's regions (`services/api/render_endpoint.py`; `charts/endpoint`
+is the reference rendering of the same objects, kept for one release), registers an
 OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway hostname in that region,
 and writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of every other region.
 `PUT` replaces the definition (version + 1), `DELETE` removes the endpoint everywhere and keeps the last

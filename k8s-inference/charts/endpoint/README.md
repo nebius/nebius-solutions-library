@@ -1,5 +1,14 @@
 # charts/endpoint
 
+**Reference rendering, kept for one release.** Since api 0.11.14 the API renders every endpoint natively
+(`services/api/render_endpoint.py`: the same objects, names, labels, annotations and specs this chart
+produces, with the chart's `values.yaml` defaults and merge order). The API image ships neither helm nor
+this chart. The chart stays in the repository for this release as the reference rendering for operators
+who template by hand: `services/api/tests/test_render_endpoint_golden.py` holds the chart's output for
+every fixture and asserts that the renderer and the chart both still produce it, so the two cannot drift.
+A change of the endpoint's objects is made in `render_endpoint.py`; the chart follows and the golden
+files are regenerated (`python services/api/tests/test_render_endpoint_golden.py --write`).
+
 One KServe `InferenceService` (Knative mode) for an explicit model container:
 GPU, pool placement, scale-to-zero, probes, volumes, optional PVCs and
 LocalModelCache. `values.yaml` documents every key.
@@ -47,4 +56,4 @@ it ahead of time (docs/OPERATIONS.md "Model weights"). `storageUri`/KServe
 model agents are not used: this chart runs explicit containers, so the
 weights path is just a directory the container reads.
 
-The API renders every endpoint with this chart (nothing in Terraform renders endpoints). Each render includes a native SecurityPolicy selecting the model's external routes and using the shared API authorizer. Use `envFrom` for Secret references. Model-write reconciliation persists retry state before applying resources; see `docs/OPERATIONS.md`.
+Nothing in Terraform renders endpoints; the API renders them (`services/api/render_endpoint.py`, this chart being the reference). Each render includes a native SecurityPolicy selecting the model's external routes and using the shared API authorizer. Use `envFrom` for Secret references. Model-write reconciliation persists retry state before applying resources; see `docs/OPERATIONS.md`.
