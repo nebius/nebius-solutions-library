@@ -1,0 +1,20 @@
+{{- if index .Values.components "ui" }}
+# Operator Grafana route (on the internal gateway when `edge.grafana_public = false`); the platform stage renders
+# the console and LiteLLM routes of the control cluster itself (stack/platform/manifests.tf).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ui-grafana
+  namespace: monitoring
+spec:
+  parentRefs:
+  - name: {{ if .Values.ui.grafanaPublic }}serverless2-external{{ else }}serverless2-internal{{ end }}
+    namespace: envoy-gateway-system
+    sectionName: https
+  hostnames:
+  - {{ .Values.hostnames.grafana }}
+  rules:
+  - backendRefs:
+    - name: kube-prometheus-stack-grafana
+      port: 80
+{{- end }}

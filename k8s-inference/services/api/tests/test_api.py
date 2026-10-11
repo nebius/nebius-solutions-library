@@ -1198,6 +1198,13 @@ def admin_keys(monkeypatch):
     return fdb
 
 
+def test_normalise_image_is_identity_without_a_cache_host(monkeypatch):
+    import models as m
+    monkeypatch.setattr(m, "IMAGES_HOST", "")     # images.cache.enabled = false: the nodes pull from the registries themselves
+    for ref in ["vllm/vllm-openai:v0.11.0", "busybox:1.36", "nvcr.io/example/http-example:1.0.0", "cr.example.com/team/private:1"]:
+        assert m.normalise_image(ref) == ref
+
+
 def test_normalise_image_maps_public_registries_to_the_cache_host():
     import models as m
     assert m.normalise_image("vllm/vllm-openai:v0.11.0") == "registry.serverless2.local/docker/vllm/vllm-openai:v0.11.0"

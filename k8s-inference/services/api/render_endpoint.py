@@ -23,7 +23,7 @@ import copy
 
 from fastapi import HTTPException
 
-from config import LABEL
+from config import IMAGES_HOST, LABEL
 
 CHART = "endpoint-0.1.3"             # charts/endpoint Chart.yaml: the `helm.sh/chart` label the chart stamped
 POOL_LABEL = f"{LABEL}/pool"
@@ -51,7 +51,7 @@ DEFAULTS: dict = {
     "localModelCache": {"enabled": False, "storageUri": "", "nodeGroups": [], "size": "50Gi"},
     "weights": {"sharedFilesystem": {"enabled": False, "claimName": "weights-shared", "path": "", "mountPath": "/weights",
                                      "readOnly": False, "prepare": True,
-                                     "prepareImage": "registry.serverless2.local/docker/library/busybox:1.36"},
+                                     "prepareImage": f"{IMAGES_HOST}/docker/library/busybox:1.36" if IMAGES_HOST else "docker.io/library/busybox:1.36"},
                 "env": {}},
     "nodes": 1, "workerCommand": [], "interconnect": "none", "ibDevices": 0, "ibClaimTemplate": "ib", "idleSeconds": 0,
     "domain": "", "gatewayName": "serverless2-external", "gatewayNamespace": "envoy-gateway-system",

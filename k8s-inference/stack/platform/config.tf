@@ -7,7 +7,7 @@ variable "fleet" {
   type        = any
 }
 
-# Stage selector (platform and models run once per cluster). The wrapper stack.sh sets it; cloud ignores it.
+# Stage selector (the platform stage runs once per cluster). The wrapper stack.sh sets it; cloud ignores it.
 variable "target" {
   description = "Cluster id this stage applies to (a region id or `control`)."
   type        = string
@@ -17,6 +17,7 @@ variable "target" {
 module "config" {
   source = "../config"
   fleet  = var.fleet
+  cloud  = { clusters = local.cloud.clusters, hub = local.cloud.hub } # what charts/platform's values depend on (providers.tf)
 }
 
 # Short names, as the stage files use them.
@@ -50,6 +51,17 @@ locals {
   catalog_without_fleet_class = module.config.catalog_without_fleet_class
   catalog_by_cluster          = module.config.catalog_by_cluster
   prepull_by_cluster          = module.config.prepull_by_cluster
+  image                       = module.config.image
+  images_cache                = module.config.images_cache
+  registry                    = module.config.registry_prefix # alias -> image prefix: through the cache, or the registry itself
+  host_of                     = module.config.host_of
+  hostnames_of                = module.config.hostnames_of
+  control_host                = module.config.control_host
+  grafana_urls                = module.config.grafana_urls
+  litellm_url_in_cluster      = module.config.litellm_url_in_cluster
+  trust_volumes               = module.config.trust_volumes
+  trust_mounts                = module.config.trust_mounts
+  platform_values             = module.config.platform_values[var.target]
 }
 
 # The Nebius IAM access token (12 h) for the Kubernetes and Helm providers of this cluster; stack.sh sets

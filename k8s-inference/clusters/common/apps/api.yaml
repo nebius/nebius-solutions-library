@@ -5,4 +5,3 @@ wave: '3'
 hubOnly: 'false'
 placement: all
 kind: manifests
-manifestsPath: overlays/api

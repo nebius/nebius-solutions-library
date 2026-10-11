@@ -1,4 +1,4 @@
-# serverless2 ops image: Nebius CLI + crane + jq + curl. Used by the CronJobs in clusters/common/manifests/ops
+# serverless2 ops image: Nebius CLI + crane + jq + curl. Used by the CronJobs in charts/platform/templates/ops
 # (and the dispatcher image copies the CLI from it). Keep it small and static.
 #
 # Bumping a tool: set the new version AND its SHA-256 below (or pass both as --build-arg). The CLI's sum is the

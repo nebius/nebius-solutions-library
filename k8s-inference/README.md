@@ -20,7 +20,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
 | Multi-node endpoints: one model served from N whole nodes (`nodes` in the definition), started and stopped explicitly, stopped when idle | LeaderWorkerSet behind the same gateway route, authorization and LiteLLM entry as a one-pod endpoint; `docs/API.md`, "Multi-node endpoints" |
 | N regions, one queue | Kueue MultiKueue on a control cluster; a dispatcher sends each job to the cheapest free pool of the GPU class the model prefers, `docs/SCHEDULING.md` |
-| Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; `docs/IMAGES.md` |
+| Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; the cache is an add-on (`images.cache.enabled`); `docs/IMAGES.md` |
 | Tenants, fair sharing, dedicated pools | a namespace per cluster, a bucket and identity per region, API keys with budgets, Pod Security baseline, their own Kueue queues with a fair-share weight and a GPU cap, pools only they use (`docs/FLEET.md`, "Tenants"), optional GPU quota and image allow-list |
 | Spot, on-demand and reserved capacity | per pool: spot with a price cap, on-demand, or capacity blocks used first |
 | GPU drivers from the node image, or from the NVIDIA GPU Operator (any driver version, open kernel modules, MIG manager; the GPUDirect Storage module is installable but not validated, see `docs/FLEET.md`) | `gpu_operator` in `terraform.tfvars`: node groups without a driver preset, the Nebius marketplace builds of the Network and GPU Operators; `docs/FLEET.md`, "GPU drivers" |
@@ -53,8 +53,8 @@ out of. It is not Nebius Serverless AI, the managed service the table compares w
 
 ```
 terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, pools, filesystems, static IPs, identities, registry, buckets, the managed database
-                                ──▶ platform   one state per cluster: Helm releases and manifests (workers first, then control)
-                                ──▶ models     one state per cluster: tenants, API keys, the acceptance probe (it creates the example model through the API)
+                                ──▶ platform   one state per cluster: Helm releases and manifests, tenants and API keys (workers first, then control)
+                     tools/verify.sh           after the apply: the acceptance probe (a run, then the example model created through the API and called)
 ```
 
 - **Control cluster** (CPU only, the default): the customer API, LiteLLM, the console, the Kueue MultiKueue
@@ -97,21 +97,23 @@ stack/bootstrap/state-bucket.sh                # 2. once: the Terraform state bu
 ./stack.sh preflight                           # 3. every pool against the Nebius compatibility matrix and quotas
 ./stack.sh apply cloud                         # 4. clusters, pools, filesystems, IPs, identities, registry, the database (about 15 min)
 tools/images.sh build                          # 5. build and push the five platform images to the fleet's registry
-./stack.sh apply                               # 6. platform on every cluster, then tenants and the acceptance probe (it creates the example model)
-./stack.sh output models control               # 7. URLs; tenant keys: ./stack.sh output models control -json tenant_keys
+./stack.sh apply                               # 6. the platform, tenants and keys on every cluster (workers first, control last)
+./stack.sh output platform control             # 7. URLs; tenant keys: ./stack.sh output platform control -json tenant_keys
+tools/verify.sh                                # 8. the acceptance probe: a run, then the example model created through the API and called
 ```
 
 The platform ships no models, only three generic job classes (`hello-run`, `container-run`,
 `distributed-run`). A model is a container you describe: any image from Docker Hub, NGC, GHCR, Quay or the
 fleet's own registry, pulled through the per-region cache. Nothing about a model is in the tfvars: you add
 models through the console ("New model") or `POST /v1/models` with an admin key, and the platform keeps
-them in its database. The acceptance probe creates the first one for you, `llm-example` (a stock
+them in its database. The acceptance probe (`tools/verify.sh`, step 8; `acceptance.probe = true` in the
+tfvars runs it as a Job at apply time instead) creates the first one for you, `llm-example` (a stock
 `vllm/vllm-openai:v0.11.0` container serving a small public chat model, `HuggingFaceTB/SmolLM2-360M-Instruct`, on one GPU of the fleet's first
 GPU class, scaled to zero when idle), calls it, and leaves it as the first model of the console. Then call
 a model yourself:
 
 ```sh
-API=$(./stack.sh output models control -raw api_url); KEY=<a tenant key from step 7>
+API=$(./stack.sh output platform control -raw api_url); KEY=<a tenant key from step 7>
 curl -H "Authorization: Bearer $KEY" $API/v1/models
 curl -X POST -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
   -d '{"mode":"run","input":{"message":"hello"}}' $API/v1/models/hello-run:invoke
@@ -150,7 +152,7 @@ through the API only.
 | `observability` | retention, alert webhook, cost export |
 | `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials |
 | `tenants.<name>` | regions, output retention, keys with budgets, optional GPU quota, fair share, dedicated pools, image allow-list |
-| `acceptance` | the probe that runs after the models stage: one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
+| `acceptance` | the probe `tools/verify.sh` runs after the apply (or, with `probe = true`, a Job at apply time): one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
 
 There is no `models` section: the tfvars describe infrastructure only. Models are runtime input of the
 platform ("Day 2" below).
@@ -185,7 +187,8 @@ platform ("Day 2" below).
     "gpu": {"count": 1, "classes": ["h100"]}, "scaling": {"min": 0, "max": 2}}'
   ```
 - **Add a region**: a `regions.<region>` block, then `./stack.sh apply`.
-- **Add a tenant or a key**: `tenants.<name>`, then `./stack.sh apply models <id>` per cluster, control last.
+- **Add a tenant or a key**: `tenants.<name>`, then `./stack.sh apply` (the cloud stage adds the buckets, the
+  platform stage of every cluster the namespace, Secrets and keys; `./stack.sh output platform control -json tenant_keys`).
 - **Grow the weights filesystem or the cache**: change the size; a filesystem change rolls the GPU pools.
 - **Rotate a secret**: every credential is a Terraform resource, so `-replace` it and re-apply the stage
   (`docs/OPERATIONS.md`, "Rotation and take-over").
@@ -219,7 +222,7 @@ tests, 3.5 hours) cost about USD 10 (`docs/VERIFICATION.md`).
 
 ## Destroying
 
-`./stack.sh destroy` runs models, platform and cloud in reverse. With `protect_data = true` (the default)
+`./stack.sh destroy` runs platform and cloud in reverse. With `protect_data = true` (the default)
 the weights filesystems and tenant buckets refuse to be destroyed: set it to `false` and apply first, or
 keep them and remove the rest. Nebius refuses to delete a bucket that still holds objects, so the destroy
 empties the disposable buckets first (`stack/scripts/empty-bucket.sh`, needs the AWS CLI) and removes every
@@ -286,14 +289,15 @@ that nobody assumes it does:
 |---|---|
 | `terraform.tfvars.example`, `stack.sh`, `Makefile` | the one input, the stage driver, short names for the everyday commands |
 | `stack/config` | the schema (`variables.tf` with validations) and the derived view shared by every stage |
-| `stack/cloud`, `stack/platform`, `stack/models` | the three stages; `stack/modules/{cluster,tenant-region}` the reusable modules |
+| `stack/cloud`, `stack/platform` | the two stages; `stack/modules/{cluster,tenant-region}` the reusable modules |
 | `stack/bootstrap`, `stack/scripts` | state bucket bootstrap, preflight, small helpers |
-| `clusters/common/apps`, `clusters/common/values`, `clusters/common/manifests` | the chart list with pinned versions, Helm values, shared manifests |
+| `clusters/common/apps`, `clusters/common/values` | the chart list with pinned versions, the Helm values of the upstream charts |
+| `charts/platform` | the platform's own manifests (API, gateway, Knative, observability, ops, scheduling, identities), one component per directory, rendered per cluster from values and applied object by object; its render is held equal to `stack/platform/tests/golden` by `make check` |
 | `charts/fleet`, `charts/tenant` | queues and cache from the fleet definition; one tenant namespace |
 | `charts/endpoint` | the reference rendering of one endpoint; the API renders endpoints natively (`services/api/render_endpoint.py`), the chart stays one release with golden tests holding the two equal |
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
 | `services/api`, `services/dispatcher`, `services/jobs`, `services/ops`, `ui` | the own code: API, dispatcher and price feed, job runner, ops image, console |
-| `tools/` | build or copy the platform images, the quality gate, the library sync |
+| `tools/` | build or copy the platform images, the quality gate, the acceptance probe (`verify.sh`), the library sync |
 | `docs/` | architecture, API, jobs, scheduling, images, edge, observability, operations, requirements, verification, security pre-review |
 
 ## Everyday commands
@@ -317,6 +321,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.3 |
+| `charts/platform` | 0.1.0 |
 | `charts/tenant` | 0.3.0 |
 
 ## License

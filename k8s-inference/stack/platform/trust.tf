@@ -14,11 +14,6 @@ locals {
     { "msp-ca.pem" = data.http.msp_ca.response_body, "fleet-ca.pem" = local.cloud.fleet_ca.cert },
     local.f.trust_bundle_pem == null ? {} : { "ca.pem" = local.f.trust_bundle_pem },
   )
-  trust_volumes = [{ name = "trust", configMap = { name = "trust" } }]
-  trust_mounts = concat(
-    [{ name = "trust", mountPath = "/etc/ssl/msp", readOnly = true }],
-    local.f.trust_bundle_pem == null ? [] : [{ name = "trust", mountPath = "/etc/ssl/certs/ca-certificates.crt", subPath = "ca.pem", readOnly = true }],
-  )
 }
 
 resource "kubernetes_config_map_v1" "trust" {
@@ -31,7 +26,9 @@ resource "kubernetes_config_map_v1" "trust" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
-# The fleet CA key pair for cert-manager's `fleet-ca` ClusterIssuer (manifests.tf) on the GPU regions.
+# The fleet CA key pair for cert-manager's `fleet-ca` ClusterIssuer (manifests.tf) on the GPU regions. The volume and
+# mount shapes of the `trust` ConfigMap are stack/config's (`trust_volumes`, `trust_mounts`): charts/platform mounts them
+# into the API, the stage into LiteLLM and the billing CronJob.
 resource "kubernetes_secret_v1" "fleet_ca" {
   count = local.fleet_ca_here ? 1 : 0
   metadata {

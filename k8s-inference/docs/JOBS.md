@@ -446,7 +446,7 @@ create/get/patch/delete, Secrets create (plus `tenant-storage` get), Kueue Workl
 worker of a fleet-placed run); plus `kueue-system/fleet-prices` get (pools per class, registries).
 The job ServiceAccount (`job-runner`, Role `job-runner` in `charts/tenant`): pods get/patch (the
 uploader polls its own pod), PVCs get/delete (release after success). The dispatcher's identity on
-a worker (`multikueue`, `clusters/common/manifests/fleet-access`) adds PVC create/get/list/patch/delete
+a worker (`multikueue`, `charts/platform/templates/fleet-access`) adds PVC create/get/list/patch/delete
 for the work volumes of fleet-placed runs.
 
 ## Verified on the hub (2026-10-07, tenant `eval`, API run locally against the cluster)

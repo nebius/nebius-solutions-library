@@ -5,7 +5,7 @@ rotation, the API allow-list, high availability, recovery of spot pools, images,
 tenants and their isolation, edge, capacity, patching and the checks after any change.*
 
 Everything operational inside the clusters is rendered by the platform stage from
-`clusters/common/manifests/ops` (the `ops` namespace, the spot-recovery CronJob, the tenant isolation
+`charts/platform/templates/ops` (the `ops` namespace, the spot-recovery CronJob, the tenant isolation
 policy) and runs in the ops image `services/ops` (Nebius CLI, crane, jq, curl). Nothing pre-existing in
 your projects is touched; every identity below is created by the cloud stage and scoped to one project.
 
@@ -17,7 +17,7 @@ your projects is touched; every identity below is created by the cloud stage and
 | SA auth key (JWT, no expiry) | Secret `ops/nebius-sa`, key `<region>.json`, written by the platform stage (`stack/platform/secrets.tf`) | mounted at `/var/run/nebius/<region>.json`; `ops-login.sh` turns every such file into a CLI profile `sa-<region>` and a registry credential helper for that region (tokens minted per call, nothing expires) |
 | SA auth keys of every GPU region's project (the same ops identities) | Secret `kueue-system/price-feed-nebius-sa` on the control cluster, key `<region>.json` per region (`stack/platform/secrets.tf`) | mounted at `/etc/nebius` in the dispatcher and its price feed; `services/dispatcher/nebius_cli.py` makes the same `sa-<region>` profiles; the dispatcher raises an InfiniBand pool's node-group floor in that region's project while a multi-node run waits (docs/SCHEDULING.md "InfiniBand pools grow on demand"), the price feed asks the calculator |
 | S3 access key of the hub ops SA | Secret `monitoring/cost-export-s3` (`ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`), the daily cost report | bucket policy on the fleet's backups bucket (`<fleet>-backups`): the ops group may write there |
-| Image cache credentials | a static Container Registry key of the hub ops SA, issued once per operator by `stack/scripts/registry-static-key.sh` and cached under `stack/.secrets/` (gitignored); Secret `registry/zot-sync-credentials` | docs/IMAGES.md |
+| Image cache credentials (with the cache, `images.cache.enabled`) | a static Container Registry key of the hub ops SA, issued once per operator by `stack/scripts/registry-static-key.sh` and cached under `stack/.secrets/` (gitignored); Secret `registry/zot-sync-credentials` | docs/IMAGES.md; without the cache neither exists |
 | Registry push/pull from the ops image | the SA token (`Username: iam`) through the docker credential helper `docker-credential-nebius-sa` inside the image | a fresh token per registry request: no 40-minute expiry |
 | LiteLLM master key, Grafana admin password, the database password | `random_password` resources of the cloud stage, in the state bucket (sensitive outputs) and in the clusters' Secrets | `./stack.sh output platform <id>` prints them |
 
@@ -33,9 +33,9 @@ There are no rotation CronJobs in this form: every credential is a Terraform res
 | the fleet database's password | `-replace=random_password.database` on the cloud stage (check the plan first: the managed cluster's bootstrap user must update in place, not be replaced), then `apply platform control` rewrites the `database` Secrets; restart `api` and `litellm` |
 | MultiKueue token of a worker | on the worker `./stack.sh tf platform <id> -- apply -replace='kubernetes_secret_v1.sa_token["multikueue"]'`, then `apply platform control` |
 | the image cache's registry static key | delete `stack/.secrets/<name>-registry-key.json`, re-apply platform on every cluster, retire the old key with `nebius iam static-key delete` |
-| tenant S3 keys | `-replace` the tenant's `nebius_iam_v2_access_key` in the models stage of that region, then `apply models` there and on the control cluster |
+| tenant S3 keys | `./stack.sh tf cloud -- apply -replace='module.tenant_region["<tenant>/<region>"].nebius_iam_v2_access_key.tenant'`, then `apply platform` on that region's cluster and on the control cluster (the hub region's key is in every cluster's `s3-fleet` Secret: re-apply everywhere after rotating it) |
 | the fleet's router key (`api/router-key`) | `./stack.sh tf platform control -- apply -replace='random_password.router_key[0]'`, then `kubectl -n api rollout restart deployment/api` (the API upserts the new hash at start and re-registers every LiteLLM group with it) |
-| a tenant key of `terraform.tfvars` | `./stack.sh tf models control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
+| a tenant key of `terraform.tfvars` | `./stack.sh tf platform control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
 
 Take-over by another operator: the tfvars, a key for the state bucket (`stack/bootstrap/state-bucket.sh`
 with their profile), `./stack.sh plan` must show no changes. `recover-stopped-nodes` keeps running on every
@@ -78,12 +78,12 @@ PodDisruptionBudget (minAvailable 1), so a node drain or a crash never takes the
 
 | Component | Where it is set | Mode |
 |---|---|---|
-| Envoy proxies `knative-external` / `knative-internal` (every request) | `clusters/common/manifests/gateway/envoyproxy-ha.yaml` (`envoyDeployment.replicas: 2`, `envoyPDB`) | active/active behind the LB / ClusterIP Service |
+| Envoy proxies `knative-external` / `knative-internal` (every request) | `charts/platform/templates/gateway/gateway.yaml` (`envoyDeployment.replicas: 2`, `envoyPDB`) | active/active behind the LB / ClusterIP Service |
 | Envoy Gateway controller | `clusters/common/values/envoy-gateway.yaml` | leader election |
 | LiteLLM proxy (keys, sync/async pass-through) | `clusters/common/values/litellm.yaml` (`replicaCount: 2`) | active/active, state in the managed PostgreSQL |
-| API | `clusters/common/manifests/api/api.yaml` (2 replicas) | active/active |
+| API | `charts/platform/templates/api/api.yaml` (2 replicas) | active/active |
 | Kueue controller | `clusters/common/values/kueue.yaml` (`controllerManager.replicas: 2`) | leader election |
-| Knative Serving (activator, autoscaler, controller, webhook) | `clusters/common/manifests/knative/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
+| Knative Serving (activator, autoscaler, controller, webhook) | `charts/platform/templates/knative-serving/knative-serving.yaml` (`high-availability.replicas: 2`) | activator is in the scale-from-zero path |
 | Fleet database | Nebius Managed PostgreSQL (`control_plane.database.hosts`, 1 by default; the service's failover with 2) | the service's |
 
 Single replicas on purpose (not in the request path, reconcile-only; an outage delays changes, not
@@ -148,15 +148,15 @@ enabling it on a region that already has nodes is a node-group template change t
 of the GPU pools (surge 1, drain 10 min): existing nodes never get the mount, only new ones.
 
 Seed weights before the first start (optional; the first start seeds too), with the Job template
-`clusters/common/manifests/ops/seed-weights-job.yaml` (not applied by the stage; variables in its header):
+`tools/seed-weights-job.yaml` (not applied by the stage; variables in its header):
 
 ```
 # HuggingFace repo into the HF cache layout
 SEED_PATH=llm-example SEED_SOURCE=hf SEED_REF=<org>/<model> SEED_REV=main SEED_IMAGE=python:3.12-slim SEED_POOL=<pool> SEED_UID=1000 \
-  envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
+  envsubst < tools/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
 # NIM image: runs the image's download-to-cache with NGC_API_KEY (Secret ops/ngc-api-key; pull Secret ops/ngc)
 SEED_PATH=<model> SEED_SOURCE=ngc SEED_REF= SEED_REV=main SEED_IMAGE=nvcr.io/<org>/<nim-image>:<tag> SEED_POOL=<pool> SEED_UID=1000 \
-  envsubst < clusters/common/manifests/ops/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
+  envsubst < tools/seed-weights-job.yaml | kubectl --context <region> -n ops create -f -
 # a bucket prefix (SEED_SOURCE=s3 SEED_REF=s3://bucket/prefix SEED_IMAGE=amazon/aws-cli:2.22.35), or any command in any image (SEED_SOURCE=cmd)
 ```
 
@@ -283,7 +283,7 @@ protect against is in README.md "Security notes and limitations".
 
 A cluster-wide policy cannot express "my own namespace", so `charts/tenant` renders a namespaced
 `CiliumNetworkPolicy tenant-local` (same-namespace ingress and egress, needed for multi-pod runs) into each
-tenant namespace (`charts/tenant/templates/network.yaml`, rendered by the models stage).
+tenant namespace (`charts/tenant/templates/network.yaml`, rendered by the platform stage).
 
 Plain `networking.k8s.io/v1` equivalent (if Cilium policy must be avoided): a per-namespace NetworkPolicy
 with `policyTypes: [Ingress, Egress]`, ingress from `podSelector: {}`, egress to `podSelector: {}`, to
@@ -292,26 +292,27 @@ with `policyTypes: [Ingress, Egress]`, ingress from `podSelector: {}`, egress to
 
 ### API RBAC
 
-`clusters/common/manifests/api/api.yaml` holds everything the `api` ServiceAccount may do: ClusterRole
-`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `clusters/common/manifests/api-agent`)
+`charts/platform/templates/api/api.yaml` holds everything the `api` ServiceAccount may do: ClusterRole
+`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `charts/platform/templates/api-agent`)
 bound per tenant namespace by the RoleBinding `charts/tenant` renders; Role `serverless2-api-endpoints` in
 `models` (inferenceservices get/list/patch, pods); read-only Roles `serverless2-api-templates` in the
 template namespaces (`api`); one ClusterRole to list tenant namespaces (billing).
 
-### Tenants (`tenants.<name>` in the tfvars, `stack/models`, `charts/tenant`)
+### Tenants (`tenants.<name>` in the tfvars, `stack/cloud/tenants.tf`, `stack/platform/tenants.tf`, `charts/tenant`)
 
 A tenant is one block of the tfvars (`budget_usd`, `lifecycle_days`, `allowed_images`, its keys) and one
-`./stack.sh apply models <id>` per cluster, control last. Per region the models stage creates a service
-account, a group with `storage.object-editor` on the tenant bucket through the bucket policy, the bucket
-`<fleet>-<name>-<region>` with a lifecycle rule that expires `operations/` objects after `lifecycle_days`
-(default 90; aborts incomplete multipart uploads after 7 days) and an S3 access key
-(`stack/modules/tenant-region`); then `charts/tenant` renders the namespace `tenant-<name>`, the run-pod
+`./stack.sh apply` (the cloud stage, then the platform stage of every cluster, control last). Per region the
+cloud stage creates a service account, a group with `storage.object-editor` on the tenant bucket through the
+bucket policy, the bucket `<fleet>-<name>-<region>` with a lifecycle rule that expires `operations/` objects
+after `lifecycle_days` (default 90; aborts incomplete multipart uploads after 7 days) and an S3 access key
+(`stack/modules/tenant-region`, `stack/cloud/tenants.tf`; `./stack.sh output cloud tenants` lists the
+buckets); then `charts/tenant` renders the namespace `tenant-<name>`, the run-pod
 identity (`job-runner`), the API binding, one Kueue LocalQueue per scheduling profile (`default`,
 `prefer-<class>`), the network policy and, on the control cluster, the namespace, queues and API binding
 only. Secrets in the tenant namespace (never in git): workers `tenant-storage` and `s3` (this region's
 bucket and key), `s3-fleet` (the hub region's bucket and key, used by fleet-placed runs), `ngc`; control
 `tenant-storage` (the hub region's bucket). The LiteLLM keys (budget, allowed models and pass-through
-routes) are created on the control cluster: `./stack.sh output models control` prints them. Adding a region
+routes) are created on the control cluster: `./stack.sh output platform control -json tenant_keys` prints them. Adding a region
 to a tenant or changing the retention is a tfvars change plus a re-apply; removing a tenant is removing the
 block (with `protect_data = true` the bucket stays and must be emptied by hand first).
 
@@ -325,8 +326,8 @@ block (with `protect_data = true` the bucket stays and must be emptied by hand f
 - **Regional API** (`api` on every cluster): the platform stage gives it Secret `api/litellm-master` (a
   copy of the control cluster's) and the tenant RoleBindings that `charts/tenant` renders. It carries no
   region kubeconfigs; sync and async calls for its region are answered there, writes go to the fleet API.
-- **Rate limits** live in `clusters/common/manifests/api/api.yaml` (API route) and
-  `clusters/common/manifests/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
+- **Rate limits** live in `charts/platform/templates/api/api.yaml` (API route) and
+  `charts/platform/templates/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
   service (`envoy-gateway-system`, deployed by the chart when `config.envoyGateway.rateLimit` is set) in
   `ratelimit-redis`. Redis is not persistent: a restart resets the windows; if it is unreachable Envoy
   fails open. Check: `kubectl -n envoy-gateway-system get deploy envoy-ratelimit ratelimit-redis`; test
@@ -342,7 +343,7 @@ managed**; the chart computes it from the two numbers, so they change together i
 (min 0) borrow a GPU only while they serve; an admitted run can wait Pending for one scale-to-zero period
 (60 s grace) in the worst case. Alerts `RunPodPendingLong` (admitted run pods Pending > 10 min) and
 `KueueWorkloadsPendingLong` (quota exhausted > 15 min) in
-`clusters/common/manifests/observability/rules-capacity.yaml`.
+`charts/platform/files/observability/rules-capacity.yaml`.
 
 When a tenant needs more: raise `max_nodes` (`./stack.sh apply`), the quota follows, and if it is a
 sustained need, a reserved (non-spot) pool as a second flavor ahead of the spot one (the preference queues
@@ -351,7 +352,7 @@ order reserved before on-demand before spot inside a class).
 ## Add a region
 
 One `regions.<name>` block (project, subnet, allowed CIDRs, pools), then `./stack.sh apply`: the cloud stage
-adds the cluster, the platform and models stages follow on it, and the control cluster's MultiKueue gains
+adds the cluster and the tenants' buckets there, the platform stage follows on it, and the control cluster's MultiKueue gains
 the worker (docs/FLEET.md "Change recipes"). The platform images need no per-region copy: the new cluster's
 cache fetches them from the source registry on first use.
 
@@ -381,8 +382,59 @@ kubectl -n ops get cronjob; kubectl -n ops logs -l app=recover-stopped-nodes --t
 kubectl -n api get job | tail -3                                  # billing CronJob runs (control cluster)
 nebius msp postgresql v1alpha1 backup list --parent-id <control project id> | head          # the managed database's backups
 kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
-./stack.sh apply models control                                   # re-runs the acceptance probe (hello-run, the example endpoint)
+tools/verify.sh                                                   # the acceptance probe: hello-run, then the example endpoint through the API
 ```
+
+## Upgrading to the two-stage layout
+
+Fleets deployed before 2026-10-11 have a third stage, `models`, with one state per cluster
+(`models/<cluster id>.tfstate`): the tenant buckets, service accounts and S3 keys of each region
+(`module.tenant_region["<tenant>"]`), the tenant releases and Secrets, the LiteLLM key Jobs and the acceptance
+probe. The cloud stage owns the buckets now (`module.tenant_region["<tenant>/<region>"]` in
+`cloud/fleet.tfstate`, `stack/cloud/tenants.tf`) and the platform stage of each cluster the rest
+(`stack/platform/tenants.tf`, same resource addresses). A root module cannot `moved` a resource into another
+root's state: the move is a `terraform state mv` between state files, before the first apply of the new
+checkout, with the old checkout's `stack.sh` for the models states (the new one has no `models` stage; the
+state keys are `models/<cluster id>.tfstate` in the state bucket). Nothing in the cloud or the clusters is
+touched by it; afterwards `./stack.sh plan` must show no replacement and no re-creation (a different plan
+means a wrong address: fix the state, do not apply). The Secrets and Jobs move from the models stage's
+Kubernetes provider 2.x to the platform stage's 3.x; `kubernetes_secret_v1` and `kubernetes_job_v1` carry the
+same resource schema version in both (0 and 1), so the move needs no state upgrade.
+
+```sh
+OLD=<checkout of the three-stage layout>; NEW=<this checkout>      # same terraform.tfvars, same state bucket credentials
+# 1. pull the states once: the models state of every cluster, the cloud state, the platform state of every cluster
+for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state pull) > models-$id.tfstate; done
+(cd $NEW && ./stack.sh tf cloud -- state pull) > cloud.tfstate
+for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state pull) > platform-$id.tfstate; done
+# 2. per tenant and worker region: the bucket, identity and key to the cloud state
+#    (<region> is the Nebius region name, eu-north1; <cluster id> the region's cluster id, hub)
+terraform state mv -state=models-hub.tfstate -state-out=cloud.tfstate \
+  'module.tenant_region["demo"]' 'module.tenant_region["demo/eu-north1"]'
+# 3. per cluster: the tenant release, Secrets, keys and probe to that cluster's platform state (same addresses)
+for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' 'kubernetes_secret_v1.s3["demo"]' \
+         'kubernetes_secret_v1.s3_fleet["demo"]' 'kubernetes_secret_v1.ngc["demo"]'; do          # workers: all of them; control: tenant_storage only
+  terraform state mv -state=models-hub.tfstate -state-out=platform-hub.tfstate "$r" "$r"; done
+for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' \
+         'random_password.key["demo-default"]' 'kubernetes_job_v1.key["demo-default"]' \
+         'random_password.key["demo-admin"]' 'kubernetes_job_v1.key["demo-admin"]'; do   # control: one pair per key
+  terraform state mv -state=models-control.tfstate -state-out=platform-control.tfstate "$r" "$r"; done
+# 4. push the cloud and platform states back (their serials were incremented by the moves; `-force` is never needed)
+(cd $NEW && ./stack.sh tf cloud -- state push ../cloud.tfstate)
+for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state push ../platform-$id.tfstate); done
+# 5. every models state now holds at most the probe Job (acceptance-probe in namespace api, re-created by
+#    tools/verify.sh's Job form when wanted): remove its entries and delete the state objects from the bucket
+for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state list); done   # must list nothing but kubernetes_job_v1.probe[0]
+kubectl -n api delete job acceptance-probe --ignore-not-found                         # the control cluster
+# `aws s3 rm s3://<state bucket>/models/<id>.tfstate` for each cluster, with the state-bucket credentials
+# 6. no replacement planned, then apply: the cloud stage adds the `tenant_storage` output, the platform stages
+#    adopt the moved resources (the tenant release gets its new chart version, the Secrets keep their values)
+(cd $NEW && ./stack.sh plan && ./stack.sh apply)
+```
+
+With `protect_data = true` the moved bucket keeps its `prevent_destroy`; a bucket that is not moved before the
+apply is planned for creation (name taken: the apply fails, nothing is lost). A tenant release that is not moved
+is planned for creation and the Helm install fails on the existing release name: move it, do not delete it.
 
 ## Reliability and upgrades
 

@@ -151,7 +151,8 @@ deduction.
 `charts/tenant` renders, per cluster, the tenant namespace with one LocalQueue per profile (`default`,
 `prefer-<class>` for every class of the fleet) pointing at the tenant's own ClusterQueues `<tenant>-<profile>`
 that `charts/fleet` renders on every cluster (since 2026-10-11); on the control cluster (`manager: true`) the
-namespace, those queues and the API binding only. The models stage renders it on every cluster of the tenant's regions.
+namespace, those queues and the API binding only. The platform stage renders it on every cluster of the tenant's regions
+(`stack/platform/tenants.tf`), after the fleet chart.
 
 How capacity is shared (`terraform.tfvars` `tenants.<name>`):
 
@@ -160,7 +161,7 @@ How capacity is shared (`terraform.tfvars` `tenants.<name>`):
 | (default) | the fleet's `default` ClusterQueue holds the nominal quota of every shared pool and lends it; a tenant's queues have nominal 0 on those pools and borrow up to the pool's capacity, in the profile's order (reserved, on-demand, spot; smallest preset first) |
 | `fair_share_weight` (1) | Kueue weighted fair sharing between the tenants' queues (`fairSharing` in the Kueue configuration, strategies LessThanOrEqualToFinalShare then LessThanInitialShare): when the fleet is full, the tenant furthest above its weighted share is preempted first, so one tenant's sweep never starves another; priority classes still order work inside a queue |
 | `gpu_quota` | caps what the tenant may borrow on each pool (at most that many GPUs of any one pool); unset = up to the pool |
-| `storage` | `managed` (default): a bucket and an S3 key per region for the runs' inputs and outputs; `external`: none, the tenant's runs use application-managed I/O only (docs/JOBS.md "Execution options"). Do not flip an existing tenant to `external`: its buckets would be planned for destruction (`protect_data` refuses) |
+| `storage` | `managed` (default): a bucket and an S3 key per region for the runs' inputs and outputs (cloud stage, `stack/cloud/tenants.tf`); `external`: none, the tenant's runs use application-managed I/O only (docs/JOBS.md "Execution options"). Do not flip an existing tenant to `external`: its buckets would be planned for destruction (`protect_data` refuses) |
 | `identities` | workload identities a run may name (`workload_identity_ref`): `{ <ref> = { audience = "sts.amazonaws.com", env = { AWS_ROLE_ARN = "..." } } }` renders a ServiceAccount `identity-<ref>` whose projected token the run presents to a storage provider's OIDC federation |
 | `execution_profiles` | execution profiles a run may name (`profile_ref`): `{ <name> = { egress_fqdns = [...], egress_cidrs = [...], shared_filesystem = false } }` renders the network policy its pods get instead of the tenant-wide "world" egress |
 | (console) | `GET /v1/fleet` reports the caller's tenant (quota, weight, dedicated pools) and, with `live=true`, the GPUs its queues hold per region; the console's Fleet page shows it |
@@ -172,10 +173,9 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 ## Change recipes
 
 - **Tenant queues moved (2026-10-11)**: a tenant's LocalQueues now point at its own ClusterQueues. A LocalQueue's
-  target is immutable, so the models stage deletes the queues that point elsewhere right before the tenant release
-  upgrades them. A LocalQueue's target queue is immutable: when a change moves a tenant's queues to other ClusterQueues,
-  delete the old LocalQueues in `tenant-<name>` first (`kubectl -n tenant-<name> delete localqueue --all`); waiting runs are
-  re-queued by Kueue, running ones are not touched. Apply the platform stage (fleet chart) before the models stage.
+  target queue is immutable: when a change moves a tenant's queues to other ClusterQueues, delete the old LocalQueues
+  in `tenant-<name>` first (`kubectl -n tenant-<name> delete localqueue --all`); waiting runs are re-queued by Kueue,
+  running ones are not touched. The platform stage renders the fleet chart (the ClusterQueues) before the tenant releases.
 
 - **Add a pool / GPU class**: one entry under `regions.<r>.pools`; `plan`
   shows one node group (and a pricing policy for a capped spot pool); Terraform
@@ -194,9 +194,9 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 - **Warm endpoint added**: raise the pool's `endpoint_floor_gpus` with the
   catalog change (docs/OPERATIONS.md "Capacity for runs and endpoints").
 - **Add a region**: one `regions.<name>` entry (project, subnet, pools; the preflight reports the tenant-wide `compute.disk.count` and preemptible-VM headroom of the region, a worker region needs about eight disks),
-  then `./stack.sh apply` (the cloud stage adds the cluster, the platform and
-  models stages follow on it, and the control cluster's MultiKueue gains the
-  worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2
+  then `./stack.sh apply` (the cloud stage adds the cluster and the tenants'
+  buckets there, the platform stage follows on it, and the control cluster's
+  MultiKueue gains the worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2
   with a B300 spot pool, docs/VERIFICATION.md).
 - **Prices**: `prices` block (nebius.com/prices); flavors, `fleet-prices` and
   the profile order follow.
@@ -211,7 +211,7 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 - Spot list prices are the "from" prices; the live spot price comes from the
   price feed, not from this file.
 
-GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md) and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
+GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md; absent with `images.cache.enabled = false`), the memlock limit for RDMA and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
 
 ## Terraform solution (2026-10-08): `terraform.tfvars` instead of `fleet.yaml`
 

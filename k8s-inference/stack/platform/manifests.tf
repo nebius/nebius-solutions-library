@@ -1,32 +1,33 @@
-# Shared manifests (clusters/common/manifests/<component>) rendered through kustomize with this cluster's
-# patches (stage.tf `patches`), applied server-side in the same waves as the charts.
-data "kustomization_overlay" "component" {
-  for_each  = local.manifest_apps
-  resources = [local.manifests_base[each.key]]
-  kustomize_options {
-    load_restrictor = "none"
-  }
-  dynamic "patches" {
-    for_each = try(local.patches[each.key], [])
-    content {
-      patch = patches.value.patch
-      target {
-        kind      = try(patches.value.target.kind, null)
-        name      = try(patches.value.target.name, null)
-        namespace = try(patches.value.target.namespace, null)
-      }
-    }
-  }
+# The platform's own manifests: charts/platform (one component per template directory) rendered by Helm with
+# this cluster's values (stack/config/locals.tf `platform_values`: hostnames, images, roles, feature flags) and
+# applied server-side, one kubectl_manifest per object in the component's wave (clusters/common/apps `wave`),
+# next to the upstream Helm releases. Never a Helm release: Helm would want its ownership labels on every object,
+# while server-side apply through the kubectl provider owns them as they are. The resources are keyed
+# <group or _>/<Kind>/<namespace or _>/<name>, the ids the kustomize render used until 2026-10-11, so every object
+# keeps its state address; tools/check.sh proves the render equal to stack/platform/tests/golden.
+data "helm_template" "platform" {
+  name         = "platform"
+  chart        = "${local.repo}/charts/platform"
+  kube_version = "${local.f.kubernetes_version}.0"
+  values       = [yamlencode(local.platform_values)]
 }
 
 locals {
-  # The `models` certificate (clusters/common/manifests/gateway/models-tls.yaml): its hostnames and issuer
+  # One entry per rendered object: the component (the template directory, from Helm's `# Source:` line) and the object.
+  platform_rendered = [for d in split("\n---\n", "\n${data.helm_template.platform.manifest}") : {
+    component = regex("# Source: platform/templates/([^/\n]+)/", d)[0]
+    object    = yamldecode(d)
+  } if trimspace(d) != ""]
+  platform_objects = { for r in local.platform_rendered :
+    "${length(split("/", r.object.apiVersion)) > 1 ? split("/", r.object.apiVersion)[0] : "_"}/${r.object.kind}/${try(r.object.metadata.namespace, "_")}/${r.object.metadata.name}" => r
+  }
+  # The `models` certificate (charts/platform/templates/gateway/models-tls.yaml): its hostnames and issuer
   # follow the models defined through the API, which rewrites them; Terraform only creates the placeholder.
   models_certificate        = "Certificate[/|]envoy-gateway-system[/|]models$"
   models_certificate_fields = ["spec.dnsNames", "spec.issuerRef", "spec.commonName"]
-  manifests_wave = { for w in ["0", "1", "2", "3"] : w => merge([
-    for n, a in local.manifest_apps : data.kustomization_overlay.component[n].manifests if tostring(a.wave) == w
-  ]...) }
+  manifests_wave = { for w in ["0", "1", "2", "3"] : w => {
+    for k, r in local.platform_objects : k => jsonencode(r.object) if tostring(try(local.manifest_apps[r.component].wave, "none")) == w
+  } }
 }
 
 resource "kubectl_manifest" "wave0" {
@@ -68,7 +69,6 @@ resource "kubectl_manifest" "wave3" {
   wait              = false
   depends_on        = [helm_release.wave3, kubectl_manifest.wave2, kubernetes_config_map_v1.catalog]
 }
-
 # ---------------------------------------------------------------------------
 # Extras rendered from this stage's inputs (what the per-cluster overlays added as files).
 locals {
@@ -203,7 +203,7 @@ locals {
       apiVersion = "gateway.networking.k8s.io/v1", kind = "HTTPRoute", metadata = { name = "ui-litellm", namespace = "litellm" }
       spec = {
         parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
-        # a chat call through LiteLLM waits for the endpoint's cold start like the API route does (clusters/common/manifests/api);
+        # a chat call through LiteLLM waits for the endpoint's cold start like the API route does (charts/platform/templates/api);
         # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model (test fleet, 2026-10-09)
         hostnames = [try(local.hostnames.litellm, "")]
         rules     = [{ backendRefs = [{ name = "litellm", port = 4000 }], timeouts = { request = "630s", backendRequest = "630s" } }]

@@ -1,6 +1,6 @@
 # Gateway, authentication and certificates
 
-Envoy Gateway is installed with its upstream Helm chart; Knative's Gateway API integration creates HTTPRoutes for KServe predictors. Shared gateway manifests are in `clusters/common/manifests/gateway`, with per-cluster patches in `stack/platform/stage.tf`.
+Envoy Gateway is installed with its upstream Helm chart; Knative's Gateway API integration creates HTTPRoutes for KServe predictors. Shared gateway manifests are in `charts/platform/templates/gateway`, with per-cluster patches in `stack/platform/stage.tf`.
 
 ## Public and private routing
 

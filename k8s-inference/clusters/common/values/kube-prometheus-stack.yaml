@@ -8,7 +8,7 @@ kubeProxy:
 kubeEtcd:
   enabled: false
 # Alerting (production-readiness gap 9): every alert goes to the in-cluster sink (Deployment alert-sink,
-# clusters/common/manifests/observability/alert-sink.yaml, logs the JSON payload: provable delivery without any
+# charts/platform/templates/observability/alert-sink.yaml, logs the JSON payload: provable delivery without any
 # external system). No external receiver is configured by default (no Slack webhook);
 # docs/OBSERVABILITY.md "Alert delivery" shows how to add one (a slack_configs/webhook_configs entry on the
 # `platform` receiver plus a Secret mounted through alertmanagerSpec.secrets). Severity routing: critical
@@ -77,7 +77,7 @@ grafana:
   enabled: true
   # Upstream dashboards by grafana.com id (downloaded at pod start): NVIDIA DCGM exporter dashboard
   # replaces the hand-made GPU row of the platform dashboard; OpenCost overview/namespace (cost export).
-  # Own dashboards (platform/endpoints/jobs/cost/logs) are ConfigMaps in clusters/common/manifests/observability,
+  # Own dashboards (platform/endpoints/jobs/cost/logs) are ConfigMaps in charts/platform/templates/observability,
   # loaded by the sidecar.
   dashboardProviders:
     dashboardproviders.yaml:

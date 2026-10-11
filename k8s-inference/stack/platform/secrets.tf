@@ -2,7 +2,8 @@
 # from the environment (secrets.*_env in terraform.tfvars); nothing is read from files in the repository.
 locals {
   # knative-serving: the KnativeServing CR (wave 2) lives there; created here before the operator reconciles it.
-  namespaces = concat(["ops", "monitoring", "api", "models", "registry", "spegel", "kueue-system", "knative-serving"], local.role.control ? ["litellm", "ui-app"] : [])
+  # registry: the image cache's namespace, only with the cache (images.cache.enabled).
+  namespaces = concat(["ops", "monitoring", "api", "models", "spegel", "kueue-system", "knative-serving"], local.images_cache ? ["registry"] : [], local.role.control ? ["litellm", "ui-app"] : [])
 }
 
 # `registry` is also rendered by charts/fleet (release fleet in kueue-system); created here with Helm's
@@ -127,9 +128,11 @@ resource "kubernetes_secret_v1" "hf_token" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
-# Image cache credentials: a static Container Registry key of the hub ops SA (issued once per operator by the
-# Nebius CLI, cached under stack/.secrets; see scripts/registry-static-key.sh) plus NGC and extra upstreams.
+# Image cache credentials (only with the cache, images.cache.enabled): a static Container Registry key of the hub
+# ops SA (issued once per operator by the Nebius CLI, cached under stack/.secrets; see
+# scripts/registry-static-key.sh) plus NGC and extra upstreams.
 data "external" "registry_key" {
+  count   = local.images_cache ? 1 : 0
   program = ["bash", "${path.module}/../scripts/registry-static-key.sh"]
   query = {
     project = local.hub_project
@@ -142,13 +145,14 @@ data "external" "registry_key" {
 locals {
   registry_host = split("/", local.cloud.hub.registry)[0]
   zot_credentials = merge(
-    { (local.registry_host) = { username = "iam", password = data.external.registry_key.result.key } },
+    { (local.registry_host) = { username = "iam", password = try(data.external.registry_key[0].result.key, "") } },
     local.ngc_key == "" ? {} : { "nvcr.io" = { username = "$oauthtoken", password = local.ngc_key } },
     local.extra_registry,
   )
 }
 
 resource "kubernetes_secret_v1" "zot_sync" {
+  count = local.images_cache ? 1 : 0
   metadata {
     name      = "zot-sync-credentials"
     namespace = "registry"
@@ -170,17 +174,10 @@ resource "kubernetes_config_map_v1" "catalog" {
 # ---------------------------------------------------------------------------
 # Worker identities the control cluster uses: Kueue MultiKueue (kueue-system/multikueue) and the fleet API
 # (api/api-agent), each with a long-lived ServiceAccount token (no rotation CronJob; rotate with
-# `terraform apply -replace`). Published as sensitive outputs; the control stage reads them.
-data "kustomization_overlay" "identities" {
-  count     = local.role.worker ? 1 : 0
-  resources = ["../../clusters/common/manifests/fleet-access/multikueue.yaml", "../../clusters/common/manifests/api-agent"]
-  kustomize_options {
-    load_restrictor = "none"
-  }
-}
-
+# `terraform apply -replace`). Published as sensitive outputs; the control stage reads them. The objects are the
+# chart's components api-agent, fleet-access and tenant-clusterrole (manifests.tf), applied before the waves.
 resource "kubectl_manifest" "identities" {
-  for_each          = local.role.worker ? data.kustomization_overlay.identities[0].manifests : {}
+  for_each          = { for k, r in local.platform_objects : k => jsonencode(r.object) if local.role.worker && contains(["api-agent", "fleet-access", "tenant-clusterrole"], r.component) }
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
@@ -189,17 +186,9 @@ resource "kubectl_manifest" "identities" {
 }
 
 # Control cluster: the same tenant ClusterRole (the fleet API creates manager Jobs in tenant namespaces and
-# reads `tenant-storage`); workers get it from the api-agent kustomization above.
-data "kustomization_overlay" "tenant_clusterrole" {
-  count     = local.role.control ? 1 : 0
-  resources = ["../../clusters/common/manifests/api-agent/tenant-clusterrole"]
-  kustomize_options {
-    load_restrictor = "none"
-  }
-}
-
+# reads `tenant-storage`); workers get it with the identities above.
 resource "kubectl_manifest" "tenant_clusterrole" {
-  for_each          = local.role.control ? data.kustomization_overlay.tenant_clusterrole[0].manifests : {}
+  for_each          = { for k, r in local.platform_objects : k => jsonencode(r.object) if local.role.control && r.component == "tenant-clusterrole" }
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true

@@ -18,7 +18,7 @@ import auth
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 
 def check_placeholders() -> None:
-    """Refuse to start with a manifest placeholder (clusters/common/manifests/api/api.yaml carries
+    """Refuse to start with a manifest placeholder (charts/platform/templates/api/api.yaml carries
     `example.invalid` hostnames that the platform stage or the cluster overlay must replace): a placeholder
     would end up in every invoke link and Grafana link this API hands out."""
     bad = [name for name, value in (("PUBLIC_API_URL", cfg.PUBLIC_API_URL), ("GRAFANA_URLS", ",".join(cfg.GRAFANA_URLS.values())))

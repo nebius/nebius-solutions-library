@@ -1,5 +1,5 @@
-# The one input of the solution: `fleet` (terraform.tfvars at the repository root). Every stage
-# (stack/cloud, stack/platform, stack/models) passes it to this module (`config.tf` in each stage);
+# The one input of the solution: `fleet` (terraform.tfvars at the repository root). Both stages
+# (stack/cloud, stack/platform) pass it to this module (`config.tf` in each stage);
 # locals.tf derives the per-cluster view and outputs.tf hands it back. Nothing else is edited to bring
 # a fleet up. terraform.tfvars.example documents every key; the validations below reject the mistakes
 # the stages cannot recover from.
@@ -184,15 +184,20 @@ variable "fleet" {
       })), {})
     }))
 
-    # Images: every image reference in the platform and the catalog names the logical host, which each node
-    # resolves to its Spegel peers and the cluster's Zot pull-through cache. `source` is the registry the
-    # platform images (services/*) are pushed to; default: the registry this solution creates in the hub
-    # project (`stack.sh output cloud registry`). `upstreams`: third-party registries reachable as
+    # Images: with the cache (default), every image reference in the platform and the catalog names the logical
+    # host, which each node resolves to its Spegel peers and the cluster's Zot pull-through cache. `source` is the
+    # registry the platform images (services/*) are pushed to; default: the registry this solution creates in the
+    # hub project (`stack.sh output cloud registry`). `upstreams`: third-party registries reachable as
     # <host>/<alias>/<path> (credentials for private ones come from the environment, see `secrets`).
+    # cache.enabled = false leaves the cache out (docs/IMAGES.md "The cache as an add-on"): no Zot, no registry
+    # credential, no containerd drop-in; the platform images are pulled from `source` as the nodes' own identity
+    # allows, catalog and model images from their upstream registries, and the API leaves references as written.
+    # Spegel stays either way.
     images = optional(object({
       host   = optional(string, "registry.serverless2.local")
       source = optional(string)
       cache = optional(object({
+        enabled   = optional(bool, true)
         node_port = optional(number, 30500)
         size_gib  = optional(number, 1024)
         keep_days = optional(number, 30)
@@ -287,7 +292,7 @@ variable "fleet" {
       })), {})
     }), {})
 
-    # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys.
+    # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region (cloud stage), LiteLLM API keys.
     # gpu_quota: GPUs the tenant may hold at once across the fleet (null = no cap: it shares the fleet
     # queues); fair_share_weight orders tenants when the fleet is full (Kueue weighted fair sharing).
     # dedicated_pools: pool names (as in regions.*.pools) only this tenant may use (its queues carry only those
@@ -325,12 +330,14 @@ variable "fleet" {
     # through the API (`POST /v1/models`, the console's "New model" form; README "Deploy a model") and
     # stored in the fleet database.
 
-    # After the models stage: a probe Job on the control cluster runs `model` (a built-in run class) and,
-    # when `example_endpoint` is true, creates the example endpoint `llm-example` (a stock vLLM container
-    # with a small model, on the fleet's first GPU class) through the API with the first admin key and calls
-    # it; a failure fails the apply. The example stays as the first model of the console (delete it there).
+    # The acceptance probe, tools/verify.sh: runs `model` (a built-in run class) with the first tenant key and,
+    # when `example_endpoint` is true, creates the example endpoint `llm-example` (a stock vLLM container with a
+    # small model, on the fleet's first GPU class) through the API with the first admin key and calls it. Run it
+    # after the apply (`tools/verify.sh`, README.md). probe = true runs the same script as a Job on the control
+    # cluster at apply time: the apply then waits for it (up to 40 minutes on a cold region) and fails with it.
+    # The example stays as the first model of the console (delete it there).
     acceptance = optional(object({
-      probe            = optional(bool, true)
+      probe            = optional(bool, false)
       model            = optional(string, "hello-run")
       example_endpoint = optional(bool, true) # needs a tenant key with admin = true
     }), {})
@@ -463,4 +470,14 @@ variable "fleet" {
     condition     = !var.fleet.edge.ip_certificate || var.fleet.edge.mode == "public"
     error_message = "edge.ip_certificate needs edge.mode = public."
   }
+}
+
+# What the cloud stage created, as far as the platform's manifests depend on it: the gateway address and
+# allocation of every cluster, the cluster ids, the registry, the backups bucket. The platform stage passes the
+# cloud state's `clusters` and `hub` outputs; without them (tools/check.sh renders the charts for the example
+# with no cloud access) deterministic placeholders stand in (locals.tf `cloud_facts`), so a render is reproducible.
+variable "cloud" {
+  description = "The cloud stage's outputs `clusters` and `hub` (null: placeholders for an offline render)."
+  type        = any
+  default     = null
 }

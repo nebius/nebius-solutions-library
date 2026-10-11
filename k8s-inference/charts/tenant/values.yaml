@@ -1,4 +1,4 @@
-# Rendered once per tenant per cluster by the models stage (stack/models/main.tf), which passes `name`, `cluster`
+# Rendered once per tenant per cluster by the platform stage (stack/platform/tenants.tf), which passes `name`, `cluster`
 # and the `clusters` entry of that cluster, plus the fleet document whose GPU classes name the scheduling-profile LocalQueues.
 name: ""                       # tenant name; namespace tenant-<name>
 cluster: hub                   # key of `clusters` below
@@ -28,7 +28,7 @@ infinibandDeviceClass: ib.networking.nebius.ai
 sharedScratch: { claim: scratch-shared, size: 1Ti }
 sharedWeights: { claim: weights-shared }   # the region's model weights, read-only for runs (`weights` of a job class, docs/JOBS.md)
 fleet: {}                      # fleet.yaml `fleet:` document (GPU classes -> prefer-<class> queues); passed by onboarding
-clusters:                      # keyed by cluster id: the models stage passes this cluster's entry. Placeholders below.
+clusters:                      # keyed by cluster id: the platform stage passes this cluster's entry. Placeholders below.
   control:                     # the MultiKueue manager: namespace, profile queues and the API binding only (no pods run here)
     region: ""
     manager: true

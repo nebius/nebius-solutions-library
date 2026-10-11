@@ -32,7 +32,7 @@ API_NAMESPACE = os.environ.get("API_NAMESPACE") or (open("/var/run/secrets/kuber
 IMAGES_HOST = os.environ.get("IMAGES_HOST", "registry.serverless2.local")   # the logical registry host (terraform.tfvars images.host)
 IMAGES_SOURCE = os.environ.get("IMAGES_SOURCE", "")                         # the fleet's own registry (images.source), alias `nebius`
 # TLS of the model endpoints' hostnames: the fleet's API rewrites Certificate envoy-gateway-system/models of a cluster
-# (clusters/common/manifests/gateway/models-tls.yaml) with the hostnames of the endpoints deployed there, issued by
+# (charts/platform/templates/gateway/models-tls.yaml) with the hostnames of the endpoints deployed there, issued by
 # ACME_ISSUER (letsencrypt | letsencrypt-staging); without endpoints it goes back to the self-signed placeholder.
 ACME_ISSUER = os.environ.get("ACME_ISSUER", "letsencrypt")
 # the issuer of the GPU regions' `models` certificates, written by the control API (fleet-ca by default: the

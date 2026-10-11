@@ -13,8 +13,8 @@ locals {
     }
     snapshot = {
       image = {
-        agent    = { repository = "${local.images_host}/ghcr/ai-dynamo/snapshot/agent" }
-        operator = { repository = "${local.images_host}/ghcr/ai-dynamo/snapshot/operator" }
+        agent    = { repository = "${local.registry.ghcr}/ai-dynamo/snapshot/agent" }
+        operator = { repository = "${local.registry.ghcr}/ai-dynamo/snapshot/operator" }
       }
       daemonset = { nodeSelector = local.snapshot_config.storage_node_selector }
       operator = { nodeSelector = merge(local.snapshot_config.storage_node_selector, {

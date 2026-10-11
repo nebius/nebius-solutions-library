@@ -4,7 +4,7 @@ The deployment owner is Terraform (`stack.sh`). Helm owns upstream controllers; 
 
 ## Deploy, change and validate
 
-Follow the root README for bootstrap, credentials and the cloud/platform/models stages. Chart versions are declared once in `clusters/common/apps/*.yaml`; cluster-specific native values are computed in `stack/platform/stage.tf`. Terraform 1.12+ is required by the shared External Secrets modules.
+Follow the root README for bootstrap, credentials and the cloud and platform stages. Chart versions are declared once in `clusters/common/apps/*.yaml`; cluster-specific native values are computed in `stack/platform/stage.tf`. Terraform 1.12+ is required by the shared External Secrets modules.
 
 Before a change, run `make check` and the UI tests/build. PostgreSQL regression tests run when `TEST_DATABASE_URL` points to a disposable database; CI supplies a PostgreSQL service. These checks create no cloud resources.
 
@@ -53,7 +53,7 @@ Managed PostgreSQL contains both `platform` (models/history/pending changes, key
 
 Loki uses a separate Object Storage bucket per cluster, native chart S3 settings and the existing operations S3 identity. Compactor retention follows `observability.loki_retention_days`; its PVC holds working data rather than the only copy of logs. Existing fleets with filesystem-backed Loki must migrate old data or retain the old schema/storage for its retention period before changing the schema; switching the store in place does not copy historical logs.
 
-Prometheus, Alloy, DCGM and OpenCost remain upstream charts. The UI embeds endpoint/app monitoring through the API; Grafana remains available to operators. Alert rules and dashboards are in `clusters/common/manifests/observability`.
+Prometheus, Alloy, DCGM and OpenCost remain upstream charts. The UI embeds endpoint/app monitoring through the API; Grafana remains available to operators. Alert rules and dashboards are in `charts/platform/templates/observability`.
 
 The cost dispatcher keeps two ranking replicas and reuses Kubernetes-client leader election. Only the elected replica nominates workloads or changes worker PVCs. Losing renewal terminates that process; Kubernetes restarts it. Freshness probes remove stale ranking replicas from service. Prices and checkpoint-aware placement remain custom because the built-in MultiKueue dispatchers do not implement all these policies.
 
