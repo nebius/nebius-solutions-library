@@ -13,7 +13,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 
 | You get | How it is built |
 |---|---|
-| One API for models: invoke, poll, fetch, cancel, resume | `services/api` behind API keys (LiteLLM) and an Envoy gateway; `docs/API.md` |
+| One API for models: invoke, poll, fetch, cancel, resume | `services/api` behind API keys (fleet database) and an Envoy gateway; `docs/API.md` |
 | Any container as a model; the platform ships none | a container description per model, given through the console or `POST /v1/models`, stored in the fleet database and rendered by the API as a KServe endpoint or as a job template |
 | Endpoints that scale to zero, with a warm floor if you want one, and warm spare nodes per pool (`warm_nodes`) that any model can start on without an instance boot | KServe on Knative, one `InferenceService` per model and region; placeholder pods of negative priority hold the spares |
 | Queued endpoint calls and long jobs that survive spot preemption | Kubernetes Jobs with a checkpoint volume; Kueue admits them, `docs/JOBS.md` |
@@ -60,8 +60,8 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
 - **Control cluster** (CPU only, the default): the customer API, LiteLLM, the console, the Kueue MultiKueue
   manager with the cost dispatcher and price feed, Grafana. Next to it, in the same project and region, the
   fleet database: one Nebius Managed Service for PostgreSQL cluster (`<fleet>-db`, private access only) with
-  the databases `platform` (model definitions and their history, owned by the API) and `litellm` (keys,
-  budgets, spend). `control_plane.dedicated = false` is the single-cluster mode for a proof of concept: those
+  the databases `platform` (model definitions and their history, keys, budgets, spend, the GPU ledger; owned
+  by the API) and `litellm` (LiteLLM's mirror of the keys for its OpenAI route). `control_plane.dedicated = false` is the single-cluster mode for a proof of concept: those
   services run on the one region's system pool.
 - **Region clusters** (one per Nebius region, one project each): GPU pools, Knative/KServe endpoints, an
   Envoy gateway with key checks, a regional API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
@@ -310,7 +310,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.15 |
+| `services/api` image | 0.11.16 |
 | `services/dispatcher` image | 0.2.9 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |

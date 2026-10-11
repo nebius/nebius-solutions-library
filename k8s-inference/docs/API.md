@@ -18,7 +18,7 @@ POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on th
 POST   /v1/artifacts/uploads         presigned upload URL scoped to the tenant prefix
 GET    /v1/artifacts/{uri}           presigned download of a tenant object
 GET    /v1/endpoints[/{id}]          InferenceServices of catalog models in this region; PATCH scaling (admin key)
-GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   LiteLLM keys of the tenant (admin key for writes; PATCH changes budget, allowed models, expiry: the console's Edit button)
+GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry: the console's Edit button)
 Idempotency-Key header on every mutating call
 ```
 
@@ -27,14 +27,15 @@ operations, keys; sync/async calls are forwarded to the region's API) and `https
 for in-region sync/async/streaming calls and runs pinned to that region. A host is `<gateway ip>.sslip.io`
 or `<cluster>.<domain>` (`docs/EDGE.md`); `./stack.sh output models control` prints the URLs of a fleet. A run submitted to the fleet API is placed in the cheapest free
 region among the model's deployments by its GPU preference (`docs/JOBS.md` "Fleet placement"); `region`
-pins it. Keys are the same everywhere (one LiteLLM).
+pins it. Keys are the same everywhere (one fleet database; a regional API looks a key up on the fleet API).
 
 Modes: `sync`, `async`, `run`, declared per model; `async` may be requested per call. `async` and
 `run` operations are Kubernetes Jobs in the tenant namespace of the region (`docs/JOBS.md`): a run
 keeps its checkpoints on a per-operation volume, resumes on its own after a spot interruption and
 by `:resume` after a failure or cancel. Endpoints are created, changed and deleted through the model
 API ("Models" below), on the fleet API only. Admission limits are not in the API: Kueue bounds concurrent
-runs (the fleet's profile queues), LiteLLM bounds sync/async calls per key (`rpm_limit`, `max_budget`), and an
+runs (the fleet's profile queues), the key's budget bounds every call ("Keys" below; LiteLLM's own `rpm_limit` and
+`max_budget` on its OpenAI route), and an
 Envoy Gateway global rate limit caps each key (distinct `Authorization` header, counted in Redis
 across replicas): 600 requests per minute on the API route, 3000 per minute on the predictor hosts.
 
@@ -83,18 +84,25 @@ and writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of
 `PUT` replaces the definition (version + 1), `DELETE` removes the endpoint everywhere and keeps the last
 version in the history, `GET /v1/models/{model}/history` lists the versions (admin key).
 
-**Model groups and the platform-internal key.** A LiteLLM model group calls the endpoint over its public
-gateway hostname, and the edge on those hostnames accepts only a valid LiteLLM key. The group therefore
-calls as the platform's own key: alias `platform-internal` (metadata `tenant: platform, role: internal`,
-no budget, no expiry, every model), created once per fleet by the platform stage (Terraform,
-`stack/platform/litellm-internal.tf`) and kept in Secret
-`api/litellm-internal`, which the control API reads as `LITELLM_INTERNAL_KEY`. The caller's own key is
-checked first: LiteLLM applies its budget, rate limit and spend before it routes to the group, then the edge
-sees the internal key, so the per-key rate limit of the edge (`SecurityPolicy model-key-check`) counts
-those calls against the platform key, not the caller. Without the Secret the API deploys the endpoint and
-registers no group (a warning in the write's response and in the log): the endpoint still answers through
-`POST /v1/models/{model}:invoke` and its gateway hostname with any tenant key. The internal key is never
-returned by the API or shown in the console.
+**Model groups and the router key.** A LiteLLM model group calls the endpoint over its public gateway
+hostname, and the edge on those hostnames accepts only a key of the fleet. The group therefore calls as
+the fleet's router key: a row of the `keys` table with role `router` (tenant `platform`, alias `router`, no
+budget, no expiry, every model), whose value the platform stage generates once per fleet (Terraform,
+`stack/platform/router-key.tf`, Secret `api/router-key`) and the control API reads as `ROUTER_KEY` and
+upserts at every start (`services/api/keys.py` `ensure_router`). The caller's own key is checked first:
+LiteLLM applies its budget, rate limit and spend before it routes to the group, then the gateway's
+authorize hook sees the router key, which it accepts without a budget check and never bills; the per-key
+rate limit of the edge (`SecurityPolicy model-key-check`) counts those calls against the router key, not
+the caller. Every other API route refuses the router key (403). Without the Secret the API deploys the
+endpoint and registers no group (a warning in the write's response and in the log): the endpoint still
+answers through `POST /v1/models/{model}:invoke` and its gateway hostname with any tenant key. The router
+key is never returned by the API or shown in the console.
+
+Accounting is split by entry point: a call that enters through LiteLLM (`/v1/chat/completions` on the
+`litellm.` host) is accounted by LiteLLM on its own record of the key (tokens, `max_budget`, `rpm_limit`);
+a call through `POST /v1/models/{model}:invoke` or the endpoint's gateway hostname is accounted by the
+platform: the key's budget and spend in the fleet database, GPU runs charged by the billing CronJob
+("Keys" below, docs/RELIABILITY.md "Accounting and budgets").
 
 Writes land on the fleet API only (the control cluster's `api.` host, the one with a database). A regional
 API serves the copies and answers `POST`, `PUT`, `DELETE` and `/history` with 409 and the fleet API's URL.
@@ -116,6 +124,20 @@ Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB i
 2026-10-10). Put `--load-format runai_streamer --model-loader-extra-config '{"concurrency": 32}'` into the command
 of any vLLM endpoint whose weights live on the filesystem, and `VLLM_CACHE_ROOT=/weights/vllm-cache` in its env so
 the torch.compile cache survives a restart (the first start of a trillion-parameter model spends about 25 min there).
+
+## Keys
+
+A key is `sk-` + 40 characters, shown once at creation; the fleet database (`keys` table, `services/api/keys.py`)
+holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`),
+model allow-list (empty = every model), budget in USD (null = unlimited), spend, expiry and block flag. Every
+API checks the key on every request (hash lookup, cached `AUTH_CACHE_S` = 30 s): blocked, expired and
+budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke`, the operations and the
+gateway's authorize hook of every endpoint hostname. The first keys of a fleet are the tenants' `keys` of
+`terraform.tfvars` (the models stage writes them with `python -m keys bootstrap`, `./stack.sh output models
+control -json tenant_keys` prints them); an admin key then mints user keys of its tenant through
+`POST /v1/keys` (budget, models, `expires_days`), edits them (`PATCH`) and revokes them (`DELETE`), on the
+fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
+the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
 
 ## Variants
 

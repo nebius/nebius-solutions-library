@@ -11,7 +11,7 @@ flowchart TB
     subgraph control["Control cluster (CPU only, optional but default)"]
         gwc["Envoy gateway<br/>TLS, key check, rate limit"]
         api["Customer API<br/>services/api"]
-        litellm["LiteLLM<br/>keys, budgets, spend"]
+        litellm["LiteLLM<br/>OpenAI route, model groups"]
         kueuem["Kueue MultiKueue manager<br/>profile queues"]
         disp["Cost dispatcher + price feed<br/>services/dispatcher"]
         obs["Grafana, Prometheus, Loki, Alertmanager"]
@@ -28,14 +28,14 @@ flowchart TB
         pools["GPU pools<br/>spot / on-demand / reserved,<br/>optional InfiniBand GPU cluster"]
     end
 
-    db[("Managed PostgreSQL (Nebius service, private)<br/>platform: model definitions + history<br/>litellm: keys, budgets, spend")]
+    db[("Managed PostgreSQL (Nebius service, private)<br/>platform: model definitions + history, keys, GPU charges<br/>litellm: LiteLLM's key mirror")]
     s3["Nebius Object Storage<br/>one bucket per tenant and region"]
     reg["Source registry + NGC, Docker Hub, GHCR"]
 
     client --> gwc --> api
     client --> gw
     api --> litellm
-    api -- "models, history" --> db
+    api -- "models, history, keys, charges" --> db
     litellm --> db
     api -- "render endpoint, catalog copy" --> ep
     api -- "manager Job" --> kueuem
@@ -62,8 +62,9 @@ The fleet database sits next to the control cluster: one Nebius Managed Service 
 (`<fleet>-db`, PostgreSQL 16, session-mode pooler) in the control plane's project and region, created by
 the cloud stage (`stack/cloud/database.tf`). It has no public access; the control cluster's nodes reach
 its private endpoint through the VPC of the control subnet. Two databases: `platform` (the bootstrap
-database: model definitions and their history, owned by the control API) and `litellm` (API keys,
-budgets, spend; created by a Job of the platform stage). Backups and point-in-time restore are the
+database: model definitions and their history, the API keys with their budgets and spend and the GPU
+charge ledger, owned by the control API) and `litellm` (LiteLLM's mirror of the keys and its own token
+accounting; created by a Job of the platform stage). Backups and point-in-time restore are the
 service's (`control_plane.database.backup_retention`, 14 days by default). Because the service exists in
 some regions only, the control plane must be in one of them.
 
@@ -96,15 +97,15 @@ acted on yet (the design review of 2026-10-09).
 sequenceDiagram
     participant C as Client
     participant GW as Envoy gateway (region)
-    participant L as LiteLLM (control)
+    participant A as API (region; the fleet database through the control API)
     participant E as KServe endpoint
     C->>GW: POST /v1/models/llm-example:invoke, Authorization: Bearer key
-    GW->>L: ext-auth: is the key valid, within budget?
-    L-->>GW: yes (model allow-list, rate limit per key)
+    GW->>A: ext-auth: is the key valid, within budget?
+    A-->>GW: yes (model allow-list, budget, expiry; cached 30 s)
     GW->>E: the request (Knative starts a replica from zero if needed)
     E-->>GW: response or stream
     GW-->>C: response
-    Note over L: spend is recorded on the key (priced routes go through LiteLLM itself)
+    Note over A: GPU runs are charged to the key in the fleet database; a call through LiteLLM's OpenAI route is accounted by LiteLLM
 ```
 
 `mode: async` is the same call wrapped in a small Job: the job's pod calls the endpoint through the
@@ -144,11 +145,11 @@ the shared checkpoint directory. `JOBS.md` has the details and the limits.
 | Capability | Component | Notes |
 |---|---|---|
 | Clusters, nodes, capacity | Nebius Managed Kubernetes, node groups with the autoscaler, spot pricing policies, capacity blocks, GPU clusters for InfiniBand | `stack/modules/cluster` |
-| Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt), ext-auth to LiteLLM | `EDGE.md` |
+| Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt), ext-auth to the API | `EDGE.md` |
 | Endpoints | KServe on Knative Serving | `services/api/render_endpoint.py` (`charts/endpoint` is the reference rendering), `catalog/models` |
 | Fleet database | Nebius Managed Service for PostgreSQL, databases `platform` and `litellm` | `stack/cloud/database.tf`, `stack/platform/database.tf`; `OPERATIONS.md` "Database" |
 | Model definitions | the control API, `services/api/models.py`, `render_endpoint.py` and `db.py` | `POST/PUT/DELETE /v1/models`, history per model, read-only copies per region |
-| Keys, budgets, per-call prices | LiteLLM proxy on the fleet database | keys per tenant, pass-through routes with a price |
+| Keys, budgets, GPU charges | the fleet database (`keys`, `charges`), `services/api/keys.py` | keys per tenant, mirrored into LiteLLM for its OpenAI route and pass-through routes with a price |
 | Queued calls and runs | Kubernetes Jobs, JobSet, the 30 MB runner image | `JOBS.md` |
 | Queueing, quotas, priorities, cross-region placement | Kueue with MultiKueue, the cost dispatcher | `SCHEDULING.md` |
 | Image cache | Zot (pull-through) and Spegel (peer-to-peer) behind one logical host, pre-pull per pool | `IMAGES.md` |
@@ -193,4 +194,4 @@ DevPods, invoicing (usage events only), GPU process snapshots, a second admissio
 (Kueue only), a second scaler (Knative for endpoints, Kueue for runs, the node-group autoscaler for
 nodes), MCP tooling. Terraform deploys the platform; the API reconciles model definitions.
 
-The optional workload-secret integration reuses the library's External Secrets Operator and MysteryBox modules. Endpoint authorization reuses the API through native Envoy SecurityPolicies; LiteLLM and the gateway share Redis. Model changes and GPU charges use transactional state in the existing managed database. See [RELIABILITY.md](RELIABILITY.md) for recovery, pinned upstream contracts and release checks.
+The optional workload-secret integration reuses the library's External Secrets Operator and MysteryBox modules. Endpoint authorization reuses the API through native Envoy SecurityPolicies; LiteLLM and the gateway share Redis. Model changes, keys and GPU charges use transactional state in the fleet database. See [RELIABILITY.md](RELIABILITY.md) for recovery, upstream contracts and release checks.

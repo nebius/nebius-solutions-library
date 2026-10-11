@@ -18,7 +18,7 @@ The API's shared authorizer checks tenant binding, key expiry/blocking, model pe
 
 Supported key transports are `Authorization: Bearer <key>`, `api_key` query parameter, and a WebSocket subprotocol `bearer.<key>` (or the raw key). Prefer the authorization header; query keys can be exposed by client/proxy URL logging. Do not log credentials. The UI reaches endpoints through the API and displays monitoring inside the endpoint/app.
 
-LiteLLM model groups use a platform-internal tenant key when calling protected predictor hosts. It must be present for OpenAI group registration; a missing key is reported in model-write warnings. Native Envoy rate limits and LiteLLM proxy rate/budget checks share the existing Redis service. See `OPERATIONS.md` for its availability and accounting limits.
+LiteLLM model groups call the protected predictor hosts with the fleet's router key (role `router` in the fleet database, Secret `api/router-key`), which the authorizer accepts without a budget check and never bills. It must be present for OpenAI group registration; a missing key is reported in model-write warnings. Native Envoy rate limits and LiteLLM proxy rate/budget checks share the existing Redis service. See `OPERATIONS.md` for its availability and accounting limits.
 
 ## Network and lifecycle checks
 

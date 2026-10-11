@@ -58,15 +58,17 @@ Enabling details worth knowing:
   `kube_workflow_status_{phase,started_at,finished_at}`. GPU requests are
   `kube_pod_container_resource_requests{resource="nvidia_com_gpu"}` (KSM
   sanitises the resource name).
-- LiteLLM 1.104: `/metrics` returns 404; the Prometheus callback is an
-  Enterprise feature in this version. Spend is read from LiteLLM's database
-  instead (Cost dashboard, Grafana datasource uid `litellm-postgres`, a Secret
-  `serverless2-datasource-litellm-postgres` in `monitoring` labelled
-  `grafana_datasource: "1"`; not in git because it carries the password). The
-  datasource points at the managed PostgreSQL: host and port from Secret
-  `litellm/database`, user and password from `litellm/litellm-db`, database
-  `litellm`, `sslmode: require`, type `grafana-postgresql-datasource`. Without
-  this Secret the Cost dashboard's spend panels stay empty.
+- Spend is read from the fleet database (Cost dashboard): the platform's spend
+  per key from `platform.keys` (datasource uid `platform-postgres`) and, since
+  LiteLLM 1.104 returns 404 on `/metrics` (the Prometheus callback is an
+  Enterprise feature in this version), LiteLLM's own accounting of the calls
+  that enter through it from `litellm.LiteLLM_SpendLogs` (uid
+  `litellm-postgres`). Each is a Secret `serverless2-datasource-<uid>` in
+  `monitoring` labelled `grafana_datasource: "1"` (not in git because it
+  carries the password), type `grafana-postgresql-datasource`, `sslmode:
+  require`, pointing at the managed PostgreSQL: host, port, user and password
+  from Secret `api/database`, database `platform` or `litellm`. Without these
+  Secrets the Cost dashboard's spend panels stay empty.
 
 ## Recording rules (`rules.yaml`, prefix `serverless2:`)
 
@@ -93,7 +95,7 @@ hardware row: that is the upstream DCGM dashboard in the Grafana folder `Upstrea
 | Serverless 2.0 / Platform | `s2-platform` | nodes per pool, Ready/allocatable/requested GPUs, node table with creation time, Node Ready timeline, pool size changes and node joins (scale events), DCGM utilisation/memory/power/tensor-active/temperature, GPU to pod map, GPUs in use by namespace, pending vs running vs unschedulable GPU pods, firing alerts |
 | Serverless 2.0 / Endpoints | `s2-endpoints` | InferenceService Ready table and counts, scale-from-zero / scale-to-zero event counts, replicas per service, desired vs requested vs actual per revision, stable concurrency vs target, activator concurrency and queue depth, panic mode, predictor pod startup time (created to Ready), queue-proxy request rate / responses by code / p50 p95 (full and app-only), Envoy per-route rate / 5xx / p95, activator request rate and p95 (the cold start shows here as one slow request) |
 | Serverless 2.0 / Jobs | `s2-jobs` | Kueue pending/admitted/evicted/preempted per ClusterQueue, GPU quota usage per LocalQueue, cohort quota, admission wait p50/p95, ClusterQueue active, gate-removal latency, finished workloads (run Jobs are Kueue workloads; per-operation detail is the API and the Logs dashboard) |
-| Serverless 2.0 / Cost | `s2-cost` | paid GPU-hours per pool (node time) and their cost at the spot and on-demand prices, burn rate now, used GPU-hours (pod requests), utilisation used/paid, mean DCGM utilisation of busy GPUs, idle GPU-hours, GPU-hours and cost per namespace / pool / InferenceService, hourly cost series, LiteLLM spend per key, per hour by model, recent priced calls (hub only) |
+| Serverless 2.0 / Cost | `s2-cost` | paid GPU-hours per pool (node time) and their cost at the spot and on-demand prices, burn rate now, used GPU-hours (pod requests), utilisation used/paid, mean DCGM utilisation of busy GPUs, idle GPU-hours, GPU-hours and cost per namespace / pool / InferenceService, hourly cost series, platform spend per key, LiteLLM spend per hour by model, recent priced calls (hub only) |
 | Serverless 2.0 / Logs | `s2-logs` | Loki: run logs by `job` (= operation id), endpoint logs by InferenceService, volume and error-ish lines per namespace, scheduling/scaling component logs, errors anywhere; variables namespace, job, inferenceservice, free-text regex |
 
 Cost dashboard variables (textboxes, defaults from the current price list):

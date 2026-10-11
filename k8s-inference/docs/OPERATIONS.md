@@ -34,7 +34,8 @@ There are no rotation CronJobs in this form: every credential is a Terraform res
 | MultiKueue token of a worker | on the worker `./stack.sh tf platform <id> -- apply -replace='kubernetes_secret_v1.sa_token["multikueue"]'`, then `apply platform control` |
 | the image cache's registry static key | delete `stack/.secrets/<name>-registry-key.json`, re-apply platform on every cluster, retire the old key with `nebius iam static-key delete` |
 | tenant S3 keys | `-replace` the tenant's `nebius_iam_v2_access_key` in the models stage of that region, then `apply models` there and on the control cluster |
-| the platform-internal LiteLLM key (`api/litellm-internal`) | by hand, see "Database" below |
+| the fleet's router key (`api/router-key`) | `./stack.sh tf platform control -- apply -replace='random_password.router_key[0]'`, then `kubectl -n api rollout restart deployment/api` (the API upserts the new hash at start and re-registers every LiteLLM group with it) |
+| a tenant key of `terraform.tfvars` | `./stack.sh tf models control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
 
 Take-over by another operator: the tfvars, a key for the state bucket (`stack/bootstrap/state-bucket.sh`
 with their profile), `./stack.sh plan` must show no changes. `recover-stopped-nodes` keeps running on every
@@ -187,8 +188,8 @@ Two databases on it:
 
 | Database | Holds | Owner |
 |---|---|---|
-| `platform` (the bootstrap database) | table `models` (id, kind, spec, rendered entry, version, managed_by, created/updated by and at) and `models_history` (every write); `schema_version` | the control API, the only writer (`services/api/db.py`) |
-| `litellm` | API keys, budgets, spend (LiteLLM's own schema) | LiteLLM (`db.useExisting` in the chart values); created once by the Job `litellm/database-init` of the platform stage |
+| `platform` (the bootstrap database) | table `models` (id, kind, spec, rendered entry, version, managed_by, created/updated by and at) and `models_history` (every write); `keys` (sha256, alias, tenant, role, models, budget, spend, expiry, blocked) and `charges` (the GPU ledger, one row per billed run); `attempts`; `schema_version` | the control API and the billing CronJob, the only writers (`services/api/db.py`, `keys.py`) |
+| `litellm` | LiteLLM's mirror of the tenant keys and its own token accounting (LiteLLM's own schema) | LiteLLM (`db.useExisting` in the chart values); created once by the Job `litellm/database-init` of the platform stage |
 
 Connection data lives in Kubernetes Secrets written by the platform stage (`stack/platform/database.tf`):
 `database` in the namespaces `api` and `litellm` (keys `host`, `port`, `user`, `password`, `platform_url`,
@@ -196,15 +197,21 @@ Connection data lives in Kubernetes Secrets written by the platform stage (`stac
 control API gets `DATABASE_URL` from `api/database` key `platform_url`; regional APIs have no database.
 The password is `random_password.database` of the cloud stage (output `secrets.database_password`).
 
-**The platform-internal LiteLLM key** (`api/litellm-internal`, alias `platform-internal`; docs/API.md "Model
-groups"): the key the model groups of API-defined OpenAI endpoints call the gateway with. Created by the
-platform stage (`stack/platform/litellm-internal.tf`: value in the Secret, registered in LiteLLM by the Job
-`litellm/key-platform-internal`). Rotation, by hand: generate a new value, `POST /key/generate` it with the
-master key (same alias is fine, aliases are not unique), replace the Secret, restart the API (`kubectl -n
-api rollout restart deployment/api`), re-save every OpenAI model once (`PUT /v1/models/<id>` with its
-current spec, which re-registers the group with the new key), then `POST /key/delete` the old key. A
-compromised key only lets its holder call the endpoints through the edge; it has no budget of its own, so
-delete and rotate it, do not just block it.
+**Keys** live in `platform.keys` (docs/API.md "Keys"): the tenants' keys of `terraform.tfvars` are written by
+the models stage (one Job `api/key-<tenant>-<name>` running `python -m keys bootstrap` of the API image), the
+rest through the API. Each is mirrored into LiteLLM (same value) for the OpenAI route; a mirror that drifted
+(LiteLLM restored from an older backup) is repaired by the next `PATCH` of the key or by re-running the
+bootstrap Job (`-replace` it). **The router key** (`api/router-key`, docs/API.md "Model groups") is the key
+the model groups of OpenAI endpoints call the gateway with; the API upserts its hash at every start (role
+`router`), so rotation is the `-replace` of the table above. A compromised router key only lets its holder
+call the endpoints through the edge; rotate it.
+
+**Upgrading from the LiteLLM-keyed releases** (api <= 0.11.15): nothing to run by hand. At its first start
+the control API applies migration 5, imports every LiteLLM key once (the keys keep their values, budgets and
+spend), creates the router key and re-registers every LiteLLM model group with it. Afterwards delete the
+former platform key in LiteLLM (`POST /key/delete {"key_aliases": ["platform-internal"]}` with the master
+key; Terraform removes its Secrets); the old GPU receipts stay in `litellm.serverless_gpu_charges` for the
+record (already-billed runs carry the `billed` annotation and are never charged again).
 
 **Backups and point-in-time restore** are the service's: a daily backup in the window starting at
 `backup_window_start` (03:00 UTC by default), kept for `backup_retention` (14 days by default), with
@@ -230,7 +237,8 @@ IMAGES=<images.host of the tfvars>   # the fleet's logical registry host, regist
 kubectl -n api run psql --rm -it --restart=Never --image=$IMAGES/docker/library/postgres:16-alpine \
   --env="PLATFORM_URL=$(kubectl -n api get secret database -o jsonpath='{.data.platform_url}' | base64 -d)" \
   -- sh -c 'psql "$PLATFORM_URL"'
-# \dt                                   tables: models, models_history, schema_version
+# \dt                                   tables: models, models_history, keys, charges, attempts, schema_version
+# select alias, tenant, role, budget, spend, expires, blocked from keys order by tenant, alias;
 # select id, kind, version, updated_by, updated_at from models order by id;
 # select id, version, action, "by", at from models_history order by at desc limit 20;
 ```
