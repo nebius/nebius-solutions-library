@@ -12,6 +12,16 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Refactor 5: two Terraform stages, one platform chart, the cache as an add-on; live state migration (2026-10-11 17:10-18:05 UTC, the same test fleet)
+
+| Check | Result |
+|---|---|
+| Offline gate | `make check` renders `charts/platform` for a worker and the control cluster and compares 83 and 74 objects with the golden set generated from the kustomize-plus-patches render of the previous commit: equal |
+| State migration | the procedure of docs/OPERATIONS.md "Upgrading to the two-stage layout" run on the five clusters: 33 `terraform state mv` between pulled state files (four `module.tenant_region` moves into the cloud state under `<tenant>/<region>`, the tenant releases, Secrets, key passwords and bootstrap Jobs into each platform state), states pushed, the models states deleted from the bucket afterwards (backups kept) |
+| What only a live plan showed | four defects the offline gate cannot see, fixed before the apply: a conditional between the cloud outputs and the placeholder objects ("inconsistent conditional result types": now `try()`); a comment-only chunk of the chart render (a template's header before its first `---`) that `yamldecode` refuses; `0440` read as decimal 440 by Terraform's YAML (the Secret file modes are 288 now); the cloud stage must be applied before any platform plan because the platform stage reads its new `tenant_storage` output |
+| Plans | cloud: outputs only, no resource change; every platform stage: no destroy or replacement of a cluster object; the changes were Helm release metadata (comment-only values edits), ConfigMaps with a trailing newline dropped (`\|` to `\|-`), the Secrets re-written by the 3.x Kubernetes provider with the same content (sha256 of `demo`'s three Secrets equal before and after), the `kueue_ready` wait re-run, on control the key bootstrap Jobs re-created (provider 2.x to 3.x nulls; idempotent, same values) and the `database-init` Job replaced by hand (`-replace`, its immutable template changed with the unified trust mount) |
+| Apply | workers 4 to 5 min each, control 14 min including the apply-time acceptance probe (`hello-run` SUCCEEDED in 10 s, `llm-example` answered after a cold start on a fresh us-central1 node); every API, gateway, Kueue and tenant object unchanged in the clusters |
+
 ## Refactor 3: one auth layer (2026-10-11 16:45-17:30 UTC, the same test fleet)
 
 | Check | Result |
