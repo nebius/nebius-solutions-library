@@ -62,7 +62,7 @@ def test_validation_of_multi_node_fields():
     with pytest.raises(HTTPException):
         models.to_entry({**SPEC, "interconnect": "fabric"})
     with pytest.raises(HTTPException):
-        models.to_entry({**SPEC, "scaling": {"min": 1, "max": 1, "buffer": 1}})
+        models.to_entry({**SPEC, "scaling": {"min": 1, "max": 1, "buffer": 1}})      # not a scaling field any more (stored ones are ignored on read)
     one = models.to_entry({**SPEC, "nodes": 1, "gpu": {"count": 1, "classes": ["b200"]}})
     assert "nodes" not in one and "nodes" not in one["runtime"]                                 # a plain endpoint is unchanged
 

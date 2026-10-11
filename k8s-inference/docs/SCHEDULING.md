@@ -4,7 +4,7 @@
 
 How a workload (endpoint pod or job) ends up on a GPU, and what a model
 declares to steer that. Three layers, all existing projects, one small
-dispatcher of our own (`services/dispatcher`, about 260 lines plus a 65-line price feed).
+dispatcher of our own (`services/dispatcher`, about 540 lines, plus the InfiniBand floor (230) and a 70-line price feed).
 
 | Layer | Decides | Project |
 |---|---|---|
@@ -68,15 +68,19 @@ job:
 
 Kueue picks the pool at admission and a Job's image cannot change afterwards (see "Not possible"
 below), so for such a class the GPU class is chosen **at submission** (option A of
-the design review of 2026-10-09): the API asks the dispatcher's ranking (`GET /v1/rank`: the
-class preference, reserved before on-demand before spot, the cost of the run (its GPUs on a node that is
-up with room, else the whole node the pool would boot: a 1-GPU run does not boot an 8-GPU node), free
-capacity now, the caller's region as a pin when given), renders the Job with the best class's image, limits its node affinity
-to that class's pools and queues it on that class's profile (`prefer-<class>`). The operation and
-every attempt record carry the class (`gpu_class`, plus the image under `image`). The run may still
-move between regions of its class while it waits (MultiKueue), and a resume keeps the class: the
-checkpoints were written by that image. If the dispatcher is unreachable at submission, the
-preferred class that has a pool is taken and a warning is logged.
+the design review of 2026-10-09): the API ranks the pools of the fleet document (`fleet-prices`) the way the
+dispatcher ranks clusters (`services/api/placement.py` mirrors `rank()` below: the class preference,
+reserved before on-demand before spot, then the cost of the run on the node the pool would boot at its list
+price, so a 1-GPU run does not pick an 8-GPU pool; the model's regions, the caller's region as a pin when
+given, a tenant's dedicated pools for that tenant only), renders the Job with the best class's image, limits
+its node affinity to that class's pools and queues it on that class's profile (`prefer-<class>`). The
+operation and every attempt record carry the class (`gpu_class`, plus the image under `image`). The run may
+still move between regions of its class while it waits (MultiKueue), and a resume keeps the class: the
+checkpoints were written by that image. What the API does not see is free quota right now and the live spot
+quote; until api 0.11.13 it asked the dispatcher for them over HTTP (`GET /v1/rank`), a round trip, a
+Service and a timeout whose only gain was that signal, while the queue waited for the preferred class
+either way. A class without a pool in the fleet document is skipped; with no pool at all the preferred class
+is taken and the queue waits for it.
 
 The trade-off, by design: a run with per-class images waits for its class instead of switching
 class while queued. A class with one image keeps today's behaviour (free class switching at queue
@@ -84,7 +88,7 @@ time). The documented follow-up "A+" re-renders a run that has not started after
 next class in its preference list (cancel the gated Job, render again with the next class's image,
 record the switch as an attempt, switch only downward in the list and at most a bounded number of
 times); it is not built, because it adds a control loop with retry semantics for a situation that
-has not hurt yet. `services/api/placement.py`, `services/dispatcher` (`rank_response`).
+has not hurt yet. `services/api/placement.py`.
 
 ## Cross-cluster dispatch (`services/dispatcher`)
 
@@ -173,31 +177,6 @@ exists (same cut-over as `fleet.yaml`).
 Decisions are logged (`kubectl -n kueue-system logs deploy/dispatcher`) as
 `<ns>/<workload> profile=... pin=... gpus=N -> [clusters] best=(cluster,
 flavor, price, free)`.
-
-## Scaling buffer: ready replicas above demand (2026-10-09)
-
-`scaling.buffer = N` on an endpoint keeps N ready replicas more than the load needs while the model serves,
-so a burst finds a replica at once instead of waiting for a start. Knative's autoscaler has no additive
-setting (it scales to load over target), so the dispatcher's elected replica adds it
-(`services/dispatcher/buffer.py`, every reconcile cycle, 15 s):
-
-1. For every model whose per-region copy (the API's catalog ConfigMap in `api`) carries `scaling.buffer`,
-   take the revision that carries the traffic (`routingState=active`). Nothing is rendered into the
-   InferenceService for it, so changing the buffer rolls no revision.
-2. Read demand from the Knative autoscaler's own metrics (`kn_revision_concurrency_stable` over
-   `kn_revision_concurrency_target`, or the request-rate pair for that metric), through the worker API
-   server's service proxy. That is Knative's formula, measured before our floor, so the floor never hides it.
-3. Hold the revision's `autoscaling.knative.dev/min-scale` at demand + N, at most `scaling.max`; at zero
-   demand the floor returns to `scaling.min`, so scale to zero is untouched (the warm spare node covers the
-   first start). A floor is lowered only once demand has asked for less for a whole cooldown (`scaling.cooldown_s`, at least 120 s); one quiet sample never drops it.
-4. The annotation goes on the Revision, not the InferenceService: a Revision annotation takes effect at
-   once and creates no rollout (measured on Knative 1.23: desired 2 within one cycle, nothing reverted). A
-   new revision starts from the template and is picked up on the next cycle. The revision carries
-   `serverless2.nebius/buffer-raised-at` while a floor of ours is up; removing the buffer restores the minimum.
-
-Cost: N replicas' GPUs for as long as the model serves. The worker identity of the manager gains read on
-InferenceServices and the model copies, patch on Revisions and `get` on the autoscaler's service proxy
-(`clusters/common/manifests/fleet-access/multikueue.yaml`).
 
 ## InfiniBand pools grow on demand (2026-10-11)
 

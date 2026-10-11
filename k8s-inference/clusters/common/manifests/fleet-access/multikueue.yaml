@@ -35,18 +35,6 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [create, get, list, patch, delete]
-  # the ready-replica buffer (services/dispatcher/buffer.py): endpoints with a buffer, their live revisions'
-  # min-scale, and the Knative autoscaler's metrics through the API server's service proxy
-  - apiGroups: [serving.kserve.io]
-    resources: [inferenceservices]
-    verbs: [get, list]
-  - apiGroups: [serving.knative.dev]
-    resources: [revisions]
-    verbs: [get, list, patch]
-  - apiGroups: [""]
-    resources: [services/proxy]
-    resourceNames: [autoscaler, "autoscaler:9090"]
-    verbs: [get]
   # InfiniBand pool floors (services/dispatcher/infiniband.py): started multi-node endpoints hold whole nodes of an
   # InfiniBand pool too; the Workloads of multi-node runs are covered by the rule above
   - apiGroups: [leaderworkerset.x-k8s.io]
@@ -57,19 +45,4 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: { name: multikueue-manager }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: multikueue-manager }
-subjects: [{ kind: ServiceAccount, name: multikueue, namespace: kueue-system }]
----
-# the ready-replica buffer reads the API's per-region model copies (scaling.buffer) in `api`
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: { name: multikueue-manager-catalog, namespace: api }
-rules:
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: { name: multikueue-manager-catalog, namespace: api }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: multikueue-manager-catalog }
 subjects: [{ kind: ServiceAccount, name: multikueue, namespace: kueue-system }]

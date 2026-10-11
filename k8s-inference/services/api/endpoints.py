@@ -34,7 +34,7 @@ def to_public(m: dict, obj: dict, region: str = REGION) -> dict:
     resources = container.get("resources", {}).get("requests", {})
     annotations = md.get("annotations") or {}
     # the native vocabulary read back from Knative's fields (models.py `to_entry` is the inverse); an API-managed
-    # definition's saved policy wins, it carries what is not rendered (`buffer`) and what Knative defaults silently
+    # definition's saved policy wins, it carries what Knative defaults silently
     rate = pred.get("scaleMetric") == "rps"
     utilization = int(float(annotations.get("autoscaling.knative.dev/target-utilization-percentage", 70)))
     scaling = {"min": pred.get("minReplicas", 0), "max": pred.get("maxReplicas", 1),

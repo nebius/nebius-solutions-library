@@ -1287,11 +1287,13 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     assert c.put("/v1/models/scaling-demo", json=saved, headers=ADMIN).status_code == 200
     assert north.custom[key]["spec"]["predictor"]["scaleMetric"] == "concurrency"
     assert c.patch("/v1/endpoints/scaling-demo", json=patch, headers=H).status_code == 403
-    r = c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN)
-    assert r.status_code == 200 and r.json()["scaling"]["buffer"] == 1, r.text
-    assert "serverless2.nebius/buffer" not in (north.custom[key]["metadata"].get("annotations") or {})   # the dispatcher reads the model copy; no revision rolls
-    assert admin_keys.rows["scaling-demo"]["spec"]["scaling"]["buffer"] == 1
-    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 9}}, headers=ADMIN).status_code == 422
+    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN).status_code == 422   # gone since 0.11.14
+    admin_keys.rows["scaling-demo"]["spec"]["scaling"]["buffer"] = 1                                                  # ... but an older release may have stored it
+    admin_keys.rows["scaling-demo"]["entry"]["spec"]["scaling"]["buffer"] = 1
+    appmod.catalog.invalidate()
+    assert "buffer" not in c.get("/v1/models/scaling-demo", headers=ADMIN).json()["spec"]["scaling"]
+    r = c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"cooldown_s": 5}}, headers=ADMIN)
+    assert r.status_code == 200 and "buffer" not in r.json()["scaling"] and "buffer" not in admin_keys.rows["scaling-demo"]["spec"]["scaling"], r.text
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"window_s": 5}}, headers=ADMIN).status_code == 422
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"metric": "rps"}}, headers=ADMIN).status_code == 422   # not a public name
     assert admin_keys.rows["scaling-demo"]["version"] == 4
