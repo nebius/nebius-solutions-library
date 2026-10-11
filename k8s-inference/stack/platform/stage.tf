@@ -33,8 +33,16 @@ locals {
   litellm_url            = local.role.control ? local.litellm_url_in_cluster : "https://litellm.${local.control_host}"
 
   image = { for c, t in local.f.images.versions : c => "${local.images_host}/nebius/serverless2/${c}:${t}" }
-  # The fleet document for the charts (stack/config/locals.tf), with the registry the cloud stage created.
-  fleet_doc = merge(local.chart_fleet, { images = merge(local.chart_fleet.images, { source = local.cloud.hub.registry }) })
+  # The fleet document for the charts (stack/config/locals.tf), with the registry the cloud stage created and, per pool,
+  # the node group the cloud stage created for it: the dispatcher raises an InfiniBand pool's floor through the Nebius
+  # API while a multi-node run waits for its nodes (docs/SCHEDULING.md "InfiniBand pools grow on demand"); null for a
+  # pool the cloud stage has not applied yet (the dispatcher leaves such a pool alone).
+  fleet_doc = merge(local.chart_fleet, {
+    images = merge(local.chart_fleet.images, { source = local.cloud.hub.registry })
+    regions = { for rn, r in local.chart_fleet.regions : rn => merge(r, {
+      pools = { for pn, p in r.pools : pn => merge(p, { node_group_id = try(local.cloud.clusters[r.id].gpu_node_group_ids[pn], null) }) }
+    }) }
+  })
 
   # Chart list: clusters/common/apps/*.yaml (one shared release inventory).
   apps_all = { for f in fileset("${local.repo}/clusters/common/apps", "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.repo}/clusters/common/apps/${f}")) }
