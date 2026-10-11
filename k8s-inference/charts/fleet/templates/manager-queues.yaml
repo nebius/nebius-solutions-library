@@ -1,15 +1,14 @@
 {{- /*
 Control cluster only: the fleet-wide scheduling queues the API submits to (docs/FLEET.md "Tenants"). Flavors are
 logical (`<region id>-<pool>`, no node labels: the job runs on a worker, whose own flavors place it) and mirror each
-worker's quota. `default` is the fleet's lender (nominal quota of every shared pool, no namespace queues here);
-`<tenant>-default` and `<tenant>-prefer-<class>` are the tenants' queues (worker-queues.yaml explains the shape:
-borrowing on shared pools capped by gpu_quota, dedicated pools as the tenant's own nominal quota, fair-share weight).
-Every tenant queue carries the MultiKueue admission check of its profile, so a workload is only admitted here once
-a worker in the profile's order admitted it; the worker's queue of the same name does the final placement.
+worker's quota; the queues are the same lender and tenant queues as on a worker (worker-queues.yaml explains them),
+each tenant queue carrying the MultiKueue admission check of its profile: a workload is only admitted here once a
+worker in the profile's order admitted it, and the worker's queue of the same name does the final placement.
 */ -}}
 {{- if include "fleet.isControl" . }}
 {{- $f := .Values.fleet }}
 {{- $all := include "fleet.allPools" $f | fromYaml }}
+{{- $bare := dict }}{{ range $n, $p := $all }}{{ $_ := set $bare $n $p.pool }}{{ end }}
 {{- range $name, $p := $all }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -31,78 +30,11 @@ metadata:
     serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) | quote }}
 spec: {}
 {{- end }}
-{{- $profiles := list "" }}
-{{- range $c := include "fleet.classes" $all | fromYamlArray }}{{ $profiles = append $profiles $c }}{{ end }}
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: ClusterQueue
-metadata:
-  name: default
-  labels:
-    {{- include "fleet.labels" $ | nindent 4 }}
-spec:
-  cohortName: {{ $.Values.cohort }}
-  namespaceSelector:
-    matchExpressions: [{ key: kubernetes.io/metadata.name, operator: In, values: [none] }]
-  queueingStrategy: BestEffortFIFO
-  resourceGroups:
-    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
-      flavors:
-        {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" $all "prefer" "") | fromYamlArray }}
-        {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" (index $all $name).pool)) }}
-        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $all $name)) | fromYaml }}
-        - name: {{ $name }}
-          resources:
-            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
-            - { name: cpu, nominalQuota: {{ $q.cpu }} }
-            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
-            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
-        {{- end }}
-        {{- end }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare) }}
 {{- range $tn, $tc := default dict $f.tenants }}
-{{- range $prefer := $profiles }}
+{{- range $prefer := prepend (include "fleet.classes" $all | fromYamlArray) "" }}
 {{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: ClusterQueue
-metadata:
-  name: {{ $tn }}-{{ $profile }}
-  labels:
-    {{- include "fleet.labels" $ | nindent 4 }}
-    serverless2.nebius/tenant: {{ $tn | quote }}
-    {{- if $prefer }}
-    serverless2.nebius/prefer: {{ $prefer | quote }}
-    {{- end }}
-spec:
-  cohortName: {{ $.Values.cohort }}
-  namespaceSelector:
-    matchLabels: { kubernetes.io/metadata.name: tenant-{{ $tn }} }
-  queueingStrategy: BestEffortFIFO
-  fairSharing:
-    weight: {{ default 1 $tc.fair_share_weight | quote }}
-  admissionChecksStrategy:
-    admissionChecks:
-      - name: multikueue-{{ $profile }}
-  flavorFungibility:
-    whenCanBorrow: MayStopSearch
-    whenCanPreempt: TryNextFlavor
-  preemption:
-    withinClusterQueue: LowerPriority
-    reclaimWithinCohort: Any
-    borrowWithinCohort:
-      policy: LowerPriority
-  resourceGroups:
-    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
-      flavors:
-        {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" $all "prefer" $prefer) | fromYamlArray }}
-        {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $all $name).pool) }}
-        {{- if or (not $owner) (eq $owner $tn) }}
-        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $all $name)) | fromYaml }}
-        - name: {{ $name }}
-          resources:
-            {{- include "fleet.tenantFlavorResources" (dict "q" $q "dedicated" (eq $owner $tn) "cap" (default 0 $tc.gpu_quota)) | nindent 12 }}
-        {{- end }}
-        {{- end }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "admissionCheck" (printf "multikueue-%s" $profile)) }}
 {{- end }}
 {{- end }}
 {{- end }}

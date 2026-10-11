@@ -243,8 +243,9 @@ def test_tenant_profiles_and_dedicated_pools():
     clusters = {"hub": {"pools": {"h100-spot-1x": {"class": "h100", "capacity": "spot", "price": 0.8, "tenant": ""},
                                   "h100-lab-8x": {"class": "h100", "capacity": "reserved", "price": 0.0, "tenant": "lab"}}}}
     free = {("hub", "h100-spot-1x"): 2, ("hub", "h100-lab-8x"): 8}
-    prof = d.profile_from_name("lab-prefer-h100", clusters, {})
+    prof = d.profile_from_name("lab-prefer-h100", clusters, {}, tenant="lab")
     assert prof == d.profile_from_name("prefer-h100", clusters, {}) and prof["strategy"] == "preferred"
+    assert d.profile_from_name("lab-prefer-h100", clusters, {})["strategy"] == "cheapest"     # no tenant known: not a profile
     lab = d.rank(prof, clusters, free, 1, {}, tenant="lab")
     assert lab[0][1] == "h100-lab-8x"                                        # its reservation first
     other = d.rank(prof, clusters, free, 1, {}, tenant="demo")

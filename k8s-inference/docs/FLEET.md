@@ -165,6 +165,11 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 
 ## Change recipes
 
+- **Tenant queues moved (2026-10-11)**: a tenant's LocalQueues now point at its own ClusterQueues. A LocalQueue's
+  target is immutable, so the models stage deletes the queues that point elsewhere right before the tenant release
+  upgrades them (`stack/scripts/localqueue-cutover.sh`, triggered by the tenant chart's version); waiting runs are
+  re-queued by Kueue, running ones are not touched. Apply the platform stage (fleet chart) before the models stage.
+
 - **Add a pool / GPU class**: one entry under `regions.<r>.pools`; `plan`
   shows one node group (and a pricing policy for a capped spot pool); Terraform
   adds the flavor, the `prefer-<class>` queue, the pre-pull DaemonSet and the

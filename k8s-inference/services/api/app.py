@@ -261,7 +261,13 @@ def idle_shutdown() -> list[str]:
                 continue
             new_spec = {**spec, "scaling": {**sc, "min": 0}}
             entry = models.to_entry(new_spec, managed_by="api")
-            db.upsert_model(entry, new_spec, by="idle-shutdown", create_only=False)
+            row = db.get_model(m["name"])
+            try:    # an admin's write in between wins: this round skips, the next one re-reads
+                db.upsert_model(entry, new_spec, by="idle-shutdown", expected=row.get("version") if row else None, create_only=False)
+            except HTTPException as e:
+                if e.status_code != 409:
+                    raise
+                continue
             catalog.invalidate()
             stopped.append(m["name"])
             log.info("idle shutdown: %s stopped after %ss without a request", m["name"], sc["idle_s"])
@@ -492,6 +498,7 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal):
     spend and the per-call price are enforced there), else straight to the predictor."""
     if int(m.get("nodes") or 1) > 1:
         st = kube.endpoint_status(m["k8s_name"], m["namespace"], nodes=int(m["nodes"]))
+        kube.stamp_last_request(m["k8s_name"], m["namespace"])     # a direct proxy call bypasses the gateway's authorize hook
         if st["status"] != "ready":
             raise HTTPException(503, f"endpoint {m['name']} is {st['status']} ({m['nodes']} nodes): a multi-node endpoint is started with "
                                      f"PATCH /v1/endpoints/{m['k8s_name']} {{\"scaling\": {{\"min\": 1}}}} (or the console's Start button) and takes "
@@ -613,10 +620,8 @@ def admin(p: Principal = Depends(principal)) -> Principal:
 def _deployed(m: dict, region: str) -> dict | None:
     """The deployed object of an endpoint in a region: the KServe InferenceService, or the LeaderWorkerSet of a
     multi-node endpoint (services/api/models.py `nodes`)."""
-    name, ns = m["k8s_name"], m["namespace"]
-    if int(m.get("nodes") or 1) > 1:
-        return kube.lws(name, ns) if region == REGION else kube.lws(name, ns, region)
-    return kube.isvc(name, ns) if region == REGION else kube.isvc(name, ns, region)
+    read = kube.lws if int(m.get("nodes") or 1) > 1 else kube.isvc
+    return read(m["k8s_name"], m["namespace"], region)
 
 
 def _endpoint_model(eid: str) -> dict:

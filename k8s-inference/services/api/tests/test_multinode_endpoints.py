@@ -140,3 +140,46 @@ def test_example_request_travels_with_the_definition():
     assert pub["example"] == spec["example"]
     with pytest.raises(HTTPException):
         models.to_entry({**spec, "example": "not an object"})
+
+
+def test_lws_public_shape_and_stopped_invoke(monkeypatch):
+    """GET /v1/endpoints of a multi-node endpoint reads the LeaderWorkerSet; :invoke on a stopped one answers 503 with
+    the way to start it (docs/API.md "Multi-node endpoints")."""
+    import endpoints as ep
+    monkeypatch.setattr(kube, "endpoint_status", lambda name, ns, region=None, nodes=1: {"status": "scaled-to-zero", "replicas_ready": 0, "pods_ready": 0, "nodes": nodes})
+    m = {"k8s_name": "kimi-k3", "name": "kimi-k3", "display_name": "Kimi", "namespace": "models", "gpu": "8x b300", "protocol": "openai",
+         "managed_by": "api", "nodes": 2, "spec": {"scaling": {"min": 0, "idle_s": 1800}, "timeout_s": 600}, "example": {"messages": []}}
+    obj = {"kind": "LeaderWorkerSet", "metadata": {"annotations": {"serverless2.nebius/nodes": "2", "serverless2.nebius/interconnect": "none"}, "creationTimestamp": "t"},
+           "spec": {"replicas": 0, "leaderWorkerTemplate": {"size": 2, "leaderTemplate": {"spec": {"containers": [{"image": "vllm", "resources": {"requests": {"cpu": "160", "memory": "2000Gi"}}}]}}}}}
+    pub = ep.to_public(m, obj, "eu-west2")
+    assert pub["nodes"] == 2 and pub["status"] == "scaled-to-zero" and pub["min_replicas"] == 0 and pub["scaling"]["idle_s"] == 1800
+    assert pub["example"] == {"messages": []} and pub["image"] == "vllm" and pub["cpu"] == "160" and pub["managed_by"] == "api"
+    one = ep.to_public({**m, "nodes": 1}, {"kind": "InferenceService", "metadata": {}, "spec": {"predictor": {"minReplicas": 1}}}, "eu-west2")
+    assert one["nodes"] == 1 and one["min_replicas"] == 1 and one["example"] == {"messages": []}
+
+
+def test_idle_shutdown_stops_an_idle_group_and_skips_a_busy_one(monkeypatch):
+    import app as appmod
+    import catalog
+    import db
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = (now - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    spec = {**SPEC, "scaling": {"min": 1, "max": 1, "idle_s": 1800}}
+    idle = {"name": "kimi-k3", "k8s_name": "kimi-k3", "namespace": "models", "managed_by": "api", "nodes": 2, "spec": spec, "deployments": {"us-central1": {}}}
+    busy = {**idle, "name": "busy", "k8s_name": "busy"}
+    starting = {**idle, "name": "starting", "k8s_name": "starting"}
+    status = {"kimi-k3": {"status": "ready", "replicas_ready": 1, "ready_at": old, "last_request_at": old},
+              "busy": {"status": "ready", "replicas_ready": 1, "ready_at": old, "last_request_at": fresh},
+              "starting": {"status": "deploying", "replicas_ready": 0}}
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    monkeypatch.setattr(catalog, "all_models", lambda: {m["name"]: m for m in (idle, busy, starting)})
+    monkeypatch.setattr(catalog, "invalidate", lambda: None)
+    monkeypatch.setattr(kube, "endpoint_status", lambda name, ns, region=None, nodes=1: status[name])
+    monkeypatch.setattr(kube, "cluster_region", lambda c: c)
+    monkeypatch.setattr(db, "get_model", lambda mid: {"version": 7})
+    writes = []
+    monkeypatch.setattr(db, "upsert_model", lambda entry, spec, by, expected=None, create_only=False, **kw: writes.append((entry["id"], spec["scaling"]["min"], by, expected)))
+    assert appmod.idle_shutdown() == ["kimi-k3"]
+    assert writes == [("kimi-k3", 0, "idle-shutdown", 7)]

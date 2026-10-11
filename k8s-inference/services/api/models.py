@@ -176,8 +176,8 @@ def validate(spec: dict) -> dict:
     kind = s.get("kind", "endpoint")
     if kind not in ("endpoint", "job"):
         raise HTTPException(400, "kind: endpoint | job")
-    if "example" in s and s["example"] is not None and not isinstance(s["example"], dict):
-        raise HTTPException(400, "example: a JSON object, a valid request body of the endpoint")
+    if "example" in s and s["example"] is not None and (not isinstance(s["example"], dict) or len(json.dumps(s["example"])) > 16384):
+        raise HTTPException(400, "example: a JSON object of at most 16 KiB, a valid request body of the endpoint")
     if s.get("data") is not None:
         d = s["data"]
         if kind != "job" or not isinstance(d, dict) or not DATA_PATH_RE.match(str(d.get("path", ""))):
@@ -311,6 +311,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             runtime["weights"] = {"sharedFilesystem": {"enabled": True, "path": w.get("path", mid), "mountPath": w.get("mount_path", "/weights")},
                                   "env": dict(w.get("env") or {})}
         nodes, interconnect = int(s.get("nodes", 1)), s.get("interconnect", "none")
+        if nodes > 1 and not s.get("regions"):      # by default every region that has a whole-node pool of the class
+            regions = [r for r in regions if pool_for(r, classes, count, nodes, interconnect)]
         deployments = {r: ({"pool": p} if (p := (pool_for(r, classes, count, nodes, interconnect) if classes else "system")) else {}) for r in regions}
         if nodes > 1:
             # charts/endpoint/templates/leaderworkerset.yaml: one replica group of `nodes` pods, the leader serves
@@ -426,7 +428,7 @@ PLURALS = {"InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservic
            "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
            "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches"),
            # multi-node endpoints (runtime.nodes > 1): the replica group, its leader Service's route to the gateway
-           "LeaderWorkerSet": ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets"),
+           "LeaderWorkerSet": kube.LWS,
            "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes")}
 
 

@@ -164,8 +164,7 @@ LAST_REQUEST_ANNOTATION = f"{LABEL}/last-request-at"
 
 
 def _lws_get(region: str, ns: str, name: str) -> dict:
-    """get_namespaced_custom_object takes (group, version, namespace, plural, name): the namespace before the plural
-    (swapped on 2026-10-10, the API server answered Forbidden for the namespace "leaderworkersets")."""
+    """One LeaderWorkerSet; the client wants (group, version, namespace, plural, name)."""
     return retry(api(region).get_namespaced_custom_object, LWS[0], LWS[1], ns, LWS[2], name)
 
 
@@ -239,7 +238,7 @@ def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_
     body = {"metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}}
     try:
         api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
-    except ApiException:
+    except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
         pass
 
 

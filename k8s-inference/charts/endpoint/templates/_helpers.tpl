@@ -37,3 +37,106 @@ kueue.x-k8s.io/priority-class: {{ . }}
 {{ toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/* The serving container's resource block, probes, volume mounts and the pod's volumes: shared by the InferenceService
+     (one pod per replica) and the LeaderWorkerSet (one pod per node) renderings. args: the effective values ($v) */}}
+{{- define "endpoint.resources" -}}
+{{- $r := .resources }}
+limits:
+  nvidia.com/gpu: {{ $r.gpu | quote }}
+  cpu: {{ $r.cpu | quote }}
+  memory: {{ $r.memory }}
+  {{- with $r.ephemeralStorage }}
+  ephemeral-storage: {{ . }}
+  {{- end }}
+requests:
+  nvidia.com/gpu: {{ $r.gpu | quote }}
+  cpu: {{ default $r.cpu $r.cpuRequest | quote }}
+  memory: {{ default $r.memory $r.memoryRequest }}
+  {{- with $r.ephemeralStorage }}
+  ephemeral-storage: {{ . }}
+  {{- end }}
+{{- end }}
+
+{{- define "endpoint.probes" -}}
+{{- with .readinessProbe }}
+readinessProbe:
+  httpGet:
+    path: {{ .path }}
+    port: {{ default $.port .port }}
+  {{- with .periodSeconds }}
+  periodSeconds: {{ . }}
+  {{- end }}
+  {{- with .failureThreshold }}
+  failureThreshold: {{ . }}
+  {{- end }}
+{{- end }}
+{{- with .livenessProbe }}
+livenessProbe:
+  httpGet:
+    path: {{ .path }}
+    port: {{ default $.port .port }}
+  periodSeconds: {{ default 15 .periodSeconds }}
+  failureThreshold: {{ default 4 .failureThreshold }}
+  {{- with .initialDelaySeconds }}
+  initialDelaySeconds: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
+{{- define "endpoint.volumeMounts" -}}
+{{- $w := default (dict) (default (dict) .weights).sharedFilesystem -}}
+{{- if .shm.enabled }}
+- { name: shm, mountPath: /dev/shm }
+{{- end }}
+{{- if $w.enabled }}
+- { name: weights, mountPath: {{ default "/weights" $w.mountPath }}, subPath: {{ default .name $w.path | quote }}, readOnly: {{ default false $w.readOnly }} }
+{{- end }}
+{{- range .volumes }}
+- { name: {{ .name }}, mountPath: {{ .mountPath }} }
+{{- end }}
+{{- range .persistentVolumes }}
+- { name: {{ .name }}, mountPath: {{ .mountPath }} }
+{{- end }}
+{{- end }}
+
+{{- define "endpoint.volumes" -}}
+{{- $w := default (dict) (default (dict) .weights).sharedFilesystem -}}
+{{- if .shm.enabled }}
+- name: shm
+  emptyDir: { medium: Memory, sizeLimit: {{ .shm.size }} }
+{{- end }}
+{{- if $w.enabled }}
+- name: weights              # region shared filesystem (Terraform weights_filesystem) through the cluster PVC; subPath <path>
+  persistentVolumeClaim: { claimName: {{ default "weights-shared" $w.claimName | quote }} }
+{{- end }}
+{{- range .volumes }}
+- name: {{ .name }}
+  emptyDir:
+    sizeLimit: {{ .sizeLimit }}
+    {{- with .medium }}
+    medium: {{ . }}
+    {{- end }}
+{{- end }}
+{{- range .persistentVolumes }}
+- name: {{ .name }}
+  persistentVolumeClaim:
+    claimName: {{ $.name }}-{{ .name }}
+{{- end }}
+{{- end }}
+
+{{/* The init container that creates the model's directory on the shared filesystem (root-owned otherwise). args: $v */}}
+{{- define "endpoint.weightsPrepare" -}}
+{{- $w := default (dict) (default (dict) .weights).sharedFilesystem -}}
+{{- if and $w.enabled $w.prepare }}
+- name: weights-prepare
+  image: {{ $w.prepareImage }}
+  command: [sh, -c, "mkdir -p /weights-root/{{ default .name $w.path }} && chmod 1777 /weights-root/{{ default .name $w.path }}"]
+  securityContext: { runAsUser: 0 }
+  volumeMounts:
+    - { name: weights, mountPath: /weights-root }
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+{{- end }}
+{{- end }}

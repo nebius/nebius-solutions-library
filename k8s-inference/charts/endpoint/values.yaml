@@ -86,7 +86,9 @@ weights:
 # Multi-node endpoints (nodes > 1, docs/API.md "Multi-node endpoints"): a LeaderWorkerSet of `nodes` pods on whole nodes
 # (resources.gpu = the preset's GPUs) instead of the InferenceService; the leader runs `command` and serves `port`,
 # the workers run `workerCommand`; every pod gets NNODES, GPUS_PER_NODE, WORLD_SIZE, NODE_RANK, MASTER_ADDR (the
-# leader) and MASTER_PORT next to the LeaderWorkerSet's own LWS_* variables. scaling.minReplicas = replica groups
+# leader pod's name through the LeaderWorkerSet's headless Service, <name>-0.<name>) and MASTER_PORT next to the
+# LeaderWorkerSet's own LWS_* variables. The leader carries the readiness and liveness probes (a hung leader is
+# restarted, and RecreateGroupOnPodRestart recreates the whole group); podMetadata applies to every pod of the group. scaling.minReplicas = replica groups
 # (0 stops, 1 runs); maxReplicas is not used. A Service and an HTTPRoute named <name>-predictor on the gateway
 # (hostname <name>-predictor.<namespace>.<domain>) keep the shape of a KServe endpoint, so the SecurityPolicy, the
 # certificate and LiteLLM registration are the same.

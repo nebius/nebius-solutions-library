@@ -2,10 +2,7 @@
 {{- /* one pod per replica (KServe on Knative); several whole nodes per replica: leaderworkerset.yaml */ -}}
 {{- if le (int (default 1 $v.nodes)) 1 }}
 {{- $r := $v.resources -}}
-{{- $w := default (dict) (default (dict) $v.weights).sharedFilesystem -}}
 {{- $wenv := default (dict) (default (dict) $v.weights).env -}}
-{{- $wdir := default $v.name $w.path -}}
-{{- $wclaim := default "weights-shared" $w.claimName -}}
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
@@ -77,17 +74,9 @@ spec:
     securityContext:
       {{- toYaml . | nindent 6 }}
     {{- end }}
-    {{- if and $w.enabled $w.prepare }}
+    {{- with include "endpoint.weightsPrepare" $v }}
     initContainers:
-      - name: weights-prepare   # the model's directory on the shared filesystem is created root-owned; make it writable for the runtime user
-        image: {{ $w.prepareImage }}
-        command: [sh, -c, "mkdir -p /weights-root/{{ $wdir }} && chmod 1777 /weights-root/{{ $wdir }}"]
-        securityContext: { runAsUser: 0 }
-        volumeMounts:
-          - { name: weights, mountPath: /weights-root }
-        resources:
-          requests: { cpu: 10m, memory: 16Mi }
-          limits: { cpu: 100m, memory: 64Mi }
+      {{- . | nindent 6 }}
     {{- end }}
     containers:
       - name: kserve-container
@@ -124,84 +113,18 @@ spec:
           - containerPort: {{ $v.port }}
             protocol: TCP
         resources:
-          limits:
-            nvidia.com/gpu: {{ $r.gpu | quote }}
-            cpu: {{ $r.cpu | quote }}
-            memory: {{ $r.memory }}
-            {{- with $r.ephemeralStorage }}
-            ephemeral-storage: {{ . }}
-            {{- end }}
-          requests:
-            nvidia.com/gpu: {{ $r.gpu | quote }}
-            cpu: {{ default $r.cpu $r.cpuRequest | quote }}
-            memory: {{ default $r.memory $r.memoryRequest }}
-            {{- with $r.ephemeralStorage }}
-            ephemeral-storage: {{ . }}
-            {{- end }}
-        {{- with $v.readinessProbe }}
-        readinessProbe:
-          httpGet:
-            path: {{ .path }}
-            port: {{ default $v.port .port }}
-          {{- with .periodSeconds }}
-          periodSeconds: {{ . }}
-          {{- end }}
-          {{- with .failureThreshold }}
-          failureThreshold: {{ . }}
-          {{- end }}
-        {{- end }}
-        {{- with $v.livenessProbe }}
-        livenessProbe:
-          httpGet:
-            path: {{ .path }}
-            port: {{ default $v.port .port }}
-          periodSeconds: {{ default 15 .periodSeconds }}
-          failureThreshold: {{ default 4 .failureThreshold }}
-          {{- with .initialDelaySeconds }}
-          initialDelaySeconds: {{ . }}
-          {{- end }}
-        {{- end }}
+          {{- include "endpoint.resources" $v | nindent 10 }}
+        {{- include "endpoint.probes" $v | nindent 8 }}
         {{- with $v.containerSecurityContext }}
         securityContext:
           {{- toYaml . | nindent 10 }}
         {{- end }}
-        {{- if or $v.shm.enabled $v.volumes $v.persistentVolumes $w.enabled }}
+        {{- with include "endpoint.volumeMounts" $v }}
         volumeMounts:
-          {{- if $v.shm.enabled }}
-          - { name: shm, mountPath: /dev/shm }
-          {{- end }}
-          {{- if $w.enabled }}
-          - { name: weights, mountPath: {{ default "/weights" $w.mountPath }}, subPath: {{ $wdir | quote }}, readOnly: {{ default false $w.readOnly }} }
-          {{- end }}
-          {{- range $v.volumes }}
-          - { name: {{ .name }}, mountPath: {{ .mountPath }} }
-          {{- end }}
-          {{- range $v.persistentVolumes }}
-          - { name: {{ .name }}, mountPath: {{ .mountPath }} }
-          {{- end }}
+          {{- . | nindent 10 }}
         {{- end }}
-    {{- if or $v.shm.enabled $v.volumes $v.persistentVolumes $w.enabled }}
+    {{- with include "endpoint.volumes" $v }}
     volumes:
-      {{- if $v.shm.enabled }}
-      - name: shm
-        emptyDir: { medium: Memory, sizeLimit: {{ $v.shm.size }} }
-      {{- end }}
-      {{- if $w.enabled }}
-      - name: weights              # region shared filesystem (Terraform weights_filesystem) through the cluster PVC; subPath <path>
-        persistentVolumeClaim: { claimName: {{ $wclaim | quote }} }
-      {{- end }}
-      {{- range $v.volumes }}
-      - name: {{ .name }}
-        emptyDir:
-          sizeLimit: {{ .sizeLimit }}
-          {{- with .medium }}
-          medium: {{ . }}
-          {{- end }}
-      {{- end }}
-      {{- range $v.persistentVolumes }}
-      - name: {{ .name }}
-        persistentVolumeClaim:
-          claimName: {{ $v.name }}-{{ .name }}
-      {{- end }}
+      {{- . | nindent 6 }}
     {{- end }}
 {{- end }}

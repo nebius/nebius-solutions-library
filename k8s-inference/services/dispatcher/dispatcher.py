@@ -36,7 +36,7 @@ The same ranking is served over HTTP (`GET /v1/rank?profile=&gpus=&classes=&regi
 the last reconcile's snapshot: the API asks it at submission for a run class with per-GPU-class images, renders
 the Job with the best class's image and queues it on that class (docs/SCHEDULING.md "Per-GPU images for runs").
 """
-import base64, re
+import base64
 import json
 import logging
 import os
@@ -131,9 +131,12 @@ def price_of(pool: dict, spot_prices: dict, key: str) -> float:
     return float(live if live is not None else pool.get("price", 1e9))
 
 
-def profile_from_name(name: str | None, clusters: dict, spot_prices: dict) -> dict:
-    """Manager ClusterQueue name -> {"classes": [...in preference order], "strategy"}.
-    prefer-<class>: that class first, then the others by their cheapest pool; anything else: cheapest of all."""
+def profile_from_name(name: str | None, clusters: dict, spot_prices: dict, tenant: str | None = None) -> dict:
+    """Manager ClusterQueue name -> {"classes": [...in preference order], "strategy"}. A tenant's queue is named
+    <tenant>-<profile> (charts/fleet); with the tenant known the prefix is stripped, then prefer-<class> means that
+    class first and the others by their cheapest pool; anything else: cheapest of all."""
+    if name and tenant and name.startswith(f"{tenant}-"):
+        name = name[len(tenant) + 1:]
     cheapest = {}
     for cname, cl in clusters.items():
         for fname, pool in (cl.get("pools") or {}).items():
@@ -142,9 +145,8 @@ def profile_from_name(name: str | None, clusters: dict, spot_prices: dict) -> di
             if c and (c not in cheapest or pr < cheapest[c]):
                 cheapest[c] = pr
     by_price = sorted(cheapest, key=lambda c: (cheapest[c], c))
-    m = re.search(r"(?:^|-)prefer-([a-z0-9-]+)$", name or "")        # prefer-<class> or <tenant>-prefer-<class> (charts/fleet)
-    if m and m.group(1) in cheapest:
-        pref = m.group(1)
+    if name and name.startswith("prefer-") and name[7:] in cheapest:
+        pref = name[7:]
         return {"classes": [pref] + [c for c in by_price if c != pref], "strategy": "preferred"}
     return {"classes": by_price, "strategy": "cheapest"}
 
@@ -482,7 +484,8 @@ def reconcile(core, custom, batch, dispatch=None):
             continue
         meta, st = wl["metadata"], wl.get("status", {})
         ns, job_name = meta["namespace"], owner_job(wl)
-        prof = profile_from_name(profile_of(custom, wl), clusters, spot)
+        tenant = ns[len("tenant-"):] if ns.startswith("tenant-") else None
+        prof = profile_from_name(profile_of(custom, wl), clusters, spot, tenant)
         pin = (meta.get("labels") or {}).get(REGION_LABEL)
         pin = aliases.get(pin, pin)
         classes, regions = allowed_of(wl)
@@ -491,7 +494,6 @@ def reconcile(core, custom, batch, dispatch=None):
         stamp = (meta.get("annotations") or {}).get(NOMINATED_AT)
         age = (time.time() - datetime.fromisoformat(stamp).timestamp()) if stamp else 0.0
         gpus = gpu_request(wl)
-        tenant = ns[len("tenant-"):] if ns.startswith("tenant-") else None
         ranked = rank(prof, clusters, free, gpus, spot, pin, classes, allowed_clusters, tenant)
         if not ranked:
             log.warning("%s/%s: no candidate cluster (profile=%s pin=%s classes=%s regions=%s)", ns, meta["name"], prof, pin, classes, regions)

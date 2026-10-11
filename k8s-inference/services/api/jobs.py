@@ -144,7 +144,6 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
            "initContainers": [fetch], "containers": [main, _uploader(name, region, values["output_prefix"], None if local_nvme else pvc, r.get("uploadExcludes", ""), gpus, placement, gpu_class)],
            "volumes": [{"name": "work", "emptyDir": {"sizeLimit": f"{r.get('pvcSizeGi', JOB_PVC_SIZE_GI)}Gi"}} if local_nvme else {"name": "work", "persistentVolumeClaim": {"claimName": pvc}},
                        {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": r.get("shm", "8Gi")}}]}
-    _mount_data(r, pod, [main])
     if gpus:
         pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
     terms = []
@@ -192,6 +191,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     nodes = int(r.get("nodes", 1) or 1)
     if nodes > 1:
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
+    _mount_data(r, pod, [main])
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
@@ -257,8 +257,6 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         pod["volumes"].append({"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}})
         for c in (main, uploader):
             c["volumeMounts"].append({"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"})
-    pod["volumes"] = [v for v in pod["volumes"] if v["name"] != "data"]      # re-mounted below on the multi-node pod shape
-    main["volumeMounts"] = [m for m in main["volumeMounts"] if m["name"] != "data"]
     _mount_data(r, pod, [main])
     rank = {"name": "NODE_RANK", "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['batch.kubernetes.io/job-completion-index']"}}}
     dist = {"NNODES": str(nodes), "GPUS_PER_NODE": str(gpus), "WORLD_SIZE": str(nodes * max(gpus, 1)),

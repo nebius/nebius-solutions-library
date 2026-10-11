@@ -1263,7 +1263,7 @@ def test_scaling_rejects_unsupported_or_invalid_settings(client, admin_keys, sca
 def test_scaling_metric_units_and_partial_updates(client, admin_keys, monkeypatch, metric, target, concurrency,
                                                  native_target, native_util, native_concurrency):
     c, fake = client
-    monkeypatch.setattr(kube, "isvc", lambda name, ns: fake.custom.get((ns, "inferenceservices", name)))
+    monkeypatch.setattr(kube, "isvc", lambda name, ns, region=None: fake.custom.get((ns, "inferenceservices", name)))
     policy = {"metric": metric, "target": target, "container_concurrency": concurrency,
               "utilization_percent": 70}  # obsolete factor must not discount the new target
     r = c.post("/v1/models", json={"id": "metric-units", "image": "nginx", "scaling": policy,

@@ -138,3 +138,86 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
 {{- end }}
 {{- end -}}
+
+{{/* A tenant's ClusterQueue for one profile (docs/FLEET.md "Tenants"): nominal 0 on the shared pools, borrowing up to the pool
+     (capped by gpu_quota), the tenant's dedicated pools as its own nominal quota, lent to nobody; the fair-share weight.
+     Fair sharing replaces the classical borrowWithinCohort policy (Kueue ignores it under fair sharing); priority classes
+     still order work inside the queue. args: dict "root" "fleet" "tenant" (name) "tc" (tenant config) "prefer" (class or "")
+     "pools" (flavor name -> pool), "bare" (flavor name -> bare pool name), "admissionCheck" (name or "") */}}
+{{- define "fleet.tenantQueue" -}}
+{{- $f := .fleet }}{{ $tn := .tenant }}{{ $tc := .tc }}{{ $prefer := .prefer -}}
+{{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: {{ $tn }}-{{ $profile }}
+  labels:
+    {{- include "fleet.labels" .root | nindent 4 }}
+    serverless2.nebius/tenant: {{ $tn | quote }}
+    {{- if $prefer }}
+    serverless2.nebius/prefer: {{ $prefer | quote }}
+    {{- end }}
+spec:
+  cohortName: {{ .root.Values.cohort }}
+  namespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: tenant-{{ $tn }} }
+  queueingStrategy: BestEffortFIFO
+  fairSharing:
+    weight: {{ default 1 $tc.fair_share_weight | quote }}
+  {{- with .admissionCheck }}
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: {{ . }}
+  {{- end }}
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch   # take the first flavor with free cohort capacity
+    whenCanPreempt: TryNextFlavor  # ... before preempting on a preferred one
+  preemption:
+    withinClusterQueue: LowerPriority     # customer-batch evicts bulk-backfill
+    reclaimWithinCohort: Any              # take back nominal quota (dedicated pools) lent out
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+      flavors:
+        {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" $prefer) | fromYamlArray }}
+        {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name)) }}
+        {{- if or (not $owner) (eq $owner $tn) }}
+        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $.pools $name)) | fromYaml }}
+        - name: {{ $name }}
+          resources:
+            {{- include "fleet.tenantFlavorResources" (dict "q" $q "dedicated" (eq $owner $tn) "cap" (default 0 $tc.gpu_quota)) | nindent 12 }}
+        {{- end }}
+        {{- end }}
+{{- end -}}
+
+{{/* The fleet's lender: the nominal quota of every shared pool. The platform's own LocalQueue `models/endpoints` (fleet-placed
+     endpoints) is the only one that queues here; the tenants' queues borrow from it. args: dict "root" "fleet" "pools" "bare" "orderPools" */}}
+{{- define "fleet.lenderQueue" -}}
+{{- $f := .fleet }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: default
+  labels:
+    {{- include "fleet.labels" .root | nindent 4 }}
+spec:
+  cohortName: {{ .root.Values.cohort }}
+  namespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: models }
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
+      flavors:
+        {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" "") | fromYamlArray }}
+        {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name))) }}
+        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $.pools $name)) | fromYaml }}
+        - name: {{ $name }}
+          resources:
+            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
+        {{- end }}
+        {{- end }}
+{{- end -}}

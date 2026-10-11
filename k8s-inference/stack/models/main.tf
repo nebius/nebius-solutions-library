@@ -28,6 +28,20 @@ module "tenant_region" {
   labels         = merge(local.f.labels, { "serverless2.nebius/tenant" = each.key })
 }
 
+# A LocalQueue's target ClusterQueue is immutable: when the tenant chart moves the queues (2026-10-11: from the fleet's
+# `<profile>` queues to the tenant's own `<tenant>-<profile>`), the ones pointing elsewhere are deleted first and the
+# release recreates them; Kueue re-queues waiting work, running work is untouched (stack/scripts/localqueue-cutover.sh).
+resource "terraform_data" "localqueue_cutover" {
+  for_each = local.tenants
+  input    = { script = "${path.module}/../scripts/localqueue-cutover.sh", server = local.cluster.endpoint, ca = local.cluster.cluster_ca_certificate, tenant = each.key }
+  # re-run whenever the tenant chart changes: the chart version is the cut-over's trigger
+  triggers_replace = [yamldecode(file("${local.repo}/charts/tenant/Chart.yaml")).version]
+  provisioner "local-exec" {
+    command     = self.input.script
+    environment = { KUBE_SERVER = self.input.server, KUBE_CA = self.input.ca, TENANT = self.input.tenant }
+  }
+}
+
 # Namespace tenant-<name> with its run identity, queues, policy and API binding (charts/tenant).
 resource "helm_release" "tenant" {
   for_each = local.tenants
@@ -52,7 +66,8 @@ resource "helm_release" "tenant" {
       manager = true
     } }
   })]
-  wait = true
+  wait       = true
+  depends_on = [terraform_data.localqueue_cutover]
 }
 
 locals {
