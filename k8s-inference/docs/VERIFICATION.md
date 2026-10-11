@@ -12,6 +12,27 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Execution options, attempt lifecycle, portable retries (2026-10-11 12:00-13:00 UTC, the same test fleet)
+
+Five execution requirements of the application layer (application-managed I/O, scoped workload identity and
+confidential inputs, attempt lifecycle, portable retries with placement-time image selection, durable finalization)
+built as docs/JOBS.md "Execution options" and "Attempts and finalization" and docs/SCHEDULING.md "Fallback to the
+next class" (api 0.11.8, jobs 0.1.13, tenant chart 0.3.0). Fleet additions for the drills: spot pools
+`l40s-spot-1x` (eu-north1) and `rtx6000-spot-1x` (us-central1, the only region with the platform), a tenant with
+`storage = "external"` (no bucket), an identity and a confidential profile, and a drill profile with no destinations
+on the demo tenant. Test containers were busybox (`fold-double`: an API-defined job class with one image tag per GPU
+class, writing checkpoints and a RESULT.json).
+
+| Check | Result |
+|---|---|
+| Application I/O, identity, binding, profile (one run) | the pod ran as `identity-customer-a`; the main container had no Kubernetes token, a projected token with `aud: ["sts.amazonaws.com"]` and `iss: https://oidc.mk8s.api.nebius.cloud/<hub cluster id>`, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` set; the binding's files were readable under `/var/run/serverless2/private`; an allowed FQDN (the storage host) was reachable, the world (1.1.1.1:443) and the metadata service were denied, DNS worked; `PUT` of the binding while the run slept changed the file within 75 s without a restart; RESULT.json made the run SUCCEEDED with `result_ref`, `checkpoint_ref`, `epoch 1`, `revision`, `cluster`, the image digest; `?since=<revision>` answered 304, `since=<revision-1>` 200; `/result` lists no artifacts |
+| Tenant without a bucket | `tenant-sciai` on every cluster with the runner identity, `identity-customer-a`, the profile queues (incl. `prefer-l40s`, `prefer-rtx-pro-6000`), the profile's CiliumNetworkPolicy and no `s3`/`tenant-storage` Secret; keys minted as usual |
+| Attempt records and fencing | the uploader's records reached the API with its pod-bound token (`POST /internal/attempts` 200); a run cancelled while running reported CANCELLED with its attempt `cancelled` and a bumped revision; a late `succeeded` posted with the cancelled pod's own token (captured with kubectl exec before the cancel) was refused with 409 "finalization refused"; a bogus token got 401. A resumed run continued the chain at epoch 2 under the original root |
+| Exit 0 is not delivery | a managed-I/O run under the demo profile with no destinations finished its command, the uploader could not reach the bucket, the operation became EXPORT_FAILED (`export_state failed`, resumable, volume kept); after the profile got the storage host (`apply models hub`, one policy change), `POST :export` ran the transfer alone (`<id>-x1`, no GPU, no fetch) and delivered the outputs, STATUS.json last, then released the volume (a second `:export` is refused with 409 once the volume is gone). The rule that a delivered retry closes the original operation (`exported_by`) is unit-tested; on the fleet the retry's record predates the root fix below, so the original still shows its own EXPORT_FAILED history. Found on the way: the uploader died on an unset variable after a failed export and in record mode (fixed in jobs 0.1.13); records of resumed runs joined the wrong root through the worker's mirror (fixed in api 0.11.8) |
+| Per-class images and fallback | three `fold-double` runs with `gpu_preference [rtx-pro-6000, l40s]`, `allowed_clusters [us-central1, eu-north1]`, `fallback_wait_s 60` and an RTX pool of two nodes: two ran on RTX PRO 6000 in us-central1 with `busybox:1.36`, the third was moved by the control API after the bound to L40S in eu-north1 (`busybox:1.37`, queue `prefer-l40s`, `reason` "rtx-pro-6000 -> l40s after 60 s without capacity", `resumed_from` the original); both pools scaled from zero (RTX node about 5 min, L40S about 4 min) |
+| Portable resume across classes and clusters | an RTX run cancelled mid-way and resumed with `{"checkpoint_ref": ..., "gpu_class": "l40s"}` ran on L40S in eu-north1 with the L40S image (digest recorded), `CHECKPOINT_REF` in its environment, a fresh volume, epoch 2 under the original root, export succeeded; without a checkpoint reference the resume of a run whose volume is gone is refused (409), another class without a checkpoint reference is refused (400) |
+| Placement narrowing | a class the model does not list or a region outside its deployments is a 400; unknown execution fields are 422 |
+
 ## Review round: hygiene, leftovers, fleet-wide run classes (2026-10-11 10:45-11:20 UTC, the same test fleet)
 
 The library reviewer's open items and a code review (dead code, migration leftovers, stale references, image hardening)
