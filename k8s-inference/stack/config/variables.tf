@@ -208,7 +208,7 @@ variable "fleet" {
       versions = optional(object({
         api        = optional(string, "0.11.6")
         dispatcher = optional(string, "0.2.7")
-        jobs       = optional(string, "0.1.12")
+        jobs       = optional(string, "0.1.13")
         ops        = optional(string, "0.1.11")
         ui         = optional(string, "0.6.1")
       }), {})

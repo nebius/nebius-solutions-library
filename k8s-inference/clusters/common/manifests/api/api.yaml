@@ -169,6 +169,8 @@ spec:
     - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
   hostnames: ["api.example.invalid"]   # placeholder, set per cluster
   rules:
+    - matches: [{ path: { type: PathPrefix, value: /internal/attempts } }]   # run pods post their attempt records with a pod-bound token (services/api/attempts.py)
+      backendRefs: [{ name: api, port: 80 }]
     - matches: [{ path: { type: PathPrefix, value: /internal } }]   # the gateway's authorizer calls (charts/endpoint SecurityPolicy) reach the Service directly
       filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]
