@@ -12,6 +12,20 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Review round: hygiene, leftovers, fleet-wide run classes (2026-10-11 10:45-11:20 UTC, the same test fleet)
+
+The library reviewer's open items and a code review (dead code, migration leftovers, stale references, image hardening)
+rolled out as api 0.11.5, jobs 0.1.11 and tenant chart 0.2.4 with `stack.sh apply platform` on the five clusters, then
+`apply models` on each (platform: 1 added, 11-13 changed, 1-3 destroyed per cluster; models: 1 changed, 1-2 destroyed).
+
+| Check | Result |
+|---|---|
+| API image non-root | every API pod on all five clusters runs `api:0.11.5` as uid 10001 (pod `runAsNonRoot`, capabilities dropped), Ready with 0 restarts; `helm version` inside the pod works with the caches under /tmp; `/openapi.json` 200 |
+| Tenant chart 0.2.4 | the legacy `argo-workflow` ServiceAccount is gone from `tenant-demo` (only `default` and `job-runner` remain); the LocalQueues `default`, `prefer-<class>` still point at `demo-<profile>` and are Active on the manager and the hub; the LocalQueue cut-over resource was destroyed without touching the queues |
+| Run class without `deployments` | `container-run` now lists every region of the fleet (eu-north1, eu-north2, eu-west2, us-central1, all `ready`); a run submitted without `region` was placed by the dispatcher (profile `prefer-h100`, landed in eu-north1), the Job's `regions` annotation names all four, the runner image is `jobs:0.1.11` (Alpine 3.22), the run SUCCEEDED and printed its uid 0 only inside its own container |
+| Endpoints after the rollout | all five listed, scaled to zero, definitions untouched |
+| Pull request CI on the pushed head (upstream main merged in) | validate/render/test, UI build, image scan: pass |
+
 ## Tenant queues, shared data, routing (2026-10-11 08:00-10:10 UTC, the same test fleet)
 
 Five schema-only features switched on and the review findings rolled out (api 0.11.4, dispatcher 0.2.7, charts
