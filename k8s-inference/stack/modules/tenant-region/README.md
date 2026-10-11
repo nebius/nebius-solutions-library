@@ -4,8 +4,9 @@ The cloud side of one tenant in one region: a service account and group with `st
 on the tenant's bucket (bucket policy), the bucket itself with a lifecycle rule that expires run
 outputs, and the S3 access key the tenant namespace uses (Secrets `tenant-storage` and `s3`).
 
-Used once per tenant and worker cluster by `stack/models/main.tf`. With `protect_data = true` the bucket
-refuses `terraform destroy`.
+Used once per tenant and region by the cloud stage (`stack/cloud/tenants.tf`, keyed `<tenant>/<region>`);
+the platform stage of every cluster writes the Secrets from the cloud state's `tenant_storage` output. With
+`protect_data = true` the bucket refuses `terraform destroy`.
 
 ## Inputs
 

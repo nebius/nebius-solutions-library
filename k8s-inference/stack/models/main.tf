@@ -7,26 +7,14 @@ locals {
   all_regions = sort(keys(local.f.regions))
   # Tenants present on this cluster: every tenant on the control cluster, tenants of this region on a worker.
   tenants = { for tn, t in local.f.tenants : tn => t if local.role.control || contains(coalesce(t.regions, local.all_regions), local.region) }
-  # Storage of the hub region per tenant: created here on the hub, read from the hub's models state elsewhere.
-  # Lookups below use try(): on `destroy` the hub's models state may already be gone (empty map), and the
-  # values are irrelevant for deleting the Secrets.
-  hub_storage = local.id == local.hub_id ? { for tn, m in module.tenant_region : tn => m.storage } : try(data.terraform_remote_state.hub_models[0].outputs.tenant_storage, {})
+  # Tenant buckets and keys are cloud-stage resources (stack/cloud/tenants.tf): this region's per tenant on a
+  # worker, the hub region's everywhere (the primary bucket of fleet-placed runs and the control cluster's API).
+  # try(): on `destroy` the cloud state may lack a region that is being removed; the values are irrelevant for
+  # deleting the Secrets.
+  hub_storage   = try(local.cloud.tenant_storage[local.hub_region], {})
+  local_storage = try(local.cloud.tenant_storage[local.region], {})
 
   fleet_doc = local.chart_fleet # charts/tenant reads regions, pools and prices from it (stack/config/locals.tf)
-}
-
-# Cloud side of a tenant in this region (workers only): identity, bucket, access key. A tenant with
-# `storage = "external"` gets none of it (application-managed I/O only, docs/JOBS.md "Execution options").
-module "tenant_region" {
-  for_each       = { for tn, t in local.tenants : tn => t if local.role.worker && t.storage == "managed" }
-  source         = "../modules/tenant-region"
-  name           = "${local.name}-${each.key}-${local.region}"
-  tenant         = each.key
-  region         = local.region
-  project_id     = local.cluster.project_id
-  lifecycle_days = each.value.lifecycle_days
-  protect_data   = local.f.protect_data
-  labels         = merge(local.f.labels, { "serverless2.nebius/tenant" = each.key })
 }
 
 # Namespace tenant-<name> with its run identity, queues, policy and API binding (charts/tenant).
@@ -59,8 +47,8 @@ resource "helm_release" "tenant" {
 }
 
 locals {
-  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? module.tenant_region[tn].storage : try(local.hub_storage[tn], null)
-  if t.storage == "managed" && (local.role.worker || can(local.hub_storage[tn])) }
+  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]
+  if t.storage == "managed" && can(local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]) }
   s3_env = { for tn, st in local.storage_here : tn => {
     AWS_ACCESS_KEY_ID = st.access_key, AWS_SECRET_ACCESS_KEY = st.secret_key, AWS_ENDPOINT_URL = st.endpoint, AWS_DEFAULT_REGION = st.region
   } }

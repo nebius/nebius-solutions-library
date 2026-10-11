@@ -1,6 +1,5 @@
 # Stage 3, models: tenants and models on ONE cluster (`-var target=<cluster id>`). Reads the cloud state
-# (endpoints, projects) and this cluster's platform state (URLs, master key), plus the hub worker's models
-# state for the tenants' primary (hub-region) storage on the other clusters.
+# (endpoints, projects, the tenant buckets and keys) and this cluster's platform state (URLs, master key).
 locals {
   backend_common = {
     bucket                      = local.state_bucket
@@ -24,13 +23,6 @@ data "terraform_remote_state" "platform" {
   config  = merge(local.backend_common, { key = "platform/${var.target}.tfstate" })
 }
 
-# The hub worker's models state (the tenants' hub-region buckets): read on every cluster but the hub itself.
-data "terraform_remote_state" "hub_models" {
-  count   = var.target == local.hub_id ? 0 : 1
-  backend = "s3"
-  config  = merge(local.backend_common, { key = "models/${local.hub_id}.tfstate" })
-}
-
 # The control cluster's probe needs the workers' endpoints to exist: their models states are applied first.
 data "terraform_remote_state" "worker_models" {
   for_each = local.roles[var.target].control && local.dedicated ? local.region_clusters : {}
@@ -44,8 +36,6 @@ locals {
   cluster  = local.cloud.clusters[var.target]
   role     = local.roles[var.target]
 }
-
-provider "nebius" {} # NEBIUS_IAM_TOKEN from the environment (stack.sh exports it)
 
 provider "kubernetes" {
   host                   = local.cluster.endpoint

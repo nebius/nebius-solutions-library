@@ -287,7 +287,7 @@ variable "fleet" {
       })), {})
     }), {})
 
-    # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys.
+    # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region (cloud stage), LiteLLM API keys.
     # gpu_quota: GPUs the tenant may hold at once across the fleet (null = no cap: it shares the fleet
     # queues); fair_share_weight orders tenants when the fleet is full (Kueue weighted fair sharing).
     # dedicated_pools: pool names (as in regions.*.pools) only this tenant may use (its queues carry only those

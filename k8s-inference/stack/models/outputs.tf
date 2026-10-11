@@ -5,12 +5,6 @@ output "tenants" {
   } }
 }
 
-output "tenant_storage" {
-  description = "Per tenant: this region's bucket and credentials (read by the other clusters' models stages)."
-  sensitive   = true
-  value       = local.storage_here
-}
-
 output "tenant_keys" {
   description = "API keys per tenant and key name (control cluster; in the fleet database, mirrored into LiteLLM)."
   sensitive   = true
