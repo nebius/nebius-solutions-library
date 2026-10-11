@@ -23,6 +23,7 @@ parameter chat model served by vLLM as the OpenAI endpoint.
 | Metrics and logs of another region | first 500: the API server proxy helper called the Kubernetes client's `update_params_for_auth` with keyword arguments the 36.x client does not take (unit-tested with a mock of the old signature). Fixed in api 0.11.19; afterwards endpoint and operation metrics and logs of eu-west2, eu-north1 and eu-north2 answer 200 in 0.4-0.8 s through the regions' API server proxies (131 log lines of the hub endpoint, 14 of the run) |
 | WebSocket | a WebSocket echo endpoint on the hub's warm spare (ready in 20 s): the upgrade request passes the authorizer with the key in the `Authorization` header and in `Sec-WebSocket-Protocol` (200 from the echo server), 401 with a wrong key; against a vLLM endpoint the same upgrade hangs after a successful authorization (vLLM has no WebSocket route; not the gateway) |
 | By hand | the orphaned per-region catalog ConfigMap copies deleted on the four workers (nine each); the control listener hostname removed once |
+| Variants after the refactors | a `tier: budget` call through the one API reached the `llm-tiered-cheap` variant on the L40S pool: 200 in 77 s with the node up (a first call that also had to add the node and pull the image exceeded a 10 min client timeout, the revision became Ready afterwards); the InfiniBand floor of the earlier drill is back at 0 nodes |
 
 ## Refactor 5: two Terraform stages, one platform chart, the cache as an add-on; live state migration (2026-10-11 17:10-18:05 UTC, the same test fleet)
 
