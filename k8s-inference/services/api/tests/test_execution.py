@@ -171,3 +171,15 @@ def test_capabilities_are_discoverable(client):
     ex = c.get("/v1/fleet", headers=H).json()["execution"]
     assert ex["io_modes"] == ["managed", "application"] and ex["identities"] == ["sci"] and ex["execution_profiles"] == ["confidential-job-v1", "open"]
     assert ex["identity_token_file"].endswith("/token") and "oidc_issuers" in ex
+
+
+def test_multinode_fleet_run_without_execution_block_submits(client, monkeypatch):
+    """A JobSet keeps its pod template under its replicated Job: the fleet path must not expect a Job's template."""
+    c, fake = client
+    from test_api import MULTINODE_FLEET
+    monkeypatch.setattr(kube, "fleet", lambda: MULTINODE_FLEET)
+    monkeypatch.setattr(kube, "cluster_region", lambda cl: "eu-north1" if cl == "hub" else cl)
+    r = c.post("/v1/models/distributed-run:invoke", json={"input": {"image": "x/y:1", "command": "echo", "nodes": 2, "gpus_per_node": 8, "interconnect": "required"}, "region": "eu-north1"}, headers=H)
+    assert r.status_code == 202, r.text
+    js = fake.custom[("tenant-demo", "jobsets", r.json()["id"])]
+    assert jobs.placement_regions(js) == ["eu-north1"] or jobs.placement_regions(js) == []

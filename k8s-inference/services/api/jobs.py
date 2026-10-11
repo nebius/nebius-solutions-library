@@ -53,6 +53,16 @@ def _mount_data(r: dict, pod: dict, containers: list) -> None:
         c["volumeMounts"].append({"name": "data", "mountPath": str(r.get("dataMountPath") or "/data"), "subPath": f"data/{path}", "readOnly": ro})
 
 
+def placement_regions(job: dict) -> list[str]:
+    """The regions a rendered run may land in (the pod template's annotation the dispatcher reads), for a Job or a
+    JobSet (whose pod template sits under its replicated Job)."""
+    tmpl = job.get("spec", {}).get("template")
+    if tmpl is None and is_jobset(job):
+        tmpl = (job["spec"].get("replicatedJobs") or [{}])[0].get("template", {}).get("spec", {}).get("template", {})
+    ann = ((tmpl or {}).get("metadata") or {}).get("annotations") or {}
+    return [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
+
+
 def _mount_weights(r: dict, pod: dict, containers: list) -> None:
     """`job.weights` (docs/JOBS.md "Model weights for runs"): a directory of the region's shared weights filesystem (the
     one endpoints cache into), mounted read-only at `weightsMountPath` (default /weights). Empty: nothing."""

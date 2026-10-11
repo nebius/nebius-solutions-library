@@ -505,7 +505,7 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
         job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
-        execution.deliver(ex, name, name, p.namespace, p.tenant, [r for r in job["spec"]["template"]["metadata"].get("annotations", {}).get(f"{cfg.LABEL}/regions", "").split(",") if r] or [region or REGION])
+        execution.deliver(ex, name, name, p.namespace, p.tenant, jobs.placement_regions(job) or [region or REGION])
         region = REGION                      # created on the manager; the dispatcher picks the worker
     else:
         _guard_run_input(m, req, p, region, ex)
@@ -811,7 +811,7 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
     ex = jobs.normalise(job).get("execution")
     if ex and ex.get("private_input_ref"):
         root = job["metadata"]["annotations"].get("serverless2.nebius/resumed-from") or id
-        regions = [r for r in job["spec"]["template"]["metadata"].get("annotations", {}).get(f"{cfg.LABEL}/regions", "").split(",") if r] or [job["metadata"]["labels"].get(f"{cfg.LABEL}/region") or REGION]
+        regions = jobs.placement_regions(job) or [job["metadata"]["labels"].get(f"{cfg.LABEL}/region") or REGION]
         execution.deliver(ex, job["metadata"]["name"], root, p.namespace, p.tenant, regions)
     return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
 
