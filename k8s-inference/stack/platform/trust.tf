@@ -10,9 +10,11 @@ data "http" "msp_ca" {
 locals {
   msp_ca_path       = "/etc/ssl/msp/msp-ca.pem"
   trust_bundle_path = "/etc/ssl/msp/bundle.pem" # msp + fleet (+ the private bundle): for clients that take one file
+  # `ca.crt`: the same private bundle under the key a Gateway API BackendTLSPolicy reads (charts/platform/templates/edge:
+  # a GPU region's gateway validates the fleet API's hostname against it in internal mode)
   trust_data = merge(
     { "msp-ca.pem" = data.http.msp_ca.response_body, "fleet-ca.pem" = local.cloud.fleet_ca.cert },
-    local.f.trust_bundle_pem == null ? {} : { "ca.pem" = local.f.trust_bundle_pem },
+    local.f.trust_bundle_pem == null ? {} : { "ca.pem" = local.f.trust_bundle_pem, "ca.crt" = local.f.trust_bundle_pem },
   )
 }
 

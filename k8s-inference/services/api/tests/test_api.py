@@ -562,15 +562,16 @@ def test_sync_proxies_to_the_predictor(client, monkeypatch):
     assert r.json()["operation"]["cost"] == 0.05 and calls[-1][0].endswith("/models/llm/chat") and calls[-1][1]["Authorization"] == "Bearer sk-good"
 
 
-def test_sync_for_another_region_is_forwarded_to_that_regions_api(client, monkeypatch):
-    """The control cluster's API hosts no endpoint: with REGION_API_URLS a sync/async invoke for another region
-    is forwarded as is (key, idempotency key, body) and the regional answer is returned; without it: 400."""
+def test_sync_for_another_region_goes_through_that_regions_gateway(client, monkeypatch):
+    """The one API hosts no endpoint of a GPU region: a sync invoke for another region is proxied to the endpoint's
+    gateway hostname (the one LiteLLM uses) with the caller's key, so the gateway's ext-auth checks it once more;
+    the endpoint's answer is returned as is. Without the region's endpoint domain: 503."""
     c, _ = client
     calls = []
 
     class R:
-        status_code = 402
-        def json(self): return {"detail": "budget exceeded"}
+        status_code = 200
+        def json(self): return {"choices": []}
 
     class FakeClient:
         def __init__(self, **kw): pass
@@ -582,15 +583,16 @@ def test_sync_for_another_region_is_forwarded_to_that_regions_api(client, monkey
     monkeypatch.setattr(appmod, "REGION", "control")   # as on the control cluster (HUB_REGION=eu-north1 maps deployments.hub there)
     monkeypatch.setitem(catalog.get("llm-example"), "regions", ["eu-north1"])
     body = {"input": {"messages": []}, "region": "eu-north1"}
+    monkeypatch.setattr(models, "ENDPOINT_DOMAINS", {})
+    monkeypatch.setattr(models, "REGION", "control")
     r = c.post("/v1/models/llm-example:invoke", json=body, headers=H)
-    assert r.status_code == 400 and "eu-north1" in r.json()["detail"] and not calls
-    monkeypatch.setattr(appmod, "REGION_API_URLS", {"eu-north1": "https://api.hub.example"})
-    r = c.post("/v1/models/llm-example:invoke", json=body, headers={**H, "Idempotency-Key": "k1"})
-    assert r.status_code == 402 and r.json() == {"detail": "budget exceeded"}
+    assert r.status_code == 503 and "ENDPOINT_DOMAINS" in r.json()["detail"] and not calls
+    monkeypatch.setattr(models, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io"})
+    r = c.post("/v1/models/llm-example:invoke", json=body, headers=H)
+    assert r.status_code == 200 and r.json()["result"] == {"choices": []} and r.json()["operation"]["region"] == "eu-north1"
     url, sent, headers = calls[0]
-    assert url == "https://api.hub.example/v1/models/llm-example:invoke"
-    assert sent["input"] == {"messages": []} and sent["region"] == "eu-north1"
-    assert headers == {"Authorization": "Bearer sk-good", "Idempotency-Key": "k1"}
+    assert url == "https://llm-example-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
+    assert sent == {"messages": [], "model": "llm"} and headers == {"Authorization": "Bearer sk-good"}
 
 
 ADMIN_INFO = {**KEY_INFO, "metadata": {**KEY_INFO["metadata"], "role": "admin"}}
@@ -688,23 +690,22 @@ def test_admin_routes_need_admin_role(client, fake_keys, monkeypatch):
     assert c.get("/v1/keys", headers=H).json() == []
 
 
-def test_key_management_is_the_fleet_apis(client, monkeypatch):
-    """A regional API has no database: key management answers 409 with the fleet API's URL."""
+def test_key_management_needs_the_fleet_database(client, monkeypatch):
+    """Without the fleet database key management answers 409."""
     c, _ = client
     import db
     monkeypatch.setattr(db, "enabled", lambda: False)
-    monkeypatch.setattr(appmod.cfg, "CONTROL_API_URL", "https://api.control.example")
 
     async def fake_info(key):
         return dict(ADMIN_INFO)
     monkeypatch.setattr(auth, "key_info", fake_info)
     r = c.get("/v1/keys", headers=H)
-    assert r.status_code == 409 and "https://api.control.example" in r.json()["detail"]
+    assert r.status_code == 409 and "fleet database" in r.json()["detail"]
 
 
-def test_key_lookup_database_control_api_and_litellm_fallback(monkeypatch):
-    """auth.key_info: the fleet database first (hash lookup); a regional API asks the control API; LiteLLM's
-    /key/info answers for a key neither holds yet. Unknown everywhere: 401; a key service down: 503."""
+def test_key_lookup_database_and_litellm_fallback(monkeypatch):
+    """auth.key_info: the fleet database first (hash lookup); LiteLLM's /key/info answers for a key it does not
+    hold yet. Unknown everywhere: 401; LiteLLM down for such a key: 503."""
     import asyncio, db, keys
     import httpx
     from fastapi import HTTPException
@@ -725,10 +726,6 @@ def test_key_lookup_database_control_api_and_litellm_fallback(monkeypatch):
                 if params["key"] == "sk-legacy":
                     return httpx.Response(200, json={"info": {"key_alias": "demo-legacy", "metadata": {"tenant": "demo"}}})
                 return httpx.Response(401, json={})
-            if url.endswith("/internal/keys/me"):
-                if headers["Authorization"] == "Bearer sk-down":
-                    return httpx.Response(503, json={})
-                return httpx.Response(200, json={"key_alias": "demo-remote", "metadata": {"tenant": "demo"}}) if headers["Authorization"] == "Bearer sk-remote" else httpx.Response(401, json={})
             raise AssertionError(url)
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     assert asyncio.run(auth.key_info("sk-db"))["key_alias"] == "demo-db" and seen == []               # the database answered
@@ -737,13 +734,6 @@ def test_key_lookup_database_control_api_and_litellm_fallback(monkeypatch):
         asyncio.run(auth.key_info("sk-nope"))
     assert e.value.status_code == 401
     assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy" and seen.count("http://litellm.litellm.svc:4000/key/info") == 2   # cached
-    # a regional API: no database, the control API
-    monkeypatch.setattr(db, "enabled", lambda: False)
-    monkeypatch.setattr(auth, "CONTROL_API_URL", "https://api.control.example")
-    assert asyncio.run(auth.key_info("sk-remote"))["key_alias"] == "demo-remote" and seen[-1] == "https://api.control.example/internal/keys/me"
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(auth.key_info("sk-down"))
-    assert e.value.status_code == 503
     auth._cache.clear()
 
 
@@ -764,10 +754,6 @@ def test_router_key_is_accepted_at_the_gateway_only(client, monkeypatch):
     r = c.post("/internal/authorize/llm-example/v1/chat/completions", headers=R)
     assert r.status_code == 200 and r.headers["x-serverless2-tenant"] == "platform" and r.headers["x-serverless2-key-alias"] == "router"
     assert c.post("/internal/authorize/llm-example", headers=H).status_code == 200                       # tenant keys as before
-    # the regional lookup route: the record itself, before the checks (a blocked or router key included)
-    r = c.get("/internal/keys/me", headers=R)
-    assert r.status_code == 200 and r.json()["metadata"]["role"] == "router"
-    assert c.get("/internal/keys/me").status_code == 401
 
 
 def test_billing_once(cluster, monkeypatch):
@@ -1247,9 +1233,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     assert isvc["spec"]["predictor"]["nodeSelector"]["serverless2.nebius/pool"] == "h100-spot-1x"
     row = fdb.rows["my-llm"]
     assert row["version"] == 1 and row["managed_by"] == "api" and row["updated_by"] == "tenant-demo" and row["entry"]["runtime"]["port"] == 8000
-    assert "configmaps" not in fake.__dict__                                   # the control API's source is the database ...
-    cm = south.configmaps[("api", "catalog-my-llm")]                           # ... every other region holds a copy
-    assert cm["metadata"]["labels"]["serverless2.nebius/catalog"] == "runtime" and "runtime:" in cm["data"]["entry.yaml"]
+    assert "configmaps" not in fake.__dict__ and "configmaps" not in south.__dict__   # the one API's source is the database: no copies anywhere
     # the OpenAI endpoint is a LiteLLM model group whose deployment is the gateway hostname of its region
     assert groups[-1][0] == "new" and groups[-1][1]["litellm_params"]["api_base"] == "https://my-llm-predictor.models.203.0.113.10.sslip.io/v1"
     assert groups[-1][1]["model_info"]["id"] == "my-llm--hub" and body["version"] == 1
@@ -1272,7 +1256,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
     assert hist[0]["spec"]["scaling"] == {"min": 1, "max": 3, "metric": "concurrency_utilization", "target": 100, "container_concurrency": 1, "window_s": 30}   # the complete policy is stored
     assert c.get("/v1/models/my-llm/history", headers=H).status_code == 403
     assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
-    assert ("models", "inferenceservices", "my-llm") not in fake.custom and ("api", "catalog-my-llm") not in south.configmaps
+    assert ("models", "inferenceservices", "my-llm") not in fake.custom
     assert "my-llm" not in fdb.rows and groups[-1] == ("delete", {"id": "my-llm--hub"})
     cert = fake.custom[("envoy-gateway-system", "certificates", "models")]["spec"]          # back to the placeholder
     assert cert["dnsNames"] == ["models.example.invalid"] and cert["issuerRef"]["name"] == "selfsigned"
@@ -1307,20 +1291,16 @@ def test_model_group_needs_the_router_key(client, admin_keys, monkeypatch, caplo
     assert c.delete("/v1/models/my-llm", headers=ADMIN).status_code == 204
 
 
-def test_regional_api_serves_copies_and_refuses_writes(client, admin_keys, monkeypatch):
-    """A regional API has no database: it lists the ConfigMap copies the control API wrote and answers writes with 409."""
+def test_without_the_fleet_database_only_the_bundled_classes_exist(client, admin_keys, monkeypatch):
+    """No DATABASE_URL: the runtime catalog is empty (the bundled classes stay) and every write answers 409."""
     c, fake = client
     import db, models as m
     monkeypatch.setattr(db, "enabled", lambda: False)
     catalog.invalidate()
-    entry = m.to_entry({"id": "copied", "kind": "job", "image": "busybox", "command": "echo hi"})
-    m.save(entry)                                        # what the control API does into this cluster
-    catalog.invalidate()
-    got = c.get("/v1/models/copied", headers=H).json()
-    assert got["managed_by"] == "api" and got["default_mode"] == "run"
+    assert m.list_runtime() == {} and c.get("/v1/models/batch-example", headers=H).status_code == 200
     r = c.post("/v1/models", json={"id": "x", "image": "busybox"}, headers=ADMIN)
-    assert r.status_code == 409 and "api.example" in r.json()["detail"]
-    assert c.delete("/v1/models/copied", headers=ADMIN).status_code == 409
+    assert r.status_code == 409 and "fleet database" in r.json()["detail"]
+    assert c.delete("/v1/models/batch-example", headers=ADMIN).status_code == 409
 
 
 def test_create_job_class_and_run_it(client, admin_keys):
@@ -1593,20 +1573,15 @@ def test_cancel_keeps_the_record_when_the_worker_copy_is_already_gone(client):
     assert out["metadata"]["annotations"][f"{jobs.LABEL}/cancelled"] == "true"
 
 
-def test_monitoring_of_a_finished_run_falls_back_to_this_region(client, monkeypatch):
-    """A worker's Job is deleted when the run completes; the regional API still serves its metrics and logs from
-    Prometheus and Loki, scoped to the caller's namespace (the console showed "not available", 2026-10-10)."""
-    import re as _re
+def test_monitoring_of_an_unknown_operation_is_404(client, monkeypatch):
+    """The operation's Job is the record (the manager's Job of a fleet run outlives the worker's copy): no Job in any
+    region, no metrics or logs."""
     from fastapi import HTTPException
     from auth import Principal
-    monkeypatch.setattr(appmod, "FLEET_MANAGER", False)
     p = Principal(key="k", tenant="demo", info={})
-    assert appmod._monitored(p, "op-container-run-deadbeef") == (appmod.REGION, "run")
-    with pytest.raises(HTTPException):
-        appmod._monitored(p, "not-an-operation")
-    import monitoring
-    sel = monitoring.selectors({"namespace": "tenant-demo", "job": _re.escape("op-container-run-deadbeef") + "(-.*)?"}, {"job"})
-    assert sel.startswith('{namespace="tenant-demo",job=~"')
+    with pytest.raises(HTTPException) as e:
+        appmod._monitored(p, "op-container-run-deadbeef")
+    assert e.value.status_code == 404
 
 
 def test_operations_list_skips_an_unreachable_region(client, monkeypatch):

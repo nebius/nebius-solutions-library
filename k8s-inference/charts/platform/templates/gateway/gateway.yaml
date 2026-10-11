@@ -82,7 +82,9 @@ spec:
     - name: https
       protocol: HTTPS
       port: 443
+      {{- if not .Values.role.control }}
       hostname: {{ printf "*.%s" .Values.host | quote }}   # the cluster's gateway domain (<ip>.sslip.io or <cluster id>.<domain>)
+      {{- end }}                                            # the control cluster answers the regions' ext-auth under their hosts (templates/api api-authorize)
       tls:
         mode: Terminate
         certificateRefs:

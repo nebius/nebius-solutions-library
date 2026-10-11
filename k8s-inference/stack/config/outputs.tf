@@ -148,10 +148,6 @@ output "control_host" {
   value = local.control_host
 }
 
-output "api_urls" {
-  value = local.api_urls
-}
-
 output "grafana_urls" {
   value = local.grafana_urls
 }

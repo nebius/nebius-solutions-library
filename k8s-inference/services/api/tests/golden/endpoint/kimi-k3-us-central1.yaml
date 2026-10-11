@@ -315,11 +315,11 @@ spec:
     http:
       path: /internal/authorize/kimi-k3
       backendRefs:
-      - group: ''
-        kind: Service
+      - group: gateway.envoyproxy.io
+        kind: Backend
         name: api
         namespace: api
-        port: 80
+        port: 443
       headersToBackend:
       - x-serverless2-tenant
       - x-serverless2-key-alias

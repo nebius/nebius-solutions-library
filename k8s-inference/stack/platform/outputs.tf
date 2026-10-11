@@ -3,7 +3,7 @@ output "cluster" {
 }
 output "gateway_ip" { value = local.cluster.gateway_ip }
 output "hostnames" { value = local.hostnames }
-output "api_url" { value = "https://${local.hostnames.api}" }
+output "api_url" { value = try("https://${local.hostnames.api}", null) } # the control cluster's; null on a GPU region
 output "grafana_url" { value = "https://${local.hostnames.grafana}" }
 output "ui_url" { value = local.role.control ? "https://${local.hostnames.app}" : null }
 output "litellm_url" { value = local.role.control ? "https://${local.hostnames.litellm}" : null }
@@ -51,7 +51,7 @@ output "acceptance" {
 }
 output "example_model" {
   description = "The acceptance probe's example model, defined through the API (control cluster)."
-  value       = local.example_on ? "${local.example_spec.id}: https://${local.hostnames.api}/v1/models/${local.example_spec.id}:invoke (console: https://${try(local.hostnames.app, local.hostnames.api)}/models)" : "disabled"
+  value       = local.example_on ? "${local.example_spec.id}: https://${try(local.hostnames.api, "")}/v1/models/${local.example_spec.id}:invoke (console: https://${try(local.hostnames.app, "")}/models)" : "disabled"
 }
 output "probe" {
   value = local.probe_on ? "acceptance-probe Job in namespace api succeeded (run class ${local.f.acceptance.model}${local.example_on ? ", example model ${local.example_spec.id}" : ""})" : "not run at apply time: tools/verify.sh"

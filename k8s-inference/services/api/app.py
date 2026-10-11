@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import asyncio, re, time, urllib.parse, uuid
+import asyncio, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -8,13 +8,12 @@ from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
-import re
 import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs, keys, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
 from auth import Principal, _principal, allows_model, check_budget, check_model, forget, forget_hash, principal
-from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
+from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, SYNC_TIMEOUT_S
 
 def check_placeholders() -> None:
     """Refuse to start with a manifest placeholder (charts/platform/templates/api/api.yaml carries
@@ -64,7 +63,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.17", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.18", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -154,16 +153,14 @@ def _public(m: dict, p: Principal | None = None) -> dict:
         m = {**m, "spec": None}  # container configuration belongs to fleet administrators
     if m["mode"] == "run":
         return catalog.to_public(m)
-    if FLEET_MANAGER:        # the endpoints live on the workers (deployments); their live state is the regional API's
-        statuses = []
-        for region in m["regions"]:
-            try:
-                st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
-            except (HTTPException, ApiException):
-                st = {"status": "unavailable", "replicas_ready": None}
-            statuses.append({"region": region, **st})
-        return catalog.to_public(m, statuses)
-    return catalog.to_public(m, [{"region": REGION, **kube.endpoint_status(m["k8s_name"], m["namespace"])}])
+    statuses = []
+    for region in m["regions"]:          # the endpoints' live state, read in their clusters (REGION_KUBECONFIGS)
+        try:
+            st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
+        except (HTTPException, ApiException):
+            st = {"status": "unavailable", "replicas_ready": None}
+        statuses.append({"region": region, **st})
+    return catalog.to_public(m, statuses)
 
 
 @app.get("/healthz")
@@ -205,7 +202,7 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
             control = region == REGION and FLEET_MANAGER
             clusters.append({"id": "control" if control else cid, "region": "control" if control and region == "control" else region,
                              "project": pool.get("project"), "roles": ["control", "manager"] if control else ["worker"],
-                             "api_url": PUBLIC_API_URL if region == REGION else REGION_API_URLS.get(region),
+                             "api_url": PUBLIC_API_URL if region == REGION else None,     # the fleet's one API
                              "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
                              **kube.cluster_summary(region)})
         out["clusters"] = clusters
@@ -232,10 +229,9 @@ def _runtime_or_409(mid: str) -> dict:
 
 
 def _writes_here():
-    """Model definitions are written where the fleet database is: the control API (DATABASE_URL)."""
+    """Model definitions are written to the fleet database (DATABASE_URL)."""
     if not db.enabled():
-        hint = f" ({PUBLIC_API_URL})" if PUBLIC_API_URL else ""
-        raise HTTPException(409, f"this API ({REGION}) has no model database; define models on the fleet's API{hint}")
+        raise HTTPException(409, "this API has no fleet database (DATABASE_URL): model definitions cannot be stored")
 
 
 def _deploy(entry: dict, after: dict, result: dict):
@@ -282,8 +278,6 @@ def reconcile_models() -> dict:
                     removed = [c for c in removed if c not in entry.get("deployments", {})]
                 if before:
                     _undeploy(before, removed, after)
-                for region in models.copy_regions():
-                    models.save(entry, region) if entry else models.remove(mid, region)
                 db.finish_change(mid, change["version"])
             except Exception:
                 log.exception("model reconciliation failed for %s generation %s", mid, change["version"])
@@ -479,18 +473,9 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
     if int(m.get("nodes") or 1) > 1:
-        kube.stamp_last_request(m["k8s_name"], m["namespace"])       # the control API's idle shutdown reads it
+        for region in m["regions"]:                                    # the gateway's call names no region: stamp every
+            kube.stamp_last_request(m["k8s_name"], m["namespace"], region)   # deployment (idle shutdown reads it, throttled)
     return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
-
-
-@app.get("/internal/keys/me", include_in_schema=False)
-async def key_record(authorization: str = Header(default="")):
-    """A regional API's key lookup (services/api/auth.py): the record of the calling key itself, as stored, before
-    the expiry, block and role checks the caller applies. Routed through the gateway for this path only."""
-    if not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer key")
-    from auth import key_info
-    return await key_info(authorization[7:].strip())
 
 
 @app.get("/v1/keys/me")
@@ -511,14 +496,10 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
     if region not in m["regions"]:
         raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
-    if mode != "run" and region != REGION:
-        if region in REGION_API_URLS:        # the control cluster hosts no endpoint: forward to the region's API
-            return await _forward(model, req, p, idempotency_key, REGION_API_URLS[region])
-        raise HTTPException(400, f"sync/async calls for {region} go to that region's API; this one serves {REGION}")
     if req.execution and mode != "run":
         raise HTTPException(400, "execution options apply to runs only")
     if mode == "sync":
-        return await _sync(m, req, p)
+        return await _sync(m, req, p, region)
     # admission: Kueue (profile queues) bounds concurrent runs; LiteLLM rpm/budget bound async calls;
     # the gateway BackendTrafficPolicy caps request rates. Nothing is counted here.
     name = jobs.op_name(p.tenant, model, idempotency_key)
@@ -527,9 +508,9 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
     if ex and ex.get("placement", {}).get("allowed_clusters") and region and region not in ex["placement"]["allowed_clusters"]:
         raise HTTPException(400, f"region {region} is not in allowed_clusters {ex['placement']['allowed_clusters']}")
-    if mode == "async":
+    if mode == "async":                  # the caller Job runs in the endpoint's region, through that region's gateway
         output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
-        job, secret = jobs.build_async(name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix)
+        job, secret = jobs.build_async(name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region)
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
         job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
@@ -604,43 +585,30 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | No
     return cls
 
 
-async def _forward(model: str, req: InvokeRequest, p: Principal, idempotency_key: str | None, base: str):
-    cfg.refresh_trust()
-    """Same request to the regional API (which validates the key, serves the endpoint and bills); the
-    answer is returned as is. Covers the UI and clients that only know the control API's hostname."""
-    headers = {"Authorization": f"Bearer {p.key}"}
-    if idempotency_key:
-        headers["Idempotency-Key"] = idempotency_key
-    try:
-        async with httpx.AsyncClient(timeout=(req.timeout_s or SYNC_TIMEOUT_S) + 30) as c:
-            r = await c.post(f"{base}/v1/models/{model}:invoke", json=req.model_dump(exclude_none=True), headers=headers)
-    except httpx.TimeoutException:
-        raise HTTPException(504, f"regional API {base} did not answer within {(req.timeout_s or SYNC_TIMEOUT_S) + 30}s")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"regional API {base} unreachable: {e}")
-    try:
-        body = r.json()
-    except ValueError:
-        body = {"detail": r.text[:500]}
-    return JSONResponse(body, status_code=r.status_code)
-
-
-async def _sync(m: dict, req: InvokeRequest, p: Principal):
-    """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget,
-    spend and the per-call price are enforced there), else straight to the predictor."""
+async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
+    """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget, spend and the
+    per-call price are enforced there); else straight to the predictor Service when the endpoint runs on this
+    cluster, and through the region's gateway hostname (the one LiteLLM uses, TLS on the fleet CA) with the caller's
+    key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API."""
     if int(m.get("nodes") or 1) > 1:
-        st = kube.endpoint_status(m["k8s_name"], m["namespace"], nodes=int(m["nodes"]))
-        kube.stamp_last_request(m["k8s_name"], m["namespace"])     # a direct proxy call bypasses the gateway's authorize hook
+        st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
+        kube.stamp_last_request(m["k8s_name"], m["namespace"], region)     # a direct proxy call bypasses the gateway's authorize hook
         if st["status"] != "ready":
             raise HTTPException(503, f"endpoint {m['name']} is {st['status']} ({m['nodes']} nodes): a multi-node endpoint is started with "
                                      f"PATCH /v1/endpoints/{m['k8s_name']} {{\"scaling\": {{\"min\": 1}}}} (or the console's Start button) and takes "
                                      f"minutes to load; it stops again after scaling.idle_s without a request")
     if m.get("litellm_route"):
         url, headers = LITELLM_URL + m["litellm_route"], {"Authorization": f"Bearer {p.key}"}
-    else:
+    elif region == REGION:
         v = _variant_for(m, req.input, models.cluster_id())
         host = m["endpoint_host"] if v["object"] == m["k8s_name"] else f"http://{v['object']}-predictor.{m['namespace']}.svc.cluster.local"
         url, headers = host + m["endpoint_path"], {}
+    else:
+        if not models.endpoint_domain(region):
+            raise HTTPException(503, f"sync calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
+        cfg.refresh_trust()
+        v = _variant_for(m, req.input, region)
+        url, headers = f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}", {"Authorization": f"Bearer {p.key}"}
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
@@ -656,7 +624,7 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal):
         body = r.json()
     except ValueError:
         body = r.text
-    op = {"id": f"sync-{uuid.uuid4().hex[:12]}", "name": req.name, "model": m["name"], "mode": "sync", "region": REGION,
+    op = {"id": f"sync-{uuid.uuid4().hex[:12]}", "name": req.name, "model": m["name"], "mode": "sync", "region": region,
           "status": "SUCCEEDED" if ok else "FAILED", "tenant": p.tenant, "created_at": started, "started_at": started,
           "ended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "duration_s": round(time.time() - t0, 3),
           "attempts": [{"index": 1, "status": "SUCCEEDED" if ok else "FAILED", "reason": None if ok else f"HTTP {r.status_code}"}],
@@ -990,37 +958,12 @@ def _endpoint_region(m: dict, region: str | None) -> str:
     return selected
 
 
-async def _remote_monitoring(p: Principal, region: str, path: str, params: dict):
-    cfg.refresh_trust()
-    url = REGION_API_URLS.get(region)
-    if not url:
-        if region not in kube.regions():
-            # a region that left the fleet (its cluster, Prometheus and Loki with it): the operation's record stays,
-            # its metrics and logs are gone; the attempt records and outputs in the tenant bucket remain (/result)
-            raise HTTPException(410, f"Region {region} is no longer part of this fleet: the metrics and logs of this operation lived "
-                                     f"on its cluster and are gone. Its attempt records and outputs in the bucket are still there (result).")
-        raise HTTPException(503, "Monitoring for this region is not connected to the fleet API.")
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url.rstrip("/") + path, params={k: v for k, v in params.items() if v is not None},
-                                        headers={"Authorization": f"Bearer {p.key}"})
-        if response.status_code in (401, 403, 404, 422):
-            raise HTTPException(response.status_code, "Resource monitoring is not available for this request.")
-        response.raise_for_status()
-        return response.json()
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(503, "Monitoring for this region is temporarily unavailable.")
-
-
 @app.get("/v1/endpoints/{id}/metrics")
 async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h", end: float | None = None,
                            p: Principal = Depends(principal)):
     m = _endpoint_model(id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
-    monitoring.window(range, end)
-    if region != REGION:
-        return await _remote_monitoring(p, region, f"/v1/endpoints/{urllib.parse.quote(id, safe='')}/metrics", {"range": range, "end": end})
     return await monitoring.metrics("endpoint", m["namespace"], m["k8s_name"], region, range, end)
 
 
@@ -1030,25 +973,13 @@ async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", s
     m = _endpoint_model(id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
-    monitoring.window(range, end)
-    if region != REGION:
-        return await _remote_monitoring(p, region, f"/v1/endpoints/{urllib.parse.quote(id, safe='')}/logs",
-                                        {"range": range, "search": search, "limit": limit, "end": end})
     return await monitoring.logs("endpoint", m["namespace"], m["k8s_name"], region, range, search, limit, end)
 
 
 def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
-    """(region, kind) of an operation for its metrics and logs. A worker's Job is deleted when the run completes
-    (MultiKueue), so a regional API may no longer hold it while Prometheus and Loki still do: the fleet API has
-    verified ownership before forwarding, and every query is scoped to the caller's own namespace anyway, so a
-    missing Job means "this region, either kind" rather than 404 (the console showed "not available" for every
-    finished run, 2026-10-10)."""
-    try:
-        job, region = jobs.find(p.namespace, id)
-    except HTTPException as e:
-        if e.status_code == 404 and not FLEET_MANAGER and re.fullmatch(r"op-[a-z0-9-]{3,80}", id):
-            return REGION, "run"                            # absent here: completed; the queries stay in p.namespace
-        raise
+    """(region, kind) of an operation for its metrics and logs: the Job's region (a fleet-placed run: the worker that
+    admitted it, None while it waits). Every query is scoped to the caller's own namespace."""
+    job, region = jobs.find(p.namespace, id)
     if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
         raise HTTPException(404, f"operation {id}: not found")    # someone else's run is never served
     return region, "jobset" if jobs.is_jobset(job) else "job"
@@ -1057,9 +988,6 @@ def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
 @app.get("/v1/operations/{id}/metrics")
 async def operation_metrics(id: str, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)):
     region, _ = _monitored(p, id)
-    monitoring.window(range, end)
-    if region and region != REGION:
-        return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/metrics", {"range": range, "end": end})
     return await monitoring.metrics("job", p.namespace, id, region or REGION, range, end)
 
 
@@ -1067,10 +995,6 @@ async def operation_metrics(id: str, range: str = "1h", end: float | None = None
 async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
                          limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
     region, kind = _monitored(p, id)
-    monitoring.window(range, end)
-    if region and region != REGION:
-        return await _remote_monitoring(p, region, f"/v1/operations/{urllib.parse.quote(id, safe='')}/logs",
-                                        {"range": range, "search": search, "limit": limit, "end": end})
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 
@@ -1083,7 +1007,7 @@ def _key_public(i: dict, tenant: str) -> dict:
 
 def _fleet_only() -> None:
     if not db.enabled():
-        raise HTTPException(409, f"keys are managed on the fleet API{' (' + cfg.CONTROL_API_URL + ')' if cfg.CONTROL_API_URL else ''}")
+        raise HTTPException(409, "keys live in the fleet database (DATABASE_URL), which this API does not have")
 
 
 @app.get("/v1/keys")

@@ -99,5 +99,6 @@ ibDevices: 0               # fabric NICs claimed per pod through DRA (ResourceCl
 ibClaimTemplate: ib
 idleSeconds: 0             # informational on the object; the control API stops the group after this many idle seconds
 domain: ""                 # the gateway's endpoint domain of the cluster (the API sets it)
+apiBackend: false          # true on a GPU region: the gateway authorizes through the Envoy Gateway Backend api/api (the fleet's API)
 gatewayName: serverless2-external
 gatewayNamespace: envoy-gateway-system

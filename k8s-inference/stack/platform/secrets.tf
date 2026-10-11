@@ -76,8 +76,16 @@ resource "kubernetes_secret_v1" "cost_export_s3" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
-# The LiteLLM master key: the API of every cluster validates keys with it.
+# The LiteLLM master key: the API (the control cluster only since api 0.11.18) reads LiteLLM's key records with it
+# until every key is imported into the fleet database (services/api/auth.py). The GPU regions had a copy for their
+# regional API; the moved block keeps the control cluster's state address and removes the copies.
+moved {
+  from = kubernetes_secret_v1.litellm_master_api
+  to   = kubernetes_secret_v1.litellm_master_api[0]
+}
+
 resource "kubernetes_secret_v1" "litellm_master_api" {
+  count = local.role.control ? 1 : 0
   metadata {
     name      = "litellm-master"
     namespace = "api"

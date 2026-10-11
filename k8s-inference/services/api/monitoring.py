@@ -1,12 +1,15 @@
 """Resource-scoped monitoring. Queries are built here, never supplied by a browser.
 
-The caller resolves/authorizes the resource and forwards remote requests to that region's API.
-Missing series stay missing (idle and unavailable are different from a measured zero).
+The caller resolves/authorizes the resource. Prometheus and Loki of this cluster are called directly; those of
+another region through that cluster's API server proxy with the api-agent kubeconfig (services/api/kube.py), so
+no monitoring service of any region is exposed outside its cluster. Missing series stay missing (idle and
+unavailable are different from a measured zero).
 """
-import asyncio, json, math, re, time
+import asyncio, json, math, re, time, urllib.parse
 import httpx
 from fastapi import HTTPException
-from config import PROMETHEUS_URL, LOKI_URL
+import kube
+from config import PROMETHEUS_URL, LOKI_URL, REGION
 
 RANGES = {"15m": 900, "1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800}
 
@@ -18,6 +21,26 @@ def window(period: str, end: float | None = None) -> tuple[float, float, int]:
     if not math.isfinite(stop) or stop > time.time() + 60 or stop < 0:
         raise HTTPException(422, "invalid end timestamp")
     return max(0, stop - RANGES[period]), stop, max(15, RANGES[period] // 240)
+
+
+def target(service_url: str, region: str) -> tuple[str, dict, str | bool]:
+    """(base url, headers, verify) for a monitoring service of a region: the in-cluster URL here; in another
+    region the API server proxy of that cluster (`/api/v1/namespaces/<ns>/services/<name>:<port>/proxy`), with the
+    bearer token and CA of its api-agent kubeconfig. 410 for a region that left the fleet (its cluster, Prometheus
+    and Loki with it: the record stays, the metrics and logs are gone; attempt records and outputs remain)."""
+    if region == REGION:
+        return service_url, {}, True
+    if region not in kube.regions():
+        raise HTTPException(410, f"Region {region} is no longer part of this fleet: the metrics and logs of this operation lived "
+                                 f"on its cluster and are gone. Its attempt records and outputs in the bucket are still there (result).")
+    u = urllib.parse.urlsplit(service_url)
+    name, ns = u.hostname.split(".")[:2]              # <name>.<namespace>.svc[.cluster.local]
+    api = kube._client(region)
+    headers: dict = {}
+    api.update_params_for_auth(headers, [], ["BearerToken"], resource_path="", method="GET", body=None)
+    conf = api.configuration
+    return (f"{conf.host.rstrip('/')}/api/v1/namespaces/{ns}/services/{name}:{u.port}/proxy", headers,
+            conf.ssl_ca_cert or conf.verify_ssl)
 
 
 def selectors(labels: dict[str, str], regex: set[str] | None = None) -> str:
@@ -48,9 +71,9 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
     return q
 
 
-async def _query(client: httpx.AsyncClient, url: str, params: dict) -> dict:
+async def _query(client: httpx.AsyncClient, url: str, params: dict, headers: dict | None = None) -> dict:
     try:
-        response = await client.get(url, params=params)
+        response = await client.get(url, params=params, headers=headers)
         response.raise_for_status()
         data = response.json()
         if data.get("status") != "success":
@@ -64,9 +87,10 @@ async def _query(client: httpx.AsyncClient, url: str, params: dict) -> dict:
 async def metrics(kind: str, namespace: str, name: str, region: str, period: str, end: float | None = None) -> dict:
     start, stop, step = window(period, end)
     definitions = queries(kind, namespace, name, step)
-    async with httpx.AsyncClient(timeout=8) as client:
-        results = await asyncio.gather(*[_query(client, PROMETHEUS_URL + "/api/v1/query_range",
-                                               {"query": q, "start": start, "end": stop, "step": step})
+    base, headers, verify = target(PROMETHEUS_URL, region)
+    async with httpx.AsyncClient(timeout=8, verify=verify) as client:
+        results = await asyncio.gather(*[_query(client, base + "/api/v1/query_range",
+                                               {"query": q, "start": start, "end": stop, "step": step}, headers)
                                          for _, _, _, q in definitions], return_exceptions=True)
     panels, unavailable = [], []
     for (mid, title, unit, _), result in zip(definitions, results):
@@ -96,16 +120,14 @@ async def logs(kind: str, namespace: str, name: str, region: str, period: str,
     if kind == "jobset":
         # Indexed child Jobs of a JobSet share its name as their prefix.
         labels["job"] = re.escape(name) + "-.*"
-    elif kind == "run":
-        # the Job is gone (a completed run): a Job of that name or the child Jobs of a JobSet of that name
-        labels["job"] = re.escape(name) + "(-.*)?"
-    query = selectors(labels, {"job"} if kind in ("jobset", "run") else None)
+    query = selectors(labels, {"job"} if kind == "jobset" else None)
     if search:
         query += " |= " + json.dumps(search)  # LogQL string literal, never executable query syntax
-    async with httpx.AsyncClient(timeout=8) as client:
-        data = await _query(client, LOKI_URL + "/loki/api/v1/query_range",
+    base, headers, verify = target(LOKI_URL, region)
+    async with httpx.AsyncClient(timeout=8, verify=verify) as client:
+        data = await _query(client, base + "/loki/api/v1/query_range",
                             {"query": query, "start": str(int(start * 1e9)), "end": str(int(stop * 1e9)),
-                             "limit": limit, "direction": "backward"})
+                             "limit": limit, "direction": "backward"}, headers)
     lines = []
     for stream in data.get("result", []):
         labels = stream.get("stream") or {}

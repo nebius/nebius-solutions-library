@@ -12,17 +12,20 @@ role:                          # what this cluster is (stack/config/locals.tf `r
 # derives it from clusters/common/apps/*.yaml (kind: manifests, `placement`) plus the identities of the cluster's role.
 components: {}                 # Helm merges maps, so the defaults list nothing: the stage names every component it renders
 host: example.invalid          # the gateway domain of this cluster: <gateway ip>.sslip.io or <cluster id>.<edge.domain>
-hostnames:                     # the public hostnames on it (app and litellm on the control cluster are routes the stage renders)
+hostnames:                     # the public hostnames on it (api, app and litellm exist on the control cluster only: app and litellm are routes the stage renders)
   api: api.example.invalid
   grafana: grafana.example.invalid
+edge:
+  controlApiHost: api.example.invalid   # the fleet's API hostname: the ext-auth Backend of a GPU region's gateway (templates/edge)
+  caConfigMap: ""                       # internal mode: ConfigMap (namespace api, key ca.crt) that validates that hostname; empty = system roots
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.17
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.18
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.9
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.11
-api:
+api:                           # the control cluster only (clusters/common/apps/api.yaml)
   rateLimitPerMinute: 600      # edge.api_rate_limit_per_minute, per API key
-  env:                         # the API container's environment, complete (services/api/config.py); computed per cluster
+  env:                         # the API container's environment, complete (services/api/config.py)
     - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
     - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
     - { name: REGION, value: control }

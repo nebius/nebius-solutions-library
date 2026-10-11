@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.17
+  version: 0.11.18
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
     Auth: `Authorization: Bearer <API key>` on every request (keys in the fleet

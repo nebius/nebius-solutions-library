@@ -38,9 +38,8 @@ on spot; each variant is its own Knative service `<id>-<variant>`, the first kee
 model group lists every variant of every cluster as a deployment with its priority (`order`).
 
 `to_entry` turns a spec into the catalog entry the rest of the API and the endpoint renderer
-(services/api/render_endpoint.py) understand (catalog/README.md); the entry is stored next to the spec (database row on the control API, ConfigMap copy
-`catalog-<id>` in the `api` namespace of every region). Entries that come from files (the bundled classes)
-are read-only here.
+(services/api/render_endpoint.py) understand (catalog/README.md); the entry is stored next to the spec in the fleet
+database (`models` table, services/api/db.py). Entries that come from files (the bundled classes) are read-only here.
 """
 import json, logging, re, sys
 import yaml
@@ -464,35 +463,15 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
     return entry
 
 
-# ---- persistence: the fleet database on the control API, a read-only ConfigMap copy per region --------------
-# The control API (the one with DATABASE_URL, services/api/db.py) owns the definitions: every write lands in
-# the `models` table (with its history) and is copied as ConfigMap `catalog-<id>` into the `api` namespace of
-# every other cluster of the fleet, through the api-agent identities (REGION_KUBECONFIGS). A regional API
-# only reads its copies; it answers writes with 409 and points at the fleet's API.
+# ---- persistence: the fleet database ------------------------------------------------------------------------
+# The API (DATABASE_URL, services/api/db.py) owns the definitions: every write lands in the `models` table (with
+# its history); the reconciler renders them on the clusters of their `deployments` (services/api/app.py).
 
-def _cm_name(mid: str) -> str:
-    return f"catalog-{mid}"
-
-
-def list_runtime(region: str = REGION) -> dict[str, dict]:
-    """Runtime catalog entries: {id: entry}. On the control API from the database; on a regional API (or
-    for another region) from that cluster's ConfigMap copies."""
-    if region == REGION and db.enabled():
-        return {mid: _stored({**row["entry"], "version": row["version"]}) for mid, row in db.list_models().items()}
-    out = {}
-    try:
-        cms = retry(kube.core(region).list_namespaced_config_map, API_NAMESPACE, label_selector=f"{CATALOG_LABEL}=runtime")
-    except Exception:  # noqa: BLE001 - no RBAC / no cluster: an empty runtime catalog
-        return out
-    for cm in getattr(cms, "items", []) or []:
-        data = (getattr(cm, "data", None) or (cm.get("data") if isinstance(cm, dict) else {}) or {})
-        try:
-            e = yaml.safe_load(data.get("entry.yaml") or "") or {}
-        except yaml.YAMLError:
-            continue
-        if e.get("id"):
-            out[e["id"]] = _stored(e)
-    return out
+def list_runtime() -> dict[str, dict]:
+    """Runtime catalog entries: {id: entry}, from the database (empty without one: the bundled classes only)."""
+    if not db.enabled():
+        return {}
+    return {mid: _stored({**row["entry"], "version": row["version"]}) for mid, row in db.list_models().items()}
 
 
 def _stored(entry: dict) -> dict:
@@ -503,33 +482,6 @@ def _stored(entry: dict) -> dict:
     if spec.get("kind", "endpoint") == "endpoint" and isinstance(spec.get("scaling"), dict):
         entry = {**entry, "spec": {**spec, "scaling": native_scaling(spec["scaling"], stored=True)}}
     return entry
-
-
-def save(entry: dict, region: str = REGION):
-    """The ConfigMap copy of an entry in one cluster (server-side apply)."""
-    body = {"apiVersion": "v1", "kind": "ConfigMap",
-            "metadata": {"name": _cm_name(entry["id"]), "namespace": API_NAMESPACE,
-                         "labels": {CATALOG_LABEL: "runtime", MODEL_LABEL: entry["id"], MANAGED_BY_LABEL: entry.get("managed_by", "api")}},
-            "data": {"entry.yaml": yaml.safe_dump(entry, sort_keys=False), "spec.json": json.dumps(entry.get("spec") or {}, indent=1)}}
-    try:
-        retry(kube.core(region).patch_namespaced_config_map, _cm_name(entry["id"]), API_NAMESPACE, body,
-              field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
-    except ApiException as e:
-        raise HTTPException(502, f"catalog ConfigMap in {region}: {e.reason}")
-
-
-def remove(mid: str, region: str = REGION):
-    try:
-        retry(kube.core(region).delete_namespaced_config_map, _cm_name(mid), API_NAMESPACE)
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(502, f"catalog ConfigMap in {region}: {e.reason}")
-
-
-def copy_regions() -> list[str]:
-    """The clusters that get a ConfigMap copy: every region the control API reaches, except itself (its own
-    source is the database)."""
-    return [r for r in kube.regions() if r != REGION]
 
 
 # ---- rendering: the endpoint's objects (render_endpoint.py), applied with server-side apply --------------
@@ -557,9 +509,11 @@ def variant_names(entry: dict) -> list[str]:
 
 def render(entry: dict, cluster: str) -> list[dict]:
     """The objects of an endpoint on one cluster, once per variant (services/api/render_endpoint.py)."""
-    # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape)
+    # the gateway hostname of a multi-node endpoint's route is <id>-predictor.<ns>.<domain> (Knative's shape); on a
+    # GPU region the gateway authorizes through the `api` Backend (this API's public hostname), here through the Service
     domain = endpoint_domain(kube.cluster_region(cluster))
-    return [doc for v in variants(entry, cluster) for doc in render_endpoint.render(entry, cluster, domain, INFINIBAND_CLAIM_TEMPLATE, v)]
+    remote = kube.cluster_region(cluster) != REGION
+    return [doc for v in variants(entry, cluster) for doc in render_endpoint.render(entry, cluster, domain, INFINIBAND_CLAIM_TEMPLATE, v, remote)]
 
 
 def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
@@ -653,8 +607,8 @@ def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
 # one more entry of the same group, added by configuration (LiteLLM routes and fails over inside a group).
 
 def endpoint_domain(region: str) -> str:
-    """The gateway domain of a region's endpoints: ENDPOINT_DOMAINS on the control API, ENDPOINT_DOMAIN for
-    the API's own cluster."""
+    """The gateway domain of a region's endpoints: ENDPOINT_DOMAINS (every GPU region), ENDPOINT_DOMAIN for
+    the API's own cluster (single-cluster mode)."""
     return ENDPOINT_DOMAINS.get(region) or (ENDPOINT_DOMAIN if region == REGION else "")
 
 

@@ -23,9 +23,17 @@ spec:
     http:
       path: /internal/authorize/{{ default $v.name $v.modelId }}
       backendRefs:
+        {{- if $v.apiBackend }}
+        - group: gateway.envoyproxy.io   # a GPU region: the fleet's API over its public hostname (charts/platform/templates/edge)
+          kind: Backend
+          name: api
+          namespace: api
+          port: 443
+        {{- else }}
         - group: ""
           kind: Service
           name: api
           namespace: api
           port: 80
+        {{- end }}
       headersToBackend: [x-serverless2-tenant, x-serverless2-key-alias]

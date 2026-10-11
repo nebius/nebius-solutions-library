@@ -3,5 +3,5 @@ component: api
 namespace: api
 wave: '3'
 hubOnly: 'false'
-placement: all
+placement: control
 kind: manifests

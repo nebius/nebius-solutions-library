@@ -172,28 +172,6 @@
    }
   }
  },
- "_/Service/api/api": {
-  "component": "api",
-  "object": {
-   "apiVersion": "v1",
-   "kind": "Service",
-   "metadata": {
-    "name": "api",
-    "namespace": "api"
-   },
-   "spec": {
-    "ports": [
-     {
-      "port": 80,
-      "targetPort": 8080
-     }
-    ],
-    "selector": {
-     "app": "api"
-    }
-   }
-  }
- },
  "_/Service/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
   "object": {
@@ -236,17 +214,6 @@
     "selector": {
      "app.kubernetes.io/name": "alert-sink"
     }
-   }
-  }
- },
- "_/ServiceAccount/api/api": {
-  "component": "api",
-  "object": {
-   "apiVersion": "v1",
-   "kind": "ServiceAccount",
-   "metadata": {
-    "name": "api",
-    "namespace": "api"
    }
   }
  },
@@ -369,178 +336,6 @@
       "maxUnavailable": "100%"
      },
      "type": "RollingUpdate"
-    }
-   }
-  }
- },
- "apps/Deployment/api/api": {
-  "component": "api",
-  "object": {
-   "apiVersion": "apps/v1",
-   "kind": "Deployment",
-   "metadata": {
-    "name": "api",
-    "namespace": "api"
-   },
-   "spec": {
-    "replicas": 2,
-    "selector": {
-     "matchLabels": {
-      "app": "api"
-     }
-    },
-    "template": {
-     "metadata": {
-      "labels": {
-       "app": "api"
-      }
-     },
-     "spec": {
-      "containers": [
-       {
-        "env": [
-         {
-          "name": "LITELLM_URL",
-          "value": "https://litellm.192.0.2.1.sslip.io"
-         },
-         {
-          "name": "LITELLM_MASTER_KEY",
-          "valueFrom": {
-           "secretKeyRef": {
-            "key": "masterkey",
-            "name": "litellm-master"
-           }
-          }
-         },
-         {
-          "name": "PUBLIC_API_URL",
-          "value": "https://api.192.0.2.2.sslip.io"
-         },
-         {
-          "name": "GRAFANA_URLS",
-          "value": "eu-north1=https://grafana.192.0.2.2.sslip.io,control=https://grafana.192.0.2.1.sslip.io"
-         },
-         {
-          "name": "CATALOG_DIRS",
-          "value": "/etc/catalog"
-         },
-         {
-          "name": "RUNNER_IMAGE",
-          "value": "registry.serverless2.local/nebius/serverless2/jobs:0.1.14"
-         },
-         {
-          "name": "HUB_REGION",
-          "value": "eu-north1"
-         },
-         {
-          "name": "REGION_OIDC_ISSUERS",
-          "value": "eu-north1=https://oidc.mk8s.api.nebius.cloud/mk8scluster-hub"
-         },
-         {
-          "name": "REGION",
-          "value": "eu-north1"
-         },
-         {
-          "name": "REGION_KUBECONFIGS",
-          "value": ""
-         },
-         {
-          "name": "ENDPOINT_DOMAIN",
-          "value": "192.0.2.2.sslip.io"
-         },
-         {
-          "name": "CONTROL_API_URL",
-          "value": "https://api.192.0.2.1.sslip.io"
-         }
-        ],
-        "image": "registry.serverless2.local/nebius/serverless2/api:0.11.17",
-        "livenessProbe": {
-         "httpGet": {
-          "path": "/healthz",
-          "port": 8080
-         },
-         "periodSeconds": 20
-        },
-        "name": "api",
-        "ports": [
-         {
-          "containerPort": 8080
-         }
-        ],
-        "readinessProbe": {
-         "httpGet": {
-          "path": "/healthz",
-          "port": 8080
-         },
-         "periodSeconds": 5
-        },
-        "resources": {
-         "limits": {
-          "cpu": "1",
-          "memory": "512Mi"
-         },
-         "requests": {
-          "cpu": "100m",
-          "memory": "256Mi"
-         }
-        },
-        "securityContext": {
-         "allowPrivilegeEscalation": false,
-         "capabilities": {
-          "drop": [
-           "ALL"
-          ]
-         }
-        },
-        "volumeMounts": [
-         {
-          "mountPath": "/etc/kubeconfigs",
-          "name": "kubeconfigs",
-          "readOnly": true
-         },
-         {
-          "mountPath": "/etc/catalog",
-          "name": "catalog",
-          "readOnly": true
-         },
-         {
-          "mountPath": "/etc/ssl/msp",
-          "name": "trust",
-          "readOnly": true
-         }
-        ]
-       }
-      ],
-      "securityContext": {
-       "runAsNonRoot": true,
-       "runAsUser": 10001,
-       "seccompProfile": {
-        "type": "RuntimeDefault"
-       }
-      },
-      "serviceAccountName": "api",
-      "volumes": [
-       {
-        "name": "kubeconfigs",
-        "secret": {
-         "optional": true,
-         "secretName": "region-kubeconfigs"
-        }
-       },
-       {
-        "configMap": {
-         "name": "catalog"
-        },
-        "name": "catalog"
-       },
-       {
-        "configMap": {
-         "name": "trust"
-        },
-        "name": "trust"
-       }
-      ]
-     }
     }
    }
   }
@@ -1270,45 +1065,22 @@
    }
   }
  },
- "gateway.envoyproxy.io/BackendTrafficPolicy/api/api-rate-limit": {
-  "component": "api",
+ "gateway.envoyproxy.io/Backend/api/api": {
+  "component": "edge",
   "object": {
    "apiVersion": "gateway.envoyproxy.io/v1alpha1",
-   "kind": "BackendTrafficPolicy",
+   "kind": "Backend",
    "metadata": {
-    "name": "api-rate-limit",
+    "name": "api",
     "namespace": "api"
    },
    "spec": {
-    "rateLimit": {
-     "global": {
-      "rules": [
-       {
-        "clientSelectors": [
-         {
-          "headers": [
-           {
-            "invert": false,
-            "name": "Authorization",
-            "type": "Distinct"
-           }
-          ]
-         }
-        ],
-        "limit": {
-         "requests": 600,
-         "unit": "Minute"
-        }
-       }
-      ]
-     },
-     "type": "Global"
-    },
-    "targetRefs": [
+    "endpoints": [
      {
-      "group": "gateway.networking.k8s.io",
-      "kind": "HTTPRoute",
-      "name": "api"
+      "fqdn": {
+       "hostname": "api.192.0.2.1.sslip.io",
+       "port": 443
+      }
      }
     ]
    }
@@ -1446,18 +1218,26 @@
    }
   }
  },
- "gateway.envoyproxy.io/HTTPRouteFilter/api/api-not-found": {
-  "component": "api",
+ "gateway.networking.k8s.io/BackendTLSPolicy/api/api": {
+  "component": "edge",
   "object": {
-   "apiVersion": "gateway.envoyproxy.io/v1alpha1",
-   "kind": "HTTPRouteFilter",
+   "apiVersion": "gateway.networking.k8s.io/v1",
+   "kind": "BackendTLSPolicy",
    "metadata": {
-    "name": "api-not-found",
+    "name": "api",
     "namespace": "api"
    },
    "spec": {
-    "directResponse": {
-     "statusCode": 404
+    "targetRefs": [
+     {
+      "group": "gateway.envoyproxy.io",
+      "kind": "Backend",
+      "name": "api"
+     }
+    ],
+    "validation": {
+     "hostname": "api.192.0.2.1.sslip.io",
+     "wellKnownCACertificates": "System"
     }
    }
   }
@@ -1567,100 +1347,6 @@
    }
   }
  },
- "gateway.networking.k8s.io/HTTPRoute/api/api": {
-  "component": "api",
-  "object": {
-   "apiVersion": "gateway.networking.k8s.io/v1",
-   "kind": "HTTPRoute",
-   "metadata": {
-    "name": "api",
-    "namespace": "api"
-   },
-   "spec": {
-    "hostnames": [
-     "api.192.0.2.2.sslip.io"
-    ],
-    "parentRefs": [
-     {
-      "name": "serverless2-external",
-      "namespace": "envoy-gateway-system",
-      "sectionName": "https"
-     },
-     {
-      "name": "serverless2-external",
-      "namespace": "envoy-gateway-system",
-      "sectionName": "http"
-     }
-    ],
-    "rules": [
-     {
-      "backendRefs": [
-       {
-        "name": "api",
-        "port": 80
-       }
-      ],
-      "matches": [
-       {
-        "path": {
-         "type": "PathPrefix",
-         "value": "/internal/attempts"
-        }
-       }
-      ]
-     },
-     {
-      "backendRefs": [
-       {
-        "name": "api",
-        "port": 80
-       }
-      ],
-      "matches": [
-       {
-        "path": {
-         "type": "Exact",
-         "value": "/internal/keys/me"
-        }
-       }
-      ]
-     },
-     {
-      "filters": [
-       {
-        "extensionRef": {
-         "group": "gateway.envoyproxy.io",
-         "kind": "HTTPRouteFilter",
-         "name": "api-not-found"
-        },
-        "type": "ExtensionRef"
-       }
-      ],
-      "matches": [
-       {
-        "path": {
-         "type": "PathPrefix",
-         "value": "/internal"
-        }
-       }
-      ]
-     },
-     {
-      "backendRefs": [
-       {
-        "name": "api",
-        "port": 80
-       }
-      ],
-      "timeouts": {
-       "backendRequest": "630s",
-       "request": "630s"
-      }
-     }
-    ]
-   }
-  }
- },
  "gateway.networking.k8s.io/HTTPRoute/monitoring/ui-grafana": {
   "component": "ui",
   "object": {
@@ -1715,6 +1401,11 @@
      {
       "group": "",
       "kind": "Service",
+      "name": "api"
+     },
+     {
+      "group": "gateway.envoyproxy.io",
+      "kind": "Backend",
       "name": "api"
      }
     ]
@@ -2560,43 +2251,6 @@
    ]
   }
  },
- "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-namespaces": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "ClusterRole",
-   "metadata": {
-    "name": "serverless2-api-namespaces"
-   },
-   "rules": [
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "namespaces"
-     ],
-     "verbs": [
-      "get",
-      "list"
-     ]
-    },
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "nodes",
-      "pods"
-     ],
-     "verbs": [
-      "get",
-      "list"
-     ]
-    }
-   ]
-  }
- },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
   "component": "tenant-clusterrole",
   "object": {
@@ -2774,84 +2428,6 @@
    ]
   }
  },
- "rbac.authorization.k8s.io/ClusterRoleBinding/_/serverless2-api-namespaces": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "ClusterRoleBinding",
-   "metadata": {
-    "name": "serverless2-api-namespaces"
-   },
-   "roleRef": {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "ClusterRole",
-    "name": "serverless2-api-namespaces"
-   },
-   "subjects": [
-    {
-     "kind": "ServiceAccount",
-     "name": "api",
-     "namespace": "api"
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/Role/api/serverless2-api-agent-catalog": {
-  "component": "api-agent",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "Role",
-   "metadata": {
-    "name": "serverless2-api-agent-catalog",
-    "namespace": "api"
-   },
-   "rules": [
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "configmaps"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "watch",
-      "create",
-      "update",
-      "patch",
-      "delete"
-     ]
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/Role/api/serverless2-api-runtime-catalog": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "Role",
-   "metadata": {
-    "name": "serverless2-api-runtime-catalog",
-    "namespace": "api"
-   },
-   "rules": [
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "configmaps"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "watch"
-     ]
-    }
-   ]
-  }
- },
  "rbac.authorization.k8s.io/Role/envoy-gateway-system/serverless2-api-agent-models-certificate": {
   "component": "api-agent",
   "object": {
@@ -2875,61 +2451,6 @@
      "verbs": [
       "get",
       "patch"
-     ]
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/Role/envoy-gateway-system/serverless2-api-models-certificate": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "Role",
-   "metadata": {
-    "name": "serverless2-api-models-certificate",
-    "namespace": "envoy-gateway-system"
-   },
-   "rules": [
-    {
-     "apiGroups": [
-      "cert-manager.io"
-     ],
-     "resourceNames": [
-      "models"
-     ],
-     "resources": [
-      "certificates"
-     ],
-     "verbs": [
-      "get",
-      "patch"
-     ]
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/Role/kueue-system/serverless2-api-fleet": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "Role",
-   "metadata": {
-    "name": "serverless2-api-fleet",
-    "namespace": "kueue-system"
-   },
-   "rules": [
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resourceNames": [
-      "fleet-prices"
-     ],
-     "resources": [
-      "configmaps"
-     ],
-     "verbs": [
-      "get"
      ]
     }
    ]
@@ -3061,127 +2582,31 @@
    ]
   }
  },
- "rbac.authorization.k8s.io/Role/models/serverless2-api-endpoints": {
-  "component": "api",
+ "rbac.authorization.k8s.io/Role/monitoring/serverless2-api-agent-monitoring": {
+  "component": "api-agent",
   "object": {
    "apiVersion": "rbac.authorization.k8s.io/v1",
    "kind": "Role",
    "metadata": {
-    "name": "serverless2-api-endpoints",
-    "namespace": "models"
+    "name": "serverless2-api-agent-monitoring",
+    "namespace": "monitoring"
    },
    "rules": [
     {
      "apiGroups": [
-      "gateway.networking.k8s.io"
-     ],
-     "resources": [
-      "httproutes"
-     ],
-     "verbs": [
-      "get",
-      "list"
-     ]
-    },
-    {
-     "apiGroups": [
-      "gateway.envoyproxy.io"
-     ],
-     "resources": [
-      "securitypolicies"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "create",
-      "patch",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
-      "serving.kserve.io"
-     ],
-     "resources": [
-      "inferenceservices",
-      "localmodelcaches"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "patch",
-      "create",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
-      "leaderworkerset.x-k8s.io"
-     ],
-     "resources": [
-      "leaderworkersets"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "patch",
-      "create",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
       ""
      ],
-     "resources": [
-      "services"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "patch",
-      "create",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
-      "gateway.networking.k8s.io"
+     "resourceNames": [
+      "kube-prometheus-stack-prometheus",
+      "kube-prometheus-stack-prometheus:9090",
+      "loki",
+      "loki:3100"
      ],
      "resources": [
-      "httproutes"
+      "services/proxy"
      ],
      "verbs": [
-      "patch",
-      "create",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "persistentvolumeclaims"
-     ],
-     "verbs": [
-      "get",
-      "list",
-      "patch",
-      "create",
-      "delete"
-     ]
-    },
-    {
-     "apiGroups": [
-      ""
-     ],
-     "resources": [
-      "pods"
-     ],
-     "verbs": [
-      "get",
-      "list"
+      "get"
      ]
     }
    ]
@@ -3215,52 +2640,6 @@
    ]
   }
  },
- "rbac.authorization.k8s.io/RoleBinding/api/serverless2-api-agent-catalog": {
-  "component": "api-agent",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "RoleBinding",
-   "metadata": {
-    "name": "serverless2-api-agent-catalog",
-    "namespace": "api"
-   },
-   "roleRef": {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "Role",
-    "name": "serverless2-api-agent-catalog"
-   },
-   "subjects": [
-    {
-     "kind": "ServiceAccount",
-     "name": "api-agent",
-     "namespace": "api"
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/RoleBinding/api/serverless2-api-runtime-catalog": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "RoleBinding",
-   "metadata": {
-    "name": "serverless2-api-runtime-catalog",
-    "namespace": "api"
-   },
-   "roleRef": {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "Role",
-    "name": "serverless2-api-runtime-catalog"
-   },
-   "subjects": [
-    {
-     "kind": "ServiceAccount",
-     "name": "api",
-     "namespace": "api"
-    }
-   ]
-  }
- },
  "rbac.authorization.k8s.io/RoleBinding/envoy-gateway-system/serverless2-api-agent-models-certificate": {
   "component": "api-agent",
   "object": {
@@ -3279,52 +2658,6 @@
     {
      "kind": "ServiceAccount",
      "name": "api-agent",
-     "namespace": "api"
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/RoleBinding/envoy-gateway-system/serverless2-api-models-certificate": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "RoleBinding",
-   "metadata": {
-    "name": "serverless2-api-models-certificate",
-    "namespace": "envoy-gateway-system"
-   },
-   "roleRef": {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "Role",
-    "name": "serverless2-api-models-certificate"
-   },
-   "subjects": [
-    {
-     "kind": "ServiceAccount",
-     "name": "api",
-     "namespace": "api"
-    }
-   ]
-  }
- },
- "rbac.authorization.k8s.io/RoleBinding/kueue-system/serverless2-api-fleet": {
-  "component": "api",
-  "object": {
-   "apiVersion": "rbac.authorization.k8s.io/v1",
-   "kind": "RoleBinding",
-   "metadata": {
-    "name": "serverless2-api-fleet",
-    "namespace": "kueue-system"
-   },
-   "roleRef": {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "Role",
-    "name": "serverless2-api-fleet"
-   },
-   "subjects": [
-    {
-     "kind": "ServiceAccount",
-     "name": "api",
      "namespace": "api"
     }
    ]
@@ -3353,24 +2686,24 @@
    ]
   }
  },
- "rbac.authorization.k8s.io/RoleBinding/models/serverless2-api-endpoints": {
-  "component": "api",
+ "rbac.authorization.k8s.io/RoleBinding/monitoring/serverless2-api-agent-monitoring": {
+  "component": "api-agent",
   "object": {
    "apiVersion": "rbac.authorization.k8s.io/v1",
    "kind": "RoleBinding",
    "metadata": {
-    "name": "serverless2-api-endpoints",
-    "namespace": "models"
+    "name": "serverless2-api-agent-monitoring",
+    "namespace": "monitoring"
    },
    "roleRef": {
     "apiGroup": "rbac.authorization.k8s.io",
     "kind": "Role",
-    "name": "serverless2-api-endpoints"
+    "name": "serverless2-api-agent-monitoring"
    },
    "subjects": [
     {
      "kind": "ServiceAccount",
-     "name": "api",
+     "name": "api-agent",
      "namespace": "api"
     }
    ]

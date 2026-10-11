@@ -176,11 +176,12 @@ locals {
   # Public hostnames: <service>.<gateway ip>.sslip.io, or <service>.<cluster id>.<domain>.
   host_of      = { for id, c in local.clusters : id => local.f.edge.domain == null ? "${local.cloud_facts.clusters[id].gateway_ip}.sslip.io" : "${id}.${local.f.edge.domain}" }
   control_host = local.host_of[local.control_id]
+  # the API, the console and LiteLLM are the control cluster's; a GPU region's gateway carries Grafana and the endpoints
   hostnames_of = { for id, c in local.clusters : id => merge(
-    { api = "api.${local.host_of[id]}", grafana = "grafana.${local.host_of[id]}" },
-    local.roles[id].control ? { app = "app.${local.host_of[id]}", litellm = "litellm.${local.host_of[id]}" } : {}
+    { grafana = "grafana.${local.host_of[id]}" },
+    local.roles[id].control ? { api = "api.${local.host_of[id]}", app = "app.${local.host_of[id]}", litellm = "litellm.${local.host_of[id]}" } : {}
   ) }
-  api_urls = { for id, c in local.clusters : c.region => "https://api.${local.host_of[id]}" if local.roles[id].worker }
+  api_host = "api.${local.control_host}"
   grafana_urls = join(",", concat(
     [for id in local.cluster_ids : "${local.clusters[id].region}=https://grafana.${local.host_of[id]}" if local.roles[id].worker],
     local.dedicated ? ["control=https://grafana.${local.control_host}"] : []
@@ -204,12 +205,12 @@ locals {
     local.f.trust_bundle_pem == null ? [] : [{ name = "trust", mountPath = "/etc/ssl/certs/ca-certificates.crt", subPath = "ca.pem", readOnly = true }],
   )
 
-  # The API's environment per cluster (services/api/config.py): the whole list, in this order (a reordered env rolls
-  # the Deployment). Every HTTPS client of the API trusts the system roots plus every CA under /etc/ssl/msp.
-  api_env = { for id, r in local.roles : id => concat([
-    { name = "LITELLM_URL", value = r.control ? local.litellm_url_in_cluster : "https://litellm.${local.control_host}" },
+  # The API's environment (services/api/config.py), the control cluster only: the whole list, in this order (a reordered
+  # env rolls the Deployment). Every HTTPS client of the API trusts the system roots plus every CA under /etc/ssl/msp.
+  api_env = { for id, r in local.roles : id => [for e in concat([
+    { name = "LITELLM_URL", value = local.litellm_url_in_cluster },
     { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-master", key = "masterkey" } } },
-    { name = "PUBLIC_API_URL", value = "https://${local.hostnames_of[id].api}" },
+    { name = "PUBLIC_API_URL", value = "https://${local.api_host}" },
     { name = "GRAFANA_URLS", value = local.grafana_urls },
     { name = "CATALOG_DIRS", value = "/etc/catalog" },
     { name = "RUNNER_IMAGE", value = local.image.jobs },
@@ -217,27 +218,24 @@ locals {
     # the OIDC issuer of every GPU region's cluster (docs.nebius.com/kubernetes/networking/oidc-public-endpoint): what a
     # storage provider trusts for a run's projected workload-identity token (docs/JOBS.md "Execution options")
     { name = "REGION_OIDC_ISSUERS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=https://oidc.mk8s.api.nebius.cloud/${local.cloud_facts.clusters[cid].cluster_id}" if local.roles[cid].worker]) },
-    ], [for e in [
-      # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
-      { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
-      { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
-      { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
-      { name = "IMAGES_SOURCE", value = local.images_source },
-      { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
-      { name = "ACME_ISSUER", value = local.certificate_issuer[id] },
-      { name = "MODELS_ISSUER", value = local.models_issuer },
-    ] : e if r.control], r.manager ? [
+    # The fleet database (services/api/db.py): the model definitions, keys and attempt records.
+    { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
+    { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
+    { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
+    { name = "IMAGES_SOURCE", value = local.images_source },
+    # the gateway domain of every GPU region: the endpoints' hostnames (LiteLLM, sync calls for another region, async calls)
+    { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
+    { name = "ACME_ISSUER", value = local.certificate_issuer[id] },
+    { name = "MODELS_ISSUER", value = local.models_issuer },
+    ], r.manager ? [
     { name = "REGION", value = "control" },
     { name = "REGION_KUBECONFIGS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=/etc/kubeconfigs/${local.clusters[cid].region}" if local.roles[cid].worker]) },
-    { name = "REGION_API_URLS", value = join(",", [for rg, u in local.api_urls : "${rg}=${u}"]) },
     { name = "FLEET_MANAGER", value = "true" },
     { name = "S3_ENV_SECRET", value = "s3-fleet" },
-    ] : [
+    ] : [ # single-cluster mode: the one cluster is the control plane and the GPU region
     { name = "REGION", value = local.clusters[id].region },
     { name = "REGION_KUBECONFIGS", value = "" },
-    { name = "ENDPOINT_DOMAIN", value = local.host_of[id] },                   # async endpoint calls go through this cluster's gateway (TLS, key check)
-    { name = "CONTROL_API_URL", value = "https://api.${local.control_host}" }, # keys live in the fleet database: a worker asks the control API (services/api/auth.py)
-  ]) }
+  ]) : e if r.control] }
 
   # The release inventory (clusters/common/apps/*.yaml) per cluster: Helm releases and the components of
   # charts/platform (kind: manifests), by placement. Releases that depend on the fleet definition: the GPU Operator
@@ -275,7 +273,10 @@ locals {
     # reference as written; nvcr.io needs credentials Knative does not have
     knative = { skipTagResolving = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"] }
     api     = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
-    trust   = { volumes = local.trust_volumes, mounts = local.trust_mounts }
+    # a GPU region's gateway authorizes endpoint calls against the fleet's API by its public hostname (templates/edge):
+    # validated against the system roots (ACME) in public mode, the trust bundle (`trust`, key ca.crt) in internal mode
+    edge  = { controlApiHost = local.api_host, caConfigMap = local.f.edge.mode == "internal" ? "trust" : "" }
+    trust = { volumes = local.trust_volumes, mounts = local.trust_mounts }
     gateway = {
       wildcardSecret = "${id}-wildcard-tls"
       serviceAnnotations = merge(

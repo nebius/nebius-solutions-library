@@ -54,17 +54,16 @@ def test_failed_deployment_remains_committed_and_retries(client, admin_keys, mon
     assert not admin_keys.changes
 
 
-def test_copy_failure_is_retried_without_another_history_version(client, admin_keys, monkeypatch):
+def test_deploy_failure_is_retried_without_another_history_version(client, admin_keys, monkeypatch):
     c, _ = client
-    monkeypatch.setattr(models, "copy_regions", lambda: ["eu-north1"])
-    save = models.save
+    apply = models.apply
     calls = []
     def fail_once(*args):
         calls.append(args)
         if len(calls) == 1:
-            raise RuntimeError("ConfigMap write unavailable")
-        return save(*args)
-    monkeypatch.setattr(models, "save", fail_once)
+            raise RuntimeError("cluster unavailable")
+        return apply(*args)
+    monkeypatch.setattr(models, "apply", fail_once)
     assert c.post("/v1/models", json=SPEC, headers=ADMIN).json()["pending"]
     api.reconcile_models()
     assert not admin_keys.changes and len(admin_keys.history(SPEC["id"])) == 1
