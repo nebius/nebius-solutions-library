@@ -32,9 +32,8 @@ charge, and `clusterName` is cleared for finished runs anyway). The admitting cl
 manager Workload (`serverless2.nebius/admitted-cluster`), once, for the API (region of the operation,
 price, where a resume must go) and for this dispatcher's own bookkeeping.
 Patches use the `kueue-admission` field manager (Kueue MultiKueue docs, external dispatcher caveat).
-The same ranking is served over HTTP (`GET /v1/rank?profile=&gpus=&classes=&regions=&pin=`, port RANK_PORT) from
-the last reconcile's snapshot: the API asks it at submission for a run class with per-GPU-class images, renders
-the Job with the best class's image and queues it on that class (docs/SCHEDULING.md "Per-GPU images for runs").
+The API reproduces the order of `rank()` from the fleet document alone (services/api/placement.py) when it has to
+pick a run's GPU class at submission (docs/SCHEDULING.md "Per-GPU images for runs"); keep the two in step.
 """
 import base64
 import json
@@ -44,11 +43,8 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
 
 import yaml
-import buffer
 import infiniband
 import nebius_cli
 from kubernetes import client, config
@@ -59,12 +55,9 @@ NS = os.environ.get("PRICES_NAMESPACE", "kueue-system")
 FLEET_CM = os.environ.get("FLEET_CONFIGMAP", "fleet-prices")   # charts/fleet: pools.yaml
 SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: spot.json
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
-BUFFER = os.environ.get("BUFFER", "1") == "1"        # ready-replica buffers of endpoints (buffer.py)
 INFINIBAND = os.environ.get("INFINIBAND", "1") == "1"   # InfiniBand pool floors for multi-node runs (infiniband.py)
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
 ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))   # grace before a volume whose manager Jobs are gone is deleted
-RANK_PORT = int(os.environ.get("RANK_PORT", "8080"))              # GET /v1/rank (the API's class choice at submission), /healthz
-DISPATCH = os.environ.get("DISPATCH", "true").lower() != "false"  # false: only refresh the ranking snapshot (a second, read-only copy)
 LABEL = "serverless2.nebius"
 REGION_LABEL = f"{LABEL}/region"
 CLASSES_ANN = f"{LABEL}/gpu-classes"
@@ -189,33 +182,11 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         # would boot (a 1-GPU run on an 8-GPU pool pays eight GPUs; measured 2026-10-09: it booted a full node)
         node = int(pool.get("gpus_per_node") or 1)
         eff = price * (max(gpus, 1) if is_free else max(max(gpus, 1), node))
-        if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then cost
+        if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then cost (mirrored in services/api/placement.py)
             return (0 if is_free else 1, classes.index(pool["class"]), cap, eff, cname, fname)
         return (0 if is_free else 1, eff, cap, cname, fname)
 
     return sorted(cands, key=key)
-
-
-SNAPSHOT: dict = {"clusters": {}, "spot": {}, "free": {}, "aliases": {}, "at": None}   # the last reconcile's view, served by /v1/rank
-
-
-def rank_response(snapshot: dict, profile_name: str | None, gpus: int, classes: list | None, regions: list | None,
-                  pin: str | None = None, tenant: str | None = None) -> dict:
-    """The /v1/rank answer from a reconcile snapshot: every (cluster, pool) candidate best-first with its GPU class,
-    capacity type, price and whether it is free now; `best` is the first one. The API asks this at submission for a
-    run class with per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class of `best` decides
-    the image, and the run is then queued on that class's profile (it may still move between regions of the class)."""
-    clusters, spot, free, aliases = snapshot["clusters"], snapshot["spot"], snapshot["free"], snapshot["aliases"]
-    names = {v: k for k, v in aliases.items()}
-    prof = profile_from_name(profile_name, clusters, spot)
-    allowed = [aliases.get(r, r) for r in regions] if regions else None
-    ranked = rank(prof, clusters, free, gpus, spot, aliases.get(pin, pin) if pin else None, classes, allowed, tenant)
-    out = []
-    for cname, fname, price, is_free in ranked:
-        pool = clusters[cname]["pools"][fname]
-        out.append({"cluster": cname, "region": names.get(cname, cname), "pool": fname, "gpu_class": pool.get("class"),
-                    "capacity": pool.get("capacity", "spot"), "price": price, "free": is_free})
-    return {"profile": prof, "ranked": out, "best": out[0] if out else None, "snapshot_at": snapshot.get("at")}
 
 
 def nominations(ranked: list, already: list, age_s: float) -> list:
@@ -472,15 +443,10 @@ def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict) -> No
 
 
 
-def reconcile(core, custom, batch, dispatch=None):
+def reconcile(core, custom, batch):
     clusters, spot = load_fleet(core)
     workers, aliases = worker_clients(core, custom)
     free = free_quota(workers)
-    SNAPSHOT.update({"clusters": clusters, "spot": spot, "free": dict(free), "aliases": aliases, "at": datetime.now(timezone.utc).isoformat()})
-    if not (DISPATCH if dispatch is None else dispatch):
-        return
-    if BUFFER:
-        buffer.reconcile_buffers(workers)
     if INFINIBAND:
         try:   # its own failures (a worker down, the CLI) must not stop the dispatch below
             infiniband.reconcile(core, workers, clusters, aliases)
@@ -537,45 +503,6 @@ def reconcile(core, custom, batch, dispatch=None):
 
 
 
-class RankHandler(BaseHTTPRequestHandler):
-    """GET /v1/rank?profile=prefer-h100&gpus=1&classes=h100,l40s&regions=eu-north1,eu-south1&pin=eu-south1 ; GET /healthz"""
-    def do_GET(self):  # noqa: N802
-        u = urlparse(self.path)
-        if u.path == "/healthz":
-            at = SNAPSHOT.get("at")
-            fresh = bool(at) and (datetime.now(timezone.utc) - datetime.fromisoformat(at)).total_seconds() < max(90, INTERVAL * 4)
-            return self._json(200 if fresh else 503, {"ok": fresh, "snapshot_at": at})
-        if u.path != "/v1/rank":
-            return self._json(404, {"error": "not found"})
-        q = parse_qs(u.query)
-        classes = [c for c in q.get("classes", [""])[0].split(",") if c] or None
-        regions = [r for r in q.get("regions", [""])[0].split(",") if r] or None
-        try:
-            gpus = int(q.get("gpus", ["1"])[0])
-        except ValueError:
-            return self._json(400, {"error": "gpus must be an integer"})
-        if SNAPSHOT.get("at") is None:
-            return self._json(503, {"error": "no snapshot yet"})
-        return self._json(200, rank_response(SNAPSHOT, q.get("profile", [None])[0], gpus, classes, regions, q.get("pin", [None])[0], q.get("tenant", [None])[0]))
-
-    def _json(self, code: int, body: dict):
-        data = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, fmt, *args):  # quiet
-        return
-
-
-def serve_rank():
-    srv = ThreadingHTTPServer(("0.0.0.0", RANK_PORT), RankHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("rank endpoint on :%d (dispatching=%s)", RANK_PORT, DISPATCH)
-
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -585,27 +512,27 @@ def main():
     core, custom, batch = client.CoreV1Api(), client.CustomObjectsApi(), client.BatchV1Api()
     if INFINIBAND:
         nebius_cli.login()      # one CLI profile per mounted region key (the node-group updates of infiniband.py)
-    # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs.
-    # A replica losing renewal exits immediately, fencing its reconcile loop before another leader starts.
+    # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs (the other one
+    # waits as a standby). A replica losing renewal exits immediately, fencing its reconcile loop before another
+    # leader starts.
     leading = threading.Event()
-    if DISPATCH:
-        from kubernetes.leaderelection import electionconfig, leaderelection
-        from kubernetes.leaderelection.resourcelock.configmaplock import ConfigMapLock
-        lock = ConfigMapLock("dispatcher-leader", NS, os.environ.get("HOSTNAME", "dispatcher"))
-        election = leaderelection.LeaderElection(electionconfig.Config(
-            lock, 60, 30, 5, leading.set, lambda: os._exit(1)))
-        def elect():
-            try:
-                election.run()
-            finally:
-                os._exit(1)
-        threading.Thread(target=elect, daemon=True).start()
-    serve_rank()
-    while True:
+    from kubernetes.leaderelection import electionconfig, leaderelection
+    from kubernetes.leaderelection.resourcelock.configmaplock import ConfigMapLock
+    lock = ConfigMapLock("dispatcher-leader", NS, os.environ.get("HOSTNAME", "dispatcher"))
+    election = leaderelection.LeaderElection(electionconfig.Config(
+        lock, 60, 30, 5, leading.set, lambda: os._exit(1)))
+    def elect():
         try:
-            reconcile(core, custom, batch, dispatch=leading.is_set())
-        except Exception as e:
-            log.exception("reconcile failed: %s", e)
+            election.run()
+        finally:
+            os._exit(1)
+    threading.Thread(target=elect, daemon=True).start()
+    while True:
+        if leading.is_set():
+            try:
+                reconcile(core, custom, batch)
+            except Exception as e:
+                log.exception("reconcile failed: %s", e)
         time.sleep(INTERVAL)
 
 

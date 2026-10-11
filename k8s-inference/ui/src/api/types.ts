@@ -8,7 +8,6 @@ export interface ScalingSpec {
   max?: number;
   metric?: "concurrency_utilization" | "requests_per_second";
   target?: number; // percent of container_concurrency, or requests/s per replica
-  buffer?: number; // ready replicas kept above demand while serving (0-8)
   container_concurrency?: number;
   cooldown_s?: number;
   window_s?: number;

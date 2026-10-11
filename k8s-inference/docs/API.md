@@ -67,7 +67,7 @@ the module docstring of `services/api/models.py`; the schema is `Model` in `serv
 `container_concurrency`, the hard per-replica request limit (1-1000, default 1); `metric: requests_per_second`
 scales on `target` requests/s per replica (default 5) with no concurrency limit; `cooldown_s` delays scale-down,
 `window_s` (6-300, default 30) is the metrics averaging window, `idle_s` keeps the last replica after the decision
-to scale to zero, `buffer` keeps ready replicas above demand (docs/SCHEDULING.md). The API writes the complete
+to scale to zero. The API writes the complete
 policy back, so a read never has to guess a default. Rendering onto Knative: `concurrency_utilization` is the
 `concurrency` metric with `container_concurrency` as the scale target and `target` as its utilization percentage;
 `requests_per_second` is the `rps` metric at 100 % with `containerConcurrency` 0. Definitions stored under the raw
@@ -213,7 +213,7 @@ The internal shape mirrors public `nebius.ai.v1` Endpoint and Job plus the
 extensions below. It is what the provider adapter writes into KServe objects and
 Kubernetes Jobs, and it is the gap list for the Serverless and Token Factory teams.
 
-Endpoint extensions: `scaling {buffer (ready replicas above demand, 0-8), min_replicas, max_replicas, target_concurrency,
+Endpoint extensions: `scaling {min_replicas, max_replicas, target_concurrency,
 scale_to_zero_after}`, `fast_start {policy}`, `capacity {pool_ref, placement:
 RESERVED|SPOT|ANY, max_spot_price, region}`, `routing {hostname, private}`,
 `status {replicas_ready, in_flight, last_cold_start, preemption_events}`.

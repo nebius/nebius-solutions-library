@@ -239,14 +239,6 @@ export function ScalingFields({
             3600,
             "Keep the last pod after the decision to scale to zero. Separate from cooldown and the averaging window.",
           )}
-          {number(
-            "Scaling buffer (extra ready replicas)",
-            "buffer",
-            0,
-            0,
-            8,
-            "Ready replicas kept above the measured demand while the app serves, so a burst finds a replica at once. Off while the app is at zero (the warm spare node covers that); lowered after the cooldown.",
-          )}
           <div className="scaling-unavailable">
             <div className="scaling-unavailable__head">
               <h3>Additional deployment controls</h3>
@@ -254,7 +246,7 @@ export function ScalingFields({
             </div>
             <Field
               label="Shared warm GPU buffer"
-              help="Spare GPU capacity shared across compatible apps. Two L40S apps with buffer 1 can share one spare L40S slot. Requires a pool capacity controller; separate from extra app replicas."
+              help="Spare GPU capacity shared across compatible apps. Two L40S apps with buffer 1 can share one spare L40S slot. Requires a pool capacity controller."
             >
               <input
                 className="input"

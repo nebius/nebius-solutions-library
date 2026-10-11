@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.13", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.14", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -561,8 +561,8 @@ def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: in
 
 def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None, ex: dict | None = None) -> str | None:
     """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
-    runs"): the dispatcher's best candidate among the model's classes and regions (the caller's region when
-    given). None for a class with one image: Kueue may then switch class at queue time as before."""
+    runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
+    given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
     if not jobs.class_images(m):
         return None
     gpus = (m.get("job") or {}).get("gpu", 1)
@@ -570,10 +570,7 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | No
         gpus = int(gpus)
     except (TypeError, ValueError):           # a parameter placeholder: one GPU for the ranking
         gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
-    pools = kube.fleet().get("pools") or {}
-    available = sorted({p.get("gpu_class") for p in pools.values() if p.get("gpu_class")}) or None
-    if ex and (ex.get("placement") or {}).get("gpu_preference"):          # the caller's order narrows the model's
-        available = [c for c in ex["placement"]["gpu_preference"] if available is None or c in available]
+    available = (ex.get("placement") or {}).get("gpu_preference") if ex else None   # the caller's order narrows the model's
     cls, how = placing.choose_class(m, region, gpus, available, tenant)
     log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
     return cls

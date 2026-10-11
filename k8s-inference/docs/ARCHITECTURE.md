@@ -161,7 +161,7 @@ Pinned versions live in `clusters/common/apps/*.yaml`, one list for every cluste
 | Piece | Where | Size | Why upstream does not cover it |
 |---|---|---|---|
 | Customer API | `services/api` | about 2,000 lines of Python with tests | one API over KServe, Jobs and LiteLLM: idempotency, status normalisation, resume, artifacts, tenancy |
-| Cost dispatcher and price feed | `services/dispatcher` | about 550 lines | Kueue's MultiKueue needs an external dispatcher to place by price across regions |
+| Cost dispatcher and price feed | `services/dispatcher` | about 900 lines | Kueue's MultiKueue needs an external dispatcher to place by price across regions |
 | Job runner | `services/jobs` | about 150 lines of shell | fetch inputs, upload outputs and attempt records, call an endpoint |
 | Ops image | `services/ops` | about 100 lines of shell | recover stopped spot VMs, Nebius CLI with service-account profiles |
 | Three charts | `charts/fleet`, `charts/endpoint`, `charts/tenant` | Helm | queues and cache from the fleet definition, one endpoint, one tenant |

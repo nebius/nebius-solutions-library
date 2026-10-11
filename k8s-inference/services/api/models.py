@@ -81,7 +81,6 @@ class ScalingSpec(BaseModel):
     cooldown_s: int | None = Field(default=None, ge=0, le=3600)
     window_s: int | None = Field(default=None, ge=6, le=300)
     idle_s: int | None = Field(default=None, ge=0, le=3600)
-    buffer: int | None = Field(default=None, ge=0, le=8)   # ready replicas kept above demand while serving (docs/SCHEDULING.md "Scaling buffer")
 # public registries -> the alias the image cache serves them under (terraform.tfvars `images.upstreams`)
 UPSTREAM_ALIAS = {"docker.io": "docker", "registry-1.docker.io": "docker", "index.docker.io": "docker",
                   "nvcr.io": "nvcr", "ghcr.io": "ghcr", "quay.io": "quay", "registry.k8s.io": "k8s"}
@@ -181,6 +180,8 @@ def native_scaling(scaling: dict, stored: bool = False) -> dict:
     database or a ConfigMap copy, where a missing metric meant raw concurrency; every definition written since carries
     its metric, so new input without one is native (`validate` fills the native defaults)."""
     sc = dict(scaling or {})
+    if stored:
+        sc.pop("buffer", None)   # the ready-replica buffer (api 0.10.2 to 0.11.13) is gone; a stored definition may still carry it
     metric = sc.get("metric")
     if metric not in RAW_METRICS and not (metric is None and (stored or "utilization_percent" in sc)):
         return sc
@@ -261,8 +262,6 @@ def validate(spec: dict) -> dict:
                 raise HTTPException(400, "interconnect: none | preferred | required")
             if scaling.get("max", 1) != max(scaling.get("min", 0), 1):
                 scaling["max"] = max(scaling.get("min", 0), 1)   # replica groups of whole nodes do not autoscale: max = running count
-            if scaling.get("buffer"):
-                raise HTTPException(400, "scaling.buffer: not for multi-node endpoints (their replicas are started and stopped explicitly)")
             if "worker_command" in s and not _command(s["worker_command"]):
                 raise HTTPException(400, "worker_command: a string or a list")
     classes = list(gpu.get("classes") or [])
