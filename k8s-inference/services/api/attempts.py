@@ -81,14 +81,11 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         cur = c.execute("select epoch, status from attempts where operation = %s and pod = %s", (operation, pod)).fetchone()
         top = c.execute("select coalesce(max(epoch), 0) from attempts where root = %s", (root,)).fetchone()[0]
         cancelled = c.execute("select cancelled_at from operation_marks where operation = %s", (operation,)).fetchone()
-        if cur:
-            epoch = cur[0]
-            if cur[1] in TERMINAL and status == "started":
-                return _row(c, operation, pod)          # a late duplicate of the start record
-        else:
-            epoch = top + 1
-        if epoch < top:
+        epoch = cur[0] if cur else top + 1
+        if epoch < top:                              # any record from a replaced attempt, pointers included
             raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
+        if cur and cur[1] in TERMINAL and status == "started":
+            return _row(c, operation, pod)           # a late duplicate of the current attempt's start record
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
         export = body.get("export") or ("n/a" if body.get("io_mode") == "application" and status != "succeeded" else None)

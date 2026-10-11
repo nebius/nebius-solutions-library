@@ -12,6 +12,22 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Integration gate of the application layer, key editing (2026-10-11 13:30-14:30 UTC, the same test fleet)
+
+Five execution contracts the application layer's offline probe required (one continuation per idempotency key on
+resume, a stable handle across capacity fallback, no success without a delivery record, scratch kept until delivery
+is acknowledged, live checkpoint pointers) built as api 0.11.10 and jobs 0.1.14; the probe
+(`probe_upstream_contracts.py` against this source) passes its three checks. Key editing (`PATCH /v1/keys/{alias}`,
+the console's Edit button) as api 0.11.9 / ui 0.6.2.
+
+| Check | Result |
+|---|---|
+| Idempotent resume | `POST :resume` twice with the same `Idempotency-Key` on a FAILED RTX run returned the same operation (202 then 200, `<root>-r-<hash>`); the same key with a different body was refused (409) |
+| Stable handle across fallback | three RTX-preferring runs with the pool full: the third was moved to L40S after 60 s; `GET` on the original handle answered 200 with the successor's state (`requested_id` the original, `resumed_from`, the fallback reason); the list shows the original as SUPERSEDED with its `successor`; the original's Workload is deactivated and its Job suspended |
+| No success without a record | an application run that exited 0 without RESULT.json became EXPORT_FAILED ("no finalization record"), its volume Bound and kept; the uploader logged "volume kept: delivery not acknowledged (export=n/a ack=200 result=no)" |
+| Pointer handoff and abrupt loss | see the drill A line below |
+| Key editing | `PATCH /v1/keys/sciai-worker` raised the budget to 75, restricted the models and set a 30-day expiry; the fresh list and the key's own `/v1/keys/me` showed the new limit; restored afterwards |
+
 ## Execution options, attempt lifecycle, portable retries (2026-10-11 12:00-13:00 UTC, the same test fleet)
 
 Five execution requirements of the application layer (application-managed I/O, scoped workload identity and
