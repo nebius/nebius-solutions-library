@@ -1,14 +1,13 @@
-"""Bearer key -> Principal. The fleet database answers (hash lookup, cached AUTH_CACHE_S); a regional API has no
-database and asks the control API (GET /internal/keys/me with the caller's own key); LiteLLM's /key/info with the
-master key stays as a read-only fallback for a key the database does not hold yet (keys.import_litellm runs
-once at the control API's start)."""
+"""Bearer key -> Principal. The fleet database answers (hash lookup, cached AUTH_CACHE_S); LiteLLM's /key/info with
+the master key stays as a read-only fallback for a key the database does not hold yet (keys.import_litellm runs
+once at the API's start)."""
 import asyncio, time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import httpx
 from fastapi import Header, HTTPException
 import db, keys
-from config import AUTH_CACHE_S, CONTROL_API_URL, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
+from config import AUTH_CACHE_S, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
 
 _cache: dict[str, tuple[float, dict]] = {}
 litellm_fallback = True      # until the control API imported LiteLLM's keys into the fleet database (app._import_keys)
@@ -61,10 +60,8 @@ async def key_info(key: str) -> dict:
     info = None
     if db.enabled():
         info = await asyncio.to_thread(keys.info, h)
-    elif CONTROL_API_URL:
-        info = await _fetch(f"{CONTROL_API_URL}/internal/keys/me", {"Authorization": f"Bearer {key}"})
-    if info is None and LITELLM_MASTER_KEY and not CONTROL_API_URL and (litellm_fallback or not db.enabled()):
-        # LiteLLM's record, read-only: a fleet without the database, or the control API before its one-time import.
+    if info is None and LITELLM_MASTER_KEY and (litellm_fallback or not db.enabled()):
+        # LiteLLM's record, read-only: a fleet without the database, or the API before its one-time import.
         # Never afterwards: LiteLLM's /key/info answers from its cache for a key deleted minutes ago (fleet, 2026-10-11)
         data = await _fetch(f"{LITELLM_URL}/key/info", {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}, params={"key": key})
         info = (data or {}).get("info") if data else None

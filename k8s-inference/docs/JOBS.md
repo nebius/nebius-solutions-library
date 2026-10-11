@@ -5,10 +5,9 @@
 Every asynchronous operation of the API is one Kubernetes `batch/v1` Job in a tenant namespace.
 No workflow engine: the Job controller retries, Kueue queues and admits, the CSI volume keeps the
 checkpoints, a 30 MB runner image moves data. `services/api/jobs.py` (about 450 lines) renders,
-submits, reads, cancels and resumes them. Two entry points create them: a regional API (hub,
-eu-south1) creates the Job in its own cluster; the fleet API on the control cluster creates it on the
-MultiKueue manager and lets Kueue plus the cost dispatcher place it on a worker ("Fleet placement"
-below).
+submits, reads, cancels and resumes them. The fleet's API creates them on the MultiKueue manager (the
+dedicated control cluster) and lets Kueue plus the cost dispatcher place them on a worker ("Fleet placement"
+below); in single-cluster mode (`control_plane.dedicated = false`) it creates them in its own cluster.
 
 ## Run class = catalog entry with a `job` block
 
@@ -406,7 +405,7 @@ it sat until the grace period's SIGKILL, holding the GPU for `graceSeconds`).
 The same Job shape without a volume: `main` is the runner's `call.sh`, which POSTs the request body
 to the model's LiteLLM pass-through route (the caller's key, in a per-operation Secret owned by the
 Job, so spend lands on that key) or to the endpoint's **gateway hostname**
-(`https://<model>-predictor.models.<ENDPOINT_DOMAIN>`, the regional API's `ENDPOINT_DOMAIN`) with the
+(`https://<model>-predictor.models.<region domain>`, `ENDPOINT_DOMAINS`; the Job runs in the endpoint's region) with the
 caller's key: the same path, key check and per-key rate limit as an external client, never the
 predictor Service (the tenant policy does not reach `models`, so no call skips the key check or the
 accounting).

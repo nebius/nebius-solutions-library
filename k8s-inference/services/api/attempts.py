@@ -9,7 +9,6 @@ replaced must not finalize the operation afterwards. The rows give every operati
 id (the pod), a monotonic epoch, a revision cursor for polling, the selected cluster/pool/class/image digest, and the
 export and finalization state that decides whether "exit 0" became a delivered result.
 
-Only the control API has the database (fleet placement); a regional API without one keeps the bucket records.
 """
 import logging
 from datetime import datetime, timezone
@@ -30,11 +29,12 @@ def enabled() -> bool:
 
 
 def verify_runner_token(token: str) -> tuple[str, str, str]:
-    """TokenReview of an uploader's projected token against every cluster this API reaches: (region, namespace,
-    pod). 401 when no cluster issued it or it is not a bound pod token of a tenant namespace."""
+    """TokenReview of an uploader's projected token against the clusters this API reaches, the GPU regions first (a
+    run's pod lives on one of them; the control cluster of a dedicated fleet issues no run tokens and answers
+    "unauthenticated" at once): (region, namespace, pod). 401 when no cluster issued it or it is not a bound pod
+    token of a tenant namespace. The record itself names no cluster: the uploader only knows its pod."""
     from kubernetes import client
-    from config import FLEET_MANAGER
-    for region in [r for r in kube.regions() if not (FLEET_MANAGER and r == REGION)] or kube.regions():
+    for region in sorted(kube.regions(), key=lambda r: r == REGION):
         try:
             review = retry(client.AuthenticationV1Api(kube._client(region)).create_token_review,
                            client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)))

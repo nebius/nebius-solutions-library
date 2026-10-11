@@ -6,7 +6,7 @@ runtime {image, port, ...} (endpoints), job {image, command, gpu, cpu, memory, p
 parameters [] (run, rendered into a Kubernetes Job by jobs.py, docs/JOBS.md), namespace, litellm_route, endpoint_host, deployments {<cluster>: {pool, image,
 priorityClassName, parameters, price_per_gpu_hour, paused}} ("hub" = this API's region)."""
 import glob, os, yaml
-from config import CATALOG_DIRS, ENDPOINT_DOMAIN, HUB_REGION, LABEL, MODELS_NAMESPACE
+from config import CATALOG_DIRS, HUB_REGION, LABEL, MODELS_NAMESPACE
 
 _cache: dict = {"mtime": None, "models": {}}
 
@@ -60,10 +60,7 @@ def normalise(doc: dict) -> dict:
     m["deployments"] = dep
     m["regions"] = list(dep)
     if m["mode"] != "run" and not m.get("endpoint_host"):
-        m["endpoint_host"] = f"http://{m['k8s_name']}-predictor.{m['namespace']}.svc.cluster.local"
-    if m["mode"] != "run" and not m.get("endpoint_external_host") and ENDPOINT_DOMAIN:
-        # the gateway's hostname of the endpoint (Knative external domain): what tenant Jobs call (docs/JOBS.md)
-        m["endpoint_external_host"] = f"https://{m['k8s_name']}-predictor.{m['namespace']}.{ENDPOINT_DOMAIN}"
+        m["endpoint_host"] = f"http://{m['k8s_name']}-predictor.{m['namespace']}.svc.cluster.local"   # on this cluster only
     if m["mode"] == "run":
         m["job"] = dict(m.get("job") or {})          # image, command, gpu, cpu, memory, ... (docs/JOBS.md)
         images = m["job"].get("images")              # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs")

@@ -17,17 +17,19 @@ POST   /v1/operations/{id}:cancel
 POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on the same checkpoint volume, same region
 POST   /v1/artifacts/uploads         presigned upload URL scoped to the tenant prefix
 GET    /v1/artifacts/{uri}           presigned download of a tenant object
-GET    /v1/endpoints[/{id}]          InferenceServices of catalog models in this region; PATCH scaling (admin key)
+GET    /v1/endpoints[/{id}]          the endpoints of the catalog models per region (`region=`); PATCH scaling (admin key)
 GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry: the console's Edit button)
 Idempotency-Key header on every mutating call
 ```
 
-Entry points: `https://api.<control cluster host>` (the fleet API on the control cluster: runs,
-operations, keys; sync/async calls are forwarded to the region's API) and `https://api.<region host>`
-for in-region sync/async/streaming calls and runs pinned to that region. A host is `<gateway ip>.sslip.io`
-or `<cluster>.<domain>` (`docs/EDGE.md`); `./stack.sh output platform control` prints the URLs of a fleet. A run submitted to the fleet API is placed in the cheapest free
-region among the model's deployments by its GPU preference (`docs/JOBS.md` "Fleet placement"); `region`
-pins it. Keys are the same everywhere (one fleet database; a regional API looks a key up on the fleet API).
+One entry point: `https://api.<control cluster host>` (the fleet's API on the control cluster: models, runs,
+operations, keys, sync and async calls for every region; `docs/ARCHITECTURE.md` "One API"). Streaming and
+WebSocket calls go to the endpoint's own gateway hostname (`https://<model>-predictor.models.<region host>`,
+the same key; `docs/EDGE.md`). A host is `<gateway ip>.sslip.io` or `<cluster>.<domain>`;
+`./stack.sh output platform control` prints the URLs of a fleet. A run is placed in the cheapest free region
+among the model's deployments by its GPU preference (`docs/JOBS.md` "Fleet placement"); `region` pins it; a
+sync or async call for an endpoint in another region than the control cluster's is served through that
+region's gateway. Keys are the same everywhere (one fleet database).
 
 Modes: `sync`, `async`, `run`, declared per model; `async` may be requested per call. `async` and
 `run` operations are Kubernetes Jobs in the tenant namespace of the region (`docs/JOBS.md`): a run
@@ -104,11 +106,10 @@ a call through `POST /v1/models/{model}:invoke` or the endpoint's gateway hostna
 platform: the key's budget and spend in the fleet database, GPU runs charged by the billing CronJob
 ("Keys" below, docs/RELIABILITY.md "Accounting and budgets").
 
-Writes land on the fleet API only (the control cluster's `api.` host, the one with a database). A regional
-API serves the copies and answers `POST`, `PUT`, `DELETE` and `/history` with 409 and the fleet API's URL.
-The built-in classes (`hello-run`, `container-run`, `distributed-run`) are files and answer writes with
-409 too. `images` (per GPU class), `deployments.<region>.variants` and `routing` are accepted and stored
-but not acted on yet (the design review of 2026-10-09).
+Writes land in the fleet database (the API answers `POST`, `PUT`, `DELETE` and `/history` with 409 without
+`DATABASE_URL`). The built-in classes (`hello-run`, `container-run`, `distributed-run`) are files and answer
+writes with 409 too. `images` (per GPU class, `docs/SCHEDULING.md`), `deployments.<region>.variants` and
+`routing` ("Variants" below) are implemented.
 
 The acceptance probe (`tools/verify.sh`) uses this path: with `acceptance.example_endpoint = true` (the
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as
@@ -219,8 +220,8 @@ boot after `scaling.min` goes to 1 and a start takes the usual few minutes longe
 Start and stop, no autoscaling in between: `scaling.min` 1 starts the replica group (the nodes boot, the drivers
 install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; the console's Start/Stop button
 and `PATCH /v1/endpoints/{id} {"scaling": {"min": 1}}` do that. `scaling.idle_s` stops it after that many seconds
-without a request, measured by the control API's reconcile loop from the later of the last authorized request (the
-regional API stamps the LeaderWorkerSet) and the moment the leader became Ready; the stop is a normal definition
+without a request, measured by the API's reconcile loop from the later of the last authorized request (the
+gateway's authorize call stamps the LeaderWorkerSet in every region of the model) and the moment the leader became Ready; the stop is a normal definition
 write (history entry by `idle-shutdown`). A call to a stopped or starting multi-node endpoint gets 503 with that
 explanation. The Service and the gateway route of the leader carry a KServe predictor's name
 (`<id>-predictor.models.<domain>`), so authorization, the certificate, LiteLLM and `:invoke` are the same as for

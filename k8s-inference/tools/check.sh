@@ -124,6 +124,10 @@ for cid, v in d["values"].items():
     platform = render("platform", v)
     kinds = {(o["kind"], o["metadata"]["name"]): o for o in platform}
     assert ("DaemonSet", "containerd-registry-config") not in kinds, f"{cid}: the containerd DaemonSet is rendered without the cache"
+    if not v["role"]["control"]:
+        assert ("Deployment", "api") not in kinds, f"{cid}: the API is the control cluster's only"
+        print(f"   ok cache off {cid}: no zot, no containerd DaemonSet, no API (a GPU region)")
+        continue
     image = kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["image"]
     assert image.startswith(d["fleet"]["images"]["source"] + "/serverless2/api:"), f"{cid}: api image {image} is not pulled from the registry"
     env = {e["name"]: e.get("value") for e in kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["env"]}

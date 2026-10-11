@@ -5,6 +5,10 @@
 # proxies (knative-external/knative-internal) are sized in charts/platform/templates/gateway/gateway.yaml.
 config:
   envoyGateway:
+    # the Backend API: the GPU regions' gateways authorize endpoint calls against the fleet's API by its public
+    # hostname (charts/platform/templates/edge); off by default in v1.6 (a SecurityPolicy then reports "backend not found")
+    extensionApis:
+      enableBackend: true
     gateway:
       controllerName: gateway.envoyproxy.io/gatewayclass-controller
     provider:

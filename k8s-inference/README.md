@@ -64,7 +64,7 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
   by the API) and `litellm` (LiteLLM's mirror of the keys for its OpenAI route). `control_plane.dedicated = false` is the single-cluster mode for a proof of concept: those
   services run on the one region's system pool.
 - **Region clusters** (one per Nebius region, one project each): GPU pools, Knative/KServe endpoints, an
-  Envoy gateway with key checks, a regional API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
+  Envoy gateway with key checks against the control cluster's API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
 
 `docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
 and their limits.
@@ -176,7 +176,7 @@ platform ("Day 2" below).
   The API stores the definition in the fleet database with its history, renders the endpoint on every
   cluster of the model's regions (`services/api/render_endpoint.py`), and registers an OpenAI endpoint as a LiteLLM
   model group. `PUT /v1/models/<id>` changes it, `DELETE` removes it, `GET /v1/models/<id>/history` lists
-  the versions. Only the fleet API writes; a regional API answers a write with 409 and the fleet API's URL.
+  the versions. There is one API, the control cluster's (`docs/ARCHITECTURE.md` "One API").
   `docs/API.md` "Models".
 
   ```sh
@@ -280,8 +280,8 @@ that nobody assumes it does:
 - `cilium-operator` with one replica Pending: Nebius runs two; keep `system_pool.node_count = 2`.
 - The first pull of a multi-GB model image in a region takes minutes (the cache syncs it once); the
   pre-pull warms the images of the built-in classes per pool, a model's image is cached at its first pull.
-- `POST /v1/models` answers 409 "this API has no model database": you called a regional API. Models are
-  written on the fleet's API (the control cluster's `api.` host), which the message names.
+- `POST /v1/models` answers 409 "no fleet database": the API runs without `DATABASE_URL` (Secret `api/database`
+  of the platform stage, docs/OPERATIONS.md "Database").
 
 ## Repository layout
 
@@ -314,14 +314,14 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.17 |
+| `services/api` image | 0.11.18 |
 | `services/dispatcher` image | 0.2.9 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |
 | `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.3 |
-| `charts/platform` | 0.1.0 |
+| `charts/platform` | 0.1.1 |
 | `charts/tenant` | 0.3.0 |
 
 ## License

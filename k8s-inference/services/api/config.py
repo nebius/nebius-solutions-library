@@ -8,21 +8,21 @@ LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 # on the endpoints' hostnames without a second budget check (role `router`, never billed). Optional: without it
 # no group is registered (the endpoint still answers through the API).
 ROUTER_KEY = os.environ.get("ROUTER_KEY", "")
-# A regional API has no fleet database: it asks the control API for a key (GET /internal/keys/me, the caller's own key)
-CONTROL_API_URL = os.environ.get("CONTROL_API_URL", "").rstrip("/")
 CATALOG_DIRS = os.environ.get("CATALOG_DIRS", "/app/catalog/models").split(":")
 REGION = os.environ.get("REGION", "control")                        # the region this API runs in (in-cluster client); `control` on the fleet manager
 HUB_REGION = os.environ.get("HUB_REGION", REGION)                   # the region the catalog's `deployments.hub` means (the manager sets it)
-# other regions: "<region>=<kubeconfig path>,..." (Secret mounted by the Deployment; missing files are skipped); the manager only
+# the GPU regions: "<region>=<kubeconfig path>,..." (Secret mounted by the Deployment; missing files are skipped). This is
+# the fleet's one API (the control cluster): it deploys endpoints, creates runs and reads their state in every region
+# through these kubeconfigs (the api-agent identities, charts/platform/templates/api-agent); the regions' gateways
+# authorize endpoint calls against it over its public hostname (docs/ARCHITECTURE.md "One API").
 REGION_KUBECONFIGS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_KUBECONFIGS", "").split(",") if "=" in kv)
-# regional API hosts: "<region>=https://api.<ip>.sslip.io,...". A sync/async invoke for another region is
-# forwarded there (same key, same body) instead of answered with 400; the control cluster's API sets this.
-REGION_API_URLS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_API_URLS", "").split(",") if "=" in kv)
-# public hostnames: the API's own URL (endpoint invoke links) and Grafana per region (operation log
-# links into Loki Explore): "<region>=<url>,..."
+# public hostnames: the API's own URL (endpoint invoke links, the uploader's attempt records, the gateways' ext-auth
+# Backend) and Grafana per region (operation log links into Loki Explore): "<region>=<url>,..."
 PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
 GRAFANA_URLS = dict(kv.split("=", 1) for kv in os.environ.get("GRAFANA_URLS", "").split(",") if "=" in kv)
-# Internal, regional monitoring services. Only the API can query them; browser clients never receive credentials.
+# Internal monitoring services of a cluster (the same names in every region). Only the API can query them; browser
+# clients never receive credentials. On this cluster they are called directly; in another region through that
+# cluster's API server proxy (`/api/v1/namespaces/<ns>/services/<name>:<port>/proxy`, the api-agent kubeconfig).
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.monitoring.svc:9090").rstrip("/")
 LOKI_URL = os.environ.get("LOKI_URL", "http://loki.monitoring.svc:3100").rstrip("/")
 MODELS_NAMESPACE = os.environ.get("MODELS_NAMESPACE", "models")
@@ -49,9 +49,9 @@ EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")            # job Servi
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
 RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.14")
-# External domain of this cluster's endpoints (the Knative domain, e.g. <gateway ip>.sslip.io): async endpoint calls
-# from tenant Jobs go through the gateway (TLS, key check, rate limit) as https://<model>-predictor.<ns>.<domain>,
-# never to the predictor Service (no call may skip the key check). Empty = no async calls to direct endpoints.
+# External domain of this cluster's own endpoints (single-cluster mode; the GPU regions are in ENDPOINT_DOMAINS): async
+# endpoint calls from tenant Jobs and sync calls for another region go through the region's gateway (TLS, key check,
+# rate limit) as https://<model>-predictor.<ns>.<domain>, never to the predictor Service (no call may skip the key check).
 ENDPOINT_DOMAIN = os.environ.get("ENDPOINT_DOMAIN", "")
 # curl --connect-to <host>:443:<this>:443 keeps the TLS name and routes the connection to the gateway's in-cluster
 # Service instead of the public IP (measured 2026-10-08: both work from a tenant pod on mk8s; the Service avoids the

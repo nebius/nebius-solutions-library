@@ -16,8 +16,10 @@ and the standard Helm labels the chart stamped (`app.kubernetes.io/managed-by: H
 re-rendered endpoint applied with server-side apply changes nothing on the live objects. Those two labels go
 with the chart.
 
-Pure functions, no I/O: `render(entry, cluster, domain, ib_claim_template, variant)`; `models.render` calls it
-once per variant.
+Pure functions, no I/O: `render(entry, cluster, domain, ib_claim_template, variant, api_backend)`; `models.render`
+calls it once per variant. `api_backend`: the gateway's ext-auth target is the Envoy Gateway `Backend` api/api
+(the fleet's API over its public hostname, charts/platform/templates/edge) on a GPU region, the Service api/api
+on the API's own cluster (the chart's `apiBackend` value).
 """
 import copy
 
@@ -445,9 +447,11 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
     return [lws, service, route]
 
 
-def _securitypolicy(v: dict) -> dict:
+def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
     """The gateway's authorization of the endpoint's external routes through the API's authorizer."""
     name = v["name"]
+    api = ({"group": "gateway.envoyproxy.io", "kind": "Backend", "name": "api", "namespace": "api", "port": 443} if api_backend
+           else {"group": "", "kind": "Service", "name": "api", "namespace": "api", "port": 80})
     return {"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy",
             "metadata": {"name": f"{name}-authorization", "namespace": v["namespace"], "labels": _labels(v)},
             "spec": {"targetSelectors": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute",
@@ -455,7 +459,7 @@ def _securitypolicy(v: dict) -> dict:
                                           "matchExpressions": [{"key": "networking.knative.dev/visibility", "operator": "NotIn", "values": ["cluster-local"]}]}],
                      "extAuth": {"failOpen": False, "timeout": "10s", "headersToExtAuth": ["authorization", "sec-websocket-protocol"],
                                  "http": {"path": f"/internal/authorize/{v.get('modelId') or name}",
-                                          "backendRefs": [{"group": "", "kind": "Service", "name": "api", "namespace": "api", "port": 80}],
+                                          "backendRefs": [api],
                                           "headersToBackend": ["x-serverless2-tenant", "x-serverless2-key-alias"]}}}}
 
 
@@ -481,12 +485,13 @@ def _pvcs(v: dict) -> list[dict]:
     return out
 
 
-def render(entry: dict, cluster: str, domain: str, ib_claim_template: str, variant: dict | None = None) -> list[dict]:
+def render(entry: dict, cluster: str, domain: str, ib_claim_template: str, variant: dict | None = None,
+           api_backend: bool = False) -> list[dict]:
     """The objects of one variant of an endpoint on a cluster (`variant`: an element of models.variants, the first
-    variant keeps the model's id as the object name)."""
+    variant keeps the model's id as the object name; `api_backend`: the cluster is a GPU region, not the API's own)."""
     v = values(entry, cluster, domain, ib_claim_template, variant)
     nodes = int(v.get("nodes") or 1)
-    docs = [_securitypolicy(v)]
+    docs = [_securitypolicy(v, api_backend)]
     docs += [_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes)
     docs += _localmodelcache(v) + _pvcs(v)
     return sorted(docs, key=lambda d: (KIND_ORDER.get(d["kind"], len(KIND_ORDER)), d["kind"] if d["kind"] not in KIND_ORDER else ""))

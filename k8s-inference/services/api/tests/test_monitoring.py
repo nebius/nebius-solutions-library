@@ -1,4 +1,4 @@
-"""Monitoring authorization, bounded queries, regional forwarding, and real response normalization."""
+"""Monitoring authorization, bounded queries, the other regions' API server proxy, and real response normalization."""
 import asyncio, time
 import httpx, pytest
 from fastapi import HTTPException
@@ -84,16 +84,32 @@ def test_operation_ownership_checked_before_monitoring(client,monkeypatch):
     assert not calls
 
 
-def test_worker_monitoring_forwards_bearer_and_resource_only(client,monkeypatch):
+class FakeAgentClient:
+    """kube._client(region) of another region: the api-agent kubeconfig's host, CA and bearer token."""
+    class configuration:
+        host = "https://10.0.0.1:6443"
+        ssl_ca_cert = None
+        verify_ssl = True
+
+    def update_params_for_auth(self, headers, querys, auth_settings, resource_path=None, method=None, body=None):
+        assert auth_settings == ["BearerToken"]
+        headers["Authorization"] = "Bearer agent-token"
+
+
+def test_another_regions_monitoring_goes_through_its_api_server_proxy(client,monkeypatch):
+    """Loki of another region is reached through that cluster's API server proxy with the api-agent credentials
+    (the caller's key never leaves this API); the query stays scoped to the resource."""
     c,_=client;requests=[]
     monkeypatch.setattr(jobs,"find",lambda ns,id:({"metadata":{"labels":{"serverless2.nebius/tenant":"demo"}}},"eu-south1"))
-    monkeypatch.setattr(appmod,"REGION_API_URLS",{"eu-south1":"https://worker-api.example"})
-    transport(monkeypatch,lambda req:requests.append(req) or httpx.Response(200,json={"region":"eu-south1","lines":[],"truncated":False}))
-    assert c.get("/v1/operations/op-owned/logs?range=6h",headers=H).status_code==200
-    assert requests[0].url.host=="worker-api.example"
-    assert requests[0].url.path=="/v1/operations/op-owned/logs"
-    assert requests[0].headers["Authorization"]=="Bearer sk-good"
-    assert "region" not in requests[0].url.params
+    monkeypatch.setattr(kube,"regions",lambda:["eu-north1","eu-south1"])
+    monkeypatch.setattr(kube,"_client",lambda region:FakeAgentClient())
+    transport(monkeypatch,lambda req:requests.append(req) or httpx.Response(200,json={"status":"success","data":{"result":[]}}))
+    r=c.get("/v1/operations/op-owned/logs?range=6h",headers=H)
+    assert r.status_code==200 and r.json()["region"]=="eu-south1"
+    assert requests[0].url.host=="10.0.0.1"
+    assert requests[0].url.path=="/api/v1/namespaces/monitoring/services/loki:3100/proxy/loki/api/v1/query_range"
+    assert requests[0].headers["Authorization"]=="Bearer agent-token" and "sk-good" not in str(requests[0].headers)
+    assert 'namespace="tenant-demo"' in requests[0].url.params["query"] and "region" not in requests[0].url.params
 
 
 def test_fleet_endpoint_list_keeps_unreachable_region(client,monkeypatch):
@@ -174,10 +190,11 @@ def test_monitoring_of_a_retired_region_says_so(monkeypatch):
     import app as appmod
     import kube
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-north2"])
-    monkeypatch.setattr(appmod, "REGION_API_URLS", {"eu-north2": "https://api.example.invalid"})
+    monkeypatch.setattr(kube, "_client", lambda region: FakeAgentClient())
     with pytest.raises(HTTPException) as e:
-        asyncio.run(appmod._remote_monitoring(None, "eu-west1", "/v1/operations/x/metrics", {}))
+        monitoring.target(monitoring.PROMETHEUS_URL, "eu-west1")
     assert e.value.status_code == 410 and "no longer part of this fleet" in e.value.detail
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(appmod._remote_monitoring(None, "eu-north1", "/v1/operations/x/metrics", {}))
-    assert e.value.status_code == 503
+    assert monitoring.target(monitoring.PROMETHEUS_URL, "eu-north1") == (monitoring.PROMETHEUS_URL, {}, True)     # this cluster: direct
+    base, headers, verify = monitoring.target(monitoring.PROMETHEUS_URL, "eu-north2")
+    assert base == "https://10.0.0.1:6443/api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy"
+    assert headers == {"Authorization": "Bearer agent-token"} and verify is True

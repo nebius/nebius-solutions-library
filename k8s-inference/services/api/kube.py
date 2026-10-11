@@ -250,9 +250,9 @@ def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_
     """Record on a multi-node endpoint's LeaderWorkerSet that it was called now (annotation, at most once a minute):
     the control API's idle shutdown reads it (services/api/app.py idle_shutdown). Cheap and best-effort."""
     now = time.time()
-    if _last_stamp.get(name, 0) + min_interval_s > now:
+    if _last_stamp.get(f"{region}/{name}", 0) + min_interval_s > now:
         return
-    _last_stamp[name] = now
+    _last_stamp[f"{region}/{name}"] = now
     body = {"metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}}
     try:
         api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)

@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test_api                                   # noqa: E402  (sets the test environment: REGION, CATALOG_DIRS, ...)
 import test_multinode_endpoints as multinode      # noqa: E402
 import test_variants as variants                  # noqa: E402
-import kube, models, render_endpoint              # noqa: E402
+import config, kube, models, render_endpoint      # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -125,9 +125,15 @@ def cases() -> dict[str, tuple[dict, str]]:
     }
 
 
+def remote(cluster: str) -> bool:
+    """A cluster other than the API's own (config.REGION, eu-north1 in the tests): the gateway authorizes through the
+    `api` Backend there, through the Service on the API's cluster (services/api/models.py `render`)."""
+    return REGIONS.get(cluster, cluster) != config.REGION
+
+
 def native(entry: dict, cluster: str) -> list[dict]:
     """models.render as the API runs it (domain and claim template fixed)."""
-    return [d for v in models.variants(entry, cluster) for d in render_endpoint.render(entry, cluster, DOMAIN, IB_CLAIM_TEMPLATE, v)]
+    return [d for v in models.variants(entry, cluster) for d in render_endpoint.render(entry, cluster, DOMAIN, IB_CLAIM_TEMPLATE, v, remote(cluster))]
 
 
 def helm(entry: dict, cluster: str) -> list[dict]:
@@ -138,7 +144,7 @@ def helm(entry: dict, cluster: str) -> list[dict]:
             yaml.safe_dump(render_endpoint.variant_entry(entry, cluster, v), f, sort_keys=False)
         try:
             cmd = ["helm", "template", v["object"], CHART, "-f", f.name, "--set", f"cluster={cluster}", "--set", f"domain={DOMAIN}",
-                   "--set", f"ibClaimTemplate={IB_CLAIM_TEMPLATE}"]
+                   "--set", f"ibClaimTemplate={IB_CLAIM_TEMPLATE}", "--set", f"apiBackend={str(remote(cluster)).lower()}"]
             if v["object"] != entry["id"]:
                 cmd += ["--set", f"variantName={v['object']}", "--set", f"variant={v['name']}"]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

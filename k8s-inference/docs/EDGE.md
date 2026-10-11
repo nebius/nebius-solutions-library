@@ -31,8 +31,8 @@ Image pre-pull, Zot/Spegel caching and shared weights remain independent of gate
 ## Certificates of the GPU regions: the fleet CA (2026-10-10)
 
 The control cluster's public hostnames (`api`, `app`, `grafana`, `litellm`) get Let's Encrypt certificates
-through ACME HTTP-01 on its gateway. The GPU regions' gateways (`api.<region>`, `grafana.<region>`, the model
-endpoints) get theirs from the **fleet CA** by default (`edge.regional_certificates = "fleet-ca"`): the cloud
+through ACME HTTP-01 on its gateway. The GPU regions' gateways (`grafana.<region>`, the model endpoints; there
+is no `api.<region>`, the API is the control cluster's) get theirs from the **fleet CA** by default (`edge.regional_certificates = "fleet-ca"`): the cloud
 stage generates a CA key pair, the platform stage installs it as cert-manager's `fleet-ca` ClusterIssuer on
 every GPU region and puts the CA certificate into the `trust` ConfigMap, the API merges it with the system
 roots (`services/api/config.py`) and LiteLLM reads the bundle through `SSL_CERT_FILE`. Nothing in the fleet

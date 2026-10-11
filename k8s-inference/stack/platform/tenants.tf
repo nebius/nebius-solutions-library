@@ -207,7 +207,7 @@ locals {
     regions = sort(distinct([for id, c in local.region_clusters : c.region if length([for pn, p in c.pools : pn if p.gpu_class == local.gpu_classes[0]]) > 0]))
   })
   acceptance = local.role.control ? {
-    api_url   = "https://${local.hostnames.api}"
+    api_url   = try("https://${local.hostnames.api}", null)
     model     = local.f.acceptance.model
     key       = local.first_key == null ? null : "sk-${random_password.key[local.first_key].result}"
     admin_key = local.first_admin == null ? null : "sk-${random_password.key[local.first_admin].result}"

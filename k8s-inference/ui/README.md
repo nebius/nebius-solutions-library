@@ -133,15 +133,15 @@ from 15 minutes to 7 days; auto-refresh is optional. Completed jobs use completi
 as the historical range end. Logs support literal text search, bounded latest entries,
 download, and refresh. Partial metric failures preserve the remaining panels.
 
-Each regional API defaults to:
+The API reads the monitoring services of its own cluster directly and those of another region through that
+cluster's API server proxy (the same Service names there, `services/api/monitoring.py`); the defaults are:
 
 ```text
 PROMETHEUS_URL=http://kube-prometheus-stack-prometheus.monitoring.svc:9090
 LOKI_URL=http://loki.monitoring.svc:3100
 ```
 
-Override those variables for different service names. `REGION_API_URLS` connects the
-control API to regional APIs, as for inference forwarding. Monitoring needs both the
+Override those variables for different service names. Monitoring needs both the
 updated API and UI images; deploying only the UI will show an unavailable state for
 these routes. Historical data depends on collection and retention in each region.
 

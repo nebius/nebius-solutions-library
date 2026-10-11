@@ -385,17 +385,18 @@ def pods_selector(job: dict) -> str:
 def build_async(name: str, model: dict, inp: dict, tenant: str, key: str, label: str | None, idem: str | None, timeout_s: int | None,
                 output_prefix: str, region: str = REGION) -> tuple[dict, dict]:
     """(Job, Secret): a queued endpoint call through LiteLLM's pass-through route when the model has
-    one (spend lands on the caller's key), else through the cluster's gateway with the caller's key
+    one (spend lands on the caller's key), else through the gateway of the endpoint's region with the caller's key
     (TLS, key check, per-key rate limit: the same path as an external client; never the predictor
-    Service, so no call skips the key check or the accounting). The key goes into a per-operation Secret owned by the
-    Job, never into the Job spec."""
+    Service, so no call skips the key check or the accounting). The Job runs in that region (services/api/app.py
+    `invoke` creates it there). The key goes into a per-operation Secret owned by the Job, never into the Job spec."""
+    import models as runtime_models
     env = []
     if model.get("litellm_route"):
         url, auth = LITELLM_URL + model["litellm_route"], f"Bearer {key}"
     else:
-        if not model.get("endpoint_external_host"):
-            raise HTTPException(503, "async calls need the cluster's endpoint domain (ENDPOINT_DOMAIN)")
-        url, auth = model["endpoint_external_host"] + model["endpoint_path"], f"Bearer {key}"
+        if not runtime_models.endpoint_domain(region):
+            raise HTTPException(503, f"async calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
+        url, auth = f"https://{runtime_models.endpoint_host(model, region)}{model['endpoint_path']}", f"Bearer {key}"
         if ENDPOINT_CONNECT_TO:
             host = url.split("/")[2]
             env.append({"name": "CONNECT_TO", "value": f"{host}:443:{ENDPOINT_CONNECT_TO}"})

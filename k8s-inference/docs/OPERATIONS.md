@@ -194,7 +194,7 @@ Two databases on it:
 Connection data lives in Kubernetes Secrets written by the platform stage (`stack/platform/database.tf`):
 `database` in the namespaces `api` and `litellm` (keys `host`, `port`, `user`, `password`, `platform_url`,
 `litellm_url`) and `litellm-db` in `litellm` (`username`, `password`, read by the LiteLLM chart). The
-control API gets `DATABASE_URL` from `api/database` key `platform_url`; regional APIs have no database.
+API gets `DATABASE_URL` from `api/database` key `platform_url`.
 The password is `random_password.database` of the cloud stage (output `secrets.database_password`).
 
 **Keys** live in `platform.keys` (docs/API.md "Keys"): the tenants' keys of `terraform.tfvars` are written by
@@ -316,16 +316,24 @@ routes) are created on the control cluster: `./stack.sh output platform control 
 to a tenant or changing the retention is a tfvars change plus a re-apply; removing a tenant is removing the
 block (with `protect_data = true` the bucket stays and must be emptied by hand first).
 
-## Edge: certificates, regional API, rate limits
+## Edge: certificates, the API behind the regions' gateways, rate limits
 
 - **Certificates** are ACME (Let's Encrypt) through the Gateway API HTTP-01 solver; see docs/EDGE.md.
   Status: `kubectl -n envoy-gateway-system get certificate,certificaterequest,order,challenge`. A failed
   order never touches the Secret the listener uses. The platform's own hostnames come from the platform
   stage (`edge` in the tfvars); the model endpoints' hostnames are kept on the Certificate `models` by the
   fleet API as models come and go.
-- **Regional API** (`api` on every cluster): the platform stage gives it Secret `api/litellm-master` (a
-  copy of the control cluster's) and the tenant RoleBindings that `charts/tenant` renders. It carries no
-  region kubeconfigs; sync and async calls for its region are answered there, writes go to the fleet API.
+- **One API** (`api` on the control cluster only, docs/ARCHITECTURE.md "One API"): a GPU region's gateway
+  authorizes endpoint calls against it through the Envoy Gateway `Backend` api/api (the API's public hostname,
+  port 443) and its `BackendTLSPolicy` (`charts/platform/templates/edge`); the Backend API is switched on in
+  the Envoy Gateway values (`extensionApis.enableBackend`). Check on a region: `kubectl -n api get
+  backend,backendtlspolicy` (both Accepted) and `kubectl -n models get securitypolicy <model>-authorization
+  -o yaml` (Accepted; "backend api/api not found" means the Backend API is off); on the control cluster
+  `curl -sk https://<any name resolving to the control gateway>/internal/authorize/<model> -H 'Authorization:
+  Bearer <key>'` answers 200 for an allowed key, 401/403 otherwise (the route `api-authorize` serves it under
+  any host). The API's own cluster uses the Service api/api. The console's metrics and logs of a region come
+  through that cluster's API server proxy (Role `serverless2-api-agent-monitoring`): `kubectl auth can-i get
+  services/proxy -n monitoring --as=system:serviceaccount:api:api-agent` there must say yes.
 - **Rate limits** live in `charts/platform/templates/api/api.yaml` (API route) and
   `charts/platform/templates/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
   service (`envoy-gateway-system`, deployed by the chart when `config.envoyGateway.rateLimit` is set) in
