@@ -5,34 +5,82 @@
   "description": "Every top-level key the templates read is declared here, so unknown keys are refused (additionalProperties: false). `fleet` is the document the config stage derives from terraform.tfvars; the chart reads only the regions' GPU classes and weights filesystem from it, so that definition stays open.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "cluster", "clusters"],
+  "required": [
+    "name",
+    "cluster",
+    "clusters"
+  ],
   "properties": {
-    "name": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "description": "tenant name; namespace tenant-<name>" },
-    "cluster": { "type": "string", "minLength": 1, "description": "key of `clusters`" },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "description": "tenant name; namespace tenant-<name>"
+    },
+    "cluster": {
+      "type": "string",
+      "minLength": 1,
+      "description": "key of `clusters`"
+    },
     "apiSubjects": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "name", "namespace"],
+        "required": [
+          "kind",
+          "name",
+          "namespace"
+        ],
         "properties": {
-          "kind": { "type": "string", "enum": ["ServiceAccount", "User", "Group"] },
-          "name": { "type": "string", "minLength": 1 },
-          "namespace": { "type": "string" }
+          "kind": {
+            "type": "string",
+            "enum": [
+              "ServiceAccount",
+              "User",
+              "Group"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "namespace": {
+            "type": "string"
+          }
         }
       }
     },
-    "runnerServiceAccount": { "type": "string", "minLength": 1 },
-    "allowedImages": { "type": "array", "items": { "type": "string" }, "description": "image prefixes a container-run of this tenant may use (empty: any)" },
+    "runnerServiceAccount": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowedImages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "image prefixes a container-run of this tenant may use (empty: any)"
+    },
     "identities": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["audience"],
+        "required": [
+          "audience"
+        ],
         "properties": {
-          "audience": { "type": "string", "minLength": 1 },
-          "env": { "type": "object", "additionalProperties": { "type": "string" } }
+          "audience": {
+            "type": "string",
+            "minLength": 1
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -42,24 +90,66 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "egress_fqdns": { "type": "array", "items": { "type": "string" } },
-          "egress_cidrs": { "type": "array", "items": { "type": "string" } },
-          "shared_filesystem": { "type": "boolean" }
+          "egress_fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "egress_cidrs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "shared_filesystem": {
+            "type": "boolean"
+          }
         }
       }
     },
-    "apiHosts": { "type": "array", "items": { "type": "string" } },
-    "profiles": { "type": "array", "items": { "type": "string" } },
-    "infiniband": { "type": "boolean" },
-    "infinibandClaimTemplate": { "type": "string", "minLength": 1 },
-    "infinibandClaimCounts": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
-    "infinibandDeviceClass": { "type": "string", "minLength": 1 },
+    "apiHosts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "infiniband": {
+      "type": "boolean"
+    },
+    "infinibandClaimTemplate": {
+      "type": "string",
+      "minLength": 1
+    },
+    "infinibandClaimCounts": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "infinibandDeviceClass": {
+      "type": "string",
+      "minLength": 1
+    },
     "sharedScratch": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "claim": { "type": "string", "minLength": 1 },
-        "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|k|M|G|T|P)?$" }
+        "claim": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|k|M|G|T|P)?$"
+        }
       }
     },
     "fleet": {
@@ -71,14 +161,30 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "id": { "type": "string" },
+              "id": {
+                "type": "string"
+              },
               "weights_filesystem": {
                 "type": "object",
-                "properties": { "enabled": { "type": "boolean" }, "mount_path": { "type": "string" } }
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "mount_path": {
+                    "type": "string"
+                  }
+                }
               },
               "pools": {
                 "type": "object",
-                "additionalProperties": { "type": "object", "properties": { "gpu_class": { "type": "string" } } }
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "gpu_class": {
+                      "type": "string"
+                    }
+                  }
+                }
               }
             }
           }
@@ -91,12 +197,29 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["region"],
+        "required": [
+          "region"
+        ],
         "properties": {
-          "region": { "type": "string" },
-          "manager": { "type": "boolean", "description": "true on the control cluster: namespace, queues and API binding only" }
+          "region": {
+            "type": "string"
+          },
+          "manager": {
+            "type": "boolean",
+            "description": "true on the control cluster: namespace, queues and API binding only"
+          }
         }
       }
+    },
+    "sharedWeights": {
+      "type": "object",
+      "description": "the region's model weights, read-only for runs (job.weights, docs/JOBS.md)",
+      "properties": {
+        "claim": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
