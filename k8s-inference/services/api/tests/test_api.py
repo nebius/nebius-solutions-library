@@ -1058,7 +1058,6 @@ def admin_keys(monkeypatch):
         return dict(ADMIN_INFO) if key == "sk-admin" else dict(KEY_INFO)
     monkeypatch.setattr(auth, "key_info", fake_info)
     import db, models as m
-    monkeypatch.setattr(m, "CHART_DIR", os.path.join(ROOT, "charts", "endpoint"))
     fdb = FakeDB()
     for name in ("enabled", "list_models", "get_model", "upsert_model", "delete_model", "history", "pending_changes", "finish_change", "reconciler"):
         monkeypatch.setattr(db, name, getattr(fdb, name))
@@ -1245,7 +1244,7 @@ def test_startup_refuses_placeholder_hostnames(monkeypatch):
 
 
 def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, monkeypatch):
-    """Exercise real Helm rendering and persisted API updates with fake regional clusters."""
+    """Exercise the endpoint rendering and persisted API updates with fake regional clusters."""
     c, north = client
     south = FakeCluster()
     regional = {"eu-north1": north, "eu-south1": south}

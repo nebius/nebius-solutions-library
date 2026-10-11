@@ -63,16 +63,17 @@ EOF
   first=$(echo "$clusters" | cut -d' ' -f1)
   helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
   helm lint "$ROOT/charts/tenant" -f "$TMP/tenant-$first.yaml" > /dev/null; echo "   ok charts/tenant"
-  step "helm template: fleet and tenant charts for every cluster of the example, endpoint chart for every deployed entry"
+  step "helm template: fleet and tenant charts for every cluster of the example; every deployed entry through the API's renderer and the reference chart"
   for cid in $clusters; do
     helm template fleet "$ROOT/charts/fleet" -f "$TMP/fleet-$cid.yaml" > /dev/null; echo "   ok charts/fleet $cid"
     helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null; echo "   ok charts/tenant $cid"
     for f in "$TMP"/endpoint-*-"$cid".yaml; do
       [ -f "$f" ] || continue
+      "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$f" > /dev/null; echo "   ok render_endpoint $(basename "$f" .yaml)"
       helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint $(basename "$f" .yaml)"
     done
   done
-  step "example model (stack/models/llm-example.json): the API's spec -> entry -> charts/endpoint, for the example's first GPU class"
+  step "example model (stack/models/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
 import json, subprocess, sys
 tmp, root = sys.argv[1], sys.argv[2]
@@ -91,6 +92,7 @@ print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['dep
 json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
 EOF
   for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
+    "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$TMP/llm-example.yaml" > /dev/null; echo "   ok render_endpoint llm-example $cid"
     helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint llm-example $cid"
   done
   step "kustomize build: every shared manifest base"

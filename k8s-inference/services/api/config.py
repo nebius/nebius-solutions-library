@@ -26,7 +26,6 @@ MODELS_NAMESPACE = os.environ.get("MODELS_NAMESPACE", "models")
 # The API's own namespace: runtime model definitions live there as ConfigMaps `catalog-<id>` (services/api/models.py)
 API_NAMESPACE = os.environ.get("API_NAMESPACE") or (open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
                                                      if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/namespace") else "api")
-CHART_DIR = os.environ.get("CHART_DIR", "/app/charts/endpoint")   # charts/endpoint, rendered by `helm template` for runtime endpoints
 IMAGES_HOST = os.environ.get("IMAGES_HOST", "registry.serverless2.local")   # the logical registry host (terraform.tfvars images.host)
 IMAGES_SOURCE = os.environ.get("IMAGES_SOURCE", "")                         # the fleet's own registry (images.source), alias `nebius`
 # TLS of the model endpoints' hostnames: the fleet's API rewrites Certificate envoy-gateway-system/models of a cluster

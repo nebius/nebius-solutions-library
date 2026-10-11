@@ -1,7 +1,6 @@
 """Variants and request routing (docs/API.md "Variants"): several deployments of one endpoint in a region behind one
 name, in priority order (a warm floor on one pool, overflow on another), per-GPU-class images, a request field that
 picks a variant, LiteLLM deployments with priorities, and the objects every variant renders."""
-import subprocess
 import pytest
 from fastapi import HTTPException
 
@@ -60,9 +59,7 @@ def test_validation_of_variants_and_routing():
     bad({"kind": "job", "command": "x", "routing": {"field": "tier"}})
 
 
-def test_each_variant_renders_its_own_objects_under_the_model_label(monkeypatch):
-    import os
-    monkeypatch.setattr(models, "CHART_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "charts", "endpoint"))
+def test_each_variant_renders_its_own_objects_under_the_model_label():
     e = models.to_entry(SPEC)
     docs = models.render(e, "hub")
     isvcs = {d["metadata"]["name"]: d for d in docs if d["kind"] == "InferenceService"}
