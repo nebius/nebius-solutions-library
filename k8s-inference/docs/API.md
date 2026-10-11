@@ -147,7 +147,9 @@ Placement: the pool whose preset has exactly `gpu.count` GPUs per node, reserved
 `interconnect` `none` (default) prefers plain pools and runs NCCL over Ethernet, which is right for pipeline
 parallelism and lets the pool scale from zero; `preferred` takes an InfiniBand pool when the region has one,
 `required` only those, and the pods then claim every fabric NIC through DRA. The cluster autoscaler never adds
-InfiniBand nodes, so an InfiniBand multi-node endpoint needs the pool's `min_nodes` set to its node count.
+InfiniBand nodes; the dispatcher raises the pool's floor to the endpoint's node count while it is started and
+restores `min_nodes` after it is stopped (docs/SCHEDULING.md "InfiniBand pools grow on demand"), so the nodes
+boot after `scaling.min` goes to 1 and a start takes the usual few minutes longer than on a pool with nodes up.
 
 Start and stop, no autoscaling in between: `scaling.min` 1 starts the replica group (the nodes boot, the drivers
 install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; the console's Start/Stop button

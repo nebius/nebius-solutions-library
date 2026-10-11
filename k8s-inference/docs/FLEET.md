@@ -46,10 +46,12 @@ fleet:
           endpoint_floor_gpus: 0  # GPUs held by warm endpoints WITHOUT runtime.queue.name (Kueue does not see those)
           interconnect: none      # or infiniband: the pool's nodes join one Nebius GPU cluster on an InfiniBand fabric
                                   # (8-GPU presets only; multi-node runs with interconnect: required land here, docs/JOBS.md;
-                                  # min_nodes = the node count of the largest multi-node run: the autoscaler never
-                                  # adds InfiniBand nodes, not even from one ("DynamicResources" filter: CEL error
-                                  # on the simulated node's devices, test fleet, 2026-10-09); the node group gets
-                                  # gpu_settings.dra = true so Managed Kubernetes runs DraNet on its nodes)
+                                  # the autoscaler never adds InfiniBand nodes, not even from one ("DynamicResources"
+                                  # filter: CEL error on the simulated node's devices, test fleet, 2026-10-09), so the
+                                  # dispatcher raises the node group's floor to a waiting multi-node run's node count,
+                                  # within max_nodes, and restores min_nodes afterwards (docs/SCHEDULING.md "InfiniBand
+                                  # pools grow on demand"); the node group gets gpu_settings.dra = true so Managed
+                                  # Kubernetes runs DraNet on its nodes)
           ib_devices_per_node: 8  # InfiniBand NICs a pod claims per node (default 8; 4 on gpu-gb300): Kueue quota
                                   # `nebius.ai/infiniband` = this x max_nodes (DRA, docs/JOBS.md "Multi-node runs")
           infiniband_fabric: fabric-7   # with interconnect: infiniband; defaults to the region's single fabric for the
@@ -183,6 +185,11 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
   `STRICT` and sorts first in its class.
 - **Raise capacity**: `max_nodes` (plan = in-place node-group update), the
   quota follows on the next sync.
+- **Multi-node run on an InfiniBand pool**: nothing to do. The dispatcher raises the pool's floor to the run's
+  node count while it waits or runs and lowers it back to `min_nodes` 10 minutes after the last such run
+  (docs/SCHEDULING.md "InfiniBand pools grow on demand"). `max_nodes` bounds it: a run that needs more nodes
+  than the pool has is a fleet change. While a floor is raised, `plan` of the cloud stage shows it going back
+  (accepted drift; it is clean again once the pool is idle).
 - **Warm endpoint added**: raise the pool's `endpoint_floor_gpus` with the
   catalog change (docs/OPERATIONS.md "Capacity for runs and endpoints").
 - **Add a region**: one `regions.<name>` entry (project, subnet, pools; the preflight reports the tenant-wide `compute.disk.count` and preemptible-VM headroom of the region, a worker region needs about eight disks),
@@ -264,7 +271,8 @@ What it costs and what it is not: a spare is a running node (spot or on-demand, 
 billed whether a model uses it or not; `min_nodes` keeps a floor too, but the first model occupies it and
 nothing refills the spare. A spare serves every model whose GPU class and count fit the pool's preset, in
 that region. It is not an extra application replica (see `scaling.min` for that), and InfiniBand pools do
-not take it (the autoscaler never adds InfiniBand nodes; keep `min_nodes` there).
+not take it (the autoscaler never adds InfiniBand nodes; there the dispatcher moves the floor itself,
+docs/SCHEDULING.md "InfiniBand pools grow on demand").
 
 ### GPU drivers: the node image or the NVIDIA GPU Operator (2026-10-10)
 
