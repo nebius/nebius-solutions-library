@@ -334,6 +334,14 @@ block (with `protect_data = true` the bucket stays and must be emptied by hand f
   any host). The API's own cluster uses the Service api/api. The console's metrics and logs of a region come
   through that cluster's API server proxy (Role `serverless2-api-agent-monitoring`): `kubectl auth can-i get
   services/proxy -n monitoring --as=system:serviceaccount:api:api-agent` there must say yes.
+  Upgrading a fleet deployed before 2026-10-11: the control cluster's https listener must lose its `hostname`
+  (the chart renders none there; the regions' ext-auth calls arrive under the endpoint's own host). Server-side
+  apply removes the field only when the platform stage's field manager owns it; if `kubectl -n
+  envoy-gateway-system get gateway serverless2-external -o jsonpath='{.spec.listeners[1].hostname}'` still
+  prints the wildcard after the apply (another manager touched the field), remove it once by hand:
+  `kubectl -n envoy-gateway-system patch gateway serverless2-external --type=json -p
+  '[{"op":"remove","path":"/spec/listeners/1/hostname"}]'`. Until then every endpoint call on a GPU region
+  answers 404 (the ext-auth connection to the control gateway fails its TLS handshake).
 - **Rate limits** live in `charts/platform/templates/api/api.yaml` (API route) and
   `charts/platform/templates/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
   service (`envoy-gateway-system`, deployed by the chart when `config.envoyGateway.rateLimit` is set) in

@@ -91,7 +91,7 @@ class FakeAgentClient:
         ssl_ca_cert = None
         verify_ssl = True
 
-    def update_params_for_auth(self, headers, querys, auth_settings, resource_path=None, method=None, body=None):
+    def update_params_for_auth(self, headers, querys, auth_settings):     # the client library's signature (36.x)
         assert auth_settings == ["BearerToken"]
         headers["Authorization"] = "Bearer agent-token"
 

@@ -37,7 +37,7 @@ def target(service_url: str, region: str) -> tuple[str, dict, str | bool]:
     name, ns = u.hostname.split(".")[:2]              # <name>.<namespace>.svc[.cluster.local]
     api = kube._client(region)
     headers: dict = {}
-    api.update_params_for_auth(headers, [], ["BearerToken"], resource_path="", method="GET", body=None)
+    api.update_params_for_auth(headers, [], ["BearerToken"])     # kubernetes 36: (headers, queries, auth_settings)
     conf = api.configuration
     return (f"{conf.host.rstrip('/')}/api/v1/namespaces/{ns}/services/{name}:{u.port}/proxy", headers,
             conf.ssl_ca_cert or conf.verify_ssl)
