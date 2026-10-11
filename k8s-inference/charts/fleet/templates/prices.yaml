@@ -28,6 +28,7 @@ data:
       interconnect: {{ default "none" $p.interconnect }}
       ib_devices_per_node: {{ include "fleet.ibDevices" $p }}
       local_nvme: {{ if $p.local_nvme }}true{{ else }}false{{ end }}
+      tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
     {{- end }}
     {{- end }}
   list.yaml: |

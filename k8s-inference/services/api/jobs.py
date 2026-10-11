@@ -36,6 +36,22 @@ from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, R
 from status import (PHASE, RECORD_STATUS, _attempts, _gpus, _main_state, _secs, _ts, finished, gpu_seconds, is_jobset, is_manager_job,
                     is_mirror, logs_url, normalise)
 
+def _mount_data(r: dict, pod: dict, containers: list) -> None:
+    """`job.data` (docs/JOBS.md "Shared data"): a directory of the tenant's area on the region's shared filesystem
+    (the tenant's RWX claim, the one `checkpoints: shared` uses), mounted read-only at `dataMountPath` (default /data)
+    unless `dataReadOnly` is false (a seeding run). An empty path renders nothing: the generic run classes expose it
+    as a parameter."""
+    path = str(r.get("data") or "").strip("/")
+    if not path:
+        return
+    if ".." in path.split("/"):
+        raise HTTPException(400, "data: a relative directory, no parent references")
+    ro = str(r.get("dataReadOnly", True)).lower() not in ("false", "0", "no")
+    pod["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC, "readOnly": ro}})
+    for c in containers:
+        c["volumeMounts"].append({"name": "data", "mountPath": str(r.get("dataMountPath") or "/data"), "subPath": f"data/{path}", "readOnly": ro})
+
+
 def build_run(name: str, model: dict, params: dict, tenant: str, label: str | None, idem: str | None, timeout_s: int | None,
               priority: str | None, region: str | None = REGION, defaults: dict | None = None, key_hash: str | None = None,
               pvc: str | None = None, placement: dict | None = None, gpu_class: str | None = None) -> dict:
@@ -128,6 +144,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
            "initContainers": [fetch], "containers": [main, _uploader(name, region, values["output_prefix"], None if local_nvme else pvc, r.get("uploadExcludes", ""), gpus, placement, gpu_class)],
            "volumes": [{"name": "work", "emptyDir": {"sizeLimit": f"{r.get('pvcSizeGi', JOB_PVC_SIZE_GI)}Gi"}} if local_nvme else {"name": "work", "persistentVolumeClaim": {"claimName": pvc}},
                        {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": r.get("shm", "8Gi")}}]}
+    _mount_data(r, pod, [main])
     if gpus:
         pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
     terms = []
@@ -240,6 +257,9 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         pod["volumes"].append({"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}})
         for c in (main, uploader):
             c["volumeMounts"].append({"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"})
+    pod["volumes"] = [v for v in pod["volumes"] if v["name"] != "data"]      # re-mounted below on the multi-node pod shape
+    main["volumeMounts"] = [m for m in main["volumeMounts"] if m["name"] != "data"]
+    _mount_data(r, pod, [main])
     rank = {"name": "NODE_RANK", "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['batch.kubernetes.io/job-completion-index']"}}}
     dist = {"NNODES": str(nodes), "GPUS_PER_NODE": str(gpus), "WORLD_SIZE": str(nodes * max(gpus, 1)),
             "MASTER_ADDR": f"{name}-workers-0-0.{name}", "MASTER_PORT": "29500", "CHECKPOINT_DIR": "/work/checkpoint"}

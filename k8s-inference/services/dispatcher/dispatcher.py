@@ -36,7 +36,7 @@ The same ranking is served over HTTP (`GET /v1/rank?profile=&gpus=&classes=&regi
 the last reconcile's snapshot: the API asks it at submission for a run class with per-GPU-class images, renders
 the Job with the best class's image and queues it on that class (docs/SCHEDULING.md "Per-GPU images for runs").
 """
-import base64
+import base64, re
 import json
 import logging
 import os
@@ -142,20 +142,22 @@ def profile_from_name(name: str | None, clusters: dict, spot_prices: dict) -> di
             if c and (c not in cheapest or pr < cheapest[c]):
                 cheapest[c] = pr
     by_price = sorted(cheapest, key=lambda c: (cheapest[c], c))
-    if name and name.startswith("prefer-") and name[7:] in cheapest:
-        pref = name[7:]
+    m = re.search(r"(?:^|-)prefer-([a-z0-9-]+)$", name or "")        # prefer-<class> or <tenant>-prefer-<class> (charts/fleet)
+    if m and m.group(1) in cheapest:
+        pref = m.group(1)
         return {"classes": [pref] + [c for c in by_price if c != pref], "strategy": "preferred"}
     return {"classes": by_price, "strategy": "cheapest"}
 
 
 def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict, pin: str | None = None,
-         allowed_classes: list | None = None, allowed_clusters: list | None = None) -> list:
+         allowed_classes: list | None = None, allowed_clusters: list | None = None, tenant: str | None = None) -> list:
     """Candidates best-first as (cluster, flavor, price, is_free).
 
     profile:  {"classes": [preferred, ...], "strategy": "preferred" | "cheapest"}
-    clusters: {cluster: {"pools": {flavor: {"class", "capacity": reserved|on_demand|spot, "price"}}}}
+    clusters: {cluster: {"pools": {flavor: {"class", "capacity": reserved|on_demand|spot, "price", "tenant"}}}}
     free:     {(cluster, flavor): free_gpus}
     allowed_classes / allowed_clusters: the model's GPU classes and deployment regions (None = no restriction)
+    tenant: the run's tenant; a pool dedicated to another tenant (fleet tenants.<name>.dedicated_pools) is never a candidate
     """
     classes = [c for c in profile.get("classes", []) if not allowed_classes or c in allowed_classes]
     strategy = profile.get("strategy", "preferred")
@@ -166,6 +168,8 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         if allowed_clusters is not None and cname not in allowed_clusters:
             continue
         for fname, pool in (cl.get("pools") or {}).items():
+            if pool.get("tenant") and pool.get("tenant") != tenant:
+                continue
             if pool.get("class") not in classes:
                 continue
             price = price_of(pool, spot_prices, f"{cname}/{fname}")
@@ -191,7 +195,7 @@ SNAPSHOT: dict = {"clusters": {}, "spot": {}, "free": {}, "aliases": {}, "at": N
 
 
 def rank_response(snapshot: dict, profile_name: str | None, gpus: int, classes: list | None, regions: list | None,
-                  pin: str | None = None) -> dict:
+                  pin: str | None = None, tenant: str | None = None) -> dict:
     """The /v1/rank answer from a reconcile snapshot: every (cluster, pool) candidate best-first with its GPU class,
     capacity type, price and whether it is free now; `best` is the first one. The API asks this at submission for a
     run class with per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class of `best` decides
@@ -200,7 +204,7 @@ def rank_response(snapshot: dict, profile_name: str | None, gpus: int, classes: 
     names = {v: k for k, v in aliases.items()}
     prof = profile_from_name(profile_name, clusters, spot)
     allowed = [aliases.get(r, r) for r in regions] if regions else None
-    ranked = rank(prof, clusters, free, gpus, spot, aliases.get(pin, pin) if pin else None, classes, allowed)
+    ranked = rank(prof, clusters, free, gpus, spot, aliases.get(pin, pin) if pin else None, classes, allowed, tenant)
     out = []
     for cname, fname, price, is_free in ranked:
         pool = clusters[cname]["pools"][fname]
@@ -359,7 +363,9 @@ def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
 
 
 def free_quota(workers: dict) -> dict:
-    """(cluster, flavor) -> free nvidia.com/gpu: worker ClusterQueue nominal quota minus flavorsUsage."""
+    """(cluster, flavor) -> free nvidia.com/gpu: the nominal quota of a flavor (the fleet's `default` queue lends the
+    shared pools, a tenant queue holds its dedicated pool) minus the usage of EVERY queue of the cohort on that flavor
+    (tenant queues borrow from the lender: their usage is what empties it)."""
     free = {}
     for cname, w in workers.items():
         try:
@@ -367,8 +373,8 @@ def free_quota(workers: dict) -> dict:
         except Exception as e:  # unreachable worker: no free capacity there
             log.warning("worker %s unreachable: %s", cname, e)
             continue
+        nominal, used = {}, {}
         for cq in cqs:
-            nominal, used = {}, {}
             for rg in cq.get("spec", {}).get("resourceGroups", []):
                 for fl in rg.get("flavors", []):
                     for r in fl.get("resources", []):
@@ -378,9 +384,9 @@ def free_quota(workers: dict) -> dict:
                 for r in fl.get("resources", []):
                     if r["name"] == "nvidia.com/gpu":
                         used[fl["name"]] = used.get(fl["name"], 0) + int(float(str(r.get("total", 0))))
-            for fname, n in nominal.items():
-                if n:  # the queue that holds the nominal quota (default); prefer-* queues have 0
-                    free[(cname, fname)] = max(free.get((cname, fname), 0), n - used.get(fname, 0))
+        for fname, n in nominal.items():
+            if n:
+                free[(cname, fname)] = max(0, n - used.get(fname, 0))
     return free
 
 
@@ -485,7 +491,8 @@ def reconcile(core, custom, batch, dispatch=None):
         stamp = (meta.get("annotations") or {}).get(NOMINATED_AT)
         age = (time.time() - datetime.fromisoformat(stamp).timestamp()) if stamp else 0.0
         gpus = gpu_request(wl)
-        ranked = rank(prof, clusters, free, gpus, spot, pin, classes, allowed_clusters)
+        tenant = ns[len("tenant-"):] if ns.startswith("tenant-") else None
+        ranked = rank(prof, clusters, free, gpus, spot, pin, classes, allowed_clusters, tenant)
         if not ranked:
             log.warning("%s/%s: no candidate cluster (profile=%s pin=%s classes=%s regions=%s)", ns, meta["name"], prof, pin, classes, regions)
             continue
@@ -539,7 +546,7 @@ class RankHandler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "gpus must be an integer"})
         if SNAPSHOT.get("at") is None:
             return self._json(503, {"error": "no snapshot yet"})
-        return self._json(200, rank_response(SNAPSHOT, q.get("profile", [None])[0], gpus, classes, regions, q.get("pin", [None])[0]))
+        return self._json(200, rank_response(SNAPSHOT, q.get("profile", [None])[0], gpus, classes, regions, q.get("pin", [None])[0], q.get("tenant", [None])[0]))
 
     def _json(self, code: int, body: dict):
         data = json.dumps(body).encode()

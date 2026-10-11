@@ -234,3 +234,34 @@ def test_a_small_run_does_not_boot_a_whole_node():
     assert d.rank({**prof, "strategy": "cheapest"}, cl, {}, 1, {})[0][1] == "h100-spot-1x"
     assert d.rank(prof, cl, {("hub", "h100-spot-8x"): 7}, 1, {})[0][1] == "h100-spot-8x"   # a node is up with room
     assert d.rank(prof, cl, {}, 8, {})[0][1] == "h100-spot-8x"                              # a whole-node run
+
+
+
+def test_tenant_profiles_and_dedicated_pools():
+    """charts/fleet names a tenant's queues <tenant>-prefer-<class>; a pool dedicated to one tenant is a candidate for
+    that tenant only (fleet tenants.<name>.dedicated_pools)."""
+    clusters = {"hub": {"pools": {"h100-spot-1x": {"class": "h100", "capacity": "spot", "price": 0.8, "tenant": ""},
+                                  "h100-lab-8x": {"class": "h100", "capacity": "reserved", "price": 0.0, "tenant": "lab"}}}}
+    free = {("hub", "h100-spot-1x"): 2, ("hub", "h100-lab-8x"): 8}
+    prof = d.profile_from_name("lab-prefer-h100", clusters, {})
+    assert prof == d.profile_from_name("prefer-h100", clusters, {}) and prof["strategy"] == "preferred"
+    lab = d.rank(prof, clusters, free, 1, {}, tenant="lab")
+    assert lab[0][1] == "h100-lab-8x"                                        # its reservation first
+    other = d.rank(prof, clusters, free, 1, {}, tenant="demo")
+    assert [c[1] for c in other] == ["h100-spot-1x"]                        # never the lab's pool
+    assert [c[1] for c in d.rank(prof, clusters, free, 1, {})] == ["h100-spot-1x"]   # no tenant known: shared pools only
+
+
+def test_free_quota_counts_every_queue_of_the_cohort():
+    """The fleet's `default` queue holds the nominal quota; the tenants' queues borrow it, so their usage is what empties it."""
+    class Custom:
+        def list_cluster_custom_object(self, g, v, plural):
+            return {"items": [
+                {"metadata": {"name": "default"}, "spec": {"resourceGroups": [{"flavors": [{"name": "h100-spot-1x", "resources": [{"name": "nvidia.com/gpu", "nominalQuota": 8}]}]}]},
+                 "status": {"flavorsUsage": []}},
+                {"metadata": {"name": "demo-prefer-h100"}, "spec": {"resourceGroups": [{"flavors": [{"name": "h100-spot-1x", "resources": [{"name": "nvidia.com/gpu", "nominalQuota": 0, "borrowingLimit": 8}]}]}]},
+                 "status": {"flavorsUsage": [{"name": "h100-spot-1x", "resources": [{"name": "nvidia.com/gpu", "total": "3"}]}]}},
+                {"metadata": {"name": "lab-default"}, "spec": {"resourceGroups": [{"flavors": [{"name": "h100-spot-1x", "resources": [{"name": "nvidia.com/gpu", "nominalQuota": 0, "borrowingLimit": 8}]}]}]},
+                 "status": {"flavorsUsage": [{"name": "h100-spot-1x", "resources": [{"name": "nvidia.com/gpu", "total": "2"}]}]}},
+            ]}
+    assert d.free_quota({"hub": {"custom": Custom()}}) == {("hub", "h100-spot-1x"): 3}

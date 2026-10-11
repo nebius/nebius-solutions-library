@@ -146,15 +146,22 @@ deduction.
 
 ## Tenants
 
-`charts/tenant` renders, per cluster, the tenant namespace with one
-LocalQueue per profile (`default`, `prefer-<class>` for every class of
-`fleet.yaml`, the chart reads it) pointing at the fleet ClusterQueue of the
-same name; on the control cluster (`clusters.control`, `manager: true`) the
-namespace, those queues and the API binding only. Tenants share the fleet
-queues; the per-tenant ClusterQueue caps of v1 are gone (fairness between
-tenants is Kueue's priority ordering; Kueue's usage-based admission fair
-sharing is the knob to turn on if one tenant starves others).
-The models stage renders it on every cluster of the tenant's regions.
+`charts/tenant` renders, per cluster, the tenant namespace with one LocalQueue per profile (`default`,
+`prefer-<class>` for every class of the fleet) pointing at the tenant's own ClusterQueues `<tenant>-<profile>`
+that `charts/fleet` renders on every cluster (since 2026-10-11); on the control cluster (`manager: true`) the
+namespace, those queues and the API binding only. The models stage renders it on every cluster of the tenant's regions.
+
+How capacity is shared (`terraform.tfvars` `tenants.<name>`):
+
+| Field | Effect |
+|---|---|
+| (default) | the fleet's `default` ClusterQueue holds the nominal quota of every shared pool and lends it; a tenant's queues have nominal 0 on those pools and borrow up to the pool's capacity, in the profile's order (reserved, on-demand, spot; smallest preset first) |
+| `fair_share_weight` (1) | Kueue weighted fair sharing between the tenants' queues (`fairSharing` in the Kueue configuration, strategies LessThanOrEqualToFinalShare then LessThanInitialShare): when the fleet is full, the tenant furthest above its weighted share is preempted first, so one tenant's sweep never starves another; priority classes still order work inside a queue |
+| `gpu_quota` | caps what the tenant may borrow on each pool (at most that many GPUs of any one pool); unset = up to the pool |
+| `dedicated_pools` | pool names (fleet-wide unique) that belong to this tenant: their quota is the tenant's own nominal quota, lent to nobody, listed in no other tenant's queue; the dispatcher never nominates them for another tenant's run and the API never pins an endpoint to them. The node isolation this gives is "no other tenant's run is ever scheduled there"; a node taint would add defence in depth, but the GPU and Network Operator DaemonSets would each need the toleration, so it is left for the security review's verdict |
+
+The dispatcher reads the nominal quota from the lender and the usage from every queue of the cohort (a tenant's
+borrowed GPUs are what empties the pool); its profile names accept the tenant prefix.
 
 ## Change recipes
 

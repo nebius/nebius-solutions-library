@@ -295,8 +295,8 @@ variable "fleet" {
       regions           = optional(list(string)) # default: all regions
       lifecycle_days    = optional(number, 90)   # run outputs under operations/ expire after N days (0 = keep)
       gpu_quota         = optional(number)
-      fair_share_weight = optional(number, 1)
-      dedicated_pools   = optional(list(string), [])
+      fair_share_weight = optional(number, 1)        # Kueue weighted fair sharing between the tenants' queues (docs/FLEET.md "Tenants")
+      dedicated_pools   = optional(list(string), []) # pools only this tenant's runs use: their quota is the tenant's alone, no endpoint lands there
       allowed_images    = optional(list(string), [])
       keys = optional(map(object({
         budget_usd = optional(number, 10)
@@ -323,6 +323,13 @@ variable "fleet" {
 
   })
 
+  validation {
+    condition = alltrue(flatten([for tn, t in var.fleet.tenants : [for p in t.dedicated_pools :
+      length([for rn, r in var.fleet.regions : rn if contains(keys(r.pools), p)]) == 1
+      && length([for tn2, t2 in var.fleet.tenants : tn2 if contains(t2.dedicated_pools, p)]) == 1
+    ]]))
+    error_message = "tenants.<name>.dedicated_pools: every name is a pool of exactly one region (dedicated pool names are fleet-wide) and dedicated to one tenant only."
+  }
   validation {
     condition     = contains(["open", "proprietary", "auto"], var.fleet.gpu_operator.kernel_module) && (!var.fleet.gpu_operator.gds || var.fleet.gpu_operator.kernel_module != "proprietary")
     error_message = "gpu_operator.kernel_module is open, proprietary or auto; GPUDirect Storage (gds) needs the open kernel modules."

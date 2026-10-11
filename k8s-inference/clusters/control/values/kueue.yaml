@@ -23,6 +23,11 @@ managerConfig:
     managedJobsNamespaceSelector:
       matchLabels:
         serverless2.nebius/kueue: managed
+    # Tenants' queues (charts/fleet <tenant>-<profile>) share the fleet's capacity by weight (fleet.tenants.<name>
+    # .fair_share_weight): a queue above its share is preempted first when another needs capacity (docs/FLEET.md "Tenants")
+    fairSharing:
+      enable: true
+      preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
     # DRA, same mapping as the workers (clusters/common/values/kueue.yaml): the manager resolves a multi-node run's
     # InfiniBand claim template (charged as nebius.ai/infiniband x count) before MultiKueue dispatches it; without the
     # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped" (s2pr2, 2026-10-09)

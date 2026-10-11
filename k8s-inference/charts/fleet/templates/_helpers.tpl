@@ -114,3 +114,27 @@ app.kubernetes.io/name: fleet
 app.kubernetes.io/part-of: serverless2
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
+
+{{/* The tenant a pool is dedicated to (fleet.tenants.<name>.dedicated_pools, bare pool names), or "". args: dict "fleet" "pool" (bare name) */}}
+{{- define "fleet.poolTenant" -}}
+{{- $t := "" }}{{ range $tn, $tc := default dict .fleet.tenants }}{{ if has $.pool (default list $tc.dedicated_pools) }}{{ $t = $tn }}{{ end }}{{ end -}}
+{{- $t -}}
+{{- end -}}
+
+{{/* The flavor resources of one pool for a tenant's queue: a dedicated pool is the tenant's nominal quota (lent to nobody), a
+     shared pool is borrowed from the fleet's `default` queue up to the pool's capacity, capped by the tenant's gpu_quota.
+     args: dict "q" (fleet.quota) "dedicated" (bool) "cap" (gpu cap or 0) */}}
+{{- define "fleet.tenantFlavorResources" -}}
+{{- $q := .q }}{{ $gpu := int $q.gpu }}{{ if and (gt (int .cap) 0) (lt (int .cap) $gpu) }}{{ $gpu = int .cap }}{{ end }}
+{{- if .dedicated }}
+- { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }}, lendingLimit: 0 }
+- { name: cpu, nominalQuota: {{ $q.cpu }}, lendingLimit: 0 }
+- { name: memory, nominalQuota: {{ $q.memoryGi }}Gi, lendingLimit: 0 }
+- { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }}, lendingLimit: 0 }
+{{- else }}
+- { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: {{ $gpu }} }
+- { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
+- { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+- { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
+{{- end }}
+{{- end -}}

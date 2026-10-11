@@ -70,7 +70,17 @@ containers:     main      the model      the rendered command, cwd /work, GPUs
                                          and pause), aws s3 sync /work/ $OUTPUT_PREFIX/ (minus in/), STATUS.json,
                                          attempts/<pod>.json, deletes the work PVC on exit 0; keeps it otherwise
 volumes:        work      PVC <id>-work (compute-csi, RWO)       shm   emptyDir (memory)
+                data      the tenant's shared claim, subPath data/<path>, read-only (only when the run names `data`)
 ```
+
+### Shared data
+
+Reference databases, model parameters, anything too large to sync per run: a directory of the tenant's area on the
+region's shared filesystem (`/mnt/weights/tenants/<tenant>/data/<path>`, the same RWX claim `checkpoints: shared`
+uses) mounted into the run, read-only by default. The generic classes expose it as the `data` parameter (a relative
+directory, no parent references) and `data_readonly` (false for a seeding run that fills it); a run class defined
+through the API declares it as `data: {path, mount_path, readonly}`. The fetch step never sees it, the uploader never
+uploads it. A region without the shared filesystem has no claim, and a run that names `data` fails to start there.
 
 The pod runs with `fsGroup: 10001` (the runner's uid) so fetch and upload work whatever user the
 model image runs as, and with a shared PID namespace so the command's shell is not PID 1 and

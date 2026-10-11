@@ -1,14 +1,15 @@
 {{- /*
-Worker scheduling profiles (docs/FLEET.md):
-  default          holds the cluster's nominal GPU/CPU/memory quota per pool flavor (pool max minus warm endpoints
-                   minus the per-node reserve) in cohort .Values.cohort; the same object as today's pool.yaml.
-  prefer-<class>   nominalQuota 0 + borrowingLimit = pool capacity (the charts/tenant pattern): a workload admitted
-                   here borrows from the cohort on the FIRST flavor with free capacity, flavors ordered
-                   preferred class (reserved, on-demand, spot) first, then the other classes by price.
-                   A workload waits only when every pool is busy.
-One profile per GPU class of the WHOLE fleet (not only this region's): a fleet-placed job submitted to
-`prefer-h100` may land in a region without H100s (the dispatcher's fallback), where that queue simply
-orders the local pools by price. Tenant LocalQueues (charts/tenant) carry the same names everywhere.
+Worker scheduling queues (docs/FLEET.md "Tenants"), one cohort .Values.cohort:
+  default                   the fleet's capacity: nominal GPU/CPU/memory quota of every SHARED pool (pool max minus warm
+                            endpoints minus the per-node reserve). No LocalQueue points here; it lends to the tenants.
+  <tenant>-default          the tenant's queue: nominal 0 on shared pools, borrowing up to the pool's capacity (capped by
+                            the tenant's gpu_quota), ordered reserved -> on-demand -> spot, smallest preset first;
+                            a pool in the tenant's dedicated_pools is the tenant's nominal quota and is lent to nobody.
+  <tenant>-prefer-<class>   the same with the preferred class first, then the other classes by price (one profile per
+                            class of the WHOLE fleet: a fleet-placed job may land in a region without that class).
+Tenants compete for the fleet's capacity through Kueue's weighted fair sharing (fleet.tenants.<name>.fair_share_weight,
+clusters/common/values/kueue.yaml `fairSharing`); within a queue, priority classes (customer-batch evicts bulk-backfill).
+The tenant LocalQueues (charts/tenant) carry the profile names and point at <tenant>-<profile> everywhere.
 */ -}}
 {{- if not (include "fleet.isControl" .) }}
 {{- $region := include "fleet.region" . | fromYaml }}
@@ -16,47 +17,72 @@ orders the local pools by price. Tenant LocalQueues (charts/tenant) carry the sa
 {{- $f := .Values.fleet }}
 {{- $profiles := list "" }}
 {{- range $c := include "fleet.classes" (include "fleet.allPools" $f | fromYaml) | fromYamlArray }}{{ $profiles = append $profiles $c }}{{ end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: default
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+spec:
+  cohortName: {{ $.Values.cohort }}
+  namespaceSelector:               # the lender: no namespace queues here
+    matchExpressions: [{ key: kubernetes.io/metadata.name, operator: In, values: [none] }]
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+      flavors:
+        {{- range $pool := include "fleet.orderedPools" (dict "fleet" $f "pools" $pools "prefer" "") | fromYamlArray }}
+        {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" $pool)) }}
+        {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $pools $pool)) | fromYaml }}
+        - name: {{ $pool }}
+          resources:
+            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
+            - { name: cpu, nominalQuota: {{ $q.cpu }} }
+            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
+        {{- end }}
+        {{- end }}
+{{- range $tn, $tc := default dict $f.tenants }}
 {{- range $prefer := $profiles }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: {{ if $prefer }}prefer-{{ $prefer }}{{ else }}default{{ end }}
+  name: {{ $tn }}-{{ if $prefer }}prefer-{{ $prefer }}{{ else }}default{{ end }}
   labels:
     {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/tenant: {{ $tn | quote }}
     {{- if $prefer }}
     serverless2.nebius/prefer: {{ $prefer | quote }}
     {{- end }}
 spec:
   cohortName: {{ $.Values.cohort }}
-  namespaceSelector: {}            # any namespace with a LocalQueue pointing here
+  namespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: tenant-{{ $tn }} }
   queueingStrategy: BestEffortFIFO
+  fairSharing:
+    weight: {{ default 1 $tc.fair_share_weight | quote }}
   flavorFungibility:
-    whenCanBorrow: MayStopSearch   # take the first flavor with free cohort capacity (v1beta2 name of "Borrow")
+    whenCanBorrow: MayStopSearch   # take the first flavor with free cohort capacity
     whenCanPreempt: TryNextFlavor  # ... before preempting on a preferred one
   preemption:
     withinClusterQueue: LowerPriority     # customer-batch evicts bulk-backfill
-    reclaimWithinCohort: Any              # take back nominal quota lent to other queues
+    reclaimWithinCohort: Any              # take back nominal quota (dedicated pools) lent out
     borrowWithinCohort:
       policy: LowerPriority               # when borrowing, may evict lower-priority borrowers
   resourceGroups:
-    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
       flavors:
         {{- range $pool := include "fleet.orderedPools" (dict "fleet" $f "pools" $pools "prefer" $prefer) | fromYamlArray }}
+        {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" $pool) }}
+        {{- if or (not $owner) (eq $owner $tn) }}
         {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $pools $pool)) | fromYaml }}
         - name: {{ $pool }}
           resources:
-            {{- if $prefer }}
-            - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: {{ $q.gpu }} }
-            - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
-            - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
-            - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
-            {{- else }}
-            - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
-            - { name: cpu, nominalQuota: {{ $q.cpu }} }
-            - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
-            - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
-            {{- end }}
+            {{- include "fleet.tenantFlavorResources" (dict "q" $q "dedicated" (eq $owner $tn) "cap" (default 0 $tc.gpu_quota)) | nindent 12 }}
         {{- end }}
+        {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

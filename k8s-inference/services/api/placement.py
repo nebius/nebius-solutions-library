@@ -17,7 +17,7 @@ from render import class_images, gpu_classes
 log = logging.getLogger("placement")
 
 
-def choose_class(model: dict, region: str | None, gpus: int, available: list[str] | None = None) -> tuple[str, str]:
+def choose_class(model: dict, region: str | None, gpus: int, available: list[str] | None = None, tenant: str | None = None) -> tuple[str, str]:
     """(gpu class, how it was chosen): the class of the dispatcher's best candidate among the model's classes (and
     the pinned region, when given); without a usable ranking the first class of the model's preference list that
     has a pool (`available`: pool classes the caller knows of; None = no filter). The fallback keeps submissions
@@ -30,6 +30,8 @@ def choose_class(model: dict, region: str | None, gpus: int, available: list[str
     try:
         params = {"profile": f"prefer-{classes[0]}" if classes else "default", "gpus": max(int(gpus), 1),
                   "classes": ",".join(allowed), "regions": ",".join(model.get("regions") or [])}
+        if tenant:
+            params["tenant"] = tenant
         if region:
             params["pin"] = region
         r = httpx.get(f"{DISPATCHER_URL}/v1/rank", params=params, timeout=RANK_TIMEOUT_S)

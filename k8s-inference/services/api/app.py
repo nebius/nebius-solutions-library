@@ -45,7 +45,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.3", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.4", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -412,7 +412,7 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         defaults = catalog.region_params(m, region)
         defaults.setdefault("output_prefix", output_prefix)
         job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
-                             gpu_class=_class_for(m, req, region))
+                             gpu_class=_class_for(m, req, region, p.tenant))
     created_job, created = jobs.create(p.namespace, job, region, secret)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
 
@@ -445,10 +445,10 @@ def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: in
     defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
     defaults.setdefault("output_prefix", f"s3://{bucket}/operations/{name}")
     return jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults,
-                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region))
+                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant))
 
 
-def _class_for(m: dict, req: InvokeRequest, region: str | None) -> str | None:
+def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None) -> str | None:
     """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
     runs"): the dispatcher's best candidate among the model's classes and regions (the caller's region when
     given). None for a class with one image: Kueue may then switch class at queue time as before."""
@@ -461,7 +461,7 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None) -> str | None:
         gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
     pools = kube.fleet().get("pools") or {}
     available = sorted({p.get("gpu_class") for p in pools.values() if p.get("gpu_class")}) or None
-    cls, how = placing.choose_class(m, region, gpus, available)
+    cls, how = placing.choose_class(m, region, gpus, available, tenant)
     log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
     return cls
 

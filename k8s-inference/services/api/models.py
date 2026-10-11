@@ -25,6 +25,9 @@ A model definition ("spec") is the shape of the console form:
      "example": {"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 64},
      # jobs only
      "cpu": "4", "memory": "16Gi", "disk_gi": 50, "grace_seconds": 300, "scratch": "network" | "local-nvme",
+     # a directory of the tenant's area on the region's shared filesystem, mounted into the run (read-only unless
+     # readonly is false: reference databases, model parameters, anything too big to sync per run; docs/JOBS.md "Shared data")
+     "data": {"path": "refdb/uniref", "mount_path": "/data", "readonly": true},
      "parameters": [{"name": "...", "type": "string", "default": "..."}]}
 
 Reserved for later, accepted and stored but not acted on yet (so adding them is not a breaking change):
@@ -59,6 +62,7 @@ ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 PROTOCOLS = ("http", "openai", "websocket", "grpc")
 PROTOCOL_PATH = {"openai": "/v1/chat/completions", "http": "/", "websocket": "/", "grpc": "/"}
 RESERVED = ("images", "routing")            # stored, not acted on
+DATA_PATH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")   # a relative directory, no parent references
 
 
 class ScalingSpec(BaseModel):
@@ -144,7 +148,8 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
     whole nodes: only pools whose preset has exactly `count` GPUs; `interconnect` required = InfiniBand pools only,
     preferred = those first."""
     order = {"reserved": 0, "on_demand": 1, "spot": 2}
-    pools = [p for p in kube.fleet()["pools"].values() if (p.get("region") or REGION) == cid]
+    # a pool dedicated to one tenant (fleet tenants.<name>.dedicated_pools) serves that tenant's runs only
+    pools = [p for p in kube.fleet()["pools"].values() if (p.get("region") or REGION) == cid and not p.get("tenant")]
     whole = int(nodes) > 1
     for c in classes:
         cands = [p for p in pools if p.get("gpu_class") == c and (int(p.get("gpus_per_node") or 1) == int(count) if whole else int(p.get("gpus_per_node") or 1) >= max(int(count), 1))]
@@ -173,6 +178,10 @@ def validate(spec: dict) -> dict:
         raise HTTPException(400, "kind: endpoint | job")
     if "example" in s and s["example"] is not None and not isinstance(s["example"], dict):
         raise HTTPException(400, "example: a JSON object, a valid request body of the endpoint")
+    if s.get("data") is not None:
+        d = s["data"]
+        if kind != "job" or not isinstance(d, dict) or not DATA_PATH_RE.match(str(d.get("path", ""))):
+            raise HTTPException(400, "data: jobs only, {path (a relative directory of the tenant's shared data, no '..'), mount_path, readonly}")
     if "automount_service_account_token" in s:
         if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
             raise HTTPException(400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token")
@@ -342,6 +351,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             job["args"] = s["args"]
         if s.get("pull_secret"):
             job["imagePullSecret"] = s["pull_secret"]
+        if (d := s.get("data")):
+            job.update({"data": d["path"], "dataMountPath": d.get("mount_path", "/data"), "dataReadOnly": bool(d.get("readonly", True))})
         entry.update({
             "mode": "run", "protocol": "kubernetes-job",
             "gpu": {"count": count, "classes": classes} if classes else "none",

@@ -19,6 +19,9 @@ job:                                        # rendered by services/api/jobs.py; 
   pvcSizeGi: "{{disk_gi}}"
   shm: 16Gi
   imagePullSecret: ngc
+  data: "{{data}}"                          # a directory of the tenant's shared data, mounted at /data (empty = none; docs/JOBS.md "Shared data")
+  dataMountPath: /data
+  dataReadOnly: "{{data_readonly}}"
 deployments:
   hub:
     price_per_gpu_hour: 2.15      # H100 spot cap
@@ -34,4 +37,6 @@ parameters:
   - { name: cpu, type: string, label: CPU request, default: "8" }
   - { name: memory, type: string, label: Memory, default: 64Gi }
   - { name: disk_gi, type: number, label: Work volume (GiB), default: 100 }
+  - { name: data, type: string, label: Shared data directory, default: "", help: "optional; a directory of the tenant's area on the region's shared filesystem, mounted read-only at /data (reference databases, model parameters): nothing is synced per run" }
+  - { name: data_readonly, type: boolean, label: Shared data read-only, default: true, help: "false mounts it writable: a seeding run fills the directory" }
   - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), default: "", help: "optional; synced to /work/in before the first attempt" }

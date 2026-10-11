@@ -32,6 +32,11 @@ managerConfig:
     managedJobsNamespaceSelector:
       matchLabels:
         serverless2.nebius/kueue: managed
+    # Tenants' queues (charts/fleet <tenant>-<profile>) share the fleet's capacity by weight (fleet.tenants.<name>
+    # .fair_share_weight): a queue above its share is preempted first when another needs capacity (docs/FLEET.md "Tenants")
+    fairSharing:
+      enable: true
+      preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
     # DRA: a pod's ResourceClaimTemplate for DeviceClass ib.networking.nebius.ai (DraNet, the node's InfiniBand
     # NICs) is charged as `nebius.ai/infiniband` x count; the fleet chart gives InfiniBand pools that quota
     # (charts/fleet, `ib_devices_per_node` x max nodes) and 0 to every other pool. ExactCount claims only.

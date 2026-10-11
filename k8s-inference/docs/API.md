@@ -90,6 +90,17 @@ The acceptance probe of the models stage uses this path: with `acceptance.exampl
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as
 the first model of the console.
 
+Run classes may declare `data: {"path": "refdb/uniref", "mount_path": "/data", "readonly": true}`: a directory of
+the tenant's area on the region's shared filesystem mounted into every run of the class (docs/JOBS.md "Shared data").
+
+### Loading large weights
+
+vLLM's default loader reads one safetensors shard at a time, about 170 MB/s from the shared filesystem; its
+Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB in 2.6 min on a B300 node,
+2026-10-10). Put `--load-format runai_streamer --model-loader-extra-config '{"concurrency": 32}'` into the command
+of any vLLM endpoint whose weights live on the filesystem, and `VLLM_CACHE_ROOT=/weights/vllm-cache` in its env so
+the torch.compile cache survives a restart (the first start of a trillion-parameter model spends about 25 min there).
+
 ## Multi-node endpoints
 
 An endpoint definition with `nodes` > 1 serves one model from that many whole nodes at once (tensor-parallel inside
