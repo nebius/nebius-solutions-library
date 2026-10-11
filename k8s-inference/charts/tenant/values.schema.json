@@ -205,8 +205,11 @@
             "type": "string"
           },
           "manager": {
-            "type": "boolean",
-            "description": "true on the control cluster: namespace, queues and API binding only"
+            "type": [
+              "boolean",
+              "string"
+            ],
+            "description": "true on the MultiKueue manager (Terraform's conditional object hands it over as a string on some versions)"
           }
         }
       }
