@@ -6,7 +6,8 @@
 # checksums.txt on the go-containerregistry release page. The build fails when a download does not match.
 # NEBIUS_CLI_BASE_URL defaults to the host the official installer uses (artifacts.nebius.cloud); any mirror that
 # serves the same release tree works (storage.<region>.nebius.cloud/cli), the checksum guards the content.
-FROM debian:bookworm-slim
+# bookworm-slim as of 2026-10: pinned by digest so that a rebuild gets the same base; the tag is the one resolved by `crane digest`
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ARG NEBIUS_CLI_VERSION=0.12.284
 ARG NEBIUS_CLI_SHA256=76dd1c525b211aa5e23207663efd8431768d3e5db9c5e1bded73a556718ac86c
 ARG NEBIUS_CLI_BASE_URL=https://artifacts.nebius.cloud/cli
