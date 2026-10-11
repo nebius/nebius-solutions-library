@@ -31,3 +31,28 @@ output "litellm_master_key" {
   sensitive = true
   value     = local.role.control ? local.secrets.litellm_master_key : null
 }
+
+output "tenants" {
+  description = "Tenants present on this cluster: namespace and bucket (the hub region's on the control cluster)."
+  value = { for tn, t in local.tenants : tn => {
+    namespace = "tenant-${tn}"
+    bucket    = try(local.storage_here[tn].bucket, null)
+  } }
+}
+output "tenant_keys" {
+  description = "LiteLLM API keys per tenant and key name (control cluster)."
+  sensitive   = true
+  value       = local.role.control ? { for tn, t in local.tenants : tn => { for kn, k in t.keys : kn => "sk-${random_password.key["${tn}-${kn}"].result}" } } : null
+}
+output "acceptance" {
+  description = "Inputs of tools/verify.sh (control cluster): the API, the first tenant key, the first admin key, the run class and the example model's definition."
+  sensitive   = true
+  value       = local.acceptance
+}
+output "example_model" {
+  description = "The acceptance probe's example model, defined through the API (control cluster)."
+  value       = local.example_on ? "${local.example_spec.id}: https://${local.hostnames.api}/v1/models/${local.example_spec.id}:invoke (console: https://${try(local.hostnames.app, local.hostnames.api)}/models)" : "disabled"
+}
+output "probe" {
+  value = local.probe_on ? "acceptance-probe Job in namespace api succeeded (run class ${local.f.acceptance.model}${local.example_on ? ", example model ${local.example_spec.id}" : ""})" : "not run at apply time: tools/verify.sh"
+}

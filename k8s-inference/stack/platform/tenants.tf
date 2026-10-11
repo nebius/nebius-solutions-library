@@ -1,9 +1,9 @@
+# Tenants on this cluster (terraform.tfvars `tenants`): the namespace with its queues, identity and policies
+# (charts/tenant), the storage Secrets from the buckets the cloud stage created, the NGC pull Secret and, on
+# the control cluster, the LiteLLM API keys and the optional apply-time acceptance probe. Until 2026-10-11 a
+# third stage (`models`) did this after the platform stage, one state per cluster; docs/OPERATIONS.md
+# "Upgrading to the two-stage layout" moves that state here.
 locals {
-  repo   = abspath("${path.module}/../..")
-  id     = var.target
-  region = local.cluster.region
-  name   = local.f.name
-
   all_regions = sort(keys(local.f.regions))
   # Tenants present on this cluster: every tenant on the control cluster, tenants of this region on a worker.
   tenants = { for tn, t in local.f.tenants : tn => t if local.role.control || contains(coalesce(t.regions, local.all_regions), local.region) }
@@ -13,11 +13,15 @@ locals {
   # deleting the Secrets.
   hub_storage   = try(local.cloud.tenant_storage[local.hub_region], {})
   local_storage = try(local.cloud.tenant_storage[local.region], {})
-
-  fleet_doc = local.chart_fleet # charts/tenant reads regions, pools and prices from it (stack/config/locals.tf)
+  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]
+  if t.storage == "managed" && can(local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]) }
+  s3_env = { for tn, st in local.storage_here : tn => {
+    AWS_ACCESS_KEY_ID = st.access_key, AWS_SECRET_ACCESS_KEY = st.secret_key, AWS_ENDPOINT_URL = st.endpoint, AWS_DEFAULT_REGION = st.region
+  } }
 }
 
-# Namespace tenant-<name> with its run identity, queues, policy and API binding (charts/tenant).
+# Namespace tenant-<name> with its run identity, queues, policy and API binding (charts/tenant). After the
+# platform (the tenant's ClusterQueues come from charts/fleet, the API binding needs the ClusterRole of wave 3).
 resource "helm_release" "tenant" {
   for_each = local.tenants
   name     = "tenant-${each.key}"
@@ -30,7 +34,7 @@ resource "helm_release" "tenant" {
     # execution options (charts/tenant execution.yaml, namespace annotations): identities, profiles, the fleet's API hosts
     identities        = each.value.identities
     executionProfiles = each.value.execution_profiles
-    apiHosts          = [for cid, c in local.cloud.clusters : "api.${local.f.edge.domain == null ? "${c.gateway_ip}.sslip.io" : "${cid}.${local.f.edge.domain}"}"]
+    apiHosts          = [for cid, c in local.cloud.clusters : "api.${local.host_of[cid]}"]
     # Multi-node runs over InfiniBand need the tenant's ResourceClaimTemplates (charts/tenant multinode.yaml):
     # on every worker whose region has an InfiniBand pool, and on the control cluster whenever any region has one
     # (Kueue there resolves the template before MultiKueue dispatches). No tfvars input: the pools decide.
@@ -43,15 +47,8 @@ resource "helm_release" "tenant" {
       manager = true
     } }
   })]
-  wait = true
-}
-
-locals {
-  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]
-  if t.storage == "managed" && can(local.role.worker ? local.local_storage[tn] : local.hub_storage[tn]) }
-  s3_env = { for tn, st in local.storage_here : tn => {
-    AWS_ACCESS_KEY_ID = st.access_key, AWS_SECRET_ACCESS_KEY = st.secret_key, AWS_ENDPOINT_URL = st.endpoint, AWS_DEFAULT_REGION = st.region
-  } }
+  wait       = true
+  depends_on = [helm_release.wave3, kubectl_manifest.wave3, helm_release.fleet]
 }
 
 # tenant-storage: the bucket this cluster's API presigns, lists and bills from (the hub-region bucket on control).
@@ -92,18 +89,14 @@ resource "kubernetes_secret_v1" "s3_fleet" {
   depends_on = [helm_release.tenant]
 }
 
-data "external" "env" {
-  program = ["bash", "${path.module}/../scripts/env.sh", local.f.secrets.ngc_api_key_env, local.f.secrets.hf_token_env, local.f.secrets.registry_credentials_env]
-}
-
 resource "kubernetes_secret_v1" "ngc" {
-  for_each = local.role.worker && data.external.env.result.ngc != "" ? local.tenants : {}
+  for_each = local.role.worker && local.ngc_key != "" ? local.tenants : {}
   metadata {
     name      = "ngc"
     namespace = "tenant-${each.key}"
   }
   type       = "kubernetes.io/dockerconfigjson"
-  data       = { ".dockerconfigjson" = jsonencode({ auths = { "nvcr.io" = { username = "$oauthtoken", password = data.external.env.result.ngc, auth = base64encode("$oauthtoken:${data.external.env.result.ngc}") } } }) }
+  data       = { ".dockerconfigjson" = jsonencode({ auths = { "nvcr.io" = { username = "$oauthtoken", password = local.ngc_key, auth = base64encode("$oauthtoken:${local.ngc_key}") } } }) }
   depends_on = [helm_release.tenant]
 }
 
@@ -111,7 +104,7 @@ resource "kubernetes_secret_v1" "ngc" {
 # API keys (control cluster): one Job per key of terraform.tfvars writes the key into the fleet database with
 # `python -m keys bootstrap` of the API image (services/api/keys.py: idempotent, the value Terraform generated,
 # mirrored into LiteLLM for its OpenAI route) and so exists before any admin key could mint through the API.
-# Values are sensitive outputs. A `-replace` of a key's random_password rotates it (same alias, spend kept).
+# Values are sensitive outputs (`tenant_keys`). A `-replace` of a key's random_password rotates it (same alias, spend kept).
 locals {
   keys = local.role.control ? merge([for tn, t in local.tenants : { for kn, k in t.keys : "${tn}-${kn}" => merge(k, { tenant = tn, key = kn }) }]...) : {}
   # the trust ConfigMap `api/trust` of the platform stage: the managed database's CA (and a private bundle, if any)
@@ -139,7 +132,7 @@ resource "kubernetes_job_v1" "key" {
         restart_policy = "OnFailure"
         container {
           name    = "key"
-          image   = "${local.images_host}/nebius/serverless2/api:${local.f.images.versions.api}"
+          image   = local.image.api
           command = ["python", "-m", "keys", "bootstrap"]
           env {
             name  = "KEY"
@@ -193,23 +186,45 @@ resource "kubernetes_job_v1" "key" {
   }
   wait_for_completion = true
   timeouts { create = "20m" }
+  depends_on = [helm_release.wave3, kubernetes_secret_v1.database, kubernetes_config_map_v1.trust, kubernetes_secret_v1.litellm_master]
 }
 
 # ---------------------------------------------------------------------------
-# Acceptance probe (control cluster, last): a run of `acceptance.model` with the first tenant key and, with
-# `acceptance.example_endpoint`, the example model `llm-example` (stack/models/llm-example.json: a stock
-# vLLM container, on the fleet's first GPU class) defined through the API with the first admin key, then
-# called. A failure fails the apply. The example stays as the first model of the console.
+# Acceptance (control cluster): tools/verify.sh runs the built-in run class `acceptance.model` with the first
+# tenant key and, with `acceptance.example_endpoint`, defines the example model `llm-example`
+# (stack/platform/llm-example.json: a stock vLLM container on the fleet's first GPU class) through the API with
+# the first admin key and calls it. The operator runs it after the apply (`./stack.sh output platform control
+# -json acceptance` gives it the inputs); `acceptance.probe = true` also runs the same script as a Job at apply
+# time, and the apply waits for it (up to 40 minutes on a cold region) and fails with it.
 locals {
   first_key   = length(local.keys) > 0 ? sort(keys(local.keys))[0] : null
   admin_keys  = sort([for k, v in local.keys : k if v.admin])
   first_admin = length(local.admin_keys) > 0 ? local.admin_keys[0] : null
   probe_on    = local.f.acceptance.probe && local.role.control && local.first_key != null
-  example_on  = local.probe_on && local.f.acceptance.example_endpoint && local.first_admin != null && length(local.gpu_classes) > 0
+  example_on  = local.role.control && local.f.acceptance.example_endpoint && local.first_admin != null && length(local.gpu_classes) > 0
   example_spec = merge(jsondecode(file("${path.module}/llm-example.json")), {
     gpu     = { count = 1, classes = [local.gpu_classes[0]] }
     regions = sort(distinct([for id, c in local.region_clusters : c.region if length([for pn, p in c.pools : pn if p.gpu_class == local.gpu_classes[0]]) > 0]))
   })
+  acceptance = local.role.control ? {
+    api_url   = "https://${local.hostnames.api}"
+    model     = local.f.acceptance.model
+    key       = local.first_key == null ? null : "sk-${random_password.key[local.first_key].result}"
+    admin_key = local.first_admin == null ? null : "sk-${random_password.key[local.first_admin].result}"
+    example   = local.example_on
+    spec      = local.example_on ? local.example_spec : null
+  } : null
+  verify_script = file("${local.repo}/tools/verify.sh")
+}
+
+resource "kubernetes_config_map_v1" "probe" {
+  count = local.probe_on ? 1 : 0
+  metadata {
+    name      = "acceptance-probe"
+    namespace = "api"
+  }
+  data       = { "verify.sh" = local.verify_script }
+  depends_on = [kubernetes_namespace_v1.ns]
 }
 
 resource "kubernetes_job_v1" "probe" {
@@ -217,6 +232,7 @@ resource "kubernetes_job_v1" "probe" {
   metadata {
     name      = "acceptance-probe"
     namespace = "api"
+    labels    = { "serverless2.nebius/script" = substr(sha256(local.verify_script), 0, 16) } # a changed script re-runs the probe
   }
   spec {
     backoff_limit = 0
@@ -226,59 +242,46 @@ resource "kubernetes_job_v1" "probe" {
         restart_policy = "Never"
         container {
           name    = "probe"
-          image   = "${local.f.images.host}/docker/curlimages/curl:8.10.1"
-          command = ["sh", "-c"]
-          args = [<<-EOT
-            set -eu
-            H="Authorization: Bearer $KEY"
-            echo "== models"; curl -sf -H "$H" "$API/v1/models" > /tmp/models.json; grep -q '"${local.f.acceptance.model}"' /tmp/models.json
-            echo "== run ${local.f.acceptance.model}"
-            id=$(curl -sf -X POST -H "$H" -H 'content-type: application/json' -d '{"mode":"run","name":"acceptance-probe","input":{}}' "$API/v1/models/${local.f.acceptance.model}:invoke" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-            echo "operation $id"
-            for i in $(seq 1 120); do
-              st=$(curl -sf -H "$H" "$API/v1/operations/$id" | sed -n 's/.*"status":"\([A-Z]*\)".*/\1/p')
-              echo "$(date -u +%T) $st"
-              case "$st" in SUCCEEDED) break ;; FAILED|CANCELLED) exit 1 ;; esac
-              sleep 10
-            done
-            [ "$st" = SUCCEEDED ]
-            %{if local.example_on~}
-            echo "== example model ${local.example_spec.id}: defined through the API (admin key), then called"
-            code=$(curl -s -o /tmp/m -w '%%{http_code}' -X POST -H "Authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' -d "$SPEC" "$API/v1/models" || echo 000)
-            echo "POST /v1/models HTTP $code"; head -c 600 /tmp/m; echo
-            case "$code" in 201) ;; 409) echo "exists already (kept)" ;; *) exit 1 ;; esac
-            for i in $(seq 1 40); do   # a first cold start in a fresh region pulls the 10 GB image once (measured 11 min, 2026-10-09)
-              code=$(curl -s -o /tmp/e -w '%%{http_code}' --max-time 660 -X POST -H "$H" -H 'content-type: application/json' \
-                -d '{"mode":"sync","input":{"messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":16}}' \
-                "$API/v1/models/${local.example_spec.id}:invoke" || echo 000)
-              echo "$(date -u +%T) HTTP $code"; [ "$code" = 200 ] && { head -c 400 /tmp/e; echo; exit 0; }
-              sleep 30
-            done
-            exit 1
-            %{endif~}
-          EOT
-          ]
+          image   = "${local.images_host}/docker/curlimages/curl:8.10.1"
+          command = ["sh", "/scripts/verify.sh"]
           env {
             name  = "API"
-            value = local.platform.api_url
+            value = local.acceptance.api_url
           }
           env {
             name  = "KEY"
-            value = "sk-${random_password.key[local.first_key].result}"
+            value = local.acceptance.key
           }
           env {
             name  = "ADMIN_KEY"
-            value = local.first_admin != null ? "sk-${random_password.key[local.first_admin].result}" : ""
+            value = coalesce(local.acceptance.admin_key, "")
+          }
+          env {
+            name  = "MODEL"
+            value = local.acceptance.model
+          }
+          env {
+            name  = "EXAMPLE"
+            value = local.example_on ? "1" : "0"
           }
           env {
             name  = "SPEC"
-            value = jsonencode(local.example_spec)
+            value = local.example_on ? jsonencode(local.example_spec) : ""
           }
+          volume_mount {
+            name       = "scripts"
+            mount_path = "/scripts"
+            read_only  = true
+          }
+        }
+        volume {
+          name = "scripts"
+          config_map { name = "acceptance-probe" }
         }
       }
     }
   }
   wait_for_completion = true
   timeouts { create = "40m" }
-  depends_on = [kubernetes_job_v1.key, kubernetes_secret_v1.tenant_storage, data.terraform_remote_state.worker_models]
+  depends_on = [kubernetes_job_v1.key, kubernetes_secret_v1.tenant_storage, helm_release.tenant, kubectl_manifest.control_extras, kubernetes_config_map_v1.probe]
 }

@@ -25,7 +25,7 @@ Idempotency-Key header on every mutating call
 Entry points: `https://api.<control cluster host>` (the fleet API on the control cluster: runs,
 operations, keys; sync/async calls are forwarded to the region's API) and `https://api.<region host>`
 for in-region sync/async/streaming calls and runs pinned to that region. A host is `<gateway ip>.sslip.io`
-or `<cluster>.<domain>` (`docs/EDGE.md`); `./stack.sh output models control` prints the URLs of a fleet. A run submitted to the fleet API is placed in the cheapest free
+or `<cluster>.<domain>` (`docs/EDGE.md`); `./stack.sh output platform control` prints the URLs of a fleet. A run submitted to the fleet API is placed in the cheapest free
 region among the model's deployments by its GPU preference (`docs/JOBS.md` "Fleet placement"); `region`
 pins it. Keys are the same everywhere (one fleet database; a regional API looks a key up on the fleet API).
 
@@ -110,7 +110,7 @@ The built-in classes (`hello-run`, `container-run`, `distributed-run`) are files
 409 too. `images` (per GPU class), `deployments.<region>.variants` and `routing` are accepted and stored
 but not acted on yet (the design review of 2026-10-09).
 
-The acceptance probe of the models stage uses this path: with `acceptance.example_endpoint = true` (the
+The acceptance probe (`tools/verify.sh`) uses this path: with `acceptance.example_endpoint = true` (the
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as
 the first model of the console.
 

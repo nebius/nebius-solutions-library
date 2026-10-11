@@ -3,10 +3,9 @@
 # Secret values never go here: NGC_API_KEY, HF_TOKEN, REGISTRY_CREDENTIALS and the state-bucket
 # credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) are environment variables at apply time.
 #
-# Three stages, one wrapper:  ./stack.sh preflight && ./stack.sh apply
-#   cloud     clusters, pools, registry, buckets, identities         (one state)
-#   platform  Helm releases and manifests per cluster                (one state per cluster)
-#   models    tenants, catalog, endpoints, keys, acceptance probe    (one state per cluster)
+# Two stages, one wrapper:  ./stack.sh preflight && ./stack.sh apply && tools/verify.sh
+#   cloud     clusters, pools, registry, buckets (fleet and tenants), identities, the database   (one state)
+#   platform  Helm releases and manifests, tenants and keys per cluster                           (one state per cluster)
 
 fleet = {
   name           = "inference"      # prefix of every cloud resource; 2-23 lowercase chars, digits, dashes
@@ -147,7 +146,7 @@ fleet = {
   }
 
   # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys
-  # (`./stack.sh output models control tenant_keys`).
+  # (`./stack.sh output platform control -json tenant_keys`).
   tenants = {
     demo = {
       lifecycle_days = 90                  # run outputs expire after N days (0 = keep)
@@ -167,11 +166,12 @@ fleet = {
   # database and deployed in every region you name. The platform ships only its generic run classes
   # (catalog/models: hello-run, container-run, distributed-run), on every GPU region.
 
-  # After the models stage: a probe Job runs `model` (a run class) with the first tenant key and, with
-  # `example_endpoint`, creates `llm-example` (a stock vLLM container with a small public chat model,
-  # stack/models/llm-example.json: swap the `--model` argument for any model you like; on the fleet's
-  # first GPU class) through the API with the first admin key and calls it; a failure fails the apply.
+  # The acceptance probe (tools/verify.sh, after the apply): runs `model` (a run class) with the first tenant key
+  # and, with `example_endpoint`, creates `llm-example` (a stock vLLM container with a small public chat model,
+  # stack/platform/llm-example.json: swap the `--model` argument for any model you like; on the fleet's first
+  # GPU class) through the API with the first admin key and calls it. probe = true runs the same script as a
+  # Job at apply time (the apply waits up to 40 minutes for it and fails with it).
   # The example stays as the first model of the console (delete it there when you do not want it).
-  acceptance = { probe = true, model = "hello-run", example_endpoint = true }
+  acceptance = { probe = false, model = "hello-run", example_endpoint = true }
 
 }

@@ -1,5 +1,5 @@
-# The one input of the solution: `fleet` (terraform.tfvars at the repository root). Every stage
-# (stack/cloud, stack/platform, stack/models) passes it to this module (`config.tf` in each stage);
+# The one input of the solution: `fleet` (terraform.tfvars at the repository root). Both stages
+# (stack/cloud, stack/platform) pass it to this module (`config.tf` in each stage);
 # locals.tf derives the per-cluster view and outputs.tf hands it back. Nothing else is edited to bring
 # a fleet up. terraform.tfvars.example documents every key; the validations below reject the mistakes
 # the stages cannot recover from.
@@ -325,12 +325,14 @@ variable "fleet" {
     # through the API (`POST /v1/models`, the console's "New model" form; README "Deploy a model") and
     # stored in the fleet database.
 
-    # After the models stage: a probe Job on the control cluster runs `model` (a built-in run class) and,
-    # when `example_endpoint` is true, creates the example endpoint `llm-example` (a stock vLLM container
-    # with a small model, on the fleet's first GPU class) through the API with the first admin key and calls
-    # it; a failure fails the apply. The example stays as the first model of the console (delete it there).
+    # The acceptance probe, tools/verify.sh: runs `model` (a built-in run class) with the first tenant key and,
+    # when `example_endpoint` is true, creates the example endpoint `llm-example` (a stock vLLM container with a
+    # small model, on the fleet's first GPU class) through the API with the first admin key and calls it. Run it
+    # after the apply (`tools/verify.sh`, README.md). probe = true runs the same script as a Job on the control
+    # cluster at apply time: the apply then waits for it (up to 40 minutes on a cold region) and fails with it.
+    # The example stays as the first model of the console (delete it there).
     acceptance = optional(object({
-      probe            = optional(bool, true)
+      probe            = optional(bool, false)
       model            = optional(string, "hello-run")
       example_endpoint = optional(bool, true) # needs a tenant key with admin = true
     }), {})

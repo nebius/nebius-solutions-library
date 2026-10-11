@@ -193,7 +193,7 @@
     },
     "clusters": {
       "type": "object",
-      "description": "keyed by cluster id; the models stage passes this cluster's entry",
+      "description": "keyed by cluster id; the platform stage passes this cluster's entry",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,

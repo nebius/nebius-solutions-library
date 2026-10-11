@@ -32,7 +32,7 @@ check_terraform() {
   terraform fmt -check -recursive "$ROOT/stack"
   [ -d "$ROOT/infra" ] && terraform fmt -check -recursive "$ROOT/infra"
   step "terraform validate: every stage and module"
-  for d in stack/config stack/cloud stack/platform stack/models stack/modules/cluster stack/modules/tenant-region; do
+  for d in stack/config stack/cloud stack/platform stack/modules/cluster stack/modules/tenant-region; do
     tf "$d" init -backend=false -input=false > /dev/null
     tf "$d" validate -no-color > /dev/null; echo "   ok $d"
   done
@@ -73,7 +73,7 @@ EOF
       helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint $(basename "$f" .yaml)"
     done
   done
-  step "example model (stack/models/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
+  step "example model (stack/platform/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
 import json, subprocess, sys
 tmp, root = sys.argv[1], sys.argv[2]
@@ -82,7 +82,7 @@ fleet = json.load(open(f"{tmp}/fleet.json")); plan = json.load(open(f"{tmp}/plan
 pools = {f"{r['id']}-{pn}": {"region": r["id"], "pool": pn, "gpu_class": p["gpu_class"], "capacity": p["capacity"]["type"]}
          for rn, r in fleet["regions"].items() for pn, p in r["pools"].items()}
 classes = sorted({p["gpu_class"] for p in pools.values() if p.get("gpu_class")})
-spec = dict(json.load(open(f"{root}/stack/models/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
+spec = dict(json.load(open(f"{root}/stack/platform/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
 json.dump(pools, open(f"{tmp}/pools.json", "w"))
 r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "entry", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
 if r.returncode: print(r.stderr); sys.exit(1)

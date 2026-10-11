@@ -151,7 +151,8 @@ deduction.
 `charts/tenant` renders, per cluster, the tenant namespace with one LocalQueue per profile (`default`,
 `prefer-<class>` for every class of the fleet) pointing at the tenant's own ClusterQueues `<tenant>-<profile>`
 that `charts/fleet` renders on every cluster (since 2026-10-11); on the control cluster (`manager: true`) the
-namespace, those queues and the API binding only. The models stage renders it on every cluster of the tenant's regions.
+namespace, those queues and the API binding only. The platform stage renders it on every cluster of the tenant's regions
+(`stack/platform/tenants.tf`), after the fleet chart.
 
 How capacity is shared (`terraform.tfvars` `tenants.<name>`):
 
@@ -172,10 +173,9 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 ## Change recipes
 
 - **Tenant queues moved (2026-10-11)**: a tenant's LocalQueues now point at its own ClusterQueues. A LocalQueue's
-  target is immutable, so the models stage deletes the queues that point elsewhere right before the tenant release
-  upgrades them. A LocalQueue's target queue is immutable: when a change moves a tenant's queues to other ClusterQueues,
-  delete the old LocalQueues in `tenant-<name>` first (`kubectl -n tenant-<name> delete localqueue --all`); waiting runs are
-  re-queued by Kueue, running ones are not touched. Apply the platform stage (fleet chart) before the models stage.
+  target queue is immutable: when a change moves a tenant's queues to other ClusterQueues, delete the old LocalQueues
+  in `tenant-<name>` first (`kubectl -n tenant-<name> delete localqueue --all`); waiting runs are re-queued by Kueue,
+  running ones are not touched. The platform stage renders the fleet chart (the ClusterQueues) before the tenant releases.
 
 - **Add a pool / GPU class**: one entry under `regions.<r>.pools`; `plan`
   shows one node group (and a pricing policy for a capped spot pool); Terraform
@@ -194,9 +194,9 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 - **Warm endpoint added**: raise the pool's `endpoint_floor_gpus` with the
   catalog change (docs/OPERATIONS.md "Capacity for runs and endpoints").
 - **Add a region**: one `regions.<name>` entry (project, subnet, pools; the preflight reports the tenant-wide `compute.disk.count` and preemptible-VM headroom of the region, a worker region needs about eight disks),
-  then `./stack.sh apply` (the cloud stage adds the cluster, the platform and
-  models stages follow on it, and the control cluster's MultiKueue gains the
-  worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2
+  then `./stack.sh apply` (the cloud stage adds the cluster and the tenants'
+  buckets there, the platform stage follows on it, and the control cluster's
+  MultiKueue gains the worker). Verified on a live fleet on 2026-10-09 (a test fleet plus eu-west2
   with a B300 spot pool, docs/VERIFICATION.md).
 - **Prices**: `prices` block (nebius.com/prices); flavors, `fleet-prices` and
   the profile order follow.

@@ -7,7 +7,7 @@ variable "fleet" {
   type        = any
 }
 
-# Stage selector (platform and models run once per cluster). The wrapper stack.sh sets it; cloud ignores it.
+# Stage selector (the platform stage runs once per cluster). The wrapper stack.sh sets it; cloud ignores it.
 variable "target" {
   description = "Cluster id this stage applies to (a region id or `control`)."
   type        = string

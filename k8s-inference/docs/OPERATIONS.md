@@ -35,7 +35,7 @@ There are no rotation CronJobs in this form: every credential is a Terraform res
 | the image cache's registry static key | delete `stack/.secrets/<name>-registry-key.json`, re-apply platform on every cluster, retire the old key with `nebius iam static-key delete` |
 | tenant S3 keys | `./stack.sh tf cloud -- apply -replace='module.tenant_region["<tenant>/<region>"].nebius_iam_v2_access_key.tenant'`, then `apply platform` on that region's cluster and on the control cluster (the hub region's key is in every cluster's `s3-fleet` Secret: re-apply everywhere after rotating it) |
 | the fleet's router key (`api/router-key`) | `./stack.sh tf platform control -- apply -replace='random_password.router_key[0]'`, then `kubectl -n api rollout restart deployment/api` (the API upserts the new hash at start and re-registers every LiteLLM group with it) |
-| a tenant key of `terraform.tfvars` | `./stack.sh tf models control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
+| a tenant key of `terraform.tfvars` | `./stack.sh tf platform control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
 
 Take-over by another operator: the tfvars, a key for the state bucket (`stack/bootstrap/state-bucket.sh`
 with their profile), `./stack.sh plan` must show no changes. `recover-stopped-nodes` keeps running on every
@@ -283,7 +283,7 @@ protect against is in README.md "Security notes and limitations".
 
 A cluster-wide policy cannot express "my own namespace", so `charts/tenant` renders a namespaced
 `CiliumNetworkPolicy tenant-local` (same-namespace ingress and egress, needed for multi-pod runs) into each
-tenant namespace (`charts/tenant/templates/network.yaml`, rendered by the models stage).
+tenant namespace (`charts/tenant/templates/network.yaml`, rendered by the platform stage).
 
 Plain `networking.k8s.io/v1` equivalent (if Cilium policy must be avoided): a per-namespace NetworkPolicy
 with `policyTypes: [Ingress, Egress]`, ingress from `podSelector: {}`, egress to `podSelector: {}`, to
@@ -298,10 +298,10 @@ bound per tenant namespace by the RoleBinding `charts/tenant` renders; Role `ser
 `models` (inferenceservices get/list/patch, pods); read-only Roles `serverless2-api-templates` in the
 template namespaces (`api`); one ClusterRole to list tenant namespaces (billing).
 
-### Tenants (`tenants.<name>` in the tfvars, `stack/models`, `charts/tenant`)
+### Tenants (`tenants.<name>` in the tfvars, `stack/cloud/tenants.tf`, `stack/platform/tenants.tf`, `charts/tenant`)
 
-A tenant is one block of the tfvars (`budget_usd`, `lifecycle_days`, `allowed_images`, its keys), one
-`./stack.sh apply cloud` and one `./stack.sh apply models <id>` per cluster, control last. Per region the
+A tenant is one block of the tfvars (`budget_usd`, `lifecycle_days`, `allowed_images`, its keys) and one
+`./stack.sh apply` (the cloud stage, then the platform stage of every cluster, control last). Per region the
 cloud stage creates a service account, a group with `storage.object-editor` on the tenant bucket through the
 bucket policy, the bucket `<fleet>-<name>-<region>` with a lifecycle rule that expires `operations/` objects
 after `lifecycle_days` (default 90; aborts incomplete multipart uploads after 7 days) and an S3 access key
@@ -312,7 +312,7 @@ identity (`job-runner`), the API binding, one Kueue LocalQueue per scheduling pr
 only. Secrets in the tenant namespace (never in git): workers `tenant-storage` and `s3` (this region's
 bucket and key), `s3-fleet` (the hub region's bucket and key, used by fleet-placed runs), `ngc`; control
 `tenant-storage` (the hub region's bucket). The LiteLLM keys (budget, allowed models and pass-through
-routes) are created on the control cluster: `./stack.sh output models control` prints them. Adding a region
+routes) are created on the control cluster: `./stack.sh output platform control -json tenant_keys` prints them. Adding a region
 to a tenant or changing the retention is a tfvars change plus a re-apply; removing a tenant is removing the
 block (with `protect_data = true` the bucket stays and must be emptied by hand first).
 
@@ -352,7 +352,7 @@ order reserved before on-demand before spot inside a class).
 ## Add a region
 
 One `regions.<name>` block (project, subnet, allowed CIDRs, pools), then `./stack.sh apply`: the cloud stage
-adds the cluster, the platform and models stages follow on it, and the control cluster's MultiKueue gains
+adds the cluster and the tenants' buckets there, the platform stage follows on it, and the control cluster's MultiKueue gains
 the worker (docs/FLEET.md "Change recipes"). The platform images need no per-region copy: the new cluster's
 cache fetches them from the source registry on first use.
 
@@ -382,37 +382,59 @@ kubectl -n ops get cronjob; kubectl -n ops logs -l app=recover-stopped-nodes --t
 kubectl -n api get job | tail -3                                  # billing CronJob runs (control cluster)
 nebius msp postgresql v1alpha1 backup list --parent-id <control project id> | head          # the managed database's backups
 kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
-./stack.sh apply models control                                   # re-runs the acceptance probe (hello-run, the example endpoint)
+tools/verify.sh                                                   # the acceptance probe: hello-run, then the example endpoint through the API
 ```
 
 ## Upgrading to the two-stage layout
 
-Fleets deployed before 2026-10-11 hold the tenant buckets, service accounts and S3 keys in the models state of
-each region (`module.tenant_region["<tenant>"]` in `models/<cluster id>.tfstate`). The cloud stage owns them now
-(`module.tenant_region["<tenant>/<region>"]` in `cloud/fleet.tfstate`, `stack/cloud/tenants.tf`), so every
-cluster reads the same credentials from one state. A root module cannot `moved` a resource into another root
-module's state: the move is a `terraform state mv` between the two state files, once per tenant and region,
-before the first apply of the new checkout. Nothing in the cloud is touched by it; afterwards `./stack.sh plan`
-must show no replacement (a different plan means a wrong address: fix the state, do not apply).
+Fleets deployed before 2026-10-11 have a third stage, `models`, with one state per cluster
+(`models/<cluster id>.tfstate`): the tenant buckets, service accounts and S3 keys of each region
+(`module.tenant_region["<tenant>"]`), the tenant releases and Secrets, the LiteLLM key Jobs and the acceptance
+probe. The cloud stage owns the buckets now (`module.tenant_region["<tenant>/<region>"]` in
+`cloud/fleet.tfstate`, `stack/cloud/tenants.tf`) and the platform stage of each cluster the rest
+(`stack/platform/tenants.tf`, same resource addresses). A root module cannot `moved` a resource into another
+root's state: the move is a `terraform state mv` between state files, before the first apply of the new
+checkout, with the old checkout's `stack.sh` for the models states (the new one has no `models` stage; the
+state keys are `models/<cluster id>.tfstate` in the state bucket). Nothing in the cloud or the clusters is
+touched by it; afterwards `./stack.sh plan` must show no replacement and no re-creation (a different plan
+means a wrong address: fix the state, do not apply). The Secrets and Jobs move from the models stage's
+Kubernetes provider 2.x to the platform stage's 3.x; `kubernetes_secret_v1` and `kubernetes_job_v1` carry the
+same resource schema version in both (0 and 1), so the move needs no state upgrade.
 
 ```sh
-# 1. pull both states (the models state of the region's cluster, the cloud state)
-./stack.sh tf models <cluster id> -- state pull > models-<cluster id>.tfstate
-./stack.sh tf cloud -- state pull > cloud.tfstate
-# 2. move each tenant of that region; <region> is the Nebius region name (eu-north1, ...), <cluster id> its id (hub, ...)
-terraform state mv -state=models-<cluster id>.tfstate -state-out=cloud.tfstate \
-  'module.tenant_region["<tenant>"]' 'module.tenant_region["<tenant>/<region>"]'
-# 3. push both back (the serial of each file was incremented by the move; `-force` is never needed)
-./stack.sh tf cloud -- state push cloud.tfstate
-./stack.sh tf models <cluster id> -- state push models-<cluster id>.tfstate
-# 4. no replacement planned, then apply: the cloud stage only adds the new `tenant_storage` output
-./stack.sh plan cloud && ./stack.sh apply cloud
-./stack.sh plan models <cluster id>              # on every cluster: no change (the Secrets keep their values)
+OLD=<checkout of the three-stage layout>; NEW=<this checkout>      # same terraform.tfvars, same state bucket credentials
+# 1. pull the states once: the models state of every cluster, the cloud state, the platform state of every cluster
+for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state pull) > models-$id.tfstate; done
+(cd $NEW && ./stack.sh tf cloud -- state pull) > cloud.tfstate
+for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state pull) > platform-$id.tfstate; done
+# 2. per tenant and worker region: the bucket, identity and key to the cloud state
+#    (<region> is the Nebius region name, eu-north1; <cluster id> the region's cluster id, hub)
+terraform state mv -state=models-hub.tfstate -state-out=cloud.tfstate \
+  'module.tenant_region["demo"]' 'module.tenant_region["demo/eu-north1"]'
+# 3. per cluster: the tenant release, Secrets, keys and probe to that cluster's platform state (same addresses)
+for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' 'kubernetes_secret_v1.s3["demo"]' \
+         'kubernetes_secret_v1.s3_fleet["demo"]' 'kubernetes_secret_v1.ngc["demo"]'; do          # workers: all of them; control: tenant_storage only
+  terraform state mv -state=models-hub.tfstate -state-out=platform-hub.tfstate "$r" "$r"; done
+for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' \
+         'random_password.key["demo-default"]' 'kubernetes_job_v1.litellm_key["demo-default"]' \
+         'random_password.key["demo-admin"]' 'kubernetes_job_v1.litellm_key["demo-admin"]'; do   # control: one pair per key
+  terraform state mv -state=models-control.tfstate -state-out=platform-control.tfstate "$r" "$r"; done
+# 4. push the cloud and platform states back (their serials were incremented by the moves; `-force` is never needed)
+(cd $NEW && ./stack.sh tf cloud -- state push ../cloud.tfstate)
+for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state push ../platform-$id.tfstate); done
+# 5. every models state now holds at most the probe Job (acceptance-probe in namespace api, re-created by
+#    tools/verify.sh's Job form when wanted): remove its entries and delete the state objects from the bucket
+for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state list); done   # must list nothing but kubernetes_job_v1.probe[0]
+kubectl -n api delete job acceptance-probe --ignore-not-found                         # the control cluster
+# `aws s3 rm s3://<state bucket>/models/<id>.tfstate` for each cluster, with the state-bucket credentials
+# 6. no replacement planned, then apply: the cloud stage adds the `tenant_storage` output, the platform stages
+#    adopt the moved resources (the tenant release gets its new chart version, the Secrets keep their values)
+(cd $NEW && ./stack.sh plan && ./stack.sh apply)
 ```
 
 With `protect_data = true` the moved bucket keeps its `prevent_destroy`; a bucket that is not moved before the
-apply is planned for creation (name taken: the apply fails, nothing is lost) and the old one for destruction on
-the next models apply (refused by `prevent_destroy`): both are a sign that step 2 was skipped for that tenant.
+apply is planned for creation (name taken: the apply fails, nothing is lost). A tenant release that is not moved
+is planned for creation and the Helm install fails on the existing release name: move it, do not delete it.
 
 ## Reliability and upgrades
 

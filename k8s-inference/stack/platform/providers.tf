@@ -1,4 +1,5 @@
-# Stage 2, platform: everything inside ONE cluster (`-var target=<cluster id>`, one state per cluster). The
+# Stage 2, platform: everything inside ONE cluster (`-var target=<cluster id>`, one state per cluster): the
+# releases and manifests, the tenants and their keys (tenants.tf). The
 # cluster's endpoint and CA come from the cloud state; authentication is the IAM token stack.sh takes from the
 # Nebius CLI (`nebius iam get-access-token`) and passes as the sensitive variable `iam_token`. It configures
 # the Kubernetes, Helm, kubectl and kustomization providers only: provider configuration is never written to

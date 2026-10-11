@@ -4,7 +4,7 @@ The deployment owner is Terraform (`stack.sh`). Helm owns upstream controllers; 
 
 ## Deploy, change and validate
 
-Follow the root README for bootstrap, credentials and the cloud/platform/models stages. Chart versions are declared once in `clusters/common/apps/*.yaml`; cluster-specific native values are computed in `stack/platform/stage.tf`. Terraform 1.12+ is required by the shared External Secrets modules.
+Follow the root README for bootstrap, credentials and the cloud and platform stages. Chart versions are declared once in `clusters/common/apps/*.yaml`; cluster-specific native values are computed in `stack/platform/stage.tf`. Terraform 1.12+ is required by the shared External Secrets modules.
 
 Before a change, run `make check` and the UI tests/build. PostgreSQL regression tests run when `TEST_DATABASE_URL` points to a disposable database; CI supplies a PostgreSQL service. These checks create no cloud resources.
 
