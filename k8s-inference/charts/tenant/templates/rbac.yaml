@@ -8,11 +8,8 @@ metadata:
 rules:
   - apiGroups: [""]                       # the uploader polls its own pod for the main container's exit code
     resources: [pods]
-    verbs: [get, patch]
-  - apiGroups: [""]
-    resources: [pods/log]
-    verbs: [get, watch]
-  - apiGroups: [""]                       # ... and releases the run's work volume after a successful upload (docs/JOBS.md)
+    verbs: [get]
+  - apiGroups: [""]                       # ... and releases the run's work volume after a verified export (docs/JOBS.md)
     resources: [persistentvolumeclaims]
     verbs: [get, delete]
 ---
@@ -24,6 +21,9 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-runner }
 subjects:
   - { kind: ServiceAccount, name: {{ .Values.runnerServiceAccount }}, namespace: {{ include "tenant.ns" . }} }
+{{- range $ref, $id := .Values.identities }}
+  - { kind: ServiceAccount, name: identity-{{ $ref }}, namespace: {{ include "tenant.ns" $ }} }
+{{- end }}
 ---
 {{- end }}
 # the API (this cluster's, and the control cluster's through its api-agent identity on a worker) manages

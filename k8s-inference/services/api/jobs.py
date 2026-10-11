@@ -31,6 +31,7 @@ from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_G
                     MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC)
 from resilience import retry
 from pod_metadata import normalise as normalise_pod_metadata
+import execution
 from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, RUNNER_SECURITY_CONTEXT, TOKEN, _job_shell, _meta,
                     _pod_failure_policy, _render, _uploader, class_images, gpu_classes, image_for_class, op_name, profile_of)
 from status import (PHASE, RECORD_STATUS, _attempts, _gpus, _main_state, _secs, _ts, finished, gpu_seconds, is_jobset, is_manager_job,
@@ -54,7 +55,7 @@ def _mount_data(r: dict, pod: dict, containers: list) -> None:
 
 def build_run(name: str, model: dict, params: dict, tenant: str, label: str | None, idem: str | None, timeout_s: int | None,
               priority: str | None, region: str | None = REGION, defaults: dict | None = None, key_hash: str | None = None,
-              pvc: str | None = None, placement: dict | None = None, gpu_class: str | None = None) -> dict:
+              pvc: str | None = None, placement: dict | None = None, gpu_class: str | None = None, ex: dict | None = None) -> dict:
     """Render the catalog entry's `job` block with the parameters (caller's input over the region's
     defaults over the entry's defaults) into a Job; the per-operation PVC is `<name>-work` unless a
     resume passes the original run's. region None = fleet placement (the dispatcher picks the worker).
@@ -127,7 +128,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if r.get("env"):
         main["env"] = [{"name": k, "value": str(v)} for k, v in r["env"].items()]
     if r.get("s3Env", True):
-        main["envFrom"] = [{"secretRef": {"name": S3_ENV_SECRET}}]
+        main["envFrom"] = (main.get("envFrom") or []) + [{"secretRef": {"name": S3_ENV_SECRET}}]   # next to env_secrets, not instead
     fetch = {"name": "fetch", "image": RUNNER_IMAGE, "command": ["/usr/local/bin/fetch.sh"],
              "env": [{"name": "INPUT_PREFIX", "value": r.get("inputs") or values.get("input_prefix") or ""}],
              "envFrom": [{"secretRef": {"name": S3_ENV_SECRET}}],
@@ -177,7 +178,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     profile = f"prefer-{gpu_class}" if gpu_class else ((placement or {}).get("profile") or profile_of(model))
     if gpu_class and placement:
         placement = {**placement, "profile": profile, "classes": [gpu_class]}   # the dispatcher keeps the run on this class
-    meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class)
+    meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class, ex)
     rates = {}
     for pool in kube.fleet().get("pools", {}).values():
         pool_region = kube.cluster_region(pool["region"])
@@ -189,13 +190,18 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if gpu_class:
         meta["annotations"][f"{LABEL}/image"] = job["image"]
     nodes = int(r.get("nodes", 1) or 1)
+    if ex:
+        execution.apply_run(pod, r, ex, name, S3_ENV_SECRET)     # io mode, identity, private input, profile (docs/JOBS.md)
     if nodes > 1:
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
     _mount_data(r, pod, [main])
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
-    return _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
+    job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
+    if ex:
+        execution.apply_job(job, ex)
+    return job
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -278,6 +284,7 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
         main["resources"]["claims"] = [{"name": "ib"}]
     pod["subdomain"] = name
+    execution.scope_runner_token(pod)
     extra = normalise_pod_metadata(model.get("podMetadata"))
     tmpl_meta = {"labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}}
     ann = dict(extra.get("annotations", {}))
@@ -642,7 +649,8 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
     return out
 
 
-def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placement: dict | None = None) -> tuple[dict, bool]:
+def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placement: dict | None = None,
+           checkpoint_ref: str | None = None, gpu_class: str | None = None) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
     original PVC (same region: the volume is regional), linked through the resumed-from annotation.
     Rendering anew (rather than copying the finished Job's spec) leaves behind everything the Job
@@ -659,9 +667,20 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         raise HTTPException(400, "only run operations can be resumed")
     pvc = ann.get(f"{LABEL}/pvc")
     worker = orig["_region"] if is_manager_job(orig) else region
-    if not worker:
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
+    except ValueError:
+        ex = None
+    if checkpoint_ref:
+        # a portable checkpoint (docs/JOBS.md "Execution options"): the application restores it from its own storage, so
+        # the new attempt needs neither the old volume nor the old region: a fresh volume where the fleet places it
+        ex = {**(ex or {}), "recovery": {**((ex or {}).get("recovery") or {}), "checkpoint_ref": checkpoint_ref}}
+        pvc, worker = None, (worker if not placement else None)
+    elif not worker:
         raise HTTPException(409, f"operation {name} never reached a worker; submit a new run")
-    if is_jobset(orig):
+    if checkpoint_ref:
+        pass
+    elif is_jobset(orig):
         if ann.get(f"{LABEL}/checkpoints") != "shared":
             raise HTTPException(409, f"operation {name} kept its checkpoints on node-local scratch (checkpoints: local); submit a new run")
         pvc = None                                  # the shared claim is mounted by name, under checkpoints/<root>
@@ -676,13 +695,14 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
     out = output_prefix(orig) or ""
     d = dict(defaults)
     d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else f"operations/{new}"
-    pl = dict(placement or {})
+    pl = execution.narrow_placement(dict(placement or {}), ex) or {}
     if is_manager_job(orig):
         pl["manager"] = True
-    # a run with per-class images keeps the class it was submitted with (its checkpoints were written by that image)
+    # a run with per-class images keeps the class it was submitted with (its checkpoints were written by that image),
+    # unless the caller resumes a portable checkpoint on another class (`gpu_class`)
     job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, op["timeout_s"],
                     labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc, placement=pl or None,
-                    gpu_class=labels.get(f"{LABEL}/gpu-class") or (gpu_classes(model)[0] if class_images(model) else None))
+                    gpu_class=gpu_class or labels.get(f"{LABEL}/gpu-class") or (gpu_classes(model)[0] if class_images(model) else None), ex=ex)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     if is_jobset(job):          # the shared checkpoint directory is keyed by the root operation
         for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:

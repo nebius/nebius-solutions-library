@@ -101,6 +101,16 @@ Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB i
 of any vLLM endpoint whose weights live on the filesystem, and `VLLM_CACHE_ROOT=/weights/vllm-cache` in its env so
 the torch.compile cache survives a restart (the first start of a trillion-parameter model spends about 25 min there).
 
+## Bindings and execution options (runs)
+
+`PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the
+tenant; `GET /v1/bindings` lists them (reference, bound operation, keys; never the data); `DELETE /v1/bindings/{ref}`
+revokes one. A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
+(`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
+"Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
+profiles, the regions' OIDC issuers). `POST /v1/operations/{id}:resume` takes an optional body
+`{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution`.
+
 ## Multi-node endpoints
 
 An endpoint definition with `nodes` > 1 serves one model from that many whole nodes at once (tensor-parallel inside

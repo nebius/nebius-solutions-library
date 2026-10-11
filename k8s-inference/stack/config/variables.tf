@@ -229,6 +229,7 @@ variable "fleet" {
       gpu-gb300      = { on_demand = 9.50, spot = 0.99 } # GB300 NVL (ARM host)
       gpu-l40s-a     = { on_demand = 1.55, spot = 0.74 } # L40S (Intel host)
       gpu-l40s-d     = { on_demand = 1.82, spot = 0.90 } # L40S (AMD host)
+      gpu-rtx6000    = { on_demand = 1.80, spot = 1.09 } # RTX PRO 6000 Blackwell (us-central1 name)
       gpu-rtx6000-a  = { on_demand = 1.80, spot = 0.95 } # RTX PRO 6000 Blackwell
     })
     reserved_marginal_price = optional(number, 0)
@@ -299,6 +300,18 @@ variable "fleet" {
       fair_share_weight = optional(number, 1)        # Kueue weighted fair sharing between the tenants' queues (docs/FLEET.md "Tenants")
       dedicated_pools   = optional(list(string), []) # pools only this tenant's runs use: their quota is the tenant's alone, no endpoint lands there
       allowed_images    = optional(list(string), [])
+      # Execution options of this tenant's runs (docs/JOBS.md "Execution options").
+      storage = optional(string, "managed") # managed: a bucket and S3 key per region for the runs' inputs and outputs; external: none
+      #                                       (runs use application-managed I/O only; identity, queues and keys as usual)
+      identities = optional(map(object({     # workload identities a run may name (workload_identity_ref): a ServiceAccount whose projected
+        audience = string                    # token (this audience) the run presents to a storage provider's OIDC federation
+        env      = optional(map(string), {}) # environment the run gets with it (e.g. AWS_ROLE_ARN); never a credential
+      })), {})
+      execution_profiles = optional(map(object({       # execution profiles a run may name (profile_ref): its pods reach only these
+        egress_fqdns      = optional(list(string), []) # destinations (plus DNS, the API server, the gateway and the fleet's APIs),
+        egress_cidrs      = optional(list(string), []) # and the shared filesystem stays out of the run unless allowed
+        shared_filesystem = optional(bool, false)
+      })), {})
       keys = optional(map(object({
         budget_usd = optional(number, 10)
         models     = optional(list(string), []) # allow-list (empty = all)
@@ -323,6 +336,12 @@ variable "fleet" {
     }), {})
 
   })
+
+  validation {
+    condition = alltrue([for tn, t in var.fleet.tenants : contains(["managed", "external"], t.storage)
+    && alltrue([for n in concat(keys(t.identities), keys(t.execution_profiles)) : can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", n))])])
+    error_message = "tenants: storage is managed or external; identity and execution profile names are DNS labels."
+  }
 
   validation {
     condition = alltrue(flatten([for tn, t in var.fleet.tenants : [for p in t.dedicated_pools :

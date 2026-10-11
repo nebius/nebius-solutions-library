@@ -15,9 +15,10 @@ locals {
   fleet_doc = local.chart_fleet # charts/tenant reads regions, pools and prices from it (stack/config/locals.tf)
 }
 
-# Cloud side of a tenant in this region (workers only): identity, bucket, access key.
+# Cloud side of a tenant in this region (workers only): identity, bucket, access key. A tenant with
+# `storage = "external"` gets none of it (application-managed I/O only, docs/JOBS.md "Execution options").
 module "tenant_region" {
-  for_each       = local.role.worker ? local.tenants : {}
+  for_each       = { for tn, t in local.tenants : tn => t if local.role.worker && t.storage == "managed" }
   source         = "../modules/tenant-region"
   name           = "${local.name}-${each.key}-${local.region}"
   tenant         = each.key
@@ -38,6 +39,10 @@ resource "helm_release" "tenant" {
     cluster       = local.id
     fleet         = local.fleet_doc
     allowedImages = each.value.allowed_images
+    # execution options (charts/tenant execution.yaml, namespace annotations): identities, profiles, the fleet's API hosts
+    identities        = each.value.identities
+    executionProfiles = each.value.execution_profiles
+    apiHosts          = [for cid, c in local.cloud.clusters : "api.${local.f.edge.domain == null ? "${c.gateway_ip}.sslip.io" : "${cid}.${local.f.edge.domain}"}"]
     # Multi-node runs over InfiniBand need the tenant's ResourceClaimTemplates (charts/tenant multinode.yaml):
     # on every worker whose region has an InfiniBand pool, and on the control cluster whenever any region has one
     # (Kueue there resolves the template before MultiKueue dispatches). No tfvars input: the pools decide.
@@ -54,7 +59,8 @@ resource "helm_release" "tenant" {
 }
 
 locals {
-  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? module.tenant_region[tn].storage : try(local.hub_storage[tn], null) if local.role.worker || can(local.hub_storage[tn]) }
+  storage_here = { for tn, t in local.tenants : tn => local.role.worker ? module.tenant_region[tn].storage : try(local.hub_storage[tn], null)
+  if t.storage == "managed" && (local.role.worker || can(local.hub_storage[tn])) }
   s3_env = { for tn, st in local.storage_here : tn => {
     AWS_ACCESS_KEY_ID = st.access_key, AWS_SECRET_ACCESS_KEY = st.secret_key, AWS_ENDPOINT_URL = st.endpoint, AWS_DEFAULT_REGION = st.region
   } }
@@ -62,7 +68,7 @@ locals {
 
 # tenant-storage: the bucket this cluster's API presigns, lists and bills from (the hub-region bucket on control).
 resource "kubernetes_secret_v1" "tenant_storage" {
-  for_each = local.tenants
+  for_each = { for tn, t in local.tenants : tn => t if contains(keys(local.storage_here), tn) }
   metadata {
     name      = "tenant-storage"
     namespace = "tenant-${each.key}"
@@ -74,7 +80,7 @@ resource "kubernetes_secret_v1" "tenant_storage" {
 # s3: AWS_* for the runner containers (this region's bucket); s3-fleet: the hub region's bucket, read and
 # written by fleet-placed runs whose region is chosen after submission.
 resource "kubernetes_secret_v1" "s3" {
-  for_each = local.role.worker ? local.tenants : {}
+  for_each = { for tn, t in local.tenants : tn => t if local.role.worker && t.storage == "managed" }
   metadata {
     name      = "s3"
     namespace = "tenant-${each.key}"
@@ -84,7 +90,7 @@ resource "kubernetes_secret_v1" "s3" {
 }
 
 resource "kubernetes_secret_v1" "s3_fleet" {
-  for_each = local.role.worker ? local.tenants : {}
+  for_each = { for tn, t in local.tenants : tn => t if local.role.worker && t.storage == "managed" }
   metadata {
     name      = "s3-fleet"
     namespace = "tenant-${each.key}"

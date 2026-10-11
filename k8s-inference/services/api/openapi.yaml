@@ -115,6 +115,20 @@ paths:
       summary: Cancel an operation (a queued one is deleted, a running one is stopped and kept with status CANCELLED)
       parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/idem" }]
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" } }
+  /v1/bindings:
+    get:
+      summary: The tenant's bindings (confidential inputs for runs; references, bound operation and keys, never the data)
+      responses: { "200": { description: bindings, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Binding" } } } } } }
+  /v1/bindings/{ref}:
+    put:
+      summary: Create or replace a binding (docs/JOBS.md "Execution options"); a replacement refreshes a running attempt's files
+      parameters: [{ name: ref, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: object, additionalProperties: { type: string } } } } } } }
+      responses: { "200": { description: binding, content: { application/json: { schema: { $ref: "#/components/schemas/Binding" } } } }, "400": { $ref: "#/components/responses/Error" } }
+    delete:
+      summary: Revoke a binding (a bound attempt's files are emptied first)
+      parameters: [{ name: ref, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: revoked }, "404": { $ref: "#/components/responses/Error" } }
   /v1/operations/{id}:resume:
     post:
       summary: Resume a FAILED or CANCELLED run from its checkpoints
@@ -203,6 +217,9 @@ components:
   responses:
     Error: { description: error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
+    Binding:
+      type: object
+      properties: { ref: { type: string }, operation: { type: string, nullable: true }, keys: { type: array, items: { type: string } }, updated_at: { type: string, nullable: true } }
     FleetInfo:
       type: object
       properties:

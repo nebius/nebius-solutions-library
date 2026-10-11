@@ -12,6 +12,9 @@
 # (preemption, cancel) it uploads what exists at once, then waits for main to finish its own
 # SIGTERM handling (checkpoint) and uploads again.
 set -uo pipefail
+# UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
+# attempt record is kept under /work/attempts (the run moves its own data).
+MODE="${UPLOAD_MODE:-sync}"; EXPORT=""
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
@@ -53,6 +56,7 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
 upload() {   # $1 = status
   cd /work || return
   record "$1"
+  if [ "$MODE" = record ]; then echo "RECORD $(date -u +%FT%TZ) status=$1 (application-managed I/O: nothing exported)"; return; fi
   # multi-node runs (UPLOAD_SCOPE=rank0, docs/JOBS.md): every pod records its attempt, only rank 0 publishes the
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then
@@ -60,17 +64,23 @@ upload() {   # $1 = status
     aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
     return
   fi
-  printf '{"operation":"%s","attempt_pod":"%s","status":"%s","exit_code":%s,"finished_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$1" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
   echo "UPLOAD START $(date -u +%FT%TZ) status=$1 -> $OUTPUT_PREFIX"
   # UPLOAD_EXCLUDES is a string of aws filters ("--exclude checkpoint/*", quotes allowed): split it like a shell
   # line with globbing OFF. Unquoted $UPLOAD_EXCLUDES expanded `checkpoint/*` against /work into `checkpoint/hf`,
   # which excludes that one entry and uploads everything below it: a multi-node run with shared checkpoints
   # pushed its 470 GB weight cache to the bucket (test fleet, 2026-10-09, docs/VERIFICATION.md).
   set -f; eval "set -- ${UPLOAD_EXCLUDES:-}"
-  aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --no-progress --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' "$@" 2>&1 | tail -n 30
+  aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --no-progress --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' --exclude 'STATUS.json' "$@" 2>&1 | tail -n 30
+  local rc=${PIPESTATUS[0]}
+  # verification: a second pass must find nothing left to copy (sizes), else the export is not durable (docs/JOBS.md)
+  if [ "$rc" = 0 ] && [ -n "$(aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --dryrun --size-only --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' --exclude 'STATUS.json' "$@" 2>/dev/null | head -n 1)" ]; then rc=99; fi
   set +f
-  echo "UPLOAD END $(date -u +%FT%TZ)"
+  if [ "$rc" = 0 ]; then EXPORT=succeeded; else EXPORT=failed; echo "UPLOAD FAILED $(date -u +%FT%TZ) rc=$rc: the volume is kept, retry the export (POST /v1/operations/$OPERATION:export)"; fi
+  # STATUS.json is published last: its presence with export=succeeded is the durable-delivery marker
+  printf '{"operation":"%s","attempt_pod":"%s","status":"%s","export":"%s","exit_code":%s,"finished_at":"%s"}\n' \
+    "$OPERATION" "$POD_NAME" "$1" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
+  aws s3 cp STATUS.json "${OUTPUT_PREFIX%/}/STATUS.json" --no-progress 2>&1 | tail -n 1
+  echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
 on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; EXIT=""; upload interrupted; }
 trap on_term TERM
@@ -101,7 +111,7 @@ while true; do
 done
 if [ "$EXIT" = "0" ]; then
   upload succeeded
-  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ]; then
+  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$EXPORT" != failed ]; then
     curl -sS -o /dev/null -w "pvc delete %{http_code}\n" --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE \
       "$API/api/v1/namespaces/$POD_NAMESPACE/persistentvolumeclaims/$PVC_NAME"
   fi

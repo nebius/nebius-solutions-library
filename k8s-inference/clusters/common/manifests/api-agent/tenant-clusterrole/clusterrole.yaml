@@ -22,13 +22,9 @@ rules:
   - apiGroups: [""]                       # one work volume per run (checkpoints; resumed on the same volume; released by the
     resources: [persistentvolumeclaims]   # uploader on success or by the billing pass when the uploader was preempted)
     verbs: [create, get, patch, delete]
-  - apiGroups: [""]                       # endpoint-call jobs get their caller's key through a per-operation Secret (owned by the Job)
-    resources: [secrets]
-    verbs: [create]
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get]
-    resourceNames: [tenant-storage]
+  - apiGroups: [""]                       # per-operation Secrets (an endpoint call's key, a run's private input), the tenant's
+    resources: [secrets]                  # bindings (services/api/execution.py) and the tenant-storage credentials
+    verbs: [create, get, list, patch, update, delete, deletecollection]
   - apiGroups: [kueue.x-k8s.io]           # fleet placement: the Workload of a manager Job names the worker that admitted it;
     resources: [workloads]                # patch: a cancelled multi-node run is deactivated (spec.active) so Kueue evicts it
     verbs: [get, list, patch]

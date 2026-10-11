@@ -92,6 +92,9 @@ JOB_PVC_SIZE_GI = int(os.environ.get("JOB_PVC_SIZE_GI", "50"))
 SYNC_TIMEOUT_S = int(os.environ.get("SYNC_TIMEOUT_S", "600"))
 AUTH_CACHE_S = int(os.environ.get("AUTH_CACHE_S", "30"))
 LABEL = "serverless2.nebius"
+# OIDC issuer of every region's cluster ("<region>=<url>,..."): what a storage provider's federation trusts for the
+# projected workload-identity tokens of runs (docs/JOBS.md "Execution options"); capability discovery lists them
+REGION_OIDC_ISSUERS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_OIDC_ISSUERS", "").split(",") if "=" in kv)
 
 
 _trust_state: dict = {"stamp": None}

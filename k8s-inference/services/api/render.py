@@ -83,7 +83,8 @@ def _render(value, params: dict):
 
 
 def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, label: str | None, inp: dict, idem: str | None,
-          priority: str | None, key_hash: str | None, profile: str = KUEUE_QUEUE, gpu_class: str | None = None) -> dict:
+          priority: str | None, key_hash: str | None, profile: str = KUEUE_QUEUE, gpu_class: str | None = None,
+          execution: dict | None = None) -> dict:
     labels = {f"{LABEL}/tenant": tenant, f"{LABEL}/model": model, f"{LABEL}/mode": mode, f"{LABEL}/profile": profile,
               "kueue.x-k8s.io/queue-name": profile,
               "kueue.x-k8s.io/priority-class": "bulk-backfill" if priority == "low" else KUEUE_PRIORITY}
@@ -93,7 +94,11 @@ def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, lab
         labels[f"{LABEL}/gpu-class"] = gpu_class
     if priority:
         labels[f"{LABEL}/priority"] = priority
+    if execution and execution.get("profile"):     # the pod label the profile's network policy selects (charts/tenant)
+        labels[f"{LABEL}/execution-profile"] = execution["profile"]["name"]
     ann = {f"{LABEL}/input": json.dumps(inp)[:60000]}
+    if execution:
+        ann[f"{LABEL}/execution"] = json.dumps(execution, sort_keys=True)     # names only, never data (services/api/execution.py)
     if key_hash:
         ann[f"{LABEL}/key"] = key_hash          # sha256 of the submitting key: billing target, never the key itself
     if label:
@@ -144,6 +149,8 @@ def _job_shell(name: str, meta: dict, pod_spec: dict, timeout_s: int | None, pla
     the dispatcher needs (it sees the Workload's pod template, not the Job): allowed GPU classes and regions,
     work volume size."""
     extra = normalise_pod_metadata(pod_metadata)
+    from execution import scope_runner_token
+    scope_runner_token(pod_spec)
     tmpl_meta = {"labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}}
     ann = dict(extra.get("annotations", {}))
     if meta["annotations"].get(f"{LABEL}/pvc-size-gi"):

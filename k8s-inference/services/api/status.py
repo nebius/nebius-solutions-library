@@ -107,6 +107,13 @@ def logs_url(ns: str, name: str, region: str | None) -> str | None:
     return f"{g}/explore?orgId=1&left={urllib.parse.quote(q)}"
 
 
+def _json(text: str | None):
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
+
+
 def normalise(job: dict, price_per_call: float | None = None, records: list | None = None) -> dict:
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
     labels, ann = md.get("labels", {}), md.get("annotations", {})
@@ -151,6 +158,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "gpu_class": labels.get(f"{LABEL}/gpu-class"), "image": ann.get(f"{LABEL}/image"),
             "resumable": status in ("FAILED", "CANCELLED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
+            "execution": _json(ann.get(f"{LABEL}/execution")),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
             "interconnect": ann.get(f"{LABEL}/interconnect"),
             "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,

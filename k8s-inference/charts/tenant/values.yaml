@@ -6,6 +6,15 @@ apiSubjects:                   # API identities bound to ClusterRole serverless2
   - { kind: ServiceAccount, name: api, namespace: api }          # this cluster's API
   - { kind: ServiceAccount, name: api-agent, namespace: api }    # the control cluster's API, on a worker
 runnerServiceAccount: job-runner   # ServiceAccount of the run pods (EXECUTOR_SA on the API)
+# Execution options (docs/JOBS.md "Execution options"; terraform.tfvars tenants.<name>.identities / execution_profiles).
+# identities: <ref>: { audience: <token audience>, env: { AWS_ROLE_ARN: ... } } -> ServiceAccount identity-<ref> (bound to
+# the same Role as the runner) whose projected token the run's main container gets for OIDC federation.
+# executionProfiles: <name>: { egress_fqdns: [...], egress_cidrs: [...], shared_filesystem: false } -> a network policy
+# for pods labelled serverless2.nebius/execution-profile=<name> (DNS, the API server, the gateway, the fleet's API hosts
+# and the listed destinations; never the world, never the metadata service).
+identities: {}
+executionProfiles: {}
+apiHosts: []                   # the fleet's API hostnames (every cluster's), reachable from every execution profile
 profiles: []                   # extra LocalQueue names (profiles) besides `default` and `prefer-<class>` from fleet.yaml
 # Multi-node runs (docs/JOBS.md "Multi-node runs"). infiniband: the tenant may run jobs with `interconnect: required`
 # (a DRA ResourceClaimTemplate for the node's InfiniBand NICs is rendered; the namespace stays under PSA baseline,

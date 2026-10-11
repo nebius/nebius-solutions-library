@@ -28,6 +28,23 @@ spec:
         - matchLabels: { io.kubernetes.pod.namespace: kube-system, k8s-app: coredns }
       toPorts:
         - ports: [{ port: "53", protocol: UDP }, { port: "53", protocol: TCP }]
-    - toEntities: [kube-apiserver, world]
+    - toEntities: [kube-apiserver]
     - toEndpoints:
         - matchLabels: { io.kubernetes.pod.namespace: envoy-gateway-system }
+---
+# The world (tenant bucket, NGC, public endpoints, a customer's storage) for every tenant pod EXCEPT one that runs under an
+# execution profile (label serverless2.nebius/execution-profile, docs/JOBS.md "Execution options"): such a pod reaches
+# only the destinations its profile's policy names (charts/tenant execution.yaml). Cilium policies are allow-lists
+# that add up, so the restriction is "not selected here", not a deny rule.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: tenant-egress-world
+spec:
+  description: tenant pods without an execution profile may reach the world
+  endpointSelector:
+    matchExpressions:
+      - { key: io.cilium.k8s.namespace.labels.serverless2.nebius/tenant, operator: Exists }
+      - { key: serverless2.nebius/execution-profile, operator: DoesNotExist }
+  egress:
+    - toEntities: [world]

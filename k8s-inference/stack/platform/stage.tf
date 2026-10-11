@@ -153,6 +153,9 @@ locals {
     { name = "CATALOG_DIRS", value = "/etc/catalog" },
     { name = "RUNNER_IMAGE", value = local.image.jobs },
     { name = "HUB_REGION", value = local.hub_region },
+    # the OIDC issuer of every GPU region's cluster (docs.nebius.com/kubernetes/networking/oidc-public-endpoint): what a
+    # storage provider trusts for a run's projected workload-identity token (docs/JOBS.md "Execution options")
+    { name = "REGION_OIDC_ISSUERS", value = join(",", [for cid, c in local.region_clusters : "${c.region}=https://oidc.mk8s.api.nebius.cloud/${local.cloud.clusters[cid].cluster_id}"]) },
   ]) # the API's HTTPS clients trust the system roots plus every CA under /etc/ssl/msp (services/api/config.py)
   # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
   api_env_control = [for e in [

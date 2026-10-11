@@ -5,7 +5,7 @@ database-authoritative budget checks are part of this integration contract (docs
 """
 import asyncio, hashlib, json, logging, os, sys
 from kubernetes.client.rest import ApiException
-import artifacts, catalog, jobs, kube
+import artifacts, catalog, execution, jobs, kube
 from config import LABEL
 from resilience import retry
 from status import _attempts, _secs
@@ -139,6 +139,8 @@ async def bill_once() -> int:
                     total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
                     done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
                     _annotate(region, ns, name, done, job)
+                    if f"{LABEL}/execution" in ann:
+                        execution.sweep_copies(ns, ann.get(f"{LABEL}/resumed-from") or name)   # private-input copies of a finished run
                     log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)
                     n += 1
                 except Exception as e:  # noqa: BLE001 - unbilled, retried on the next run

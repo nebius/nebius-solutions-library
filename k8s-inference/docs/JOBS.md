@@ -262,6 +262,36 @@ DRA claims allocated (8 NICs per pod), NCCL `NET/IB` on `mlx5_0..7`, a 1 GiB all
 16 GPUs at 436.5 GB/s bus bandwidth, restart-all after rank failures, rank-0 upload. 16 x B300 is
 the same path on an `8gpu-192vcpu-2768gb` pool (uk-south1, eu-west2, us-north1).
 
+## Execution options
+
+A run may carry an `execution` block next to `input` (`services/api/execution.py`; unknown fields are refused,
+`GET /v1/fleet` `execution` lists what the tenant may ask for). Everything it names is rendered by the operator
+into the tenant (terraform.tfvars `tenants.<name>`: `storage`, `identities`, `execution_profiles`); the API resolves
+the references against the tenant's own namespace, never against raw Kubernetes names, so another tenant's
+identity or profile does not exist for a caller.
+
+```json
+{"input": {"image": "...", "command": "..."},
+ "execution": {"io_mode": "application",
+               "profile_ref": "confidential-job-v1",
+               "workload_identity_ref": "customer-a",
+               "private_input_ref": "job-7-manifest",
+               "placement": {"gpu_preference": ["rtx-pro-6000", "l40s"], "allowed_clusters": ["us-central1", "eu-north1"], "fallback_wait_s": 60},
+               "recovery": {"on_infrastructure_loss": "retry", "checkpoint_ref": null}}}
+```
+
+| Field | What it does |
+|---|---|
+| `io_mode: application` | the run moves its own data: no `fetch` init container, no tenant S3 credentials in any container, the uploader only records the attempt (`UPLOAD_MODE=record`), `input_prefix`/`output_prefix` are refused, `/result` lists no artifacts. A tenant with `storage = "external"` has no bucket at all and can only run this way. `managed` (default) is the tenant-bucket path described above |
+| `profile_ref` | an execution profile of the tenant: the pod carries `serverless2.nebius/execution-profile=<name>`, which takes it out of the cluster-wide "world" egress policy; the profile's own policy (charts/tenant `execution.yaml`) lists what it may reach: DNS, the API server, the gateway, the fleet's API hostnames and the profile's `egress_fqdns`/`egress_cidrs`. The metadata service and other namespaces are never in the list. The shared filesystem (`data`, `checkpoints: shared`) stays out unless the profile sets `shared_filesystem = true` |
+| `workload_identity_ref` | an identity of the tenant: the pod runs as the ServiceAccount `identity-<ref>` (same Role as the runner, nothing more) and the main container gets a projected token with the identity's audience at `/var/run/secrets/workload-identity/token` (`AWS_WEB_IDENTITY_TOKEN_FILE` set, plus the identity's `env`, e.g. `AWS_ROLE_ARN`). The kubelet mints it per pod and renews it; a storage provider trusts the cluster's OIDC issuer (`GET /v1/fleet` `execution.oidc_issuers`, Nebius Managed Kubernetes publishes `https://oidc.mk8s.api.nebius.cloud/<cluster id>`) and its own role/trust policy enforces the permitted bucket, paths and actions. The token's subject is the ServiceAccount, so two runs with the same identity are the same principal to the provider; a narrower grant is the provider's (or the application's) to enforce |
+| `private_input_ref` | a binding of the tenant (`PUT /v1/bindings/<ref>` with string data: credentials where no federation exists, a sensitive manifest): copied into a per-operation Secret and mounted read-only into the main container only, under `/var/run/serverless2/private/<key>` (`PRIVATE_INPUT_DIR`). A binding serves one operation and that operation's resumes (another operation gets 409: a new job needs a new grant); a new `PUT` refreshes the files of a running attempt within the kubelet's sync period (no restart); `DELETE` empties them first, then removes everything. Nothing of it enters the Job, the operation's response or the logs |
+| `placement` | `gpu_preference` narrows and orders the model's GPU classes (a class the model does not list is an error), `allowed_clusters` narrows its regions; `fallback_wait_s` bounds how long the run waits for its first choice before the next class is tried (docs/SCHEDULING.md) |
+| `recovery` | `on_infrastructure_loss: retry` (default: a replacement attempt on the same volume, as above) or `fail` (the operation fails on a disruption; resume it with a checkpoint reference). `checkpoint_ref` reaches the run as `CHECKPOINT_REF`; `POST /v1/operations/<id>:resume` with `{"checkpoint_ref": ..., "gpu_class": ...}` resumes a run from a portable checkpoint the application restores itself: no previous volume, any permitted cluster, optionally another class and therefore that class's image |
+
+Every run pod, with or without the block, mounts the runner's Kubernetes token into the uploader only
+(`automountServiceAccountToken: false`, a projected 1-hour token): the model's container holds no Kubernetes credential.
+
 ## Fleet placement (control cluster API, `FLEET_MANAGER=true`)
 
 The control cluster's API is the entry point for runs. It renders the same Job but creates it on

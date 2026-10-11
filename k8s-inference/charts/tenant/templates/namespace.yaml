@@ -14,11 +14,14 @@ metadata:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted
-  {{- if .Values.allowedImages }}
   annotations:
+    {{- if .Values.allowedImages }}
     # image prefixes a container-run of this tenant may use (the API refuses others, services/api app.py)
     serverless2.nebius/allowed-images: {{ join "," .Values.allowedImages | quote }}
-  {{- end }}
+    {{- end }}
+    # what a run may reference in its execution block (services/api/execution.py resolves against these, never raw names)
+    serverless2.nebius/identities: {{ .Values.identities | toJson | quote }}
+    serverless2.nebius/execution-profiles: {{ .Values.executionProfiles | toJson | quote }}
 {{- if not $c.manager }}
 ---
 apiVersion: v1
@@ -26,4 +29,15 @@ kind: ServiceAccount
 metadata:
   name: {{ .Values.runnerServiceAccount }}
   namespace: {{ include "tenant.ns" . }}
+{{- range $ref, $id := .Values.identities }}
+---
+# workload identity `{{ $ref }}`: the pod of a run with workload_identity_ref={{ $ref }} runs as this account; no Kubernetes
+# permissions beyond the runner's (the uploader's pod lookup); its projected token (audience {{ $id.audience | quote }}) is what
+# the run presents to a storage provider's OIDC federation
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: identity-{{ $ref }}
+  namespace: {{ include "tenant.ns" $ }}
+{{- end }}
 {{- end }}

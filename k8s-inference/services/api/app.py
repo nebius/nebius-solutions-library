@@ -9,9 +9,10 @@ from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
 import re
-import artifacts, billing, catalog, config as cfg, db, jobs, kube, models, monitoring, placement as placing
+import artifacts, billing, catalog, config as cfg, db, execution, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
+from execution import BindingRequest, ExecutionSpec
 from auth import Principal, allows_model, check_budget, check_model, forget, principal
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_MASTER_KEY, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 from resilience import retry_http
@@ -55,6 +56,12 @@ class InvokeRequest(BaseModel):
     region: str | None = None
     priority: str | None = None
     timeout_s: int | None = None
+    execution: ExecutionSpec | None = None     # docs/JOBS.md "Execution options" (runs only)
+
+
+class ResumeRequest(BaseModel):
+    checkpoint_ref: str | None = Field(default=None, max_length=1024)   # a portable checkpoint: no volume, any permitted cluster/class
+    gpu_class: str | None = None
 
 
 class UploadRequest(BaseModel):
@@ -126,6 +133,7 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                      | {r for m in catalog.all_models().values() for r in m.get("regions", [])})
     out = {"regions": regions, "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
            "fleet_manager": FLEET_MANAGER, "region": REGION,
+           "execution": execution.capabilities(p.namespace),      # what this tenant may ask for (services/api/execution.py)
            "pools": [{"region": kube.cluster_region(pool.get("region") or REGION), "cluster": pool.get("region"), "pool": pool.get("pool"),
                       "gpu_class": pool.get("gpu_class"), "platform": pool.get("platform"), "preset": pool.get("preset"),
                       "gpus_per_node": int(pool.get("gpus_per_node") or 1), "capacity": pool.get("capacity"),
@@ -398,6 +406,8 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         if region in REGION_API_URLS:        # the control cluster hosts no endpoint: forward to the region's API
             return await _forward(model, req, p, idempotency_key, REGION_API_URLS[region])
         raise HTTPException(400, f"sync/async calls for {region} go to that region's API; this one serves {REGION}")
+    if req.execution and mode != "run":
+        raise HTTPException(400, "execution options apply to runs only")
     if mode == "sync":
         return await _sync(m, req, p)
     # admission: Kueue (profile queues) bounds concurrent runs; LiteLLM rpm/budget bound async calls;
@@ -405,28 +415,40 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     name = jobs.op_name(p.tenant, model, idempotency_key)
     timeout = req.timeout_s          # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
+    ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
+    if ex and ex.get("placement", {}).get("allowed_clusters") and region and region not in ex["placement"]["allowed_clusters"]:
+        raise HTTPException(400, f"region {region} is not in allowed_clusters {ex['placement']['allowed_clusters']}")
     if mode == "async":
         output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
         job, secret = jobs.build_async(name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix)
     elif FLEET_MANAGER:
-        _guard_run_input(m, req, p, REGION)
-        job = _fleet_run(m, req, p, name, timeout, idempotency_key)
+        _guard_run_input(m, req, p, REGION, ex)
+        job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
+        execution.deliver(ex, name, name, p.namespace, p.tenant, [r for r in job["spec"]["template"]["metadata"].get("annotations", {}).get(f"{cfg.LABEL}/regions", "").split(",") if r] or [region or REGION])
         region = REGION                      # created on the manager; the dispatcher picks the worker
     else:
-        _guard_run_input(m, req, p, region)
-        output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
+        _guard_run_input(m, req, p, region, ex)
         defaults = catalog.region_params(m, region)
-        defaults.setdefault("output_prefix", output_prefix)
+        if not (ex and ex.get("io_mode") == "application"):
+            defaults.setdefault("output_prefix", f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}")
+        else:
+            defaults.setdefault("output_prefix", "")
         job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
-                             gpu_class=_class_for(m, req, region, p.tenant))
+                             gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
+        execution.deliver(ex, name, name, p.namespace, p.tenant, [region])
     created_job, created = jobs.create(p.namespace, job, region, secret)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
 
 
-def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str) -> None:
+def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex: dict | None = None) -> None:
     """A caller-supplied output_prefix must stay inside the tenant's own bucket of that region (never another
-    tenant's), and an `image` parameter (container-run) must match the tenant's image allow-list when one is set."""
+    tenant's), and an `image` parameter (container-run) must match the tenant's image allow-list when one is set.
+    Application-managed I/O names no bucket at all."""
     out = req.input.get("output_prefix")
+    if ex and ex.get("io_mode") == "application":
+        if out or req.input.get("input_prefix"):
+            raise HTTPException(400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data")
+        out = None
     if out:
         bucket = artifacts.storage(p.namespace, region)["bucket"]
         if not str(out).startswith(f"s3://{bucket}/"):
@@ -435,26 +457,28 @@ def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str) -> 
         jobs.check_image_allowed(p.namespace, str(req.input["image"]), region)
 
 
-def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: int | None, idempotency_key: str | None) -> dict:
+def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: int | None, idempotency_key: str | None,
+               ex: dict | None = None) -> dict:
     """Fleet placement (control cluster, docs/JOBS.md): the Job is created on the manager and MultiKueue +
     the dispatcher pick the worker among the model's regions and GPU classes. Inputs and outputs live in the
     tenant's hub-region bucket (the one this cluster's tenant-storage names). Per-region parameter defaults
     apply when every deployment agrees on them, or when the caller pins a region. Image references are
     fleet-wide (the logical registry host, docs/IMAGES.md), so an unpinned run is placed at queue time: the
     dispatcher nominates the cheapest free cluster and re-nominates while the run waits."""
-    bucket = artifacts.storage(p.namespace, REGION)["bucket"]
+    application = bool(ex and ex.get("io_mode") == "application")
+    bucket = None if application else artifacts.storage(p.namespace, REGION)["bucket"]
     inp = req.input.get("input_prefix")
     if inp and not str(inp).startswith(f"s3://{bucket}/"):
         raise HTTPException(400, f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)")
-    placement = {"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}
+    placement = execution.narrow_placement({"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}, ex)
     region = req.region
     defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
-    defaults.setdefault("output_prefix", f"s3://{bucket}/operations/{name}")
+    defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
     return jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults,
-                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant))
+                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
 
 
-def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None) -> str | None:
+def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None, ex: dict | None = None) -> str | None:
     """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
     runs"): the dispatcher's best candidate among the model's classes and regions (the caller's region when
     given). None for a class with one image: Kueue may then switch class at queue time as before."""
@@ -467,6 +491,8 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | No
         gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
     pools = kube.fleet().get("pools") or {}
     available = sorted({p.get("gpu_class") for p in pools.values() if p.get("gpu_class")}) or None
+    if ex and (ex.get("placement") or {}).get("gpu_preference"):          # the caller's order narrows the model's
+        available = [c for c in ex["placement"]["gpu_preference"] if available is None or c in available]
     cls, how = placing.choose_class(m, region, gpus, available, tenant)
     log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
     return cls
@@ -582,15 +608,48 @@ def cancel(id: str, p: Principal = Depends(principal)):
 
 
 @app.post("/v1/operations/{id}:resume")
-def resume(id: str, p: Principal = Depends(principal)):
+def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(principal)):
     """A new operation `<id>-r<n>` in the same region on the same work volume (checkpoints); for a
     FAILED or CANCELLED run whose volume still exists (docs/JOBS.md). Preemptions resume on their own.
-    A fleet-placed run is resumed through the manager, pinned to the worker that ran it."""
+    A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
+    `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
+    needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
     orig, region = _owned(p, id)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
+    req = req or ResumeRequest()
+    if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
+        raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
+    if req.gpu_class and not req.checkpoint_ref:
+        raise HTTPException(400, "another gpu_class needs a checkpoint_ref: the work volume's checkpoints belong to the original class")
     placement = {"profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]} if jobs.is_manager_job(orig) else None
-    job, created = jobs.resume(p.namespace, id, _home(orig), m, catalog.region_params(m, region) if region else {}, placement)
+    if req.gpu_class and placement:
+        placement["classes"] = [req.gpu_class]
+    job, created = jobs.resume(p.namespace, id, _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref else {}, placement,
+                               checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class)
+    ex = jobs.normalise(job).get("execution")
+    if ex and ex.get("private_input_ref"):
+        root = job["metadata"]["annotations"].get("serverless2.nebius/resumed-from") or id
+        regions = [r for r in job["spec"]["template"]["metadata"].get("annotations", {}).get(f"{cfg.LABEL}/regions", "").split(",") if r] or [job["metadata"]["labels"].get(f"{cfg.LABEL}/region") or REGION]
+        execution.deliver(ex, job["metadata"]["name"], root, p.namespace, p.tenant, regions)
     return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
+
+
+# ---- bindings: confidential inputs for runs (docs/JOBS.md "Execution options") ----
+@app.put("/v1/bindings/{ref}")
+def put_binding(ref: str, req: BindingRequest, p: Principal = Depends(principal)):
+    return execution.put_binding(p.namespace, p.tenant, ref, req.data)
+
+
+@app.get("/v1/bindings")
+def list_bindings(p: Principal = Depends(principal)):
+    return execution.list_bindings(p.namespace)
+
+
+@app.delete("/v1/bindings/{ref}", status_code=204)
+def delete_binding(ref: str, p: Principal = Depends(principal)):
+    if not execution.delete_binding(p.namespace, ref):
+        raise HTTPException(404, f"binding {ref}: not found")
+    return None
 
 
 @app.post("/v1/artifacts/uploads", status_code=201)

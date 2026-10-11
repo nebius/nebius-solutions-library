@@ -116,7 +116,52 @@ class FakeCluster:
         del self.pvcs[(ns, name)]
 
     def create_namespaced_secret(self, ns, body):
+        if (ns, body["metadata"]["name"]) in self.secrets:
+            raise ApiException(status=409, reason="AlreadyExists")
+        body = copy.deepcopy(body)
+        if "stringData" in body:
+            body["data"] = dict(body["stringData"])          # the API server would base64-encode; tests read either
         self.secrets[(ns, body["metadata"]["name"])] = body
+
+    def read_namespaced_secret(self, name, ns):
+        if (ns, name) not in self.secrets:
+            raise ApiException(status=404, reason="NotFound")
+        return self.secrets[(ns, name)]
+
+    def replace_namespaced_secret(self, name, ns, body):
+        if (ns, name) not in self.secrets:
+            raise ApiException(status=404, reason="NotFound")
+        body = copy.deepcopy(body)
+        if "stringData" in body:
+            body["data"] = dict(body["stringData"])
+        self.secrets[(ns, name)] = body
+        return body
+
+    def patch_namespaced_secret(self, name, ns, body):
+        s = self.secrets[(ns, name)]
+        s["metadata"].setdefault("annotations", {}).update((body.get("metadata") or {}).get("annotations") or {})
+        return s
+
+    def list_namespaced_secret(self, ns, label_selector=""):
+        want = {}
+        for kv in label_selector.split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1); want[k] = v
+            elif kv:
+                want[kv] = None
+        def ok(s):
+            labels = s["metadata"].get("labels") or {}
+            return all((k in labels) if v is None else labels.get(k) == v for k, v in want.items())
+        return Items([s for (n, _), s in self.secrets.items() if n == ns and ok(s)])
+
+    def delete_namespaced_secret(self, name, ns):
+        if (ns, name) not in self.secrets:
+            raise ApiException(status=404, reason="NotFound")
+        del self.secrets[(ns, name)]
+
+    def delete_collection_namespaced_secret(self, ns, label_selector=""):
+        for s in list(self.list_namespaced_secret(ns, label_selector).items):
+            del self.secrets[(ns, s["metadata"]["name"])]
 
     # custom objects (JobSets of multi-node runs; Kueue Workloads are listed empty)
     def create_namespaced_custom_object(self, group, version, ns, plural, body):
