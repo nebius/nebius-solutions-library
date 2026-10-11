@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.7", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.8", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -697,7 +697,7 @@ async def record_attempt(request: Request, authorization: str = Header(default="
     region, ns, pod = await asyncio.to_thread(attempts.verify_runner_token, authorization[7:].strip())
     operation = str(body.get("operation") or "")
     try:
-        job = await asyncio.to_thread(jobs.get, ns, operation, region)
+        job, _ = await asyncio.to_thread(jobs.find, ns, operation)      # the manager's Job for a fleet run (the worker holds a mirror)
         body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
     except HTTPException:
         body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts

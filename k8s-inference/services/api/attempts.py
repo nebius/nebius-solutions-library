@@ -33,7 +33,8 @@ def verify_runner_token(token: str) -> tuple[str, str, str]:
     """TokenReview of an uploader's projected token against every cluster this API reaches: (region, namespace,
     pod). 401 when no cluster issued it or it is not a bound pod token of a tenant namespace."""
     from kubernetes import client
-    for region in kube.regions():
+    from config import FLEET_MANAGER
+    for region in [r for r in kube.regions() if not (FLEET_MANAGER and r == REGION)] or kube.regions():
         try:
             review = retry(client.AuthenticationV1Api(kube._client(region)).create_token_review,
                            client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)))
