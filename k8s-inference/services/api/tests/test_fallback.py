@@ -80,6 +80,39 @@ def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
     assert appmod.fallback_switch() == []
 
 
+@pytest.mark.parametrize("binding_available", [True, False])
+def test_fallback_delivers_private_input_before_creating_successor(client, monkeypatch, binding_available):
+    c, fake = client
+    monkeypatch.setattr(kube, "fleet", lambda: TWO_CLASS_FLEET)
+    monkeypatch.setattr(catalog, "get", lambda name: _fold_model() if name == "fold" else None)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    assert c.put("/v1/bindings/private-fallback", json={"data": {"input.json": "private"}}, headers=H).status_code == 200
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": {
+        "io_mode": "application", "private_input_ref": "private-fallback",
+        "placement": {"gpu_preference": ["rtx-pro-6000", "l40s"], "fallback_wait_s": 60}}}, headers=H)
+    assert r.status_code == 202, r.text
+    root = r.json()["id"]
+    successor = f"{root}-r1"
+    create = fake.create_namespaced_job
+
+    def require_private_input(ns, body):
+        assert fake.secrets[(ns, f"{successor}-private")]["data"] == {"input.json": "private"}
+        return create(ns, body)
+
+    monkeypatch.setattr(fake, "create_namespaced_job", require_private_input)
+    if not binding_available:
+        assert c.delete("/v1/bindings/private-fallback", headers=H).status_code == 204
+    moved = appmod.fallback_switch()
+    assert moved == ([successor] if binding_available else [])
+    original = fake.jobs[("tenant-demo", root)]
+    if binding_available:
+        assert fake.secrets[("tenant-demo", f"{successor}-private")]["metadata"]["labels"][f"{LABEL}/operation"] == root
+        assert original["metadata"]["annotations"][f"{LABEL}/successor"] == successor
+    else:
+        assert ("tenant-demo", successor) not in fake.jobs
+        assert f"{LABEL}/successor" not in original["metadata"]["annotations"]
+
+
 def test_resume_with_a_checkpoint_reference_needs_no_volume_and_may_change_class(client, monkeypatch):
     c, fake = client
     monkeypatch.setattr(kube, "fleet", lambda: TWO_CLASS_FLEET)     # after the client fixture's own fleet

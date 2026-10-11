@@ -166,6 +166,44 @@ def test_application_io_refuses_bucket_prefixes_and_sync_calls_take_no_execution
     assert r.status_code == 400
 
 
+def test_resume_delivers_binding_before_job_is_admitted(client, monkeypatch):
+    c, fake = client
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    assert c.put("/v1/bindings/resume-input", json={"data": {"input.json": "private"}}, headers=H).status_code == 200
+    r = c.post("/v1/models/container-run:invoke", json={"input": {"image": "x", "command": "y"},
+        "execution": {"io_mode": "application", "private_input_ref": "resume-input"}}, headers=H)
+    assert r.status_code == 202, r.text
+    root = r.json()["id"]
+    fake.jobs[("tenant-demo", root)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    create = fake.create_namespaced_job
+
+    def require_private_input(ns, body):
+        name = body["metadata"]["name"]
+        assert fake.secrets[(ns, f"{name}-private")]["data"] == {"input.json": "private"}
+        return create(ns, body)
+
+    monkeypatch.setattr(fake, "create_namespaced_job", require_private_input)
+    r = c.post(f"/v1/operations/{root}:resume", json={"checkpoint_ref": "app://checkpoint/1"}, headers=H)
+    assert r.status_code == 202, r.text
+    assert ("tenant-demo", f"{r.json()['id']}-work") in fake.pvcs  # non-fleet portable resume gets a new volume
+
+
+def test_cleanup_of_finished_attempt_preserves_live_successor_and_binding(client):
+    c, fake = client
+    assert c.put("/v1/bindings/cleanup-input", json={"data": {"input.json": "private"}}, headers=H).status_code == 200
+    ex = {"private_input_ref": "cleanup-input"}
+    execution.deliver(ex, "op-root", "op-root", "tenant-demo", "demo", ["eu-north1"])
+    execution.deliver(ex, "op-root-r1", "op-root", "tenant-demo", "demo", ["eu-north1"])
+    execution.deliver(ex, "op-root-r2", "op-root", "tenant-demo", "demo", ["eu-north1"])
+    execution.sweep_copies("tenant-demo", "op-root-r1")
+    assert ("tenant-demo", "op-root-r1-private") not in fake.secrets
+    execution.sweep_copies("tenant-demo", "op-root")
+    assert ("tenant-demo", "op-root-private") not in fake.secrets
+    assert fake.secrets[("tenant-demo", "op-root-r2-private")]["data"] == {"input.json": "private"}
+    assert ("tenant-demo", "binding-cleanup-input") in fake.secrets
+    execution.sweep_copies("tenant-demo", "op-root")  # idempotent
+
+
 def test_capabilities_are_discoverable(client):
     c, _ = client
     ex = c.get("/v1/fleet", headers=H).json()["execution"]

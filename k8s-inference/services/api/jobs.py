@@ -452,6 +452,12 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     import hashlib
     request_hash = hashlib.sha256(json.dumps(job["spec"], sort_keys=True).encode()).hexdigest()
     job["metadata"].setdefault("annotations", {})[f"{LABEL}/request-hash"] = request_hash
+    # Every admission path (initial, resume, fallback, export retry) must deliver private inputs before Kueue
+    # can start the Job. Keeping this here prevents a new path from creating an unstartable successor.
+    ann = job["metadata"]["annotations"]
+    ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
+    execution.deliver(ex, name, ann.get(f"{LABEL}/resumed-from") or name, ns,
+                      job["metadata"]["labels"][f"{LABEL}/tenant"], placement_regions(job) or [region])
     was_created = True
     try:
         if is_jobset(job):
@@ -475,7 +481,8 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     owner = {"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": created["metadata"].get("uid", "")}
     ann, core = job["metadata"].get("annotations", {}), kube.core(region)
     pvc = None if is_manager_job(job) else ann.get(f"{LABEL}/pvc")
-    if pvc and not ann.get(f"{LABEL}/resumed-from"):
+    if pvc and (not ann.get(f"{LABEL}/resumed-from") or pvc == f"{name}-work"):
+        # A portable resume gets a fresh volume, unlike a same-region resume that reuses the old one.
         body = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
                 "metadata": {"name": pvc, "ownerReferences": [owner], "labels": {f"{LABEL}/operation": name}},
                 "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": f"{ann[f'{LABEL}/pvc-size-gi']}Gi"}}}}

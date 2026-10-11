@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.19", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.20", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -516,7 +516,6 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
         job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
-        execution.deliver(ex, name, name, p.namespace, p.tenant, jobs.placement_regions(job) or [region or REGION])
         region = REGION                      # created on the manager; the dispatcher picks the worker
     else:
         _guard_run_input(m, req, p, region, ex)
@@ -527,7 +526,6 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
             defaults.setdefault("output_prefix", "")
         job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
                              gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
-        execution.deliver(ex, name, name, p.namespace, p.tenant, [region])
     created_job, created = jobs.create(p.namespace, job, region, secret)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
 
@@ -803,11 +801,6 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
         placement["classes"] = [req.gpu_class]
     job, created = jobs.resume(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {}, placement,
                                checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class, idem=idempotency_key, pointer=pointer)
-    ex = jobs.normalise(job).get("execution")
-    if ex and ex.get("private_input_ref"):
-        root = job["metadata"]["annotations"].get("serverless2.nebius/resumed-from") or id
-        regions = jobs.placement_regions(job) or [job["metadata"]["labels"].get(f"{cfg.LABEL}/region") or REGION]
-        execution.deliver(ex, job["metadata"]["name"], root, p.namespace, p.tenant, regions)
     return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
 
 

@@ -766,7 +766,7 @@ def test_billing_once(cluster, monkeypatch):
     """The CronJob entry point bills finished, unbilled runs exactly once (annotation guard), no claim protocol."""
     import asyncio, billing
     done = {"metadata": {"name": "op-b", "uid": "uid-op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo"},
-                         "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work"}},
+                         "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work", f"{L}/resumed-from": "op-root", f"{L}/execution": "{}"}},
             "spec": {}, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}
     cluster.jobs[("tenant-demo", "op-b")] = done
     cluster.pvcs[("tenant-demo", "op-b-work")] = {"metadata": {"name": "op-b-work"}}      # the uploader was preempted before releasing it
@@ -784,7 +784,10 @@ def test_billing_once(cluster, monkeypatch):
     async def fake_add(token, usd, operation, gpu_s):
         spent.append((token, usd)); return 2.1
     monkeypatch.setattr(billing, "add_spend", fake_add)
+    swept = []
+    monkeypatch.setattr(billing.execution, "sweep_copies", lambda ns, op: swept.append((ns, op)))
     assert asyncio.run(billing.bill_once()) == 1 and spent == [("deadbeef", 1.6)]
+    assert swept == [("tenant-demo", "op-b")]  # never sweep a whole root while a successor may be running
     assert done["metadata"]["annotations"][f"{L}/billed"] == "1.6" and done["metadata"]["annotations"][f"{L}/gpu-seconds"] == "3600.0"
     assert ("tenant-demo", "op-b-work") not in cluster.pvcs                              # released by the pass
     assert asyncio.run(billing.bill_once()) == 0            # idempotent; the running one waits

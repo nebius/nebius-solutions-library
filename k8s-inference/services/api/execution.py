@@ -354,10 +354,10 @@ def deliver(ex: dict | None, name: str, root: str, ns: str, tenant: str, regions
             raise HTTPException(502, f"kubernetes ({r}): private input copy: {e.reason}")
 
 
-def sweep_copies(ns: str, root: str) -> None:
-    """Remove the per-operation copies of a finished operation in every region (best effort)."""
+def sweep_copies(ns: str, operation: str) -> None:
+    """Remove only this finished operation's copies, never those of a live successor sharing its root binding."""
     for r in kube.regions():
         try:
-            retry(kube.core(r).delete_collection_namespaced_secret, ns, label_selector=f"{LABEL}/operation={root},{LABEL}/binding")
+            retry(kube.core(r).delete_namespaced_secret, f"{operation}-private", ns)
         except (ApiException, OSError):
             continue

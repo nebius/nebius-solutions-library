@@ -327,6 +327,13 @@ authenticated, epoch-fenced path, and writes the acknowledgement to `/work/CHECK
 another class or the volume is gone (an abrupt node loss), so a run recovers on a fresh volume elsewhere. The
 operation reports `checkpoint_ref` and `checkpoint_generation`.
 
+Private input delivery is part of Job creation, including timed GPU fallback, resume and export retries. The
+per-operation Secret is present in the allowed worker regions before the new Job can be admitted. A missing or
+revoked binding fails before admission; fallback leaves the original handle unchanged. Finishing or billing an
+older operation removes only its own private copies, not those of an active successor. The tenant's source
+binding remains available for explicit resumes until it is revoked. A portable non-fleet resume creates a fresh
+work volume rather than looking for the previous region's volume.
+
 Idempotent resume: `POST :resume` with an `Idempotency-Key` header creates one continuation per (source operation,
 key); a replay returns it (200), the same key with different input is 409, concurrent replays collide on the Job
 name. Without the header a new `<root>-r<n>` is created each time.
