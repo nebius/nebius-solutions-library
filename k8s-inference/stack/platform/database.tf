@@ -55,7 +55,7 @@ resource "kubernetes_job_v1" "database_init" {
         restart_policy = "OnFailure"
         container {
           name    = "psql"
-          image   = "${local.images_host}/docker/library/postgres:16-alpine"
+          image   = "${local.registry.docker}/library/postgres:16-alpine"
           command = ["sh", "-c"]
           args = [<<-EOT
             set -eu

@@ -128,6 +128,14 @@ output "image" {
   value = local.image
 }
 
+output "images_cache" {
+  value = local.images_cache
+}
+
+output "registry_prefix" {
+  value = local.registry_prefix
+}
+
 output "host_of" {
   value = local.host_of
 }

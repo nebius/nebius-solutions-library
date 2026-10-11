@@ -15,8 +15,9 @@ host: example.invalid          # the gateway domain of this cluster: <gateway ip
 hostnames:                     # the public hostnames on it (app and litellm on the control cluster are routes the stage renders)
   api: api.example.invalid
   grafana: grafana.example.invalid
-images:                        # the platform images (terraform.tfvars images.versions, through the logical registry host)
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.15
+images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
+  host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.17
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.9
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.11
 api:
@@ -31,6 +32,8 @@ api:
 trust:                         # the CA bundle ConfigMap `trust` (stack/platform/trust.tf) mounted into the API
   volumes: [{ name: trust, configMap: { name: trust } }]
   mounts: [{ name: trust, mountPath: /etc/ssl/msp, readOnly: true }]
+knative:
+  skipTagResolving: [registry.serverless2.local, nvcr.io]   # registries Knative never resolves tags on (the logical host resolves on nodes only)
 gateway:
   wildcardSecret: hub-wildcard-tls   # the TLS Secret of the cluster's public hostnames (Certificate <cluster id>-wildcard, platform stage)
   serviceAnnotations: {}             # on the external Envoy Service: the static address's allocation id, the internal load-balancer type

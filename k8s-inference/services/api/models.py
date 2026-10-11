@@ -89,9 +89,10 @@ UPSTREAM_ALIAS = {"docker.io": "docker", "registry-1.docker.io": "docker", "inde
 def normalise_image(ref: str) -> str:
     """A plain image reference the way people write it (`vllm/vllm-openai:latest`, `nvcr.io/nim/x:1`,
     `<fleet registry>/team/x:1`) -> the fleet's logical registry host, which every node resolves to its
-    region's cache (docs/IMAGES.md). Already-logical and unknown private registries are left as they are."""
+    region's cache (docs/IMAGES.md). Already-logical and unknown private registries are left as they are.
+    Without the cache (IMAGES_HOST empty: `images.cache.enabled = false`) every reference stays as written."""
     ref = ref.strip()
-    if not ref or ref.startswith(IMAGES_HOST + "/") or "{{" in ref:
+    if not ref or not IMAGES_HOST or ref.startswith(IMAGES_HOST + "/") or "{{" in ref:
         return ref
     first = ref.split("/", 1)[0]
     has_registry = ("." in first or ":" in first or first == "localhost") and "/" in ref

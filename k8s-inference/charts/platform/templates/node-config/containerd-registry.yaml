@@ -47,7 +47,7 @@ spec:
               # table and no restart pulled nothing through the cache). containerd 2.x does not expose the images
               # plugin's registry setting through `crictl info`, so the check is functional: pull a 2 MB image
               # through the logical host exactly as the kubelet would (served by Spegel or the Zot cache).
-              PROBE=registry.serverless2.local/docker/library/busybox:1.36
+              PROBE={{ .Values.images.host }}/docker/library/busybox:1.36
               # Memlock (docs/JOBS.md "Multi-node runs"): RDMA memory registration is bounded by RLIMIT_MEMLOCK (8 MiB on
               # the node image); an unlimited limit on the containerd unit lets every container register memory without
               # CAP_IPC_LOCK. The GPU cloud-init writes the same drop-in at boot; here for nodes created before it.

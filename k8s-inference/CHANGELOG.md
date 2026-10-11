@@ -7,6 +7,7 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 ## 2026-10-11
 
+- api 0.11.17: the image cache is an add-on (`images.cache.enabled`): with an empty `IMAGES_HOST` the API leaves image references as written and the weights-prepare image is Docker Hub's.
 - platform chart 0.1.0: the platform's own manifests (`clusters/common/manifests` until now) as one chart with values in place of the platform stage's per-cluster JSON patches; the render is held equal to the objects the patches produced (`stack/platform/tests/golden`, `make check`), so a live cluster sees no change; the kustomization provider leaves the platform stage.
 - tenant chart 0.3.2: rendered by the platform stage (the models stage is folded into it; tenant buckets are cloud-stage resources; the acceptance probe is `tools/verify.sh`); no template change.
 - api 0.11.16: a model's own `env` entry replaces the platform default of the same name in a multi-node endpoint (kimi-k3 sets `NCCL_IB_DISABLE` itself; server-side apply refused the duplicate); a multi-node run's delivery is rank 0's record (the other ranks record no export).

@@ -55,6 +55,12 @@ locals {
         limits   = { cpu = "10m", memory = "16Mi", "nvidia.com/gpu" = tostring(tonumber(regex("^([0-9]+)gpu", p.preset)[0])) }
       }
     } if p.warm_nodes > 0] }
+    # Spegel mirrors the logical host and falls through to the cluster's cache (clusters/common/values/spegel.yaml);
+    # without the cache it mirrors the public registries between the nodes only
+    spegel = local.images_cache ? {} : { spegel = {
+      mirroredRegistries      = [for alias, host in module.config.registry_prefix : "https://${host}" if alias != "nebius"]
+      additionalMirrorTargets = []
+    } }
     opencost = { opencost = {
       customPricing = { costModel = {
         GPU     = length(local.gpu_prices) > 0 ? max([for p in local.gpu_prices : p.on_demand]...) : 0

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# The five platform images (api, dispatcher, jobs, ops, ui) in the fleet's own registry (README.md, step 5).
-# Every cluster's cache pulls them from there as registry.serverless2.local/nebius/serverless2/<component>:<tag>.
+# The five platform images (api, dispatcher, jobs, ops, ui) in the fleet's own registry (README.md, step 5), tagged
+# <registry>/serverless2/<component>:<tag>. Every cluster's cache pulls them from there as
+# registry.serverless2.local/nebius/serverless2/<component>:<tag>; without the cache (images.cache.enabled = false)
+# the manifests name <registry>/serverless2/<component>:<tag> itself, the same tags (docs/IMAGES.md).
 #
 #   tools/images.sh build [<registry>]              build and push all five with docker buildx
 #   tools/images.sh copy <from-registry> [<registry>]   copy the five tags from another registry (crane, no build)

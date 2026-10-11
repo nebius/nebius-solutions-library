@@ -211,7 +211,7 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 - Spot list prices are the "from" prices; the live spot price comes from the
   price feed, not from this file.
 
-GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md) and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
+GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md; absent with `images.cache.enabled = false`), the memlock limit for RDMA and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
 
 ## Terraform solution (2026-10-08): `terraform.tfvars` instead of `fleet.yaml`
 

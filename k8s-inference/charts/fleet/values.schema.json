@@ -67,6 +67,7 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "enabled": { "type": "boolean" },
                 "node_port": { "type": "integer" },
                 "size_gib": { "type": "integer", "minimum": 1 },
                 "keep_days": { "type": "integer", "minimum": 1 }

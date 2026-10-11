@@ -100,8 +100,9 @@ variable "protect_data" {
 }
 
 variable "image_cache" {
-  description = "Logical registry host and the Zot NodePort; cloud-init writes them into containerd's mirror file on GPU nodes."
+  description = "Logical registry host and the Zot NodePort; cloud-init writes them into containerd's mirror file on GPU nodes (enabled = false: no mirror configuration at boot, images.cache.enabled)."
   type = object({
+    enabled   = optional(bool, true)
     host      = string
     node_port = number
   })

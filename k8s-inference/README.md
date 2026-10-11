@@ -20,7 +20,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
 | Multi-node endpoints: one model served from N whole nodes (`nodes` in the definition), started and stopped explicitly, stopped when idle | LeaderWorkerSet behind the same gateway route, authorization and LiteLLM entry as a one-pod endpoint; `docs/API.md`, "Multi-node endpoints" |
 | N regions, one queue | Kueue MultiKueue on a control cluster; a dispatcher sends each job to the cheapest free pool of the GPU class the model prefers, `docs/SCHEDULING.md` |
-| Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; `docs/IMAGES.md` |
+| Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; the cache is an add-on (`images.cache.enabled`); `docs/IMAGES.md` |
 | Tenants, fair sharing, dedicated pools | a namespace per cluster, a bucket and identity per region, API keys with budgets, Pod Security baseline, their own Kueue queues with a fair-share weight and a GPU cap, pools only they use (`docs/FLEET.md`, "Tenants"), optional GPU quota and image allow-list |
 | Spot, on-demand and reserved capacity | per pool: spot with a price cap, on-demand, or capacity blocks used first |
 | GPU drivers from the node image, or from the NVIDIA GPU Operator (any driver version, open kernel modules, MIG manager; the GPUDirect Storage module is installable but not validated, see `docs/FLEET.md`) | `gpu_operator` in `terraform.tfvars`: node groups without a driver preset, the Nebius marketplace builds of the Network and GPU Operators; `docs/FLEET.md`, "GPU drivers" |
@@ -314,7 +314,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.16 |
+| `services/api` image | 0.11.17 |
 | `services/dispatcher` image | 0.2.9 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |

@@ -123,7 +123,10 @@ locals {
     deployments = { for k, d in try(e.deployments, {}) : (k == "hub" ? local.hub_id : k) => d if contains(keys(local.clusters), k == "hub" ? local.hub_id : k) }
     }, length([for c in try(e.gpu.classes, []) : c if contains(local.gpu_classes, c)]) > 0 ? {
     gpu = merge(e.gpu, { classes = [for c in e.gpu.classes : c if contains(local.gpu_classes, c)] })
-  } : {}) }
+    } : {},
+    can(e.job.image) ? { job = merge(e.job, { image = local.direct_image[e.job.image] }) } : {},
+    can(e.runtime.image) ? { runtime = merge(e.runtime, { image = local.direct_image[e.runtime.image] }) } : {},
+  ) }
   catalog_without_fleet_class = [for id, e in local.catalog_raw : id if can(e.gpu.classes) && length([for c in try(e.gpu.classes, []) : c if contains(local.gpu_classes, c)]) == 0]
   # Per cluster: the entries that run or may run there.
   catalog_by_cluster = { for id in local.cluster_ids : id => { for mid, e in local.catalog : mid => e if contains(keys(e.deployments), id) } }
@@ -154,7 +157,21 @@ locals {
     }
   }
   images_source = local.cloud_facts.hub.registry
-  image         = { for c, t in local.f.images.versions : c => "${local.images_host}/nebius/serverless2/${c}:${t}" }
+  images_cache  = local.f.images.cache.enabled
+  # Where an image reference points: with the cache, <host>/<alias>/<path> on the logical host every node resolves
+  # to its cache; without it, the registry itself (the fleet registry for `nebius`, docker.io for Docker Hub, ...).
+  upstream_host = { for alias, url in local.f.images.upstreams : alias => replace(trimprefix(url, "https://"), "registry-1.docker.io", "docker.io") }
+  registry_prefix = merge(
+    { for alias, host in local.upstream_host : alias => local.images_cache ? "${local.images_host}/${alias}" : host },
+    { nebius = local.images_cache ? "${local.images_host}/nebius" : local.images_source },
+  )
+  image = { for c, t in local.f.images.versions : c => "${local.registry_prefix.nebius}/serverless2/${c}:${t}" }
+  # The bundled classes name their images through the logical host; with the cache off they are rewritten to the
+  # upstream once here (a reference without a known prefix, or a `{{image}}` parameter, stays as it is).
+  logical_prefix = { for alias, p in local.registry_prefix : "${local.images_host}/${alias}/" => "${p}/" }
+  direct_image = { for ref in distinct(compact(flatten([for id, e in local.catalog_raw : [try(e.job.image, ""), try(e.runtime.image, "")]]))) : ref =>
+    local.images_cache ? ref : try([for lp, dp in local.logical_prefix : "${dp}${trimprefix(ref, lp)}" if startswith(ref, lp)][0], ref)
+  }
 
   # Public hostnames: <service>.<gateway ip>.sslip.io, or <service>.<cluster id>.<domain>.
   host_of      = { for id, c in local.clusters : id => local.f.edge.domain == null ? "${local.cloud_facts.clusters[id].gateway_ip}.sslip.io" : "${id}.${local.f.edge.domain}" }
@@ -204,7 +221,7 @@ locals {
       # The fleet database (services/api/db.py): only the control API has it and writes model definitions.
       { name = "DATABASE_URL", valueFrom = { secretKeyRef = { name = "database", key = "platform_url" } } },
       { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
-      { name = "IMAGES_HOST", value = local.images_host },
+      { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
       { name = "IMAGES_SOURCE", value = local.images_source },
       { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
       { name = "ACME_ISSUER", value = local.certificate_issuer[id] },
@@ -230,10 +247,13 @@ locals {
   # with a Mellanox NIC (2026-10-10: a B300 node without InfiniBand waited forever without it).
   apps_dir = "${path.module}/../../clusters/common/apps"
   apps_all = { for f in fileset(local.apps_dir, "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.apps_dir}/${f}")) }
+  # The image cache (docs/IMAGES.md): the Zot release and the containerd DaemonSet exist only with it; Spegel stays.
   app_enabled = {
     gpu-operator         = local.f.gpu_operator.enabled
     network-operator     = local.f.gpu_operator.enabled && coalesce(local.f.gpu_operator.network_operator, true)
     nvidia-device-plugin = !local.f.gpu_operator.enabled
+    zot                  = local.images_cache
+    node-config          = local.images_cache
   }
   apps_by_cluster = { for id, r in local.roles : id => { for n, a in local.apps_all : n => a if(
     (a.placement == "all" || (a.placement == "worker" && r.worker) || (a.placement == "control" && r.control))
@@ -250,9 +270,12 @@ locals {
     components = merge({ for n, a in local.apps_by_cluster[id] : n => true if a.kind == "manifests" }, { for n in local.identity_components[id] : n => true })
     host       = local.host_of[id]
     hostnames  = local.hostnames_of[id]
-    images     = { api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
-    api        = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
-    trust      = { volumes = local.trust_volumes, mounts = local.trust_mounts }
+    images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
+    # the logical host resolves only on the nodes (containerd), not in the cluster network: Knative keeps such a
+    # reference as written; nvcr.io needs credentials Knative does not have
+    knative = { skipTagResolving = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"] }
+    api     = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
+    trust   = { volumes = local.trust_volumes, mounts = local.trust_mounts }
     gateway = {
       wildcardSecret = "${id}-wildcard-tls"
       serviceAnnotations = merge(

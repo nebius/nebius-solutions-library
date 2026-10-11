@@ -52,6 +52,8 @@ locals {
   catalog_by_cluster          = module.config.catalog_by_cluster
   prepull_by_cluster          = module.config.prepull_by_cluster
   image                       = module.config.image
+  images_cache                = module.config.images_cache
+  registry                    = module.config.registry_prefix # alias -> image prefix: through the cache, or the registry itself
   host_of                     = module.config.host_of
   hostnames_of                = module.config.hostnames_of
   control_host                = module.config.control_host

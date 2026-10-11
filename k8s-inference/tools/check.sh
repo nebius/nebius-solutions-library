@@ -24,8 +24,8 @@ tf() { # <dir> <terraform args...>: an init without backend into a data director
   local dir="$1"; shift
   TF_DATA_DIR="$ROOT/$dir/.terraform-check" terraform -chdir="$ROOT/$dir" "$@"
 }
-render() { # a Terraform expression over terraform.tfvars.example, as JSON
-  echo "$1" | tf stack/config console -var-file="$EXAMPLE" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read()))))'
+render() { # a Terraform expression over terraform.tfvars.example (or TFVARS_EXAMPLE), as JSON
+  echo "$1" | tf stack/config console -var-file="${TFVARS_EXAMPLE:-$EXAMPLE}" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read()))))'
 }
 
 check_terraform() {
@@ -102,6 +102,36 @@ EOF
     "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$TMP/llm-example.yaml" > /dev/null; echo "   ok render_endpoint llm-example $cid"
     helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint llm-example $cid"
   done
+  # The image cache as an add-on (docs/IMAGES.md): the example with `images.cache.enabled = false` renders both charts
+  # without the cache's objects and with the platform images pulled from the registry itself.
+  step "image cache off: charts/fleet and charts/platform render without the cache"
+  sed 's/cache = {/cache = { enabled = false, /' "$EXAMPLE" > "$TMP/nocache.tfvars"
+  grep -q 'enabled = false' "$TMP/nocache.tfvars" || { echo "!! the example has no images.cache block to switch off" >&2; exit 1; }
+  TFVARS_EXAMPLE="$TMP/nocache.tfvars" render 'jsonencode({ fleet = local.chart_fleet, values = local.platform_values, prepull = local.prepull_by_cluster })' > "$TMP/nocache.json"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF2'
+import json, subprocess, sys, yaml
+tmp, root = sys.argv[1], sys.argv[2]
+d = json.load(open(f"{tmp}/nocache.json"))
+def render(chart, values):
+    yaml.safe_dump(values, open(f"{tmp}/nocache-values.yaml", "w"))
+    r = subprocess.run(["helm", "template", "x", f"{root}/charts/{chart}", "-f", f"{tmp}/nocache-values.yaml"], capture_output=True, text=True)
+    if r.returncode: sys.exit(r.stderr)
+    return [o for o in yaml.safe_load_all(r.stdout) if o]
+for cid, v in d["values"].items():
+    worker = v["role"]["worker"]
+    fleet = render("fleet", {"cluster": cid, "fleet": d["fleet"], "prepull": {"enabled": worker, "images": d["prepull"].get(cid, [])}})
+    assert not [o for o in fleet if o["metadata"]["name"] in ("zot-config", "zot-pvc-zot-0")], f"{cid}: charts/fleet renders the cache without it"
+    platform = render("platform", v)
+    kinds = {(o["kind"], o["metadata"]["name"]): o for o in platform}
+    assert ("DaemonSet", "containerd-registry-config") not in kinds, f"{cid}: the containerd DaemonSet is rendered without the cache"
+    image = kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["image"]
+    assert image.startswith(d["fleet"]["images"]["source"] + "/serverless2/api:"), f"{cid}: api image {image} is not pulled from the registry"
+    env = {e["name"]: e.get("value") for e in kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env.get("IMAGES_HOST", "") == "", f"{cid}: IMAGES_HOST is set without the cache"
+    for img in d["prepull"].get(cid, []):
+        assert not img["image"].startswith(d["fleet"]["images"]["host"] + "/"), f"{cid}: pre-pull image {img['image']} names the logical host without the cache"
+    print(f"   ok cache off {cid}: no zot, no containerd DaemonSet, api from {image.rsplit('/', 2)[0]}")
+EOF2
   # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: the objects
   # (names, namespaces, labels, every field) and their components (the wave, hence the state address) must be
   # equal, so that an apply changes nothing on a live cluster. The golden set was first written from the kustomize

@@ -98,8 +98,10 @@ fleet = {
 
   # Images: the platform images are pushed once to the registry this fleet creates (tools/images.sh); every
   # cluster caches them and the model images (NGC, Docker Hub, GHCR, Quay, registry.k8s.io) on demand.
+  # cache.enabled = false leaves the per-cluster cache out: images are pulled from their registries directly
+  # (docs/IMAGES.md "The cache as an add-on").
   images = {
-    cache = { size_gib = 1024, keep_days = 30 }
+    cache = { size_gib = 1024, keep_days = 30 }   # enabled = true
     # source   = "cr.eu-north1.nebius.cloud/<registry id>"   # an existing registry instead of the created one
     # versions = { api = "0.8.1" }                            # platform image tags (defaults in stack/config/variables.tf)
   }

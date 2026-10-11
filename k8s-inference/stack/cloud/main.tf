@@ -17,7 +17,7 @@ module "cluster" {
   cpu_pools                   = try(each.value.cpu_pools, {})
   weights_filesystem          = each.value.weights_filesystem
   protect_data                = local.f.protect_data
-  image_cache                 = { host = local.images_host, node_port = local.f.images.cache.node_port }
+  image_cache                 = { enabled = local.f.images.cache.enabled, host = local.images_host, node_port = local.f.images.cache.node_port }
   public_ip                   = local.f.edge.mode == "public"
 }
 

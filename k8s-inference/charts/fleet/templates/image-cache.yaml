@@ -3,6 +3,10 @@
        fleet.yaml `images` stays the one place naming our registry (`images.source`) and the upstreams. The
        credentials file it references is Secret registry/zot-sync-credentials, created outside git. */ -}}
 {{- $img := required "fleet.images is required" .Values.fleet.images }}
+{{- $cacheCfg := default dict $img.cache }}
+{{- /* images.cache.enabled = false (docs/IMAGES.md "The cache as an add-on"): no namespace, configuration or claim; `default`
+       would turn a false into true, hence hasKey */ -}}
+{{- if or (not (hasKey $cacheCfg "enabled")) $cacheCfg.enabled }}
 {{- $src := splitList "/" $img.source }}
 {{- $srcHost := index $src 0 }}
 {{- $srcPath := join "/" (rest $src) }}
@@ -70,3 +74,4 @@ spec:
   resources:
     requests:
       storage: {{ $size }}
+{{- end }}

@@ -184,15 +184,20 @@ variable "fleet" {
       })), {})
     }))
 
-    # Images: every image reference in the platform and the catalog names the logical host, which each node
-    # resolves to its Spegel peers and the cluster's Zot pull-through cache. `source` is the registry the
-    # platform images (services/*) are pushed to; default: the registry this solution creates in the hub
-    # project (`stack.sh output cloud registry`). `upstreams`: third-party registries reachable as
+    # Images: with the cache (default), every image reference in the platform and the catalog names the logical
+    # host, which each node resolves to its Spegel peers and the cluster's Zot pull-through cache. `source` is the
+    # registry the platform images (services/*) are pushed to; default: the registry this solution creates in the
+    # hub project (`stack.sh output cloud registry`). `upstreams`: third-party registries reachable as
     # <host>/<alias>/<path> (credentials for private ones come from the environment, see `secrets`).
+    # cache.enabled = false leaves the cache out (docs/IMAGES.md "The cache as an add-on"): no Zot, no registry
+    # credential, no containerd drop-in; the platform images are pulled from `source` as the nodes' own identity
+    # allows, catalog and model images from their upstream registries, and the API leaves references as written.
+    # Spegel stays either way.
     images = optional(object({
       host   = optional(string, "registry.serverless2.local")
       source = optional(string)
       cache = optional(object({
+        enabled   = optional(bool, true)
         node_port = optional(number, 30500)
         size_gib  = optional(number, 1024)
         keep_days = optional(number, 30)
@@ -206,7 +211,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.16")
+        api        = optional(string, "0.11.17")
         dispatcher = optional(string, "0.2.9")
         jobs       = optional(string, "0.1.14")
         ops        = optional(string, "0.1.11")

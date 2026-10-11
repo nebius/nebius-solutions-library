@@ -242,7 +242,7 @@ resource "kubernetes_job_v1" "probe" {
         restart_policy = "Never"
         container {
           name    = "probe"
-          image   = "${local.images_host}/docker/curlimages/curl:8.10.1"
+          image   = "${local.registry.docker}/curlimages/curl:8.10.1"
           command = ["sh", "/scripts/verify.sh"]
           env {
             name  = "API"

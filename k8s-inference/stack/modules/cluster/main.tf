@@ -263,7 +263,8 @@ locals {
 
   # GPU pools: containerd reads the image cache's mirror files (hosts.toml) only with `config_path` set, which
   # the GPU node image lacks, and the first pulls of a fresh node happen before Spegel has written them.
-  # Both files are written at boot so the first pull already goes through the cache (docs/IMAGES.md).
+  # Both files are written at boot so the first pull already goes through the cache (docs/IMAGES.md); without
+  # the cache (image_cache.enabled = false) neither is, and containerd keeps the node image's configuration.
   containerd_registry_dropin = join("\n", [
     "# serverless2 image cache (docs/IMAGES.md): per-registry mirror configuration (Spegel peers, Zot cache)",
     "version = 2",
@@ -286,15 +287,19 @@ locals {
     [
       "#cloud-config",
       "write_files:",
-      " - path: /etc/containerd/conf.d/serverless2-registry.toml",
-      "   content: |",
     ],
-    [for l in split("\n", local.containerd_registry_dropin) : "     ${l}"],
-    [
-      " - path: /etc/containerd/certs.d/${var.image_cache.host}/hosts.toml",
-      "   content: |",
-    ],
-    [for l in split("\n", local.containerd_hosts_toml) : "     ${l}"],
+    var.image_cache.enabled ? concat(
+      [
+        " - path: /etc/containerd/conf.d/serverless2-registry.toml",
+        "   content: |",
+      ],
+      [for l in split("\n", local.containerd_registry_dropin) : "     ${l}"],
+      [
+        " - path: /etc/containerd/certs.d/${var.image_cache.host}/hosts.toml",
+        "   content: |",
+      ],
+      [for l in split("\n", local.containerd_hosts_toml) : "     ${l}"],
+    ) : [],
     [
       " - path: /etc/sysctl.d/90-serverless2.conf",
       "   content: |",
@@ -309,9 +314,11 @@ locals {
       "     LimitMEMLOCK=infinity",
       "runcmd:",
       " - sysctl --system",
+      ], var.image_cache.enabled ? [
       " - mkdir -p /etc/containerd/certs.d",
       " - grep -q '^imports' /etc/containerd/config.toml || sed -i '1a imports = [\"/etc/containerd/conf.d/*.toml\"]' /etc/containerd/config.toml",
       " - touch /etc/containerd/certs.d/.serverless2-containerd-restarted",
+      ] : [], [
       " - systemctl daemon-reload",
       " - systemctl restart containerd",
     ],
