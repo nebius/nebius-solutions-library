@@ -40,6 +40,13 @@ def test_exit_zero_is_not_delivery():
     assert app_bad["status"] == "EXPORT_FAILED" and "finalization" in app_bad["error"]
 
 
+def test_a_finalizing_pod_is_a_running_operation():
+    name = "op-container-run-2"
+    job = _job(name, complete=False)
+    job["_pods"] = [{"metadata": {"name": f"{name}-a", "namespace": "tenant-demo"}, "spec": {}, "status": {"phase": "Running", "containerStatuses": [{"name": "main", "state": {"terminated": {"exitCode": 0, "startedAt": "2026-10-11T10:00:00Z", "finishedAt": "2026-10-11T10:01:00Z"}}}]}}]
+    assert status.normalise(job)["status"] == "RUNNING"
+
+
 def test_lifecycle_fields_come_from_the_rows(monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: False)
     rows = [{**_record("op-x", "op-x-a", "interrupted", epoch=1, revision=3), "operation": "op-x"},
@@ -111,6 +118,11 @@ def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypat
     assert new["metadata"]["annotations"][f"{LABEL}/export-of"] == op
     monkeypatch.setattr(attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="succeeded"), "operation": op}])
     assert c.post(f"/v1/operations/{op}:export", headers=H).status_code == 409
+    # the retry delivered: the original reports SUCCEEDED and names the retry
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="failed"), "operation": op},
+                                                               {**_record(f"{op}-x1", f"{op}-x1-b", export="succeeded"), "operation": f"{op}-x1"}])
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "SUCCEEDED" and got["export_state"] == "succeeded" and got["exported_by"] == f"{op}-x1"
 
 
 @pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL is needed for PostgreSQL integration tests")

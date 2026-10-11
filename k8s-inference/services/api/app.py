@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.6", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.7", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -634,6 +634,11 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     records, root = _records(p, job, id, region)
     op = jobs.normalise(job, _price(job), records)
     op.update(attempts.lifecycle(id, root, records))
+    if op["status"] == "EXPORT_FAILED" and attempts.enabled():
+        # a transfer-only retry (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md "Attempts and finalization")
+        done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{id}-x") and (r.get("export_state") or r.get("export")) == "succeeded"]
+        if done:
+            op.update({"status": "SUCCEEDED", "export_state": "succeeded", "exported_by": done[-1]["operation"], "error": None})
     return op
 
 

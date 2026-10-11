@@ -146,8 +146,8 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
     elif ann.get(f"{LABEL}/cancelled"):
         status = "CANCELLED"
-    elif any(a["status"] == "RUNNING" for a in attempts):
-        status = "RUNNING"
+    elif any(a["status"] == "RUNNING" for a in attempts) or any((p.get("status") or {}).get("phase") == "Running" for p in job.get("_pods", [])):
+        status = "RUNNING"          # includes finalization: main ended, the uploader is still exporting
     else:
         status = "QUEUED"          # gated by Kueue, pending for a node, being placed, or between attempts after a preemption
     if ann.get(f"{LABEL}/cancelled") and attempts and attempts[-1]["status"] in ("PREEMPTED", "RUNNING", "QUEUED"):
