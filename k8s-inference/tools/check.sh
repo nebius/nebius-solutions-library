@@ -53,7 +53,7 @@ fleet = json.load(open(f"{tmp}/fleet.json")); plan = json.load(open(f"{tmp}/plan
 for cid, c in plan["clusters"].items():
     worker = c["roles"]["worker"]
     yaml.safe_dump({"cluster": cid, "fleet": fleet, "prepull": {"enabled": worker, "images": []}}, open(f"{tmp}/fleet-{cid}.yaml", "w"))
-    cluster = {"region": c["region"], "bucket": "example-bucket", "endpoint": f"storage.{c['region']}.nebius.cloud"} if worker else {"region": c["region"], "manager": True}
+    cluster = {"region": c["region"]} if worker else {"region": c["region"], "manager": True}
     yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
     for mid, e in catalog.items():
         if "runtime" in e and cid in e.get("deployments", {}):

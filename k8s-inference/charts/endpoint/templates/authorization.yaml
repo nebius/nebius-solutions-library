@@ -4,6 +4,8 @@ kind: SecurityPolicy
 metadata:
   name: {{ $v.name }}-authorization
   namespace: {{ $v.namespace }}
+  labels:
+    {{- include "endpoint.labels" . | nindent 4 }}
 spec:
   targetSelectors:
     - group: gateway.networking.k8s.io

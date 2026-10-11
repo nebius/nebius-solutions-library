@@ -21,6 +21,8 @@ kind: ResourceClaimTemplate
 metadata:
   name: {{ $.Values.infinibandClaimTemplate }}-{{ $n }}
   namespace: {{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
 spec:
   spec:
     devices:
@@ -42,7 +44,7 @@ kind: PersistentVolume
 metadata:
   name: scratch-shared-{{ include "tenant.ns" . }}
   labels:
-    serverless2.nebius/tenant: {{ .Values.name }}
+    {{- include "tenant.labels" . | nindent 4 }}
 spec:
   capacity:
     storage: {{ .Values.sharedScratch.size }}
@@ -61,6 +63,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.sharedScratch.claim }}
   namespace: {{ include "tenant.ns" . }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: shared-scratch

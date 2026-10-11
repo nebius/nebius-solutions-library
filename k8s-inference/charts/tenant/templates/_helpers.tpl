@@ -14,3 +14,13 @@
 {{- range $p := .Values.profiles }}{{ $out = append $out $p }}{{ end -}}
 {{- $out | uniq | toYaml -}}
 {{- end -}}
+{{/* Labels of every rendered object: the standard Helm set plus the tenant; selectors elsewhere use
+     serverless2.nebius/tenant (the API lists tenant namespaces by it) and kubernetes.io/metadata.name, never these. */}}
+{{- define "tenant.labels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+app.kubernetes.io/part-of: serverless2
+serverless2.nebius/tenant: {{ .Values.name }}
+{{- end -}}

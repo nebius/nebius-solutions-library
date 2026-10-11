@@ -12,6 +12,8 @@ kind: CiliumNetworkPolicy
 metadata:
   name: execution-profile-{{ $name }}
   namespace: {{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
 spec:
   endpointSelector:
     matchLabels: { serverless2.nebius/execution-profile: {{ $name | quote }} }
