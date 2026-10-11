@@ -262,6 +262,15 @@ DRA claims allocated (8 NICs per pod), NCCL `NET/IB` on `mlx5_0..7`, a 1 GiB all
 16 GPUs at 436.5 GB/s bus bandwidth, restart-all after rank failures, rank-0 upload. 16 x B300 is
 the same path on an `8gpu-192vcpu-2768gb` pool (uk-south1, eu-west2, us-north1).
 
+## Model weights for runs
+
+A job class may name `weights: {path, mount_path}` (the generic classes expose it as the `weights` parameter): a
+directory of the region's shared model weights, the filesystem endpoints cache into (`weights` of an endpoint),
+mounted read-only at `/weights` (or `mount_path`) through the tenant's read-only claim `weights-shared`. A run can
+thus read what an endpoint seeded without copying it; it cannot write there (the tenant's writable area is `data`).
+Every run's image reference goes through the region's cache like an endpoint's (`registry.serverless2.local/...`,
+docs/IMAGES.md), whether it comes from the job class or from the caller's `image` parameter.
+
 ## Execution options
 
 A run may carry an `execution` block next to `input` (`services/api/execution.py`; unknown fields are refused,

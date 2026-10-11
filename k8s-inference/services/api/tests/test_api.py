@@ -444,7 +444,7 @@ def test_render_and_build_run(cluster):
     assert e.value.status_code == 500
     cr = jobs.build_run("op-c", catalog.get("container-run"), {"image": "img:1", "command": "python train.py", "gpus": 2}, "demo", None, None, None, "high", "eu-north1", {"output_prefix": "x"})
     main = _main(cr)
-    assert main["image"] == "img:1" and main["command"] == ["/bin/sh", "-c", "python train.py"] and main["resources"]["requests"]["nvidia.com/gpu"] == "2"
+    assert main["image"] == "registry.serverless2.local/docker/library/img:1" and main["command"] == ["/bin/sh", "-c", "python train.py"] and main["resources"]["requests"]["nvidia.com/gpu"] == "2"
     assert {e["name"]: e["value"] for e in main["env"]}["CHECKPOINT_DIR"] == "/work/checkpoint" and cr["spec"]["template"]["spec"]["priorityClassName"] == "serverless2-batch-priority"
     assert cr["metadata"]["annotations"][f"{L}/pvc-size-gi"] == "100" and cr["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ngc"}]
     monkeypatch_urls = {"eu-north1": "https://grafana.example"}
@@ -1478,3 +1478,15 @@ def test_fleet_live_lists_pools_and_clusters(client, monkeypatch):
     d = r.json()
     assert d["pools"] and d["pools"][0]["nodes_ready"] == 1
     assert d["clusters"] and d["clusters"][0]["kubernetes_version"] == "v1.35.7" and d["clusters"][0]["reachable"]
+
+
+def test_fleet_info_reports_the_tenant_quotas_and_usage(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr(kube, "fleet", lambda: {**FLEET, "tenants": {"demo": {"gpu_quota": 4, "fair_share_weight": 2, "dedicated_pools": ["h100-lab-1x"]}}})
+    monkeypatch.setattr(kube, "tenant_usage", lambda tenant, region="eu-north1": {"gpus_by_pool": {"h100-spot-1x": 2}, "admitted": 1, "pending": 3})
+    monkeypatch.setattr(kube, "pool_usage", lambda cluster, pool: {"nodes_ready": 0, "gpus_total": 0, "gpus_used": 0})
+    monkeypatch.setattr(kube, "cluster_summary", lambda region: {"reachable": True})
+    t = c.get("/v1/fleet", headers=H).json()["tenant"]
+    assert t == {"name": "demo", "gpu_quota": 4, "fair_share_weight": 2, "dedicated_pools": ["h100-lab-1x"]}
+    live = c.get("/v1/fleet?live=true", headers=H).json()["tenant"]
+    assert live["usage"]["eu-north1"] == {"gpus_by_pool": {"h100-spot-1x": 2}, "admitted": 1, "pending": 3}

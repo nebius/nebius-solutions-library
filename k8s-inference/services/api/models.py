@@ -185,6 +185,10 @@ def validate(spec: dict) -> dict:
         d = s["data"]
         if kind != "job" or not isinstance(d, dict) or not DATA_PATH_RE.match(str(d.get("path", ""))):
             raise HTTPException(400, "data: jobs only, {path (a relative directory of the tenant's shared data, no '..'), mount_path, readonly}")
+    if s.get("weights") is not None and kind == "job":
+        w = s["weights"]
+        if not isinstance(w, dict) or not DATA_PATH_RE.match(str(w.get("path", ""))):
+            raise HTTPException(400, "weights (jobs): {path (a directory of the region's shared weights, no '..'), mount_path}")
     if "automount_service_account_token" in s:
         if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
             raise HTTPException(400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token")
@@ -432,6 +436,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             job["imagePullSecret"] = s["pull_secret"]
         if (d := s.get("data")):
             job.update({"data": d["path"], "dataMountPath": d.get("mount_path", "/data"), "dataReadOnly": bool(d.get("readonly", True))})
+        if (w := s.get("weights")):
+            job.update({"weights": w["path"], "weightsMountPath": w.get("mount_path", "/weights")})
         entry.update({
             "mode": "run", "protocol": "kubernetes-job",
             "gpu": {"count": count, "classes": classes} if classes else "none",

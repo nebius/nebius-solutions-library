@@ -69,6 +69,7 @@ def fleet() -> dict:
         import yaml
         data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
         _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
+        _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
     except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
         pass
     _fleet_cache["until"] = time.time() + 60
@@ -279,6 +280,27 @@ def pool_usage(cluster: str, pool: str) -> dict:
     except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
         used = None
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
+
+
+def tenant_usage(tenant: str, region: str = REGION) -> dict:
+    """What the tenant's Kueue queues hold on a cluster (charts/fleet `<tenant>-<profile>` ClusterQueues): GPUs in use per
+    pool (flavor), admitted and pending workloads. Unreachable: empty."""
+    out = {"gpus_by_pool": {}, "admitted": 0, "pending": 0}
+    try:
+        items = retry(api(region).list_cluster_custom_object, "kueue.x-k8s.io", "v1beta2", "clusterqueues").get("items", [])
+    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as empty
+        return out
+    for q in items:
+        if not q["metadata"]["name"].startswith(f"{tenant}-"):
+            continue
+        st = q.get("status") or {}
+        out["admitted"] += int(st.get("admittedWorkloads") or 0)
+        out["pending"] += int(st.get("pendingWorkloads") or 0)
+        for fu in st.get("flavorsUsage") or []:
+            for r in fu.get("resources") or []:
+                if r.get("name") == "nvidia.com/gpu":
+                    out["gpus_by_pool"][fu["name"]] = out["gpus_by_pool"].get(fu["name"], 0) + int(float(str(r.get("total") or 0)))
+    return out
 
 
 def cluster_summary(region: str) -> dict:

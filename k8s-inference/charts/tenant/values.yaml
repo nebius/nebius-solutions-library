@@ -25,6 +25,7 @@ infinibandClaimTemplate: ib          # ResourceClaimTemplates ib-<n> for every n
 infinibandClaimCounts: [8, 4]       # NICs per node: 8 on H100/H200/B200/B300 full nodes, 4 on GB300
 infinibandDeviceClass: ib.networking.nebius.ai
 sharedScratch: { claim: scratch-shared, size: 1Ti }
+sharedWeights: { claim: weights-shared }   # the region's model weights, read-only for runs (`weights` of a job class, docs/JOBS.md)
 fleet: {}                      # fleet.yaml `fleet:` document (GPU classes -> prefer-<class> queues); passed by onboarding
 clusters:                      # keyed by cluster id: the models stage passes this cluster's entry. Placeholders below.
   control:                     # the MultiKueue manager: namespace, profile queues and the API binding only (no pods run here)

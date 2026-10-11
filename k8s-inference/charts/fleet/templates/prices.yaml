@@ -31,6 +31,10 @@ data:
       tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
     {{- end }}
     {{- end }}
+  tenants.yaml: |
+    {{- range $tn, $t := (default dict $f.tenants) }}
+    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }} }
+    {{- end }}
   list.yaml: |
     {{- range $platform, $pr := $f.prices }}
     {{- if kindIs "map" $pr }}

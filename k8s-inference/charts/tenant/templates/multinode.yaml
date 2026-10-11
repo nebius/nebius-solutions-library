@@ -68,5 +68,39 @@ spec:
   resources:
     requests:
       storage: {{ .Values.sharedScratch.size }}
+---
+# The region's model weights (the filesystem the endpoints write their caches to), read-only for this tenant's runs:
+# a job class names `weights: {path, mount_path}` and the run sees <mount_path> (docs/JOBS.md "Model weights for runs").
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.sharedWeights.claim }}-{{ include "tenant.ns" . }}
+  labels:
+    serverless2.nebius/tenant: {{ .Values.name }}
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: shared-weights
+  claimRef:
+    name: {{ .Values.sharedWeights.claim }}
+    namespace: {{ include "tenant.ns" . }}
+  hostPath:
+    path: {{ default "/mnt/weights" $fs.mount_path }}
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.sharedWeights.claim }}
+  namespace: {{ include "tenant.ns" . }}
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: shared-weights
+  volumeName: {{ .Values.sharedWeights.claim }}-{{ include "tenant.ns" . }}
+  resources:
+    requests:
+      storage: 1Ti
 {{- end }}
 {{- end }}

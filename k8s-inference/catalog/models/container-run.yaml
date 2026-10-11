@@ -22,6 +22,8 @@ job:                                        # rendered by services/api/jobs.py; 
   data: "{{data}}"                          # a directory of the tenant's shared data, mounted at /data (empty = none; docs/JOBS.md "Shared data")
   dataMountPath: /data
   dataReadOnly: "{{data_readonly}}"
+  weights: "{{weights}}"
+  weightsMountPath: /weights
 parameters:
   - { name: scratch, type: string, label: Scratch storage, default: network, help: "network = per-run network volume (resumes after preemption); local-nvme = host NVMe of the node (fastest, gone with the pod, checkpoint to the bucket yourself)" }
   - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md); any public reference also works" }
@@ -34,4 +36,5 @@ parameters:
   - { name: disk_gi, type: number, label: Work volume (GiB), default: 100 }
   - { name: data, type: string, label: Shared data directory, default: "", help: "optional; a directory of the tenant's area on the region's shared filesystem, mounted read-only at /data (reference databases, model parameters): nothing is synced per run" }
   - { name: data_readonly, type: boolean, label: Shared data read-only, default: true, help: "false mounts it writable: a seeding run fills the directory" }
+  - { name: weights, type: string, label: Model weights, default: "", help: "a directory of the region's shared model weights (the endpoints' cache), mounted read-only at /weights" }
   - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), default: "", help: "optional; synced to /work/in before the first attempt" }

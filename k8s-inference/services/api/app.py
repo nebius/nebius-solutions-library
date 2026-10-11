@@ -169,7 +169,13 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                       "gpus_per_node": int(pool.get("gpus_per_node") or 1), "capacity": pool.get("capacity"),
                       "usd_per_gpu_hour": pool.get("usd_per_gpu_hour"), "max_nodes": pool.get("max_nodes"),
                       "interconnect": pool.get("interconnect"), "local_nvme": bool(pool.get("local_nvme"))} for pool in pools]}
+    # the caller's tenant: its quotas as terraform.tfvars shaped them (charts/fleet tenants.yaml) and, live, what its
+    # queues hold per region (docs/FLEET.md "Tenants")
+    t = (kube.fleet().get("tenants") or {}).get(p.tenant) or {}
+    out["tenant"] = {"name": p.tenant, "gpu_quota": t.get("gpu_quota"), "fair_share_weight": t.get("fair_share_weight", 1),
+                     "dedicated_pools": list(t.get("dedicated_pools") or [])}
     if live:
+        out["tenant"]["usage"] = {region: kube.tenant_usage(p.tenant, region) for region in kube.regions() if not (FLEET_MANAGER and region == REGION)}
         for entry in out["pools"]:
             entry.update(kube.pool_usage(entry["cluster"], entry["pool"]))
         # the clusters: this one (the control plane when it is the fleet manager) and every region it reaches

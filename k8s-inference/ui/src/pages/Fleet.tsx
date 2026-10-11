@@ -25,6 +25,25 @@ export function Fleet() {
         </div>
       </div>
       {loading && !data && <Loading />}
+      {data?.tenant && (
+        <div className="card" style={{ marginBottom: 16, padding: "12px 16px" }}>
+          <h2 style={{ margin: "0 0 8px" }}>Your tenant: {data.tenant.name}</h2>
+          <div className="stats">
+            <div className="stat"><div className="small muted">GPU quota per pool</div><div className="stat-value">{data.tenant.gpu_quota ?? "no cap"}</div></div>
+            <div className="stat"><div className="small muted">Fair-share weight</div><div className="stat-value">{data.tenant.fair_share_weight ?? 1}</div></div>
+            <div className="stat"><div className="small muted">Dedicated pools</div><div className="stat-value">{data.tenant.dedicated_pools?.length ? data.tenant.dedicated_pools.join(", ") : "none"}</div></div>
+            {Object.entries(data.tenant.usage ?? {}).map(([region, u]) => (
+              <div className="stat" key={region}>
+                <div className="small muted">{region}: GPUs in use (admitted / pending)</div>
+                <div className="stat-value">
+                  {Object.values(u.gpus_by_pool).reduce((a, b) => a + b, 0)} ({u.admitted} / {u.pending})
+                </div>
+                <div className="small muted">{Object.entries(u.gpus_by_pool).map(([pool, n]) => `${pool}: ${n}`).join(", ") || "idle"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {data?.clusters && data.clusters.length > 0 && (
         <div className="card tbl-wrap" style={{ marginBottom: 16 }}>
           <h2 style={{ margin: "12px 16px" }}>Clusters</h2>

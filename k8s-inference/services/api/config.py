@@ -85,6 +85,7 @@ INFINIBAND_CLAIM_TEMPLATE = os.environ.get("INFINIBAND_CLAIM_TEMPLATE", "ib")
 # Shared checkpoint claim for multi-node runs (charts/tenant renders it on clusters with the weights filesystem):
 # RWX across nodes, so a restarted JobSet and a `:resume` find the checkpoints (`checkpoints: shared`).
 SHARED_SCRATCH_PVC = os.environ.get("SHARED_SCRATCH_PVC", "scratch-shared")
+WEIGHTS_SHARED_PVC = os.environ.get("WEIGHTS_SHARED_PVC", "weights-shared")   # the region's weights, read-only for runs (charts/tenant)
 KUEUE_PRIORITY = os.environ.get("KUEUE_PRIORITY", "customer-batch")
 JOB_TTL_S = int(os.environ.get("JOB_TTL_S", str(90 * 86400)))      # finished Jobs stay this long (operation history)
 JOB_BACKOFF_LIMIT = int(os.environ.get("JOB_BACKOFF_LIMIT", "3"))  # application failures before a Job is FAILED (disruptions do not count)

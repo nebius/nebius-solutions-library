@@ -224,6 +224,13 @@ export interface FleetInfo {
   region: string;
   pools?: FleetPool[];
   clusters?: FleetCluster[];
+  tenant?: {
+    name: string;
+    gpu_quota?: number | null;
+    fair_share_weight?: number;
+    dedicated_pools?: string[];
+    usage?: Record<string, { gpus_by_pool: Record<string, number>; admitted: number; pending: number }>;
+  };
 }
 export interface MetricPanel {
   id: string;

@@ -56,3 +56,21 @@ def test_job_definitions_carry_data_and_endpoints_skip_dedicated_pools(monkeypat
         models.to_entry({"id": "bad", "kind": "endpoint", "image": "img", "data": {"path": "x"}})
     # the reserved pool is dedicated to tenant `lab`: an endpoint of the fleet never goes there
     assert models.pool_for("hub", ["h100"], 1) == "h100-spot-1x"
+
+
+def test_weights_mount_read_only_and_images_through_the_cache():
+    """`weights` (docs/JOBS.md "Model weights for runs") mounts the region's shared weights read-only; a caller's plain image
+    reference is rewritten to the fleet's logical registry host like an endpoint's."""
+    from config import WEIGHTS_SHARED_PVC
+    job = _run({"weights": "llm-example", "image": "vllm/vllm-openai:v0.31.0"})
+    pod = job["spec"]["template"]["spec"]
+    vol = next(v for v in pod["volumes"] if v["name"] == "weights")
+    assert vol["persistentVolumeClaim"] == {"claimName": WEIGHTS_SHARED_PVC, "readOnly": True}
+    main = next(c for c in pod["containers"] if c["name"] == "main")
+    assert {"name": "weights", "mountPath": "/weights", "subPath": "llm-example", "readOnly": True} in main["volumeMounts"]
+    assert main["image"].startswith("registry.serverless2.local/docker/vllm/vllm-openai:")
+    assert not any(v["name"] == "weights" for v in _run({})["spec"]["template"]["spec"]["volumes"])
+    with pytest.raises(HTTPException):
+        _run({"weights": "../x"})
+    e = models.to_entry({"id": "wjob", "kind": "job", "image": "img", "command": "x", "weights": {"path": "llm-example", "mount_path": "/w"}})
+    assert e["job"]["weights"] == "llm-example" and e["job"]["weightsMountPath"] == "/w"

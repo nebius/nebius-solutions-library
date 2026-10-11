@@ -28,7 +28,7 @@ import kube
 from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_GI, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL,
                     ENDPOINT_CONNECT_TO, LITELLM_URL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION, RUNNER_IMAGE, S3_ENV_SECRET,
                     INFINIBAND_CLAIM_TEMPLATE, INFINIBAND_ENV, JOBSET_GROUP, JOBSET_NAME_LABEL, JOBSET_PLURAL, JOBSET_VERSION,
-                    MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC)
+                    MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC, WEIGHTS_SHARED_PVC)
 from resilience import retry
 from pod_metadata import normalise as normalise_pod_metadata
 import execution
@@ -53,6 +53,19 @@ def _mount_data(r: dict, pod: dict, containers: list) -> None:
         c["volumeMounts"].append({"name": "data", "mountPath": str(r.get("dataMountPath") or "/data"), "subPath": f"data/{path}", "readOnly": ro})
 
 
+def _mount_weights(r: dict, pod: dict, containers: list) -> None:
+    """`job.weights` (docs/JOBS.md "Model weights for runs"): a directory of the region's shared weights filesystem (the
+    one endpoints cache into), mounted read-only at `weightsMountPath` (default /weights). Empty: nothing."""
+    path = str(r.get("weights") or "").strip("/")
+    if not path:
+        return
+    if ".." in path.split("/"):
+        raise HTTPException(400, "weights: a relative directory, no parent references")
+    pod["volumes"].append({"name": "weights", "persistentVolumeClaim": {"claimName": WEIGHTS_SHARED_PVC, "readOnly": True}})
+    for c in containers:
+        c["volumeMounts"].append({"name": "weights", "mountPath": str(r.get("weightsMountPath") or "/weights"), "subPath": path, "readOnly": True})
+
+
 def build_run(name: str, model: dict, params: dict, tenant: str, label: str | None, idem: str | None, timeout_s: int | None,
               priority: str | None, region: str | None = REGION, defaults: dict | None = None, key_hash: str | None = None,
               pvc: str | None = None, placement: dict | None = None, gpu_class: str | None = None, ex: dict | None = None) -> dict:
@@ -75,6 +88,8 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         gpu_class = None
     if not job.get("image") or not job.get("command"):
         raise HTTPException(500, f"model {model['name']} has no job.image/job.command")
+    from models import normalise_image            # a caller-supplied image (container-run) goes through the region's cache too
+    job["image"] = normalise_image(str(job["image"]))
     declared = {p["name"]: p.get("default") for p in model.get("parameters", [])}
     declared.update({k: None for k in (defaults or {})})
     declared.update({"input_prefix": None, "output_prefix": None})
@@ -89,6 +104,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         raise HTTPException(400, f"missing required parameters {missing}")
     values["operation"] = name
     r = _render(job, values)
+    r["image"] = normalise_image(str(r.get("image") or ""))     # after the parameters: `{{image}}` is now a reference
     if argument_parameter := job.get("argsParameter"):
         arguments = values.get(argument_parameter, [])
         if not isinstance(arguments, list) or len(arguments) > 100 or not all(isinstance(a, str) for a in arguments):
@@ -197,6 +213,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if nodes > 1:
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
     _mount_data(r, pod, [main])
+    _mount_weights(r, pod, [main])
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
@@ -266,6 +283,7 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         for c in (main, uploader):
             c["volumeMounts"].append({"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"})
     _mount_data(r, pod, [main])
+    _mount_weights(r, pod, [main])
     rank = {"name": "NODE_RANK", "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['batch.kubernetes.io/job-completion-index']"}}}
     dist = {"NNODES": str(nodes), "GPUS_PER_NODE": str(gpus), "WORLD_SIZE": str(nodes * max(gpus, 1)),
             "MASTER_ADDR": f"{name}-workers-0-0.{name}", "MASTER_PORT": "29500", "CHECKPOINT_DIR": "/work/checkpoint"}
