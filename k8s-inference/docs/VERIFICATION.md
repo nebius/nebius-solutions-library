@@ -12,6 +12,19 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Missing parts round: variants, weights for runs, tenant quotas, one scaling vocabulary, hygiene, InfiniBand floor, refactors 1 and 2 (2026-10-11 15:00-17:00 UTC, the same test fleet)
+
+| Check | Result |
+|---|---|
+| Variants and request routing | `llm-tiered` (vLLM, a small open model) defined with two variants on the hub: `primary` on `h100-spot-1x` and `cheap` on `l40s-spot-1x`, `routing.field: tier`; two InferenceServices rendered (`llm-tiered`, `llm-tiered-cheap`) with their pools and bounds, two SecurityPolicies pointing at the model's authorizer; `GET /v1/endpoints` listed both variants with their state and the routing block. `:invoke` with `tier: budget` answered from the cheap variant on L40S (its pod served the request; cold start about 8.5 min for the node and the model), a request without the field went to the first ready variant (cheap, the primary being scaled to zero), `tier: fast` started the primary on the warm H100 spare and answered in 60 s. A call made before the variant's Knative service existed failed fast ("endpoint unreachable") instead of waiting: an endpoint is usable once its objects are up |
+| Model weights for runs | a demo run with `weights: boltz2` saw `/weights` as virtiofs read-only with the endpoint's cache (9.4 GB) and got "Read-only file system" on a write; its busybox image was rewritten to the fleet's registry host |
+| Tenant quotas in the console | `GET /v1/fleet` carries the caller's tenant (quota, weight, dedicated pools) and, live, the GPUs its queues hold per region; the Fleet page shows the card |
+| Multi-node runs after the execution round | a fleet submission of a two-node JobSet failed with 500 (the fleet path read a Job's pod template); fixed (`jobs.placement_regions`) with a regression test |
+| Hygiene | chart maintainers, kubeVersion, values schemas (the tenant schema had to accept Terraform's string-typed `manager` flag), standard labels, CHANGELOG and a versions table, digest-pinned base images; the models stage stays on kubernetes provider 2.x until a planned state upgrade |
+| One scaling vocabulary | `concurrency_utilization` / `requests_per_second` with `target`, `container_concurrency`, `window_s`, `cooldown_s`, `idle_s`; stored raw-Knative definitions normalise on read (a stored raw concurrency target becomes the replica's concurrency limit); console and docs follow |
+| Refactor 1: dispatcher to its core | scaling buffer and rank endpoint removed (no dispatcher Service, no HTTP round trip); the API ranks pools from the fleet document with the dispatcher's order; the fleet drill of a per-class run is in the lines below |
+| Refactor 2: endpoints rendered natively | `services/api/render_endpoint.py` reproduces the chart for twelve golden cases (parsed-YAML equality, including the three-variant case); helm left the API image; the chart stays one release as the reference rendering with a drift test |
+
 ## Integration gate of the application layer, key editing (2026-10-11 13:30-14:30 UTC, the same test fleet)
 
 Five execution contracts the application layer's offline probe required (one continuation per idempotency key on
