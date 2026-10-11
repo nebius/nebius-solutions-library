@@ -416,8 +416,8 @@ for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["dem
          'kubernetes_secret_v1.s3_fleet["demo"]' 'kubernetes_secret_v1.ngc["demo"]'; do          # workers: all of them; control: tenant_storage only
   terraform state mv -state=models-hub.tfstate -state-out=platform-hub.tfstate "$r" "$r"; done
 for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' \
-         'random_password.key["demo-default"]' 'kubernetes_job_v1.litellm_key["demo-default"]' \
-         'random_password.key["demo-admin"]' 'kubernetes_job_v1.litellm_key["demo-admin"]'; do   # control: one pair per key
+         'random_password.key["demo-default"]' 'kubernetes_job_v1.key["demo-default"]' \
+         'random_password.key["demo-admin"]' 'kubernetes_job_v1.key["demo-admin"]'; do   # control: one pair per key
   terraform state mv -state=models-control.tfstate -state-out=platform-control.tfstate "$r" "$r"; done
 # 4. push the cloud and platform states back (their serials were incremented by the moves; `-force` is never needed)
 (cd $NEW && ./stack.sh tf cloud -- state push ../cloud.tfstate)
