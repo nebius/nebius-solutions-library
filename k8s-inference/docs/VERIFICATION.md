@@ -12,6 +12,24 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Tenant queues, shared data, routing (2026-10-11 08:00-10:10 UTC, the same test fleet)
+
+Five schema-only features switched on and the review findings rolled out (api 0.11.4, dispatcher 0.2.7, charts
+fleet 0.1.3, tenant 0.2.3): per-tenant Kueue queues with weighted fair sharing, the per-pool GPU cap and dedicated
+pools (docs/FLEET.md "Tenants"); a shared-data mount for runs (docs/JOBS.md "Shared data"); LiteLLM's router settings
+for models served in several regions; the LocalQueue cut-over step of the models stage; idle shutdown and start-up
+times of multi-node endpoints. Applied with `stack.sh` on all five clusters, one stage at a time.
+
+| Check | Result |
+|---|---|
+| Kueue queues after the rollout (manager and hub) | ClusterQueues `default` (the lender, namespace selector `models`) and `demo-default`, `demo-prefer-h100`, `demo-prefer-h200`, ... (weight 1) all Active; the tenant's LocalQueues point at `demo-<profile>` on every cluster (the cut-over script deleted the old ones, Helm recreated them: `LocalQueue.spec.clusterQueue` is immutable); hub `demo-prefer-h100` flavors `h100-spot-1x` borrowing limit 2 (the tenant's `gpu_quota`), `h100-spot-8x` 8, `h100-spot-8x-ib` 16; nominal quota 0 everywhere but on dedicated pools |
+| Kueue configuration | `fairSharing: {preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]}`; the first roll-out carried `enable: true`, which Kueue 0.20's v1beta2 configuration rejects ("unknown field"): the new controller pods crash-looped while the old ones kept serving, so nothing was lost; fixed in the values, controllers restarted on all clusters |
+| Fair-sharing weights, dedicated pools in the dispatcher | `/v1/rank?tenant=demo` skips pools owned by another tenant and ranks `demo-prefer-<class>` profiles; free quota = the lender's nominal minus usage over all ClusterQueues (dispatcher tests) |
+| Shared data for runs (`job.data`) | a seeding run (`container-run`, `"data": "verify-2026-10-11b", "data_readonly": false`, 0 GPUs) saw `weights on /data type virtiofs (rw)` and wrote `hello.txt`; the next run with `"data": "verify-2026-10-11b"` saw `virtiofs (ro)`, read the file and got "Read-only file system" on a write (10:03-10:05 UTC, both on the hub's H100 node, `/mnt/weights/tenants/demo/data/verify-2026-10-11b` on the filesystem). A first pair submitted while the control cluster's platform apply was still rolling the API had been rendered by the old API pod (no data volume, the files landed in the container): a Job is rendered at submission time by whichever API pod serves it, so submit after the rollout |
+| LiteLLM router settings | `router_settings: {routing_strategy: least-busy, num_retries: 1, allowed_fails: 3, cooldown_time: 60}` in the rendered configuration; a model deployed in two regions is one LiteLLM group with two deployments |
+| Endpoints after the rollout | all five endpoints (`llm-warm`, `boltz2`, `deepseek-v4-pro`, `kimi-k3`, the probe's example) listed with their `example` request, the big ones scaled to zero by idle shutdown (`idle_shutdown()` in the reconcile loop, 30 min after the last request, a concurrent write is respected through the row version) |
+| Pull request CI | validate/render/test, UI build, image scan green on the review head |
+
 ## Multi-node endpoints, trillion-parameter models on demand, Boltz-2 (2026-10-10 13:30-16:00 UTC, the same test fleet)
 
 Three endpoints defined through the model API (nothing in Terraform but their pools): NVIDIA's Boltz-2 NIM on one
