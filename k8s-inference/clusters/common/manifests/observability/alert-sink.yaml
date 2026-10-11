@@ -1,7 +1,7 @@
 # In-cluster alert receiver (gap 9: alert delivery). Alertmanager posts every alert group here (receivers
 # `platform`, `sink`, `heartbeat`); the pod logs one JSON line per notification, so delivery is provable from
 # `kubectl -n monitoring logs deploy/alert-sink` and from Loki (Logs dashboard, namespace monitoring) without
-# any external system. It is the only receiver (no Slack webhook for now, owner decision 2026-10-07; see
+# any external system. It is the only receiver by default (no Slack webhook; see
 # docs/OBSERVABILITY.md "Alert delivery" for adding an external one).
 apiVersion: v1
 kind: ConfigMap

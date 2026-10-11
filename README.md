@@ -24,7 +24,6 @@ For those who prefer containerized environments, our Kubernetes solution include
 
 Our SLURM solutions offer a streamlined approach for users who prefer traditional HPC environments. These solutions include ready-to-use images pre-configured with NVIDIA drivers and are ideal for those looking to take advantage of SLURM’s robust job scheduling capabilities.  Similar to our Kubernetes offerings, the SLURM solutions are optimized for InfiniBand connectivity, ensuring peak performance and efficiency in data transfer and communication between nodes.
 
-<!-- k8s-inference:start -->
 ### Inference
 
 [Kubernetes inference fleet](./k8s-inference/README.md)
@@ -50,7 +49,6 @@ The two are not exclusive: a team can start on Serverless AI and move to this fl
 queues, tenants or multi-node jobs; a model is a container plus a few knobs in both. Check the
 Serverless AI documentation for its limits of the day; this table compares the shapes of the two offerings.
 
-<!-- k8s-inference:end -->
 ### Network
 
 [Wireguard](./wireguard/README.md)

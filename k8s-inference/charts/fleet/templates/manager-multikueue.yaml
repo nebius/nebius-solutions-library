@@ -1,10 +1,10 @@
 {{- /*
 Control cluster only: Kueue MultiKueue manager objects (docs/FLEET.md "Cross-region dispatch").
   MultiKueueCluster <region id>      one per worker cluster; kubeconfig in Secret kueue-system/multikueue-<region id>
-                                      (service account `multikueue` on the worker, created by lane F2; never in git).
+                                      (service account `multikueue` on the worker, created by the platform stage; never in git).
   MultiKueueConfig  <profile>         worker order for the profile: regions with the preferred GPU class first, by
                                       their cheapest pool of that class, then the others by price. The dispatcher
-                                      (Kueue config `multiKueue.dispatcherName`, lane F4) decides whether that order
+                                      (Kueue config `multiKueue.dispatcherName`) decides whether that order
                                       is tried incrementally or all at once.
   AdmissionCheck    multikueue-<profile>
 */ -}}

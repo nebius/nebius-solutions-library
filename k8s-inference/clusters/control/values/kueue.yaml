@@ -2,7 +2,7 @@
 # clusters/common/values/kueue.yaml, a manager configuration (no pod integration: nothing runs here) and the
 # multiKueue block. The worker clusters keep the common values. Dispatcher: the default (all at once: every
 # region of the profile's MultiKueueConfig receives the workload, the first to admit wins, the others are
-# withdrawn); lane F4 replaces it with the cost-aware dispatcher.
+# withdrawn); the cost-aware dispatcher replaces it.
 managerConfig:
   controllerManagerConfigYaml: |-
     apiVersion: config.kueue.x-k8s.io/v1beta2
@@ -29,7 +29,7 @@ managerConfig:
       preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
     # DRA, same mapping as the workers (clusters/common/values/kueue.yaml): the manager resolves a multi-node run's
     # InfiniBand claim template (charged as nebius.ai/infiniband x count) before MultiKueue dispatches it; without the
-    # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped" (s2pr2, 2026-10-09)
+    # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped" (test fleet, 2026-10-09)
     resources:
       deviceClassMappings:
         - name: nebius.ai/infiniband

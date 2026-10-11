@@ -6,7 +6,6 @@ metadata:
   labels:
     grafana_dashboard: "1"
   annotations:
-    serverless2.nebius/generated-by: spikes/S14-observability/gen_dashboards.py
 data:
   serverless2-cost.json: |
     {
@@ -52,7 +51,7 @@ data:
         "label": "RTX PRO 6000 spot $/GPU-h",
         "type": "textbox",
         "query": "0.79",
-        "description": "eu-south1 pool rtx6000-spot-1x: spot list price (from)",
+        "description": "RTX PRO 6000 spot list price (from); set your pool's price",
         "current": {
          "selected": false,
          "text": "0.79",

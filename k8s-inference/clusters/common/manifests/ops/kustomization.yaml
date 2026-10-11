@@ -1,4 +1,4 @@
-# Shared base for the `ops` component; clusters/<cluster>/apps/overlays/ add the cluster-specific parts.
+# The `ops` component; the platform stage (stack/platform/stage.tf) patches the cluster-specific parts.
 # seed-weights-job.yaml is a Job TEMPLATE created by hand (envsubst), not listed here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

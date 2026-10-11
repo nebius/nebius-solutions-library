@@ -204,7 +204,7 @@ locals {
       spec = {
         parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
         # a chat call through LiteLLM waits for the endpoint's cold start like the API route does (clusters/common/manifests/api);
-        # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model (s2pr2, 2026-10-09)
+        # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model (test fleet, 2026-10-09)
         hostnames = [try(local.hostnames.litellm, "")]
         rules     = [{ backendRefs = [{ name = "litellm", port = 4000 }], timeouts = { request = "630s", backendRequest = "630s" } }]
       }
@@ -270,11 +270,6 @@ resource "kubectl_manifest" "weights_pvc" {
   wait              = false
   depends_on        = [kubectl_manifest.extras1]
   lifecycle { ignore_changes = [yaml_body] }
-}
-
-moved {
-  from = kubectl_manifest.extras1["weights_pvc"]
-  to   = kubectl_manifest.weights_pvc["weights_pvc"]
 }
 
 resource "kubectl_manifest" "control_extras" {

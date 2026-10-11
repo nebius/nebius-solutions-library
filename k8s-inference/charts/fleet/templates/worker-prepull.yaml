@@ -1,4 +1,4 @@
-{{- /* Image pre-pull DaemonSet per GPU pool (replaces clusters/<cluster>/apps/overlays/edge/prepull*.yaml);
+{{- /* Image pre-pull DaemonSet per GPU pool;
        the image list is per cluster in clusters/<cluster>/values/fleet.yaml (prepull.images). */ -}}
 {{- if and .Values.prepull.enabled (not (include "fleet.isControl" .)) .Values.prepull.images }}
 {{- $region := include "fleet.region" . | fromYaml }}

@@ -55,7 +55,7 @@ managerConfig:
       labelKeysToCopy:    # Kueue config: integrations.labelKeysToCopy (top-level is rejected: "unknown field")
       - serverless2.nebius/region
       - serverless2.nebius/profile
-    # MultiKueue manager only (control-plane cluster, lane F2): route placement through the cost-aware external
+    # MultiKueue manager only (control-plane cluster): route placement through the cost-aware external
     # dispatcher (clusters/common/manifests/dispatcher). Any name other than the two built-in dispatchers means
     # "external". The dispatcher patches status.nominatedClusterNames with the kueue-admission field manager.
     # multiKueue:

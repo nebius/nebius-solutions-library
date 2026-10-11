@@ -84,7 +84,7 @@ Writes land on the fleet API only (the control cluster's `api.` host, the one wi
 API serves the copies and answers `POST`, `PUT`, `DELETE` and `/history` with 409 and the fleet API's URL.
 The built-in classes (`hello-run`, `container-run`, `distributed-run`) are files and answer writes with
 409 too. `images` (per GPU class), `deployments.<region>.variants` and `routing` are accepted and stored
-but not acted on yet (`docs/DESIGN-REVIEW-2026-10-09.md`).
+but not acted on yet (the design review of 2026-10-09).
 
 The acceptance probe of the models stage uses this path: with `acceptance.example_endpoint = true` (the
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as

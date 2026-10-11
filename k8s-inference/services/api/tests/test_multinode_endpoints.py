@@ -31,7 +31,7 @@ SPEC = {"id": "kimi-k3", "kind": "endpoint", "image": "vllm/vllm-openai:v0.31.0"
 def fleet(monkeypatch):
     monkeypatch.setattr(kube, "fleet", lambda: POOLS)
     monkeypatch.setattr(kube, "cluster_region", lambda c: "eu-north1" if c == "hub" else c)
-    monkeypatch.setattr(models, "endpoint_domain", lambda region: "195.242.0.1.sslip.io")
+    monkeypatch.setattr(models, "endpoint_domain", lambda region: "203.0.113.1.sslip.io")
 
 
 def test_pool_for_takes_whole_nodes_and_honours_the_interconnect():
@@ -76,7 +76,7 @@ def test_chart_renders_a_leaderworkerset_behind_a_predictor_route():
     with open(values, "w") as f:
         yaml.safe_dump(e, f, sort_keys=False)
     try:
-        r = subprocess.run(["helm", "template", "kimi-k3", chart, "-f", values, "--set", "cluster=us-central1", "--set", "domain=195.242.0.1.sslip.io"],
+        r = subprocess.run(["helm", "template", "kimi-k3", chart, "-f", values, "--set", "cluster=us-central1", "--set", "domain=203.0.113.1.sslip.io"],
                            capture_output=True, text=True, timeout=60)
     finally:
         os.unlink(values)
@@ -96,7 +96,7 @@ def test_chart_renders_a_leaderworkerset_behind_a_predictor_route():
     assert "readinessProbe" in leader["containers"][0] and "readinessProbe" not in worker["containers"][0]
     assert "resourceClaims" not in leader                                                        # Ethernet: no DRA claim
     route = docs[("HTTPRoute", "kimi-k3-predictor")]
-    assert route["spec"]["hostnames"] == ["kimi-k3-predictor.models.195.242.0.1.sslip.io"]
+    assert route["spec"]["hostnames"] == ["kimi-k3-predictor.models.203.0.113.1.sslip.io"]
     assert route["metadata"]["labels"]["serving.knative.dev/route"] == "kimi-k3-predictor"     # the SecurityPolicy's selector
     assert docs[("Service", "kimi-k3-predictor")]["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
 

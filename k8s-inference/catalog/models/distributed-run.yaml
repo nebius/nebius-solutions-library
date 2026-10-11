@@ -23,9 +23,6 @@ job:                                        # rendered by services/api/jobs.py i
   data: "{{data}}"                          # a directory of the tenant's shared data, mounted at /data (empty = none; docs/JOBS.md "Shared data")
   dataMountPath: /data
   dataReadOnly: "{{data_readonly}}"
-deployments:
-  hub:
-    price_per_gpu_hour: 2.15      # H100 spot cap
 parameters:
   - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md)" }
   - { name: command, type: string, label: Command, required: true, help: "run with /bin/sh -c on every node; use $MASTER_ADDR $MASTER_PORT $NODE_RANK $NNODES $GPUS_PER_NODE $WORLD_SIZE (torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --master_addr=$MASTER_ADDR ...); checkpoint under $CHECKPOINT_DIR, results under /work/out on rank 0" }

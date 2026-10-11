@@ -2,8 +2,7 @@
 
 One KServe `InferenceService` (Knative mode) for an explicit model container:
 GPU, pool placement, scale-to-zero, probes, volumes, optional PVCs and
-LocalModelCache. `values.yaml` documents every key; `values.schema.json`
-validates them.
+LocalModelCache. `values.yaml` documents every key.
 
 ## Two ways to pass values
 
@@ -38,7 +37,7 @@ weights:
 
 The chart mounts the cluster's ReadWriteMany claim `weights-shared` (a static
 hostPath PersistentVolume over `/mnt/weights`,
-`clusters/<cluster>/apps/overlays/scheduling/weights-pv.yaml`) with
+the platform stage's `weights-shared` PersistentVolume) with
 `subPath: <path>`, adds an init container that makes the directory writable
 (subPath directories are created root-owned) and the env vars. Knative allows
 hostPath volumes only read-only, so the PVC route is used (feature flags

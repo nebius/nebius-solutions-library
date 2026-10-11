@@ -68,7 +68,7 @@ job:
 
 Kueue picks the pool at admission and a Job's image cannot change afterwards (see "Not possible"
 below), so for such a class the GPU class is chosen **at submission** (option A of
-`docs/DESIGN-REVIEW-2026-10-09.md`): the API asks the dispatcher's ranking (`GET /v1/rank`: the
+the design review of 2026-10-09): the API asks the dispatcher's ranking (`GET /v1/rank`: the
 class preference, reserved before on-demand before spot, the cost of the run (its GPUs on a node that is
 up with room, else the whole node the pool would boot: a 1-GPU run does not boot an 8-GPU node), free
 capacity now, the caller's region as a pin when given), renders the Job with the best class's image, limits its node affinity
@@ -146,7 +146,7 @@ on first run (runtime-owned, outside Terraform). Until
 2026-10-09 the feed asked with `--preemptible-priority 1`, a field the API
 deprecated on 2026-05-11; the CLI 0.12 rejects it (exit 4), so the feed wrote
 an empty map and every spot pool was ranked at its list price (seen on the
-test fleet s2pr2, dispatcher 0.1.8). Quotes seen on 2026-10-09 for the 8-GPU
+a test fleet, dispatcher 0.1.8). Quotes seen on 2026-10-09 for the 8-GPU
 B300 preset following the spot price: eu-west2 7.92 USD/h (0.99 per
 GPU-hour), us-north1 28, uk-south1 75.92; regular 76 everywhere. Measured
 2026-10-07: H100 1-GPU preset 4.5 on-demand, 2.15 spot. The calculator needs
@@ -251,7 +251,7 @@ kubectl -n kueue-system get cm spot-prices -o jsonpath='{.data.spot\.json}'
   quota, renomination timing; a smoke run against the chart-rendered
   `pools.yaml` of today's fleet gives `prefer-h100` with H100 busy ->
   eu-south1 RTX PRO 6000 (cheapest free class), `prefer-l40s` -> hub L40S.
-- Manual end-to-end test for lane F2 (needs the control cluster from F1):
+- Manual end-to-end test of MultiKueue placement:
   set `multiKueue.dispatcherName` on the manager's Kueue, create the
   MultiKueueCluster Secrets, move `fleet.yaml` and `dispatcher.yaml` from
   `clusters/common/apps-staged`, submit a Job to a LocalQueue on

@@ -6,7 +6,6 @@ metadata:
   labels:
     grafana_dashboard: "1"
   annotations:
-    serverless2.nebius/generated-by: spikes/S14-observability/gen_dashboards.py
 data:
   serverless2-jobs.json: |
     {

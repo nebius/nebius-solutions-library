@@ -398,10 +398,6 @@ def check_image_allowed(ns: str, image: str, region: str = REGION) -> None:
         raise HTTPException(400, f"image {image!r} is not allowed for this tenant (allowed prefixes: {prefixes})")
 
 
-def _main_container(job: dict) -> dict:
-    return next((c for c in job.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []) if c.get("name") == "main"), {})
-
-
 def output_prefix(job: dict) -> str | None:
     """The uploader's OUTPUT_PREFIX: s3://<bucket>/operations/<id>; names the bucket of the run's artifacts."""
     for c in job.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):

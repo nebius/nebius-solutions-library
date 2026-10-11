@@ -140,7 +140,7 @@ def test_work_volume_only_where_admitted_and_swept_elsewhere():
 
 def test_only_the_work_volume_is_the_dispatchers():
     """A multi-node run with `checkpoints: shared` mounts the tenant's `scratch-shared` claim next to an emptyDir
-    `work`: the dispatcher must neither adopt nor sweep it (it deleted the tenant's claim as an "orphan" on s2pr2,
+    `work`: the dispatcher must neither adopt nor sweep it (it deleted the tenant's claim as an "orphan" on a test fleet,
     2026-10-09). Only the pod's `work` volume names the dispatcher's claim."""
     shared = {"spec": {"volumes": [{"name": "work", "emptyDir": {"sizeLimit": "500Gi"}},
                                    {"name": "shm", "emptyDir": {"medium": "Memory"}},

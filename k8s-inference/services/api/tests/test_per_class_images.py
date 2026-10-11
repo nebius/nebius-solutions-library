@@ -1,5 +1,5 @@
 """Per-GPU-class images for run classes (docs/SCHEDULING.md "Per-GPU images for runs", option A of
-docs/DESIGN-REVIEW-2026-10-09.md): the class is chosen at submission from the dispatcher's ranking, the Job gets
+the design review of 2026-10-09): the class is chosen at submission from the dispatcher's ranking, the Job gets
 that class's image, an affinity over that class's pools only and the class's profile queue; a resume keeps the
 class; a run class with one image is untouched. Fixture: tests/catalog/batch-example-tuned.yaml."""
 import copy

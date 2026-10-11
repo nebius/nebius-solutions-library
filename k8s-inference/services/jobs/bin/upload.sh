@@ -66,7 +66,7 @@ upload() {   # $1 = status
   # UPLOAD_EXCLUDES is a string of aws filters ("--exclude checkpoint/*", quotes allowed): split it like a shell
   # line with globbing OFF. Unquoted $UPLOAD_EXCLUDES expanded `checkpoint/*` against /work into `checkpoint/hf`,
   # which excludes that one entry and uploads everything below it: a multi-node run with shared checkpoints
-  # pushed its 470 GB weight cache to the bucket (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md).
+  # pushed its 470 GB weight cache to the bucket (test fleet, 2026-10-09, docs/VERIFICATION.md).
   set -f; eval "set -- ${UPLOAD_EXCLUDES:-}"
   aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --no-progress --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' "$@" 2>&1 | tail -n 30
   set +f

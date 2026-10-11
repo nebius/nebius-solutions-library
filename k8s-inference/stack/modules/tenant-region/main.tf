@@ -3,7 +3,7 @@
 # tenant namespace uses (Secrets tenant-storage / s3). `protect_data` makes the bucket refuse destroy.
 terraform {
   required_providers {
-    nebius = { source = "nebius/nebius" }
+    nebius = { source = "nebius/nebius", version = ">= 0.6.23" }
   }
 }
 

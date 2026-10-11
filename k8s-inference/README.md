@@ -23,7 +23,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Fast pod starts | Zot pull-through cache plus Spegel peer-to-peer in every cluster, one logical registry host, pre-pull per pool, a shared weights filesystem; `docs/IMAGES.md` |
 | Tenants, fair sharing, dedicated pools | a namespace per cluster, a bucket and identity per region, API keys with budgets, Pod Security baseline, their own Kueue queues with a fair-share weight and a GPU cap, pools only they use (`docs/FLEET.md`, "Tenants"), optional GPU quota and image allow-list |
 | Spot, on-demand and reserved capacity | per pool: spot with a price cap, on-demand, or capacity blocks used first |
-| GPU drivers from the node image, or from the NVIDIA GPU Operator (any driver version, open kernel modules, GPUDirect Storage, MIG manager) | `gpu_operator` in `terraform.tfvars`: node groups without a driver preset, the Nebius marketplace builds of the Network and GPU Operators; `docs/FLEET.md`, "GPU drivers" |
+| GPU drivers from the node image, or from the NVIDIA GPU Operator (any driver version, open kernel modules, MIG manager; the GPUDirect Storage module is installable but not validated, see `docs/FLEET.md`) | `gpu_operator` in `terraform.tfvars`: node groups without a driver preset, the Nebius marketplace builds of the Network and GPU Operators; `docs/FLEET.md`, "GPU drivers" |
 | Operations | Grafana, Prometheus, Loki, Alertmanager, OpenCost with Nebius prices, a managed PostgreSQL with the service's backups, spot-node recovery; `docs/OBSERVABILITY.md`, `docs/OPERATIONS.md` |
 
 ## When to use what: Nebius Serverless AI or this solution
@@ -41,7 +41,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | Operations? | None. | Grafana, Prometheus, Loki, OpenCost, backups and spot recovery are installed; upgrades and incidents are yours. |
 | Pick it when... | You want one or a few models online quickly and do not want to run anything. | You run a platform for several teams or customers, mix online and batch work, need placement control, reserved capacity, private networking or your own observability, and are fine operating Kubernetes. |
 
-A feature-by-feature list and the roadmap are in `docs/ROADMAP.md`. The two are not exclusive: a team can start on Serverless AI and move to this fleet when it needs
+The two are not exclusive: a team can start on Serverless AI and move to this fleet when it needs
 queues, tenants or multi-node jobs; a model is a container plus a few knobs in both. Check the
 Serverless AI documentation for its limits of the day; this table compares the shapes of the two offerings.
 
@@ -66,8 +66,8 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
 - **Region clusters** (one per Nebius region, one project each): GPU pools, Knative/KServe endpoints, an
   Envoy gateway with key checks, a regional API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
 
-`docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/REQUIREMENTS.md` maps every
-requirement to the mechanism that implements it.
+`docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
+and their limits.
 
 ## Prerequisites
 
@@ -84,7 +84,8 @@ requirement to the mechanism that implements it.
   validated with 0.6.67), `helm`, `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
   `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
 - Optional: an NVIDIA NGC key for NIM images, a Hugging Face token for gated weights. They are read from
-  environment variables, never written into the tfvars.
+  environment variables (`secrets.*_env` names them), never written into the tfvars; like every generated
+  credential they end up in the platform's Terraform state, so keep the state bucket private (`docs/SECURITY.md`).
 
 ## Quick start
 
@@ -235,6 +236,8 @@ password is Terraform-generated and lives in Kubernetes Secrets; the control API
 model definitions.
 
 ## Security notes and limitations
+
+`docs/SECURITY.md` lists the controls, their boundaries and what a production deployment adds.
 
 This is a template for a platform team, not a hardened multi-tenant service. What it does not do, so
 that nobody assumes it does:

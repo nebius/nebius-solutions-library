@@ -4,7 +4,7 @@
 # tenant namespace by a RoleBinding to `serverless2-api-tenant` that onboarding creates.
 # Credentials are never static: `python -m onboarding bootstrap --region <region>` seeds a 48 h
 # TokenRequest token as a kubeconfig in the hub Secret api/region-kubeconfigs, and the hub CronJob
-# ops/rotate-api-agent-token renews it daily (docs/OPERATIONS.md "Rotation").
+# rotate it by re-applying the platform stage (docs/OPERATIONS.md "Rotation").
 apiVersion: v1
 kind: Namespace
 metadata: { name: api }

@@ -58,8 +58,8 @@ HTTPRoute, rate limit, RBAC), host from `PUBLIC_API_URL`. Secret `api/litellm-ma
 `python -m onboarding bootstrap`.
 
 Tests: `pip install -r services/api/requirements-dev.txt && pytest services/api/tests` (cluster and
-LiteLLM faked). Tenants: `services/onboarding` (cloud identities + bucket with the Nebius CLI,
-`charts/tenant` with `tenants/<name>.yaml` for the Kubernetes objects, Secrets by the script, LiteLLM
+LiteLLM faked). Tenants: the models stage (`stack/models`: cloud identities + bucket, `charts/tenant` for the
+Kubernetes objects, Secrets, LiteLLM
 key); `clusters/common/manifests/api-agent` (installed by Terraform per worker) installs the fleet API's identity in each region.
 
 Not done: operation history beyond the Jobs' 90-day TTL (finished Jobs are the history; a longer

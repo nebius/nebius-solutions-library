@@ -1,4 +1,4 @@
-# Customer API (services/api). Shared base with the hub's values; clusters/<cluster>/apps/overlays/api/ patches
+# Customer API (services/api). Shared base; the platform stage (stack/platform/stage.tf) patches
 # the region, hostnames and LiteLLM address (the regional instance reaches the hub's LiteLLM over its public
 # TLS hostname). Secret api/litellm-master (copy of litellm/litellm-master) is created per cluster by
 # `python -m onboarding bootstrap`, never in git. Sync/async/streaming calls are served by the API of the
@@ -125,9 +125,11 @@ spec:
     metadata: { labels: { app: api } }
     spec:
       serviceAccountName: api
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: api
-          image: registry.serverless2.local/nebius/serverless2/api:0.10.12
+          image: registry.serverless2.local/nebius/serverless2/api:0.11.5
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
           ports: [{ containerPort: 8080 }]
           env:
             - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }

@@ -26,12 +26,4 @@ kind: ServiceAccount
 metadata:
   name: {{ .Values.runnerServiceAccount }}
   namespace: {{ include "tenant.ns" . }}
-{{- if .Values.legacyRunnerServiceAccount }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ .Values.legacyRunnerServiceAccount }}
-  namespace: {{ include "tenant.ns" . }}
-{{- end }}
 {{- end }}

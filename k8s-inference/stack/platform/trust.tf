@@ -4,7 +4,7 @@
 # gateways carry certificates it signed, edge.regional_certificates). Private deployments add a complete bundle
 # (`trust_bundle_pem`) that replaces the system roots. Never an insecure TLS switch.
 data "http" "msp_ca" {
-  url = "https://storage.eu-north1.nebius.cloud/msp-certs/ca.pem"
+  url = local.f.msp_ca_url
 }
 
 locals {

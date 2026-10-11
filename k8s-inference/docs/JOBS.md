@@ -8,8 +8,7 @@ checkpoints, a 30 MB runner image moves data. `services/api/jobs.py` (about 450 
 submits, reads, cancels and resumes them. Two entry points create them: a regional API (hub,
 eu-south1) creates the Job in its own cluster; the fleet API on the control cluster creates it on the
 MultiKueue manager and lets Kueue plus the cost dispatcher place it on a worker ("Fleet placement"
-below). Argo Workflows is gone (lane F5, 2026-10-07): no WorkflowTemplates, executor identities or
-archive database remain.
+below).
 
 ## Run class = catalog entry with a `job` block
 
@@ -35,7 +34,7 @@ job:
   inputs: "{{input_prefix}}"      # default: the input_prefix parameter
   uploadExcludes: "--exclude 'scratch/*'"
 gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # classes the image runs on, PREFERRED FIRST (scheduling profile)
-deployments:                      # the regions the run class may land in; per-region parameter defaults and price
+deployments:                      # optional: the regions the run class may land in (default: every region of the fleet); per-region parameter defaults and price
   hub:       { price_per_gpu_hour: 2.15, parameters: { nb_min_ci: "16000" } }
   eu-south1: { price_per_gpu_hour: 1.60, parameters: { nb_min_ci: "16000" } }
 parameters:
@@ -121,7 +120,7 @@ pass merge these records with the live pods (a live pod wins over its own record
 endpoint shows live pods only. Measured on the hub: an endpoint scaling up on the shared H100 pool
 preempted a run's pod two seconds after `main` had finished; the Job was still `Complete`, the
 outputs were in the bucket, the pod was gone. A node that dies without warning (a spot VM stopped by
-Nebius: no SIGTERM reaches the pod; measured 2026-10-09 on a B300 spot node, `docs/dev-fleet/VERIFICATION-DEV.md`)
+Nebius: no SIGTERM reaches the pod; measured 2026-10-09 on a B300 spot node, `docs/VERIFICATION.md`)
 leaves the "started" record the uploader writes to the volume and the bucket when `main` begins (jobs
 image 0.1.8): the attempt shows as `PREEMPTED` with reason "node lost without warning", no end time, and
 bills nothing. A stop that is orderly enough for the SIGTERM path (the B300 spot VM stopped on
@@ -172,7 +171,7 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   MultiKueue dispatches it, so the control cluster carries the tenant's claim templates (charts/tenant, rendered
   there whenever any region has an InfiniBand pool) and the same Kueue `deviceClassMappings` as the workers
   (`clusters/control/values/kueue.yaml`); without either the workload stays `QuotaReserved=False
-  DRAResourcesUnresolved` (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md).
+  DRAResourcesUnresolved` (test fleet, 2026-10-09, docs/VERIFICATION.md).
 - **InfiniBand in the pod, without privileges.** Nebius GPU node images ship the InfiniBand
   drivers (8 x 400 Gb/s NDR ports `mlx5_0..7`, interfaces `ib0..7`, measured on an 8x H100 node in a
   fabric-3 GPU cluster), and Managed Kubernetes runs **DraNet** (Kubernetes DRA driver for the RDMA
@@ -226,7 +225,7 @@ scale-up (`pod didn't trigger scale-up: cannot allocate all claims`, measured on
 2026-10-08; GKE documents the same rule for DRA node pools). It does not grow from one node either:
 the autoscaler's simulation of a new node copies the devices without their attributes and the
 DeviceClass selector fails (`"DynamicResources" filter plugin: class ib.networking.nebius.ai: selector #0:
-CEL runtime error: no such key: ifName`, measured on s2pr2 2026-10-09 with one node in the pool). An
+CEL runtime error: no such key: ifName`, measured on test fleet, 2026-10-09 with one node in the pool). An
 InfiniBand pool therefore keeps `min_nodes` at the node count of the largest run it must take
 (`min_nodes >= 1` is what the tfvars validation enforces; the operator sets the real floor). Reserved
 pools (the usual home of a 16-node job) are fixed-size anyway.

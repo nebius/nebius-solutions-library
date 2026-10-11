@@ -14,9 +14,9 @@ import app as appmod, auth, catalog, jobs, kube, models
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
             "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]}}
 L = "serverless2.nebius"
-FLEET = {"pools": {"hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100"},
-                   "hub-l40s-ondemand-1x": {"region": "hub", "pool": "l40s-ondemand-1x", "gpu_class": "l40s"},
-                   "eu-south1-rtx6000-spot-1x": {"region": "eu-south1", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000", "local_nvme": True}},
+FLEET = {"pools": {"hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "usd_per_gpu_hour": 2.15},
+                   "hub-l40s-ondemand-1x": {"region": "hub", "pool": "l40s-ondemand-1x", "gpu_class": "l40s", "usd_per_gpu_hour": 2.15},
+                   "eu-south1-rtx6000-spot-1x": {"region": "eu-south1", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000", "local_nvme": True, "usd_per_gpu_hour": 1.6}},
          "registries": {"hub": "cr.eu-north1.nebius.cloud/e00exampleexampleex", "eu-south1": "cr.eu-south1.nebius.cloud/e07exampleexampleex"}}
 
 
@@ -198,9 +198,10 @@ def client(monkeypatch, cluster):
 H = {"Authorization": "Bearer sk-good"}
 
 
-def test_catalog_one_schema():
-    m = catalog.normalise({"id": "foo", "mode": "run"})
-    assert m["job"] == {} and m["protocol"] == "kubernetes-job" and m["modes"] == ["run"] and m["regions"] == ["eu-north1"]
+def test_catalog_one_schema(monkeypatch):
+    monkeypatch.setattr(kube, "fleet", lambda: FLEET)
+    m = catalog.normalise({"id": "foo", "mode": "run"})       # a run class without deployments: every region of the fleet
+    assert m["job"] == {} and m["protocol"] == "kubernetes-job" and m["modes"] == ["run"] and m["regions"] == ["eu-north1", "eu-south1"]
     s = catalog.normalise({"id": "bar.v2", "endpoints": {"chat": "/v1/chat", "ready": "/health"}, "price": {"unit": "call", "usd": 0.01},
                            "gpu": {"count": 1, "classes": ["h100"]}, "deployments": {"hub": {}, "eu-south1": {"paused": True}}})
     assert s["k8s_name"] == "bar-v2" and s["endpoint_host"] == "http://bar-v2-predictor.models.svc.cluster.local"
@@ -558,8 +559,6 @@ def test_endpoints_read_and_scale_only(client, monkeypatch):
     pub = ep.to_public(catalog.get("llm-example"), isvc)
     assert pub["id"] == "llm-example" and pub["scale_to_zero_after_s"] == 120 and pub["managed_by"] == "git"
     assert pub["url"] == "https://api.example/v1/models/llm-example:invoke"
-    assert ep.scaling_patch({"min_replicas": 1, "scale_to_zero_after_s": 300}) == {
-        "spec": {"predictor": {"minReplicas": 1}}, "metadata": {"annotations": {"autoscaling.knative.dev/scale-to-zero-pod-retention-period": "300s"}}}
     # no create/delete routes any more: endpoints are git-only
     assert c.post("/v1/endpoints", json={"model": "llm-example"}, headers=H).status_code == 405
     assert c.delete("/v1/endpoints/llm-example", headers=H).status_code == 405
@@ -647,7 +646,7 @@ def test_retry_helper(monkeypatch):
 
 
 def test_region_client_reloads_when_kubeconfig_changes(monkeypatch, tmp_path):
-    """The api-agent kubeconfigs are rotated daily (ops/rotate-api-agent-token): a changed file must yield a new client."""
+    """The api-agent kubeconfigs are rotated (by re-applying the platform stage): a changed file must yield a new client."""
     kc = tmp_path / "eu-south1"
     kc.write_text("apiVersion: v1\nkind: Config\n")
     monkeypatch.setattr(kube, "REGION_KUBECONFIGS", {"eu-south1": str(kc)})
@@ -833,9 +832,9 @@ def test_tenant_image_allow_list_and_output_prefix_guard(client, monkeypatch):
 
 
 MULTINODE_FLEET = {"pools": {
-    "hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "gpus_per_node": 1, "interconnect": "none"},
-    "hub-h100-spot-8x": {"region": "hub", "pool": "h100-spot-8x", "gpu_class": "h100", "gpus_per_node": 8, "interconnect": "none"},
-    "hub-h200-ib-8x": {"region": "hub", "pool": "h200-ib-8x", "gpu_class": "h200", "gpus_per_node": 8, "interconnect": "infiniband"}}}
+    "hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "gpus_per_node": 1, "interconnect": "none", "usd_per_gpu_hour": 2.15},
+    "hub-h100-spot-8x": {"region": "hub", "pool": "h100-spot-8x", "gpu_class": "h100", "gpus_per_node": 8, "interconnect": "none", "usd_per_gpu_hour": 2.15},
+    "hub-h200-ib-8x": {"region": "hub", "pool": "h200-ib-8x", "gpu_class": "h200", "gpus_per_node": 8, "interconnect": "infiniband", "usd_per_gpu_hour": 2.15}}}
 
 
 def _jobset_pod(js):
@@ -1305,7 +1304,7 @@ def test_scaling_metric_units_and_partial_updates(client, admin_keys, monkeypatc
 def test_endpoint_pool_fits_the_gpu_count(monkeypatch):
     """An endpoint is pinned to a pool whose nodes carry at least its GPUs: the smallest preset that fits, plain pools
     before InfiniBand ones, reserved before spot. An 8-GPU replica on a 1-GPU preset was Unschedulable forever
-    (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md)."""
+    (test fleet, 2026-10-09, docs/VERIFICATION.md)."""
     pools = {"pools": {
         "hub-h100-spot-1x": {"region": "hub", "pool": "h100-spot-1x", "gpu_class": "h100", "gpus_per_node": 1, "capacity": "spot"},
         "hub-h100-spot-8x-ib": {"region": "hub", "pool": "h100-spot-8x-ib", "gpu_class": "h100", "gpus_per_node": 8, "capacity": "spot",
@@ -1326,7 +1325,7 @@ def test_endpoint_pool_fits_the_gpu_count(monkeypatch):
 
 def test_cancel_of_a_dispatched_jobset_deactivates_its_workload(client):
     """Fleet path: cancelling a running multi-node run deactivates its manager Workload (Kueue evicts it) besides
-    suspending the worker's JobSet; the suspend alone was undone by Kueue and the pods restarted (s2pr2, 2026-10-09)."""
+    suspending the worker's JobSet; the suspend alone was undone by Kueue and the pods restarted (test fleet, 2026-10-09)."""
     c, fake = client
     uid = "u-123"
     fake.custom[("tenant-demo", "workloads", "jobset-op-x-abc")] = {"metadata": {"name": "jobset-op-x-abc", "labels": {kube.KUEUE_JOB_UID_LABEL: uid}},

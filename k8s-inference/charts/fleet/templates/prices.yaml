@@ -1,6 +1,6 @@
 {{- /* fleet-prices: USD per GPU-hour per pool (every region on the control cluster, this region's pools on a
        worker) for the cost-aware dispatcher and the price feed. OpenCost itself keeps one GPU/spot price per
-       cluster (clusters/<cluster>/apps/overlays/observability), set from the same numbers. */ -}}
+       cluster (platform stage), set from the same numbers. */ -}}
 {{- $f := .Values.fleet }}
 {{- $all := include "fleet.allPools" $f | fromYaml }}
 apiVersion: v1

@@ -68,7 +68,7 @@ localModelCache:         # later: KServe LocalModelCache on node-local disk
 
 # Model weights on the region's shared filesystem (Terraform `weights_filesystem`: a Nebius Compute
 # shared filesystem mounted on every GPU node at /mnt/weights; exposed to pods as the ReadWriteMany
-# PVC `models/weights-shared`, clusters/<cluster>/apps/overlays/scheduling/weights-pv.yaml). The pod
+# PVC `models/weights-shared`, created by the platform stage). The pod
 # mounts the claim with subPath <path> at mountPath. Runtimes write their caches there on the first
 # start (NIM: NIM_CACHE_PATH, HF/vLLM: HF_HOME), every later cold start is warm, and `ops/seed-weights`
 # can pre-fill it. An init container makes the directory exist and be writable for the runtime's user

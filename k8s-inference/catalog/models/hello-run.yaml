@@ -18,7 +18,6 @@ job:
   pvcSizeGi: 1
   graceSeconds: 10
   s3Env: false
-deployments: { hub: {}, eu-south1: {} }
 parameters:
   - { name: message, type: string, label: Message, default: hello }
   - { name: seconds, type: number, label: Seconds to run, default: 5 }

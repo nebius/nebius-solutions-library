@@ -1,4 +1,4 @@
-{{- /* One Kueue ResourceFlavor per GPU pool of this cluster (name = pool key, as clusters/<cluster>/apps/overlays/scheduling/pool.yaml today). */ -}}
+{{- /* One Kueue ResourceFlavor per GPU pool of this cluster (name = pool key). */ -}}
 {{- if not (include "fleet.isControl" .) }}
 {{- $region := include "fleet.region" . | fromYaml }}
 {{- if not $region.r }}{{ fail (printf "cluster %q is not a region id in fleet.yaml" .Values.cluster) }}{{ end }}

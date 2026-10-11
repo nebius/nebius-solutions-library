@@ -177,7 +177,7 @@ const real = {
       method: "POST",
     }),
   invoke: (model: string, req: InvokeRequest) => {
-    // only the documented fields; for run-class models `input` holds the WorkflowTemplate parameters
+    // only the documented fields; for run-class models `input` holds the class's parameters
     const { name, mode, input, region, priority, timeout_s } = req;
     const body: InvokeRequest = {
       name,

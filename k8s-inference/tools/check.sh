@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The quality gate, the same locally (`make check`, `./stack.sh check`) and in CI (.github/workflows/ci.yml).
+# The quality gate, the same locally (`make check`, `./stack.sh check`) and in CI (.github/workflows/k8s-inference.yml).
 # No cloud access: every Terraform stage and module must validate, terraform.tfvars.example must pass the
 # schema validations, every chart and manifest must render for every cluster of the example, and the tests
 # of the API and the dispatcher must pass.
@@ -7,8 +7,7 @@
 #   tools/check.sh            everything
 #   tools/check.sh terraform | render | tests      one part
 #
-# PYTHON (default python3) runs the tests. Terraform roots under infra/ (a reference fleet's own; absent from the
-# library copy) are validated when a checkout has them.
+# PYTHON (default python3) runs the tests.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="${TFVARS_EXAMPLE:-$ROOT/terraform.tfvars.example}"
@@ -37,9 +36,6 @@ check_terraform() {
     tf "$d" init -backend=false -input=false > /dev/null
     tf "$d" validate -no-color > /dev/null; echo "   ok $d"
   done
-  if [ -d "$ROOT/infra/cluster" ]; then
-    for d in infra/cluster infra/tenant; do tf "$d" init -backend=false -input=false > /dev/null; tf "$d" validate -no-color > /dev/null; echo "   ok $d"; done
-  fi
   step "terraform.tfvars.example passes the schema validations"
   tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
 }
@@ -102,12 +98,6 @@ EOF
     [ -f "$d/kustomization.yaml" ] || continue
     kubectl kustomize "$d" > /dev/null; echo "   ok ${d#"$ROOT"/}"
   done
-  if [ -d "$ROOT/clusters/hub" ]; then
-    for d in "$ROOT"/clusters/*/apps/overlays/*/ "$ROOT"/clusters/fleet/root/ "$ROOT"/clusters/control/apps/; do
-      [ -f "$d/kustomization.yaml" ] && kubectl kustomize "$d" > /dev/null
-    done
-    echo "   ok reference fleet overlays"
-  fi
 }
 
 check_tests() {

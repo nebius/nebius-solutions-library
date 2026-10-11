@@ -10,14 +10,6 @@ def _secs(d: str) -> int:
     return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[m.group(2)] if m else 120
 
 
-def scaling_patch(sc: dict) -> dict:
-    pred = {k2: sc[k] for k, k2 in (("min_replicas", "minReplicas"), ("max_replicas", "maxReplicas"), ("target_concurrency", "scaleTarget")) if sc.get(k) is not None}
-    body = {"spec": {"predictor": pred}}
-    if sc.get("scale_to_zero_after_s") is not None:
-        body["metadata"] = {"annotations": {"autoscaling.knative.dev/scale-to-zero-pod-retention-period": f"{int(sc['scale_to_zero_after_s'])}s"}}
-    return body
-
-
 def _base(m: dict, md: dict, st: dict) -> dict:
     """What every endpoint kind reports (docs/API.md `GET /v1/endpoints`): identity, live status, start-up timing of the
     newest pod, the example request, and who owns the definition (api: through POST /v1/models, editable in the console;

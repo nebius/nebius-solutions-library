@@ -22,11 +22,6 @@ job:                                        # rendered by services/api/jobs.py; 
   data: "{{data}}"                          # a directory of the tenant's shared data, mounted at /data (empty = none; docs/JOBS.md "Shared data")
   dataMountPath: /data
   dataReadOnly: "{{data_readonly}}"
-deployments:
-  hub:
-    price_per_gpu_hour: 2.15      # H100 spot cap
-  eu-south1:
-    price_per_gpu_hour: 1.60      # RTX PRO 6000 spot
 parameters:
   - { name: scratch, type: string, label: Scratch storage, default: network, help: "network = per-run network volume (resumes after preemption); local-nvme = host NVMe of the node (fastest, gone with the pod, checkpoint to the bucket yourself)" }
   - { name: image, type: string, label: Container image, required: true, help: "registry.serverless2.local/<nvcr|ghcr|docker|quay|k8s|nebius>/<path> goes through the regional cache (docs/IMAGES.md); any public reference also works" }

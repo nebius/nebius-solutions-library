@@ -35,7 +35,7 @@ def _client(region: str) -> client.ApiClient:
     path = REGION_KUBECONFIGS.get(region)
     if not path or not os.path.exists(path):
         raise HTTPException(400, f"region {region} is not served by this API (available: {regions()})")
-    # the kubeconfig Secret is rotated daily (48 h tokens, ops/rotate-api-agent-token): rebuild the
+    # the kubeconfig Secret is rotated daily (48 h tokens, re-applied by the platform stage): rebuild the
     # client whenever the mounted file changed, so no restart is needed after a rotation
     mtime = _mtime(path)
     if region not in _clients or _kubeconfig_mtime.get(region) != mtime:
@@ -110,7 +110,7 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Kueue `spec.active = false` on the manager Workload of a run (label kueue.x-k8s.io/job-uid): Kueue evicts the
     run everywhere (the worker's copy goes, its pods with it) and never admits it again. A `suspend` patched onto
     the worker's JobSet alone is undone within seconds: Kueue keeps an admitted workload's JobSet running, and the
-    JobSet controller then restarts every pod (s2pr2, 2026-10-09: a cancelled 16-GPU run came back on fresh pods).
+    JobSet controller then restarts every pod (test fleet, 2026-10-09: a cancelled 16-GPU run came back on fresh pods).
     `region` is the cluster that holds the Workload: the manager for a dispatched run, the worker for a run pinned
     to a region (its Kueue admits the JobSet directly and would undo a suspend the same way).
     Returns the number of Workloads patched (0: none found, the run never reached the queue)."""
@@ -144,10 +144,6 @@ def workload_clusters(ns: str) -> dict[str, str]:
 
 
 _isvc_cache: dict[str, tuple[float, dict]] = {}
-
-
-def invalidate_endpoint(name: str, ns: str, region: str = REGION) -> None:
-    _isvc_cache.pop(f"{region}/{ns}/{name}", None)
 
 
 def isvc(name: str, ns: str, region: str = REGION) -> dict | None:

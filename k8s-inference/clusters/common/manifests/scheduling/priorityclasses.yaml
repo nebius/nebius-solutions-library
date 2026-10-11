@@ -28,4 +28,4 @@ metadata:
 value: 100
 preemptionPolicy: Never
 globalDefault: false
-description: "Default for run-class pods (set by the run WorkflowTemplates). Never preempts; first victim of serverless2-interactive."
+description: "Default for run-class pods (set by the API on every run pod). Never preempts; first victim of serverless2-interactive."

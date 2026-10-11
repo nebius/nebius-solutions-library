@@ -48,7 +48,7 @@ digest), so a catalog entry can pin a digest and the cache serves exactly it.
 | Zot 2.1.22 (CNCF) | pull-through cache: sync extension `onDemand` from every upstream, `docker2s2` compat, anonymous read only (pushes get 401), GC + retention (tags not pulled for `images.cache.keep_days` are dropped, untagged after 24 h), Prometheus metrics | app `clusters/common/apps/zot.yaml` (chart `zot` 0.1.128), values `clusters/common/values/zot.yaml` (+ `clusters/control/values/zot.yaml`: 100 Gi), config rendered by `charts/fleet/templates/image-cache.yaml` from fleet.yaml `images` into ConfigMap `registry/zot-config` |
 | Spegel 0.7.4 (CNCF sandbox) | peer-to-peer distribution of layers between the nodes of a cluster, and the writer of containerd's `hosts.toml` for the logical host and the public registries (`additionalMirrorTargets` = the Zot NodePort) | app `clusters/common/apps/spegel.yaml` (native OCI chart), values `clusters/common/values/spegel.yaml` |
 | node-config DaemonSet | containerd on the GPU node images has no registry `config_path`: a drop-in `/etc/containerd/conf.d/serverless2-registry.toml` (`config_path`, `discard_unpacked_layers = false`) and one containerd restart per node, through the host's systemd (`hostPID`, privileged init container; the CPU images already ship the setting and are left alone) | `clusters/common/manifests/node-config`, app `node-config` |
-| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"cr.eu-north1.nebius.cloud": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | created at bootstrap (docs/BOOTSTRAP.md); the static key: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
+| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"cr.eu-north1.nebius.cloud": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | written by the platform stage (`stack/platform/secrets.tf`) from the key `stack/scripts/registry-static-key.sh` issues; by hand: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
 | Knative | `registries-skipping-tag-resolving: registry.serverless2.local` (the host resolves on nodes, not in the cluster network) | `clusters/common/manifests/knative/knative-serving.yaml` |
 
 No per-region image rewriting exists any more: `services/api` renders the
@@ -88,11 +88,6 @@ the tag.
    apply at once: `kubectl -n registry rollout restart statefulset/zot`).
 3. Make sure the credential in `registry/zot-sync-credentials` can read the
    new registry (same host, same project: nothing to do).
-
-Done on 2026-10-07: `k8s-inference-h100` (FS2-owned) -> `serverless2-models`
-(`cr.<region>.nebius.cloud/<registry id>`, Terraform, hub project): the
-eight references in use were copied in 42 s by an in-cluster Job, the key
-flipped, the three caches restarted.
 
 ## Warm-up and sizing
 

@@ -48,7 +48,7 @@ fleet:
                                   # (8-GPU presets only; multi-node runs with interconnect: required land here, docs/JOBS.md;
                                   # min_nodes = the node count of the largest multi-node run: the autoscaler never
                                   # adds InfiniBand nodes, not even from one ("DynamicResources" filter: CEL error
-                                  # on the simulated node's devices, s2pr2 2026-10-09); the node group gets
+                                  # on the simulated node's devices, test fleet, 2026-10-09); the node group gets
                                   # gpu_settings.dra = true so Managed Kubernetes runs DraNet on its nodes)
           ib_devices_per_node: 8  # InfiniBand NICs a pod claims per node (default 8; 4 on gpu-gb300): Kueue quota
                                   # `nebius.ai/infiniband` = this x max_nodes (DRA, docs/JOBS.md "Multi-node runs")
@@ -103,7 +103,7 @@ Worker cluster (every region):
   prefers H100 lands on H100 when free, else on the next class, and waits
   only when every pool is full. A LocalQueue pointing at `prefer-<class>` is
   all a job needs (`kueue.x-k8s.io/queue-name`); the API maps a model's
-  preferred class to it (lane F3/F4).
+  preferred class to it.
 - `DaemonSet prepull-<pool>` in `models`, same shape as the hand-written
   ones, image list per cluster in `clusters/<id>/values/fleet.yaml`.
 - `ConfigMap kueue-system/fleet-prices`: per-pool price, class, capacity,
@@ -111,7 +111,7 @@ Worker cluster (every region):
   (`list.yaml`) for the cost-aware dispatcher, the price feed and the API
   (class affinity). OpenCost
   keeps one GPU / spot price per cluster in
-  `clusters/<id>/apps/overlays/observability`, set from the same numbers.
+  the platform stage, set from the same numbers.
 - DCGM exporter now follows any `serverless2.nebius/pool` label except
   `system`, so new pools need no observability change.
 
@@ -129,12 +129,12 @@ Control cluster (Kueue MultiKueue manager):
   the worker's queue of the same name does the final pool placement.
 - Dispatch order vs. "all at once" is Kueue configuration
   (`multiKueue.dispatcherName`, incremental tries the listed regions in
-  order); the cost-aware dispatcher (lane F4) replaces the static order with
+  order); the cost-aware dispatcher replaces the static order with
   live prices from `fleet-prices` and `spot-prices` (`docs/SCHEDULING.md`).
 - Resume after spot preemption: MultiKueue keeps a Workload on the worker
   that admitted it; the Job's own `backoffLimit` / JobSet restart and the
   checkpoint on the region's shared filesystem resume it in the same region
-  (lane F3). A workload is only re-dispatched to another region when the
+  A workload is only re-dispatched to another region when the
   worker evicts it entirely.
 
 Endpoints: Knative scales them (a revision superseded by a newer one is collected after an hour; a model whose first revision never becomes Ready keeps its Pending pod and GPU request until the model is changed or deleted, Knative never collects the latest revision); an endpoint with `runtime.queue.name` set
@@ -167,7 +167,8 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
 
 - **Tenant queues moved (2026-10-11)**: a tenant's LocalQueues now point at its own ClusterQueues. A LocalQueue's
   target is immutable, so the models stage deletes the queues that point elsewhere right before the tenant release
-  upgrades them (`stack/scripts/localqueue-cutover.sh`, triggered by the tenant chart's version); waiting runs are
+  upgrades them. A LocalQueue's target queue is immutable: when a change moves a tenant's queues to other ClusterQueues,
+  delete the old LocalQueues in `tenant-<name>` first (`kubectl -n tenant-<name> delete localqueue --all`); waiting runs are
   re-queued by Kueue, running ones are not touched. Apply the platform stage (fleet chart) before the models stage.
 
 - **Add a pool / GPU class**: one entry under `regions.<r>.pools`; `plan`
@@ -197,7 +198,7 @@ borrowed GPUs are what empties the pool); its profile names accept the tenant pr
   Kueue's automated quota management needs its feature gate and was not
   enabled.
 - Spot list prices are the "from" prices; the live spot price comes from the
-  price feed (lane F4), not from this file.
+  price feed, not from this file.
 
 GPU node groups carry a cloud-init fragment (`stack/modules/cluster/main.tf` `gpu_cloud_init`): the containerd registry drop-in of the image cache (docs/IMAGES.md) and, when `weights_filesystem` is enabled, the virtiofs mount of the shared weights filesystem. Changing it rolls the pools (surge 1).
 
@@ -273,7 +274,7 @@ Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tf
 | Device plugin, GFD, NFD | the fleet's `nvidia-device-plugin` release (`clusters/common/apps/nvidia-device-plugin.yaml`) | the operator's (`gpu-operator.yaml`, namespace `nvidia-gpu-operator`); the fleet release is not installed |
 | RDMA / InfiniBand | OFED in the image, DraNet (Managed Kubernetes) advertises the NICs | NVIDIA Network Operator (`network-operator.yaml`, DOCA driver container on every node with a Mellanox NIC) installed first on every worker cluster: the Nebius driver profiles of the SXM platforms wait for it on such nodes, InfiniBand or not (a B300 node without the fabric waited forever on 2026-10-10); `gpu_operator.network_operator = false` leaves it out. DraNet unchanged |
 | Driver version | whatever the preset ships (580.173.02 on 2026-10) | `gpu_operator.driver_version` (an image tag of the marketplace driver image: `crane ls cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/image/driver`) |
-| Kernel modules, GDS | the image's | `gpu_operator.kernel_module` (open, proprietary, auto) and `gpu_operator.gds` (GPUDirect Storage: the `nvidia-fs` module built next to the driver, needs the open modules) |
+| Kernel modules, GDS | the image's | `gpu_operator.kernel_module` (open, proprietary, auto) and `gpu_operator.gds` (GPUDirect Storage: the `nvidia-fs` module built next to the driver, needs the open modules; experimental: the module loads, but cuFile direct I/O on local NVMe was not achieved on the current node images and the shared filesystem never supports it) |
 | MIG | no (the node device plugin has no MIG manager) | the operator's MIG manager (`nvidia.com/mig.config` node label) |
 | DCGM metrics | the fleet's `dcgm-exporter` release | the same (the operator's exporter stays off) |
 
@@ -303,8 +304,8 @@ with Intel Granite Rapids platform (gpu-b300-sxm) with the eight-GPU preset 8gpu
 
 | Platform | Preset | Local disks | Regions | Evidence |
 |---|---|---|---|---|
-| gpu-b300-sxm | 8gpu-192vcpu-2768gb | 6 x 3.84 TB NVMe | uk-south1, eu-west2, us-north1 | **verified 2026-10-09** on a spot node in eu-west2 (test fleet s2pr2, pool `b300-spot-8x`): six `MTFDKCC3T8TGP` 3.5 TiB NVMe in a RAID0 (`md127`, ext4, 21 TiB) under `/mnt/local-ephemeral` with `/var/lib/kubelet` and `/var/lib/containerd` on it; node capacity `ephemeral-storage` 22.4 TB (allocatable 20.65 TB); a `scratch: local-nvme` run wrote 100 GiB at 6.7 GB/s (one `dd`, direct, fsync) and read it at 1.6 GB/s single-stream / 5.7 GB/s with four readers; a spot pool, so the preemptible quota applies (`compute.instance.preemptible.count`), not the B300 GPU quota |
-| gpu-b300-sxm | 1gpu-24vcpu-346gb | none | eu-west2 | node group with `local_disks` rejected on 2026-10-08 (test fleet s2lib, see docs/VERIFICATION.md) |
+| gpu-b300-sxm | 8gpu-192vcpu-2768gb | 6 x 3.84 TB NVMe | uk-south1, eu-west2, us-north1 | **verified 2026-10-09** on a spot node in eu-west2 (a test fleet, pool `b300-spot-8x`): six `MTFDKCC3T8TGP` 3.5 TiB NVMe in a RAID0 (`md127`, ext4, 21 TiB) under `/mnt/local-ephemeral` with `/var/lib/kubelet` and `/var/lib/containerd` on it; node capacity `ephemeral-storage` 22.4 TB (allocatable 20.65 TB); a `scratch: local-nvme` run wrote 100 GiB at 6.7 GB/s (one `dd`, direct, fsync) and read it at 1.6 GB/s single-stream / 5.7 GB/s with four readers; a spot pool, so the preemptible quota applies (`compute.instance.preemptible.count`), not the B300 GPU quota |
+| gpu-b300-sxm | 1gpu-24vcpu-346gb | none | eu-west2 | node group with `local_disks` rejected on 2026-10-08 (a test fleet, see docs/VERIFICATION.md) |
 | gpu-h100-sxm | 1gpu-16vcpu-200gb, 8gpu-128vcpu-1600gb | none | eu-north1 | rejected on 2026-10-08: `local_disks.passthrough_group.requested is invalid` |
 | gpu-h200-sxm, gpu-b200-sxm, gpu-gb300, gpu-l40s-a/-d, gpu-rtx6000-a | all | none | - | not listed in the documentation (the H100 probe above is the behaviour on an unlisted preset) |
 
@@ -317,7 +318,7 @@ and `scratch: local-nvme` run volume (`/work`, docs/JOBS.md) lands on NVMe, and 
 `local_nvme_mode = raw` leaves the devices unformatted (`config.none`) for a workload that owns them. The
 rendering (node-group template, node label, catalog `scratch`, pod affinity and emptyDir) is covered by
 `terraform plan` and the API unit tests, and the whole path ran end to end on 2026-10-09 on a B300 spot node
-(`docs/dev-fleet/VERIFICATION-DEV.md`, "Local NVMe on a B300 spot node"). Two things that test fixed: the
+(`docs/VERIFICATION.md`, "Local NVMe on a B300 spot node"). Two things that test fixed: the
 Kueue flavor of an NVMe pool now carries the `local-nvme` label (without it Kueue ignored the affinity key
 and admitted such a run on any flavor), and a local-NVMe run is dispatched only to regions that have an
 NVMe pool. The NVMe content does not survive a preemption: a stopped spot VM loses `/mnt/local-ephemeral`

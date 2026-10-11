@@ -51,6 +51,11 @@ def normalise(doc: dict) -> dict:
     m["gpu_classes"] = list(gpu.get("classes") or []) if isinstance(gpu, dict) else []    # preferred first (scheduling profile)
     m["nodes"] = int(m.get("nodes") or rt.get("nodes") or 1)       # > 1: a multi-node endpoint (LeaderWorkerSet, services/api/models.py)
     m["cold_start_class"] = m.get("coldStartClass")
+    if not m.get("deployments") and m["mode"] == "run":
+        import kube                                   # lazy: catalog must not import kube at load
+        # a run class without deployments runs in every region of the fleet (the fleet document's pools), else here
+        regions = sorted({kube.cluster_region(p["region"]) for p in (kube.fleet().get("pools") or {}).values() if p.get("region")})
+        m["deployments"] = {r: {} for r in (regions or kube.regions())}
     dep = {(k if k != "hub" else HUB_REGION): (v or {}) for k, v in (m.get("deployments") or {"hub": {}}).items() if not (v or {}).get("paused")}
     m["deployments"] = dep
     m["regions"] = list(dep)

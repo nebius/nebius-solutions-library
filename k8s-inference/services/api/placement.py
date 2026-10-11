@@ -7,7 +7,7 @@ cannot change afterwards, so for such a class the choice happens here, at submis
 move between regions of the class while it waits (MultiKueue), and a resume keeps the class. Runs whose class has
 one image are not affected: they keep switching class at queue time.
 
-The option "re-render a waiting run for the next class after N minutes" (A+ in docs/DESIGN-REVIEW-2026-10-09.md)
+The option "re-render a waiting run for the next class after N minutes" (A+ in the design review of 2026-10-09)
 is documented, not built."""
 import logging
 import httpx

@@ -65,7 +65,7 @@ its private endpoint through the VPC of the control subnet. Two databases: `plat
 database: model definitions and their history, owned by the control API) and `litellm` (API keys,
 budgets, spend; created by a Job of the platform stage). Backups and point-in-time restore are the
 service's (`control_plane.database.backup_retention`, 14 days by default). Because the service exists in
-some regions only, the control plane must be in one of them (`REQUIREMENTS.md`).
+some regions only, the control plane must be in one of them.
 
 ## Model definitions
 
@@ -86,7 +86,7 @@ catalog entry and:
 A regional API serves those copies and answers writes with 409 pointing at the fleet API. The built-in
 classes (`catalog/models`: `hello-run`, `container-run`, `distributed-run`) stay files and are read-only.
 `images` (per GPU class), `deployments.<region>.variants` and `routing` are accepted and stored but not
-acted on yet (`DESIGN-REVIEW-2026-10-09.md`).
+acted on yet (the design review of 2026-10-09).
 
 ## Request path: an endpoint call
 

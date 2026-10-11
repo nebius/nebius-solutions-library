@@ -33,7 +33,7 @@ fleet = {
   # GPU drivers: the Managed Kubernetes node image by default (pools.<name>.driver_preset, cuda13.0). Alternatively
   # the NVIDIA GPU Operator installs the driver (plus toolkit, device plugin, feature discovery, GDRCopy) on nodes
   # created without a preset, the Network Operator (DOCA drivers) before it (docs/FLEET.md "GPU drivers").
-  # gpu_operator = { enabled = true, driver_version = "580.173.02", kernel_module = "open", gds = true }
+  # gpu_operator = { enabled = true, driver_version = "580.173.02", kernel_module = "open", gds = false }   # gds: experimental, docs/FLEET.md
 
   regions = {
     eu-north1 = {

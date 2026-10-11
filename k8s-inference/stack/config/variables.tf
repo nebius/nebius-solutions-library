@@ -8,7 +8,8 @@ variable "fleet" {
   description = "The inference fleet: control plane, GPU regions with their pools, images, prices, edge, tenants and models."
   type = object({
     schema_version   = optional(number, 1)
-    trust_bundle_pem = optional(string) # public CA bundle, including private gateway/database roots when needed
+    trust_bundle_pem = optional(string)                                                            # public CA bundle, including private gateway/database roots when needed
+    msp_ca_url       = optional(string, "https://storage.eu-north1.nebius.cloud/msp-certs/ca.pem") # the Nebius managed-services CA (docs.nebius.com/postgresql/databases/connect)
     # Prefix of every cloud resource (clusters, service accounts, buckets, registry): <name>-<cluster id>-...
     name               = string
     kubernetes_version = optional(string, "1.35")
@@ -108,7 +109,7 @@ variable "fleet" {
         mount_on_system = optional(bool, false)
       }), {})
       # Preview startup snapshots. Defaults leave every existing workload alone.
-      # Custom values use the portable charts/gpu-snapshot schema; credentials
+      # Custom values use the snapshot chart's own schema; credentials
       # belong in Secrets, never this field. The namespace is Terraform-owned.
       gpu_snapshot = optional(object({
         enabled   = optional(bool, false)
@@ -205,9 +206,9 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.4")
+        api        = optional(string, "0.11.5")
         dispatcher = optional(string, "0.2.7")
-        jobs       = optional(string, "0.1.10")
+        jobs       = optional(string, "0.1.11")
         ops        = optional(string, "0.1.11")
         ui         = optional(string, "0.6.1")
       }), {})

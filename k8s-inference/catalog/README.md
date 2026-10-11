@@ -2,10 +2,9 @@
 
 One file per model in `catalog/models/<id>.yaml`, one schema for endpoints and
 run classes (the API reads this directory; `services/api/catalog.py`).
-Endpoint entries (a `runtime` block) are deployed straight from this directory:
-endpoints are defined through the API, which renders `charts/endpoint` (the catalog directory holds run classes only).
-with the entry as its values file, once per cluster named in its
-`deployments` (and not `paused`). Nothing is rendered into the repository. Run-class
+Endpoints are defined through the API (`POST /v1/models`), which renders `charts/endpoint` with the
+entry as its values file, once per cluster named in its `deployments` (and not `paused`); this directory
+holds the built-in run classes only. Nothing is rendered into the repository. Run-class
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
 class, command, GPUs, CPU, memory, work volume size, `scratch: network | local-nvme`; `{{name}}`
 placeholders; `docs/SCHEDULING.md` "Per-GPU images for runs") that the API renders into
@@ -30,7 +29,7 @@ port: 8000
 endpoints: { ...: /path }      # what a client calls; documented, not enforced
 gpu: { count: 1, memoryGiB: 8, classes: [h100, rtx-pro-6000] }   # run classes: classes the image runs on, preferred first (profile prefer-<first>)
 concurrency: 1                 # sessions/requests one replica handles at once
-coldStartClass: fast | medium | slow     # measured, see spikes/S10-endpoints/RESULT.md
+coldStartClass: fast | medium | slow     # informational
 price: { unit: call | audio-minute | 1k-tokens, usd: 0.05 }
 scaleToZero: true
 runtime:                       # charts/endpoint values (see charts/endpoint/values.yaml)

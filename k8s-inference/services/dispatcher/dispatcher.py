@@ -262,7 +262,7 @@ def pvc_of(template: dict) -> str | None:
     """The claim behind the pod's `work` volume, None when it is not a claim (multi-node runs scratch on an emptyDir).
     Other claims of the pod are never the dispatcher's: a multi-node run with `checkpoints: shared` mounts the
     tenant's `scratch-shared` claim (charts/tenant), which the sweeper deleted as an "orphan" when it was taken for
-    the work volume (s2pr2, 2026-10-09, docs/dev-fleet/VERIFICATION-DEV.md)."""
+    the work volume (test fleet, 2026-10-09, docs/VERIFICATION.md)."""
     for v in (template.get("spec") or {}).get("volumes") or []:
         if v.get("name") == WORK_VOLUME and v.get("persistentVolumeClaim", {}).get("claimName"):
             return v["persistentVolumeClaim"]["claimName"]

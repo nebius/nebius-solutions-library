@@ -14,6 +14,6 @@ RUN apk upgrade --no-cache
 USER 101
 COPY templates/default.conf.template /etc/nginx/templates/default.conf.template
 # API_UPSTREAM/DNS_RESOLVER: the same-origin proxy; PUBLIC_API_URL/GRAFANA_URLS: served at /config.json (set per fleet)
-ENV API_UPSTREAM=http://api.api.svc.cluster.local:80 DNS_RESOLVER=10.2.0.10 PUBLIC_API_URL= GRAFANA_URLS=
+ENV API_UPSTREAM=http://api.api.svc.cluster.local:80 DNS_RESOLVER=kube-dns.kube-system.svc.cluster.local PUBLIC_API_URL= GRAFANA_URLS=
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080

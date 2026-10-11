@@ -24,9 +24,6 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-runner }
 subjects:
   - { kind: ServiceAccount, name: {{ .Values.runnerServiceAccount }}, namespace: {{ include "tenant.ns" . }} }
-{{- if .Values.legacyRunnerServiceAccount }}
-  - { kind: ServiceAccount, name: {{ .Values.legacyRunnerServiceAccount }}, namespace: {{ include "tenant.ns" . }} }
-{{- end }}
 ---
 {{- end }}
 # the API (this cluster's, and the control cluster's through its api-agent identity on a worker) manages
