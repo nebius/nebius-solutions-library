@@ -512,3 +512,18 @@ it("labels controls, traps dialog focus, closes on Escape and restores focus", a
   );
   await waitFor(() => expect(trigger).toHaveFocus());
 });
+
+it("administrators edit a key's spending limit from the keys page", async () => {
+  vi.spyOn(api(), "listKeys").mockResolvedValue([principal]);
+  vi.spyOn(api(), "listModels").mockResolvedValue([]);
+  const update = vi.spyOn(api(), "updateKey").mockResolvedValue({ ...principal, budget: 250 });
+  show(<Keys />);
+  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const budget = await screen.findByLabelText("Budget (USD)");
+  await userEvent.clear(budget);
+  await userEvent.type(budget, "250");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(update).toHaveBeenCalledWith(principal.alias, expect.objectContaining({ budget: 250 })),
+  );
+});

@@ -288,6 +288,14 @@ const real = {
     expires_days?: number;
   }) =>
     http<ApiKey>(`/v1/keys`, { method: "POST", body: JSON.stringify(input) }),
+  updateKey: (
+    alias: string,
+    input: { budget?: number; models?: string[]; expires_days?: number },
+  ) =>
+    http<ApiKey>(`/v1/keys/${encodeURIComponent(alias)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
   deleteKey: (alias: string) =>
     http<void>(`/v1/keys/${encodeURIComponent(alias)}`, { method: "DELETE" }),
   keyInfo: () => http<ApiKey>(`/v1/keys/me`),

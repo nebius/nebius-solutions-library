@@ -224,6 +224,24 @@ export async function previewRequest(
     keys.push(key);
     return key;
   }
+  if (path.startsWith("/v1/keys/") && method === "PATCH") {
+    const key = keys.find((k) => k.alias === path.split("/")[3]);
+    if (!key) throw new Error("key not found");
+    const input = body as {
+      budget?: number;
+      models?: string[];
+      expires_days?: number;
+    };
+    if (input.budget !== undefined) key.budget = input.budget;
+    if (input.models !== undefined) key.models = input.models;
+    if (input.expires_days !== undefined)
+      key.expires_at = input.expires_days
+        ? new Date(Date.now() + input.expires_days * 86400000).toISOString()
+        : undefined;
+    key.status =
+      key.budget != null && key.spend >= key.budget ? "exhausted" : "active";
+    return key;
+  }
   if (path.startsWith("/v1/keys/") && method === "DELETE") {
     const index = keys.findIndex((key) => key.alias === path.split("/")[3]);
     if (index >= 0) keys.splice(index, 1);

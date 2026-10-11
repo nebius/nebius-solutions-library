@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import type { ApiKey } from "../api/types";
 import {
   Badge,
   Empty,
@@ -32,6 +33,13 @@ export function Keys() {
     expires: 90,
   });
   const [busy, setBusy] = useState(false);
+  // editing an existing key: budget, allowed models, expiry (days from now; 0 = never)
+  const [editing, setEditing] = useState<{
+    alias: string;
+    budget: number | "";
+    models: string[];
+    expires: number;
+  } | null>(null);
   const totalSpend = (data ?? []).reduce((a, k) => a + k.spend, 0);
   const totalBudget = (data ?? []).reduce((a, k) => a + (k.budget ?? 0), 0);
   const unlimitedBudget = (data ?? []).some((k) => k.budget == null);
@@ -60,6 +68,48 @@ export function Keys() {
       });
       setCreated(k.key ?? "(key not returned)");
       setOpen(false);
+      reload();
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function startEdit(k: ApiKey) {
+    const daysLeft = k.expires_at
+      ? Math.max(
+          0,
+          Math.ceil((Date.parse(k.expires_at) - Date.now()) / 86400000),
+        )
+      : 0;
+    setEditing({
+      alias: k.alias,
+      budget: k.budget ?? "",
+      models: [...k.models],
+      expires: daysLeft,
+    });
+  }
+  async function saveEdit() {
+    if (!editing) return;
+    if (
+      editing.budget === "" ||
+      !Number.isFinite(editing.budget) ||
+      editing.budget < 0 ||
+      !Number.isInteger(editing.expires) ||
+      editing.expires < 0
+    ) {
+      toast("Enter a nonnegative budget and a nonnegative expiry in days (0 = never).", true);
+      return;
+    }
+    setBusy(true);
+    try {
+      await api().updateKey(editing.alias, {
+        budget: editing.budget,
+        models: editing.models,
+        expires_days: editing.expires,
+      });
+      toast("Key updated");
+      setEditing(null);
       reload();
     } catch (e) {
       toast((e as Error).message, true);
@@ -201,12 +251,20 @@ export function Keys() {
                     </td>
                     <td>
                       {admin && (
-                        <button
-                          className="btn btn--sm btn--danger"
-                          onClick={() => setRevoking(k.alias)}
-                        >
-                          Revoke
-                        </button>
+                        <div className="row" style={{ gap: 6 }}>
+                          <button
+                            className="btn btn--sm"
+                            onClick={() => startEdit(k)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="btn btn--sm btn--danger"
+                            onClick={() => setRevoking(k.alias)}
+                          >
+                            Revoke
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -242,6 +300,97 @@ export function Keys() {
             >
               Revoke key
             </button>
+          </div>
+        </Modal>
+      )}
+      {editing && admin && (
+        <Modal
+          title={`Edit key ${editing.alias}`}
+          onClose={() => {
+            if (!busy) setEditing(null);
+          }}
+        >
+          <div className="form">
+            <div className="row">
+              <Field
+                label="Budget (USD)"
+                help="Calls are refused once spend reaches the budget; spend so far is kept."
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={editing.budget}
+                  autoFocus
+                  onChange={(e) =>
+                    setEditing({
+                      ...editing,
+                      budget:
+                        e.target.value === "" ? "" : Number(e.target.value),
+                    })
+                  }
+                />
+              </Field>
+              <Field
+                label="Expires in (days)"
+                help="Counted from now; 0 = never expires."
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  value={editing.expires}
+                  onChange={(e) =>
+                    setEditing({ ...editing, expires: Number(e.target.value) })
+                  }
+                />
+              </Field>
+            </div>
+            <Field
+              label="Allowed models"
+              help="None selected = all models of the tenant."
+            >
+              <div>
+                {(models.data ?? []).map((m) => (
+                  <label
+                    key={m.id}
+                    className="chip"
+                    style={{ cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={editing.models.includes(m.id)}
+                      onChange={(e) =>
+                        setEditing({
+                          ...editing,
+                          models: e.target.checked
+                            ? [...editing.models, m.id]
+                            : editing.models.filter((x) => x !== m.id),
+                        })
+                      }
+                    />{" "}
+                    {m.id}
+                  </label>
+                ))}
+              </div>
+            </Field>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="btn"
+                disabled={busy}
+                onClick={() => setEditing(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn--primary"
+                disabled={busy}
+                onClick={saveEdit}
+              >
+                {busy && <span className="spin" />} Save
+              </button>
+            </div>
           </div>
         </Modal>
       )}

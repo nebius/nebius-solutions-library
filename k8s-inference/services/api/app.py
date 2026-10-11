@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.8", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.9", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -85,6 +85,14 @@ class KeyRequest(BaseModel):
     budget: float = 10.0
     models: list[str] = Field(default_factory=list)
     expires_days: int | None = None
+
+
+class KeyUpdate(BaseModel):
+    """What an admin may change on an existing key: the spending limit, the model allow-list, the expiry (days from
+    now; 0 = never). Fields left out stay as they are; spend and the key value never change here."""
+    budget: float | None = Field(default=None, ge=0)
+    models: list[str] | None = None
+    expires_days: int | None = Field(default=None, ge=0)
 
 
 
@@ -986,6 +994,33 @@ async def create_key(req: KeyRequest, p: Principal = Depends(admin)):
     out = _key_public({**body, "key_name": "sk-..." + k["key"][-4:], "spend": 0, "created_at": k.get("created_at")}, p.tenant)
     out["key"] = k["key"]
     return out
+
+
+@app.patch("/v1/keys/{alias}")
+async def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
+    """Change a key's budget, allowed models or expiry (LiteLLM `/key/update` on the key's token hash; the spend ledger
+    is untouched, docs/RELIABILITY.md)."""
+    data = await _litellm("GET", "/key/list", params={"return_full_object": "true", "size": 100})
+    mine = [k for k in data.get("keys", []) if isinstance(k, dict) and (k.get("metadata") or {}).get("tenant") == p.tenant]
+    k = next((x for x in mine if x.get("key_alias") == alias), None)
+    if not k:
+        raise HTTPException(404, f"key {alias} not found")
+    if not k.get("token"):
+        raise HTTPException(502, "key service returned no token hash for the key")
+    body: dict = {"key": k["token"]}
+    if req.budget is not None:
+        body["max_budget"] = req.budget
+    if req.models is not None:
+        body["models"] = req.models
+    if req.expires_days is not None:
+        body["duration"] = f"{req.expires_days}d" if req.expires_days else None
+    if len(body) == 1:
+        raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
+    await _litellm("POST", "/key/update", json=body)
+    forget(k.get("key") or "")              # a cached principal would keep the old budget for AUTH_CACHE_S
+    updated = await _litellm("GET", "/key/list", params={"return_full_object": "true", "size": 100})
+    row = next((x for x in updated.get("keys", []) if isinstance(x, dict) and x.get("key_alias") == alias), None) or {**k, **body}
+    return _key_public(row, p.tenant)
 
 
 @app.delete("/v1/keys/{alias}", status_code=204)

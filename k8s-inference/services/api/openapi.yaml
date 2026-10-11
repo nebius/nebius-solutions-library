@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.8
+  version: 0.11.9
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
     Auth: `Authorization: Bearer <LiteLLM virtual key>` on every request; the
@@ -197,6 +197,11 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [alias], properties: { alias: { type: string }, budget: { type: number, default: 10 }, models: { type: array, items: { type: string } }, expires_days: { type: integer } } } } } }
       responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } } }
   /v1/keys/{alias}:
+    patch:
+      summary: Change a key's budget, allowed models or expiry (admin key); the key value and its spend stay
+      parameters: [{ name: alias, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { budget: { type: number, minimum: 0 }, models: { type: array, items: { type: string } }, expires_days: { type: integer, minimum: 0, description: "days from now; 0 = never" } } } } } }
+      responses: { "200": { description: the key, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } }, "404": { $ref: "#/components/responses/Error" } }
     delete:
       summary: Revoke a key by alias (admin key)
       parameters: [{ name: alias, in: path, required: true, schema: { type: string } }]

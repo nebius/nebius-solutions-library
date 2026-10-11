@@ -625,13 +625,23 @@ def test_admin_routes_need_admin_role(client, monkeypatch):
         calls.append((method, path, kw))
         if path == "/key/generate":
             return {"key": "sk-newkey1234", "created_at": "now"}
-        return {"keys": [{"key_alias": "demo-ci", "key_name": "sk-...1234", "spend": 0, "max_budget": 5, "metadata": {"tenant": "demo"}},
-                         {"key_alias": "other", "metadata": {"tenant": "other"}}]}
+        if path == "/key/update":
+            return {}
+        return {"keys": [{"key_alias": "demo-ci", "key_name": "sk-...1234", "token": "hash-ci", "spend": 0, "max_budget": 5, "metadata": {"tenant": "demo"}},
+                         {"key_alias": "other", "token": "hash-other", "metadata": {"tenant": "other"}}]}
     monkeypatch.setattr(appmod, "_litellm", fake_litellm)
     r = c.post("/v1/keys", json={"alias": "ci", "budget": 5, "expires_days": 7}, headers=H)
     assert r.status_code == 201 and r.json()["key"] == "sk-newkey1234" and r.json()["alias"] == "demo-ci"
     assert calls[-1][2]["json"]["metadata"] == {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]} and calls[-1][2]["json"]["duration"] == "7d"
     assert [k["alias"] for k in c.get("/v1/keys", headers=H).json()] == ["demo-ci"]
+    # editing: budget, models and expiry on the key's token hash; another tenant's key is not found; empty patch refused
+    r = c.patch("/v1/keys/demo-ci", json={"budget": 50, "models": ["llm-example"], "expires_days": 30}, headers=H)
+    assert r.status_code == 200, r.text
+    upd = next(x for x in calls if x[1] == "/key/update")
+    assert upd[2]["json"] == {"key": "hash-ci", "max_budget": 50, "models": ["llm-example"], "duration": "30d"}
+    assert c.patch("/v1/keys/other", json={"budget": 1}, headers=H).status_code == 404
+    assert c.patch("/v1/keys/demo-ci", json={}, headers=H).status_code == 400
+    assert c.patch("/v1/keys/demo-ci", json={"budget": -1}, headers=H).status_code == 422
     assert c.delete("/v1/keys/demo-ci", headers=H).status_code == 204 and calls[-1][1] == "/key/delete"
     assert c.delete("/v1/keys/other", headers=H).status_code == 404
 
