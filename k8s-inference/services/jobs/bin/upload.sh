@@ -16,11 +16,11 @@ set -uo pipefail
 # attempt record is kept under /work/attempts (the run moves its own data).
 MODE="${UPLOAD_MODE:-sync}"; EXPORT=""
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
-TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token; TOKEN=$(cat "$TOKEN_FILE"); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
 MAIN="${MAIN_CONTAINER:-main}"; EXIT=""; POD="{}"; SEEN=0
 
-pod() { POD=$(curl -sS --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$POD_URL" 2>/dev/null || echo '{}'); }
+pod() { TOKEN=$(cat "$TOKEN_FILE"); POD=$(curl -sS --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$POD_URL" 2>/dev/null || echo '{}'); }
 field() { jq -r --arg m "$MAIN" "$1" <<<"$POD"; }
 
 main_alive() {   # any process whose ancestry ends neither at this shell nor at pid 1 (pause) belongs to another container
@@ -42,21 +42,38 @@ main_alive() {   # any process whose ancestry ends neither at this shell nor at 
 
 record() {   # $1 = status; the attempt as the uploader sees it now (main may still be running on SIGTERM)
   pod
-  local started ended node pool
+  local started ended node pool image digest result ckpt
   started=$(field '.status.containerStatuses[]? | select(.name==$m) | (.state.terminated.startedAt // .state.running.startedAt // empty)')
   ended=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.finishedAt // empty')
   node=$(field '.spec.nodeName // empty')
   pool=$(field '.spec.nodeSelector["serverless2.nebius/pool"] // empty')
+  image=$(field '.spec.containers[]? | select(.name==$m) | .image // empty')
+  digest=$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')
+  # the application's finalization record (docs/JOBS.md "Attempts and finalization"): RESULT.json next to the
+  # outputs names the committed result and checkpoint; without it an application-managed run is not delivered
+  result=""; ckpt=""
+  if [ -f /work/RESULT.json ]; then
+    result=$(jq -r '.result_ref // empty' /work/RESULT.json 2>/dev/null); ckpt=$(jq -r '.checkpoint_ref // empty' /work/RESULT.json 2>/dev/null)
+  fi
   mkdir -p /work/attempts
   [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
-  printf '{"operation":"%s","pod":"%s","node":"%s","pool":"%s","status":"%s","exit_code":%s,"gpus":%s,"gpu_class":"%s","started_at":"%s","ended_at":"%s"}\n' \
-    "$OPERATION" "$POD_NAME" "$node" "$pool" "$1" "${EXIT:-null}" "${GPUS:-0}" "${GPU_CLASS:-}" "$started" "$ended" > "/work/attempts/$POD_NAME.json"
+  jq -cn --arg op "$OPERATION" --arg pod "$POD_NAME" --arg node "$node" --arg pool "$pool" --arg st "$1" --argjson exit "${EXIT:-null}" \
+    --argjson gpus "${GPUS:-0}" --arg cls "${GPU_CLASS:-}" --arg s "$started" --arg e "$ended" --arg img "$image" --arg dg "$digest" \
+    --arg exp "${EXPORT:-}" --arg res "$result" --arg ck "$ckpt" --arg mode "$([ "$MODE" = record ] && echo application || echo managed)" \
+    '{operation:$op,pod:$pod,node:$node,pool:$pool,status:$st,exit_code:$exit,gpus:$gpus,gpu_class:$cls,started_at:$s,ended_at:$e,
+      image:$img,image_digest:$dg,io_mode:$mode} + (if $exp != "" then {export:$exp} else {} end)
+      + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)' > "/work/attempts/$POD_NAME.json"
+  # the durable copy: the fleet API keeps attempts in its database (fenced by epoch; a stale pod gets 409), best effort
+  if [ -n "${API_URL:-}" ]; then
+    curl -sS -m 20 -o /dev/null -w "attempt record $1 -> API %{http_code}\n" -X POST "$API_URL/internal/attempts" \
+      -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@/work/attempts/$POD_NAME.json" 2>&1 || true
+  fi
 }
 
 upload() {   # $1 = status
   cd /work || return
   record "$1"
-  if [ "$MODE" = record ]; then echo "RECORD $(date -u +%FT%TZ) status=$1 (application-managed I/O: nothing exported)"; return; fi
+  if [ "$MODE" = record ]; then EXPORT="n/a"; record "$1"; echo "RECORD $(date -u +%FT%TZ) status=$1 (application-managed I/O: nothing exported)"; return; fi
   # multi-node runs (UPLOAD_SCOPE=rank0, docs/JOBS.md): every pod records its attempt, only rank 0 publishes the
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then
@@ -76,6 +93,8 @@ upload() {   # $1 = status
   if [ "$rc" = 0 ] && [ -n "$(aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --dryrun --size-only --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' --exclude 'STATUS.json' "$@" 2>/dev/null | head -n 1)" ]; then rc=99; fi
   set +f
   if [ "$rc" = 0 ]; then EXPORT=succeeded; else EXPORT=failed; echo "UPLOAD FAILED $(date -u +%FT%TZ) rc=$rc: the volume is kept, retry the export (POST /v1/operations/$OPERATION:export)"; fi
+  record "$1"                                   # the record now says how the export went (and reaches the API)
+  aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
   # STATUS.json is published last: its presence with export=succeeded is the durable-delivery marker
   printf '{"operation":"%s","attempt_pod":"%s","status":"%s","export":"%s","exit_code":%s,"finished_at":"%s"}\n' \
     "$OPERATION" "$POD_NAME" "$1" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json

@@ -179,6 +179,8 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
     if gpu_class and placement:
         placement = {**placement, "profile": profile, "classes": [gpu_class]}   # the dispatcher keeps the run on this class
     meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class, ex)
+    if model.get("version") is not None:
+        meta["annotations"][f"{LABEL}/model-version"] = str(model["version"])     # the revision this run is rendered from
     rates = {}
     for pool in kube.fleet().get("pools", {}).values():
         pool_region = kube.cluster_region(pool["region"])
@@ -497,6 +499,10 @@ def _with_worker(job: dict, ns: str, clusters: dict) -> dict:
     cluster = clusters.get(job["metadata"].get("uid", ""))
     if not cluster:
         job["_pods"], job["_region"], job["_cluster"] = [], None, None
+        try:
+            job["_reason"] = kube.workload_reasons(ns).get(job["metadata"].get("uid", ""))
+        except Exception:  # noqa: BLE001 - advisory
+            job["_reason"] = None
         return job
     region = kube.cluster_region(cluster)
     try:
@@ -649,6 +655,89 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
     return out
 
 
+def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -> tuple[dict, bool]:
+    """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
+    exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization")."""
+    orig = get(ns, name, region)
+    op = normalise(orig)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    pvc = ann.get(f"{LABEL}/pvc")
+    worker = orig["_region"] if is_manager_job(orig) else region
+    if not pvc or not worker or is_jobset(orig):
+        raise HTTPException(409, f"operation {name} has no kept work volume to export")
+    import catalog
+    model = catalog.pinned(model, ann)
+    try:
+        retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
+    except ApiException as e:
+        raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    n = 1 + sum(1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x"))
+    new = f"{root}-x{n}"
+    d = dict(defaults)
+    out = output_prefix(orig) or ""
+    d["output_prefix"] = out                     # the same prefix: the retry completes the original export
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
+    except ValueError:
+        ex = None
+    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, 3600,
+                    labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc,
+                    placement={"manager": True} if is_manager_job(orig) else None, gpu_class=labels.get(f"{LABEL}/gpu-class"), ex=ex)
+    spec = job["spec"]["template"]["spec"]
+    spec["initContainers"] = []
+    for c in spec["containers"]:
+        if c["name"] == "main":
+            c.update({"image": RUNNER_IMAGE, "command": ["/bin/sh", "-c", "true"], "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}}})
+            c.pop("args", None)
+    spec.pop("nodeSelector", None); spec.pop("affinity", None); spec.pop("tolerations", None)
+    job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
+    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
+    return create(ns, job, region)
+
+
+def switch_class(ns: str, name: str, region: str, model: dict, defaults: dict, next_class: str, remaining: list[str]) -> tuple[dict, bool]:
+    """Fallback placement (docs/SCHEDULING.md "Fallback to the next class"): a QUEUED fleet run that waited longer than
+    its `fallback_wait_s` for its class is deleted on the manager (nothing ran) and created again as `<root>-rN` for
+    `next_class` (that class's image), keeping only the remaining preference; the new Job says why."""
+    orig = get(ns, name, region)
+    op = normalise(orig)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    if op["status"] != "QUEUED" or orig.get("_cluster") or orig.get("_pods"):
+        raise HTTPException(409, f"operation {name} is {op['status']} (placed: {bool(orig.get('_cluster'))}); no fallback")
+    import catalog
+    model = catalog.pinned(model, ann)
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
+    except ValueError:
+        ex = {}
+    ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    n = 1 + sum(1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root)
+    new = f"{root}-r{n}"
+    d = dict(defaults)
+    out = output_prefix(orig) or ""
+    d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
+    placement = {"manager": True, "profile": f"prefer-{next_class}", "classes": remaining,
+                 "regions": [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r] or (ex.get("placement") or {}).get("allowed_clusters") or model["regions"]}
+    tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(f"{LABEL}/regions")
+    if tmpl_regions:
+        placement["regions"] = tmpl_regions.split(",")
+    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, op["timeout_s"],
+                    labels.get(f"{LABEL}/priority"), None, d, ann.get(f"{LABEL}/key"), placement=placement, gpu_class=next_class, ex=ex)
+    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    job["metadata"]["annotations"][f"{LABEL}/fallback"] = f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
+    try:
+        retry(kube.batch(region).delete_namespaced_job, name, ns, propagation_policy="Background")
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    return create(ns, job, region)
+
+
 def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placement: dict | None = None,
            checkpoint_ref: str | None = None, gpu_class: str | None = None) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
@@ -665,6 +754,8 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         raise HTTPException(409, f"operation {name} is {op['status']}; cancel it first")
     if op["mode"] != "run":
         raise HTTPException(400, "only run operations can be resumed")
+    import catalog
+    model = catalog.pinned(model, ann)
     pvc = ann.get(f"{LABEL}/pvc")
     worker = orig["_region"] if is_manager_job(orig) else region
     try:

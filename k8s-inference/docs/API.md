@@ -109,7 +109,10 @@ revokes one. A run names a binding as `execution.private_input_ref`; the other f
 (`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
 profiles, the regions' OIDC issuers). `POST /v1/operations/{id}:resume` takes an optional body
-`{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution`.
+`{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution` and their lifecycle
+(`root_operation_id`, `attempt_id`, `epoch`, `revision`, `cluster`, `image_digest`, `export_state`, `result_ref`,
+`checkpoint_ref`; docs/JOBS.md "Attempts and finalization"); `GET /v1/operations/{id}?since=<revision>` answers 304
+while nothing changed; `POST /v1/operations/{id}:export` retries a failed export without rerunning the simulation.
 
 ## Multi-node endpoints
 

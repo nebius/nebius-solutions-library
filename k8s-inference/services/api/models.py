@@ -348,6 +348,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "graceSeconds": int(s.get("grace_seconds", 300)), "scratch": s.get("scratch", "network"),
             "env": dict(s.get("env") or {}),
             "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
+            # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class chosen at submission picks one
+            **({"images": {k: normalise_image(v) for k, v in s["images"].items()}} if isinstance(s.get("images"), dict) and s["images"] else {}),
         }
         if s.get("args"):
             job["args"] = s["args"]
@@ -378,7 +380,7 @@ def list_runtime(region: str = REGION) -> dict[str, dict]:
     """Runtime catalog entries: {id: entry}. On the control API from the database; on a regional API (or
     for another region) from that cluster's ConfigMap copies."""
     if region == REGION and db.enabled():
-        return {mid: row["entry"] for mid, row in db.list_models().items()}
+        return {mid: {**row["entry"], "version": row["version"]} for mid, row in db.list_models().items()}
     out = {}
     try:
         cms = retry(kube.core(region).list_namespaced_config_map, API_NAMESPACE, label_selector=f"{CATALOG_LABEL}=runtime")

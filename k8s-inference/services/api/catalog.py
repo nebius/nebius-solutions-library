@@ -6,7 +6,7 @@ runtime {image, port, ...} (endpoints), job {image, command, gpu, cpu, memory, p
 parameters [] (run, rendered into a Kubernetes Job by jobs.py, docs/JOBS.md), namespace, litellm_route, endpoint_host, deployments {<cluster>: {pool, image,
 priorityClassName, parameters, price_per_gpu_hour, paused}} ("hub" = this API's region)."""
 import glob, os, yaml
-from config import CATALOG_DIRS, ENDPOINT_DOMAIN, HUB_REGION, MODELS_NAMESPACE
+from config import CATALOG_DIRS, ENDPOINT_DOMAIN, HUB_REGION, LABEL, MODELS_NAMESPACE
 
 _cache: dict = {"mtime": None, "models": {}}
 
@@ -102,6 +102,22 @@ def all_models() -> dict:
 
 def get(name: str) -> dict | None:
     return all_models().get(name)
+
+
+def pinned(model: dict, ann: dict) -> dict:
+    """The model as the operation was rendered from it: a resume or an export retry re-renders from the revision the
+    Job pinned (`serverless2.nebius/model-version`, models_history), never silently from a newer definition."""
+    want = ann.get(f"{LABEL}/model-version")
+    if not want or str(model.get("version")) == str(want) or model.get("managed_by") != "api":
+        return model
+    import db, models as runtime_store
+    if not db.enabled():
+        return model
+    for h in db.history(model["name"], 500):
+        if str(h["version"]) == str(want) and h.get("spec"):
+            entry = runtime_store.to_entry(h["spec"], managed_by="api")
+            return normalise({**entry, "version": h["version"]})
+    return model
 
 
 def region_params(m: dict, region: str) -> dict:

@@ -44,6 +44,40 @@ MIGRATIONS = [
         error text, updated_at timestamptz not null default now()
     );
     """,
+    # 3: the attempt lifecycle of runs (services/api/attempts.py)
+    """
+create table if not exists attempts (
+    operation   text not null,
+    pod         text not null,
+    root        text not null,
+    tenant      text not null,
+    namespace   text not null,
+    epoch       int not null,
+    region      text,
+    node        text,
+    pool        text,
+    gpu_class   text,
+    gpus        int not null default 0,
+    image       text,
+    image_digest text,
+    status      text not null,
+    exit_code   int,
+    started_at  timestamptz,
+    ended_at    timestamptz,
+    export_state text,
+    result_ref  text,
+    checkpoint_ref text,
+    revision    bigserial,
+    updated_at  timestamptz not null default now(),
+    primary key (operation, pod)
+);
+create index if not exists attempts_root on attempts (root);
+create table if not exists operation_marks (
+    operation   text primary key,
+    cancelled_at timestamptz,
+    revision    bigserial
+);
+""",
 ]
 
 _pool = None

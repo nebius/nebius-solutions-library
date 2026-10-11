@@ -11,7 +11,7 @@
 Nothing here talks to Kubernetes; jobs.py does."""
 import hashlib, json, re, uuid
 from fastapi import HTTPException
-from config import JOB_BACKOFF_LIMIT, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, RUNNER_IMAGE, S3_ENV_SECRET
+from config import PUBLIC_API_URL, JOB_BACKOFF_LIMIT, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, RUNNER_IMAGE, S3_ENV_SECRET
 from pod_metadata import normalise as normalise_pod_metadata
 
 TOKEN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -99,6 +99,8 @@ def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, lab
     ann = {f"{LABEL}/input": json.dumps(inp)[:60000]}
     if execution:
         ann[f"{LABEL}/execution"] = json.dumps(execution, sort_keys=True)     # names only, never data (services/api/execution.py)
+        if (execution.get("placement") or {}).get("fallback_wait_s") is not None:
+            ann[f"{LABEL}/fallback-wait-s"] = str(execution["placement"]["fallback_wait_s"])
     if key_hash:
         ann[f"{LABEL}/key"] = key_hash          # sha256 of the submitting key: billing target, never the key itself
     if label:
@@ -116,6 +118,8 @@ def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None
            {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}}]
     if pvc:
         env.append({"name": "PVC_NAME", "value": pvc})
+    if PUBLIC_API_URL:
+        env.append({"name": "API_URL", "value": PUBLIC_API_URL})        # POST /internal/attempts with the pod's projected token
     if excludes:
         env.append({"name": "UPLOAD_EXCLUDES", "value": excludes})
     return {"name": "uploader", "image": RUNNER_IMAGE, "command": ["/usr/local/bin/upload.sh"], "env": env,

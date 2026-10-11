@@ -9,7 +9,7 @@ from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
 import re
-import artifacts, billing, catalog, config as cfg, db, execution, jobs, kube, models, monitoring, placement as placing
+import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs, kube, models, monitoring, placement as placing
 log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
@@ -46,7 +46,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.5", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.6", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -284,10 +284,57 @@ def idle_shutdown() -> list[str]:
     return stopped
 
 
+def fallback_switch() -> list[str]:
+    """Fleet runs that asked for `placement.fallback_wait_s` and are still unplaced after it: moved to the next class of
+    their preference (jobs.switch_class). Returns the new operation ids. Control API only."""
+    if not FLEET_MANAGER:
+        return []
+    moved = []
+    now = datetime.now(timezone.utc)
+    try:
+        namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
+    except Exception:  # noqa: BLE001
+        return []
+    for ns in namespaces:
+        try:
+            b = kube.batch()
+            items = [b.api_client.sanitize_for_serialization(j) for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items]
+        except Exception:  # noqa: BLE001
+            continue
+        clusters = None
+        for job in items:
+            ann = job["metadata"].get("annotations") or {}
+            wait = ann.get(f"{cfg.LABEL}/fallback-wait-s")
+            if wait is None or not jobs.is_manager_job(job) or jobs.finished(job):
+                continue
+            created = datetime.fromisoformat(str(job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
+            if (now - created).total_seconds() < int(wait):
+                continue
+            if clusters is None:
+                clusters = kube.workload_clusters(ns)
+            if clusters.get(job["metadata"].get("uid", "")):
+                continue                      # placed: the wait is over
+            try:
+                ex = jobs.normalise(job).get("execution") or {}
+                pref = (ex.get("placement") or {}).get("gpu_preference") or []
+                current = job["metadata"].get("labels", {}).get(f"{cfg.LABEL}/gpu-class") or (pref[0] if pref else None)
+                remaining = pref[pref.index(current) + 1:] if current in pref else []
+                if not remaining:
+                    continue                  # the last class of the preference: keep waiting
+                m = _model(job["metadata"]["labels"].get(f"{cfg.LABEL}/model", ""))
+                new, _ = jobs.switch_class(ns, job["metadata"]["name"], REGION, m, catalog.fleet_params(m), remaining[0], remaining)
+                moved.append(new["metadata"]["name"])
+                log.info("fallback: %s/%s -> %s on %s", ns, job["metadata"]["name"], new["metadata"]["name"], remaining[0])
+            except Exception:  # noqa: BLE001
+                log.exception("fallback of %s/%s failed", ns, job["metadata"]["name"])
+    return moved
+
+
 async def _reconcile_loop():
     while True:
         try:
             await asyncio.to_thread(idle_shutdown)
+            await asyncio.to_thread(fallback_switch)
             await asyncio.to_thread(reconcile_models)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -573,24 +620,83 @@ def _owned(p: Principal, id: str) -> tuple[dict, str]:
     return job, region
 
 
+def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list, str]:
+    """The attempt records of an operation: the database's (fenced, durable) when this API has one, else the
+    uploader's bucket records. Returns (records, root operation)."""
+    root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    rows = [r for r in attempts.for_operation(root) if r["operation"] == id] if attempts.enabled() else []
+    if rows:
+        return rows, root
+    return artifacts.attempt_records(p.namespace, id, region or REGION, jobs.output_prefix(job)), root
+
+
+def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
+    records, root = _records(p, job, id, region)
+    op = jobs.normalise(job, _price(job), records)
+    op.update(attempts.lifecycle(id, root, records))
+    return op
+
+
 @app.get("/v1/operations/{id}")
-def get_operation(id: str, p: Principal = Depends(principal)):
+def get_operation(id: str, since: int | None = None, p: Principal = Depends(principal)):
+    """`since=<revision>`: 304 while nothing about the operation's attempts changed (polling cursor; the live
+    pod state is still re-read on every 200)."""
     job, region = _owned(p, id)
-    return jobs.normalise(job, _price(job), artifacts.attempt_records(p.namespace, id, region or REGION, jobs.output_prefix(job)))
+    op = _operation(p, job, id, region)
+    if since is not None and op.get("revision") and op["revision"] <= since and op["status"] not in ("QUEUED", "RUNNING"):
+        return JSONResponse(None, status_code=304)
+    return op
 
 
 @app.get("/v1/operations/{id}/result")
 def get_result(id: str, p: Principal = Depends(principal)):
     job, region = _owned(p, id)
-    op = jobs.normalise(job)
-    res = {"operation_id": id, "status": op["status"], "region": region, "error": op.get("error")}
+    op = _operation(p, job, id, region)
+    res = {"operation_id": id, "status": op["status"], "region": region, "error": op.get("error"),
+           "export_state": op.get("export_state"), "result_ref": op.get("result_ref"), "checkpoint_ref": op.get("checkpoint_ref")}
     if op["status"] in ("QUEUED", "RUNNING"):
         return JSONResponse(res, status_code=409)
     prefix = jobs.output_prefix(job)
+    application = (op.get("execution") or {}).get("io_mode") == "application"
     if op["mode"] == "async":
         res["result"] = artifacts.read_json(p.namespace, f"operations/{id}/out/response.json", region or REGION, prefix=prefix)
-    res["artifacts"] = artifacts.list_outputs(p.namespace, id, region or REGION, prefix) if op["mode"] == "run" else []
+    res["artifacts"] = artifacts.list_outputs(p.namespace, id, region or REGION, prefix) if op["mode"] == "run" and not application else []
     return res
+
+
+@app.post("/v1/operations/{id}:export")
+def export_again(id: str, p: Principal = Depends(principal)):
+    """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
+    kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
+    orig, region = _owned(p, id)
+    op = _operation(p, orig, id, region)
+    if op["status"] != "EXPORT_FAILED":
+        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED run is exported again")
+    m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
+    job, created = jobs.export_again(p.namespace, id, _home(orig), m, catalog.region_params(m, region) if region else {})
+    return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
+
+
+@app.post("/internal/attempts", include_in_schema=False)
+async def record_attempt(request: Request, authorization: str = Header(default="")):
+    """The uploader of a run pod reports its attempt (services/jobs/bin/upload.sh) with the pod's projected
+    ServiceAccount token; the token's TokenReview names the pod, so a record can only describe the pod it comes
+    from (services/api/attempts.py). 501 on an API without the fleet database (the bucket records stand)."""
+    if not attempts.enabled():
+        raise HTTPException(501, "this API keeps no attempt records (no fleet database)")
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer token")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "a JSON object is expected")
+    region, ns, pod = await asyncio.to_thread(attempts.verify_runner_token, authorization[7:].strip())
+    operation = str(body.get("operation") or "")
+    try:
+        job = await asyncio.to_thread(jobs.get, ns, operation, region)
+        body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
+    except HTTPException:
+        body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts
+    return await asyncio.to_thread(attempts.record, region, ns, pod, body)
 
 
 def _home(job: dict) -> str:
@@ -601,6 +707,7 @@ def _home(job: dict) -> str:
 @app.post("/v1/operations/{id}:cancel")
 def cancel(id: str, p: Principal = Depends(principal)):
     job, _ = _owned(p, id)
+    attempts.mark_cancelled(id)       # a late "succeeded" from the cancelled attempt is refused from now on
     op = jobs.normalise(jobs.cancel(p.namespace, id, _home(job)))
     if op["status"] in ("QUEUED", "RUNNING"):
         op["status"] = "CANCELLED"   # the Job controller converges within seconds (pods get SIGTERM)

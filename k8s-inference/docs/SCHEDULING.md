@@ -251,6 +251,22 @@ kubectl -n kueue-system get cm spot-prices -o jsonpath='{.data.spot\.json}'
   quota, renomination timing; a smoke run against the chart-rendered
   `pools.yaml` of today's fleet gives `prefer-h100` with H100 busy ->
   eu-south1 RTX PRO 6000 (cheapest free class), `prefer-l40s` -> hub L40S.
+## Fallback to the next class
+
+A run that names `execution.placement.gpu_preference` and `fallback_wait_s` (docs/JOBS.md "Execution options") is
+rendered for the first class of its preference (that class's image, `prefer-<class>` queue, the class's pools as
+affinity). The control API's reconcile loop (every 15 s) looks at fleet runs that are still unplaced (no worker
+admitted their Workload) after the wait bound and moves each to the next class of its preference
+(`jobs.switch_class`): the queued manager Job is deleted (nothing ran) and `<root>-r<n>` is created for the next
+class with the remaining preference, carrying `serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s
+without capacity"), which the operation reports as `reason` and `resumed_from`. The last class of the preference
+keeps waiting (Kueue reports why: `reason` carries the Workload's own condition message while an operation is
+QUEUED). Capacity that becomes free in a worse class is never taken silently: the preference order is the caller's.
+
+A resume with `checkpoint_ref` (docs/JOBS.md "Attempts and finalization") goes through the same placement with an
+optional `gpu_class`: the new attempt gets that class's image, a fresh volume where it lands, and the pinned model
+revision (`serverless2.nebius/model-version`), never a newer definition.
+
 - Manual end-to-end test of MultiKueue placement:
   set `multiKueue.dispatcherName` on the manager's Kueue, create the
   MultiKueueCluster Secrets, move `fleet.yaml` and `dispatcher.yaml` from

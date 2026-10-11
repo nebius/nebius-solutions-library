@@ -125,6 +125,27 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     return len(items)
 
 
+def workload_reasons(ns: str) -> dict[str, str]:
+    """Job uid -> why its Workload is not admitted (the condition messages Kueue writes): what a QUEUED operation
+    reports as `reason`."""
+    try:
+        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get("items", [])
+    except ApiException:
+        return {}
+    out = {}
+    for w in items:
+        uid = (w.get("metadata", {}).get("labels") or {}).get(KUEUE_JOB_UID_LABEL)
+        conds = {c.get("type"): c for c in ((w.get("status") or {}).get("conditions") or [])}
+        if not uid or (conds.get("Admitted") or {}).get("status") == "True":
+            continue
+        for t in ("Evicted", "QuotaReserved", "Admitted", "PodsReady"):
+            c = conds.get(t)
+            if c and c.get("status") != "True" and c.get("message"):
+                out[uid] = c["message"][:300]
+                break
+    return out
+
+
 def workload_clusters(ns: str) -> dict[str, str]:
     """Job uid -> worker cluster that ADMITTED it, for the manager's Jobs in a tenant namespace: the Workload's
     status.clusterName while the worker's copy exists, afterwards the record the dispatcher wrote on the Workload

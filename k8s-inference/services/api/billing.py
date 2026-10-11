@@ -5,7 +5,7 @@ database-authoritative budget checks are part of this integration contract (docs
 """
 import asyncio, hashlib, json, logging, os, sys
 from kubernetes.client.rest import ApiException
-import artifacts, catalog, execution, jobs, kube
+import artifacts, attempts, catalog, execution, jobs, kube
 from config import LABEL
 from resilience import retry
 from status import _attempts, _secs
@@ -125,12 +125,15 @@ async def bill_once() -> int:
                     price_region = kube.cluster_region(cluster) if cluster else None
                     job["_pods"] = []         # the worker's pods are gone with its copy: the uploader's records are the attempts
                 else:
-                    release_volume(job, ns, region)
                     if pods is None:
                         raw = retry(kube.core(region).list_namespaced_pod, ns, label_selector=f"{LABEL}/mode=run").items
                         pods = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
                     job["_pods"] = [p for p in pods if (p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name") or p["metadata"].get("labels", {}).get("job-name")) == name]
-                records = artifacts.attempt_records(ns, name, region, jobs.output_prefix(job))
+                root = ann.get(f"{LABEL}/resumed-from") or name
+                records = attempts.for_operation(root) if attempts.enabled() else []
+                records = [r for r in records if r["operation"] == name] or artifacts.attempt_records(ns, name, region, jobs.output_prefix(job))
+                if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
+                    release_volume(job, ns, region)       # delivered: the volume may go (an EXPORT_FAILED run keeps it)
                 try:
                     gpu_s, usd = cost_of(job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region)
                     identity = job["metadata"].get("uid")

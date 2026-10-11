@@ -10,6 +10,7 @@ import pytest, yaml
 from fastapi.testclient import TestClient
 from kubernetes.client.rest import ApiException
 import app as appmod, auth, catalog, jobs, kube, models
+from config import RUNNER_IMAGE
 
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
             "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/models/llm/chat"]}}
@@ -340,7 +341,7 @@ def test_run_builds_job_with_volume_and_is_idempotent(client, monkeypatch):
     assert rs.status_code == 202 and rs.json()["region"] == "eu-south1" and ("tenant-demo", rs.json()["id"]) in south.jobs
     sj = south.jobs[("tenant-demo", rs.json()["id"])]
     assert _main(sj)["image"] == "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
-    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.10"
+    assert sj["spec"]["template"]["spec"]["containers"][1]["image"] == RUNNER_IMAGE
     assert sj["spec"]["template"]["spec"]["initContainers"][0]["image"].startswith("registry.serverless2.local/nebius/serverless2/jobs:")
     g = c.get(f"/v1/operations/{rs.json()['id']}", headers=H)
     assert g.status_code == 200 and g.json()["region"] == "eu-south1"
@@ -748,7 +749,7 @@ def test_fleet_manager_path(client, monkeypatch):
     job = control.jobs[("tenant-demo", op["id"])]
     assert job["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and f"{L}/region" not in job["metadata"]["labels"]
     assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "prefer-h100"
-    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == "registry.serverless2.local/nebius/serverless2/jobs:0.1.10"
+    assert job["spec"]["template"]["spec"]["initContainers"][0]["image"] == RUNNER_IMAGE
     tmpl = job["spec"]["template"]["metadata"]["annotations"]
     assert tmpl[f"{L}/gpu-classes"] == "h100,h200,b200,b300,gb300,rtx-pro-6000,l40s" and tmpl[f"{L}/regions"] == "eu-north1,eu-south1" and tmpl[f"{L}/pvc-size-gi"] == "100"
     assert not control.pvcs and ("tenant-demo", op["id"]) not in hub.jobs                  # no volume on the manager

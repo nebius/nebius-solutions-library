@@ -292,6 +292,30 @@ identity or profile does not exist for a caller.
 Every run pod, with or without the block, mounts the runner's Kubernetes token into the uploader only
 (`automountServiceAccountToken: false`, a projected 1-hour token): the model's container holds no Kubernetes credential.
 
+## Attempts and finalization
+
+Every attempt (a pod of an operation) is on record twice: the uploader writes `attempts/<pod>.json` into the tenant
+bucket (managed I/O) and posts the same record to the API that rendered the Job (`POST /internal/attempts`, with the
+pod's projected ServiceAccount token: a TokenReview against the issuing cluster names the pod, so a record can only
+describe the pod it comes from). The control API keeps the posted records in the fleet database
+(`services/api/attempts.py`): they survive the pod, the worker's copy of the Job and the Job's TTL, and they exist
+without a bucket. Every operation reports `root_operation_id` (the first operation of a resume chain), `attempt_id`
+(the newest pod), `epoch` (monotonic over the chain), `revision` (a cursor: `GET /v1/operations/<id>?since=<revision>`
+answers 304 while nothing changed), `cluster`, `image_digest`, `export_state`, `result_ref` and `checkpoint_ref`.
+
+Fencing: the first record of a pod opens an epoch; a terminal record from a pod whose epoch is no longer the chain's
+newest is refused (409), as is a success after `:cancel`. A worker that returns after a network partition therefore
+cannot finalize the operation its replacement owns. This fences the platform's own state; it does not revoke an
+external storage credential the old worker still holds (the provider's expiry or an online check does that).
+
+Delivery, not exit code: a run's `SUCCEEDED` needs more than `main` exiting 0. With managed I/O the uploader's export
+must be verified (the sync succeeded and a second, size-only pass finds nothing left), its `STATUS.json` is published
+last, and the work volume is released only then; otherwise the operation is `EXPORT_FAILED`, the volume is kept, and
+`POST /v1/operations/<id>:export` runs the transfer again on that volume without the simulation (`<id>-x<n>`). With
+application-managed I/O the application writes `/work/RESULT.json` (`{"result_ref": "...", "checkpoint_ref": "..."}`)
+after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
+`EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.
+
 ## Fleet placement (control cluster API, `FLEET_MANAGER=true`)
 
 The control cluster's API is the entry point for runs. It renders the same Job but creates it on
@@ -367,6 +391,10 @@ bucket; `GET /v1/operations/{id}/result` returns the response inline from there.
 names the served model as the endpoint expects it (`served_model`, injected when the caller omits `model`).
 
 ## Status mapping
+
+`EXPORT_FAILED`: the run itself succeeded, its delivery did not (see "Attempts and finalization"); resumable and
+exportable again.
+
 
 | Job | Operation |
 |---|---|

@@ -45,6 +45,15 @@ def _gpus(pod: dict) -> int:
 RECORD_STATUS = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}
 
 
+def _lifecycle_fields(r: dict) -> dict:
+    """What an attempt record carries beyond the pod's state (the uploader's `export`, the database's `export_state`)."""
+    out = {k: r.get(k) for k in ("result_ref", "checkpoint_ref", "image_digest", "epoch") if r.get(k) is not None}
+    export = r.get("export_state") or r.get("export")
+    if export is not None:
+        out["export_state"] = export
+    return out
+
+
 def _attempts(pods: list, records: list | None = None, name: str | None = None) -> list[dict]:
     """One attempt per pod, live pods first; attempt records from the bucket (uploader-written,
     docs/JOBS.md) stand in for pods that preemption or node loss deleted. `_gpus` is internal."""
@@ -64,19 +73,22 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         if disrupted:
             reason = next((c.get("message") for c in st["conditions"] if c.get("type") == "DisruptionTarget"), reason)
         seen.add(p["metadata"]["name"])
-        out.append({"started_at": term.get("startedAt") or run.get("startedAt") or st.get("startTime"),
+        out.append({"attempt_id": p["metadata"]["name"], "started_at": term.get("startedAt") or run.get("startedAt") or st.get("startTime"),
                     "ended_at": term.get("finishedAt"), "status": s, "node": p["spec"].get("nodeName"),
                     "gpu_class": (p["metadata"].get("labels") or {}).get(f"{LABEL}/gpu-class") or None,
                     "_pool": p["spec"].get("nodeSelector", {}).get(f"{LABEL}/pool"),
                     "reason": reason if s != "SUCCEEDED" else None, "exit_code": term.get("exitCode"), "_gpus": _gpus(p)})
     for r in records or []:
-        if r.get("pod") in seen or (name and r.get("operation") not in (None, name)):
+        if name and r.get("operation") not in (None, name):
+            continue
+        if r.get("pod") in seen:          # the live pod is the attempt; the record adds what only the uploader knows
+            next(a for a in out if a.get("attempt_id") == r.get("pod")).update(_lifecycle_fields(r))
             continue
         out.append({"started_at": r.get("started_at") or None, "ended_at": r.get("ended_at") or None,
                     "status": RECORD_STATUS.get(r.get("status"), "FAILED"), "node": r.get("node") or None,
-                    "gpu_class": r.get("gpu_class") or None, "_pool": r.get("pool"),
+                    "gpu_class": r.get("gpu_class") or None, "_pool": r.get("pool"), "attempt_id": r.get("pod"),
                     "reason": {"interrupted": "pod deleted (preempted)", "started": "node lost without warning (no end record)"}.get(r.get("status")),
-                    "exit_code": r.get("exit_code"), "_gpus": int(r.get("gpus") or 0)})
+                    "exit_code": r.get("exit_code"), "_gpus": int(r.get("gpus") or 0), **_lifecycle_fields(r)})
     out.sort(key=lambda a: a["started_at"] or "")
     for i, a in enumerate(out, 1):
         a["index"] = i
@@ -119,8 +131,17 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     conds = {c.get("type"): c for c in (st.get("conditions") or []) if c.get("status") == "True"}
     attempts = [{k: v for k, v in a.items() if not k.startswith("_")} for a in _attempts(job.get("_pods", []), records, md.get("name"))]
+    error = None
     if "Complete" in conds or "SuccessCriteriaMet" in conds:
         status = "SUCCEEDED"
+        # delivery, not exit code: a verified export (managed I/O) or the application's finalization record
+        # (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization") must be on record
+        last = next((a for a in reversed(attempts) if a["status"] == "SUCCEEDED"), None)
+        execution = _json(ann.get(f"{LABEL}/execution")) or {}
+        if last and last.get("export_state") == "failed":
+            status, error = "EXPORT_FAILED", "export failed after a successful run; the volume is kept (POST /v1/operations/<id>:export retries the transfer)"
+        elif last and execution.get("io_mode") == "application" and last.get("export_state") is not None and not last.get("result_ref"):
+            status, error = "EXPORT_FAILED", "the run ended without a finalization record (RESULT.json): its results are not confirmed"
     elif "Failed" in conds or "FailureTarget" in conds:
         status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
     elif ann.get(f"{LABEL}/cancelled"):
@@ -132,7 +153,6 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     if ann.get(f"{LABEL}/cancelled") and attempts and attempts[-1]["status"] in ("PREEMPTED", "RUNNING", "QUEUED"):
         attempts[-1]["status"], attempts[-1]["reason"] = "CANCELLED", "cancelled"      # the attempt the cancel interrupted
     c = conds.get("Failed") or conds.get("FailureTarget") or {}
-    error = None
     if status == "FAILED":
         last = next((a for a in reversed(attempts) if a["status"] == "FAILED"), None)
         error = (last or {}).get("reason") or c.get("message") or c.get("reason")
@@ -156,9 +176,10 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "attempts": attempts, "logs_url": logs_url(md.get("namespace", ""), md["name"], region),
             "error": error, "input": inp, "resumed_from": ann.get(f"{LABEL}/resumed-from"),
             "gpu_class": labels.get(f"{LABEL}/gpu-class"), "image": ann.get(f"{LABEL}/image"),
-            "resumable": status in ("FAILED", "CANCELLED") and labels.get(f"{LABEL}/mode") == "run" and
+            "resumable": status in ("FAILED", "CANCELLED", "EXPORT_FAILED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "execution": _json(ann.get(f"{LABEL}/execution")),
+            "reason": (job.get("_reason") if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback"),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
             "interconnect": ann.get(f"{LABEL}/interconnect"),
             "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,

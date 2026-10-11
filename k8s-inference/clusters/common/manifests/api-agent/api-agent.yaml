@@ -95,3 +95,19 @@ kind: RoleBinding
 metadata: { name: serverless2-api-agent-models-certificate, namespace: envoy-gateway-system }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-models-certificate }
 subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+# The control cluster's API verifies the projected tokens of run pods (attempt records, services/api/attempts.py)
+# with a TokenReview against the cluster that issued them: cluster-scoped, so a ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-agent-tokenreview }
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-agent-tokenreview }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-agent-tokenreview }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
