@@ -12,6 +12,18 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Refactor 3: one auth layer (2026-10-11 16:45-17:30 UTC, the same test fleet)
+
+| Check | Result |
+|---|---|
+| Rollout | api 0.11.16 on every cluster; the control API imported LiteLLM's keys once (the demo admin key kept its spend, 9.64 USD); the key bootstrap Jobs of the three tfvars keys completed in 4 s each (`python -m keys bootstrap`, idempotent, "ready" when the row exists) |
+| Create, edit, use | an admin key minted `demo-r3drill` (budget 1 USD, allow-list one model); `PATCH` raised the budget to 2; the key answered on LiteLLM's OpenAI route (mirrored value) and on `:invoke` of a ready B300 endpoint in another region (200 both) |
+| Allow-list, tenant isolation | `:invoke` of a model outside the allow-list: 403; another tenant's admin cannot read or edit the key: 404; the catalogue itself is fleet-wide by design, any tenant key calls a defined endpoint |
+| Budget exhaustion | budget set to 0: `:invoke` 402 "key budget exhausted" after the 30 s cache; LiteLLM's route 422 `budget_exceeded` (the mirror carries the budget) |
+| Revocation | `DELETE` 204, LiteLLM's route 401 at once; the API kept answering `GET /v1/keys/me` for the deleted key after the cache window: LiteLLM's `/key/info` served the deleted key from its own cache and the read-only fallback resurrected it. Fixed in api 0.11.17 (no LiteLLM fallback once the import succeeded; fleet re-check below) |
+| Router key | the former `platform-internal` LiteLLM key deleted by hand; a chat through LiteLLM's route still reaches the endpoint with the fleet's router key (role `router`, 200) |
+| Multi-node endpoint | the API log showed server-side apply refusing the two-node LeaderWorkerSet: the model's own `NCCL_IB_DISABLE` duplicated the platform default. Fixed (the model's entry wins, one entry per name) with a golden-render test |
+
 ## Missing parts round: variants, weights for runs, tenant quotas, one scaling vocabulary, hygiene, InfiniBand floor, refactors 1 and 2 (2026-10-11 15:00-17:00 UTC, the same test fleet)
 
 | Check | Result |
