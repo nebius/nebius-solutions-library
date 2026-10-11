@@ -11,6 +11,7 @@ import db, keys
 from config import AUTH_CACHE_S, CONTROL_API_URL, LITELLM_MASTER_KEY, LITELLM_URL, TENANT_NS_PREFIX
 
 _cache: dict[str, tuple[float, dict]] = {}
+litellm_fallback = True      # until the control API imported LiteLLM's keys into the fleet database (app._import_keys)
 
 
 @dataclass
@@ -62,7 +63,9 @@ async def key_info(key: str) -> dict:
         info = await asyncio.to_thread(keys.info, h)
     elif CONTROL_API_URL:
         info = await _fetch(f"{CONTROL_API_URL}/internal/keys/me", {"Authorization": f"Bearer {key}"})
-    if info is None and LITELLM_MASTER_KEY:        # not imported yet: LiteLLM's record, read-only
+    if info is None and LITELLM_MASTER_KEY and not CONTROL_API_URL and (litellm_fallback or not db.enabled()):
+        # LiteLLM's record, read-only: a fleet without the database, or the control API before its one-time import.
+        # Never afterwards: LiteLLM's /key/info answers from its cache for a key deleted minutes ago (fleet, 2026-10-11)
         data = await _fetch(f"{LITELLM_URL}/key/info", {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}, params={"key": key})
         info = (data or {}).get("info") if data else None
     if info is None:

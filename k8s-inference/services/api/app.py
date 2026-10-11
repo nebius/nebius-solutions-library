@@ -14,6 +14,7 @@ log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
 from auth import Principal, _principal, allows_model, check_budget, check_model, forget, forget_hash, principal
+import auth
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, REGION_API_URLS, SYNC_TIMEOUT_S
 
 def check_placeholders() -> None:
@@ -33,6 +34,7 @@ async def _import_keys() -> None:
     for attempt in range(30):
         try:
             log.info("imported %s key(s) from LiteLLM", await asyncio.to_thread(keys.import_litellm))
+            auth.litellm_fallback = False
             return
         except Exception as e:  # noqa: BLE001 - LiteLLM not up yet, or unreachable
             log.warning("key import from LiteLLM failed (attempt %s): %s", attempt + 1, e)
@@ -64,7 +66,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.16", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.17", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):

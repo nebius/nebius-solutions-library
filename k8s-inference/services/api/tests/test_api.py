@@ -737,6 +737,13 @@ def test_key_lookup_database_control_api_and_litellm_fallback(monkeypatch):
         asyncio.run(auth.key_info("sk-nope"))
     assert e.value.status_code == 401
     assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy" and seen.count("http://litellm.litellm.svc:4000/key/info") == 2   # cached
+    # after the import LiteLLM is not asked again: its /key/info still answers for a key deleted from both
+    monkeypatch.setattr(auth, "litellm_fallback", False)
+    auth._cache.clear()
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(auth.key_info("sk-legacy"))
+    assert e.value.status_code == 401 and seen.count("http://litellm.litellm.svc:4000/key/info") == 2
+    monkeypatch.setattr(auth, "litellm_fallback", True)
     # a regional API: no database, the control API
     monkeypatch.setattr(db, "enabled", lambda: False)
     monkeypatch.setattr(auth, "CONTROL_API_URL", "https://api.control.example")
