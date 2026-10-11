@@ -21,7 +21,7 @@ IMG_H100 = "registry.serverless2.local/nebius/batch-example:1.0-h100"
 IMG_DEFAULT = "registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120"
 
 
-# the test fleet with an RTX PRO 6000 pool in the hub too (the regional API of eu-north1 ranks its own region's pools)
+# the test fleet with an RTX PRO 6000 pool in the hub too (in single-cluster mode the API of eu-north1 ranks its own region's pools)
 FLEET_RTX_IN_HUB = {**FLEET, "pools": {**FLEET["pools"], "hub-rtx6000-spot-1x": {"region": "hub", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000", "usd_per_gpu_hour": 1.6}}}
 
 
@@ -85,7 +85,7 @@ def test_choose_class_from_the_fleet_document(monkeypatch):
 
 
 def test_run_with_per_class_images_is_rendered_for_the_chosen_class(client, monkeypatch):
-    """The regional API (eu-north1 here) creates the Job in its own cluster, so its region pins the ranking: with an
+    """In single-cluster mode the API (eu-north1 here) creates the Job in its own cluster, so its region pins the ranking: with an
     RTX pool in the hub the preferred class wins, without one the H100 pool of the region decides."""
     c, fake = client
     monkeypatch.setattr(kube, "fleet", lambda: FLEET_RTX_IN_HUB)

@@ -18,8 +18,7 @@ flowchart TB
     end
 
     subgraph region["Region cluster (one per Nebius region)"]
-        gw["Envoy gateway<br/>TLS, key check"]
-        rapi["Regional API"]
+        gw["Envoy gateway<br/>TLS, key check against the fleet API"]
         ep["KServe endpoints on Knative<br/>scale 0..N"]
         kueuew["Kueue worker<br/>flavor per pool"]
         jobs["Jobs / JobSets in tenant namespaces<br/>fetch | main | uploader"]
@@ -37,13 +36,13 @@ flowchart TB
     api --> litellm
     api -- "models, history, keys, charges" --> db
     litellm --> db
-    api -- "render endpoint, catalog copy" --> ep
+    api -- "render endpoint" --> ep
     api -- "manager Job" --> kueuem
     kueuem -- "copy to the nominated worker" --> kueuew
     disp -- "nominates by class, free quota, price" --> kueuem
-    api -- "status, pods, cancel" --> rapi
+    api -- "status, pods, cancel; metrics and logs through the API server proxy" --> jobs
+    gw -- "ext-auth: key check (Backend, the API's hostname)" --> gwc
     gw --> ep
-    gw --> rapi
     kueuew --> jobs
     jobs --> s3
     ep --> fs
@@ -53,8 +52,8 @@ flowchart TB
     obs -. "scrapes, logs" .- region
 ```
 
-Every region cluster is identical; the control cluster is the only place where tenants' keys, the
-MultiKueue manager and the dispatcher live. `control_plane.dedicated = false` folds the control
+Every region cluster is identical; the control cluster is the only place where the API, the tenants'
+keys, the MultiKueue manager and the dispatcher live ("One API" below). `control_plane.dedicated = false` folds the control
 cluster's services onto the first region's system pool for a single-region proof of concept (no
 MultiKueue: jobs are admitted locally).
 
@@ -79,17 +78,34 @@ catalog entry and:
 1. stores spec and entry in table `models` and the write in `models_history` (`GET /v1/models/{id}/history`);
 2. renders the endpoint on every cluster of the model's regions natively (`services/api/render_endpoint.py`:
    InferenceService or LeaderWorkerSet with its Service and HTTPRoute, SecurityPolicy, claims; server-side
-   apply through the api-agent identities: Roles `serverless2-api-agent-models` and
-   `serverless2-api-agent-catalog`). `charts/endpoint` is the reference rendering of the same objects, kept
-   for one release with golden tests that hold the two equal;
+   apply through the api-agent identities: Role `serverless2-api-agent-models`). `charts/endpoint` is the
+   reference rendering of the same objects, kept for one release with golden tests that hold the two equal;
 3. registers an OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway
-   hostname under that region's domain (`ENDPOINT_DOMAINS`);
-4. writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of every other region.
+   hostname under that region's domain (`ENDPOINT_DOMAINS`).
 
-A regional API serves those copies and answers writes with 409 pointing at the fleet API. The built-in
-classes (`catalog/models`: `hello-run`, `container-run`, `distributed-run`) stay files and are read-only.
-`images` (per GPU class), `deployments.<region>.variants` and `routing` are accepted and stored but not
-acted on yet (the design review of 2026-10-09).
+The built-in classes (`catalog/models`: `hello-run`, `container-run`, `distributed-run`) stay files and are
+read-only. `images` (per GPU class, `SCHEDULING.md` "Per-GPU images for runs"), `deployments.<region>.variants`
+and `routing` (`API.md` "Variants") are implemented.
+
+## One API
+
+The control cluster's API is the fleet's one API (api 0.11.18; before, every GPU region ran a second API
+Deployment that forwarded, copied and looked keys up). It holds the fleet database and the regions' kubeconfigs
+(the `api-agent` identities): it renders endpoints and creates runs in the regions, reads their pods, and
+reads Prometheus and Loki of a region through that cluster's API server proxy (`/api/v1/namespaces/monitoring/
+services/<name>:<port>/proxy`, Role `serverless2-api-agent-monitoring`). A region's gateway authorizes every
+endpoint call against it: the endpoint's SecurityPolicy targets the Envoy Gateway `Backend` api/api, whose
+endpoint is the API's public hostname on port 443, validated by a `BackendTLSPolicy` (system roots: the
+control cluster's certificate is ACME; the trust bundle in internal mode). Envoy keeps the original request's
+authority on an ext-auth call, so the control cluster's https listener carries no hostname and the route
+`api-authorize` serves `/internal/authorize` under any host. Measured on the test fleet (2026-10-11, hub and
+control in eu-north1): the cross-cluster ext-auth adds about 5 ms per call over a route without
+authorization (median 173 ms to 178 ms end to end); a distant region adds its round trip once per call
+(Envoy keeps the connection open). A sync `:invoke` for an endpoint in another region is proxied to the
+endpoint's gateway hostname with the caller's key (the same hostname LiteLLM uses), so that gateway checks the
+key once more; async calls run as Jobs in the endpoint's region through its gateway; the uploader of a run
+posts its attempt records to the API's public hostname. `control_plane.dedicated = false` is the same API on
+the one cluster (the Service path for ext-auth, no MultiKueue).
 
 ## Request path: an endpoint call
 
@@ -97,10 +113,10 @@ acted on yet (the design review of 2026-10-09).
 sequenceDiagram
     participant C as Client
     participant GW as Envoy gateway (region)
-    participant A as API (region; the fleet database through the control API)
+    participant A as Fleet API (control cluster, the fleet database)
     participant E as KServe endpoint
     C->>GW: POST /v1/models/llm-example:invoke, Authorization: Bearer key
-    GW->>A: ext-auth: is the key valid, within budget?
+    GW->>A: ext-auth over the API's public hostname (Backend, TLS): is the key valid, within budget?
     A-->>GW: yes (model allow-list, budget, expiry; cached 30 s)
     GW->>E: the request (Knative starts a replica from zero if needed)
     E-->>GW: response or stream
@@ -129,7 +145,7 @@ sequenceDiagram
     W->>S: fetch inputs; main runs; uploader streams checkpoints and outputs
     W-->>K: status mirrored back (region = the admitting cluster)
     C->>A: GET /v1/operations/{id}
-    A->>W: pods, attempts, logs
+    A->>W: pods, attempts; metrics and logs through the API server proxy
     A-->>C: QUEUED / RUNNING / SUCCEEDED / FAILED, attempts, cost
     Note over W: spot preemption: the replacement pod reattaches the volume in the same region
     C->>A: POST /v1/operations/{id}:resume (after FAILED or CANCELLED)
@@ -145,10 +161,10 @@ the shared checkpoint directory. `JOBS.md` has the details and the limits.
 | Capability | Component | Notes |
 |---|---|---|
 | Clusters, nodes, capacity | Nebius Managed Kubernetes, node groups with the autoscaler, spot pricing policies, capacity blocks, GPU clusters for InfiniBand | `stack/modules/cluster` |
-| Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt), ext-auth to the API | `EDGE.md` |
+| Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt, the fleet CA), ext-auth to the fleet API (a `Backend` on the GPU regions) | `EDGE.md` |
 | Endpoints | KServe on Knative Serving | `services/api/render_endpoint.py` (`charts/endpoint` is the reference rendering), `catalog/models` |
 | Fleet database | Nebius Managed Service for PostgreSQL, databases `platform` and `litellm` | `stack/cloud/database.tf`, `stack/platform/database.tf`; `OPERATIONS.md` "Database" |
-| Model definitions | the control API, `services/api/models.py`, `render_endpoint.py` and `db.py` | `POST/PUT/DELETE /v1/models`, history per model, read-only copies per region |
+| Model definitions | the control API, `services/api/models.py`, `render_endpoint.py` and `db.py` | `POST/PUT/DELETE /v1/models`, history per model |
 | Keys, budgets, GPU charges | the fleet database (`keys`, `charges`), `services/api/keys.py` | keys per tenant, mirrored into LiteLLM for its OpenAI route and pass-through routes with a price |
 | Queued calls and runs | Kubernetes Jobs, JobSet, the 30 MB runner image | `JOBS.md` |
 | Queueing, quotas, priorities, cross-region placement | Kueue with MultiKueue, the cost dispatcher | `SCHEDULING.md` |
@@ -175,8 +191,8 @@ Pinned versions live in `clusters/common/apps/*.yaml`, one list for every cluste
 - One cluster per region because a Nebius project is bound to one region.
 - An endpoint lives in the regions its definition names (`regions`); a run goes where the dispatcher
   ranks it among those regions, or where the caller pins it.
-- Model definitions are written once, on the control API, into the fleet database; every region reads
-  its own copy.
+- One API, the control cluster's: model definitions are written once into the fleet database and rendered
+  on the regions' clusters; the regions' gateways authorize endpoint calls against it over its public hostname.
 - Images carry one logical host name everywhere; each cluster's cache fetches them once.
 - A tenant has a namespace with the profile queues on every cluster and a bucket per region; runs placed
   by the fleet use the first region's bucket.

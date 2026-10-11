@@ -11,7 +11,7 @@ info:
     Operation ids are Kubernetes Job names inside the tenant namespace (docs/JOBS.md). The control
     cluster's API (`api.<control cluster host>`) is the entry point for runs: it creates the Job on the
     fleet's MultiKueue manager and Kueue plus the cost dispatcher place it in the best region among the
-    model's deployments and GPU classes; a regional API creates runs in its own cluster.
+    model's deployments and GPU classes (single-cluster mode: in its own cluster).
     Runs keep their checkpoints on a per-operation volume: a preempted attempt resumes on its own,
     a FAILED or CANCELLED run can be resumed in place with `:resume`.
 servers:
@@ -49,7 +49,7 @@ paths:
     post:
       summary: Define a model from a container (admin key). An endpoint (always-on, scales to zero) or a job class. The image may be a plain public reference; it is pulled through the fleet's image cache.
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelSpec" } } } }
-      responses: { "201": { description: created and, for endpoints, deployed in every region of the spec }, "400": { $ref: "#/components/responses/Error" }, "409": { description: the id exists (PUT replaces it), the model is a built-in class, or this is a regional API (models are written on the fleet's API, the control cluster) } }
+      responses: { "201": { description: created and, for endpoints, deployed in every region of the spec }, "400": { $ref: "#/components/responses/Error" }, "409": { description: the id exists (PUT replaces it), the model is a built-in class, or the API has no fleet database } }
   /v1/models/{model}:
     get:
       summary: Get one model
@@ -59,11 +59,11 @@ paths:
       summary: Replace a model defined through this API (admin key); endpoints roll to the new definition
       parameters: [{ $ref: "#/components/parameters/model" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelSpec" } } } }
-      responses: { "200": { description: replaced; the new version is in the history }, "409": { description: a built-in class, or a regional API } }
+      responses: { "200": { description: replaced; the new version is in the history }, "409": { description: a built-in class } }
     delete:
       summary: Delete a model defined through this API (admin key); its endpoints are removed from every region
       parameters: [{ $ref: "#/components/parameters/model" }]
-      responses: { "204": { description: deleted; the last version stays in the history }, "404": { $ref: "#/components/responses/Error" }, "409": { description: a built-in class, or a regional API } }
+      responses: { "204": { description: deleted; the last version stays in the history }, "404": { $ref: "#/components/responses/Error" }, "409": { description: a built-in class } }
   /v1/models/{model}/history:
     get:
       summary: "Every version of a model defined through the API (admin key, fleet API): action, who, when, the spec"
@@ -350,7 +350,7 @@ components:
         name: { type: string, description: free-text label stored on the operation }
         mode: { $ref: "#/components/schemas/Mode" }
         input: { type: object, additionalProperties: true, description: "sync/async: the request body sent to the endpoint; run: the model's parameters (unknown names are a 400)" }
-        region: { type: string, description: "run mode: pin the job to one of the model's regions (fleet API: optional, the dispatcher picks the cheapest free region by the model's GPU preference; regional API: its own region). sync/async: the region whose API serves the endpoint (the fleet API forwards)" }
+        region: { type: string, description: "run mode: pin the job to one of the model's regions (optional: the dispatcher picks the cheapest free region by the model's GPU preference; single-cluster mode: its own region). sync/async: the region whose endpoint answers (default: the model's first region); an endpoint in another region than the API's cluster is called through that region's gateway with the caller's key" }
         priority: { type: string, enum: [low, normal, high] }
         timeout_s: { type: integer, description: sync wait budget (default 600) or run deadline }
     SyncResponse:
