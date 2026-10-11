@@ -184,6 +184,20 @@ def test_the_chart_still_produces_the_golden_objects(name):
     assert helm(entry, cluster) == golden(name)
 
 
+def test_a_models_own_env_entry_replaces_the_platform_default():
+    """kimi-k3 sets NCCL_IB_DISABLE itself: one entry per name, the model's value (server-side apply refuses duplicates)."""
+    entry, cluster = cases()["kimi-k3-us-central1"]
+    own = [{"name": "NCCL_IB_DISABLE", "value": "0"}, {"name": "NCCL_SOCKET_IFNAME", "value": "eth1"}]
+    patched = {**entry, "runtime": {**entry["runtime"], "env": list(entry["runtime"].get("env") or []) + own}}
+    lws = next(d for d in native(patched, cluster) if d["kind"] == "LeaderWorkerSet")
+    for tmpl in ("leaderTemplate", "workerTemplate"):
+        env = lws["spec"]["leaderWorkerTemplate"][tmpl]["spec"]["containers"][0]["env"]
+        names = [e["name"] for e in env]
+        assert len(names) == len(set(names))
+        values = {e["name"]: e.get("value") for e in env}
+        assert values["NCCL_IB_DISABLE"] == "0" and values["NCCL_SOCKET_IFNAME"] == "eth1"
+
+
 def test_rendering_errors_name_the_object():
     from fastapi import HTTPException
     entry = {**KUEUE_EXAMPLE, "runtime": {**KUEUE_EXAMPLE["runtime"], "image": ""}}

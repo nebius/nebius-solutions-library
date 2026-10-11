@@ -362,7 +362,10 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
         # Ethernet between the nodes: NCCL must not try the InfiniBand transport (the nodes carry Mellanox NICs, the
         # pod holds none: "unhandled system error" at communicator setup on B300, 2026-10-10)
         env += [{"name": "NCCL_SOCKET_IFNAME", "value": "eth0"}, {"name": "NCCL_IB_DISABLE", "value": "1"}]
-    c["env"] = env + list(v.get("env") or []) + _weights_env(v)
+    # the model's own entries win over the platform defaults (one entry per name: server-side apply refuses duplicates)
+    own = list(v.get("env") or []) + _weights_env(v)
+    taken = {e.get("name") for e in own}
+    c["env"] = [e for e in env if e.get("name") not in taken] + own
     if v.get("envFrom"):
         c["envFrom"] = list(v["envFrom"])
     c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]

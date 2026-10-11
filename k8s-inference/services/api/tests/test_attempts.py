@@ -40,6 +40,18 @@ def test_exit_zero_is_not_delivery():
     assert app_bad["status"] == "EXPORT_FAILED" and "finalization" in app_bad["error"]
 
 
+def test_multinode_delivery_is_rank_zeros_record():
+    """A JobSet's rank 0 exports for every rank: its record carries the export state, the other ranks' do not."""
+    name = "op-distributed-run-1"
+    job = _job(name); job["kind"] = "JobSet"; job["spec"] = {"replicatedJobs": [{"name": "workers", "template": {"spec": {"template": {"spec": {}}}}}]}
+    job["status"] = {"conditions": [{"type": "Completed", "status": "True"}]}
+    import status as st
+    import jobs as jobs_mod
+    records = [_record(name, f"{name}-workers-0-0", export="succeeded"), _record(name, f"{name}-workers-0-1")]
+    op = st.normalise({**job, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}, None, records)
+    assert op["status"] == "SUCCEEDED"
+
+
 def test_a_finalizing_pod_is_a_running_operation():
     name = "op-container-run-2"
     job = _job(name, complete=False)
