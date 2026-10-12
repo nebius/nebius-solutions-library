@@ -130,6 +130,27 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     seen.clear()
     got = c.get(f"/v1/operations/{op}", headers=H)
     assert got.status_code == 200 and "eu-south1" in seen and "south" not in seen
+    # the authenticated record is stamped with the canonical cluster id (the Workload's admitting cluster), the region stays
+    # the Nebius region: the application keys identities and allowed_clusters by the configured id (new fleet, 2026-10-12)
+    acked = {}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "verify_runner_token", lambda token: ("eu-south1", "tenant-demo", f"{op}-pq52n"))
+    monkeypatch.setattr(attempts, "record", lambda region, ns, pod_, body: acked.update({**body, "region": region}) or {**body, "region": region})
+    ack = c.post("/internal/attempts", json={"operation": op, "status": "started", "gpus": 1}, headers={"Authorization": "Bearer t"})
+    assert ack.status_code == 200 and ack.json()["cluster"] == "south" and ack.json()["region"] == "eu-south1" and acked["cluster"] == "south"
+    rows = [{"operation": op, "pod": f"{op}-pq52n", "root": op, "tenant": "demo", "status": "started", "epoch": 1, "revision": 2, "gpus": 1,
+             "region": "eu-south1", "cluster": "south", "started_at": "2026-10-12T19:53:52Z"}]
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["cluster"] == "south" and got["region"] == "eu-south1"
+    rows[0].pop("cluster")                                                           # a row written before the column: the region maps to the worker's id
+    assert c.get(f"/v1/operations/{op}", headers=H).json()["cluster"] == "south"
+    # the inverse map: an id equal to the region wins, control entries never count, the hub alias stays without a map
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}, "clusters": {"hub": {"region": "eu-north1"}, "control": {"region": "eu-north1", "control": True}, "eu-west2": {"region": "eu-west2"}}})
+    assert kube.cluster_id("eu-north1") == "hub" and kube.cluster_id("eu-west2") == "eu-west2" and kube.cluster_id(None) is None
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}})
+    assert kube.cluster_id("eu-south1") == "eu-south1"
     assert c.post(f"/v1/operations/{op}:cancel", headers=H).status_code == 200
 
 

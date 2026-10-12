@@ -146,7 +146,9 @@ A QUEUED run reports `phase` and a bounded `reason` so a cold start is not an un
 (no cluster admitted the Workload yet; `reason` is Kueue's condition message: quota, nomination), `waiting_for_node`
 (admitted on `cluster`; the pod has no node: the scheduler's message, typically a pool scaling from zero or a full
 pool, or no pod yet) and `starting` (scheduled; a container is waiting: the init containers, an image pull). `cluster`
-names the admitting worker's region from admission on, before any attempt record exists; `attempt_id` stays the
+names the admitting worker's **configured cluster id** (the tfvars id placement, identities and `allowed_clusters` are
+keyed by; `region` is the Nebius region, two ids may share one) from admission on, before any attempt record exists;
+attempt records and the uploader's acknowledgement carry the same `cluster` and `region`; `attempt_id` stays the
 newest authenticated attempt (null until the uploader's first record), the pending pod is listed in `attempts`. Read
 from the pod the API already lists, never from Events; `phase` is null outside QUEUED.
 

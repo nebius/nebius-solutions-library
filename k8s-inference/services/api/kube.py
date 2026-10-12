@@ -113,6 +113,20 @@ def cluster_region(cluster: str) -> str:
     return HUB_REGION if cluster == "hub" else cluster
 
 
+def cluster_id(region: str | None) -> str | None:
+    """Nebius region -> the id of the worker cluster in it (the fleet document's clusters.yaml, control entries left
+    out): the canonical cluster name on attempt records and operations, as placement, identities and the application
+    key them. An id equal to the region wins; without the map the legacy `hub` alias, else the region itself."""
+    if not region:
+        return None
+    known = {cid: c for cid, c in (fleet().get("clusters") or {}).items() if (c or {}).get("region") == region and not (c or {}).get("control")}
+    if region in known:
+        return region
+    if known:
+        return sorted(known)[0]
+    return "hub" if region == HUB_REGION and region != REGION else region
+
+
 def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Kueue `spec.active = false` on the manager Workload of a run (label kueue.x-k8s.io/job-uid): Kueue evicts the
     run everywhere (the worker's copy goes, its pods with it) and never admits it again. A `suspend` patched onto

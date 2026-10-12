@@ -116,6 +116,11 @@ create table if not exists operation_marks (
     """
     alter table attempts add column if not exists role text not null default 'run';
     """,
+    # 7: the canonical cluster id of an attempt (the fleet's configured id, as placement and identities key it);
+    # `region` stays the Nebius region (two ids may share one region)
+    """
+    alter table attempts add column if not exists cluster text;
+    """,
 ]
 
 _pool = None

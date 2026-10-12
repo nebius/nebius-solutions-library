@@ -99,9 +99,10 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
         export = body.get("export") or ("n/a" if body.get("io_mode") == "application" and status != "succeeded" else None)
         c.execute("""insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
-                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role)
-                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s)
+                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster)
+                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s)
                      on conflict (operation, pod) do update set
+                        cluster = coalesce(excluded.cluster, attempts.cluster),
                         status = excluded.status, exit_code = excluded.exit_code, node = coalesce(excluded.node, attempts.node),
                         pool = coalesce(excluded.pool, attempts.pool), image = coalesce(excluded.image, attempts.image),
                         image_digest = coalesce(excluded.image_digest, attempts.image_digest),
@@ -116,12 +117,12 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                    status, body.get("exit_code"), _ts(body.get("started_at")), _ts(body.get("ended_at")), export,
                    body.get("result_ref") or None, body.get("checkpoint_ref") or None,
                    int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
-                   str(body.get("role") or "run")))
+                   str(body.get("role") or "run"), body.get("cluster") or None))
         return _row(c, operation, pod)
 
 
 COLS = ("operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
-        "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role")
+        "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster")
 
 
 def _dict(r) -> dict:
@@ -187,6 +188,7 @@ def synthesize(operation: str, tenant: str) -> dict | None:
                  "started_at": r.get("started_at"), "ended_at": r.get("ended_at"), "node": r.get("node"), "gpu_class": r.get("gpu_class"), "epoch": r.get("epoch"),
                  "export_state": r.get("export_state"), "result_ref": r.get("result_ref"), "checkpoint_ref": r.get("checkpoint_ref"), "image_digest": r.get("image_digest")} for i, r in enumerate(rows)]
     return {"id": operation, "name": None, "model": None, "mode": "run", "status": status, "region": last.get("region"), "tenant": tenant,
+            "phase": None,
             "created_at": rows[0].get("started_at"), "started_at": rows[0].get("started_at"), "ended_at": last.get("ended_at"), "attempts": attempts,
             "error": None, "input": {}, "resumed_from": last["root"] if last["root"] != operation else None, "gpu_class": last.get("gpu_class"),
             "image": last.get("image"), "resumable": False, "nodes": 1, "execution": None, "reason": "the Job object expired; this is the durable record",
@@ -219,6 +221,8 @@ def lifecycle(operation: str, root: str, rows: list[dict]) -> dict:
     return {"root_operation_id": root, "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,
             "revision": revision, "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
             "result_ref": latest.get("result_ref") if latest else None, "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
-            "image_digest": latest.get("image_digest") if latest else None, "cluster": latest.get("region") if latest else None,
+            "image_digest": latest.get("image_digest") if latest else None,
+            # the canonical cluster id (configured name); the Nebius region is the operation's `region`
+            "cluster": (latest.get("cluster") or kube.cluster_id(latest.get("region"))) if latest else None,
             "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
             "attempt_role": (latest.get("role") or "run") if latest else None}

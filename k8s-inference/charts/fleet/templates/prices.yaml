@@ -43,7 +43,7 @@ data:
     {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }} }
     {{- end }}
     {{- if ne $f.control.id "none" }}
-    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }} }
+    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true }
     {{- end }}
   tenants.yaml: |
     {{- range $tn, $t := (default dict $f.tenants) }}

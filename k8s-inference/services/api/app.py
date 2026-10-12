@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.29", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.30", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -834,7 +834,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         chain.append({"id": mid, "created_at": m["metadata"].get("creationTimestamp"),
                       "status": op["status"] if mid == name else jobs.normalise(m, None, [r for r in rows if r["operation"] == mid])["status"],
                       "gpu_class": (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/gpu-class"),
-                      "cluster": next((by_pod[a["attempt_id"]].get("region") for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
+                      "cluster": next(((by_pod[a["attempt_id"]].get("cluster") or kube.cluster_id(by_pod[a["attempt_id"]].get("region"))) for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
                       "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
                       "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0), "gpu_seconds_complete": not unknown,
                       "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None})
@@ -876,8 +876,8 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
     op.update(attempts.lifecycle(name, root, records))
-    if not op.get("cluster") and job.get("_region"):
-        op["cluster"] = job["_region"]          # admitted but no attempt record yet: the admitting worker's region
+    if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
+        op["cluster"] = job.get("_cluster") or kube.cluster_id(job["_region"])   # admitted, no record yet: the admitting cluster's id
     if name != id:
         op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
     if root != name or name != id or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root))):
@@ -973,9 +973,12 @@ async def record_attempt(request: Request, authorization: str = Header(default="
         job, _ = await asyncio.to_thread(jobs.find, ns, operation)      # the manager's Job for a fleet run (the worker holds a mirror)
         body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
         body["role"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") or "run"    # the platform's statement, never the pod's
+        # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
+        body["cluster"] = job.get("_cluster") or kube.cluster_id(region)
     except HTTPException:
         body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"
+        body["cluster"] = kube.cluster_id(region)
     return await asyncio.to_thread(attempts.record, region, ns, pod, body)
 
 
