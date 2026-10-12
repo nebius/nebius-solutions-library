@@ -112,6 +112,19 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     r = c.post("/v1/models/hello-run:invoke", json={"input": {"message": "x"}}, headers=H)
     assert r.status_code == 202, r.text
     op = r.json()["id"]
+    # a private input for a run whose model names clusters by id: the copies go to the mapped regions' clients
+    # (the new fleet refused `region south is not served` before any GPU job was admitted)
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}, "clusters": {"north": {"region": "eu-north1", "project": "p1"}, "south": {"region": "eu-south1", "project": "p2"}}})
+    monkeypatch.setattr(execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}})
+    ided = catalog.normalise({**models_mod.to_entry({"id": "byid", "kind": "job", "image": "img", "command": "x", "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]}}, managed_by="api"), "version": 1})
+    ided["regions"] = ["south", "north"]
+    monkeypatch.setattr(catalog, "get", lambda name: ided if name == "byid" else None)
+    assert c.put("/v1/bindings/by-id-input", json={"data": {"manifest.json": "{}"}}, headers=H).status_code == 200
+    seen.clear()
+    r = c.post("/v1/models/byid:invoke", json={"input": {}, "execution": {"io_mode": "application", "private_input_ref": "by-id-input", "placement": {"allowed_clusters": ["south"]}}}, headers=H)
+    assert r.status_code == 202, r.text
+    assert "eu-south1" in seen and "south" not in seen and ("tenant-demo", f"{r.json()['id']}-private") in fake.secrets
+    assert fake.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "south"   # the dispatcher still gets the id
     uid = fake.jobs[("tenant-demo", op)]["metadata"].get("uid", "")
     monkeypatch.setattr(kube, "workload_clusters", lambda ns: {uid: "south"})
     seen.clear()

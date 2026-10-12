@@ -369,7 +369,11 @@ def deliver(ex: dict | None, name: str, root: str, ns: str, tenant: str, regions
     copy = {"apiVersion": "v1", "kind": "Secret",
             "metadata": {"name": f"{name}-private", "labels": {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref, f"{LABEL}/operation": root}},
             "data": binding.get("data") or {}}
-    for r in regions or [region]:
+    # `regions` are the run's candidate clusters as the dispatcher names them (cluster ids: `north`, `south`, `hub`, or a
+    # region name); the Kubernetes client is keyed by the Nebius region, so every id is mapped through the fleet
+    # document first (kube.cluster_region) and deduplicated (two ids in one region share a cluster only never)
+    targets = sorted({kube.cluster_region(r) for r in (regions or [region])})
+    for r in targets:
         try:
             retry(kube.core(r).create_namespaced_secret, ns, copy)
         except ApiException as e:
