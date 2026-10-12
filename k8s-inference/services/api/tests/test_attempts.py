@@ -162,6 +162,8 @@ def test_epoch_fencing_in_the_database(database):
     assert e.value.status_code == 409 and "superseded" in e.value.detail
     with pytest.raises(HTTPException):
         attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "succeeded", "export": "succeeded"})
+    closed = attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "interrupted", "gpus": 1, "ended_at": "2026-10-11T11:00:00Z"})
+    assert closed["status"] == "interrupted"          # the evicted pod may still close its own attempt
     rows = attempts.for_operation("op-x")
     assert [r["pod"] for r in rows] == ["op-x-a", "op-x-b"] and rows[1]["revision"] > rows[0]["revision"]
     attempts.mark_cancelled("op-x")
