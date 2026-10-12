@@ -29,13 +29,23 @@ locals {
   manifest_apps = { for n, a in local.apps : n => a if a.kind == "manifests" }
 
   # Per-cluster Helm values (merged over clusters/common/values/<component>.yaml).
-  gpu_prices = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
+  gpu_prices            = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
+  gpu_driver_profiles   = yamldecode(file("${local.repo}/clusters/common/values/gpu-operator.yaml")).nebius.nvidiaDriverCRDPatch.profiles
+  gpu_platforms_missing = sort(distinct([for pn, p in try(local.clusters[local.id].pools, {}) : p.platform if !contains([for pr in local.gpu_driver_profiles : pr.name], p.platform)]))
   values_override = {
     kueue = local.role.manager ? yamldecode(file("${local.repo}/clusters/control/values/kueue.yaml")) : {}
     # the driver the operator installs (terraform.tfvars gpu_operator); the rest is clusters/common/values/gpu-operator.yaml
     gpu-operator = {
       driver = { version = local.f.gpu_operator.driver_version, kernelModuleType = local.f.gpu_operator.kernel_module }
       gds    = { enabled = local.f.gpu_operator.gds }
+      # one NVIDIADriver per platform: the chart's list (clusters/common/values/gpu-operator.yaml) plus a profile for every
+      # platform of this cluster's pools the list lacks, with the manager settings of its longest-prefix sibling
+      # (gpu-rtx6000-a -> gpu-rtx6000). Helm replaces lists, so the whole list is given here.
+      nebius = { nvidiaDriverCRDPatch = { profiles = concat(local.gpu_driver_profiles, [for platform in local.gpu_platforms_missing : {
+        name         = platform
+        nodeSelector = { "node.kubernetes.io/instance-type" = platform }
+        managerEnv   = try([for pr in local.gpu_driver_profiles : pr.managerEnv if startswith(platform, pr.name)][0], [])
+      }]) } }
     }
     # with the operator the driver lives in a container and the `nvidia` RuntimeClass (created by the operator) injects it;
     # a pod that only relies on the node's default runtime can be created before the toolkit has made nvidia the default

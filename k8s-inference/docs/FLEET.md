@@ -291,6 +291,13 @@ Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tf
 | MIG | no (the node device plugin has no MIG manager) | the operator's MIG manager (`nvidia.com/mig.config` node label) |
 | DCGM metrics | the fleet's `dcgm-exporter` release | the same (the operator's exporter stays off) |
 
+One NVIDIADriver per GPU platform: the chart's list lives in `clusters/common/values/gpu-operator.yaml` and the
+platform stage appends a profile for every platform of the cluster's pools that the list lacks (a regional
+variant such as `gpu-rtx6000-a` gets the manager settings of its longest-prefix sibling, `gpu-rtx6000`). A node whose
+`node.kubernetes.io/instance-type` matches no profile never receives a driver: the toolkit waits for driver
+validation and the node stays at zero allocatable GPUs (eu-south1 RTX PRO 6000, 2026-10-12). Check with
+`kubectl get nvidiadrivers` that every platform of the region appears.
+
 Why one would switch: a driver version other than the preset's, GPUDirect Storage, MIG profiles or any other
 operator feature, and one driver stack that is the same on every platform. Why one would not: the node image is
 ready at boot, the operator's driver container compiles and loads the module after the node joins (about
