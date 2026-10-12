@@ -94,6 +94,7 @@ def nominate(custom, ns, name, want, status=None):
         field_manager="kueue-admission", force=True, _content_type="application/apply-patch+yaml")
 PVC_JOBS_ANN = f"{LABEL}/jobs"          # on a worker PVC: Jobs that use it (owners once they exist)
 MANAGED_LABEL = f"{LABEL}/managed-by"
+SUCCESSOR_ANN = f"{LABEL}/successor"         # on a manager Job the platform superseded (services/api/jobs.py switch_class, recover)
 CAP_RANK = {"reserved": 0, "on_demand": 1, "ondemand": 1, "spot": 2}   # fleet.yaml capacity_order
 
 
@@ -293,28 +294,62 @@ def admitted_volume(wl: dict, cname: str | None = None) -> tuple | None:
     return cname, wl["metadata"]["namespace"], claim, size, job_name
 
 
-def volume_action(pvc_cluster: str, wanted: list, admitted: dict, ns: str, jobs_exist: bool, age_s: float) -> str | None:
-    """What the sweeper does with a dispatcher-created volume: "orphan" when none of its manager Jobs exists any
-    more (after the grace period), "elsewhere" when every Job that uses it was admitted in another cluster,
-    None to keep it."""
-    if not jobs_exist:
+def volume_action(pvc_cluster: str, users: set, superseded: set, admitted: dict, ns: str, age_s: float) -> str | None:
+    """What the sweeper does with a dispatcher-created volume. `users`: the manager Jobs that reference the claim and
+    were not superseded (any state: an unfinished run, a pending or running resume or finalizer, a FAILED or
+    EXPORT_FAILED handle whose volume `:resume`/`:export` may still use); `superseded`: the referencing Jobs the
+    platform fenced and continued elsewhere (fallback, automatic recovery: the `successor` annotation). "orphan"
+    when nothing references it any more (after the grace period), "superseded" when every Job of it that still
+    exists was superseded (the chain moved to fresh volumes, the readable handles stay), "elsewhere" when every user
+    was admitted in another cluster, None to keep it."""
+    if not users:
+        if superseded:
+            return "superseded"
         return "orphan" if age_s >= ORPHAN_AFTER_S else None
-    if wanted and all(admitted.get((ns, j)) not in (None, pvc_cluster) for j in wanted):
+    if all(admitted.get((ns, j)) not in (None, pvc_cluster) for j in users):
         return "elsewhere"
     return None
 
 
-# ---------- cluster access ----------
-def load_fleet(core: client.CoreV1Api):
-    data = core.read_namespaced_config_map(FLEET_CM, NS).data or {}
-    pools = yaml.safe_load(data.get("pools.yaml", "") or "") or {}
+def manager_jobs(batch: client.BatchV1Api, ns: str, cache: dict) -> dict | None:
+    """name -> manager Job of a tenant namespace, listed once per reconcile (`cache`); None when the manager could not
+    be listed (unknown: callers preserve what exists)."""
+    if ns in cache:
+        return cache[ns]
     try:
-        spot = json.loads((core.read_namespaced_config_map(SPOT_CM, NS).data or {}).get("spot.json", "{}"))
-    except client.exceptions.ApiException as e:
-        if e.status != 404:
-            raise
-        spot = {}
-    return clusters_from_pools(pools), spot
+        out = {j.metadata.name: j for j in batch.list_namespaced_job(ns).items}
+    except Exception as e:  # noqa: BLE001 - unknown is a state of its own here
+        log.warning("manager jobs %s: %s", ns, e)
+        out = None
+    cache[ns] = out
+    return out
+
+
+def is_superseded(job) -> bool:
+    """A manager Job the platform superseded (fallback or automatic recovery, services/api/jobs.py): suspended, its
+    Workload deactivated, a successor on a fresh volume; a readable handle that never runs again."""
+    return bool(((job.metadata.annotations or {}) if job is not None else {}).get(SUCCESSOR_ANN))
+
+
+def job_claim(job) -> str | None:
+    """The work claim a manager Job's pod template names (a resume or finalizer shares the original's)."""
+    tmpl = getattr(getattr(job, "spec", None), "template", None)
+    for v in (getattr(getattr(tmpl, "spec", None), "volumes", None) or []):
+        pvc = getattr(v, "persistent_volume_claim", None)
+        if getattr(v, "name", None) == WORK_VOLUME and pvc is not None and getattr(pvc, "claim_name", None):
+            return pvc.claim_name
+    return None
+
+
+def claim_references(wanted: list, idx: dict, claim: str) -> tuple[set, set]:
+    """(users, superseded): the manager Jobs that reference a volume: those recorded on it (`wanted`, the admitted-
+    volume pass) and every Job whose pod template claims it, recorded or not (a same-volume resume or finalizer the
+    API created that the volume pass has not seen admitted yet). Recorded Jobs that are gone count for nothing."""
+    users, superseded = set(), set()
+    for name, job in idx.items():
+        if name in wanted or job_claim(job) == claim:
+            (superseded if is_superseded(job) else users).add(name)
+    return users, superseded
 
 
 def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
@@ -408,10 +443,14 @@ def ensure_pvc(w: dict, ns: str, claim: str, size_gi: str, job_name: str) -> Non
             raise
 
 
-def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict) -> None:
-    """Worker PVCs the dispatcher created: delete one once none of its Jobs exists on the manager any more
-    (older than ORPHAN_AFTER_S), or when every Job that uses it was admitted in another cluster (`admitted`:
-    (namespace, manager job) -> cluster)."""
+def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict, jobs_cache: dict | None = None) -> None:
+    """Worker PVCs the dispatcher created: delete one once nothing on the manager references it any more (older than
+    ORPHAN_AFTER_S), once every Job that still references it was superseded by a continuation on a fresh volume, or
+    when every Job that uses it was admitted in another cluster (`admitted`: (namespace, manager job) -> cluster).
+    References are the actual manager Jobs (template claim or recorded on the volume), never the record alone; a
+    namespace whose Jobs cannot be listed is left alone. Deletion completes only once no pod mounts the claim
+    (Kubernetes' pvc-protection finalizer)."""
+    jobs_cache = {} if jobs_cache is None else jobs_cache
     for cname, w in workers.items():
         try:
             pvcs = w["core"].list_persistent_volume_claim_for_all_namespaces(label_selector=f"{MANAGED_LABEL}=dispatcher").items
@@ -422,25 +461,17 @@ def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict) -> No
             ns, name = pvc.metadata.namespace, pvc.metadata.name
             if not name.endswith(f"-{WORK_VOLUME}"):
                 continue                  # not a work volume the dispatcher created: never swept, whatever its labels say
+            idx = manager_jobs(batch, ns, jobs_cache)
+            if idx is None:
+                continue                  # unknown: keep
             age = (datetime.now(timezone.utc) - pvc.metadata.creation_timestamp).total_seconds()
             wanted = [j for j in ((pvc.metadata.annotations or {}).get(PVC_JOBS_ANN) or "").split(",") if j]
-            alive = False
-            for jn in wanted:
-                try:
-                    batch.read_namespaced_job(jn, ns)
-                    alive = True
-                    break
-                except client.exceptions.ApiException as e:
-                    if e.status != 404:
-                        log.warning("manager job %s/%s: %s", ns, jn, e.reason)
-                        alive = True          # unknown: keep
-                        break
-            action = volume_action(cname, wanted, admitted, ns, alive, age)
+            users, superseded = claim_references(wanted, idx, name)
+            action = volume_action(cname, users, superseded, admitted, ns, age)
             if action:
                 w["core"].delete_namespaced_persistent_volume_claim(name, ns)
-                log.info("worker %s: deleted volume %s/%s (%s; manager jobs %s, admitted %s)", cname, ns, name, action, wanted,
-                         {j: admitted.get((ns, j)) for j in wanted})
-
+                log.info("worker %s: deleted volume %s/%s (%s; recorded %s, users %s, superseded %s, admitted %s)", cname, ns, name, action,
+                         wanted, sorted(users), sorted(superseded), {j: admitted.get((ns, j)) for j in sorted(users | superseded)})
 
 
 def reconcile(core, custom, batch):
@@ -484,6 +515,7 @@ def reconcile(core, custom, batch):
             free[(cname, fname)] = free.get((cname, fname), 0) - max(gpus, 1)
     # work volumes: exactly one, in the cluster that admitted the run
     admitted = {}
+    jobs_cache: dict = {}
     for wl in workloads:
         meta = wl["metadata"]
         recorded = (meta.get("annotations") or {}).get(ADMITTED_ANN)
@@ -498,8 +530,12 @@ def reconcile(core, custom, batch):
         vol = admitted_volume(wl, cname)
         if vol and vol[0] in workers:
             cname, ns, claim, size, job_name = vol
+            # a superseded Job's Workload is deactivated, not finished: its volume is never (re)created for it
+            idx = manager_jobs(batch, ns, jobs_cache)
+            if idx is not None and is_superseded(idx.get(job_name)):
+                continue
             ensure_pvc(workers[cname], ns, claim, size, job_name)
-    sweep_volumes(workers, batch, admitted)
+    sweep_volumes(workers, batch, admitted, jobs_cache)
 
 
 

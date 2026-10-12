@@ -129,13 +129,130 @@ def test_work_volume_only_where_admitted_and_swept_elsewhere():
     wl["metadata"]["annotations"] = {d.ADMITTED_ANN: "hub"}                             # ... the dispatcher's record remains
     assert d.admitted_cluster(wl) == "hub"
     admitted = {("t", "op-1"): "hub"}
-    assert d.volume_action("eu-south1", ["op-1"], admitted, "t", jobs_exist=True, age_s=0) == "elsewhere"
-    assert d.volume_action("hub", ["op-1"], admitted, "t", jobs_exist=True, age_s=0) is None
-    assert d.volume_action("eu-south1", ["op-1"], {}, "t", jobs_exist=True, age_s=0) is None            # not admitted yet: keep
-    assert d.volume_action("hub", ["op-1", "op-1-r1"], {("t", "op-1"): "eu-south1"}, "t", jobs_exist=True, age_s=0) is None   # a resume still pending here
-    assert d.volume_action("hub", ["op-1"], {}, "t", jobs_exist=False, age_s=d.ORPHAN_AFTER_S + 1) == "orphan"
-    assert d.volume_action("hub", ["op-1"], {}, "t", jobs_exist=False, age_s=1) is None
+    assert d.volume_action("eu-south1", {"op-1"}, set(), admitted, "t", age_s=0) == "elsewhere"
+    assert d.volume_action("hub", {"op-1"}, set(), admitted, "t", age_s=0) is None
+    assert d.volume_action("eu-south1", {"op-1"}, set(), {}, "t", age_s=0) is None            # not admitted yet: keep
+    assert d.volume_action("hub", {"op-1", "op-1-r1"}, set(), {("t", "op-1"): "eu-south1"}, "t", age_s=0) is None   # a resume still pending here
+    assert d.volume_action("hub", set(), set(), {}, "t", age_s=d.ORPHAN_AFTER_S + 1) == "orphan"
+    assert d.volume_action("hub", set(), set(), {}, "t", age_s=1) is None
     assert d.pvc_of(TEMPLATE) == "op-1-work" and d.pvc_of({"spec": {}}) is None
+
+
+# ---- closed recovery chains: scratch retention (docs/SCHEDULING.md "Automatic recovery", docs/JOBS.md "Work volume") ----
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from types import SimpleNamespace as NS  # noqa: E402
+
+
+def mjob(name: str, claim: str | None, successor: str | None = None, finished: bool = False):
+    """A manager Job as the kubernetes client returns it: a pod template that names its work claim, the `successor`
+    annotation when the platform superseded it (suspended, Workload deactivated: never Finished)."""
+    ann = {f"{d.LABEL}/successor": successor} if successor else {}
+    vols = [NS(name="work", persistent_volume_claim=NS(claim_name=claim))] if claim else [NS(name="shm", persistent_volume_claim=None)]
+    return NS(metadata=NS(name=name, annotations=ann), spec=NS(template=NS(spec=NS(volumes=vols)), suspend=bool(successor)),
+              status=NS(succeeded=1 if finished else 0))
+
+
+class FakeBatch:
+    def __init__(self, jobs: dict | None):
+        self.jobs, self.lists = jobs, 0
+
+    def list_namespaced_job(self, ns):
+        self.lists += 1
+        if self.jobs is None:
+            raise RuntimeError("manager unreachable")
+        return NS(items=list(self.jobs.values()))
+
+
+class FakeCore:
+    def __init__(self, pvcs: dict, age_s: float = 0):
+        ts = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+        self.items = [NS(metadata=NS(namespace="t", name=n, annotations={d.PVC_JOBS_ANN: a}, creation_timestamp=ts)) for n, a in pvcs.items()]
+        self.deleted = []
+
+    def list_persistent_volume_claim_for_all_namespaces(self, label_selector=None):
+        return NS(items=self.items)
+
+    def delete_namespaced_persistent_volume_claim(self, name, ns):
+        self.deleted.append(name)
+
+
+def test_superseded_root_releases_scratch_once_the_successor_has_its_own_volume():
+    """The observed defect: a recovery original is suspended with a `successor` annotation, its Workload deactivated,
+    never Finished. Its old scratch is released (the successor restores a portable checkpoint onto a fresh volume and
+    never reads it), the readable handle stays, and the successor's own volume is kept while its Job exists."""
+    idx = {"op-1": mjob("op-1", "op-1-work", successor="op-1-r-ab12cd34"), "op-1-r-ab12cd34": mjob("op-1-r-ab12cd34", "op-1-r-ab12cd34-work", finished=True)}
+    users, sup = d.claim_references(["op-1"], idx, "op-1-work")
+    assert (users, sup) == (set(), {"op-1"})
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1"): "eu-south1"}, "t", age_s=1) == "superseded"      # no grace period: the fence is the proof
+    users, sup = d.claim_references(["op-1-r-ab12cd34"], idx, "op-1-r-ab12cd34-work")
+    assert (users, sup) == ({"op-1-r-ab12cd34"}, set())
+    assert d.volume_action("hub", users, sup, {("t", "op-1-r-ab12cd34"): "hub"}, "t", age_s=10 ** 6) is None   # a completed successor keeps its volume until its handle goes (uploader/TTL)
+    # the volume pass never recreates the superseded original's claim; an unknown manager keeps the old behaviour
+    assert d.is_superseded(idx["op-1"]) and not d.is_superseded(idx["op-1-r-ab12cd34"]) and not d.is_superseded(None)
+    cache = {}
+    assert d.manager_jobs(FakeBatch(idx), "t", cache) == idx and d.manager_jobs(FakeBatch(None), "t", cache) == idx   # one list per reconcile
+    assert d.manager_jobs(FakeBatch(None), "u", cache) is None
+
+
+def test_multi_link_recovery_chain_releases_every_closed_link():
+    """root -> r-a -> r-b, each link recovered onto a fresh volume: the two superseded links' volumes go, the running
+    link's stays; the handles are not deleted."""
+    idx = {"op-1": mjob("op-1", "op-1-work", successor="op-1-r-aaaaaaaa"),
+           "op-1-r-aaaaaaaa": mjob("op-1-r-aaaaaaaa", "op-1-r-aaaaaaaa-work", successor="op-1-r-bbbbbbbb"),
+           "op-1-r-bbbbbbbb": mjob("op-1-r-bbbbbbbb", "op-1-r-bbbbbbbb-work")}
+    admitted = {("t", "op-1"): "eu-south1", ("t", "op-1-r-aaaaaaaa"): "hub", ("t", "op-1-r-bbbbbbbb"): "hub"}
+    core = FakeCore({"op-1-work": "op-1", "op-1-r-aaaaaaaa-work": "op-1-r-aaaaaaaa", "op-1-r-bbbbbbbb-work": "op-1-r-bbbbbbbb"})
+    batch = FakeBatch(idx)
+    d.sweep_volumes({"hub": {"core": core}}, batch, admitted)
+    assert sorted(core.deleted) == ["op-1-r-aaaaaaaa-work", "op-1-work"]
+    assert batch.lists == 1 and set(idx) == {"op-1", "op-1-r-aaaaaaaa", "op-1-r-bbbbbbbb"}     # handles untouched
+
+
+def test_same_volume_resume_or_finalizer_not_yet_recorded_keeps_the_claim():
+    """A `-r<n>` resume or `-x<n>` finalizer the API created on the original's volume is a reference from the moment
+    the Job exists, before the admitted-volume pass records it on the claim: the sweeper reads the manager's Jobs,
+    not the record alone (also when the root itself was superseded: nothing that still names the claim loses it)."""
+    idx = {"op-1": mjob("op-1", "op-1-work", successor="op-1-r-ab12cd34"), "op-1-x1": mjob("op-1-x1", "op-1-work")}
+    users, sup = d.claim_references(["op-1"], idx, "op-1-work")
+    assert (users, sup) == ({"op-1-x1"}, {"op-1"})
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1"): "eu-south1"}, "t", age_s=1) is None           # not admitted yet: keep
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1"): "eu-south1", ("t", "op-1-x1"): "eu-south1"}, "t", age_s=1) is None
+    idx["op-1-r1"] = mjob("op-1-r1", "op-1-work")
+    core = FakeCore({"op-1-work": "op-1"})
+    d.sweep_volumes({"eu-south1": {"core": core}}, FakeBatch(idx), {("t", "op-1"): "eu-south1"})
+    assert core.deleted == []
+    del idx["op-1-x1"], idx["op-1-r1"]                                                                            # both gone (TTL): the superseded root alone
+    d.sweep_volumes({"eu-south1": {"core": core}}, FakeBatch(idx), {("t", "op-1"): "eu-south1"})
+    assert core.deleted == ["op-1-work"]
+
+
+def test_failed_delivery_and_failed_runs_keep_their_volume():
+    """A FAILED run with a 'delivery pending' exit code, an EXPORT_FAILED run, a cancelled run: finished, not
+    superseded, their volume is what `:export`/`:resume` work on; kept whatever its age, until the handle goes."""
+    idx = {"op-1": mjob("op-1", "op-1-work", finished=True)}
+    users, sup = d.claim_references(["op-1"], idx, "op-1-work")
+    assert (users, sup) == ({"op-1"}, set())
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1"): "eu-south1"}, "t", age_s=10 ** 7) is None
+    # a chain whose first link failed on this volume and whose same-volume resume was then recovered elsewhere: the
+    # FAILED root still names the claim and is resumable on it; the volume stays until that handle goes
+    idx["op-1-r1"] = mjob("op-1-r1", "op-1-work", successor="op-1-r-ab12cd34")
+    users, sup = d.claim_references(["op-1", "op-1-r1"], idx, "op-1-work")
+    assert (users, sup) == ({"op-1"}, {"op-1-r1"})
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1"): "eu-south1", ("t", "op-1-r1"): "eu-south1"}, "t", age_s=10 ** 7) is None
+    del idx["op-1"]
+    users, sup = d.claim_references(["op-1", "op-1-r1"], idx, "op-1-work")
+    assert d.volume_action("eu-south1", users, sup, {("t", "op-1-r1"): "eu-south1"}, "t", age_s=1) == "superseded"
+
+
+def test_sweeper_preserves_on_unknown_manager_and_ignores_foreign_claims():
+    """The manager's Jobs cannot be listed: nothing is deleted. A Job that names another claim is no reference."""
+    core = FakeCore({"op-1-work": "op-1"}, age_s=d.ORPHAN_AFTER_S + 1)
+    d.sweep_volumes({"hub": {"core": core}}, FakeBatch(None), {})
+    assert core.deleted == []
+    idx = {"op-2": mjob("op-2", "op-2-work"), "op-3": mjob("op-3", None)}
+    assert d.claim_references(["op-1"], idx, "op-1-work") == (set(), set())
+    d.sweep_volumes({"hub": {"core": core}}, FakeBatch(idx), {})
+    assert core.deleted == ["op-1-work"]                                                                          # orphan after the grace period, as before
 
 
 def test_only_the_work_volume_is_the_dispatchers():

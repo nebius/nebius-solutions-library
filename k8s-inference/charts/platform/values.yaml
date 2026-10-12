@@ -21,7 +21,7 @@ edge:
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
   api: registry.serverless2.local/nebius/serverless2/api:0.11.31
-  dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.9
+  dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.10
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.11
 api:                           # the control cluster only (clusters/common/apps/api.yaml)
   rateLimitPerMinute: 600      # edge.api_rate_limit_per_minute, per API key

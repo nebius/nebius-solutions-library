@@ -750,7 +750,7 @@
           "value": "/tmp"
          }
         ],
-        "image": "registry.serverless2.local/nebius/serverless2/dispatcher:0.2.9",
+        "image": "registry.serverless2.local/nebius/serverless2/dispatcher:0.2.10",
         "name": "dispatcher",
         "resources": {
          "limits": {
@@ -942,7 +942,7 @@
             "value": "/tmp"
            }
           ],
-          "image": "registry.serverless2.local/nebius/serverless2/dispatcher:0.2.9",
+          "image": "registry.serverless2.local/nebius/serverless2/dispatcher:0.2.10",
           "name": "price-feed",
           "resources": {
            "limits": {

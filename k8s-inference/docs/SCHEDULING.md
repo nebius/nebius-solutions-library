@@ -343,6 +343,12 @@ where it is (the same-worker retry continues) and the operation's `reason` says 
 Handles are those of fallback: the original is `SUPERSEDED`, `GET`, `:cancel`, `:result`, `:export`, metrics and
 logs on it follow to the live successor (`requested_id`), `root_operation_id` stays the root; the successor reports
 `recovered_from`, `resumed_from` (the root) and `reason` ("recovered from <original> (<loss>): rtx-pro-6000 -> l40s").
+The superseded original's work volume is scratch nothing reads again (the successor restores the portable checkpoint
+onto its own volume; a superseded handle's `:resume` and `:export` follow to the successor): the dispatcher never
+(re)creates it and its sweeper deletes it once every manager Job that still references the claim was superseded,
+leaving the handles, their attempt records and the chain history in place (docs/JOBS.md "Work volume"). A FAILED
+link that still names the claim (a failed run whose same-volume resume was then recovered elsewhere) keeps it as
+before, until that handle goes.
 
 Supported fault injection for a drill, touching only the run itself (no shared node): deactivate the run's Kueue
 Workload on the control cluster, `kubectl -n tenant-<t> patch workload $(kubectl -n tenant-<t> get workload -l

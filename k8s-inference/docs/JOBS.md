@@ -414,9 +414,14 @@ copy on the worker carries the pods. What differs from the regional path:
   `pvc-size-gi` from the pod template; the worker's pod waits for it for at most one reconcile),
   without an owner there: MultiKueue deletes the worker's copy of the Job (and its pods) the moment
   the manager's Job finishes, and a failed run must keep its checkpoints for `:resume`. The uploader
-  deletes it after a successful upload; the dispatcher's sweeper deletes it once none of the manager
-  Jobs recorded on it exists any more (TTL, a cancel of a queued run; 15 min after creation at the
-  earliest), or when every Job that uses it was admitted in another cluster.
+  deletes it after a successful upload; the dispatcher's sweeper deletes it once no manager Job
+  references it any more (TTL, a cancel of a queued run; 15 min after creation at the earliest), once
+  every Job that still references it was superseded by a continuation on a fresh volume (fallback,
+  automatic recovery: the handles stay readable, dispatcher 0.2.10), or when every Job that uses it was
+  admitted in another cluster. A reference is a manager Job whose pod template names the claim or that
+  the volume pass recorded on it, in any state: a FAILED, EXPORT_FAILED or cancelled handle keeps its
+  volume for `:resume`/`:export` until the handle itself goes; a same-volume resume or finalizer counts
+  from the moment its Job exists. Deletion completes only once no pod mounts the claim.
 - **Status.** The manager Job's status is MultiKueue's mirror of the worker's; while the run is
   active, attempts and logs use the worker's pods (the API finds the worker through the Workload's
   `status.clusterName`, `region` is null until then). After it finishes the worker's copy is gone
