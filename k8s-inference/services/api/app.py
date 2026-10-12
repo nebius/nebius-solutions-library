@@ -834,7 +834,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         chain.append({"id": mid, "created_at": m["metadata"].get("creationTimestamp"),
                       "status": op["status"] if mid == name else jobs.normalise(m, None, [r for r in rows if r["operation"] == mid])["status"],
                       "gpu_class": (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/gpu-class"),
-                      "cluster": next(((by_pod[a["attempt_id"]].get("cluster") or kube.cluster_id(by_pod[a["attempt_id"]].get("region"))) for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
+                      "cluster": next(((by_pod[a["attempt_id"]].get("cluster") or kube.cluster_id_or_none(by_pod[a["attempt_id"]].get("region"))) for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
                       "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
                       "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0), "gpu_seconds_complete": not unknown,
                       "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None})
@@ -865,7 +865,7 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
         latest = rows[-1] if rows else None
         out.update({"status": "FINALIZING", "finalizing_by": aname, "error": None,
                     "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,
-                    "attempt_role": "finalize", "cluster": latest.get("region") if latest else out.get("cluster")})
+                    "attempt_role": "finalize", "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else out.get("cluster")})
     return out
 
 
@@ -877,7 +877,7 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     op = jobs.normalise(job, _price(job), records)
     op.update(attempts.lifecycle(name, root, records))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
-        op["cluster"] = job.get("_cluster") or kube.cluster_id(job["_region"])   # admitted, no record yet: the admitting cluster's id
+        op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(job["_region"])   # admitted, no record yet: the admitting cluster's id
     if name != id:
         op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
     if root != name or name != id or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root))):
@@ -974,12 +974,21 @@ async def record_attempt(request: Request, authorization: str = Header(default="
         body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
         body["role"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") or "run"    # the platform's statement, never the pod's
         # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
-        body["cluster"] = job.get("_cluster") or kube.cluster_id(region)
+        body["cluster"] = job.get("_cluster") or _cluster_of(region)
     except HTTPException:
         body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"
-        body["cluster"] = kube.cluster_id(region)
+        body["cluster"] = _cluster_of(region)
     return await asyncio.to_thread(attempts.record, region, ns, pod, body)
+
+
+def _cluster_of(region: str) -> str:
+    """The configured cluster id of the worker a record's token came from; an ambiguous map (two worker clusters in
+    one region and no admitting cluster known) is refused rather than stamped wrong."""
+    try:
+        return kube.cluster_id(region)
+    except LookupError as e:
+        raise HTTPException(409, f"attempt record not stamped: {e}")
 
 
 def _home(job: dict) -> str:

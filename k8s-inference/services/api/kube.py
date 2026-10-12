@@ -122,9 +122,19 @@ def cluster_id(region: str | None) -> str | None:
     known = {cid: c for cid, c in (fleet().get("clusters") or {}).items() if (c or {}).get("region") == region and not (c or {}).get("control")}
     if region in known:
         return region
-    if known:
-        return sorted(known)[0]
+    if len(known) == 1:
+        return next(iter(known))
+    if known:                      # two worker clusters in one region: never guess an identity, the caller must know the cluster
+        raise LookupError(f"ambiguous worker cluster for region {region}: {sorted(known)}; the Workload's admitting cluster is required")
     return "hub" if region == HUB_REGION and region != REGION else region
+
+
+def cluster_id_or_none(region: str | None) -> str | None:
+    """cluster_id for status projections: unknown (None) rather than an error when the map is ambiguous."""
+    try:
+        return cluster_id(region)
+    except LookupError:
+        return None
 
 
 def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:

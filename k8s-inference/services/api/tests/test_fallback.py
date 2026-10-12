@@ -135,6 +135,7 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     acked = {}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(attempts, "verify_runner_token", lambda token: ("eu-south1", "tenant-demo", f"{op}-pq52n"))
     monkeypatch.setattr(attempts, "record", lambda region, ns, pod_, body: acked.update({**body, "region": region}) or {**body, "region": region})
     ack = c.post("/internal/attempts", json={"operation": op, "status": "started", "gpus": 1}, headers={"Authorization": "Bearer t"})
@@ -151,6 +152,13 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     assert kube.cluster_id("eu-north1") == "hub" and kube.cluster_id("eu-west2") == "eu-west2" and kube.cluster_id(None) is None
     monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}})
     assert kube.cluster_id("eu-south1") == "eu-south1"
+    # two worker clusters in one region: the map is ambiguous, a record without an admitting cluster is refused, a status shows unknown
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}, "clusters": {"a": {"region": "eu-x"}, "b": {"region": "eu-x"}, "control": {"region": "eu-x", "control": True}}})
+    with pytest.raises(LookupError):
+        kube.cluster_id("eu-x")
+    assert kube.cluster_id_or_none("eu-x") is None
+    monkeypatch.setattr(attempts, "verify_runner_token", lambda token: ("eu-x", "tenant-demo", "op-gone-abc"))
+    assert c.post("/internal/attempts", json={"operation": "op-gone", "status": "started", "gpus": 1}, headers={"Authorization": "Bearer t"}).status_code == 409
     assert c.post(f"/v1/operations/{op}:cancel", headers=H).status_code == 200
 
 

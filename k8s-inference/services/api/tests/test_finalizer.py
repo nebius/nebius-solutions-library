@@ -97,8 +97,10 @@ def test_export_runs_the_model_finalizer_on_the_kept_volume(failed_run):
     # while it runs: the root's handle shows FINALIZING with the finalizer's attempt, role and epoch; a second call is idempotent
     rows.append({"operation": x1, "pod": f"{x1}-fin", "root": op, "tenant": "demo", "status": "started", "epoch": 2, "revision": 4, "gpus": 0, "role": "finalize",
                  "started_at": "2026-10-12T19:40:00Z", "region": "eu-north1"})
+    rows[-1]["cluster"] = "north"                                                    # the finalizer's record carries the canonical cluster id
     got = c.get(f"/v1/operations/{op}", headers=H).json()
     assert got["status"] == "FINALIZING" and got["finalizing_by"] == x1 and got["attempt_id"] == f"{x1}-fin" and got["epoch"] == 2 and got["attempt_role"] == "finalize"
+    assert got["cluster"] == "north" and got["region"] == "eu-north1"
     assert got["finalize_attempts"] == 1 and [a["attempt_role"] for a in got["attempts"]] == ["run", "finalize"]
     again = c.post(f"/v1/operations/{op}:export", headers=H)
     assert again.status_code == 200 and again.json()["id"] == x1 and len([k for k in fake.jobs if k[1].startswith(f"{op}-x")]) == 1

@@ -223,6 +223,6 @@ def lifecycle(operation: str, root: str, rows: list[dict]) -> dict:
             "result_ref": latest.get("result_ref") if latest else None, "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
             "image_digest": latest.get("image_digest") if latest else None,
             # the canonical cluster id (configured name); the Nebius region is the operation's `region`
-            "cluster": (latest.get("cluster") or kube.cluster_id(latest.get("region"))) if latest else None,
+            "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
             "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
             "attempt_role": (latest.get("role") or "run") if latest else None}
