@@ -48,6 +48,39 @@
 {{- dict "gpu" (sub (mul $s.gpus (int $p.max_nodes)) $floor) "cpu" (mul (sub $s.vcpu (default 2 $res.cpu)) $nodes) "memoryGi" (mul (sub $s.memGi (default 20 $res.memory_gib)) $nodes) "ib" (mul (int (include "fleet.ibDevices" $p)) $nodes) | toYaml -}}
 {{- end -}}
 
+{{/* Kueue quota of a region's system pool for the CPU-only `system` flavor: node_count x (preset minus the per-node
+     system_reserve), never below zero. The preset is `<n>vcpu-<n>gb`. args: dict "fleet" "system_pool" */}}
+{{- define "fleet.systemQuota" -}}
+{{- $f := .fleet }}{{ $sp := default dict .system_pool -}}
+{{- $parts := regexSplit "[^0-9]+" (default "8vcpu-32gb" $sp.preset) -1 -}}
+{{- $nums := list }}{{ range $x := $parts }}{{ if ne $x "" }}{{ $nums = append $nums (atoi $x) }}{{ end }}{{ end -}}
+{{- $vcpu := index $nums (sub (len $nums) 2) }}{{ $memGi := last $nums -}}
+{{- $res := default (dict "cpu" 4 "memory_gib" 16) $f.system_reserve -}}
+{{- $n := int (default 2 $sp.node_count) -}}
+{{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) | toYaml -}}
+{{- end -}}
+
+{{/* The `system` flavor entries of a queue, first in its flavor list: GPU-free workloads fit them (nominal 0 GPUs, so a
+     GPU request moves on to the pool flavors), CPU and memory from fleet.systemQuota. args: dict "systems" (flavor name ->
+     quota) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
+{{- define "fleet.systemFlavors" -}}
+{{- range $name, $q := .systems }}
+- name: {{ $name }}
+  resources:
+    {{- if $.lender }}
+    - { name: nvidia.com/gpu, nominalQuota: 0 }
+    - { name: cpu, nominalQuota: {{ $q.cpu }} }
+    - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+    - { name: nebius.ai/infiniband, nominalQuota: 0 }
+    {{- else }}
+    - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: 0 }
+    - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
+    - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+    - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: 0 }
+    {{- end }}
+{{- end }}
+{{- end -}}
+
 {{/* Index of a pool's capacity type in fleet.capacity_order (unknown types last). args: dict "fleet" "pool" */}}
 {{- define "fleet.capIndex" -}}
 {{- $t := (default (dict "type" "on_demand") .pool.capacity).type -}}
@@ -179,6 +212,7 @@ spec:
   resourceGroups:
     - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
       flavors:
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" false) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" $prefer) | fromYamlArray }}
         {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name)) }}
         {{- if or (not $owner) (eq $owner $tn) }}
@@ -209,6 +243,7 @@ spec:
   resourceGroups:
     - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
       flavors:
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" true) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" "") | fromYamlArray }}
         {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name))) }}
         {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $.pools $name)) | fromYaml }}

@@ -30,11 +30,27 @@ metadata:
     serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) | quote }}
 spec: {}
 {{- end }}
-{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare) }}
+{{- $systems := dict }}
+{{- range $rn, $r := $f.regions }}
+{{- $_ := set $systems (printf "%s-system" $r.id) (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $r.system_pool) | fromYaml) }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $r.id }}-system
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $r.id | quote }}
+    serverless2.nebius/pool: "system"
+    serverless2.nebius/gpu-class: "none"
+    serverless2.nebius/capacity: "system"
+spec: {}
+{{- end }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare "systems" $systems) }}
 {{- range $tn, $tc := default dict $f.tenants }}
 {{- range $prefer := prepend (include "fleet.classes" $all | fromYamlArray) "" }}
 {{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
-{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "admissionCheck" (printf "multikueue-%s" $profile)) }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "systems" $systems "admissionCheck" (printf "multikueue-%s" $profile)) }}
 {{- end }}
 {{- end }}
 {{- end }}

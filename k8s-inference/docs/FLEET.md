@@ -276,6 +276,18 @@ that region. It is not an extra application replica (see `scaling.min` for that)
 not take it (the autoscaler never adds InfiniBand nodes; there the dispatcher moves the floor itself,
 docs/SCHEDULING.md "InfiniBand pools grow on demand").
 
+### CPU-only runs: the `system` flavor (2026-10-12)
+
+Every ClusterQueue (the fleet's `default`, each tenant's `default` and `prefer-<class>`, on the workers and mirrored
+on the manager) lists a `system` flavor first: the region's CPU system nodes (`serverless2.nebius/pool=system`, no GPU
+toleration), with `nvidia.com/gpu: 0` and CPU/memory = `regions.<r>.system_pool` (`node_count` x preset) minus the
+per-node `system_reserve` of `charts/fleet/values.yaml` (default 4 CPUs and 16 GiB for the platform's add-ons), the
+tenants borrowing it like any pool. Kueue's flavor order makes the split exact: a workload that requests a GPU
+cannot fit the `system` flavor and takes its pool flavor as before; a GPU-free workload (the application finalizer,
+an export retry, a CPU run class) fits it first and is scheduled onto the system nodes of the cluster that admitted
+it, with the pool node selector of a GPU flavor never injected. No node is added and no GPU quota changes; the
+budget is what the system nodes already have. `tools/check.sh` asserts the rendered order and quotas.
+
 ### GPU drivers: the node image or the NVIDIA GPU Operator (2026-10-10)
 
 Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tfvars`:

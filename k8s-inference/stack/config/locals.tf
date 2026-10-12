@@ -76,6 +76,7 @@ locals {
     regions = { for rn, r in local.f.regions : rn => {
       id                   = coalesce(r.id, rn)
       project              = r.project_id
+      system_pool          = r.system_pool # the CPU nodes the `system` Kueue flavor budgets (charts/fleet)
       image_cache_size_gib = coalesce(r.image_cache_size_gib, local.f.images.cache.size_gib)
       # charts/tenant multinode.yaml renders the shared scratch claim (`checkpoints: shared`) only where the region has it
       weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib }

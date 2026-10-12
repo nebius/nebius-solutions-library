@@ -324,7 +324,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `services/ops` image | 0.1.11 |
 | `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
-| `charts/fleet` | 0.1.6 |
+| `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.1 |
 | `charts/tenant` | 0.3.0 |
 

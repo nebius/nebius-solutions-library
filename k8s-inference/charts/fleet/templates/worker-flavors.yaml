@@ -1,7 +1,20 @@
-{{- /* One Kueue ResourceFlavor per GPU pool of this cluster (name = pool key). */ -}}
+{{- /* One Kueue ResourceFlavor per GPU pool of this cluster (name = pool key), plus `system`: the cluster's CPU nodes
+       (serverless2.nebius/pool=system, no GPU toleration) for GPU-free workloads (finalizers, export retries, CPU classes). */ -}}
 {{- if not (include "fleet.isControl" .) }}
 {{- $region := include "fleet.region" . | fromYaml }}
 {{- if not $region.r }}{{ fail (printf "cluster %q is not a region id in fleet.yaml" .Values.cluster) }}{{ end }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: system
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/gpu-class: "none"
+    serverless2.nebius/capacity: "system"
+spec:
+  nodeLabels:
+    serverless2.nebius/pool: system
 {{- range $pool, $p := $region.r.pools }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2

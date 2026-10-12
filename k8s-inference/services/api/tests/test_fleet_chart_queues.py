@@ -42,16 +42,20 @@ def _flavors(cq: dict) -> dict:
 def test_worker_queues_lender_tenants_and_dedicated_pool():
     docs = _render("hub")
     lender = _flavors(docs[("ClusterQueue", "default")])
-    assert set(lender) == {"h100-spot-1x"}                                   # the lab's pool is not the fleet's to lend
+    assert set(lender) == {"system", "h100-spot-1x"}                         # the lab's pool is not the fleet's to lend
+    # CPU-only admission (docs/FLEET.md "CPU-only runs"): the system flavor first, GPU-free, with the system nodes' CPU
+    assert list(lender) == ["system", "h100-spot-1x"] and lender["system"]["nvidia.com/gpu"]["nominalQuota"] == 0 and lender["system"]["cpu"]["nominalQuota"] > 0
+    assert docs[("ResourceFlavor", "system")]["spec"] == {"nodeLabels": {"serverless2.nebius/pool": "system"}}
     assert lender["h100-spot-1x"]["nvidia.com/gpu"]["nominalQuota"] == 4
     assert docs[("ClusterQueue", "default")]["spec"]["namespaceSelector"] == {"matchLabels": {"kubernetes.io/metadata.name": "models"}}
     demo = docs[("ClusterQueue", "demo-prefer-h100")]
     assert demo["spec"]["fairSharing"] == {"weight": "1"} and "borrowWithinCohort" not in demo["spec"]["preemption"]
     assert demo["spec"]["namespaceSelector"] == {"matchLabels": {"kubernetes.io/metadata.name": "tenant-demo"}}
     f = _flavors(demo)
-    assert set(f) == {"h100-spot-1x"} and f["h100-spot-1x"]["nvidia.com/gpu"] == {"name": "nvidia.com/gpu", "nominalQuota": 0, "borrowingLimit": 2}
+    assert list(f) == ["system", "h100-spot-1x"] and f["h100-spot-1x"]["nvidia.com/gpu"] == {"name": "nvidia.com/gpu", "nominalQuota": 0, "borrowingLimit": 2}
+    assert f["system"]["nvidia.com/gpu"] == {"name": "nvidia.com/gpu", "nominalQuota": 0, "borrowingLimit": 0} and f["system"]["cpu"]["borrowingLimit"] > 0
     lab = _flavors(docs[("ClusterQueue", "lab-default")])
-    assert list(lab) == ["h100-lab-8x", "h100-spot-1x"]                     # its reservation first, then the shared spot pool
+    assert list(lab) == ["system", "h100-lab-8x", "h100-spot-1x"]           # CPU nodes first, then its reservation, then the shared spot pool
     assert lab["h100-lab-8x"]["nvidia.com/gpu"] == {"name": "nvidia.com/gpu", "nominalQuota": 8, "lendingLimit": 0}
     assert lab["h100-spot-1x"]["nvidia.com/gpu"]["borrowingLimit"] == 4   # no gpu_quota: up to the pool
     assert docs[("ClusterQueue", "lab-default")]["spec"]["fairSharing"] == {"weight": "3"}
@@ -62,6 +66,7 @@ def test_manager_queues_carry_the_admission_check():
     docs = _render("control")
     q = docs[("ClusterQueue", "demo-prefer-h100")]
     assert q["spec"]["admissionChecksStrategy"] == {"admissionChecks": [{"name": "multikueue-prefer-h100"}]}
-    assert set(_flavors(q)) == {"hub-h100-spot-1x"}
-    assert set(_flavors(docs[("ClusterQueue", "lab-prefer-h100")])) == {"hub-h100-lab-8x", "hub-h100-spot-1x"}
+    assert list(_flavors(q)) == ["hub-system", "hub-h100-spot-1x"]            # the logical system flavor of every region first
+    assert docs[("ResourceFlavor", "hub-system")]["spec"] == {} and _flavors(q)["hub-system"]["nvidia.com/gpu"]["borrowingLimit"] == 0
+    assert set(_flavors(docs[("ClusterQueue", "lab-prefer-h100")])) == {"hub-system", "hub-h100-lab-8x", "hub-h100-spot-1x"}
     assert docs[("ResourceFlavor", "hub-h100-lab-8x")]["metadata"]["labels"]["serverless2.nebius/tenant"] == "lab"
