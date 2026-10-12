@@ -7,6 +7,7 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 ## 2026-10-11
 
+- stack (2026-10-12): optional `service_cidrs` per cluster (`control_plane.service_cidrs`, `regions.<r>.service_cidrs` -> `kube_network.service_cidrs`), unset by default so existing clusters are untouched; for projects whose private pool has no /16 left (README troubleshooting).
 - api 0.11.24 (built, not yet deployed on the test fleet: rollouts on hold during the Scientific AI cohorts): chain history on every member of a resume/fallback/recovery chain (docs/API.md "Chains": the root's `created_at`, all attempts with measured GPU seconds and images, per-member `chain`, cumulative measured consumption, `successor_created_at`; the effective id and current attempt unchanged); an export retry's uploader records `gpus 0` and no class: the transfer attempt bills no GPU seconds once its pod is gone (the record carried the model's GPU count before).
 - api 0.11.23: a superseded pod's own `interrupted`/`failed` record keeps its accounting but promotes nothing: `checkpoint_ref`, `checkpoint_generation` and `result_ref` are dropped from it before the row is written (0.11.22 coalesced them in).
 - api 0.11.22: the superseded-operation fence refuses start and pointer records as well as a final success (0.11.21 let a pointer record through); an evicted pod may still close its own attempt with `interrupted` or `failed`.

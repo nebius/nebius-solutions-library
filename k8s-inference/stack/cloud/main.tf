@@ -11,6 +11,7 @@ module "cluster" {
   kubernetes_version          = local.f.kubernetes_version
   labels                      = merge(local.f.labels, { "serverless2.nebius/fleet" = local.f.name })
   control_plane_allowed_cidrs = each.value.allowed_cidrs
+  service_cidrs               = try(each.value.service_cidrs, null)
   system_pool                 = each.value.system_pool
   gpu_pools                   = each.value.pools
   gpu_operator                = local.f.gpu_operator.enabled

@@ -271,6 +271,11 @@ that nobody assumes it does:
   that cluster's `allowed_cidrs`. Enforcement is per region; list your egress IP everywhere.
 - `apply cloud` fails with `spec.local_disks.passthrough_group.requested is invalid`: the preset ships no
   local disks (see Limits).
+- `apply cloud` fails creating a cluster with `Unable to allocate private ipv4 cidr /16 from the pool` /
+  `NotEnoughResources`: the project's private pool has no /16 left for the cluster's Service network (every
+  cluster takes one by default). Set `service_cidrs = ["10.96.0.0/20"]` (any free private block; a /20 holds
+  4096 Services) on that cluster's block (`control_plane.service_cidrs`, `regions.<r>.service_cidrs`) and apply
+  again; the field is immutable after creation, and clusters that already exist are left alone while it stays unset.
 - A `vpc.ipv4-address.public.count` quota error: the region's project has no free public IP for the gateway.
 - A run stays `QUEUED` with no queue on its Workload: the catalog entry prefers a GPU class no pool declares;
   `preflight` reports such entries.

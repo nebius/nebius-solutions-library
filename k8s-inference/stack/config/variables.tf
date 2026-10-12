@@ -70,7 +70,12 @@ variable "fleet" {
       }), {})
       # CIDRs allowed to reach the public Kubernetes API endpoint. Empty = open. Terraform itself must be
       # able to reach it from where you run it (your NAT egress, VPN).
-      allowed_cidrs        = optional(list(string), [])
+      allowed_cidrs = optional(list(string), [])
+      # Kubernetes Service CIDRs of the cluster (kube_network.service_cidrs). Unset: Nebius allocates a /16 from the
+      # project's private pool; when that pool is exhausted ("Unable to allocate private ipv4 cidr /16",
+      # NotEnoughResources) name a smaller block, e.g. ["10.96.0.0/20"]. Immutable after creation; existing clusters
+      # keep what they have when this stays unset.
+      service_cidrs        = optional(list(string))
       image_cache_size_gib = optional(number, 100)
       # The fleet database: Nebius Managed Service for PostgreSQL in this project and region, databases
       # `platform` (model definitions, the API) and `litellm` (keys, budgets, spend). Backups are the
@@ -98,6 +103,7 @@ variable "fleet" {
         node_count = optional(number, 2) # 2: Nebius' cilium-operator keeps a replica Pending on a single node
       }), {})
       allowed_cidrs = optional(list(string), [])
+      service_cidrs = optional(list(string)) # as control_plane.service_cidrs
       # Shared Nebius filesystem for model weights, mounted on every GPU node at /mnt/weights and exposed to
       # endpoints as the RWX claim models/weights-shared (catalog `weights.sharedFilesystem`).
       weights_filesystem = optional(object({

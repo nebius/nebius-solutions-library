@@ -35,6 +35,9 @@ resource "nebius_mk8s_v1_cluster" "this" {
   parent_id = var.project_id
   name      = var.name
   labels    = local.labels
+  # Service CIDRs only when the fleet names them: null leaves the provider's allocation alone (existing clusters
+  # keep theirs; a /16 is taken from the project's private pool, which can run out).
+  kube_network = var.service_cidrs == null ? null : { service_cidrs = var.service_cidrs }
   control_plane = {
     subnet_id         = data.nebius_vpc_v1_subnet.target.id
     version           = var.kubernetes_version

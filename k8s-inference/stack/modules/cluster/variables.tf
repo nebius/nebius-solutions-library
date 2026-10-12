@@ -30,6 +30,12 @@ variable "control_plane_allowed_cidrs" {
   default     = []
 }
 
+variable "service_cidrs" {
+  description = "Kubernetes Service CIDRs (kube_network.service_cidrs). null = the provider's default allocation (a /16 from the project's private pool)."
+  type        = list(string)
+  default     = null
+}
+
 variable "system_pool" {
   description = "The CPU node group that runs the platform add-ons (gateway, caches, controllers)."
   type = object({

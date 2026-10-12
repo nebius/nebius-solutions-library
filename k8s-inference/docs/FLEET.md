@@ -31,6 +31,7 @@ fleet:
       subnet: <vpc subnet>
       system_pool: { platform: cpu-d3, preset: 8vcpu-32gb, node_count: 2 }
       allowed_cidrs: [...]        # public API endpoint allow-list (docs/OPERATIONS.md)
+      service_cidrs: [...]        # optional Kubernetes Service CIDRs (also on control_plane); unset = a /16 from the project's pool
       ops: { registries: [...], backups_bucket: ... }
       weights_filesystem: { enabled: true, size_gib: 2048 }
       pools:
