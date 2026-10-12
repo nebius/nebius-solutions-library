@@ -727,6 +727,10 @@ def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -
         if c["name"] == "main":
             c.update({"image": RUNNER_IMAGE, "command": ["/bin/sh", "-c", "true"], "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}}})
             c.pop("args", None)
+        elif c["name"] == "uploader":
+            # the transfer runs on no GPU: its attempt record must say so (the record stands in for the pod once it is
+            # gone, and billing reads the record's gpus; the original class is not this attempt's)
+            c["env"] = [e for e in c.get("env", []) if e["name"] not in ("GPUS", "GPU_CLASS")] + [{"name": "GPUS", "value": "0"}, {"name": "GPU_CLASS", "value": ""}]
     spec.pop("nodeSelector", None); spec.pop("affinity", None); spec.pop("tolerations", None)
     job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root

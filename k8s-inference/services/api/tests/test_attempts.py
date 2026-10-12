@@ -126,6 +126,9 @@ def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypat
     spec = new["spec"]["template"]["spec"]
     main = next(x for x in spec["containers"] if x["name"] == "main")
     assert main["command"][-1] == "true" and "nvidia.com/gpu" not in main["resources"]["limits"] and not spec["initContainers"]
+    uploader_env = {e["name"]: e.get("value") for e in next(x for x in spec["containers"] if x["name"] == "uploader")["env"]}
+    assert uploader_env["GPUS"] == "0" and uploader_env["GPU_CLASS"] == ""     # the durable record of the transfer bills no GPU
+    assert f"{LABEL}/gpu-class" not in new["metadata"]["labels"]
     assert next(v for v in spec["volumes"] if v["name"] == "work")["persistentVolumeClaim"]["claimName"] == f"{op}-work"
     assert new["metadata"]["annotations"][f"{LABEL}/export-of"] == op
     monkeypatch.setattr(attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="succeeded"), "operation": op}])
