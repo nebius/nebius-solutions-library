@@ -2767,7 +2767,8 @@
       "jobs"
      ],
      "verbs": [
-      "get"
+      "get",
+      "list"
      ]
     },
     {

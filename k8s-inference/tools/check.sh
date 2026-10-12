@@ -183,6 +183,34 @@ EOF2
       "$PYTHON" "$ROOT/stack/platform/tests/render.py" "$ROOT/stack/platform/tests/golden/$cid.json" < "$TMP/platform-$cid.rendered.yaml"
     fi
   done
+  # The dispatcher's RBAC against what its source calls: every BatchV1Api method used on the manager Jobs needs its
+  # verb in the rendered ClusterRole (a live rollout of 0.2.11 found `list` missing: 403 on every tenant namespace,
+  # the sweeper preserved everything), and the rule stays read-only (`get` is kept next to `list`: the single-Job read
+  # of earlier versions, harmless and already granted on live clusters).
+  step "charts/platform: the dispatcher ClusterRole covers the batch/jobs calls of services/dispatcher/dispatcher.py"
+  echo "$clusters" > "$TMP/clusters.txt"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF3'
+import re, sys, yaml
+tmp, root = sys.argv[1], sys.argv[2]
+src = open(f"{root}/services/dispatcher/dispatcher.py").read()
+verb_of = {"read": "get", "list": "list", "watch": "watch", "patch": "patch", "create": "create", "delete": "delete", "replace": "update"}
+called = {verb_of[m] for m in re.findall(r"batch\.(\w+?)_(?:namespaced_|cluster_)?job\b", src)}
+assert called, "no batch.<verb>_namespaced_job call found in dispatcher.py (the pattern is stale)"
+found = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "ClusterRole" and o["metadata"]["name"] == "serverless2-dispatcher"]
+    if not roles:
+        continue
+    found += 1
+    rules = [r for r in roles[0]["rules"] if "batch" in r.get("apiGroups", []) and "jobs" in r.get("resources", [])]
+    assert len(rules) == 1, f"{cid}: expected one batch/jobs rule in the dispatcher ClusterRole, got {len(rules)}"
+    verbs = set(rules[0]["verbs"])
+    assert called <= verbs, f"{cid}: dispatcher.py calls batch jobs {sorted(called)}, the ClusterRole grants {sorted(verbs)}"
+    assert verbs <= {"get", "list", "watch"}, f"{cid}: the dispatcher ClusterRole grants batch jobs {sorted(verbs)}: it only ever reads manager Jobs"
+    print(f"   ok dispatcher RBAC {cid}: batch/jobs {sorted(verbs)} covers the source's calls {sorted(called)}, read-only")
+assert found, "no cluster rendered the dispatcher ClusterRole"
+EOF3
 }
 
 check_tests() {

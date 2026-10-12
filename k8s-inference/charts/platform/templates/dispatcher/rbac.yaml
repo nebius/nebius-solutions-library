@@ -16,9 +16,9 @@ rules:
   - apiGroups: [kueue.x-k8s.io]
     resources: [workloads, workloads/status]
     verbs: [patch, update]
-  - apiGroups: [batch]                    # the volume sweeper checks whether a worker volume's manager Jobs still exist
-    resources: [jobs]
-    verbs: [get]
+  - apiGroups: [batch]                    # the volume pass and sweeper read the manager Jobs that reference a worker volume
+    resources: [jobs]                     # (list per tenant namespace since dispatcher 0.2.11; get kept for the single-Job reads)
+    verbs: [get, list]
   - apiGroups: [jobset.x-k8s.io]          # multi-node runs (JobSets) own Workloads too
     resources: [jobsets]
     verbs: [get]
