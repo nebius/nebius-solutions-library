@@ -519,12 +519,6 @@ variable "wait_for_nvidia_persistenced" {
   nullable    = false
 }
 
-variable "shared_memory_size_gibibytes" {
-  description = "Shared memory size for Slurm controller and worker nodes in GiB."
-  type        = number
-  default     = 64
-}
-
 # endregion Config
 
 # region Telemetry
