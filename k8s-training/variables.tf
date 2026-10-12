@@ -137,7 +137,7 @@ variable "node_group_strategy" {
 
 # Generic GPU node group reservation policy
 variable "gpu_nodes_reservation_policy" {
-  description = "Capacity reservation policy for generic GPU node groups (not CPU or GB300 groups). policy: AUTO | STRICT | FORBID. Null inherits provider default."
+  description = "Capacity reservation policy for generic GPU node groups (not CPU or GB300 groups). policy: AUTO | STRICT | FORBID; required when reservation_ids is non-empty. Null inherits provider default."
   type = object({
     policy          = optional(string)
     reservation_ids = optional(list(string))
@@ -151,6 +151,14 @@ variable "gpu_nodes_reservation_policy" {
       )
     )
     error_message = "policy must be one of: AUTO, STRICT, FORBID."
+  }
+
+  validation {
+    condition = var.gpu_nodes_reservation_policy == null ? true : (
+      length(coalesce(var.gpu_nodes_reservation_policy.reservation_ids, [])) == 0 ||
+      var.gpu_nodes_reservation_policy.policy != null
+    )
+    error_message = "Set policy to AUTO or STRICT when reservation_ids is non-empty."
   }
 
   # FORBID must not name any reservation (on-demand/PAYG only).

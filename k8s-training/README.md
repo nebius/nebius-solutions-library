@@ -112,7 +112,7 @@ gpu_nodes_reservation_policy = {
 | `AUTO` | Try specified reservations, then available capacity blocks, then fall back to pay-as-you-go (PAYG). | Optional. |
 | `FORBID` | Use PAYG capacity only; do not use reservations. | Omit or leave empty. |
 
-`reservation_ids` is an ordered list of capacity block group IDs. Omit it, set it to `null`, or use `[]` when you do not want to select specific groups. Individual entries must not be null, empty, or whitespace-only strings. An empty list does not force PAYG; use `policy = "FORBID"` for that.
+`reservation_ids` is an ordered list of capacity block group IDs. When the list is non-empty, explicitly set `policy` to `AUTO` or `STRICT`. Omit the list, set it to `null`, or use `[]` when you do not want to select specific groups. Individual entries must not be null, empty, or whitespace-only strings. An empty list does not force PAYG; use `policy = "FORBID"` for that.
 
 This policy is part of the GPU node template, so changing it can trigger node recreation. Review the Terraform plan and the existing [`node_group_strategy` configuration](./variables.tf) before applying it, especially when reserved capacity leaves no room for surge nodes.
 

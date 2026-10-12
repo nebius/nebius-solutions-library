@@ -34,6 +34,7 @@ gpu_node_groups = 1 # In case you need more then 100 nodes in cluster you have t
 # Does not apply to CPU or GB300 node groups.
 # STRICT uses reserved capacity only; AUTO allows PAYG fallback; FORBID uses PAYG only.
 # Leave unset to inherit the provider default. IDs are optional with STRICT.
+# When IDs are supplied, explicitly set policy to AUTO or STRICT.
 # gpu_nodes_reservation_policy = {
 #   policy          = "STRICT"
 #   reservation_ids = [] # Ordered capacity block group IDs; must be empty with FORBID.
