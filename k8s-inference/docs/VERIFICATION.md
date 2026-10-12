@@ -12,6 +12,18 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Fresh deployment of the two-stage layout: a second fleet from the PR branch (2026-10-12 17:30-18:50 UTC, deployed and operated by the Scientific AI migration lane, read here from its coordination record)
+
+| Check | Result |
+|---|---|
+| Fleet | a new, isolated fleet: control and one GPU region in one project, a second GPU region (RTX PRO 6000, platform `gpu-rtx6000-a`) in another project; six on-demand CPU system nodes, six spot GPU pools at zero; its own state bucket, registry, Managed PostgreSQL; pinned source first `49bf3bf1b`, then the fixes below |
+| Cloud stage | the first apply failed creating two clusters: the project's private pool had no /16 left for the clusters' Service network (`NotEnoughResources`). Fixed by the optional `service_cidrs` per cluster (`["/20"]`, a prefix length Nebius allocates); the second apply created everything, the cluster from the other project untouched |
+| Platform stages | workers 118 creates each, control 127; database init, LiteLLM migrations and the system tenant's key bootstrap Jobs succeeded; API and console at two replicas, public TLS valid; final plans of all four states at `709bb41b8`: no changes |
+| Kubernetes API allow-lists | the audit log showed the operator's calls from a different address than the host believes it has; lists tightened in place one cluster at a time with the same-shell check (the documented procedure) |
+| Placement defects found and fixed | `allowed_clusters` without a top-level region was refused against the implicit default region (0.11.25); a `gpu_preference` on a generic single-image class kept the model's queue and spanned every pool, so H100, H200 and L40S probes all scaled the H100 pool (0.11.26: the queue and the pool affinity follow the preference); custom cluster ids (`north`, `south`) were unknown to the API, breaking admitted cancellation, logs, metrics and the attempt-record token review (0.11.26 + fleet chart 0.1.5: `clusters.yaml` maps ids to regions); the GPU Operator chart had no driver profile for `gpu-rtx6000-a`, leaving the RTX node without a driver (one NVIDIADriver per pool platform, longest-prefix sibling for the manager settings) |
+| GPU qualification | all four classes SUCCEEDED with the physical device matching the requested class and 65 536 CUDA outputs each through the API's logs; the south request that had queued ran after the driver profile landed, without node replacement; admitted cancellation terminal with no worker pods left; unused spot nodes scaled back (H100 4 -> 1) with no manual floors |
+| Shared fleets | s2pr2 and the customer cluster untouched throughout (read-only plans only) |
+
 ## Automatic recovery after infrastructure loss (2026-10-12 14:15-14:40 UTC, the same test fleet)
 
 | Check | Result |
