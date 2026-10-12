@@ -417,7 +417,7 @@ copy on the worker carries the pods. What differs from the regional path:
   deletes it after a successful upload; the dispatcher's sweeper deletes it once no manager Job
   references it any more (TTL, a cancel of a queued run; 15 min after creation at the earliest), once
   every Job that still references it was superseded by a continuation on a fresh volume (fallback,
-  automatic recovery: the handles stay readable, dispatcher 0.2.10), or when every Job that uses it was
+  automatic recovery: the handles stay readable, dispatcher 0.2.11), or when every Job that uses it was
   admitted in another cluster. A reference is a manager Job whose pod template names the claim or that
   the volume pass recorded on it, in any state: a FAILED, EXPORT_FAILED or cancelled handle keeps its
   volume for `:resume`/`:export` until the handle itself goes; a same-volume resume or finalizer counts

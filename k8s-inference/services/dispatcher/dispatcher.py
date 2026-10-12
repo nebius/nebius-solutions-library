@@ -352,6 +352,18 @@ def claim_references(wanted: list, idx: dict, claim: str) -> tuple[set, set]:
     return users, superseded
 
 
+def load_fleet(core: client.CoreV1Api):
+    data = core.read_namespaced_config_map(FLEET_CM, NS).data or {}
+    pools = yaml.safe_load(data.get("pools.yaml", "") or "") or {}
+    try:
+        spot = json.loads((core.read_namespaced_config_map(SPOT_CM, NS).data or {}).get("spot.json", "{}"))
+    except client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        spot = {}
+    return clusters_from_pools(pools), spot
+
+
 def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
     """Per MultiKueueCluster (from its kubeconfig Secret): {"custom", "core", "batch"} API clients,
     plus {region name: cluster id}."""
