@@ -25,7 +25,7 @@ fleet = {
     subnet_id     = "vpcsubnet-e00xxxxxxxxxxxxxxxx"  # `nebius vpc subnet list --parent-id <project>`
     system_pool   = { platform = "cpu-d3", preset = "8vcpu-32gb", node_count = 2 }
     allowed_cidrs = []                                  # your egress CIDRs; [] = the Kubernetes API is open
-    # service_cidrs = ["10.96.0.0/20"]                  # only when the project's private pool has no /16 left (docs/OPERATIONS.md)
+    # service_cidrs = ["/20"]                         # a prefix length: Nebius allocates the block; only when the project's pool has no /16 left (README troubleshooting)
   }
 
   # GPU regions. Key = Nebius region; `id` = short cluster id (names, catalog `deployments.<id>`, outputs).

@@ -73,7 +73,7 @@ variable "fleet" {
       allowed_cidrs = optional(list(string), [])
       # Kubernetes Service CIDRs of the cluster (kube_network.service_cidrs). Unset: Nebius allocates a /16 from the
       # project's private pool; when that pool is exhausted ("Unable to allocate private ipv4 cidr /16",
-      # NotEnoughResources) name a smaller block, e.g. ["10.96.0.0/20"]. Immutable after creation; existing clusters
+      # NotEnoughResources) name a smaller block, e.g. ["/20"]. Immutable after creation; existing clusters
       # keep what they have when this stays unset.
       service_cidrs        = optional(list(string))
       image_cache_size_gib = optional(number, 100)
