@@ -1,7 +1,7 @@
 locals {
   active_checks_scopes = {
-    # Scope for dev clusters
-    dev = {
+    # Run only checks required for cluster initialization.
+    skip_all = {
       ssh-check = {
         k8sJobSpec = {
           jobContainer = {
@@ -12,9 +12,18 @@ locals {
           }
         }
       }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = false
+      }
     }
 
-    # Run what is relevant in E2E
+    # Run what is relevant in E2E.
     testing = {
       ssh-check = {
         k8sJobSpec = {
@@ -26,58 +35,20 @@ locals {
           }
         }
       }
-    }
-    # Check the provisioned cluster, but don't run health-checks that take long
-    prod_quick = {
-      all-reduce-perf-nccl-in-docker = {
-        runAfterCreation = false
-      }
-      ssh-check = {
-        k8sJobSpec = {
-          jobContainer = {
-            env = [{
-              name : "NUM_OF_LOGIN_NODES",
-              value : tostring(var.node_count.login)
-            }]
-          }
-        }
-      }
       dcgmi-diag-r3 = {
         runAfterCreation = false
       }
-    }
-
-    # Run all available health-checks
-    prod_acceptance = {
-      all-reduce-perf-nccl-in-docker = {
-        runAfterCreation = false
-      }
-      ssh-check = {
-        k8sJobSpec = {
-          jobContainer = {
-            env = [{
-              name : "NUM_OF_LOGIN_NODES",
-              value : tostring(var.node_count.login)
-            }]
-          }
-        }
-      }
-    }
-
-    # Skip most of checks and run only essential ones
-    essential = {
-      all-reduce-perf-nccl-in-docker = {
-        runAfterCreation = false
-      }
-      dcgmi-diag-r3 = {
-        runAfterCreation = false
-      }
-      prepull-container-image = {
+      gpu-checks = {
+        suspend          = true
         runAfterCreation = false
       }
       manage-jail-state = {
-        runAfterCreation = false
+        runAfterCreation = true
       }
+    }
+
+    # Skip everything that can be skipped in production.
+    essential = {
       ssh-check = {
         k8sJobSpec = {
           jobContainer = {
@@ -88,8 +59,60 @@ locals {
           }
         }
       }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
       gpu-checks = {
         runAfterCreation = false
+      }
+      manage-jail-state = {
+        runAfterCreation = true
+      }
+    }
+
+    # Run short GPU health checks.
+    prod_quick = {
+      ssh-check = {
+        k8sJobSpec = {
+          jobContainer = {
+            env = [{
+              name : "NUM_OF_LOGIN_NODES",
+              value : tostring(var.node_count.login)
+            }]
+          }
+        }
+      }
+      dcgmi-diag-r3 = {
+        runAfterCreation = false
+      }
+      gpu-checks = {
+        runAfterCreation = true
+      }
+      manage-jail-state = {
+        runAfterCreation = true
+      }
+    }
+
+    # Run all available checks.
+    prod_acceptance = {
+      ssh-check = {
+        k8sJobSpec = {
+          jobContainer = {
+            env = [{
+              name : "NUM_OF_LOGIN_NODES",
+              value : tostring(var.node_count.login)
+            }]
+          }
+        }
+      }
+      dcgmi-diag-r3 = {
+        runAfterCreation = true
+      }
+      gpu-checks = {
+        runAfterCreation = true
+      }
+      manage-jail-state = {
+        runAfterCreation = true
       }
     }
   }

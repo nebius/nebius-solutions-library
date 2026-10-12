@@ -62,7 +62,7 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
   labels = {
     "library-solution" : "k8s-training",
   }
-  version = var.k8s_version
+  version  = var.k8s_version
   strategy = var.node_group_strategy
   template = {
     boot_disk = {
@@ -82,10 +82,6 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
       platform = local.cpu_nodes_platform
       preset   = local.cpu_nodes_preset
     }
-    preemptible = var.cpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 1
-    } : null
     filesystems = var.enable_filestore ? [
       {
         attach_mode = "READ_WRITE"
@@ -116,7 +112,7 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 resource "nebius_mk8s_v1_node_group" "gpu" {
-  count = var.gpu_node_groups
+  count = local.gb300_enabled ? 0 : var.gpu_node_groups
 
   lifecycle {
     precondition {
@@ -137,7 +133,7 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
   labels = {
     "library-solution" : "k8s-training",
   }
-  version = var.k8s_version
+  version  = var.k8s_version
   strategy = var.node_group_strategy
   template = {
     metadata = {
@@ -163,10 +159,6 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       platform = local.gpu_nodes_platform
       preset   = local.gpu_nodes_preset
     }
-    preemptible = var.gpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 1
-    } : null
     filesystems = var.enable_filestore ? [
       {
         attach_mode = "READ_WRITE"
@@ -183,8 +175,17 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       priority      = 3
     } : null
 
-    underlay_required = false
-    reservation_policy = var.node_group_reservation_policy
+    local_disks = var.gpu_enable_local_disks ? {
+      config = {
+        kubelet_ephemeral = true
+      }
+      passthrough_group = {
+        requested = true
+      }
+    } : null
+
+    reservation_policy = var.gpu_nodes_reservation_policy
+    underlay_required  = false
     cloud_init_user_data = templatefile("${path.module}/../modules/cloud-init/k8s-cloud-init.tftpl", {
       enable_filestore         = var.enable_filestore ? "true" : "false",
       filestore_mount_path     = local.filestore.mount_path,

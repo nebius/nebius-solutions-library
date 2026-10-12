@@ -78,7 +78,10 @@ resource "helm_release" "soperator_fluxcd_cm" {
     soperator_image_repo     = local.image.repository
     soperator_image_repo_nfs = var.nfs_in_k8s.use_stable_repo ? local.image.repository_stable : local.image.repository
 
-    dcgm_job_mapping_enabled       = var.dcgm_job_mapping_enabled
+    # The custom kruise chart is only published to the stable repo.
+    kruise_helm_repo = local.helm.repository.slurm_stable
+
+    dcgm_exporter_enabled          = var.dcgm_exporter_enabled
     enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
     # Cluster-wide toggle for the [program:dockerd] block in the shared jail
     # supervisord config (customConfigmaps), which is one configmap for the whole
@@ -92,7 +95,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     docker_enabled = anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
 
     tailscale_enabled       = var.tailscale_enabled
-    apparmor_enabled        = var.use_default_apparmor_profile
+    apparmor_profile        = local.apparmor_profile
     enable_soperator_checks = var.enable_soperator_checks
 
     operator_version                          = var.operator_version
@@ -105,12 +108,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
     opentelemetry_sending_queue               = var.opentelemetry_sending_queue
     opentelemetry_sending_queue_enabled       = local.opentelemetry_sending_queue_enabled
     opentelemetry_delete_jail_logs_after_read = var.opentelemetry_delete_jail_logs_after_read
+    opentelemetry_delete_jail_logs_min_age    = var.opentelemetry_delete_jail_logs_min_age
     prometheus_crds_version                   = var.prometheus_crds_version
-    security_profiles_operator_version        = var.security_profiles_operator_version
     vmstack_version                           = var.vmstack_version
     vmstack_crds_version                      = var.vmstack_crds_version
     vmlogs_version                            = var.vmlogs_version
-    dcgm_job_map_dir                          = var.dcgm_job_map_dir
     notifier                                  = var.soperator_notifier
     nccl_inspector_profiling                  = var.nccl_inspector_profiling
 
@@ -120,6 +122,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     public_o11y_enabled     = var.public_o11y_enabled
     tsa_token_writer_source = local.public_o11y_tsa_token_writer_source
     has_local_nvme          = anytrue([for nodeset in var.worker_nodesets : try(nodeset.local_nvme.enabled, false)])
+    has_nccl_network_vars   = length(local.worker_nccl_network_vars) > 0
     metrics_collector       = local.metrics_collector
     create_pvcs             = var.create_pvcs
 
@@ -127,10 +130,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
       scheduling = local.node_filters
 
       volume = {
-        controller_spool = {
-          size   = "${var.filestores.controller_spool.size_gibibytes}Gi"
-          device = var.filestores.controller_spool.device
-        }
+        controller_spool = var.filestores.controller_spool != null ? {
+          enabled = true
+          size    = "${var.filestores.controller_spool.size_gibibytes}Gi"
+          device  = var.filestores.controller_spool.device
+        } : { enabled = false }
         jail = {
           size   = "${var.filestores.jail.size_gibibytes}Gi"
           device = var.filestores.jail.device
@@ -140,7 +144,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
           size   = "${submount.size_gibibytes}Gi"
           device = submount.device
         }]
-        accounting = var.accounting_enabled ? {
+        accounting = var.accounting_enabled && var.filestores.accounting != null ? {
           enabled = true
           size    = "${var.filestores.accounting.size_gibibytes}Gi"
           device  = var.filestores.accounting.device
@@ -151,13 +155,15 @@ resource "helm_release" "soperator_fluxcd_cm" {
     slurm_cluster = {
       maintenance = var.maintenance
 
+      custom_slurm_config = local.custom_slurm_config_lines
+
       partition_configuration = {
         slurm_config_type = var.slurm_partition_config_type
         slurm_raw_config  = var.slurm_partition_raw_config
       }
 
       topology = {
-        block_size = var.topology.plugin == "topology/block" ? var.topology.block_size : null
+        topologies = var.topology.topologies
       }
 
       use_preinstalled_gpu_drivers = var.use_preinstalled_gpu_drivers
@@ -192,8 +198,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
           enabled              = var.accounting_enabled
           use_protected_secret = var.use_protected_secret
           mariadb_operator = var.accounting_enabled ? {
-            enabled         = var.accounting_enabled
-            storage_size    = var.accounting_enabled ? var.filestores.accounting.size_gibibytes : 0
+            enabled = var.accounting_enabled
+            storage_size = var.accounting_enabled ? coalesce(
+              try(var.filestores.accounting.size_gibibytes, null),
+              var.accounting_storage_size_gibibytes,
+            ) : 0
             metrics_enabled = var.telemetry_enabled
             resources       = local.resources.mariadb
           } : null
@@ -237,11 +246,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
               -local.resources.munge.cpu
               -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
             ) - local.resources.kruise_daemon.cpu
-            memory = floor(
-              var.node_capacity.worker[0].memory_gibibytes
-              -local.resources.munge.memory
-              -(var.sssd_enabled ? local.resources.sssd.memory : 0)
-            ) - local.resources.kruise_daemon.memory
+            memory = local.worker_memory[0]
             ephemeral_storage = floor(
               var.node_capacity.worker[0].ephemeral_storage_gibibytes
               -local.resources.munge.ephemeral_storage
@@ -256,6 +261,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
 
         login = {
           size                     = var.node_count.login
+          autoscaling              = var.login_autoscaling
           k8s_node_filter_name     = var.login_on_worker_nodes ? local.node_filters.worker.name : local.node_filters.login.name
           allocation_id            = var.login_allocation_id
           sshd_config_map_ref_name = var.login_sshd_config_map_ref_name
@@ -323,20 +329,20 @@ resource "helm_release" "soperator_fluxcd_cm" {
     }
 
     resources = {
-      vm_single               = local.selected_preset.vm_single
-      vm_agent                = local.selected_preset.vm_agent
-      vm_logs                 = local.selected_preset.vm_logs
-      logs_collector          = local.selected_preset.logs_collector
-      jail_logs_collector     = local.selected_preset.jail_logs_collector
-      events_collector        = local.selected_preset.events_collector
-      nccl_profiles_collector = local.selected_preset.nccl_profiles_collector
-      node_configurator       = local.resources.node_configurator
-      slurm_operator          = local.resources.slurm_operator
-      slurm_checks            = local.resources.slurm_checks
-      dcgm_exporter           = local.resources.dcgm_exporter
-      nfs_server              = local.resources.nfs_server
-      spo                     = local.resources.spo
-      kruise_manager          = local.selected_preset.kruise_manager
+      vm_single                   = local.selected_preset.vm_single
+      vm_agent                    = local.selected_preset.vm_agent
+      vm_logs                     = local.selected_preset.vm_logs
+      logs_collector              = local.selected_preset.logs_collector
+      jail_logs_collector         = local.selected_preset.jail_logs_collector
+      events_collector            = local.selected_preset.events_collector
+      nccl_profiles_collector     = local.selected_preset.nccl_profiles_collector
+      node_configurator           = local.resources.node_configurator
+      soperator_main_controller   = local.resources.soperator_main_controller
+      soperator_checks_controller = local.resources.soperator_checks_controller
+      dcgm_exporter               = local.resources.dcgm_exporter
+      nfs_server                  = local.resources.nfs_server
+      kruise_manager              = local.selected_preset.kruise_manager
+      kube_state_metrics          = local.selected_preset.kube_state_metrics
     }
 
     vm_agent_queue_count = local.vm_agent_queue_count
@@ -358,14 +364,14 @@ resource "helm_release" "soperator_fluxcd_bootstrap" {
   ]
 
   name       = "soperator-fluxcd-bootstrap"
-  repository = var.operator_stable ? "oci://cr.eu-north1.nebius.cloud/soperator" : "oci://cr.eu-north1.nebius.cloud/soperator-unstable"
+  repository = var.operator_stable ? "oci://cr.nebius.cloud/soperator" : "oci://cr.nebius.cloud/soperator-unstable"
   chart      = "helm-soperator-fluxcd-bootstrap"
   version    = var.operator_version
   namespace  = var.flux_namespace
 
   set {
     name  = "helmRepository.url"
-    value = var.operator_stable ? "oci://cr.eu-north1.nebius.cloud/soperator" : "oci://cr.eu-north1.nebius.cloud/soperator-unstable"
+    value = var.operator_stable ? "oci://cr.nebius.cloud/soperator" : "oci://cr.nebius.cloud/soperator-unstable"
   }
 }
 

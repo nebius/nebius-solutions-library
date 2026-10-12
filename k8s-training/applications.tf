@@ -5,6 +5,7 @@ module "kuberay" {
   depends_on = [
     nebius_mk8s_v1_node_group.cpu-only,
     nebius_mk8s_v1_node_group.gpu,
+    nebius_mk8s_v1_node_group.gb300,
     module.network-operator,
     module.gpu-operator,
   ]
@@ -33,6 +34,7 @@ module "kuberay-service" {
   depends_on = [
     nebius_mk8s_v1_node_group.cpu-only,
     nebius_mk8s_v1_node_group.gpu,
+    nebius_mk8s_v1_node_group.gb300,
     module.network-operator,
     module.gpu-operator,
   ]

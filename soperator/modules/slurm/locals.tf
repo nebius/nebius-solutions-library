@@ -1,15 +1,24 @@
 locals {
+  apparmor_profile = var.use_default_apparmor_profile ? "soperator-default" : "unconfined"
+
+  # One Slurm setting per element. Split any entry that still carries newlines, trim each
+  # line and drop the blanks: the template renders these as a YAML block scalar, where a
+  # stray leading space or an embedded newline would silently truncate the block.
+  custom_slurm_config_lines = [
+    for line in flatten([for entry in var.slurm_custom_config_override : split("\n", entry)]) :
+    trimspace(line) if trimspace(line) != ""
+  ]
+
   kube_rbac_proxy = {
     image = "gcr.io/kubebuilder/kube-rbac-proxy"
     tag   = "v0.15.0"
   }
   helm = {
     repository = {
-      slurm        = "oci://cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-      slurm_stable = "oci://cr.eu-north1.nebius.cloud/soperator"
+      slurm        = "oci://cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+      slurm_stable = "oci://cr.nebius.cloud/soperator"
       mariadb      = "https://helm.mariadb.com/mariadb-operator"
       raw          = "https://bedag.github.io/helm-charts/"
-      spo          = "oci://cr.eu-north1.nebius.cloud/e00xdc03sb7gpqfd0a"
     }
 
     chart = {
@@ -18,7 +27,6 @@ locals {
       slurm_operator_crds   = "soperator-crds"
       nodeconfigurator      = "nodeconfigurator"
       raw                   = "raw"
-      spo                   = "security-profiles-operator"
 
       operator = {
         slurm       = "soperator"
@@ -31,13 +39,12 @@ locals {
       slurm   = var.operator_version
       mariadb = "25.10.2"
       raw     = "2.0.0"
-      spo     = "0.8.4-soperator"
     }
   }
 
   image = {
-    repository        = "cr.eu-north1.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-    repository_stable = "cr.eu-north1.nebius.cloud/soperator"
+    repository        = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+    repository_stable = "cr.nebius.cloud/soperator"
     tag               = var.operator_version
   }
 
@@ -118,18 +125,14 @@ locals {
     # System/observability components are sized by the sizing tier,
     # with per-component overrides merged inside ../sizing_tier (see var.component_overrides).
     # local.selected_preset is the post-merge result.
-    exporter          = local.selected_preset.exporter
-    rest              = local.selected_preset.rest
-    mariadb           = local.selected_preset.mariadb
-    node_configurator = local.selected_preset.node_configurator
-    slurm_operator    = local.selected_preset.slurm_operator
-    slurm_checks      = local.selected_preset.slurm_checks
-    kruise_daemon     = local.selected_preset.kruise_daemon
-    dcgm_exporter     = local.selected_preset.dcgm_exporter
-    spo = {
-      daemon     = local.selected_preset.spo_daemon
-      controller = local.selected_preset.spo_controller
-    }
+    exporter                    = local.selected_preset.exporter
+    rest                        = local.selected_preset.rest
+    mariadb                     = local.selected_preset.mariadb
+    node_configurator           = local.selected_preset.node_configurator
+    soperator_main_controller   = local.selected_preset.soperator_main_controller
+    soperator_checks_controller = local.selected_preset.soperator_checks_controller
+    kruise_daemon               = local.selected_preset.kruise_daemon
+    dcgm_exporter               = local.selected_preset.dcgm_exporter
     # The NFS server pod fills its dedicated node, so when an NFS nodeset exists
     # its node capacity (var.node_capacity.nfs) wins over the tier value.
     nfs_server = {
@@ -143,23 +146,19 @@ locals {
     }
   }
 
-  slurm_node_extra = "\\\"{ \\\\\\\"ib_pod\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER2\\\\\\\", \\\\\\\"ib_su\\\\\\\": \\\\\\\"$TOPO_SWITCH_TIER1\\\\\\\" }\\\""
+  # Slurm Extra attached to every worker node.
+  slurm_node_extra = "{ \"ib_pod\": \"$TOPO_SWITCH_TIER2\", \"ib_su\": \"$TOPO_SWITCH_TIER1\" }"
 
   # Calculate vmagent remote write queue count based on cluster size
   # This sets metrics ingestion capacity for larger clusters properly
   vm_agent_queue_count = 2 + floor(sum(var.node_count.worker) / 60)
 
-  # kube-state-metrics starts exceeding the default 32MiB scrape limit around 1.1k workers.
-  kube_state_metrics_large_cluster_worker_threshold = 1000
-  kube_state_metrics_large_cluster_max_scrape_size  = 150554432
+  # Cap on the kube-state-metrics scrape response: an explicit var wins, otherwise the sizing
+  # tier decides (null below M keeps vmagent's global guard).
   kube_state_metrics_max_scrape_size = (
     var.kube_state_metrics_max_scrape_size != null
     ? var.kube_state_metrics_max_scrape_size
-    : (
-      sum(var.node_count.worker) >= local.kube_state_metrics_large_cluster_worker_threshold
-      ? local.kube_state_metrics_large_cluster_max_scrape_size
-      : null
-    )
+    : module.sizing.kube_state_metrics_max_scrape_size
   )
 
   # Total declared worker nodes across all worker nodesets. Drives the sizing tier.

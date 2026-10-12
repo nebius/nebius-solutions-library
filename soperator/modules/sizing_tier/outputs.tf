@@ -23,6 +23,11 @@ output "all_node_presets" {
   value       = local.node_presets
 }
 
+output "kube_state_metrics_max_scrape_size" {
+  description = "Cap (bytes) on the kube-state-metrics scrape response for the resolved tier; null keeps vmagent's global guard."
+  value       = local.kube_state_metrics_max_scrape_size_presets[local.sizing_tier]
+}
+
 output "capacity_violations" {
   description = <<-EOT
     Broken capacity invariants, one self-explaining message each (see the capacity locals in main.tf).

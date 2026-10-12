@@ -35,7 +35,14 @@ variable "k8s_cluster_id" {
   type        = string
 }
 
-# region PartitionConfiguration
+# region Configuration
+
+variable "slurm_custom_config_override" {
+  description = "Custom Slurm settings to append or override the auto-generated ones. One setting per element."
+  type        = list(string)
+  default     = []
+  nullable    = false
+}
 
 variable "slurm_partition_config_type" {
   description = "Type of the Slurm partition config. Could be either `default` or `custom`."
@@ -50,28 +57,42 @@ variable "slurm_partition_raw_config" {
 }
 
 variable "topology" {
-  description = "Slurm topology configuration. topology/tree leaves the chart default unset; topology/block renders BlockAsNodeRank and requires block_size."
+  description = "Named Slurm topologies rendered in topology.yaml."
   type = object({
-    plugin     = string
-    block_size = optional(number)
+    topologies = list(object({
+      name            = string
+      cluster_default = optional(bool)
+      type            = string
+      block_sizes     = optional(list(number), [])
+      nodeset_refs    = optional(list(string), [])
+    }))
   })
   default = {
-    plugin = "topology/tree"
+    topologies = [{
+      name            = "flat"
+      cluster_default = true
+      type            = "flat"
+      block_sizes     = []
+      nodeset_refs    = ["ALL"]
+    }]
   }
   nullable = false
 
   validation {
-    condition     = contains(["topology/tree", "topology/block"], var.topology.plugin)
-    error_message = "topology.plugin must be one of 'topology/tree' or 'topology/block'."
+    condition = alltrue([
+      for topology in var.topology.topologies : contains(["flat", "tree", "block"], topology.type)
+    ])
+    error_message = "topology.topologies[].type must be one of 'flat', 'tree', or 'block'."
   }
 
   validation {
-    condition     = var.topology.plugin == "topology/block" ? try(var.topology.block_size > 0, false) : true
-    error_message = "topology.block_size must be a positive number when topology.plugin is 'topology/block'."
+    condition     = length(distinct([for topology in var.topology.topologies : topology.name])) == length(var.topology.topologies)
+    error_message = "topology.topologies[].name values must be unique."
   }
+
 }
 
-# endregion PartitionConfiguration
+# endregion Configuration
 
 # region HealthCheckConfig
 
@@ -106,6 +127,18 @@ variable "node_count" {
   }
 }
 
+variable "login_autoscaling" {
+  description = "CPU-based login pod autoscaling. Its bounds override node_count.login when enabled."
+  type = object({
+    enabled                           = bool
+    min_size                          = optional(number, 1)
+    max_size                          = optional(number, 4)
+    target_cpu_utilization_percentage = optional(number, 70)
+  })
+  default  = null
+  nullable = true
+}
+
 # endregion Nodes
 
 # region Resources
@@ -133,25 +166,24 @@ variable "component_overrides" {
     the sizing tier drive everything.
   EOT
   type = object({
-    exporter                = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    rest                    = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    mariadb                 = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    node_configurator       = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    slurm_operator          = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    slurm_checks            = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    dcgm_exporter           = optional(object({ cpu = number, memory = number }))
-    kruise_daemon           = optional(object({ cpu = number, memory = number }))
-    nfs_server              = optional(object({ cpu = number, memory = number }))
-    spo_controller          = optional(object({ cpu = string, memory = string }))
-    spo_daemon              = optional(object({ cpu = string, memory = string }))
-    kruise_manager          = optional(object({ cpu = string, memory = string }))
-    vm_single               = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
-    vm_agent                = optional(object({ memory = string, cpu = string }))
-    vm_logs                 = optional(object({ memory = string, cpu = string, size = string }))
-    events_collector        = optional(object({ memory = string, cpu = string }))
-    logs_collector          = optional(object({ memory = string, cpu = string }))
-    jail_logs_collector     = optional(object({ memory = string, cpu = string }))
-    nccl_profiles_collector = optional(object({ memory = string, cpu = string }))
+    exporter                    = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    rest                        = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    mariadb                     = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    node_configurator           = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    soperator_main_controller   = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    soperator_checks_controller = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    dcgm_exporter               = optional(object({ cpu = number, memory = number }))
+    kruise_daemon               = optional(object({ cpu = number, memory = number }))
+    nfs_server                  = optional(object({ cpu = number, memory = number }))
+    kruise_manager              = optional(object({ cpu = string, memory = string }))
+    kube_state_metrics          = optional(object({ requests = object({ cpu = string, memory = string }), limits = object({ memory = string }) }))
+    vm_single                   = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
+    vm_agent                    = optional(object({ memory = string, cpu = string }))
+    vm_logs                     = optional(object({ memory = string, cpu = string, size = string }))
+    events_collector            = optional(object({ memory = string, cpu = string }))
+    logs_collector              = optional(object({ memory = string, cpu = string }))
+    jail_logs_collector         = optional(object({ memory = string, cpu = string }))
+    nccl_profiles_collector     = optional(object({ memory = string, cpu = string }))
   })
   default  = {}
   nullable = false
@@ -208,6 +240,27 @@ resource "terraform_data" "check_worker_nodesets" {
     precondition {
       condition     = length(var.node_count.worker) == length(var.node_capacity.worker)
       error_message = "Worker node set resources must accord to the worker node count."
+    }
+
+    precondition {
+      condition     = alltrue([for memory in local.worker_memory : memory > 0])
+      error_message = "Worker capacity must leave positive Slurmd memory after sidecar and agent reservations."
+    }
+
+    precondition {
+      condition = alltrue([
+        for i, nodeset in var.worker_nodesets :
+        !try(nodeset.local_nvme.enabled, false) ||
+        try(nodeset.local_nvme.size_limit_gibibytes, null) == null ||
+        try(
+          nodeset.local_nvme.size_limit_gibibytes
+          + local.resources.munge.ephemeral_storage
+          + (var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+          <= var.node_capacity.worker[i].ephemeral_storage_gibibytes,
+          false,
+        )
+      ])
+      error_message = "Local NVMe size_limit_gibibytes plus worker sidecar reservations cannot exceed the usable ephemeral-storage capacity."
     }
   }
 }
@@ -330,10 +383,10 @@ variable "rest_enabled" {
 variable "filestores" {
   description = "Filestores to be used in Slurm cluster."
   type = object({
-    controller_spool = object({
+    controller_spool = optional(object({
       size_gibibytes = number
       device         = string
-    })
+    }))
     jail = object({
       size_gibibytes = number
       device         = string
@@ -358,6 +411,22 @@ variable "controller_state_on_filestore" {
   description = "Whether to use filestore for controller node storage (when true) or PVC (when false)."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.controller_state_on_filestore || var.filestores.controller_spool != null
+    error_message = "A controller_spool Filestore must be configured when controller_state_on_filestore is true."
+  }
+}
+
+variable "accounting_storage_size_gibibytes" {
+  description = "Size of the PVC used by the MariaDB accounting database when no legacy accounting Filestore is configured."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.accounting_storage_size_gibibytes > 0
+    error_message = "Accounting storage size must be greater than zero."
+  }
 }
 
 variable "enroot_direct_squashfs_enabled" {
@@ -443,6 +512,13 @@ variable "nfs_in_k8s" {
 
 # region Config
 
+variable "wait_for_nvidia_persistenced" {
+  description = "Whether GPU workers with preinstalled drivers should wait for the host NVIDIA persistence socket before starting, allowing the NVIDIA runtime to inject it."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "shared_memory_size_gibibytes" {
   description = "Shared memory size for Slurm controller and worker nodes in GiB."
   type        = number
@@ -459,14 +535,14 @@ variable "telemetry_enabled" {
   default     = true
 }
 
-variable "dcgm_job_mapping_enabled" {
-  description = "Whether to enable HPC job mapping by installing a separate dcgm-exporter"
+variable "dcgm_exporter_enabled" {
+  description = "Whether to install soperator's dcgm-exporter chart. When false, the NVIDIA gpu-operator's stock dcgm-exporter is used instead."
   type        = bool
   default     = true
 }
 
 variable "kube_state_metrics_max_scrape_size" {
-  description = "Maximum kube-state-metrics HTTP scrape size in bytes. Leave null to raise it automatically for large clusters."
+  description = "Maximum kube-state-metrics HTTP scrape size in bytes. Leave null to let the sizing tier decide (raised automatically on M and larger clusters)."
   type        = number
   default     = null
   nullable    = true
@@ -478,7 +554,7 @@ variable "kube_state_metrics_max_scrape_size" {
 }
 
 variable "opentelemetry_batch" {
-  description = "OpenTelemetry sending_queue batch overrides for logs, jail logs, events, and nccl-profiles collectors. Leave null to use chart defaults."
+  description = "OpenTelemetry sending_queue batch overrides for the in-cluster (VictoriaLogs/VictoriaMetrics) exporters of the logs, jail logs, events, and nccl-profiles collectors. Does not affect the public Cloud Logging exporter, whose batching is managed by the chart (publicBatch, capped at 1000 records per request). Leave null to use chart defaults."
   type = object({
     timeout             = optional(string)
     send_batch_size     = optional(number)
@@ -559,10 +635,15 @@ variable "opentelemetry_delete_jail_logs_after_read" {
   default     = false
 }
 
-variable "dcgm_job_map_dir" {
-  description = "Directory where HPC job mapping files are located"
+variable "opentelemetry_delete_jail_logs_min_age" {
+  description = "Minimum time a jail log file must remain unmodified before the OpenTelemetry collector deletes it after reading. Logs are node-local (worker boot disk), so this is also the on-node debugging window."
   type        = string
-  default     = "/var/run/nebius/slurm"
+  default     = "4h"
+
+  validation {
+    condition     = can(regex("^[0-9]+(s|m|h)$", var.opentelemetry_delete_jail_logs_min_age))
+    error_message = "Must be a Go-style duration with a single unit, e.g. 90s, 30m, or 4h."
+  }
 }
 
 # endregion Telemetry
@@ -597,7 +678,7 @@ variable "slurm_accounting_config" {
 
 # region Apparmor
 variable "use_default_apparmor_profile" {
-  description = "Whether to use default AppArmor profile."
+  description = "Use the soperator-default AppArmor profile, which must be loaded on nodes by provisioning."
   type        = bool
   default     = true
 }
@@ -687,7 +768,7 @@ variable "nccl_inspector_profiling" {
   type = object({
     enabled  = bool
     verbose  = optional(bool, false)
-    dump_dir = optional(string, "/opt/soperator-outputs/nccl_profiles")
+    dump_dir = optional(string, "/opt/soperator-outputs/shared/nccl_profiles")
   })
   default = {
     enabled = false
@@ -784,11 +865,6 @@ variable "prometheus_crds_version" {
   type        = string
   default     = ""
 }
-variable "security_profiles_operator_version" {
-  description = "The version of the security profiles operator."
-  type        = string
-  default     = ""
-}
 
 variable "vmstack_version" {
   description = "The version of the vmstack."
@@ -840,7 +916,7 @@ variable "backups_config" {
 variable "region" {
   description = "Region where the Slurm cluster is deployed."
   type        = string
-  default     = "eu-north1"
+  default     = "eu-west2"
 }
 
 variable "use_preinstalled_gpu_drivers" {
@@ -855,8 +931,8 @@ variable "active_checks_scope" {
   description = "Scope of active health-checks. Defines what checks should run after the cluster is provisioned."
   default     = "prod_quick"
   validation {
-    condition     = contains(["dev", "testing", "prod_quick", "prod_acceptance", "essential"], var.active_checks_scope)
-    error_message = "active_checks_scope should be one of: dev, testing, prod_quick, prod_acceptance, essential."
+    condition     = contains(["prod_quick", "prod_acceptance", "essential", "skip_all", "testing"], var.active_checks_scope)
+    error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all, testing."
   }
 }
 # endregion ActiveChecks
@@ -866,13 +942,17 @@ variable "active_checks_scope" {
 variable "worker_nodesets" {
   type = list(object({
     name                           = string
+    platform                       = string
     replicas                       = number
     max_unavailable                = string
+    rolling_update_strategy        = optional(string, "slurmAwareRollingUpdate")
     features                       = list(string)
     cpu_topology                   = map(number)
     gres_name                      = optional(string)
     gres_config                    = list(string)
+    auto_resume                    = optional(bool, false)
     create_partition               = bool
+    partition_topology             = string
     ephemeral_nodes                = optional(bool, false)
     initial_number_ephemeral_nodes = optional(number, 0)
     persistent_volume_claim_retention_policy = optional(object({
@@ -880,9 +960,11 @@ variable "worker_nodesets" {
       when_scaled  = string
     }))
     local_nvme = optional(object({
-      enabled         = optional(bool, false)
-      mount_path      = optional(string, "/mnt/local-nvme")
-      filesystem_type = optional(string, "ext4")
+      enabled                   = optional(bool, false)
+      device_count              = optional(number)
+      device_capacity_gigabytes = optional(number)
+      mount_path                = optional(string, "/mnt/local-nvme")
+      size_limit_gibibytes      = optional(number)
     }), {})
     node_local_image_storage = object({
       enabled = bool
@@ -909,12 +991,28 @@ variable "worker_nodesets" {
   validation {
     condition = alltrue([
       for worker in var.worker_nodesets :
+      contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
+    ])
+    error_message = "worker_nodesets.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
       worker.persistent_volume_claim_retention_policy == null || (
         contains(["Retain", "Delete"], worker.persistent_volume_claim_retention_policy.when_deleted) &&
         contains(["Retain", "Delete"], worker.persistent_volume_claim_retention_policy.when_scaled)
       )
     ])
     error_message = "When worker persistent_volume_claim_retention_policy is set, when_deleted and when_scaled must be `Retain` or `Delete`."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
+      contains([for topology in var.topology.topologies : topology.name], worker.partition_topology)
+    ])
+    error_message = "Each worker partition_topology must reference a topology created by Terraform."
   }
 }
 
@@ -928,6 +1026,7 @@ variable "slurm_nodesets_partitions" {
     name         = string
     is_all       = optional(bool, false)
     nodeset_refs = optional(list(string), [])
+    topology     = string
     config       = string
   }))
   default = []
@@ -970,6 +1069,14 @@ variable "slurm_nodesets_partitions" {
     )
     error_message = "All partition names in slurm_nodesets_partitions must be unique."
   }
+
+  validation {
+    condition = alltrue([
+      for partition in var.slurm_nodesets_partitions :
+      contains([for topology in var.topology.topologies : topology.name], partition.topology)
+    ])
+    error_message = "Each partition topology must reference a topology created by Terraform."
+  }
 }
 
 # endregion Nodesets
@@ -977,5 +1084,5 @@ variable "slurm_nodesets_partitions" {
 variable "cuda_version" {
   description = "CUDA version used for populate-jail image selection and active checks."
   type        = string
-  default     = "13.0.2"
+  default     = "13.0.3"
 }

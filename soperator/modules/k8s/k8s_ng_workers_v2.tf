@@ -3,9 +3,9 @@ locals {
   gpu_clusters_v2 = {
     for gpu_placement in distinct([for worker in var.node_group_workers_v2 :
       {
-        fabric = worker.gpu_cluster.infiniband_fabric
+        fabric = try(trimspace(worker.gpu_cluster.infiniband_fabric), "")
       }
-      if worker.gpu_cluster != null
+      if worker.gpu_cluster != null && try(trimspace(worker.gpu_cluster.id), "") == "" && try(trimspace(worker.gpu_cluster.infiniband_fabric), "") != ""
     ]) :
     gpu_placement.fabric => {
       fabric = gpu_placement.fabric
@@ -16,11 +16,25 @@ locals {
     for ng in distinct([for worker in var.node_group_workers_v2 :
       {
         name   = worker.name
-        fabric = worker.gpu_cluster.infiniband_fabric
+        fabric = try(trimspace(worker.gpu_cluster.infiniband_fabric), "")
       }
-      if worker.gpu_cluster != null
+      if worker.gpu_cluster != null && try(trimspace(worker.gpu_cluster.id), "") == "" && try(trimspace(worker.gpu_cluster.infiniband_fabric), "") != ""
     ]) :
     ng.name => ng.fabric
+  }
+
+  node_group_gpu_cluster_id_v2 = {
+    worker = [
+      for worker in var.node_group_workers_v2 :
+      try(trimspace(worker.gpu_cluster.id), "")
+    ]
+  }
+
+  node_group_gpu_cluster_fabric_v2 = {
+    worker = [
+      for worker in var.node_group_workers_v2 :
+      try(trimspace(worker.gpu_cluster.infiniband_fabric), "")
+    ]
   }
 }
 
@@ -83,19 +97,19 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
       # Don't recreate the node if it's not ready for 5 minutes
       # to avoid races with Soperator, since it does the same
       {
-        type     = "NodeReady"
+        type     = "Ready"
         status   = "FALSE"
         disabled = true
       },
       # Don't restart nodes with not responding kubelet
       # to avoid races with Soperator, since it does the same
       {
-        type     = "NodeReady"
+        type     = "Ready"
         status   = "UNKNOWN"
         disabled = true
       },
       # Don't recreate nodes with broken boot disks
-      # since it's covered by NodeReady=Unknown
+      # since it's covered by Ready=Unknown
       {
         type     = "NebiusBootDiskIOError"
         status   = "TRUE"
@@ -109,7 +123,7 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
         disabled = true
       },
       # Don't restart nodes with broken containerd
-      # since it's covered by NodeReady=False
+      # since it's covered by Ready=False
       {
         type     = "NebiusContainerRuntimeError"
         status   = "TRUE"
@@ -131,12 +145,13 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
     max_surge = {
       percent = 0
     }
-    drain_timeout = null
+    drain_timeout = var.node_group_workers_v2[count.index].drain_timeout
   }
 
   template = {
     metadata = {
       labels = merge(
+        var.node_group_workers_v2[count.index].extra_labels,
         module.labels.label_jail,
         module.labels.label_nodeset_worker,
         tomap({
@@ -159,8 +174,13 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
       preset   = var.node_group_workers_v2[count.index].resource.preset
     }
     gpu_cluster = (local.node_group_gpu_cluster_compatible_v2.worker[count.index]
-      ? (var.node_group_workers_v2[count.index].gpu_cluster != null
-        ? nebius_compute_v1_gpu_cluster.this_v2[local.gpu_clusters_by_nodegroup[var.node_group_workers_v2[count.index].name]]
+      ? (var.node_group_workers_v2[count.index].gpu_cluster != null && (local.node_group_gpu_cluster_id_v2.worker[count.index] != "" || local.node_group_gpu_cluster_fabric_v2.worker[count.index] != "")
+        ? {
+          id = (local.node_group_gpu_cluster_id_v2.worker[count.index] != ""
+            ? local.node_group_gpu_cluster_id_v2.worker[count.index]
+            : nebius_compute_v1_gpu_cluster.this_v2[local.gpu_clusters_by_nodegroup[var.node_group_workers_v2[count.index].name]].id
+          )
+        }
         : null
       )
       : null
@@ -184,7 +204,7 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
 
     local_disks = try(var.node_group_workers_v2[count.index].local_nvme.enabled, false) ? {
       config = {
-        none = true
+        kubelet_ephemeral = true
       }
       passthrough_group = {
         requested = true
@@ -231,15 +251,12 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
     os = "ubuntu24.04"
 
     cloud_init_user_data = (
-      local.node_ssh_access.enabled ||
-      (local.node_group_gpu_present_v2.worker[count.index] && length(var.nvidia_config_lines) > 0) ||
-      try(var.node_group_workers_v2[count.index].local_nvme.enabled, false)
+      local.node_cloud_init.enabled ||
+      (local.node_group_gpu_present_v2.worker[count.index] && length(var.nvidia_config_lines) > 0)
       ) ? templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-        ssh_users                  = var.node_ssh_access_users
-        nvidia_config_lines        = local.node_group_gpu_present_v2.worker[count.index] ? var.nvidia_config_lines : []
-        local_nvme_enabled         = try(var.node_group_workers_v2[count.index].local_nvme.enabled, false)
-        local_nvme_mount_path      = try(var.node_group_workers_v2[count.index].local_nvme.mount_path, "/mnt/local-nvme")
-        local_nvme_filesystem_type = try(var.node_group_workers_v2[count.index].local_nvme.filesystem_type, "ext4")
+        ssh_users                    = var.node_ssh_access_users
+        use_default_apparmor_profile = var.use_default_apparmor_profile
+        nvidia_config_lines          = local.node_group_gpu_present_v2.worker[count.index] ? var.nvidia_config_lines : []
     }) : null
   }
 

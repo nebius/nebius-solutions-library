@@ -21,9 +21,20 @@ locals {
       gpu_nodes_platform = "gpu-h100-sxm"
       gpu_nodes_preset   = "1gpu-16vcpu-200gb"
     }
+    eu-west2 = {
+      cpu_nodes_platform = "cpu-d3"
+      cpu_nodes_preset   = "16vcpu-64gb"
+      gpu_nodes_platform = "gpu-b300-sxm"
+      gpu_nodes_preset   = "1gpu-24vcpu-346gb"
+    }
   }
 
   current_region_defaults = local.regions_default[var.region]
+
+  boot_image_family = coalesce(
+    var.boot_image_family,
+    var.platform == "gpu-b300-sxm" ? "ubuntu24.04-cuda13.0" : "ubuntu24.04-cuda12"
+  )
 
   # cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, local.current_region_defaults.cpu_nodes_preset)
   # cpu_nodes_platform = coalesce(var.cpu_nodes_platform, local.current_region_defaults.cpu_nodes_platform)

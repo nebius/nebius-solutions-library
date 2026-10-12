@@ -23,7 +23,7 @@ for i in $(seq 1 "$retries"); do
         exit 0
     fi
     if [[ $i -lt $retries ]]; then
-        echo "($i/$retries) Command failed, retrying in ${interval}s..."
+        echo "($i/$retries) Command failed, retrying in ${interval}s..." >&2
         sleep "$interval"
     fi
 done

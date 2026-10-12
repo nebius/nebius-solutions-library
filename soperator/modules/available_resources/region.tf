@@ -7,5 +7,6 @@ locals {
     me-west1    = "me-west1"
     uk-south1   = "uk-south1"
     us-central1 = "us-central1"
+    us-north1   = "us-north1"
   }
 }

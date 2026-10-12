@@ -109,10 +109,8 @@ variable "ssh_public_key" {
   }
 }
 
-
-# K8s Node group strategy
 variable "node_group_strategy" {
-  description = "Node group roll-out strategy on template change. Set max_surge/max_unavailable with count OR percent (not both); they cannot both be 0. Null inherits provider default."
+  description = "Node-group rollout strategy on template changes. Set max_surge and max_unavailable using count or percent. GB300 requires max_surge to be zero."
   type = object({
     max_surge = optional(object({
       count   = optional(number)
@@ -124,11 +122,22 @@ variable "node_group_strategy" {
     }))
   })
   default = null
+
+  validation {
+    condition = var.node_group_strategy == null || alltrue([
+      for setting in [
+        try(var.node_group_strategy.max_surge, null),
+        try(var.node_group_strategy.max_unavailable, null),
+      ] :
+      setting == null || !(try(setting.count, null) != null && try(setting.percent, null) != null)
+    ])
+    error_message = "Set either count or percent for each node-group strategy setting, not both."
+  }
 }
 
-# K8s Node group reservation policy
-variable "node_group_reservation_policy" {
-  description = "Capacity reservation policy for node placement. policy: AUTO | STRICT | FORBID. Null inherits provider default."
+# Generic GPU node group reservation policy
+variable "gpu_nodes_reservation_policy" {
+  description = "Capacity reservation policy for generic GPU node groups (not CPU or GB300 groups). policy: AUTO | STRICT | FORBID. Null inherits provider default."
   type = object({
     policy          = optional(string)
     reservation_ids = optional(list(string))
@@ -136,24 +145,26 @@ variable "node_group_reservation_policy" {
   default = null
 
   validation {
-    condition = var.node_group_reservation_policy == null || contains(
-      ["AUTO", "STRICT", "FORBID"], coalesce(var.node_group_reservation_policy.policy, "AUTO")
+    condition = var.gpu_nodes_reservation_policy == null ? true : (
+      var.gpu_nodes_reservation_policy.policy == null ? true : contains(
+        ["AUTO", "STRICT", "FORBID"], var.gpu_nodes_reservation_policy.policy
+      )
     )
     error_message = "policy must be one of: AUTO, STRICT, FORBID."
   }
 
   # FORBID must not name any reservation (on-demand/PAYG only).
   validation {
-    condition = var.node_group_reservation_policy == null || coalesce(var.node_group_reservation_policy.policy, "AUTO") != "FORBID" || length(coalesce(var.node_group_reservation_policy.reservation_ids, [])) == 0
+    condition     = var.gpu_nodes_reservation_policy == null ? true : var.gpu_nodes_reservation_policy.policy != "FORBID" || length(coalesce(var.gpu_nodes_reservation_policy.reservation_ids, [])) == 0
     error_message = "reservation_ids must be empty when policy = FORBID."
   }
 
-  # No empty-string IDs; use [] for no reservations.
+  # No null or empty-string IDs; use [] for no reservations.
   validation {
-    condition = var.node_group_reservation_policy == null || alltrue([
-      for id in coalesce(var.node_group_reservation_policy.reservation_ids, []) : trimspace(id) != ""
+    condition = var.gpu_nodes_reservation_policy == null ? true : alltrue([
+      for id in coalesce(var.gpu_nodes_reservation_policy.reservation_ids, []) : try(trimspace(id) != "", false)
     ])
-    error_message = "reservation_ids must not contain empty strings; use [] for no reservations."
+    error_message = "reservation_ids must not contain null or empty strings; use [] for no reservations."
   }
 }
 
@@ -235,6 +246,33 @@ variable "gpu_nodes_preset" {
   description = "Configuration for GPU amount, CPU, and RAM for nodes in the GPU node group."
   type        = string
   default     = null
+}
+
+variable "gb300" {
+  description = <<-EOT
+    Number of production GB300 racks. Each rack creates one fixed 18-node MK8s
+    node group and one 18-node NVLink instance group (72 GPUs per rack).
+    boot_disk_size_gibibytes controls the network-backed boot disk size.
+    Set local_nvme to true to pass through the host NVMe devices and combine
+    them into kubelet ephemeral storage on each GB300 node.
+    Set rack_count to zero to disable the GB300 path.
+  EOT
+  type = object({
+    rack_count               = optional(number, 0)
+    boot_disk_size_gibibytes = optional(number, 1024)
+    local_nvme               = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.gb300.rack_count >= 0 && var.gb300.rack_count == floor(var.gb300.rack_count)
+    error_message = "gb300.rack_count must be a non-negative whole number. Each rack always contains 18 nodes (72 GPUs)."
+  }
+
+  validation {
+    condition     = var.gb300.boot_disk_size_gibibytes > 0 && var.gb300.boot_disk_size_gibibytes == floor(var.gb300.boot_disk_size_gibibytes)
+    error_message = "gb300.boot_disk_size_gibibytes must be a positive whole number."
+  }
 }
 
 variable "gpu_disk_type" {
@@ -325,6 +363,24 @@ variable "mig_parted_config" {
   }
 }
 
+variable "gpu_enable_local_disks" {
+  description = "Whether to request local NVMe passthrough disks and use them as managed kubelet ephemeral storage"
+  type        = bool
+  default     = false
+
+  validation {
+    condition = (
+      !var.gpu_enable_local_disks ||
+      (
+        local.gpu_nodes_platform == "gpu-b300-sxm" &&
+        local.gpu_nodes_preset == "8gpu-192vcpu-2768gb"
+      )
+    )
+    error_message = "Local disks are supported only on B300 platform with preset 8gpu-192vcpu-2768gb."
+  }
+}
+
+
 # Observability
 
 variable "enable_nebius_o11y_agent" {
@@ -385,6 +441,17 @@ variable "test_mode" {
   description = "Switch between real usage and testing"
   type        = bool
   default     = false
+}
+
+variable "nccl_test_image" {
+  description = "Container image used by the NCCL test deployed in test mode. Override it for a different GPU architecture or CUDA/NCCL combination."
+  type        = string
+  default     = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
+
+  validation {
+    condition     = length(trimspace(var.nccl_test_image)) > 0
+    error_message = "nccl_test_image must not be empty."
+  }
 }
 
 variable "enable_kuberay_cluster" {
@@ -491,12 +558,24 @@ variable "custom_driver" {
 variable "filesystem_csi" {
   description = "Configuration for Nebius Shared Filesystem CSI installation when a shared filesystem is present. Set previous_default_storage_class_name to an empty string to skip demoting another StorageClass."
   type = object({
+    chart_repository                    = optional(string, "oci://cr.nebius.cloud/mk8s/helm")
     chart_version                       = optional(string, "0.1.5")
+    image_repository                    = optional(string, "cr.nebius.cloud/mk8s/csi-mounted-fs-path")
     namespace                           = optional(string, "kube-system")
     make_default_storage_class          = optional(bool, true)
     previous_default_storage_class_name = optional(string, "compute-csi-default-sc")
   })
   default = {}
+
+  validation {
+    condition     = startswith(var.filesystem_csi.chart_repository, "oci://")
+    error_message = "filesystem_csi.chart_repository must be an OCI repository URL beginning with oci://."
+  }
+
+  validation {
+    condition     = length(trimspace(var.filesystem_csi.chart_version)) > 0 && length(trimspace(var.filesystem_csi.image_repository)) > 0
+    error_message = "filesystem_csi.chart_version and filesystem_csi.image_repository must not be empty."
+  }
 }
 
 variable "opa_gatekeeper_enable" {

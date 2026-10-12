@@ -110,7 +110,7 @@ variable "node_group_workers" {
     size                    = number
     max_unavailable_percent = number
     max_surge_percent       = optional(number)
-    drain_timeout           = optional(string)
+    drain_timeout           = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string
@@ -121,7 +121,8 @@ variable "node_group_workers" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible   = optional(object({}))
     nodeset_index = number
@@ -138,6 +139,7 @@ variable "node_group_workers_v2" {
     min_size        = number
     max_size        = number
     autoscaling     = bool
+    drain_timeout   = optional(string, "0s")
     resource = object({
       platform = string
       preset   = string
@@ -148,20 +150,25 @@ variable "node_group_workers_v2" {
       block_size_kibibytes = number
     })
     gpu_cluster = optional(object({
-      infiniband_fabric = string
+      id                = optional(string)
+      infiniband_fabric = optional(string)
     }))
     preemptible = optional(object({}))
     reservation_policy = optional(object({
       policy          = optional(string)
       reservation_ids = optional(list(string))
     }))
-    nvl_instance_group_id  = optional(string)
+    nvl_instance_group_id = optional(string)
+    # Additional labels applied to the mk8s worker node template.
+    extra_labels           = optional(map(string), {})
     max_pods               = optional(number, 32)
     placement_policy_nodes = optional(list(string))
     local_nvme = optional(object({
-      enabled         = optional(bool, false)
-      mount_path      = optional(string, "/mnt/local-nvme")
-      filesystem_type = optional(string, "ext4")
+      enabled                   = optional(bool, false)
+      device_count              = optional(number)
+      device_capacity_gigabytes = optional(number)
+      mount_path                = optional(string, "/mnt/local-nvme")
+      size_limit_gibibytes      = optional(number)
     }), {})
     nodeset_index = number
     subset_index  = number
@@ -224,10 +231,10 @@ variable "node_group_accounting" {
 
 variable "filestores" {
   type = object({
-    controller_spool = object({
+    controller_spool = optional(object({
       id        = string
       mount_tag = string
-    })
+    }))
     jail = object({
       id        = string
       mount_tag = string
@@ -270,4 +277,10 @@ variable "use_preinstalled_gpu_drivers" {
   description = "Enable preinstalled mode for worker nodes."
   type        = bool
   default     = false
+}
+
+variable "use_default_apparmor_profile" {
+  description = "Load the soperator-default AppArmor profile on every node at each boot. Requires AppArmor and apparmor_parser in the node image."
+  type        = bool
+  default     = true
 }

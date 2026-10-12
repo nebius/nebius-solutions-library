@@ -16,7 +16,7 @@ resource "terraform_data" "login_service_cleanup" {
       "SOPERATOR_NAMESPACE" : self.triggers_replace.namespace,
       "LOGIN_SERVICE_NAME" : self.triggers_replace.service_name,
     }
-    command = "/bin/bash ${path.module}/scripts/k8s_login_service_cleanup.sh"
+    command = "/bin/bash ${path.module}/scripts/k8s_soperator_cleanup.sh"
   }
 }
 

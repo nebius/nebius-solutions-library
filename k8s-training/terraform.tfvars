@@ -19,8 +19,6 @@ cpu_nodes_autoscaling = {
   min_size = null
   max_size = 4
 }
-cpu_disk_size = "128" # Disk size (in GB) for nodes in the CPU-only node group
-
 gpu_nodes_fixed_count_per_group = 1 # Number of GPU nodes per group, used only when gpu_nodes_autoscaling.enabled = false
 gpu_nodes_autoscaling = {
   enabled = false
@@ -32,40 +30,51 @@ gpu_nodes_autoscaling = {
   max_size = 1
 }
 gpu_node_groups = 1 # In case you need more then 100 nodes in cluster you have to put multiple node groups
-gpu_disk_size = "1023" # Disk size (in GB) for nodes in the GPU node group
+# Optional capacity reservation policy for generic GPU node groups only.
+# Does not apply to CPU or GB300 node groups.
+# STRICT uses reserved capacity only; AUTO allows PAYG fallback; FORBID uses PAYG only.
+# Leave unset to inherit the provider default. IDs are optional with STRICT.
+# gpu_nodes_reservation_policy = {
+#   policy          = "STRICT"
+#   reservation_ids = [] # Ordered capacity block group IDs; must be empty with FORBID.
+# }
 
-# Node group roll-out strategy
-node_group_strategy = {
-  max_unavailable = { count = 1 } # nodes offline at once -> "delete-first": old node leaves first.
-  max_surge       = { count = 0 } # extra nodes ABOVE desired count -> "create-first": new node up before old leaves.
-}
-
-# Capacity reservation policy.
-#   STRICT = reserved blocks only (never leaves reservation billing; fails if unavailable).
-#   AUTO   = reservations first, then any block, then PAYG fallback -> use for urgent scale-out.
-#   FORBID = on-demand (PAYG) only.
-node_group_reservation_policy = {
-  policy          = "AUTO"
-  reservation_ids = [] # e.g. ["capacityblockgroup-e00..."] - required when policy = STRICT, (List of String) Capacity block groups, order matters
-}
-# Urgent scale-out that may exceed the reservation:
-# node_group_reservation_policy = { policy = "AUTO" }
-
-
-# CPU platform and presets: https://docs.nebius.com/compute/virtual-machines/types#presets-for-non-gpu-platforms
+# CPU platform and presets: https://docs.nebius.com/compute/virtual-machines/types#cpu-configurations
 cpu_nodes_platform = "cpu-d3"     # CPU nodes platform
 cpu_nodes_preset   = "4vcpu-16gb" # CPU nodes preset
 # GPU platform and preset: https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
-gpu_nodes_platform = "gpu-h200-sxm"        # GPU nodes platform: gpu-h100-sxm, gpu-h200-sxm, gpu-b200-sxm
-gpu_nodes_preset   = "8gpu-128vcpu-1600gb" # GPU nodes preset: 8gpu-128vcpu-1600gb, 8gpu-128vcpu-1600gb, 8gpu-160vcpu-1792gb
+# By default, these are selected from the region map in locals.tf.
+# gpu_nodes_platform = "gpu-b300-sxm"
+# gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
+gpu_enable_local_disks = false # Only B300 supports local disks.
 # Infiniband fabrics: https://docs.nebius.com/compute/clusters/gpu#fabrics
-infiniband_fabric = "" # Leave empty to disable GPU clustering for RTX6000 deployments or single-node deployments.
+# New B300 region fabrics: eu-west2-a (eu-west2), us-north1-a (us-north1).
+# infiniband_fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2; set to "" to disable clustering.
+
+# Node-group rollout strategy. GB300 requires max_surge to be zero and the
+# recommended production rollout replaces one node at a time.
+# node_group_strategy = {
+#   max_unavailable = { count = 1 }
+#   max_surge       = { count = 0 }
+# }
+
+# GB300 production example. A positive rack_count replaces the generic GPU node
+# groups above. Each rack contains 18 nodes (72 GPUs) and receives its own NVLink
+# instance group. Two or more racks require the same XDR infiniband_fabric.
+# gb300 = {
+#   rack_count                = 2
+#   boot_disk_size_gibibytes = 1024
+#   local_nvme                = true
+# }
 
 gpu_nodes_driverfull_image = true
 enable_k8s_node_group_sa   = true
 enable_egress_gateway      = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
+
+# NCCL test image used when test_mode = true. Override for the selected GPU/CUDA platform.
+# nccl_test_image = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
 
 cpu_nodes_public_ips         = false
 gpu_nodes_public_ips         = false
@@ -95,7 +104,9 @@ filestore_forbid_deletion      = false # Set to true to protect Terraform-create
 
 # Shared filesystem CSI driver. Enable only when using Shared Filesystem.
 # filesystem_csi = {
+#   chart_repository                    = "oci://cr.nebius.cloud/mk8s/helm"
 #   chart_version                       = "0.1.5"
+#   image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
 #   namespace                           = "kube-system"
 #   make_default_storage_class          = true
 #   previous_default_storage_class_name = "compute-csi-default-sc"

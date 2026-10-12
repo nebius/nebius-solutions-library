@@ -1,0 +1,3 @@
+# Per-run outputs — raw NCCL logs + generated report. They embed node names and
+# cluster-specific device/topology details, so they are not committed.
+results/

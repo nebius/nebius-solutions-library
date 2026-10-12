@@ -28,7 +28,7 @@ unset NEBIUS_IAM_TOKEN
 if ! nebius profile list | grep -Fxq ${self.triggers_replace.o11y_profile}; then
   CURRENT_PROFILE=$(nebius profile current)
   # The o11y IAM tenant is managed through the EU control plane; log ingestion itself is region-specific.
-  nebius profile create --endpoint api.eu.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
+  nebius profile create --endpoint api.nebius.cloud --federation-endpoint auth.eu.nebius.com --parent-id ${self.triggers_replace.o11y_iam_tenant_id} ${self.triggers_replace.o11y_profile}
   nebius profile activate $CURRENT_PROFILE
 fi
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
@@ -120,13 +120,13 @@ TOKEN=$(echo $output | jq -r .token)
 export NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN_BKP
 
 echo "Applying namespace..."
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ${self.triggers_replace.o11y_secret_logs_namespace}
 EOF
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -134,14 +134,12 @@ metadata:
 EOF
 
 echo "Creating secret..."
-if kubectl --context ${self.triggers_replace.k8s_cluster_context} -n logs-system get secret ${self.triggers_replace.o11y_secret_name} >/dev/null 2>&1; then
-  echo "Secret exists, deleting..."
-  kubectl --context ${self.triggers_replace.k8s_cluster_context} -n logs-system delete secret ${self.triggers_replace.o11y_secret_name}
-fi
-
-kubectl --context ${self.triggers_replace.k8s_cluster_context} create secret generic ${self.triggers_replace.o11y_secret_name} \
+kubectl --context "${self.triggers_replace.k8s_cluster_context}" create secret generic "${self.triggers_replace.o11y_secret_name}" \
   -n ${self.triggers_replace.o11y_secret_logs_namespace} \
-  --from-literal=accessToken="$TOKEN"
+  --from-literal=accessToken="$TOKEN" \
+  --dry-run=client \
+  -o yaml \
+  | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --server-side --context "${self.triggers_replace.k8s_cluster_context}"
 EOT
   }
 
@@ -214,7 +212,7 @@ O11YWORKSPACE_ID=$(echo "$PROJECT_ID" | sed 's#project-#o11yworkspace-#')
 export NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN_BKP
 
 echo "Applying opentelemetry controller configmap with $PROJECT_ID..."
-cat <<EOF | kubectl --context "${self.triggers_replace.k8s_cluster_context}" apply -f -
+cat <<EOF | "${path.module}/../scripts/kubectl_apply_with_retries.sh" --context "${self.triggers_replace.k8s_cluster_context}"
 apiVersion: v1
 kind: ConfigMap
 metadata:

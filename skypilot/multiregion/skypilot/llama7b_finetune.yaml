@@ -1,7 +1,7 @@
 name: llama7b-finetune
 
 resources:
-  accelerators: {H100:8}
+  accelerators: {B300: 8}
   cpus: 64
   memory: 1000+
 

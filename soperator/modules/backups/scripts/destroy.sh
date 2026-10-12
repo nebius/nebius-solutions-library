@@ -14,7 +14,7 @@ fi
 
 # Delete all IAM access keys for the service account.
 # Skip the IAM block if the SA was already removed out-of-band (e.g. by force-cleanup).
-if "$retry_script" -- nebius iam v2 service-account get --id "$SERVICE_ACCOUNT_ID" >/dev/null 2>&1; then
+if "$retry_script" -- nebius iam service-account get --id "$SERVICE_ACCOUNT_ID" >/dev/null 2>&1; then
   for AKID in $("$retry_script" -- nebius iam v2 access-key list-by-account \
     --account-service-account-id "$SERVICE_ACCOUNT_ID" \
     --format json | jq -r '.items[].metadata.id'); do

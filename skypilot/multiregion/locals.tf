@@ -23,6 +23,13 @@ locals {
       gpu_nodes_preset   = "8gpu-128vcpu-1600gb"
       infiniband_fabric  = "fabric-3"
     }
+    eu-west2 = {
+      cpu_nodes_platform = "cpu-d3"
+      cpu_nodes_preset   = "16vcpu-64gb"
+      gpu_nodes_platform = "gpu-b300-sxm"
+      gpu_nodes_preset   = "8gpu-192vcpu-2768gb"
+      infiniband_fabric  = "eu-west2-a"
+    }
     eu-north2 = {
       cpu_nodes_platform = "cpu-d3"
       cpu_nodes_preset   = "16vcpu-64gb"
@@ -83,22 +90,22 @@ locals {
   cluster_config = {
     for cluster_key, cluster in local.deployment_clusters : cluster_key => merge(cluster, {
       name               = local.multi_region ? "${var.cluster_name}-${cluster.region}" : var.cluster_name
-      cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).cpu_nodes_preset)
-      cpu_nodes_platform = coalesce(var.cpu_nodes_platform, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).cpu_nodes_platform)
+      cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).cpu_nodes_preset)
+      cpu_nodes_platform = coalesce(var.cpu_nodes_platform, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).cpu_nodes_platform)
       gpu_nodes_platform = (
-        cluster_key == "region1" ? coalesce(var.gpu_nodes_platform_primary, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_platform)
-        : cluster_key == "region2" ? coalesce(var.gpu_nodes_platform_secondary, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_platform)
-        : coalesce(var.gpu_nodes_platform, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_platform)
+        cluster_key == "region1" ? coalesce(var.gpu_nodes_platform_primary, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_platform)
+        : cluster_key == "region2" ? coalesce(var.gpu_nodes_platform_secondary, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_platform)
+        : coalesce(var.gpu_nodes_platform, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_platform)
       )
       gpu_nodes_preset = (
-        cluster_key == "region1" ? coalesce(var.gpu_nodes_preset_primary, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_preset)
-        : cluster_key == "region2" ? coalesce(var.gpu_nodes_preset_secondary, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_preset)
-        : coalesce(var.gpu_nodes_preset, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).gpu_nodes_preset)
+        cluster_key == "region1" ? coalesce(var.gpu_nodes_preset_primary, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_preset)
+        : cluster_key == "region2" ? coalesce(var.gpu_nodes_preset_secondary, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_preset)
+        : coalesce(var.gpu_nodes_preset, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).gpu_nodes_preset)
       )
       infiniband_fabric = (
-        cluster_key == "region1" ? coalesce(var.infiniband_fabric_primary, var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).infiniband_fabric)
-        : cluster_key == "region2" ? coalesce(var.infiniband_fabric_secondary, var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).infiniband_fabric)
-        : coalesce(var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-north1"]).infiniband_fabric)
+        cluster_key == "region1" ? coalesce(var.infiniband_fabric_primary, var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).infiniband_fabric)
+        : cluster_key == "region2" ? coalesce(var.infiniband_fabric_secondary, var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).infiniband_fabric)
+        : coalesce(var.infiniband_fabric, lookup(local.regions_default, cluster.region, local.regions_default["eu-west2"]).infiniband_fabric)
       )
       existing_filestore = cluster_key == "region1" ? (
         var.existing_filestore_region1 != null && trimspace(var.existing_filestore_region1) != "" ? var.existing_filestore_region1 : (

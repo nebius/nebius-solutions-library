@@ -31,26 +31,33 @@ variable "component_overrides" {
     Components left unset keep their default values.
   EOT
   type = object({
-    exporter                = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    rest                    = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    mariadb                 = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
-    node_configurator       = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    slurm_operator          = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    slurm_checks            = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
-    dcgm_exporter           = optional(object({ cpu = number, memory = number }))
-    kruise_daemon           = optional(object({ cpu = number, memory = number }))
-    nfs_server              = optional(object({ cpu = number, memory = number }))
-    spo_controller          = optional(object({ cpu = string, memory = string }))
-    spo_daemon              = optional(object({ cpu = string, memory = string }))
-    kruise_manager          = optional(object({ cpu = string, memory = string }))
-    vm_single               = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
-    vm_agent                = optional(object({ memory = string, cpu = string }))
-    vm_logs                 = optional(object({ memory = string, cpu = string, size = string }))
-    events_collector        = optional(object({ memory = string, cpu = string }))
-    logs_collector          = optional(object({ memory = string, cpu = string }))
-    jail_logs_collector     = optional(object({ memory = string, cpu = string }))
-    nccl_profiles_collector = optional(object({ memory = string, cpu = string }))
+    exporter                    = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    rest                        = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    mariadb                     = optional(object({ cpu = number, memory = number, ephemeral_storage = number }))
+    node_configurator           = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    soperator_main_controller   = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    soperator_checks_controller = optional(object({ requests = object({ cpu = number, memory = number }), limits = object({ memory = number }) }))
+    dcgm_exporter               = optional(object({ cpu = number, memory = number }))
+    kruise_daemon               = optional(object({ cpu = number, memory = number }))
+    nfs_server                  = optional(object({ cpu = number, memory = number }))
+    kruise_manager              = optional(object({ cpu = string, memory = string }))
+    kube_state_metrics          = optional(object({ requests = object({ cpu = string, memory = string }), limits = object({ memory = string }) }))
+    vm_single                   = optional(object({ memory = string, cpu = string, size = string, gomaxprocs = number }))
+    vm_agent                    = optional(object({ memory = string, cpu = string }))
+    vm_logs                     = optional(object({ memory = string, cpu = string, size = string }))
+    events_collector            = optional(object({ memory = string, cpu = string }))
+    logs_collector              = optional(object({ memory = string, cpu = string }))
+    jail_logs_collector         = optional(object({ memory = string, cpu = string }))
+    nccl_profiles_collector     = optional(object({ memory = string, cpu = string }))
   })
   default  = {}
   nullable = false
+
+  validation {
+    condition = var.component_overrides.vm_single == null ? true : (
+      can(regex("^\\d+Gi$", var.component_overrides.vm_single.size)) &&
+      tonumber(trimsuffix(var.component_overrides.vm_single.size, "Gi")) % 93 == 0
+    )
+    error_message = "component_overrides.vm_single.size must be \"<N>Gi\" with N a multiple of 93 GiB (IO M3 disk size granularity)."
+  }
 }
