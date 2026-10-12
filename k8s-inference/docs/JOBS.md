@@ -351,6 +351,41 @@ application-managed I/O the application writes `/work/RESULT.json` (`{"result_re
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.
 
+## Finalization by the application (2026-10-12)
+
+With application-managed I/O the platform cannot re-upload what the application owns. A run class may therefore
+declare a model-owned finalizer, `job.finalize = {"command": "...", "on_exit_codes": [75], "timeout_s": 1800,
+"cpu": "1", "memory": "2Gi"}`: a fixed command in the model's own image that re-delivers from the kept work volume
+after the scientific compute ended with one of `on_exit_codes` ("compute done, delivery pending"). Never a
+caller-supplied executable, never a GPU, never a recomputation.
+
+`POST /v1/operations/<id>:export` (the existing verb) is then accepted for a FAILED application run whose newest
+attempt ended with one of those exit codes and whose volume is kept: `<root>-x<n>` is rendered on the same
+per-operation volume, in that attempt's cluster, with the original environment (identity token, private input,
+execution profile, `CHECKPOINT_REF`, the model's `env`) plus `ATTEMPT_ROLE=finalize`, `FINALIZE_OF=<the compute
+attempt's pod>`, `FINALIZE_EPOCH`, `FINALIZE_EXIT_CODE` and `WORK_DIR=/work`; `main` is the model's image (the
+finalized attempt's digest when on record) running `finalize.command` with `cpu`/`memory` as requests and limits and
+no node selector. An init container removes the compute attempt's bridge files first (`CHECKPOINT.json`,
+`CHECKPOINT.ack.json`, `RESULT.json`, `attempts/.ack.json`), so the finalizer's uploader records only what the
+finalizer writes and an old result marker can never become this attempt's success; the application's own workspace
+and delivery marker are untouched, and whether the workspace is complete is the application's decision from its own
+marker. A failed computation (any other exit code) is never finalized; a model without `finalize` keeps today's
+behaviour.
+
+Exit semantics: `0` with `/work/RESULT.json` -> the finalizer's record carries `result_ref`, the root reports
+`SUCCEEDED` with `exported_by`, the volume is released after the acknowledged record; an exit code in
+`on_exit_codes` or any other non-zero -> the finalizer is FAILED, the volume kept, another `:export` allowed; `0`
+without RESULT.json -> EXPORT_FAILED. At most three retries per root (`-x1..-x3`, 409 after); one active finalizer per
+root: `:export` while one is QUEUED/RUNNING returns it (200). Retries always name the compute attempt in
+`FINALIZE_OF`, never a previous finalizer, also when called through a finalizer's own handle.
+
+Identity and accounting: the finalizer's `started` record opens the next epoch of the root (every earlier pod of the
+chain is fenced); records carry `attempt_role` (`run`, `export`, `finalize`), stamped by the API from the Job it
+rendered, never from the pod's claim; `gpus 0`, no class, no GPU seconds billed. While a finalizer is active the
+root's handle (and every chain member's) reports `status: FINALIZING`, `finalizing_by`, and the finalizer pod's
+`attempt_id`, `epoch` and `attempt_role`; `:cancel` on the root cancels the active finalizer and leaves the root
+FAILED with its volume; `finalize_attempts` counts them. `GET /v1/fleet` lists `execution.finalize`.
+
 ## Fleet placement (control cluster API, `FLEET_MANAGER=true`)
 
 The control cluster's API is the entry point for runs. It renders the same Job but creates it on

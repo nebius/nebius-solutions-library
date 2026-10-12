@@ -112,6 +112,10 @@ create table if not exists operation_marks (
         at          timestamptz not null default now()
     );
     """,
+    # 6: the attempt's role (run, export, finalize): the platform's statement from the Job it rendered
+    """
+    alter table attempts add column if not exists role text not null default 'run';
+    """,
 ]
 
 _pool = None

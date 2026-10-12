@@ -113,6 +113,9 @@ def capabilities(ns: str, region: str = REGION) -> dict:
     return {"io_modes": list(IO_MODES), "identities": sorted(cfg["identities"]), "execution_profiles": sorted(cfg["execution_profiles"]),
             "oidc_issuers": dict(REGION_OIDC_ISSUERS), "private_input_dir": PRIVATE_DIR, "identity_token_file": f"{IDENTITY_DIR}/token",
             # automatic continuation after a confirmed infrastructure loss (docs/SCHEDULING.md): what a caller may ask for
+            # application finalizer (docs/JOBS.md "Finalization by the application"): the model-owned command that re-delivers
+            "finalize": {"roles": ["run", "export", "finalize"], "max_retries": 3, "trigger": "POST /v1/operations/{id}:export",
+                         "declared_by": "the model's job.finalize"},
             "recovery": {"on_infrastructure_loss": ["retry", "fail", "recover"], "max_recoveries": RECOVERY_MAX, "defaults": dict(RECOVERY_DEFAULTS),
                          "requires": "an acknowledged checkpoint pointer (CHECKPOINT.json) and a gpu_preference with a next class"}}
 

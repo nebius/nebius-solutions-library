@@ -696,9 +696,16 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
     return out
 
 
-def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -> tuple[dict, bool]:
+EXPORT_RETRIES_MAX = 3
+
+
+def export_again(ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None) -> tuple[dict, bool]:
     """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
-    exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization")."""
+    exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization"). With `finalize`
+    (docs/JOBS.md "Finalization by the application": {"spec": job.finalize, "attempt": the failed attempt's record})
+    the main container is the model's own image running the model's `finalize.command` on that volume, CPU only,
+    with the finalized attempt named in its environment: the application re-delivers what it computed; the
+    platform re-runs nothing."""
     orig = get(ns, name, region)
     op = normalise(orig)
     md = orig["metadata"]
@@ -715,6 +722,8 @@ def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -
         raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
     root = ann.get(f"{LABEL}/resumed-from", name)
     n = 1 + sum(1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x"))
+    if n > EXPORT_RETRIES_MAX:
+        raise HTTPException(409, f"operation {root}: {EXPORT_RETRIES_MAX} export/finalization retries used; submit a new run")
     new = f"{root}-x{n}"
     d = dict(defaults)
     out = output_prefix(orig) or ""
@@ -723,13 +732,35 @@ def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -
         ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
     except ValueError:
         ex = None
-    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, 3600,
+    fz = (finalize or {}).get("spec") or {}
+    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, int(fz.get("timeoutS") or 3600),
                     labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc,
                     placement={"manager": True} if is_manager_job(orig) else None, gpu_class=labels.get(f"{LABEL}/gpu-class"), ex=ex)
     spec = job["spec"]["template"]["spec"]
     spec["initContainers"] = []
+    role = "finalize" if finalize else "export"
+    if finalize:
+        # the retained scratch still carries the compute attempt's bridge files (its checkpoint pointer, its RESULT.json
+        # if any, the uploader's acknowledgement): removed before the finalizer starts, so the new attempt's uploader
+        # records only what the finalizer itself writes and an old result marker can never become this attempt's
+        # success; the application's own workspace and delivery marker are not touched
+        spec["initContainers"] = [{"name": "bridge-reset", "image": RUNNER_IMAGE,
+                                   "command": ["/bin/sh", "-c", "rm -f /work/CHECKPOINT.json /work/CHECKPOINT.json.tmp /work/CHECKPOINT.ack.json /work/RESULT.json /work/attempts/.ack.json"],
+                                   "volumeMounts": [{"name": "work", "mountPath": "/work"}], "securityContext": RUNNER_SECURITY_CONTEXT,
+                                   "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "200m", "memory": "64Mi"}}}]
     for c in spec["containers"]:
-        if c["name"] == "main":
+        if c["name"] == "main" and finalize:
+            # the model's own image (the finalized attempt's digest when on record, else the pinned revision's image) and
+            # its fixed finalize command; CPU only; the attempt it finalizes named in the environment (docs/JOBS.md)
+            done = finalize.get("attempt") or {}
+            c.update({"image": done.get("image_digest") or c["image"], "command": ["/bin/sh", "-c", fz["command"]],
+                      "resources": {"requests": {"cpu": fz["cpu"], "memory": fz["memory"]}, "limits": {"cpu": fz["cpu"], "memory": fz["memory"]}}})
+            c.pop("args", None)
+            c["env"] = [e for e in c.get("env", []) if e["name"] not in ("ATTEMPT_ROLE", "FINALIZE_OF", "FINALIZE_EPOCH", "FINALIZE_EXIT_CODE", "WORK_DIR")] + [
+                {"name": "ATTEMPT_ROLE", "value": "finalize"}, {"name": "FINALIZE_OF", "value": str(done.get("pod") or "")},
+                {"name": "FINALIZE_EPOCH", "value": str(done.get("epoch") or "")}, {"name": "FINALIZE_EXIT_CODE", "value": str(done.get("exit_code") if done.get("exit_code") is not None else "")},
+                {"name": "WORK_DIR", "value": "/work"}]
+        elif c["name"] == "main":
             c.update({"image": RUNNER_IMAGE, "command": ["/bin/sh", "-c", "true"], "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}}})
             c.pop("args", None)
         elif c["name"] == "uploader":
@@ -740,6 +771,11 @@ def export_again(ns: str, name: str, region: str, model: dict, defaults: dict) -
     job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
+    # the role is the platform's statement about this Job: the API stamps every attempt record of it with it
+    job["metadata"]["annotations"][f"{LABEL}/attempt-role"] = role
+    job["spec"]["template"]["metadata"].setdefault("labels", {})[f"{LABEL}/attempt-role"] = role
+    if finalize:
+        job["metadata"]["annotations"][f"{LABEL}/finalize-of"] = str((finalize.get("attempt") or {}).get("pod") or name)
     return create(ns, job, region)
 
 

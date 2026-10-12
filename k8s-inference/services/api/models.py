@@ -25,6 +25,7 @@ A model definition ("spec") is the shape of the console form:
      "example": {"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 64},
      # jobs only
      "cpu": "4", "memory": "16Gi", "disk_gi": 50, "grace_seconds": 300, "scratch": "network" | "local-nvme",
+     "finalize": {"command": "...", "on_exit_codes": [75], "timeout_s": 1800, "cpu": "1", "memory": "2Gi"},   # application finalizer
      # a directory of the tenant's area on the region's shared filesystem, mounted into the run (read-only unless
      # readonly is false: reference databases, model parameters, anything too big to sync per run; docs/JOBS.md "Shared data")
      "data": {"path": "refdb/uniref", "mount_path": "/data", "readonly": true},
@@ -448,6 +449,20 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         }
         if s.get("args"):
             job["args"] = s["args"]
+        if (fz := s.get("finalize")) is not None:
+            # the model-owned finalizer (docs/JOBS.md "Finalization by the application"): a fixed command in the model's
+            # own image that re-delivers from the kept work volume after the scientific compute ended with one of
+            # `on_exit_codes`; never a caller-supplied executable, never a GPU
+            if not isinstance(fz, dict) or not str(fz.get("command") or "").strip():
+                raise HTTPException(400, "finalize: {command (required), on_exit_codes (default [75]), timeout_s (60..86400), cpu, memory}")
+            codes = fz.get("on_exit_codes", [75])
+            if not isinstance(codes, list) or not codes or not all(isinstance(c, int) and 1 <= c <= 255 for c in codes):
+                raise HTTPException(400, "finalize.on_exit_codes: a non-empty list of exit codes 1..255 of the compute that mean 'delivery pending'")
+            timeout = int(fz.get("timeout_s", 1800))
+            if not 60 <= timeout <= 86400:
+                raise HTTPException(400, "finalize.timeout_s: 60..86400")
+            job["finalize"] = {"command": str(fz["command"]), "onExitCodes": codes, "timeoutS": timeout,
+                               "cpu": str(fz.get("cpu", "1")), "memory": str(fz.get("memory", "2Gi"))}
         if s.get("pull_secret"):
             job["imagePullSecret"] = s["pull_secret"]
         if (d := s.get("data")):

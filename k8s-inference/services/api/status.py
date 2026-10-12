@@ -75,7 +75,8 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         if disrupted:
             reason = next((c.get("message") for c in st["conditions"] if c.get("type") == "DisruptionTarget"), reason)
         seen.add(p["metadata"]["name"])
-        out.append({"attempt_id": p["metadata"]["name"], "started_at": term.get("startedAt") or run.get("startedAt") or st.get("startTime"),
+        out.append({"attempt_id": p["metadata"]["name"], "attempt_role": (p["metadata"].get("labels") or {}).get(f"{LABEL}/attempt-role") or "run",
+                    "started_at": term.get("startedAt") or run.get("startedAt") or st.get("startTime"),
                     "ended_at": term.get("finishedAt"), "status": s, "node": p["spec"].get("nodeName"),
                     "gpu_class": (p["metadata"].get("labels") or {}).get(f"{LABEL}/gpu-class") or None,
                     "_pool": p["spec"].get("nodeSelector", {}).get(f"{LABEL}/pool"),
@@ -86,7 +87,7 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         if r.get("pod") in seen:          # the live pod is the attempt; the record adds what only the uploader knows
             next(a for a in out if a.get("attempt_id") == r.get("pod")).update(_lifecycle_fields(r))
             continue
-        out.append({"started_at": r.get("started_at") or None, "ended_at": r.get("ended_at") or None,
+        out.append({"started_at": r.get("started_at") or None, "ended_at": r.get("ended_at") or None, "attempt_role": r.get("role") or "run",
                     "status": RECORD_STATUS.get(r.get("status"), "FAILED"), "node": r.get("node") or None,
                     "gpu_class": r.get("gpu_class") or None, "_pool": r.get("pool"), "attempt_id": r.get("pod"),
                     "reason": {"interrupted": "pod deleted (preempted)", "started": "node lost without warning (no end record)"}.get(r.get("status")),

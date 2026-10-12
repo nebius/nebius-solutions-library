@@ -99,8 +99,8 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
         export = body.get("export") or ("n/a" if body.get("io_mode") == "application" and status != "succeeded" else None)
         c.execute("""insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
-                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at)
-                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role)
+                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s)
                      on conflict (operation, pod) do update set
                         status = excluded.status, exit_code = excluded.exit_code, node = coalesce(excluded.node, attempts.node),
                         pool = coalesce(excluded.pool, attempts.pool), image = coalesce(excluded.image, attempts.image),
@@ -115,12 +115,13 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                    body.get("gpu_class") or None, int(body.get("gpus") or 0), body.get("image") or None, body.get("image_digest") or None,
                    status, body.get("exit_code"), _ts(body.get("started_at")), _ts(body.get("ended_at")), export,
                    body.get("result_ref") or None, body.get("checkpoint_ref") or None,
-                   int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None))
+                   int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
+                   str(body.get("role") or "run")))
         return _row(c, operation, pod)
 
 
 COLS = ("operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
-        "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at")
+        "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role")
 
 
 def _dict(r) -> dict:
@@ -219,4 +220,5 @@ def lifecycle(operation: str, root: str, rows: list[dict]) -> dict:
             "revision": revision, "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
             "result_ref": latest.get("result_ref") if latest else None, "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
             "image_digest": latest.get("image_digest") if latest else None, "cluster": latest.get("region") if latest else None,
-            "checkpoint_generation": latest.get("checkpoint_generation") if latest else None}
+            "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
+            "attempt_role": (latest.get("role") or "run") if latest else None}

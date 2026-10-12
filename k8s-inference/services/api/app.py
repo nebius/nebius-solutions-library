@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.26", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.27", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -820,7 +820,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     for a in all_attempts:
         r = by_pod.get(a.get("attempt_id")) or {}
         a["operation"] = r.get("operation") or name
-        a["attempt_role"] = r.get("attempt_role") or "run"
+        a["attempt_role"] = r.get("role") or a.get("attempt_role") or "run"
         a["image"] = r.get("image")
         d = st._secs(a.get("started_at"), a.get("ended_at"))
         a["gpu_seconds"] = round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None   # unknown stays unknown
@@ -849,6 +849,26 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
             "gpu_seconds": round(total, 1), "gpu_seconds_complete": complete, "cost": round(sum(billed), 6) if billed else None}
 
 
+def _finalizers(p: Principal, name: str, root: str) -> dict:
+    """The application finalizers of an operation (docs/JOBS.md "Finalization by the application"): how many ran
+    (`finalize_attempts`) and, while one is QUEUED or RUNNING, the handle shows it: `status FINALIZING`,
+    `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
+    xs = [j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
+          if (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
+          and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"]
+    out: dict = {"finalize_attempts": len(xs)}
+    active = [j for j in xs if jobs.normalise(j)["status"] in ("QUEUED", "RUNNING") and not (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")]
+    if active:
+        a = sorted(active, key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))[-1]
+        aname = a["metadata"]["name"]
+        rows = [r for r in attempts.for_operation(root) if r["operation"] == aname]
+        latest = rows[-1] if rows else None
+        out.update({"status": "FINALIZING", "finalizing_by": aname, "error": None,
+                    "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,
+                    "attempt_role": "finalize", "cluster": latest.get("region") if latest else out.get("cluster")})
+    return out
+
+
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
         return job["_synthetic"]
@@ -858,15 +878,18 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     op.update(attempts.lifecycle(name, root, records))
     if name != id:
         op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
-    if root != name or name != id:
-        op.update(_chain(p, op, job, root))
-    if op["status"] in ("EXPORT_FAILED", "FINALIZING") and attempts.enabled():
-        # a transfer-only retry (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md "Attempts and finalization")
+    if root != name or name != id or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root))):
+        op.update(_chain(p, op, job, root))       # a chain member, a followed handle, or a root with retries/successors on record
+    if op["status"] in ("FAILED", "EXPORT_FAILED") and attempts.enabled() and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "run":
+        op.update(_finalizers(p, name, root))
+    if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
+        # a transfer-only retry or an application finalizer (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md
+        # "Attempts and finalization", "Finalization by the application"); a FAILED run only ever has finalizers
         done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{name}-x")
                 and ((r.get("export_state") or r.get("export")) == "succeeded" or (r.get("result_ref") and r["status"] == "succeeded"))]
         if done:
             op.update({"status": "SUCCEEDED", "export_state": done[-1].get("export_state") or "succeeded", "exported_by": done[-1]["operation"],
-                       "result_ref": op.get("result_ref") or done[-1].get("result_ref"), "error": None})
+                       "result_ref": done[-1].get("result_ref") or op.get("result_ref"), "error": None})   # the delivering attempt's result
     return op
 
 
@@ -902,11 +925,31 @@ def export_again(id: str, p: Principal = Depends(principal)):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
     orig, region = _owned(p, id)
-    op = _operation(p, orig, id, region)
-    if op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
-        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again")
+    exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
+    if exported:                          # a previous retry's handle: the retry is of the compute attempt, never of a retry
+        orig, region = _owned(p, exported, follow=False)
+    op = _operation(p, orig, orig["metadata"]["name"], region)
+    if op.get("finalizing_by"):
+        # one active finalizer per root: the call is idempotent while it runs
+        active, _ = _owned(p, op["finalizing_by"], follow=False)
+        return JSONResponse(jobs.normalise(active, _price(active)), status_code=200)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
-    job, created = jobs.export_again(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region else {})
+    finalize = None
+    fz = (m.get("job") or {}).get("finalize")
+    if op["status"] == "FAILED" and fz and (op.get("execution") or {}).get("io_mode") == "application":
+        # the application finalizer (docs/JOBS.md "Finalization by the application"): only after a compute that ended with
+        # one of the model's "delivery pending" exit codes; a failed computation is never finalized into a success
+        name = orig["metadata"]["name"]
+        root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or name
+        rows = [r for r in attempts.for_operation(root) if r["operation"] == name and r["status"] == "failed"] if attempts.enabled() else []
+        last = rows[-1] if rows else None
+        if last is None or last.get("exit_code") not in fz["onExitCodes"]:
+            raise HTTPException(409, f"operation {id} is FAILED with exit code {(last or {}).get('exit_code')}; the model finalizes only after exit codes {fz['onExitCodes']} (compute done, delivery pending)")
+        finalize = {"spec": fz, "attempt": last}
+    elif op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
+        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
+                                 + (" (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)" if op["status"] == "FAILED" else ""))
+    job, created = jobs.export_again(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region else {}, finalize=finalize)
     return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
 
 
@@ -927,8 +970,10 @@ async def record_attempt(request: Request, authorization: str = Header(default="
     try:
         job, _ = await asyncio.to_thread(jobs.find, ns, operation)      # the manager's Job for a fleet run (the worker holds a mirror)
         body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
+        body["role"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") or "run"    # the platform's statement, never the pod's
     except HTTPException:
         body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts
+        body["role"] = "run"
     return await asyncio.to_thread(attempts.record, region, ns, pod, body)
 
 
@@ -939,10 +984,14 @@ def _home(job: dict) -> str:
 
 @app.post("/v1/operations/{id}:cancel")
 def cancel(id: str, p: Principal = Depends(principal)):
-    job, _ = _owned(p, id)
+    job, region = _owned(p, id)
     if job.get("_synthetic"):
         raise HTTPException(409, f"operation {id} is over; nothing to cancel")
     current = job["metadata"]["name"]
+    op = _operation(p, job, id, region)
+    if op.get("finalizing_by"):           # the root's handle: a cancel stops its active finalizer, the root stays as it is
+        job, _ = _owned(p, op["finalizing_by"], follow=False)
+        current = job["metadata"]["name"]
     attempts.mark_cancelled(current)       # a late "succeeded" from the cancelled attempt is refused from now on
     op = jobs.normalise(jobs.cancel(p.namespace, current, _home(job)))
     if op["status"] in ("QUEUED", "RUNNING"):
