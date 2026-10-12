@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.24", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.25", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -622,8 +622,13 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     timeout = req.timeout_s          # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
-    if ex and ex.get("placement", {}).get("allowed_clusters") and region and region not in ex["placement"]["allowed_clusters"]:
-        raise HTTPException(400, f"region {region} is not in allowed_clusters {ex['placement']['allowed_clusters']}")
+    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
+    if allowed and req.region and req.region not in allowed:
+        # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
+        # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
+        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
+    if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
+        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
     if mode == "async":                  # the caller Job runs in the endpoint's region, through that region's gateway
         output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
         job, secret = jobs.build_async(name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region)
@@ -679,10 +684,11 @@ def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: in
     defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
     defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
     return jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults,
-                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
+                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")), ex=ex)
 
 
-def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None, ex: dict | None = None) -> str | None:
+def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None, ex: dict | None = None,
+               regions: list[str] | None = None) -> str | None:
     """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
     runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
     given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
@@ -694,7 +700,7 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | No
     except (TypeError, ValueError):           # a parameter placeholder: one GPU for the ranking
         gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
     available = (ex.get("placement") or {}).get("gpu_preference") if ex else None   # the caller's order narrows the model's
-    cls, how = placing.choose_class(m, region, gpus, available, tenant)
+    cls, how = placing.choose_class(m, region, gpus, available, tenant, regions)      # `regions`: the run's allowed clusters
     log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
     return cls
 

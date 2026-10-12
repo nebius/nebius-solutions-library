@@ -15,6 +15,9 @@ import jobs
 import kube
 from config import LABEL
 
+import placement as _placement
+_real_choose_class = _placement.choose_class          # captured before the autouse stub replaces it
+
 CFG = {"identities": {}, "execution_profiles": {}}
 PER_CLASS = {"id": "fold", "kind": "job", "image": "img:default", "images": {"rtx-pro-6000": "img:rtx", "l40s": "img:l40s"},
              "command": "fold", "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]}}
@@ -31,7 +34,7 @@ def _env(monkeypatch):
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "us-central1"])
     monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
     monkeypatch.setattr(appmod, "FLEET_MANAGER", True)
-    monkeypatch.setattr(jobs.placing if hasattr(jobs, "placing") else appmod.placing, "choose_class", lambda m, region, gpus, available=None, tenant=None: (available[0] if available else "rtx-pro-6000", "test"))
+    monkeypatch.setattr(jobs.placing if hasattr(jobs, "placing") else appmod.placing, "choose_class", lambda m, region, gpus, available=None, tenant=None, regions=None: (available[0] if available else "rtx-pro-6000", "test"))
 
 
 def _fold_model():
@@ -78,6 +81,39 @@ def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
     # the last class of the preference keeps waiting
     new["metadata"]["creationTimestamp"] = "2026-10-05T20:00:00Z"
     assert appmod.fallback_switch() == []
+
+
+def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, monkeypatch):
+    """A fleet run names where it may land through execution.placement.allowed_clusters; the API's implicit default
+    region (the first deployment) is no request and never contradicts it. The class is ranked among the allowed
+    clusters only; an explicit region outside the list is the one error; nothing widens the list."""
+    c, fake = client
+    monkeypatch.setattr(kube, "fleet", lambda: TWO_CLASS_FLEET)
+    m = _fold_model()                                                   # regions eu-north1 (hub) and us-central1
+    monkeypatch.setattr(catalog, "get", lambda name: m if name == "fold" else None)
+    import placement as placing
+    # the module's autouse stub ranks nothing: this test needs the real ranking
+    monkeypatch.setattr(placing, "choose_class", placing.choose_class.__wrapped__ if hasattr(placing.choose_class, "__wrapped__") else _real_choose_class)
+    ex = {"placement": {"gpu_preference": ["rtx-pro-6000", "l40s"], "allowed_clusters": ["us-central1"]}}
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": ex}, headers=H)                  # no region
+    assert r.status_code == 202, r.text
+    job = fake.jobs[("tenant-demo", r.json()["id"])]
+    assert job["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "us-central1"        # no widening
+    assert job["metadata"]["labels"][f"{LABEL}/gpu-class"] == "rtx-pro-6000"                             # ranked within us-central1 only
+    assert json.loads(job["metadata"]["annotations"][f"{LABEL}/execution"])["placement"]["allowed_clusters"] == ["us-central1"]
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "region": "us-central1", "execution": ex}, headers=H)   # explicit, consistent
+    assert r.status_code == 202, r.text
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "region": "eu-north1", "execution": ex}, headers=H)     # explicit contradiction
+    assert r.status_code == 400 and "not in allowed_clusters" in r.text
+    both = {"placement": {"allowed_clusters": ["us-central1", "eu-north1"]}}
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": both}, headers=H)
+    assert r.status_code == 202 and set(fake.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"].split(",")) == {"us-central1", "eu-north1"}
+    # single-cluster mode (no fleet manager): runs happen here, so a list that excludes this region is an error
+    monkeypatch.setattr(appmod, "FLEET_MANAGER", False)
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": ex}, headers=H)
+    assert r.status_code == 400 and "runs jobs in eu-north1 only" in r.text
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": {"placement": {"allowed_clusters": ["eu-north1"]}}}, headers=H)
+    assert r.status_code == 202, r.text
 
 
 @pytest.mark.parametrize("binding_available", [True, False])

@@ -51,16 +51,18 @@ def rank_pools(pools: dict, classes: list[str], gpus: int, regions: list[str] | 
     return sorted(cands, key=lambda c: (classes.index(c["gpu_class"]), CAP_RANK.get(c["capacity"], 3), c["cost"], c["cluster"], c["pool"]))
 
 
-def choose_class(model: dict, region: str | None, gpus: int, available: list[str] | None = None, tenant: str | None = None) -> tuple[str, str]:
+def choose_class(model: dict, region: str | None, gpus: int, available: list[str] | None = None, tenant: str | None = None,
+                 regions: list[str] | None = None) -> tuple[str, str]:
     """(gpu class, how it was chosen): the class of the best pool in the fleet document among the model's classes
-    (`available`: the caller's narrowing and order when given, None = the model's own) and regions, pinned to
-    `region` when given. Without any such pool the first allowed class is taken; the queue then waits for it."""
+    (`available`: the caller's narrowing and order when given, None = the model's own) and regions (`regions`: the
+    caller's allowed clusters when given, None = the model's own), pinned to `region` when given. Without any such
+    pool the first allowed class is taken; the queue then waits for it."""
     classes = gpu_classes(model)
     images = class_images(model) or {}
     allowed = [c for c in classes if c in images or "default" in images] or classes
     if available is not None:
         allowed = [c for c in available if c in allowed] or allowed
-    ranked = rank_pools(kube.fleet().get("pools") or {}, allowed, gpus, model.get("regions") or None, region, tenant)
+    ranked = rank_pools(kube.fleet().get("pools") or {}, allowed, gpus, regions or model.get("regions") or None, region, tenant)
     if ranked:
         best = ranked[0]
         return best["gpu_class"], f"fleet ({best['region']}/{best['pool']}, {best['capacity']}, ${best['price']}/GPU-h)"
