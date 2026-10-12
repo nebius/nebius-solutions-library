@@ -140,6 +140,19 @@ control -json tenant_keys` prints them); an admin key then mints user keys of it
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
 the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
 
+## Chains
+
+A resume, a capacity fallback or an automatic recovery continues an operation as a new member of a chain
+(`root_operation_id`, `resumed_from`, `recovered_from`). Any member, and any handle that resolves to one, reports the
+chain's history next to its own state: `id`, `status`, `attempt_id`, `epoch`, `cluster`, `checkpoint_*` and `revision`
+are the effective member's; `created_at` is the root's submission time; `started_at` the chain's first attempt;
+`attempts` every attempt of every member in order, each with `operation`, `attempt_role`, `gpu_class`, `image`,
+`image_digest`, times and `gpu_seconds` (measured main-container time x GPUs; `null` without an end record: nothing
+is guessed); `chain` one entry per member (`id`, `created_at`, `status`, `gpu_class`, `cluster`, `reason`,
+`gpu_seconds`, `gpu_seconds_complete`, `cost`); `gpu_seconds` and `cost` the measured totals over the chain
+(`gpu_seconds_complete: false` while an attempt has no end record); `successor_created_at` when the newest successor
+was created (its own first attempt may wait for capacity). An operation outside a chain carries none of these fields.
+
 ## Variants
 
 One endpoint may run as several deployments in a region behind its one name, in priority order: a warm floor on

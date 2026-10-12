@@ -796,6 +796,53 @@ def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list
     return artifacts.attempt_records(p.namespace, id, region or REGION, jobs.output_prefix(job)), root
 
 
+def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
+    """The history of a resume/fallback/recovery chain on its effective member (docs/API.md "Chains"): the root's
+    creation time, every attempt of every member with its measured GPU time and pinned image, per-member timing
+    and consumption, cumulative measured consumption (what is not on record stays unknown: no end record, no
+    seconds), and when the newest successor was created. The effective id, status and current attempt are the
+    member's own and unchanged."""
+    import status as st
+    rows = attempts.for_operation(root) if attempts.enabled() else []
+    by_pod = {r["pod"]: r for r in rows}                               # one row per pod (the newest wins)
+    rows = list(by_pod.values())
+    members = sorted([j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
+                      if j["metadata"]["name"] == root or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root],
+                     key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))
+    name = job["metadata"]["name"]
+    all_attempts = st._attempts(job.get("_pods", []), rows)          # every member's records; the live pods are this member's
+    for a in all_attempts:
+        r = by_pod.get(a.get("attempt_id")) or {}
+        a["operation"] = r.get("operation") or name
+        a["attempt_role"] = r.get("attempt_role") or "run"
+        a["image"] = r.get("image")
+        d = st._secs(a.get("started_at"), a.get("ended_at"))
+        a["gpu_seconds"] = round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None   # unknown stays unknown
+    chain, total, complete = [], 0.0, True
+    for m in members:
+        mid = m["metadata"]["name"]
+        mine = [a for a in all_attempts if a["operation"] == mid]
+        measured = [a["gpu_seconds"] for a in mine if a["gpu_seconds"] is not None]
+        unknown = any(a["gpu_seconds"] is None and a["status"] != "QUEUED" for a in mine)
+        ann = m["metadata"].get("annotations") or {}
+        chain.append({"id": mid, "created_at": m["metadata"].get("creationTimestamp"),
+                      "status": op["status"] if mid == name else jobs.normalise(m, None, [r for r in rows if r["operation"] == mid])["status"],
+                      "gpu_class": (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/gpu-class"),
+                      "cluster": next((by_pod[a["attempt_id"]].get("region") for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
+                      "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
+                      "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0), "gpu_seconds_complete": not unknown,
+                      "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None})
+        total += sum(measured); complete = complete and not unknown
+    root_member = next((c for c in chain if c["id"] == root), None)
+    successors = [c for c in chain if c["id"] != root]
+    billed = [c["cost"] for c in chain if c["cost"] is not None]
+    return {"created_at": (root_member or {}).get("created_at") or min((a["started_at"] for a in all_attempts if a.get("started_at")), default=op.get("created_at")),
+            "started_at": min((a["started_at"] for a in all_attempts if a.get("started_at")), default=None),
+            "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
+            "chain": chain, "successor_created_at": successors[-1]["created_at"] if successors else None,
+            "gpu_seconds": round(total, 1), "gpu_seconds_complete": complete, "cost": round(sum(billed), 6) if billed else None}
+
+
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
         return job["_synthetic"]
@@ -805,6 +852,8 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     op.update(attempts.lifecycle(name, root, records))
     if name != id:
         op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
+    if root != name or name != id:
+        op.update(_chain(p, op, job, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING") and attempts.enabled():
         # a transfer-only retry (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md "Attempts and finalization")
         done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{name}-x")

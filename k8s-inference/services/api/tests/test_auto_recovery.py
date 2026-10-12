@@ -21,6 +21,14 @@ from config import LABEL
 NS = "tenant-demo"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_catalog():
+    """The file catalog is cached by mtime: entries normalised under this module's patched fleet must not leak into
+    the next module (run classes take their regions from the fleet)."""
+    yield
+    catalog._cache.update({"mtime": None, "models": {}})
+
+
 def _ago(seconds: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -87,6 +95,31 @@ def test_lost_run_continues_on_the_next_class_from_its_acknowledged_pointer(lost
     # a second tick (or a competing replica) creates nothing more; the same name would be computed again
     assert appmod.recovery_switch() == []
     assert len([k for k in fake.jobs if k[1].startswith(f"{op}-r-")]) == 1
+
+
+def test_recovered_handle_projects_the_whole_chain(lost_run):
+    """docs/API.md "Chains": the effective member keeps its id and current attempt; the response carries the root's
+    creation time, every attempt with measured GPU seconds and image, per-member consumption, cumulative measured
+    consumption with unknowns kept unknown, and when the successor was created."""
+    c, fake, op, records, fences, marks = lost_run
+    new = appmod.recovery_switch()[0]
+    records[0]["image"] = records[1]["image"] = "img:rtx"
+    records.append({"operation": new, "pod": f"{new}-xyz", "root": op, "tenant": "demo", "status": "started", "epoch": 2, "revision": 9,
+                    "gpu_class": "l40s", "gpus": 1, "started_at": _ago(20), "image": "img:l40s", "region": "eu-north1"})
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["id"] == new and got["requested_id"] == op and got["epoch"] == 2 and got["attempt_id"] == f"{new}-xyz"
+    assert got["created_at"] == fake.jobs[(NS, op)]["metadata"]["creationTimestamp"]            # the root's submission time
+    assert got["successor_created_at"] == fake.jobs[(NS, new)]["metadata"]["creationTimestamp"]
+    assert [(a["operation"], a["status"], a["gpu_class"], a["image"]) for a in got["attempts"]] == [(op, "PREEMPTED", "rtx-pro-6000", "img:rtx"), (new, "PREEMPTED", "l40s", "img:l40s")]
+    assert 535 <= got["attempts"][0]["gpu_seconds"] <= 545 and got["attempts"][1]["gpu_seconds"] is None   # no end record: unknown
+    assert [m["id"] for m in got["chain"]] == [op, new] and got["chain"][0]["gpu_class"] == "rtx-pro-6000" and got["chain"][0]["status"] == "SUPERSEDED"
+    assert got["chain"][0]["gpu_seconds_complete"] is True and got["chain"][1]["gpu_seconds"] is None and got["chain"][1]["gpu_seconds_complete"] is False
+    assert 535 <= got["gpu_seconds"] <= 545 and got["gpu_seconds_complete"] is False and "rtx-pro-6000 -> l40s" in got["chain"][1]["reason"]
+    assert got["started_at"] == records[0]["started_at"]
+    # a plain operation is untouched
+    r = c.post("/v1/models/fold:invoke", json={"input": {}}, headers=H)
+    plain = c.get(f"/v1/operations/{r.json()['id']}", headers=H).json()
+    assert "chain" not in plain and "successor_created_at" not in plain
 
 
 def test_recovery_waits_for_the_run_to_come_back_and_clears_the_loss(lost_run, monkeypatch):
