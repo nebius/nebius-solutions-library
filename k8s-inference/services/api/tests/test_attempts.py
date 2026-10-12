@@ -157,6 +157,11 @@ def test_epoch_fencing_in_the_database(database):
     assert attempts.latest_checkpoint("op-x") == {"checkpoint_ref": "app://ckpt/4", "generation": 4, "epoch": 2, "attempt_id": "op-x-b"}
     attempts.mark_successor("op-x", "op-x-r1")
     assert attempts.successor_of("op-x") == "op-x-r1"
+    with pytest.raises(HTTPException) as e:        # superseded (automatic recovery): the live pod of the original cannot publish either
+        attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "started", "checkpoint_ref": "app://ckpt/5", "checkpoint_generation": 5, "gpus": 1})
+    assert e.value.status_code == 409 and "superseded" in e.value.detail
+    with pytest.raises(HTTPException):
+        attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "succeeded", "export": "succeeded"})
     rows = attempts.for_operation("op-x")
     assert [r["pod"] for r in rows] == ["op-x-a", "op-x-b"] and rows[1]["revision"] > rows[0]["revision"]
     attempts.mark_cancelled("op-x")

@@ -80,10 +80,15 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (root,))
         cur = c.execute("select epoch, status from attempts where operation = %s and pod = %s", (operation, pod)).fetchone()
         top = c.execute("select coalesce(max(epoch), 0) from attempts where root = %s", (root,)).fetchone()[0]
-        cancelled = c.execute("select cancelled_at from operation_marks where operation = %s", (operation,)).fetchone()
+        marks = c.execute("select cancelled_at, successor from operation_marks where operation = %s", (operation,)).fetchone()
+        cancelled = (marks[0],) if marks else None
         epoch = cur[0] if cur else top + 1
         if epoch < top:                              # any record from a replaced attempt, pointers included
             raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
+        if marks and marks[1] and not (cur and cur[1] == status):
+            # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
+            # publish progress or a final result (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
+            raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
         if cur and cur[1] in TERMINAL and status == "started":
             return _row(c, operation, pod)           # a late duplicate of the current attempt's start record
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":

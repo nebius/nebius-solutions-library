@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import asyncio, time, urllib.parse, uuid
+import asyncio, json, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.20", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.21", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -380,11 +380,125 @@ def fallback_switch() -> list[str]:
     return moved
 
 
+def _lost(op: dict, job: dict) -> tuple[dict | None, str | None]:
+    """The confirmed infrastructure loss of a run, if any: (the lost attempt, why) when no attempt is RUNNING and the
+    newest attempt that ran ended PREEMPTED (a pod with DisruptionTarget or deleted, an uploader record `interrupted`,
+    or a `started` record whose pod no longer exists on the worker). Never: an application failure (exit code, OOM),
+    a deadline, a cancel, a finished run, a run that never started, or a worker whose pods are unknown."""
+    if job.get("_pods_unknown") or op["status"] not in ("QUEUED", "RUNNING"):
+        return None, None
+    attempts_ = op.get("attempts") or []
+    if any(a["status"] == "RUNNING" for a in attempts_):
+        return None, None
+    ran = [a for a in attempts_ if a.get("started_at")]
+    if not ran or ran[-1]["status"] != "PREEMPTED":
+        return None, None
+    return ran[-1], ran[-1].get("reason") or "infrastructure loss"
+
+
+def recovery_switch() -> list[str]:
+    """Runs that asked for `recovery.on_infrastructure_loss: recover` and lost their worker (docs/SCHEDULING.md
+    "Automatic recovery after infrastructure loss"): once the loss stands for `wait_s` without a replacement attempt,
+    the run continues from its newest acknowledged checkpoint pointer on the next class of its preference
+    (jobs.recover), within `max_recoveries` and `deadline_s`. Returns the successors' ids. Control API only."""
+    if not FLEET_MANAGER or not attempts.enabled():
+        return []
+    moved = []
+    now = datetime.now(timezone.utc)
+    try:
+        namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
+    except Exception:  # noqa: BLE001
+        return []
+    for ns in namespaces:
+        try:
+            b = kube.batch()
+            items = [b.api_client.sanitize_for_serialization(j) for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items]
+        except Exception:  # noqa: BLE001
+            continue
+        for item in items:
+            md = item["metadata"]
+            ann = md.get("annotations") or {}
+            name = md["name"]
+            try:
+                ex = json.loads(ann.get(f"{cfg.LABEL}/execution") or "null") or {}
+            except ValueError:
+                ex = {}
+            rec = ex.get("recovery") or {}
+            if rec.get("on_infrastructure_loss") != "recover" or not jobs.is_manager_job(item) or jobs.finished(item) \
+                    or ann.get(f"{cfg.LABEL}/successor") or ann.get(f"{cfg.LABEL}/cancelled"):
+                continue
+            try:
+                job = jobs.get(ns, name, REGION)
+                root = ann.get(f"{cfg.LABEL}/resumed-from") or name
+                op = jobs.normalise(job, records=attempts.for_operation(root))
+                lost, why = _lost(op, job)
+                if lost is None:
+                    if ann.get(f"{cfg.LABEL}/lost-at"):          # back on its own class: the loss is over
+                        _annotate(ns, name, {f"{cfg.LABEL}/lost-at": None})
+                    continue
+                lost_at = ann.get(f"{cfg.LABEL}/lost-at")
+                if not lost_at:
+                    _annotate(ns, name, {f"{cfg.LABEL}/lost-at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
+                    lost_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if (now - datetime.fromisoformat(lost_at.replace("Z", "+00:00"))).total_seconds() < int(rec.get("wait_s") or 0):
+                    continue
+                tenant = md["labels"][f"{cfg.LABEL}/tenant"]
+                marks = attempts._marks(name)
+                if marks and marks[1]:
+                    continue                                       # cancelled: never resurrected
+                stop = None
+                pointer = (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
+                if not pointer:
+                    stop = "no acknowledged checkpoint pointer: the run cannot continue elsewhere (POST :resume after a cancel)"
+                done = jobs.recoveries(ns, tenant, root)
+                if not stop and done >= int(rec.get("max_recoveries") or 1):
+                    stop = f"recovery exhausted: {done} of {rec.get('max_recoveries')} automatic continuations used"
+                remaining_s = None
+                if rec.get("deadline_s"):
+                    root_job = job if root == name else jobs.get(ns, root, REGION)
+                    born = datetime.fromisoformat(str(root_job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
+                    remaining_s = int(born.timestamp() + int(rec["deadline_s"]) - now.timestamp())
+                    if not stop and remaining_s <= 0:
+                        stop = f"recovery deadline passed: {rec['deadline_s']} s after the root operation was created"
+                m = _model(md["labels"].get(f"{cfg.LABEL}/model", ""))
+                pref = (ex.get("placement") or {}).get("gpu_preference") or jobs.gpu_classes(m)
+                current = lost.get("gpu_class") or md.get("labels", {}).get(f"{cfg.LABEL}/gpu-class") or (pref[0] if pref else None)
+                remaining = pref[pref.index(current) + 1:] if current in pref else list(pref)
+                next_class = remaining[0] if remaining else current
+                if not stop and not next_class:
+                    stop = "no GPU class to continue on"
+                if stop:
+                    if ann.get(f"{cfg.LABEL}/recovery") != stop:
+                        _annotate(ns, name, {f"{cfg.LABEL}/recovery": stop})
+                    continue
+                placement = execution.narrow_placement({"profile": jobs.profile_of(m), "classes": [next_class], "regions": m["regions"]}, ex) or {}
+                placement["classes"] = [next_class]
+                new, created = jobs.recover(ns, name, REGION, m, placement, pointer, int(lost.get("epoch") or 0), next_class,
+                                            remaining or [next_class], why, timeout_s=remaining_s)
+                marks = attempts._marks(name)
+                if marks and marks[1]:                                 # cancelled while we were moving it: cancel the successor, too
+                    attempts.mark_cancelled(new["metadata"]["name"])
+                    jobs.cancel(ns, new["metadata"]["name"], REGION)   # never started: deleted
+                    _annotate(ns, name, {f"{cfg.LABEL}/cancelled": "true", f"{cfg.LABEL}/recovery": "cancelled while recovering: the successor was withdrawn"})
+                    continue
+                if created:
+                    moved.append(new["metadata"]["name"])
+                    log.info("recovery: %s/%s -> %s on %s (%s)", ns, name, new["metadata"]["name"], next_class, why)
+            except Exception:  # noqa: BLE001
+                log.exception("recovery of %s/%s failed", ns, name)
+    return moved
+
+
+def _annotate(ns: str, name: str, annotations: dict) -> None:
+    kube.batch().patch_namespaced_job(name, ns, {"metadata": {"annotations": annotations}})
+
+
 async def _reconcile_loop():
     while True:
         try:
             await asyncio.to_thread(idle_shutdown)
             await asyncio.to_thread(fallback_switch)
+            await asyncio.to_thread(recovery_switch)
             await asyncio.to_thread(reconcile_models)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -645,7 +759,7 @@ def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le
 def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
     """The operation's Job. A handle that capacity fallback superseded resolves to its current successor (the
     original stays readable, docs/SCHEDULING.md); an operation whose Job expired is served from its durable rows."""
-    current = id
+    current, previous = id, None
     for _ in range(16):
         try:
             job, region = jobs.find(p.namespace, current)
@@ -658,13 +772,15 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
                 continue
             synthetic = attempts.synthesize(current, p.tenant)
             if synthetic is None:
+                if previous is not None:          # a successor that is marked but not created yet: the original stands
+                    return previous
                 raise
             return {"_synthetic": synthetic, "metadata": {"name": current, "labels": {"serverless2.nebius/tenant": p.tenant, "serverless2.nebius/mode": "run"}, "annotations": {}}}, synthetic.get("region")
         if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
             raise HTTPException(404, f"operation {id}: not found")
         nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor")
         if follow and nxt and nxt != current:
-            current = nxt
+            current, previous = nxt, (job, region)
             continue
         return job, region
     raise HTTPException(502, f"operation {id}: successor chain too long")

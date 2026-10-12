@@ -543,8 +543,8 @@ def _with_worker(job: dict, ns: str, clusters: dict) -> dict:
     region = kube.cluster_region(cluster)
     try:
         out = _with_pods(job, ns, region)
-    except HTTPException:            # the worker's kubeconfig is not mounted here: status only
-        job["_pods"], job["_region"] = [], region
+    except HTTPException:            # the worker is unreachable (no kubeconfig here, its API down): status only
+        job["_pods"], job["_region"], job["_pods_unknown"] = [], region, True
         out = job
     out["_cluster"] = cluster
     return out
@@ -783,20 +783,83 @@ def switch_class(ns: str, name: str, region: str, model: dict, defaults: dict, n
     return created, was_created
 
 
+def recoveries(ns: str, tenant: str, root: str) -> int:
+    """How many automatic continuations the chain of `root` already has (docs/SCHEDULING.md "Automatic recovery")."""
+    return sum(1 for j in list_ops(ns, tenant, None, 500)
+               if (j["metadata"].get("annotations") or {}).get(f"{LABEL}/resumed-from") == root and (j["metadata"].get("annotations") or {}).get(f"{LABEL}/recovered-from"))
+
+
+def recover(ns: str, name: str, region: str, model: dict, placement: dict, pointer: str, lost_epoch: int, next_class: str,
+            remaining: list[str], loss: str, timeout_s: int | None = None) -> tuple[dict, bool]:
+    """Automatic recovery after a confirmed infrastructure loss (docs/SCHEDULING.md "Automatic recovery after
+    infrastructure loss"): the original is fenced first (successor mark in the fleet database: every further record of
+    it is refused; its Workload deactivated: the worker's copy and any pod go; the Job suspended), then the successor
+    `<root>-r-<sha8>` is created from the acknowledged checkpoint pointer on `next_class` with that class's image and a
+    fresh volume. The name is a function of (original, lost epoch): competing API replicas and repeated ticks
+    converge on one Job (create is ignore-exists). Returns (successor, created)."""
+    import attempts, hashlib
+    orig = get(ns, name, region)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    idem = f"recover:{lost_epoch}"
+    new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
+    except ValueError:
+        ex = {}
+    ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
+    # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
+    regions = [r for r in placement.get("regions") or [] if r] or [region]
+    execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], regions)
+    attempts.mark_successor(name, new)                                    # fence 1: no record of the original from now on
+    try:
+        kube.deactivate_workload(ns, md.get("uid", ""), region)           # fence 2: the worker's copy and its pods go
+    except Exception as e:  # noqa: BLE001 - the Job is suspended below either way
+        log.warning("recovery: deactivate workload of %s/%s: %s", ns, name, e)
+    try:
+        retry(kube.batch(region).patch_namespaced_job, name, ns, {"spec": {"suspend": True}})
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    reason = f"recovered from {name} ({loss}): {labels.get(f'{LABEL}/gpu-class') or 'its class'} -> {next_class}"
+    # a modified execution block for the successor: the same block minus what the pinned original already carries
+    job_ann = {f"{LABEL}/recovered-from": name, f"{LABEL}/recovery": reason}
+    orig["metadata"]["annotations"] = {**ann, f"{LABEL}/execution": json.dumps(ex, sort_keys=True)}
+    created, was_created = _resume_from(orig, ns, name, region, model, placement, pointer, next_class, idem, job_ann, timeout_s)
+    try:
+        retry(kube.batch(region).patch_namespaced_job, name, ns, {"metadata": {"annotations": {f"{LABEL}/successor": new, f"{LABEL}/recovery": reason}}})
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    return created, was_created
+
+
+def _resume_from(orig: dict, ns: str, name: str, region: str, model: dict, placement: dict, pointer: str, next_class: str,
+                 idem: str, job_ann: dict, timeout_s: int | None) -> tuple[dict, bool]:
+    """resume() on an already-read original (its execution annotation adjusted by the caller); `timeout_s` is the
+    root's remaining deadline when the request set `recovery.deadline_s` (the successor never gets a fresh full budget)."""
+    return resume(ns, name, region, model, {}, placement, checkpoint_ref=pointer, gpu_class=next_class, idem=idem,
+                  pointer=pointer, superseding=job_ann, _orig=orig, timeout_s=timeout_s)
+
+
 def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placement: dict | None = None,
            checkpoint_ref: str | None = None, gpu_class: str | None = None, idem: str | None = None,
-           pointer: str | None = None) -> tuple[dict, bool]:
+           pointer: str | None = None, superseding: dict | None = None, _orig: dict | None = None,
+           timeout_s: int | None = None) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
     original PVC (same region: the volume is regional), linked through the resumed-from annotation.
     Rendering anew (rather than copying the finished Job's spec) leaves behind everything the Job
     controller and Kueue injected into it (selector, workload annotation, flavor labels). The
     original must be finished and its PVC must exist. `region` is the cluster the original is read
-    from (the manager for a fleet-placed run); the new Job is pinned to the worker's region."""
-    orig = get(ns, name, region)
+    from (the manager for a fleet-placed run); the new Job is pinned to the worker's region.
+    `superseding`: automatic recovery (jobs.recover) continues a run the platform fenced itself; its annotations
+    go onto the successor and the original's state is not a precondition."""
+    orig = _orig or get(ns, name, region)
     op = normalise(orig)
     md = orig["metadata"]
     labels, ann = md.get("labels", {}), md.get("annotations", {})
-    if op["status"] in ("QUEUED", "RUNNING"):
+    if op["status"] in ("QUEUED", "RUNNING") and superseding is None:
         raise HTTPException(409, f"operation {name} is {op['status']}; cancel it first")
     if op["mode"] != "run":
         raise HTTPException(400, "only run operations can be resumed")
@@ -855,12 +918,15 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         pl["manager"] = True
     # a run with per-class images keeps the class it was submitted with (its checkpoints were written by that image),
     # unless the caller resumes a portable checkpoint on another class (`gpu_class`)
-    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None, op["timeout_s"],
+    job = build_run(new, model, op["input"], labels[f"{LABEL}/tenant"], ann.get(f"{LABEL}/name"), None,
+                    min(op["timeout_s"], timeout_s) if op["timeout_s"] and timeout_s else (timeout_s or op["timeout_s"]),
                     labels.get(f"{LABEL}/priority"), worker, d, ann.get(f"{LABEL}/key"), pvc=pvc, placement=pl or None,
                     gpu_class=gpu_class or labels.get(f"{LABEL}/gpu-class") or (gpu_classes(model)[0] if class_images(model) else None), ex=ex)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     if idem:
         job["metadata"]["annotations"][f"{LABEL}/idempotency-key"] = idem
+    if superseding:             # automatic recovery: the successor says where it comes from and why (status.py `reason`)
+        job["metadata"]["annotations"].update(superseding)
     if is_jobset(job):          # the shared checkpoint directory is keyed by the root operation
         for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:
             for m in c.get("volumeMounts", []):

@@ -309,6 +309,49 @@ revision (`serverless2.nebius/model-version`), never a newer definition.
   15 s and admission on eu-south1; then label a Job
   `serverless2.nebius/region: hub` and expect nomination of `hub` only.
 
+## Automatic recovery after infrastructure loss (2026-10-12)
+
+Opt-in per run: `execution.recovery.on_infrastructure_loss: recover` (docs/JOBS.md "Execution options"; the default
+`retry` and `fail` are unchanged). The Job keeps the `retry` policy, so a disruption first gets the Kubernetes Job
+controller's replacement attempt on the same worker and volume. The control API's reconcile loop (every 15 s) then
+watches the run: it is **lost** when a confirmed infrastructure loss is on record and no attempt is RUNNING: the newest
+attempt that ran ended `PREEMPTED` because its pod carried `DisruptionTarget` or was deleted (preemption, drain, a
+spot reclaim: the uploader's `interrupted` record), because its `started` record has no end and the pod no longer
+exists on the worker (a node lost without warning; the worker's pod listing must have succeeded), or because Kueue
+evicted the Workload after the run had started. Never a loss: an application failure (`main` exit code, including
+`OOMKilled`, which reports `FAILED` and not `PREEMPTED`), `DeadlineExceeded`, a cancel, a finished run, a run that
+never started, and a worker whose Kubernetes API is unreachable (the tick skips it).
+
+The first tick that sees the loss stamps `serverless2.nebius/lost-at` on the manager Job (cleared when an attempt runs
+again). Once the loss stands for `wait_s` (default 300), the chain has an acknowledged checkpoint pointer (the newest
+`CHECKPOINT.json` the uploader recorded, docs/JOBS.md "Attempts and finalization"), fewer than `max_recoveries`
+(1..3, default 1) automatic continuations exist and `deadline_s` (from the root's creation) has not passed, the API
+(`jobs.recover`): delivers the private input for the successor (a revoked binding stops here, the original untouched);
+fences the original with a successor mark in the fleet database (every further attempt record of it, pointers and
+finals alike, is refused with 409), deactivates its Kueue Workload (the worker's copy and any pod, a pending
+same-worker replacement included, go) and suspends the Job; creates the successor `<root>-r-<sha8>` with
+`sha8 = sha256("<original>:recover:<lost epoch>")[:8]` (a deterministic name: competing API replicas and repeated
+ticks converge on one Job, the create is ignore-exists) from the pointer (`CHECKPOINT_REF`) on the next class of
+`placement.gpu_preference` after the lost attempt's class (the last class stays on itself) with that class's pinned
+image, a fresh volume, the permitted clusters, the same input, key, identity, profile and private input, the
+preference narrowed to the remaining classes, and the root's **remaining** deadline as its `activeDeadlineSeconds`
+when `deadline_s` was set (never a fresh full budget); then annotates the original with `successor` and the successor
+with `recovered-from`. A cancel that lands while the run is being moved withdraws the successor and marks the original
+cancelled; a cancelled run is never recovered. Exhausted bounds, a missing pointer or a revoked binding leave the run
+where it is (the same-worker retry continues) and the operation's `reason` says why.
+
+Handles are those of fallback: the original is `SUPERSEDED`, `GET`, `:cancel`, `:result`, `:export`, metrics and
+logs on it follow to the live successor (`requested_id`), `root_operation_id` stays the root; the successor reports
+`recovered_from`, `resumed_from` (the root) and `reason` ("recovered from <original> (<loss>): rtx-pro-6000 -> l40s").
+
+Supported fault injection for a drill, touching only the run itself (no shared node): deactivate the run's Kueue
+Workload on the control cluster, `kubectl -n tenant-<t> patch workload $(kubectl -n tenant-<t> get workload -l
+kueue.x-k8s.io/job-uid=<job uid> -o name) --type=merge -p '{"spec":{"active":false}}'`. Kueue evicts the worker's
+copy, the pod gets SIGTERM, the uploader records `interrupted`, and because the Workload stays inactive no
+same-worker replacement starts: the run is lost deterministically and recovers after `wait_s`. Deleting or evicting
+the pod alone is not deterministic: the Job controller's same-worker replacement may start within `wait_s` and
+the run then legitimately continues where it was.
+
 ## Not possible: swapping the image after Kueue picked the pool
 
 Measured 2026-10-07 with Kyverno 3.9.1 on the hub: a mutating policy that

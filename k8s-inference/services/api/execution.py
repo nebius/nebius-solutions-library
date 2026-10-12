@@ -15,7 +15,11 @@
                           serves one operation (and its resumes); a new PUT refreshes the files of a running attempt
     placement             gpu_preference (narrows and orders the model's classes), allowed_clusters (narrows its regions),
                           fallback_wait_s (docs/SCHEDULING.md)
-    recovery              on_infrastructure_loss: retry (default) | fail; checkpoint_ref: handed to the run as CHECKPOINT_REF
+    recovery              on_infrastructure_loss: retry (default) | fail | recover; checkpoint_ref: handed to the run as
+                          CHECKPOINT_REF. `recover` (opt-in): after a confirmed infrastructure loss the control API moves
+                          the run to the next class of its preference from its newest acknowledged checkpoint pointer,
+                          bounded by max_recoveries (1..3, default 1), wait_s (default 300) and deadline_s
+                          (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
 
 References are resolved against what the operator rendered into the tenant namespace (annotations of the namespace,
 charts/tenant), never against raw Kubernetes names: a reference another tenant owns does not exist here. Nothing
@@ -42,6 +46,9 @@ MAX_BINDING_BYTES = 64 * 1024
 KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")     # a binding key is a file name under the private directory
 
 
+RECOVERY_MAX = 3
+
+
 class PlacementSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     gpu_preference: list[str] | None = None
@@ -51,8 +58,14 @@ class PlacementSpec(BaseModel):
 
 class RecoverySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    on_infrastructure_loss: Literal["retry", "fail"] = "retry"
+    on_infrastructure_loss: Literal["retry", "fail", "recover"] = "retry"
     checkpoint_ref: str | None = Field(default=None, max_length=1024)
+    max_recoveries: int | None = Field(default=None, ge=1, le=RECOVERY_MAX)     # `recover` only: automatic continuations per root
+    wait_s: int | None = Field(default=None, ge=0, le=86400)                   # `recover` only: time to come back on its own class first
+    deadline_s: int | None = Field(default=None, ge=60, le=7 * 86400)          # `recover` only: no recovery past root.created_at + deadline_s
+
+
+RECOVERY_DEFAULTS = {"max_recoveries": 1, "wait_s": 300}
 
 
 class ExecutionSpec(BaseModel):
@@ -98,7 +111,10 @@ def capabilities(ns: str, region: str = REGION) -> dict:
     from config import REGION_OIDC_ISSUERS
     cfg = tenant_config(ns, region)
     return {"io_modes": list(IO_MODES), "identities": sorted(cfg["identities"]), "execution_profiles": sorted(cfg["execution_profiles"]),
-            "oidc_issuers": dict(REGION_OIDC_ISSUERS), "private_input_dir": PRIVATE_DIR, "identity_token_file": f"{IDENTITY_DIR}/token"}
+            "oidc_issuers": dict(REGION_OIDC_ISSUERS), "private_input_dir": PRIVATE_DIR, "identity_token_file": f"{IDENTITY_DIR}/token",
+            # automatic continuation after a confirmed infrastructure loss (docs/SCHEDULING.md): what a caller may ask for
+            "recovery": {"on_infrastructure_loss": ["retry", "fail", "recover"], "max_recoveries": RECOVERY_MAX, "defaults": dict(RECOVERY_DEFAULTS),
+                         "requires": "an acknowledged checkpoint pointer (CHECKPOINT.json) and a gpu_preference with a next class"}}
 
 
 def _ref(value: str | None, what: str) -> str | None:
@@ -152,6 +168,11 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         ex["recovery"] = {"on_infrastructure_loss": spec.recovery.on_infrastructure_loss}
         if spec.recovery.checkpoint_ref:
             ex["recovery"]["checkpoint_ref"] = spec.recovery.checkpoint_ref
+        bounds = {k: getattr(spec.recovery, k) for k in ("max_recoveries", "wait_s", "deadline_s") if getattr(spec.recovery, k) is not None}
+        if spec.recovery.on_infrastructure_loss == "recover":
+            ex["recovery"].update({**RECOVERY_DEFAULTS, **bounds})
+        elif bounds:
+            raise HTTPException(400, f"recovery.{'/'.join(bounds)}: only with on_infrastructure_loss: recover")
     return ex
 
 

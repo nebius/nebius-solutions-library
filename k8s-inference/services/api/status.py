@@ -65,7 +65,8 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         term, run = state.get("terminated") or {}, state.get("running") or {}
         disrupted = any(c.get("type") == "DisruptionTarget" and c.get("status") == "True" for c in (st.get("conditions") or []))
         if term:                                  # the attempt is `main`: the uploader may still be running after it
-            s = "SUCCEEDED" if term.get("exitCode") == 0 else ("PREEMPTED" if disrupted or term.get("exitCode") in (137, 143) else "FAILED")
+            # an OOM kill ends with 137 like a preemption's SIGKILL: the kubelet's reason tells them apart (an OOM is the application's)
+            s = "SUCCEEDED" if term.get("exitCode") == 0 else ("FAILED" if term.get("reason") == "OOMKilled" else "PREEMPTED" if disrupted or term.get("exitCode") in (137, 143) else "FAILED")
         elif run:
             s = "PREEMPTED" if p["metadata"].get("deletionTimestamp") else "RUNNING"
         else:
@@ -133,8 +134,8 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     conds = {c.get("type"): c for c in (st.get("conditions") or []) if c.get("status") == "True"}
     attempts = [{k: v for k, v in a.items() if not k.startswith("_")} for a in _attempts(job.get("_pods", []), records, md.get("name"))]
     error = None
-    if ann.get(f"{LABEL}/successor"):
-        status = "SUPERSEDED"       # capacity fallback moved the run: the successor is the live operation (docs/SCHEDULING.md)
+    if ann.get(f"{LABEL}/successor") and not ann.get(f"{LABEL}/cancelled"):
+        status = "SUPERSEDED"       # fallback or recovery moved the run: the successor is the live operation (docs/SCHEDULING.md)
     elif "Complete" in conds or "SuccessCriteriaMet" in conds:
         status = "SUCCEEDED"
         # delivery, not exit code: a verified export (managed I/O) or the application's finalization record
@@ -194,8 +195,9 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "resumable": status in ("FAILED", "CANCELLED", "EXPORT_FAILED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "execution": _json(ann.get(f"{LABEL}/execution")),
-            "reason": (job.get("_reason") if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback"),
+            "reason": (job.get("_reason") if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback") or ann.get(f"{LABEL}/recovery"),
             "successor": ann.get(f"{LABEL}/successor"),
+            "recovered_from": ann.get(f"{LABEL}/recovered-from"),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
             "interconnect": ann.get(f"{LABEL}/interconnect"),
             "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,

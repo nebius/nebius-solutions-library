@@ -174,7 +174,7 @@ tenant; `GET /v1/bindings` lists them (reference, bound operation, keys; never t
 revokes one. A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
 (`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
-profiles, the regions' OIDC issuers). `POST /v1/operations/{id}:resume` takes an optional body
+profiles, the regions' OIDC issuers, the `recovery` policies and bounds the fleet supports). `POST /v1/operations/{id}:resume` takes an optional body
 `{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution` and their lifecycle
 (`root_operation_id`, `attempt_id`, `epoch`, `revision`, `cluster`, `image_digest`, `export_state`, `result_ref`,
 `checkpoint_ref`; docs/JOBS.md "Attempts and finalization"); `GET /v1/operations/{id}?since=<revision>` answers 304
