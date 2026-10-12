@@ -918,7 +918,7 @@ def test_fleet_manager_path(client, monkeypatch):
     rr = c.post(f"/v1/operations/{op['id']}:resume", headers=H)
     assert rr.status_code == 202 and rr.json()["id"] == f"{op['id']}-r1" and rr.json()["region"] == "eu-north1"
     new = control.jobs[("tenant-demo", f"{op['id']}-r1")]
-    assert new["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and new["metadata"]["labels"][f"{L}/region"] == "eu-north1"
+    assert new["spec"]["managedBy"] == "kueue.x-k8s.io/multikueue" and new["metadata"]["labels"][f"{L}/region"] == "hub"   # pinned by the admitting cluster's id (0.11.31)
     assert new["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == f"{op['id']}-work" and not control.pvcs
     assert hub.pvcs[("tenant-demo", f"{op['id']}-work")]["metadata"]["ownerReferences"] == [{"uid": "uid-worker"}]   # untouched from here
     # billing: MultiKueue removes the worker's copy (and its pods) when the manager's Job finishes, so the manager's

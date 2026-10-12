@@ -194,6 +194,65 @@ def test_a_stale_result_marker_is_never_this_attempts_success(failed_run):
     assert got["status"] == "SUCCEEDED" and got["exported_by"] == x1 and got["result_ref"] == "app://md/result/new"
 
 
+def test_delivery_pending_fails_the_compute_job_at_once(failed_run):
+    """A declared 'delivery pending' exit code is a FailJob rule on the compute Job: the GPU computation is not restarted by
+    the Job's backoff for a delivery problem; retries are the finalizer's, bounded by :export. The ordinary policy
+    (disruptions and SIGKILL/SIGTERM ignored) is unchanged, and a model without a finalizer keeps it as it was."""
+    c, fake, op, rows, marks = failed_run
+    rules = fake.jobs[(NS, op)]["spec"]["podFailurePolicy"]["rules"]
+    assert rules[0] == {"action": "FailJob", "onExitCodes": {"containerName": "main", "operator": "In", "values": [75]}}
+    assert [r_["action"] for r_ in rules[1:]] == ["Ignore", "Ignore"] and fake.jobs[(NS, op)]["spec"]["backoffLimit"] >= 1
+    x1 = c.post(f"/v1/operations/{op}:export", headers=H).json()["id"]
+    assert fake.jobs[(NS, x1)]["spec"]["podFailurePolicy"]["rules"][0]["onExitCodes"]["values"] == [75]      # the finalizer too: no restarts, :export bounds it
+    plain = _model({k: v for k, v in SPEC.items() if k != "finalize"})
+    import catalog as cat
+    import pytest as pt
+    with pt.MonkeyPatch.context() as mp:
+        mp.setattr(cat, "get", lambda name: plain if name == "md" else None)
+        r = c.post("/v1/models/md:invoke", json={"input": {}, "region": "eu-north1"}, headers=H)
+    assert [r_["action"] for r_ in fake.jobs[(NS, r.json()["id"])]["spec"]["podFailurePolicy"]["rules"]] == ["Ignore", "Ignore"]
+
+
+def test_finalizer_of_a_fleet_run_is_pinned_to_the_admitting_cluster(client, monkeypatch):
+    """A fleet run's retry on its kept volume cannot be dispatched elsewhere: the Job carries the admitting cluster's id as
+    its region pin and as its only candidate, so the dispatcher reuses the volume in that cluster and never creates a
+    fresh one in another cluster of the same GPU class."""
+    c, fake = client
+    m = _model({**SPEC, "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]}})
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {"south-rtx": {"region": "south", "pool": "rtx6000-spot-1x", "gpu_class": "rtx-pro-6000", "usd_per_gpu_hour": 1.0},
+                                                          "north-l40s": {"region": "north", "pool": "l40s-spot-1x", "gpu_class": "l40s", "usd_per_gpu_hour": 0.8}},
+                                                "clusters": {"north": {"region": "eu-north1"}, "south": {"region": "eu-south1"}}})
+    monkeypatch.setattr(kube, "cluster_region", lambda cid: {"north": "eu-north1", "south": "eu-south1"}.get(cid, cid))
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-south1"])
+    monkeypatch.setattr(catalog, "get", lambda name: m if name == "md" else None)
+    monkeypatch.setattr(execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}})
+    monkeypatch.setattr(appmod, "FLEET_MANAGER", True)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    m["regions"] = ["south", "north"]                                               # the new fleet names regions by cluster id
+    r = c.post("/v1/models/md:invoke", json={"input": {}, "execution": {"io_mode": "application", "placement": {"allowed_clusters": ["south", "north"]}}}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    job = fake.jobs[(NS, op)]
+    assert f"{LABEL}/region" not in job["metadata"]["labels"]                       # a fleet run: no pin at submission
+    uid = job["metadata"].get("uid", "")
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {uid: "south"})      # admitted by south, the volume lives there
+    job["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    fake.pvcs[(NS, f"{op}-work")] = {"metadata": {"name": f"{op}-work"}}
+    rows = [{"operation": op, "pod": f"{op}-abc", "root": op, "tenant": "demo", "status": "failed", "exit_code": 75, "epoch": 1, "revision": 3,
+             "gpus": 1, "gpu_class": "rtx-pro-6000", "started_at": "2026-10-12T19:00:00Z", "ended_at": "2026-10-12T19:30:00Z", "region": "eu-south1", "cluster": "south", "role": "run"}]
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    r = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert r.status_code == 202, r.text
+    x1 = fake.jobs[(NS, f"{op}-x1")]
+    assert x1["metadata"]["labels"][f"{LABEL}/region"] == "south"                                            # pinned by cluster id
+    assert x1["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "south"                  # the only candidate
+    assert next(v for v in x1["spec"]["template"]["spec"]["volumes"] if v["name"] == "work")["persistentVolumeClaim"]["claimName"] == f"{op}-work"
+    assert x1["spec"].get("managedBy") == "kueue.x-k8s.io/multikueue"                                       # still a manager Job
+    assert "nvidia.com/gpu" not in json.dumps(next(c_ for c_ in x1["spec"]["template"]["spec"]["containers"] if c_["name"] == "main")["resources"])
+
+
 def test_discovery_lists_the_finalizer(client, monkeypatch):
     c, _ = client
     monkeypatch.setattr(execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}})

@@ -4,6 +4,7 @@
 attempt records from the bucket standing in for pods that preemption deleted; `gpu_seconds` is what the
 billing CronJob prices. The predicates (`is_jobset`, `is_manager_job`, `is_mirror`) tell the kinds apart."""
 import json, urllib.parse
+import kube
 from datetime import datetime, timezone
 from config import GRAFANA_URLS, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION
 
@@ -199,7 +200,9 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         inp = json.loads(ann.get(f"{LABEL}/input", "{}"))
     except ValueError:
         inp = {}
-    region = labels.get(f"{LABEL}/region") or job.get("_region") or (None if is_manager_job(job) else REGION)
+    # the region label is the dispatcher's pin (a cluster id or a region name); the operation's `region` is always the Nebius region
+    pinned = labels.get(f"{LABEL}/region")
+    region = (kube.cluster_region(pinned) if pinned else None) or job.get("_region") or (None if is_manager_job(job) else REGION)
     phase, waiting = _waiting(job, region) if status == "QUEUED" else (None, None)
     if is_jobset(job):              # a JobSet reports no start/completion time of its own: the pods' are the run's
         st = dict(st)

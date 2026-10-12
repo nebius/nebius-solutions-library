@@ -370,7 +370,11 @@ no node selector. An init container removes the compute attempt's bridge files f
 finalizer writes and an old result marker can never become this attempt's success; the application's own workspace
 and delivery marker are untouched, and whether the workspace is complete is the application's decision from its own
 marker. A failed computation (any other exit code) is never finalized; a model without `finalize` keeps today's
-behaviour.
+behaviour. A declared exit code is a `FailJob` rule on the compute Job: the GPU computation is never restarted
+by the Job's backoff for a delivery problem (the ordinary policy, disruptions and SIGKILL/SIGTERM ignored, is
+unchanged). A retry is pinned to the cluster that admitted the original (by cluster id, as the dispatcher's
+region pin and as the only candidate), so it reuses the kept volume there and never gets a fresh volume in
+another cluster of the same class.
 
 Exit semantics: `0` with `/work/RESULT.json` -> the finalizer's record carries `result_ref`, the root reports
 `SUCCEEDED` with `exported_by`, the volume is released after the acknowledged record; an exit code in

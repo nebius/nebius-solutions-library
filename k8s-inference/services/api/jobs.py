@@ -233,6 +233,10 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
     job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
+    if (fz := r.get("finalize")) and fz.get("onExitCodes"):
+        # "compute done, delivery pending" ends the Job at once: the GPU computation is never restarted by the Job's
+        # backoff for a delivery problem; re-delivery is the model's finalizer through :export (bounded there)
+        job["spec"]["podFailurePolicy"]["rules"].insert(0, {"action": "FailJob", "onExitCodes": {"containerName": "main", "operator": "In", "values": list(fz["onExitCodes"])}})
     if ex:
         execution.apply_job(job, ex)
     return job
@@ -699,6 +703,19 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
 EXPORT_RETRIES_MAX = 3
 
 
+def _pin_to_worker(job: dict, orig: dict) -> None:
+    """A retry on the original's kept volume must land on the cluster that holds it: the Job is pinned to the admitting
+    cluster by its id (the dispatcher's `serverless2.nebius/region` label, Kueue copies it to the Workload) and the
+    candidate list is that cluster alone (the `regions` annotation); a region name would only pin through the
+    MultiKueueCluster alias and is ambiguous with two workers in one region. A run pinned to a region from the start
+    (no manager Workload) keeps its region label."""
+    cluster = orig.get("_cluster")
+    if not cluster:
+        return
+    job["metadata"]["labels"][f"{LABEL}/region"] = cluster
+    job["spec"]["template"]["metadata"].setdefault("annotations", {})[f"{LABEL}/regions"] = cluster
+
+
 def export_again(ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None) -> tuple[dict, bool]:
     """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
     exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization"). With `finalize`
@@ -769,6 +786,7 @@ def export_again(ns: str, name: str, region: str, model: dict, defaults: dict, f
             c["env"] = [e for e in c.get("env", []) if e["name"] not in ("GPUS", "GPU_CLASS")] + [{"name": "GPUS", "value": "0"}, {"name": "GPU_CLASS", "value": ""}]
     spec.pop("nodeSelector", None); spec.pop("affinity", None); spec.pop("tolerations", None)
     job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
+    _pin_to_worker(job, orig)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
     # the role is the platform's statement about this Job: the API stamps every attempt record of it with it
@@ -972,6 +990,8 @@ def resume(ns: str, name: str, region: str, model: dict, defaults: dict, placeme
         job["metadata"]["annotations"][f"{LABEL}/idempotency-key"] = idem
     if superseding:             # automatic recovery: the successor says where it comes from and why (status.py `reason`)
         job["metadata"]["annotations"].update(superseding)
+    if pvc and not checkpoint_ref and not is_jobset(orig):
+        _pin_to_worker(job, orig)   # the same volume: the same cluster, by id
     if is_jobset(job):          # the shared checkpoint directory is keyed by the root operation
         for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:
             for m in c.get("volumeMounts", []):
