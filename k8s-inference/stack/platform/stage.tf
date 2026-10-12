@@ -32,6 +32,9 @@ locals {
   gpu_prices            = [for pn, p in try(local.clusters[local.id].pools, {}) : local.f.prices[p.platform]]
   gpu_driver_profiles   = yamldecode(file("${local.repo}/clusters/common/values/gpu-operator.yaml")).nebius.nvidiaDriverCRDPatch.profiles
   gpu_platforms_missing = sort(distinct([for pn, p in try(local.clusters[local.id].pools, {}) : p.platform if !contains([for pr in local.gpu_driver_profiles : pr.name], p.platform)]))
+  # the listed profile whose name is the longest prefix of a missing platform (gpu-b200-sxm-a-x -> gpu-b200-sxm-a, not gpu-b200-sxm)
+  gpu_driver_sibling = { for platform in local.gpu_platforms_missing : platform => try(
+  substr(reverse(sort([for pr in local.gpu_driver_profiles : format("%03d:%s", length(pr.name), pr.name) if startswith(platform, pr.name)]))[0], 4, -1), null) }
   values_override = {
     kueue = local.role.manager ? yamldecode(file("${local.repo}/clusters/control/values/kueue.yaml")) : {}
     # the driver the operator installs (terraform.tfvars gpu_operator); the rest is clusters/common/values/gpu-operator.yaml
@@ -44,7 +47,7 @@ locals {
       nebius = { nvidiaDriverCRDPatch = { profiles = concat(local.gpu_driver_profiles, [for platform in local.gpu_platforms_missing : {
         name         = platform
         nodeSelector = { "node.kubernetes.io/instance-type" = platform }
-        managerEnv   = try([for pr in local.gpu_driver_profiles : pr.managerEnv if startswith(platform, pr.name)][0], [])
+        managerEnv   = try([for pr in local.gpu_driver_profiles : pr.managerEnv if pr.name == local.gpu_driver_sibling[platform]][0], [])
       }]) } }
     }
     # with the operator the driver lives in a container and the `nvidia` RuntimeClass (created by the operator) injects it;
