@@ -12,6 +12,17 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
+## Automatic recovery after infrastructure loss (2026-10-12 14:15-14:40 UTC, the same test fleet)
+
+| Check | Result |
+|---|---|
+| Rollout | api 0.11.21, 0.11.22 and 0.11.23 applied on the control cluster with the narrow plan each time (the API Deployment, the billing CronJob's image, the three key bootstrap Jobs re-created; no pool, floor, quota, tenant or route change); `GET /v1/fleet` lists `execution.recovery` |
+| Fence on the fleet database | after a successor mark: a start or pointer record of the superseded pod 409, a success 409; its own `interrupted`/`failed` record accepted but stripped of `checkpoint_ref`, `checkpoint_generation`, `result_ref` (0.11.21 let a pointer record through, 0.11.22 coalesced a terminal record's pointer: both found by a live check with a throwaway operation and closed in 0.11.23) |
+| Drill | a run of the checkpoint-writing test class (policy `recover`, `wait_s 0`, `max_recoveries 1`, `deadline_s 7200`, preference RTX PRO 6000 then L40S) on us-central1; the injection was the Workload's `spec.active = false` on the control cluster (the documented, run-only method). Within one reconciler tick: the evicted pod's `interrupted` record accepted, `lost-at` stamped, the successor `<root>-r-<sha8>` created on L40S with the L40S image, `CHECKPOINT_REF` = the newest acknowledged pointer (generation 5), the preference narrowed, `activeDeadlineSeconds` 6697 = the root's remaining budget, a fresh volume; the original suspended, its Workload inactive, `successor` and `recovery` annotations set, status SUPERSEDED |
+| Handles | `GET` on the original returns the successor with `requested_id`, `root_operation_id`, `recovered_from`, `reason` ("recovered from <original> (infrastructure loss): rtx-pro-6000 -> l40s"); `:cancel` on the original cancelled the live successor |
+| Continuation | the successor ran on a fresh L40S node (about 6 min from zero), epoch 2, resumed at generation 6 from the pointer and reached 13 before the cancel; a later tick created no second successor |
+| Not a loss | unit-tested: application exit codes, `OOMKilled` (now `FAILED`, not `PREEMPTED`), deadlines, cancels (before and during a move), a worker whose pods cannot be listed, exhausted bounds, a missing pointer, the legacy `retry` default |
+
 ## Refactor 4: one API tier (2026-10-11 18:05-19:20 UTC, the same test fleet)
 
 | Check | Result |
