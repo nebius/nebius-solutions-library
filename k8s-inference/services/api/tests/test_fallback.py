@@ -5,7 +5,7 @@ and a queued operation says why it waits."""
 import json
 import pytest
 
-from test_api import FLEET, H, client, cluster  # noqa: F401
+from test_api import FLEET, H, client, cluster, pod  # noqa: F401
 import app as appmod
 import attempts
 import catalog
@@ -249,6 +249,49 @@ def test_resume_renders_the_pinned_revision(monkeypatch):
     assert pinned["job"]["command"] == "fold --v3" and pinned["version"] == 3
     assert catalog.pinned(current, {f"{LABEL}/model-version": "4"}) is current
     assert catalog.pinned(current, {}) is current
+
+
+def test_admitted_queued_run_names_its_cluster_phase_and_wait(client, monkeypatch):
+    """docs/API.md: a run admitted on a worker whose node is still coming up shows the cluster, `phase` and a bounded
+    reason from the pod the API lists (no Events), before any authenticated attempt exists; the QUEUED contract and the
+    record-based `attempt_id` stay."""
+    c, fake = client
+    monkeypatch.setattr(kube, "fleet", lambda: TWO_CLASS_FLEET)
+    m = _fold_model()
+    monkeypatch.setattr(catalog, "get", lambda name: m if name == "fold" else None)
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [])
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": {"placement": {"allowed_clusters": ["us-central1"]}}}, headers=H)
+    op = r.json()["id"]
+    uid = fake.jobs[("tenant-demo", op)]["metadata"].get("uid", "")
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "QUEUED" and got["phase"] == "waiting_for_admission" and got["cluster"] is None and got["attempt_id"] is None
+    # admitted on us-central1, no pod yet (the worker's copy is being created)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {uid: "us-central1"})
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "QUEUED" and got["cluster"] == "us-central1" and got["phase"] == "waiting_for_node" and "waiting for a node" in got["reason"]
+    # the pod exists and waits for a node (the pool scales from zero)
+    pending = {"metadata": {"name": f"{op}-pq52n", "namespace": "tenant-demo", "labels": {"job-name": op, f"{LABEL}/tenant": "demo", f"{LABEL}/mode": "run"}, "creationTimestamp": "2026-10-12T19:50:00Z"},
+               "spec": {"containers": [{"name": "main", "resources": {"limits": {"nvidia.com/gpu": "1"}}}]},
+               "status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": "0/4 nodes are available: 1 Insufficient nvidia.com/gpu, 3 node(s) didn't match Pod's node affinity/selector. " + "x" * 400}]}}
+    fake.pods.append(pending)
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "QUEUED" and got["phase"] == "waiting_for_node" and got["reason"].startswith("0/4 nodes are available") and len(got["reason"]) <= 300
+    assert got["cluster"] == "us-central1" and got["attempt_id"] is None and got["attempts"][-1]["attempt_id"] == f"{op}-pq52n"
+    # scheduled, the image is being pulled
+    pending["status"] = {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "True"}],
+                         "initContainerStatuses": [{"name": "fetch", "state": {"waiting": {"reason": "ContainerCreating"}}}],
+                         "containerStatuses": [{"name": "main", "state": {"waiting": {"reason": "PodInitializing"}}}]}
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["phase"] == "starting" and got["reason"] == "fetch: ContainerCreating"
+    # running: no phase, no reason
+    fake.pods.remove(pending)
+    fake.pods.append(pod(op, "Running", started="2026-10-12T19:56:00Z"))
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "RUNNING" and got["phase"] is None and got["reason"] is None and got["cluster"] == "us-central1"
 
 
 def test_queued_operation_reports_the_workload_reason(client, monkeypatch):

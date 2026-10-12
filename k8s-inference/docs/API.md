@@ -140,6 +140,16 @@ control -json tenant_keys` prints them); an admin key then mints user keys of it
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
 the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
 
+## Waiting runs
+
+A QUEUED run reports `phase` and a bounded `reason` so a cold start is not an unexplained queue: `waiting_for_admission`
+(no cluster admitted the Workload yet; `reason` is Kueue's condition message: quota, nomination), `waiting_for_node`
+(admitted on `cluster`; the pod has no node: the scheduler's message, typically a pool scaling from zero or a full
+pool, or no pod yet) and `starting` (scheduled; a container is waiting: the init containers, an image pull). `cluster`
+names the admitting worker's region from admission on, before any attempt record exists; `attempt_id` stays the
+newest authenticated attempt (null until the uploader's first record), the pending pod is listed in `attempts`. Read
+from the pod the API already lists, never from Events; `phase` is null outside QUEUED.
+
 ## Chains
 
 A resume, a capacity fallback or an automatic recovery continues an operation as a new member of a chain

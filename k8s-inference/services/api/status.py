@@ -129,6 +129,28 @@ def _json(text: str | None):
         return None
 
 
+def _waiting(job: dict, region: str | None) -> tuple[str, str | None]:
+    """(phase, reason) of a QUEUED run (docs/API.md): `waiting_for_admission` while no cluster admitted it (Kueue's
+    condition message, `_reason`), else `waiting_for_node` while its newest pod has no node (the scheduler's
+    `PodScheduled` message: a pool scaling from zero, a full pool) or no pod exists yet, else `starting` (a container
+    is waiting: image pull, the init containers). Bounded text, read from the pod the API already lists: no Events."""
+    if job.get("_reason") is not None or (is_manager_job(job) and not job.get("_cluster")):
+        return "waiting_for_admission", job.get("_reason")
+    pods = job.get("_pods") or []
+    if not pods:
+        return "waiting_for_node", f"placed on {region}, waiting for a node" if region else "placed, waiting for a node"
+    p = pods[-1]
+    st = p.get("status") or {}
+    sched = next((c for c in (st.get("conditions") or []) if c.get("type") == "PodScheduled"), None)
+    if sched and sched.get("status") != "True":
+        return "waiting_for_node", str(sched.get("message") or sched.get("reason") or "no node yet")[:300]
+    for c in (st.get("initContainerStatuses") or []) + (st.get("containerStatuses") or []):
+        w = (c.get("state") or {}).get("waiting") or {}
+        if w:
+            return "starting", (f"{c.get('name')}: {w.get('reason') or 'waiting'}" + (f" ({w['message']})" if w.get("message") else ""))[:300]
+    return "starting", None
+
+
 def normalise(job: dict, price_per_call: float | None = None, records: list | None = None) -> dict:
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
     labels, ann = md.get("labels", {}), md.get("annotations", {})
@@ -178,6 +200,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     except ValueError:
         inp = {}
     region = labels.get(f"{LABEL}/region") or job.get("_region") or (None if is_manager_job(job) else REGION)
+    phase, waiting = _waiting(job, region) if status == "QUEUED" else (None, None)
     if is_jobset(job):              # a JobSet reports no start/completion time of its own: the pods' are the run's
         st = dict(st)
         st["startTime"] = min((a["started_at"] for a in attempts if a["started_at"]), default=None)
@@ -196,7 +219,8 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             "resumable": status in ("FAILED", "CANCELLED", "EXPORT_FAILED") and labels.get(f"{LABEL}/mode") == "run" and
             (ann.get(f"{LABEL}/checkpoints") == "shared" if is_jobset(job) else bool(ann.get(f"{LABEL}/pvc"))),
             "execution": _json(ann.get(f"{LABEL}/execution")),
-            "reason": (job.get("_reason") if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback") or ann.get(f"{LABEL}/recovery"),
+            "reason": (waiting if status == "QUEUED" else None) or ann.get(f"{LABEL}/fallback") or ann.get(f"{LABEL}/recovery"),
+            "phase": phase,
             "successor": ann.get(f"{LABEL}/successor"),
             "recovered_from": ann.get(f"{LABEL}/recovered-from"),
             "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,

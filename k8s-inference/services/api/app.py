@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.28", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.29", lifespan=_lifespan)
 
 
 class InvokeRequest(BaseModel):
@@ -876,6 +876,8 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
     op.update(attempts.lifecycle(name, root, records))
+    if not op.get("cluster") and job.get("_region"):
+        op["cluster"] = job["_region"]          # admitted but no attempt record yet: the admitting worker's region
     if name != id:
         op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
     if root != name or name != id or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root))):
