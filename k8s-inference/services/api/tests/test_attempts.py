@@ -162,8 +162,13 @@ def test_epoch_fencing_in_the_database(database):
     assert e.value.status_code == 409 and "superseded" in e.value.detail
     with pytest.raises(HTTPException):
         attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "succeeded", "export": "succeeded"})
-    closed = attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "interrupted", "gpus": 1, "ended_at": "2026-10-11T11:00:00Z"})
-    assert closed["status"] == "interrupted"          # the evicted pod may still close its own attempt
+    closed = attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "interrupted", "gpus": 1, "ended_at": "2026-10-11T11:00:00Z",
+                                                                   "checkpoint_ref": "app://ckpt/9", "checkpoint_generation": 9, "result_ref": "app://late"})
+    assert closed["status"] == "interrupted"          # the evicted pod may still close its own attempt ...
+    assert closed["checkpoint_ref"] == "app://ckpt/4" and closed["checkpoint_generation"] == 4 and not closed.get("result_ref")   # ... but promotes nothing
+    assert attempts.latest_checkpoint("op-x")["generation"] == 4
+    failed = attempts.record("eu-north1", "tenant-demo", "op-x-b", {"operation": "op-x", "status": "failed", "exit_code": 1, "result_ref": "app://late-result"})
+    assert failed["status"] == "failed" and not failed.get("result_ref")
     rows = attempts.for_operation("op-x")
     assert [r["pod"] for r in rows] == ["op-x-a", "op-x-b"] and rows[1]["revision"] > rows[0]["revision"]
     attempts.mark_cancelled("op-x")

@@ -85,11 +85,14 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         epoch = cur[0] if cur else top + 1
         if epoch < top:                              # any record from a replaced attempt, pointers included
             raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
-        if marks and marks[1] and status not in ("interrupted", "failed"):
+        if marks and marks[1]:
             # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
             # publish progress (a start or pointer record) or a final success; its own interruption or failure may
-            # still close its attempt (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
-            raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
+            # still close its attempt, but promotes nothing: no pointer, generation or result from a superseded pod
+            # ever reaches the durable row (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
+            if status not in ("interrupted", "failed"):
+                raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
+            body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
         if cur and cur[1] in TERMINAL and status == "started":
             return _row(c, operation, pod)           # a late duplicate of the current attempt's start record
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
