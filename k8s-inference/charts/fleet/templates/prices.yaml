@@ -36,6 +36,15 @@ data:
       tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
     {{- end }}
     {{- end }}
+  clusters.yaml: |
+    {{- /* cluster id (MultiKueueCluster name, pools' `region`, catalog deployments) -> the Nebius region and project:
+           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region) */}}
+    {{- range $rn, $r := $f.regions }}
+    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }} }
+    {{- end }}
+    {{- if ne $f.control.id "none" }}
+    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }} }
+    {{- end }}
   tenants.yaml: |
     {{- range $tn, $t := (default dict $f.tenants) }}
     {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }} }

@@ -56,7 +56,7 @@ def batch(region: str = REGION) -> client.BatchV1Api:
     return client.BatchV1Api(_client(region))
 
 
-_fleet_cache: dict = {"until": 0.0, "pools": {}}
+_fleet_cache: dict = {"until": 0.0, "pools": {}, "clusters": {}}
 
 
 def fleet() -> dict:
@@ -70,6 +70,7 @@ def fleet() -> dict:
         data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
         _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
         _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
+        _fleet_cache["clusters"] = yaml.safe_load(data.get("clusters.yaml") or "") or {}
     except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
         pass
     _fleet_cache["until"] = time.time() + 60
@@ -102,8 +103,13 @@ def ib_devices_per_node(pools: list[str]) -> int:
 
 
 def cluster_region(cluster: str) -> str:
-    """MultiKueueCluster name (fleet.yaml region id: `hub`, `eu-south1`) -> region name the API uses
-    (`eu-north1`, `eu-south1`). The hub is the one id that differs from its region."""
+    """Cluster id (MultiKueueCluster name, the pools' `region`, catalog deployment keys; `hub`, `north`, `eu-south1`, ...)
+    -> the Nebius region the API uses for kubeconfigs, gateway domains and prices. The map is the fleet document's
+    `clusters.yaml` (charts/fleet, from the tfvars ids); before it exists only the hub alias was known, which is kept
+    as the fallback, and an id that is its own region name maps to itself."""
+    known = (fleet().get("clusters") or {}).get(cluster) or {}
+    if known.get("region"):
+        return known["region"]
     return HUB_REGION if cluster == "hub" else cluster
 
 

@@ -13,10 +13,12 @@ import db
 import execution
 import jobs
 import kube
+import models as models_mod
 from config import LABEL
 
 import placement as _placement
 _real_choose_class = _placement.choose_class          # captured before the autouse stub replaces it
+_real_cluster_region = kube.cluster_region                # same for the cluster id map
 
 CFG = {"identities": {}, "execution_profiles": {}}
 PER_CLASS = {"id": "fold", "kind": "job", "image": "img:default", "images": {"rtx-pro-6000": "img:rtx", "l40s": "img:l40s"},
@@ -35,6 +37,13 @@ def _env(monkeypatch):
     monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
     monkeypatch.setattr(appmod, "FLEET_MANAGER", True)
     monkeypatch.setattr(jobs.placing if hasattr(jobs, "placing") else appmod.placing, "choose_class", lambda m, region, gpus, available=None, tenant=None, regions=None: (available[0] if available else "rtx-pro-6000", "test"))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_catalog():
+    """The file catalog is cached by mtime: entries normalised under this module's patched fleet must not leak."""
+    yield
+    catalog._cache.update({"mtime": None, "models": {}})
 
 
 def _fold_model():
@@ -83,6 +92,34 @@ def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
     assert appmod.fallback_switch() == []
 
 
+def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypatch):
+    """Custom cluster ids (tfvars `regions.<r>.id`, e.g. north/south) resolve to their Nebius region through the
+    fleet document's clusters.yaml: kubeconfig choice, logs/metrics clients and admitted cancellation of a run that a
+    worker named `south` holds all depend on it (0.11.25 knew only the `hub` alias)."""
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}, "clusters": {"north": {"region": "eu-north1", "project": "p1"}, "south": {"region": "eu-south1", "project": "p2"}, "control": {"region": "eu-north1", "project": "p1"}}})
+    monkeypatch.setattr(kube, "cluster_region", _real_cluster_region)   # the module's autouse stub knows only hub
+    assert kube.cluster_region("north") == "eu-north1" and kube.cluster_region("south") == "eu-south1" and kube.cluster_region("control") == "eu-north1"
+    assert kube.cluster_region("eu-west2") == "eu-west2"                                  # an id that is its own region
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}})                           # a fleet document without the map: the legacy alias
+    assert kube.cluster_region("hub") == kube.HUB_REGION and kube.cluster_region("south") == "south"
+    # a run admitted by `south` is read, cancelled and logged through the eu-south1 clients
+    c, fake = client
+    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {}, "clusters": {"south": {"region": "eu-south1", "project": "p2"}}})
+    seen = []
+    orig_batch, orig_core = kube.batch, kube.core
+    monkeypatch.setattr(kube, "batch", lambda region="eu-north1": (seen.append(region), orig_batch(region))[1])
+    monkeypatch.setattr(kube, "core", lambda region="eu-north1": (seen.append(region), orig_core(region))[1])
+    r = c.post("/v1/models/hello-run:invoke", json={"input": {"message": "x"}}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    uid = fake.jobs[("tenant-demo", op)]["metadata"].get("uid", "")
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {uid: "south"})
+    seen.clear()
+    got = c.get(f"/v1/operations/{op}", headers=H)
+    assert got.status_code == 200 and "eu-south1" in seen and "south" not in seen
+    assert c.post(f"/v1/operations/{op}:cancel", headers=H).status_code == 200
+
+
 def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, monkeypatch):
     """A fleet run names where it may land through execution.placement.allowed_clusters; the API's implicit default
     region (the first deployment) is no request and never contradicts it. The class is ranked among the allowed
@@ -108,6 +145,22 @@ def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, m
     both = {"placement": {"allowed_clusters": ["us-central1", "eu-north1"]}}
     r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": both}, headers=H)
     assert r.status_code == 202 and set(fake.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"].split(",")) == {"us-central1", "eu-north1"}
+    # a class without per-class images: the preference alone must pick the queue and the class list (every probe used
+    # to land on the model's first class)
+    plain = catalog.normalise({**models_mod.to_entry({"id": "probe", "kind": "job", "image": "img:cuda", "command": "nvidia-smi",
+                                                     "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]}}, managed_by="api"), "version": 1})
+    monkeypatch.setattr(catalog, "get", lambda name: plain if name == "probe" else (m if name == "fold" else None))
+    for pref, queue in ((["l40s"], "prefer-l40s"), (["rtx-pro-6000"], "prefer-rtx-pro-6000"), (None, "prefer-rtx-pro-6000")):
+        body = {"input": {}, "execution": {"placement": {"gpu_preference": pref, "allowed_clusters": ["eu-north1", "us-central1"]}}} if pref else {"input": {}}
+        r = c.post("/v1/models/probe:invoke", json=body, headers=H)
+        assert r.status_code == 202, r.text
+        j = fake.jobs[("tenant-demo", r.json()["id"])]
+        assert j["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == queue, (pref, j["metadata"]["labels"])
+        assert j["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/gpu-classes"] == (",".join(pref) if pref else "rtx-pro-6000,l40s")
+        terms = j["spec"]["template"]["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"]
+        pools = next(t["values"] for t in terms if t["key"] == f"{LABEL}/pool")
+        assert set(pools) == ({"l40s": {"l40s-spot-1x"}, "rtx-pro-6000": {"rtx6000-spot-1x"}}[pref[0]] if pref else {"l40s-spot-1x", "rtx6000-spot-1x"})   # only the asked class's pools
+        assert f"{LABEL}/gpu-class" not in j["metadata"]["labels"]                                   # no class pin for a single-image class (Kueue may still move within the list)
     # single-cluster mode (no fleet manager): runs happen here, so a list that excludes this region is an error
     monkeypatch.setattr(appmod, "FLEET_MANAGER", False)
     r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": ex}, headers=H)

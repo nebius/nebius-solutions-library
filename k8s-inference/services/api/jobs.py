@@ -180,7 +180,8 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         # the preference queue may fall back to another GPU class; keep it to the classes the image runs on
         # (Kueue assigns only flavors whose node labels satisfy the affinity, docs/SCHEDULING.md). With per-class
         # images the image is the chosen class's, so only that class's pools qualify.
-        pools = kube.class_pools([gpu_class] if gpu_class else gpu_classes(model))
+        # the run's own class list when the caller narrowed it (execution.placement.gpu_preference), else the model's
+        pools = kube.class_pools([gpu_class] if gpu_class else ((placement or {}).get("classes") or gpu_classes(model)))
         if pools:
             terms.append({"key": f"{LABEL}/pool", "operator": "In", "values": pools})
     if local_nvme:
@@ -201,7 +202,11 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}}}
     if r.get("imagePullSecret"):
         pod["imagePullSecrets"] = [{"name": r["imagePullSecret"]}]
-    profile = f"prefer-{gpu_class}" if gpu_class else ((placement or {}).get("profile") or profile_of(model))
+    # the queue follows the class actually asked for: the pinned class, else the first of the run's (narrowed) class
+    # list, else the model's own profile; a gpu_preference without per-class images used to keep the model's queue
+    # and so landed every run on the model's first class (new fleet qualification, 2026-10-12)
+    classes_here = (placement or {}).get("classes") or []
+    profile = f"prefer-{gpu_class}" if gpu_class else (f"prefer-{classes_here[0]}" if classes_here else ((placement or {}).get("profile") or profile_of(model)))
     if gpu_class and placement:
         placement = {**placement, "profile": profile, "classes": [gpu_class]}   # the dispatcher keeps the run on this class
     meta = _meta(name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class, ex)
