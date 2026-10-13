@@ -110,7 +110,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.43", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.44", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -303,18 +303,67 @@ def _variant_for(m: dict, inp, cluster: str) -> dict:
     return vs[0]
 
 
+def _deployment_of(m: dict, requested: str | None) -> tuple[str, str]:
+    """Where a request for model `m` goes: (the deployment's cluster id as the catalog keys it, the Nebius region this
+    API reaches it in). `requested` (a request's `region`) may name the cluster id (`north`) or the region
+    (`eu-north1`); nothing = this API's own cluster when the model is deployed there, else the model's only
+    deployment. Two deployments in one region are never guessed between (400: name the cluster); a cluster this API
+    cannot reach is 400 (one kubeconfig per region, docs/API.md)."""
+    deps = list(m.get("regions") or [])
+    if not deps:
+        raise HTTPException(400, f"model {m.get('name')} is not deployed anywhere")
+    by_region: dict[str, list[str]] = {}
+    for cid in deps:
+        by_region.setdefault(kube.cluster_region(cid), []).append(cid)
+    if requested is None:
+        own = by_region.get(REGION) or []
+        if len(own) > 1:
+            raise HTTPException(400, f"model {m['name']} has several deployments in {REGION} ({own}); give region")
+        cid = own[0] if own else (deps[0] if len(deps) == 1 or len(by_region) == 1 and len(deps) == 1 else None)
+        if cid is None:
+            if len(deps) == 1:
+                cid = deps[0]
+            else:
+                raise HTTPException(
+                    400, f"model {m['name']} is deployed in {deps}; give region (a cluster id or a region)"
+                )
+    elif requested in deps:
+        cid = requested
+    else:
+        same = by_region.get(requested) or []
+        if not same:
+            raise HTTPException(400, f"model {m['name']} is deployed in {deps}, not {requested}")
+        if len(same) > 1:
+            raise HTTPException(
+                400, f"region {requested} has several deployments of {m['name']} ({same}); give the cluster id"
+            )
+        cid = same[0]
+    region = kube.cluster_region(cid)
+    if region not in kube.regions():
+        raise HTTPException(400, f"cluster {cid} ({region}) is not served by this API (available: {kube.regions()})")
+    if len(by_region.get(region) or []) > 1 and kube.cluster_id_or_none(region) != cid:
+        raise HTTPException(
+            400,
+            f"cluster {cid} shares region {region} with {by_region[region]}; this API reaches one cluster per region",
+        )
+    return cid, region
+
+
 def _public(m: dict, p: Principal | None = None) -> dict:
     if p is not None and (p.info.get("metadata") or {}).get("role") != "admin":
         m = {**m, "spec": None}  # container configuration belongs to fleet administrators
     if m["mode"] == "run":
         return catalog.to_public(m)
     statuses = []
-    for region in m["regions"]:  # the endpoints' live state, read in their clusters (REGION_KUBECONFIGS)
+    for cid in m[
+        "regions"
+    ]:  # deployments by cluster id; the live state is read in the cluster's region (REGION_KUBECONFIGS)
+        region = kube.cluster_region(cid)
         try:
             st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
         except (HTTPException, ApiException):
             st = {"status": "unavailable", "replicas_ready": None}
-        statuses.append({"region": region, **st})
+        statuses.append({"region": region, "cluster": cid, **st})
     return catalog.to_public(m, statuses)
 
 
@@ -574,9 +623,17 @@ async def invoke(
     authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
     if mode not in m["modes"]:
         raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
-    region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
-    if region not in m["regions"]:
-        raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
+    if mode == "run":
+        # a run's region is where its Job is created (the manager on the fleet path, where the dispatcher places it):
+        # the class's first region by default; a cluster id or a region name of the class is accepted
+        region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
+        if region not in m["regions"] and kube.cluster_region(region) not in m["regions"]:
+            raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
+        region = region if region in m["regions"] else kube.cluster_region(region)
+    else:
+        _cluster, region = _deployment_of(
+            m, req.region
+        )  # the endpoint's cluster id, and the region the API reaches it in
     if req.execution and mode == "sync":
         raise HTTPException(
             400, "execution options apply to runs and asynchronous endpoint calls, not to synchronous calls"
@@ -622,7 +679,7 @@ def _invoke_job(
                 400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
             )
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
-    if allowed and req.region and req.region not in allowed:
+    if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
         # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
         # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
         raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
@@ -1573,28 +1630,34 @@ def _variants_public(m: dict, region: str) -> list[dict]:
 
 @app.get("/v1/endpoints", responses={200: {"model": list[schemas.Endpoint]}})
 def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("read:catalog"))):
+    """Every deployment of every endpoint the key may see: one entry per deployment cluster (`cluster` is the id the
+    catalog keys it by, `region` the Nebius region the API reaches it in). `region` selects a cluster id or a region."""
     served_regions = kube.regions()
-    if region and region not in served_regions:
-        raise HTTPException(400, f"region {region} is not served by this API")
-    selected_region = region
+    if region and region not in served_regions and kube.cluster_region(region) not in served_regions:
+        raise HTTPException(400, f"region {region} is not served by this API (available: {served_regions})")
     out = []
     for m in catalog.all_models().values():
         if not allows_model(p, m["name"]):
             continue
         if m["mode"] == "run":
             continue
-        for region in [selected_region] if selected_region else served_regions:
-            if region not in m["regions"]:
+        for cid in m["regions"]:
+            cluster_region = kube.cluster_region(cid)
+            if region and region not in (cid, cluster_region):
+                continue
+            if cluster_region not in served_regions:
                 continue
             try:
-                i = _deployed(m, region)
+                _deployment_of(m, cid)  # 400 for a cluster this API cannot tell apart from another in its region
+                i = _deployed(m, cluster_region)
                 if i:
                     out.append(
                         {
-                            **ep.to_public(m, i, region),
+                            **ep.to_public(m, i, cluster_region),
+                            "cluster": cid,
                             **(
                                 {"variants": vs, "routing": m.get("routing")}
-                                if (vs := _variants_public(m, region))
+                                if (vs := _variants_public(m, cluster_region))
                                 else {}
                             ),
                         }
@@ -1605,7 +1668,8 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("rea
                         "id": m["k8s_name"],
                         "name": m["display_name"],
                         "model": m["name"],
-                        "region": region,
+                        "region": cluster_region,
+                        "cluster": cid,
                         "status": "unavailable",
                         "replicas_ready": None,
                         "gpu": m.get("gpu"),
@@ -1660,12 +1724,8 @@ def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: 
 
 
 def _endpoint_region(m: dict, region: str | None) -> str:
-    selected = region or (REGION if REGION in m["regions"] else m["regions"][0])
-    if selected not in kube.regions():
-        raise HTTPException(400, f"region {selected} is not served by this API")
-    if selected not in m["regions"]:
-        raise HTTPException(404, "Endpoint not deployed in this region")
-    return selected
+    """The Nebius region an endpoint request is served in, from a cluster id or a region (`_deployment_of`)."""
+    return _deployment_of(m, region)[1]
 
 
 @app.get("/v1/endpoints/{id}/metrics", responses={200: {"model": schemas.Metrics}})

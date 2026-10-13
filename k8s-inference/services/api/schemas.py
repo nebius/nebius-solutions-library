@@ -305,6 +305,7 @@ class ModelGpu(BaseModel):
 
 class ModelRegion(BaseModel):
     region: str | None = None
+    cluster: str | None = None
     status: Literal["ready", "scaled-to-zero", "deploying", "error", "unavailable"] | None = None
     replicas_ready: int | None = None
     reason: str | None = None
@@ -492,6 +493,9 @@ class Endpoint(BaseModel):
     name: str
     model: str
     region: str
+    cluster: str | None = (
+        None  # the deployment's cluster id as the catalog keys it (`north`); `region` is where the API reaches it
+    )
     url: str
     status: Literal["ready", "scaled-to-zero", "deploying", "error", "unavailable"]
     replicas_ready: int | None

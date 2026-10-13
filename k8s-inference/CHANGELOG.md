@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.44
+
+- Deployments keyed by cluster id (`north`) and clients keyed by Nebius region (`eu-north1`) are resolved through the
+  fleet document on every path: `:invoke` (sync and async), `GET /v1/models` region status, `GET /v1/endpoints`
+  (one entry per deployment with `cluster` and `region`), endpoint detail and scaling; a request's `region` may be
+  either; two deployments of one model in one region are never guessed between (400: name the cluster).
+
 ## api 0.11.43, jobs 0.1.18
 
 - Endpoint calls with private input and application-owned output (docs/JOBS.md "Endpoint calls with private input and
