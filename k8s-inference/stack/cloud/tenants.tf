@@ -3,8 +3,7 @@
 # (stack/modules/tenant-region). Created with the other cloud resources so that every cluster's platform stage
 # reads the same credentials from this one state: a worker writes its region's bucket into the tenant
 # namespace, every cluster also gets the hub region's bucket (fleet-placed runs and the control cluster's API
-# use it). In the earlier three-stage layout the buckets were created by the models stage of each region, and the other
-# clusters read them from the hub's models state (docs/OPERATIONS.md "Upgrading to the two-stage layout").
+# use it).
 locals {
   tenant_regions = merge([for tn, t in local.f.tenants : {
     for rn in coalesce(t.regions, sort(keys(local.f.regions))) : "${tn}/${rn}" => { tenant = tn, region = rn, config = t }

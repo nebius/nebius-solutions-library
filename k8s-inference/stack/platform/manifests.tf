@@ -3,8 +3,8 @@
 # applied server-side, one kubectl_manifest per object in the component's wave (clusters/common/apps `wave`),
 # next to the upstream Helm releases. Never a Helm release: Helm would want its ownership labels on every object,
 # while server-side apply through the kubectl provider owns them as they are. The resources are keyed
-# <group or _>/<Kind>/<namespace or _>/<name>, the ids the earlier kustomize render used, so every object
-# keeps its state address; tools/check.sh proves the render equal to stack/platform/tests/golden.
+# <group or _>/<Kind>/<namespace or _>/<name>, so every object keeps a stable state address across releases;
+# tools/check.sh holds the render equal to the record in stack/platform/tests/golden.
 data "helm_template" "platform" {
   name         = "platform"
   chart        = "${local.repo}/charts/platform"
