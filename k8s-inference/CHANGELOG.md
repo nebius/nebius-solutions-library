@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.45, jobs 0.1.19
+
+- An endpoint call's pod carries the runner's file-system group (fsGroup 10001, as a run's pod): the retained work
+  volume is writable and the private binding readable by the non-root caller; the uploader keeps recording under /tmp
+  when the volume is not writable. A main container that ended with an exit code the Job's failure policy fails on is
+  reported FAILED at once (jobs 0.1.19 for the uploader).
+
 ## api 0.11.44
 
 - Deployments keyed by cluster id (`north`) and clients keyed by Nebius region (`eu-north1`) are resolved through the

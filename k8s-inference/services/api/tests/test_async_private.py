@@ -373,3 +373,58 @@ def test_a_delivered_error_capture_stays_failed_on_the_root_live_and_after_gc(
     rows[-1].update({"status": "succeeded", "exit_code": 0})
     got = c.get(f"/v1/operations/{oid}", headers=H).json()
     assert got["status"] == "SUCCEEDED" and got["exported_by"] == x1
+
+
+def test_private_call_pod_owns_its_volume_and_binding_and_a_dead_main_is_failed(client, monkeypatch):
+    """The caller runs as uid 10001: the pod's fsGroup makes the claim's root and the 0440 binding files its (the
+    permission-denied blocker of 2026-10-13); and a main that exited with a FailJob code is FAILED at once, not RUNNING
+    while the uploader still posts."""
+    import status
+    from test_api import pod as make_pod
+
+    c, cluster = client
+    _tenant(monkeypatch)
+    _bind(c, "call-7")
+    body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-7"}}
+    oid = c.post("/v1/models/llm-example:invoke", json=body, headers=H).json()["id"]
+    job = cluster.jobs[("tenant-demo", oid)]
+    spec = job["spec"]["template"]["spec"]
+    assert (
+        spec["securityContext"]["fsGroup"] == 10001
+        and spec["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+    )
+    vols = {v["name"]: v for v in spec["volumes"]}
+    assert vols["private-input"]["secret"]["defaultMode"] == 0o440
+    # main exited 2 (the caller's error), the pod still Running (uploader): the operation is FAILED now
+    p = make_pod(oid, "Running", finished="2026-10-13T20:00:10Z", exit_code=2, gpus=0)
+    assert (
+        status._fails_job(job, 2)
+        and status._fails_job(job, 4)
+        and status._fails_job(job, 5)
+        and not status._fails_job(job, 1)
+    )
+    op = status.normalise({**job, "_pods": [p]}, None, [])
+    assert op["status"] == "FAILED" and op["error"]  # the error is the attempt's container reason
+    managed = cluster.jobs[
+        (
+            "tenant-demo",
+            c.post(
+                "/v1/models/llm-example:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H
+            ).json()["id"],
+        )
+    ]
+    assert (
+        status.normalise(
+            {
+                **managed,
+                "_pods": [
+                    make_pod(
+                        managed["metadata"]["name"], "Running", finished="2026-10-13T20:00:10Z", exit_code=1, gpus=0
+                    )
+                ],
+            },
+            None,
+            [],
+        )["status"]
+        == "RUNNING"
+    )

@@ -728,7 +728,10 @@ def build_async(
         "serviceAccountName": EXECUTOR_SA,
         "terminationGracePeriodSeconds": 60,
         "priorityClassName": "serverless2-batch",
-        "securityContext": POD_SECURITY_CONTEXT,
+        # the runner (uid/gid 10001) writes the work volume (a claim's root is root-owned until the kubelet applies the
+        # group) and reads the private binding (a Secret volume, mode 0440): the file-system group makes both its, as
+        # for a run's pod (build_run)
+        "securityContext": {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch", **POD_SECURITY_CONTEXT},
         "containers": [main, _uploader(name, region, output_prefix, work)],
         "volumes": [
             {"name": "work", "persistentVolumeClaim": {"claimName": work}}

@@ -30,6 +30,22 @@ PHASE = {"Pending": "QUEUED", "Running": "RUNNING", "Succeeded": "SUCCEEDED", "F
 FINALIZING_GRACE_S = 600  # a completed run without a delivery record is FINALIZING this long, then EXPORT_FAILED
 
 
+def _fails_job(job: dict, exit_code) -> bool:
+    """Whether `exit_code` of `main` is one the Job's podFailurePolicy answers with FailJob (no more pod retries)."""
+    if exit_code is None:
+        return False
+    for rule in ((job.get("spec") or {}).get("podFailurePolicy") or {}).get("rules") or []:
+        codes = rule.get("onExitCodes") or {}
+        if (
+            rule.get("action") == "FailJob"
+            and codes.get("containerName", "main") == "main"
+            and codes.get("operator", "In") == "In"
+            and int(exit_code) in [int(v) for v in codes.get("values") or []]
+        ):
+            return True
+    return False
+
+
 def _main_state(pod: dict) -> dict:
     for c in pod.get("status", {}).get("containerStatuses") or []:
         if c.get("name") == "main":
@@ -252,6 +268,11 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
     elif ann.get(f"{LABEL}/cancelled"):
         status = "CANCELLED"
+    elif attempts and attempts[-1]["status"] == "FAILED" and _fails_job(job, attempts[-1].get("exit_code")):
+        # the main container ended with an exit code the Job's failure policy turns into FailJob: the Job fails as soon
+        # as the pod ends (the uploader may still be posting the record); the operation is over now, not RUNNING
+        status = "FAILED"
+        error = f"main exited {attempts[-1].get('exit_code')}: {attempts[-1].get('reason') or 'the Job fails on this exit code'}"
     elif any(a["status"] == "RUNNING" for a in attempts) or any(
         (p.get("status") or {}).get("phase") == "Running" for p in job.get("_pods", [])
     ):

@@ -64,7 +64,10 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   if [ -z "$ckpt" ] && [ -f /work/CHECKPOINT.json ]; then
     ckpt=$(jq -r '.checkpoint_ref // empty' /work/CHECKPOINT.json 2>/dev/null); gen=$(jq -r '.generation // empty' /work/CHECKPOINT.json 2>/dev/null)
   fi
-  mkdir -p /work/attempts
+  # the record goes next to the outputs; a volume this container cannot write (a misconfigured claim) must not stop
+  # the record from reaching the API: it is kept under /tmp then and the upload step reports the volume
+  REC=/work/attempts
+  if ! mkdir -p "$REC" 2>/dev/null || ! [ -w "$REC" ]; then REC=/tmp/attempts; mkdir -p "$REC"; echo "WARN: /work is not writable by the uploader; records kept under $REC"; fi
   [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
   jq -cn --arg op "$OPERATION" --arg pod "$POD_NAME" --arg node "$node" --arg pool "$pool" --arg st "$1" --argjson exit "${EXIT:-null}" \
     --argjson gpus "${GPUS:-0}" --arg cls "${GPU_CLASS:-}" --arg s "$started" --arg e "$ended" --arg img "$image" --arg dg "$digest" \
@@ -74,22 +77,22 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
       image:$img,image_digest:$dg,io_mode:$mode} + (if $exp != "" then {export:$exp} else {} end)
       + (if $opmode != "" then {mode:$opmode} else {} end) + (if $model != "" then {model:$model} else {} end)
       + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)
-      + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "/work/attempts/$POD_NAME.json"
+      + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "$REC/$POD_NAME.json"
   # the durable copy: the fleet API keeps attempts in its database (fenced by epoch; a stale pod gets 409). A terminal
   # record is retried; ACK holds the last HTTP status (200 = acknowledged; the work volume is released only then)
   ACK=""
   if [ -n "${API_URL:-}" ]; then
     local tries=1; [ "$1" = started ] || tries=4
     for i in $(seq 1 $tries); do
-      ACK=$(curl -sS -m 20 -o /work/attempts/.ack.json -w "%{http_code}" -X POST "$API_URL/internal/attempts" \
-        -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@/work/attempts/$POD_NAME.json" 2>/dev/null || echo 000)
+      ACK=$(curl -sS -m 20 -o "$REC/.ack.json" -w "%{http_code}" -X POST "$API_URL/internal/attempts" \
+        -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@$REC/$POD_NAME.json" 2>/dev/null || echo 000)
       echo "attempt record $1 -> API $ACK"
       case "$ACK" in 200|409) break ;; esac
       [ "$i" -lt "$tries" ] && { sleep 20 & wait $!; }
     done
     if [ "$ACK" = 200 ] && [ -n "$gen" ]; then
       jq -c --arg g "$gen" '{generation:($g|tonumber), epoch:.epoch, checkpoint_ref:.checkpoint_ref, revision:.revision, acknowledged_at:(now|todate)}' \
-        /work/attempts/.ack.json > /work/CHECKPOINT.ack.json.tmp 2>/dev/null && mv /work/CHECKPOINT.ack.json.tmp /work/CHECKPOINT.ack.json
+        "$REC/.ack.json" > /work/CHECKPOINT.ack.json.tmp 2>/dev/null && mv /work/CHECKPOINT.ack.json.tmp /work/CHECKPOINT.ack.json
     fi
   fi
 }
@@ -115,7 +118,7 @@ upload() {   # $1 = status
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then
     echo "RECORD $(date -u +%FT%TZ) rank=$NODE_RANK status=$st -> $OUTPUT_PREFIX/attempts/$POD_NAME.json"
-    aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
+    aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
     return
   fi
   echo "UPLOAD START $(date -u +%FT%TZ) status=$st -> $OUTPUT_PREFIX"
@@ -131,7 +134,7 @@ upload() {   # $1 = status
   set +f
   if [ "$rc" = 0 ]; then EXPORT=succeeded; else EXPORT=failed; echo "UPLOAD FAILED $(date -u +%FT%TZ) rc=$rc: the volume is kept, retry the export (POST /v1/operations/$OPERATION:export)"; fi
   record "$st"                                  # the record now says how the export went (and reaches the API)
-  aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
+  aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
   # STATUS.json is published last: its presence with export=succeeded is the durable-delivery marker
   printf '{"operation":"%s","attempt_pod":"%s","status":"%s","export":"%s","exit_code":%s,"finished_at":"%s"}\n' \
     "$OPERATION" "$POD_NAME" "$st" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
@@ -153,7 +156,7 @@ while true; do
       # sends no SIGTERM, measured on a B300 spot node) leaves this "started" record, which the
       # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
       record started
-      [ "$MODE" = record ] || aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
+      [ "$MODE" = record ] || aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
     fi
     SEEN=1; gone=0
     checkpoint_changed && record started     # the live pointer, fenced and acknowledged through the API
