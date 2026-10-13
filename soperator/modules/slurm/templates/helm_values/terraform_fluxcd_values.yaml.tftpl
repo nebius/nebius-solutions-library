@@ -347,6 +347,13 @@ resources:
 
             %{~ if has_nccl_network_vars ~}
             slurmScripts:
+              taskPrologEnv:
+                enabled: true
+                sourceFiles:
+                  - /etc/profile.d/90-nccl-network-vars.sh
+                exportVars:
+                  - UCX_NET_DEVICES
+                  - NCCL_IB_HCA
               extra:
                 nccl-network-vars.sh:
                   content: |-
