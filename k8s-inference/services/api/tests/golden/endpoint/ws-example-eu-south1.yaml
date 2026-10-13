@@ -122,6 +122,7 @@ spec:
     headersToExtAuth:
     - authorization
     - sec-websocket-protocol
+    - x-serverless2-admitted
     http:
       path: /internal/authorize/ws-example
       backendRefs:

@@ -52,7 +52,7 @@ for rn, r in regions.items():
                              for v in m.get("versions", []) if v.get("kubernetes_version") == k8s for it in v.get("items", []))
         if not ok:
             findings.append(f"{rn}/{pn}: driver preset {drv} is not compatible with {plat} on Kubernetes {k8s}")
-        # docs.nebius.com/compute/storage/local-disks (2026-10-08): local SSD only on gpu-b300-sxm / 8gpu-192vcpu-2768gb
+        # docs.nebius.com/compute/storage/local-disks: local SSD only on gpu-b300-sxm / 8gpu-192vcpu-2768gb
         # in uk-south1, eu-west2, us-north1; every other preset rejects local_disks at node-group creation.
         if p.get("interconnect") == "infiniband":
             clusterable = [x["name"] for x in d.get("spec", {}).get("presets", []) if x.get("allow_gpu_clustering")]
@@ -81,7 +81,7 @@ for project in sorted({r["project"] for r in regions.values()}):
 
 # tenant-wide limits per region (the project-level allowances above carry no limit): every worker region needs
 # about eight disks (node boot disks, the Loki, Prometheus and image-cache volumes) and one preemptible VM per spot
-# node. me-west1 on 2026-10-09: compute.disk.count 70/70 for the whole tenant, no volume could be provisioned.
+# node. A region at compute.disk.count 70/70 for the whole tenant (seen in me-west1) provisions no volume at all.
 tenant = None
 for project in sorted({r["project"] for r in regions.values()}):
     pj, err = nebius("iam", "project", "get", "--id", project)

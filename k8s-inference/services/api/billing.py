@@ -118,6 +118,8 @@ async def bill_once() -> int:
                     if not identity:
                         raise ValueError("job UID is required for accounting")
                     total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
+                    if db.enabled():
+                        keys.release(name, gpu_s)                 # the key's slot and its GPU-second reservation (keys.admit)
                     done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
                     _annotate(region, ns, name, done, job)
                     if f"{LABEL}/execution" in ann:

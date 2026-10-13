@@ -4,7 +4,7 @@
 
 Every asynchronous operation of the API is one Kubernetes `batch/v1` Job in a tenant namespace.
 No workflow engine: the Job controller retries, Kueue queues and admits, the CSI volume keeps the
-checkpoints, a 30 MB runner image moves data. `services/api/jobs.py` (about 450 lines) renders,
+checkpoints, a 30 MB runner image moves data. `services/api/jobs.py` renders,
 submits, reads, cancels and resumes them. The fleet's API creates them on the MultiKueue manager (the
 dedicated control cluster) and lets Kueue plus the cost dispatcher place them on a worker ("Fleet placement"
 below); in single-cluster mode (`control_plane.dedicated = false`) it creates them in its own cluster.
@@ -34,8 +34,8 @@ job:
   uploadExcludes: "--exclude 'scratch/*'"
 gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # classes the image runs on, PREFERRED FIRST (scheduling profile)
 deployments:                      # optional: the regions the run class may land in (default: every region of the fleet); per-region parameter defaults and price
-  hub:       { price_per_gpu_hour: 2.15, parameters: { nb_min_ci: "16000" } }
-  eu-south1: { price_per_gpu_hour: 1.60, parameters: { nb_min_ci: "16000" } }
+  hub:           { price_per_gpu_hour: 2.15, parameters: { nb_min_ci: "16000" } }
+  <region id>:   { price_per_gpu_hour: 1.60, parameters: { nb_min_ci: "16000" } }
 parameters:
   - { name: image, type: string, required: true }
 ```
@@ -51,8 +51,9 @@ With `job.images` (one image per GPU class) the API chooses the class at submiss
 dispatcher's ranking, renders that class's image and limits the affinity to that class's pools; the
 operation reports it as `gpu_class` and `image`, and a resume keeps it.
 
-Three run classes ship: `container-run` (any image and command; the generic job class),
-`hello-run` (CPU smoke test). Application layers define their own run classes through the model API.
+Three run classes ship (`catalog/models`): `container-run` (any image and command; the generic job
+class), `hello-run` (CPU smoke test) and `distributed-run` (multi-node JobSet, "Multi-node runs"
+below). Application layers define their own run classes through the model API (`kind: job`).
 `parameters` is what a client shows and what `input` may contain (unknown names, or a missing
 `required` one, are a 400); `deployments.<cluster>.parameters` are per-region defaults the caller
 never sees (pool, in-region image, tuning). `input_prefix` and `output_prefix` are always accepted;
@@ -83,8 +84,8 @@ uploads it. A region without the shared filesystem has no claim, and a run that 
 The pod runs with `fsGroup: 10001` (the runner's uid) so fetch and upload work whatever user the
 model image runs as, and with a shared PID namespace so the command's shell is not PID 1 and
 SIGTERM really terminates `sh -c ...` commands (PID 1 ignores it, and the pod would hold its GPU
-until the grace period's SIGKILL). The runner image (`services/jobs`, `serverless2/jobs:0.1.4` in
-each region's registry under the same path; `RUNNER_IMAGE` on the API names the hub one) is alpine +
+until the grace period's SIGKILL). The runner image (`services/jobs`, the jobs image of
+`images.versions`, through the logical registry host; `RUNNER_IMAGE` on the API names it) is alpine +
 aws-cli + curl + jq + three scripts. The pod
 carries the Kueue labels (`kueue.x-k8s.io/queue-name: <profile>`, priority class `customer-batch` or
 `bulk-backfill` for `priority: low`), so the Job is gated until the profile's ClusterQueue admits it:
@@ -116,16 +117,13 @@ manager on a lost node), so the pod is not the record. The uploader writes `atte
 (operation, pod, node, status, exit code, GPUs, start and end) into the work volume and the bucket
 on every exit path, including a partial upload on SIGTERM; `GET /v1/operations/{id}` and the billing
 pass merge these records with the live pods (a live pod wins over its own record). The list
-endpoint shows live pods only. Measured on the hub: an endpoint scaling up on the shared H100 pool
-preempted a run's pod two seconds after `main` had finished; the Job was still `Complete`, the
-outputs were in the bucket, the pod was gone. A node that dies without warning (a spot VM stopped by
-Nebius: no SIGTERM reaches the pod; measured 2026-10-09 on a B300 spot node, `docs/VERIFICATION.md`)
-leaves the "started" record the uploader writes to the volume and the bucket when `main` begins (jobs
-image 0.1.8): the attempt shows as `PREEMPTED` with reason "node lost without warning", no end time, and
-bills nothing. A stop that is orderly enough for the SIGTERM path (the B300 spot VM stopped on
-2026-10-09) gets the full record on the volume, which before 0.1.8 reached the bucket, and the
-operation, only with the next upload on that volume (the resumed attempt's); the start record makes
-the attempt visible at once either way.
+endpoint shows live pods only. An endpoint scaling up on a shared pool can preempt a run's pod
+seconds after `main` has finished: the Job is still `Complete`, the outputs are in the bucket, the
+pod is gone. A node that dies without warning (a spot VM stopped by Nebius: no SIGTERM reaches the
+pod) leaves the "started" record the uploader writes to the volume and the bucket when `main`
+begins: the attempt shows as `PREEMPTED` with reason "node lost without warning", no end time, and
+bills nothing. A stop that is orderly enough for the SIGTERM path gets the full record; the start
+record makes the attempt visible at once either way.
 
 **Manual: `POST /v1/operations/{id}:resume`.** For a run that is `FAILED` (retries exhausted,
 or a bug that has since been fixed in the inputs) or `CANCELLED`. The API renders Job `<id>-r<n>`
@@ -170,17 +168,17 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   MultiKueue dispatches it, so the control cluster carries the tenant's claim templates (charts/tenant, rendered
   there whenever any region has an InfiniBand pool) and the same Kueue `deviceClassMappings` as the workers
   (`clusters/control/values/kueue.yaml`); without either the workload stays `QuotaReserved=False
-  DRAResourcesUnresolved` (test fleet, 2026-10-09, docs/VERIFICATION.md).
+  DRAResourcesUnresolved`.
 - **InfiniBand in the pod, without privileges.** Nebius GPU node images ship the InfiniBand
-  drivers (8 x 400 Gb/s NDR ports `mlx5_0..7`, interfaces `ib0..7`, measured on an 8x H100 node in a
-  fabric-3 GPU cluster), and Managed Kubernetes runs **DraNet** (Kubernetes DRA driver for the RDMA
+  drivers (8 x 400 Gb/s NDR ports `mlx5_0..7`, interfaces `ib0..7` on an 8-GPU H100 node in a GPU
+  cluster), and Managed Kubernetes runs **DraNet** (Kubernetes DRA driver for the RDMA
   NICs; DeviceClasses `ib.networking.nebius.ai` and `rdma.networking.nebius.ai` on every cluster)
   on the nodes of a node group that sets `gpu_settings.dra = true` (`nebius.com/dranet-rdma-capable`
   label, one ResourceSlice per node). Terraform sets it on every `interconnect: infiniband` pool;
   without it a node has the NICs but publishes no devices and a claiming pod never schedules
-  (`cannot allocate all claims`, measured 2026-10-08). A `required` run references the tenant's
-  ResourceClaimTemplate `ib-<n>` (charts/tenant, `infiniband: true`; n = the pool's
-  `ib_devices_per_node`, ExactCount because that is what Kueue's DRA accounting supports): the
+  (`cannot allocate all claims`). A `required` run references the tenant's
+  ResourceClaimTemplate `ib-<n>` (charts/tenant, `infiniband: true`; n = the NICs per node of the
+  pool, ExactCount because that is what Kueue's DRA accounting supports): the
   node's `n` RDMA interfaces move into the pod, `main` gets `resources.claims: [ib]`, Kueue charges
   `nebius.ai/infiniband` x n against the pool's quota (`charts/fleet`, Kueue `deviceClassMappings`),
   and the pod gets the NCCL environment of the
@@ -189,7 +187,7 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   wins). **No capability, no root, no privileged namespace.** RDMA pins memory
   (`ibv_reg_mr`), which `RLIMIT_MEMLOCK` bounds: the Nebius node image ships 8 MiB, and with every
   capability dropped NCCL fails at `ibv_reg_mr_iova2` / `ibv_create_cq` with "Cannot allocate
-  memory" (measured 2026-10-08, two restarts, docs/VERIFICATION.md). The usual fix is
+  memory". The usual fix is
   `CAP_IPC_LOCK` (it bypasses the limit), which is outside Pod Security Admission `baseline` and
   would force the namespace to `privileged`. Instead the GPU nodes' container runtime runs with an
   unlimited memlock limit (`LimitMEMLOCK=infinity` on the containerd unit, written by the pools'
@@ -198,7 +196,8 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   runner sidecars, and the tenant namespace stays at `baseline`. (The same approach as NVIDIA's
   InfiniBand node configuration for Kubernetes; `privileged: true` in Nebius' own NCCL test
   manifest exists only to raise that limit.) NVIDIA Network Operator is not needed on the Nebius node
-  images (docs.nebius.com/kubernetes/gpu/set-up: required only for custom images or B200).
+  images (docs.nebius.com/kubernetes/gpu/set-up: required only for custom images or B200); it is
+  installed when the fleet uses the GPU Operator (docs/FLEET.md "GPU drivers").
 - **Scratch and checkpoints.** `/work` is node-local per pod (`emptyDir`, `disk_gi` limit; the
   kubelet's ephemeral storage, which is the local NVMe on presets that have it), not a per-run RWO
   volume: N pods on N nodes cannot share one disk. Inputs are fetched by every pod. Checkpoints:
@@ -207,7 +206,7 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   `/work/checkpoint` under `checkpoints/<root id>`, so a restart and a `:resume` continue from it;
   `local` (default) keeps them under `/work`, gone with the pod. Rank 0 uploads `/work`
   (minus `in/` and `checkpoint/`) and `STATUS.json`; every rank uploads its attempt record
-  (`UPLOAD_SCOPE=rank0`, runner 0.1.6).
+  (`UPLOAD_SCOPE=rank0`).
 - **Failure, preemption, resume.** The indexed Job has `backoffLimit: 0`; any pod loss (spot
   preemption, node loss, an application exit) fails it and the JobSet's
   `failurePolicy: {maxRestarts: 3, restartStrategy: Recreate}` recreates every pod, so the ranks
@@ -220,35 +219,31 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
 
 **Scale-from-zero does not work with DRA claims.** The cluster autoscaler builds the template of an
 empty node group without ResourceSlices, so a pod that claims InfiniBand NICs never triggers a
-scale-up (`pod didn't trigger scale-up: cannot allocate all claims`, measured on the hub
-2026-10-08; GKE documents the same rule for DRA node pools). It does not grow from one node either:
-the autoscaler's simulation of a new node copies the devices without their attributes and the
-DeviceClass selector fails (`"DynamicResources" filter plugin: class ib.networking.nebius.ai: selector #0:
-CEL runtime error: no such key: ifName`, measured on test fleet, 2026-10-09 with one node in the pool). The
-dispatcher therefore moves the pool's floor itself (docs/SCHEDULING.md "InfiniBand pools grow on demand"):
-while a multi-node run waits for or holds an InfiniBand pool, the node group's minimum is raised to the run's
-node count through the Nebius API (within `max_nodes`), and it returns to the fleet's `min_nodes` ten minutes
-after the last such run. Submitting a run is all it takes; the nodes boot after admission (a few minutes, the
-usual start of a scaled-from-zero pool). Reserved pools (the usual home of a 16-node job) are fixed-size anyway.
+scale-up (`pod didn't trigger scale-up: cannot allocate all claims`; GKE documents the same rule for
+DRA node pools). It does not grow from one node either: the autoscaler's simulation of a new node
+copies the devices without their attributes and the DeviceClass selector fails (`"DynamicResources"
+filter plugin: class ib.networking.nebius.ai: selector #0: CEL runtime error: no such key: ifName`).
+The dispatcher therefore moves the pool's floor itself (docs/SCHEDULING.md "InfiniBand pools grow on
+demand"): submitting a run is all it takes; the nodes boot after admission (a few minutes, the usual
+start of a scaled-from-zero pool). Reserved pools (the usual home of a 16-node job) are fixed-size anyway.
 
 ### Limits of multi-node runs
 
 What works, and where the edges are (sources: docs.nebius.com/compute/clusters/gpu,
-docs.nebius.com/kubernetes/gpu/clusters, docs.nebius.com/kubernetes/node-groups/manage, and the
-measurements in docs/VERIFICATION.md):
+docs.nebius.com/kubernetes/gpu/clusters, docs.nebius.com/kubernetes/node-groups/manage):
 
 | Limit | Why |
 |---|---|
 | All pods of one run land in **one pool = one GPU cluster = one InfiniBand fabric**. No cross-pool, cross-region or mixed-platform runs. | A Nebius GPU cluster lives in one fabric of one region and one project; nodes outside it have no InfiniBand path to it (Nebius isolates GPU clusters with InfiniBand partition keys: nodes of different GPU clusters cannot talk over the fabric even on the same physical fabric). The API pins the JobSet to the pools of the model's classes that have the fabric; Kueue admits the whole pod set on one flavor. |
 | **8-GPU presets only.** | GPU clusters accept only full-node presets (`8gpu-*`); the renderer, the solution's tfvars validation and the Nebius API refuse others. One pod takes one whole node. |
-| **The pool's floor follows the run, not the autoscaler** (the autoscaler never adds InfiniBand nodes): the dispatcher raises the node group's minimum to the largest waiting or running multi-node run's node count, within `max_nodes`, and restores `min_nodes` after an idle period; `terraform plan` shows the raised floor as drift meanwhile. | The cluster autoscaler templates an empty node group without DRA ResourceSlices (`cannot allocate all claims`, measured 2026-10-08), and from one node its simulated devices carry no attributes, so the DeviceClass selector errors (`CEL runtime error: no such key: ifName`, measured 2026-10-09): no scale-up either way. docs/SCHEDULING.md "InfiniBand pools grow on demand". Reserved pools are fixed-size anyway. |
+| **The pool's floor follows the run, not the autoscaler** (the autoscaler never adds InfiniBand nodes); `terraform plan` shows the raised floor as drift meanwhile. | docs/SCHEDULING.md "InfiniBand pools grow on demand". Reserved pools are fixed-size anyway. |
 | **NIC claims are ExactCount: 8 per node (4 on GB300).** | Kueue's DRA accounting (0.20) supports ExactCount claims only; the tenant's `ib-8` / `ib-4` templates hand the pod every NIC of its node (the pod has the whole node anyway). |
-| **Size of one run**: `nodes <= MULTINODE_MAX_NODES` (64 by default), a node group holds at most 100 nodes, and a fabric has limited GPU capacity. | Nebius publishes no fixed maximum per GPU cluster; "each fabric has limited GPU capacity" and a GPU cluster is bounded by the quota of its project and the free capacity of its fabric. A 16-node run needs 16 nodes in ONE pool (one node group, one GPU cluster): size `max_nodes` (and the reservation) accordingly; the Kueue quota of the pool is `ib_devices_per_node x max_nodes` NICs. |
+| **Size of one run**: `nodes <= MULTINODE_MAX_NODES` (64 by default), a node group holds at most 100 nodes, and a fabric has limited GPU capacity. | Nebius publishes no fixed maximum per GPU cluster; "each fabric has limited GPU capacity" and a GPU cluster is bounded by the quota of its project and the free capacity of its fabric. A 16-node run needs 16 nodes in ONE pool (one node group, one GPU cluster): size `max_nodes` (and the reservation) accordingly; the Kueue quota of the pool is NICs per node x `max_nodes`. |
 | **Spot preemption = restart-all** from the last checkpoint; after `maxRestarts` (3) the run is FAILED. | A partial rank set cannot continue an NCCL job. Use `checkpoints: shared` so the restart (and a `:resume`) continues from the shared filesystem; `local` checkpoints die with the pod. Reserved or on-demand pools avoid the restarts. |
 | **One run per node at a time.** | A pod requests the preset's GPU count, CPU and memory; nothing else fits on the node while it runs. |
-| **Which platforms and regions have fabrics today** | H100 (`gpu-h100-sxm`): eu-north1 `fabric-2/3/4/6`. H200 (`gpu-h200-sxm`): eu-north1 `fabric-7`, eu-west1 `fabric-5`, eu-north2 `eu-north2-a`. B200 (`gpu-b200-sxm`, `8gpu-160vcpu-1792gb`): us-central1, me-west1. B300 (`gpu-b300-sxm`, `8gpu-192vcpu-2768gb`): uk-south1, eu-west2, us-north1. GB300 (`gpu-gb300`): 4 NICs per node. No fabric: L40S, RTX PRO 6000, every 1-GPU preset, eu-south1 today. The fabric names change as Nebius adds capacity: `fleet.yaml infiniband_fabric` is the one place to update (docs.nebius.com/compute/clusters/gpu). |
+| **Which platforms and regions have fabrics** | H100 (`gpu-h100-sxm`): eu-north1 `fabric-2/3/4/6`. H200 (`gpu-h200-sxm`): eu-north1 `fabric-7`, eu-west1 `fabric-5`, eu-north2 `eu-north2-a`. B200 (`gpu-b200-sxm`, `8gpu-160vcpu-1792gb`): us-central1, me-west1. B300 (`gpu-b300-sxm`, `8gpu-192vcpu-2768gb`): uk-south1, eu-west2, us-north1. GB300 (`gpu-gb300`): 4 NICs per node. No fabric: L40S, RTX PRO 6000, every 1-GPU preset. The fabric names change as Nebius adds capacity: `infiniband_fabric` in `terraform.tfvars` is the one place to update (docs.nebius.com/compute/clusters/gpu). |
 
-Terraform side (`fleet.yaml`, docs/FLEET.md): a pool with `interconnect: infiniband` (8-GPU preset)
+Terraform side (`terraform.tfvars`, docs/FLEET.md): a pool with `interconnect: infiniband` (8-GPU preset)
 gets a `nebius_compute_v1_gpu_cluster` on `infiniband_fabric` (region and platform specific:
 `fabric-2/3/4/6` H100 eu-north1, `fabric-7` H200 eu-north1, `fabric-5` H200 eu-west1,
 `eu-north2-a` H200 eu-north2; B300 in uk-south1/eu-west2/us-north1, B200 in us-central1/me-west1
@@ -256,12 +251,10 @@ per docs.nebius.com/kubernetes/gpu/clusters) and its node group attaches through
 `template.gpu_cluster`. Pools without it can run multi-node jobs over the pod network only on explicit request
 (`interconnect: none`), which is fine for small models and useless for 16 x B300.
 
-Verified (2026-10-08, docs/VERIFICATION.md): the control path on the hub with a 2-pod CPU-only
-JobSet through the API (creation, Kueue admission, rank env, rank-0 upload, cancel), and the
-InfiniBand data path on a temporary pool of 2 x 8 H100 spot nodes in a fabric-3 GPU cluster:
-DRA claims allocated (8 NICs per pod), NCCL `NET/IB` on `mlx5_0..7`, a 1 GiB all-reduce over
-16 GPUs at 436.5 GB/s bus bandwidth, restart-all after rank failures, rank-0 upload. 16 x B300 is
-the same path on an `8gpu-192vcpu-2768gb` pool (uk-south1, eu-west2, us-north1).
+Measured on a pool of 2 x 8 H100 nodes in one GPU cluster: DRA claims allocated (8 NICs per pod),
+NCCL `NET/IB` on `mlx5_0..7`, a 1 GiB all-reduce over 16 GPUs at 436.5 GB/s bus bandwidth, restart-all
+after rank failures, rank-0 upload. 16 x B300 is the same path on an `8gpu-192vcpu-2768gb` pool
+(uk-south1, eu-west2, us-north1).
 
 ## Model weights for runs
 
@@ -351,7 +344,7 @@ application-managed I/O the application writes `/work/RESULT.json` (`{"result_re
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.
 
-## Finalization by the application (2026-10-12)
+## Finalization by the application
 
 With application-managed I/O the platform cannot re-upload what the application owns. A run class may therefore
 declare a model-owned finalizer, `job.finalize = {"command": "...", "on_exit_codes": [75], "timeout_s": 1800,
@@ -369,7 +362,7 @@ no node selector. An init container removes the compute attempt's bridge files f
 `CHECKPOINT.ack.json`, `RESULT.json`, `attempts/.ack.json`), so the finalizer's uploader records only what the
 finalizer writes and an old result marker can never become this attempt's success; the application's own workspace
 and delivery marker are untouched, and whether the workspace is complete is the application's decision from its own
-marker. A failed computation (any other exit code) is never finalized; a model without `finalize` keeps today's
+marker. A failed computation (any other exit code) is never finalized; a model without `finalize` keeps the ordinary
 behaviour. A declared exit code is a `FailJob` rule on the compute Job: the GPU computation is never restarted
 by the Job's backoff for a delivery problem (the ordinary policy, disruptions and SIGKILL/SIGTERM ignored, is
 unchanged). A retry is pinned to the cluster that admitted the original (by cluster id, as the dispatcher's
@@ -400,10 +393,10 @@ MultiKueue copies the Job there, syncing its status back. The manager Job is the
 copy on the worker carries the pods. What differs from the regional path:
 
 - **Bucket.** The worker is not known when the run is submitted, so inputs and outputs live in
-  the tenant's hub-region bucket (`s3://serverless2-<tenant>-eu-north1`, the `tenant-storage`
+  the tenant's hub-region bucket (`s3://<fleet>-<tenant>-<hub region>`, the `tenant-storage`
   Secret of the control cluster's tenant namespace; `input_prefix` elsewhere is a 400). The runner
-  containers read it through the Secret `s3-fleet` that onboarding writes into every worker's tenant
-  namespace (hub-region key, public endpoint). The regional path keeps the regional bucket (`s3`).
+  containers read it through the Secret `s3-fleet` that the platform stage writes into every worker's
+  tenant namespace (hub-region key, public endpoint). The regional path keeps the regional bucket (`s3`).
 - **Region.** None unless pinned: by the caller (`region`) or by a resume (the worker that ran the
   original; `serverless2.nebius/region` label, copied onto the Workload). Image references are
   fleet-wide (`registry.serverless2.local/...`, `docs/IMAGES.md`), so nothing in the Job depends on
@@ -417,7 +410,7 @@ copy on the worker carries the pods. What differs from the regional path:
   deletes it after a successful upload; the dispatcher's sweeper deletes it once no manager Job
   references it any more (TTL, a cancel of a queued run; 15 min after creation at the earliest), once
   every Job that still references it was superseded by a continuation on a fresh volume (fallback,
-  automatic recovery: the handles stay readable, dispatcher 0.2.11), or when every Job that uses it was
+  automatic recovery: the handles stay readable), or when every Job that uses it was
   admitted in another cluster. A reference is a manager Job whose pod template names the claim or that
   the volume pass recorded on it, in any state: a FAILED, EXPORT_FAILED or cancelled handle keeps its
   volume for `:resume`/`:export` until the handle itself goes; a same-volume resume or finalizer counts
@@ -426,7 +419,7 @@ copy on the worker carries the pods. What differs from the regional path:
   active, attempts and logs use the worker's pods (the API finds the worker through the Workload's
   `status.clusterName`, `region` is null until then). After it finishes the worker's copy is gone
   and the attempts are the uploader's records in the bucket (`attempts/<pod>.json`), which is why
-  the uploader waits for the kubelet to report `main`'s exit code (up to 2 min, runner 0.1.3)
+  the uploader waits for the kubelet to report `main`'s exit code (up to 2 min)
   before it writes the record. The worker's copy is never listed as an operation of its own
   (label `kueue.x-k8s.io/multikueue-origin`).
 - **Cancel / resume.** Cancel of a running run patches the deadline onto the worker's copy and the
@@ -448,8 +441,8 @@ and the `cancelled` annotation: the controller terminates the pod (SIGTERM, grac
 uploader does a partial upload with status `interrupted` at once, then waits for `main`'s own
 SIGTERM handling to end and uploads again), the Job ends `Failed/DeadlineExceeded` and is reported
 `CANCELLED`, resumable. The kubelet does not refresh a terminating pod's container statuses, which
-is why the uploader watches `main`'s processes and not only the API (measured: with the API alone
-it sat until the grace period's SIGKILL, holding the GPU for `graceSeconds`).
+is why the uploader watches `main`'s processes and not only the API (with the API alone it would
+sit until the grace period's SIGKILL, holding the GPU for `graceSeconds`).
 
 ## Endpoint calls (`mode: async`)
 
@@ -461,8 +454,8 @@ caller's key: the same path, key check and per-key rate limit as an external cli
 predictor Service (the tenant policy does not reach `models`, so no call skips the key check or the
 accounting).
 `call.sh` reaches the gateway's in-cluster Service with curl `--connect-to` while keeping the
-public TLS name (`ENDPOINT_CONNECT_TO`, runner 0.1.4; the public IP works from pods too, measured,
-the Service avoids the NAT hop). It retries 408/429/5xx/connection
+public TLS name (`ENDPOINT_CONNECT_TO`; the public IP works from pods too, the Service avoids the
+NAT hop). It retries 408/429/5xx/connection
 errors with backoff for as long as the Job lives (a scaled-to-zero or saturated endpoint is simply
 waited for; any other 4xx is the caller's error: exit 2, which a `FailJob` rule turns into a FAILED
 operation without pod retries). The uploader puts `out/response.json` and `out/call.json` in the
@@ -499,30 +492,13 @@ uploader polls its own pod), PVCs get/delete (release after success). The dispat
 a worker (`multikueue`, `charts/platform/templates/fleet-access`) adds PVC create/get/list/patch/delete
 for the work volumes of fleet-placed runs.
 
-## Verified on the hub (2026-10-07, tenant `eval`, API run locally against the cluster)
-
-| Case | Result |
-|---|---|
-| `hello-run` | QUEUED -> RUNNING -> SUCCEEDED in 58 s; `STATUS.json`, `out/result.json`, `attempts/<pod>.json` in the bucket; PVC deleted by the uploader |
-| a GPU run class (molecular dynamics, 5k steps), H100 spot | SUCCEEDED; outputs and checkpoint uploaded; billed 12 GPU-s = $0.0072 to the key (`/key/update`), PVC released |
-| `container-run` checkpoint loop, pod deleted mid-run | replacement pod on the same volume, `FETCH SKIP`, `start at n=9`; Job stayed `Running`, not failed |
-| cancel while running | pod gone 12 s after `:cancel` (SIGTERM reaches `sh` through the shared PID namespace); operation CANCELLED, attempt CANCELLED, resumable |
-| `:resume` of the cancelled loop | `<id>-r1` on the same PVC, `start at n=37`, SUCCEEDED, `out/done.txt` under `operations/<id>-r1/`, PVC released; the PVC had both Jobs as owners |
-| `async` call to an OpenAI endpoint | SUCCEEDED in 155 s (cold start waited for by `call.sh`), response inline from `out/response.json`; a wrong `model` name is a 404: FAILED at once |
-| endpoint preempts a run | an endpoint scaling up preempted the run's pod 2 s after `main` ended: Job `Complete`, pod gone, attempt record from the bucket is the only history |
-| billing pass | 7 runs billed once, idempotent on the second pass, two leftover volumes released |
-
-Two findings changed the design during verification: a pod deleted by preemption leaves no
-attempt (hence the records in the bucket), and a resumed Job must be re-rendered, not copied
-(Kueue `PodSetUpdate: conflict`). A copy of a finished Job's spec is never a valid new Job.
-
 ## Writing a job for `container-run`
 
 ```sh
 curl -X POST $API/v1/models/container-run:invoke -H "Authorization: Bearer $KEY" -d '{
-  "name": "finetune-7b", "region": "eu-south1", "priority": "normal",
+  "name": "finetune-7b", "region": "eu-north1", "priority": "normal",
   "input": { "image": "registry.serverless2.local/nebius/trainer:1.2", "gpus": 1, "disk_gi": 200,
-             "input_prefix": "s3://serverless2-<tenant>-eu-south1/uploads/<id>",
+             "input_prefix": "s3://<fleet>-<tenant>-eu-north1/uploads/<id>",
              "command": "python train.py --data /work/in --out /work/out --resume-from $CHECKPOINT_DIR" } }'
 ```
 
@@ -534,7 +510,7 @@ SIGTERM reaches the shell of a string command (shared PID namespace); a long-run
 that shell (`python train.py`) only sees it if the script forwards it (`exec python train.py`,
 or a `trap`), so prefer `exec` for the final command of a script.
 
-## Terraform solution (2026-10-08): scratch storage
+## Scratch storage
 
 A run class may set `job.scratch: network | local-nvme` (`container-run` exposes it as the `scratch`
 parameter, default `network`). `network` is the per-operation PVC described above (automatic resume on

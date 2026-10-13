@@ -26,8 +26,7 @@ keep its checkpoints for `:resume`. The uploader deletes the volume after a succ
 here deletes it once none of its Jobs exists on the manager any more (the Job's TTL, a cancel of a queued
 run; after ORPHAN_AFTER_S), or when every Job that uses it was admitted in another cluster.
 Admission is read on the WORKERS: MultiKueue creates the remote Workload under the same name in every
-nominated cluster, and the one whose Workload carries `Admitted: True` runs the Job (measured 2026-10-07:
-the manager's own `status.clusterName` / admission check never turn while the external dispatcher is in
+nominated cluster, and the one whose Workload carries `Admitted: True` runs the Job (the manager's own `status.clusterName` / admission check never turn while the external dispatcher is in
 charge, and `clusterName` is cleared for finished runs anyway). The admitting cluster is written onto the
 manager Workload (`serverless2.nebius/admitted-cluster`), once, for the API (region of the operation,
 price, where a resume must go) and for this dispatcher's own bookkeeping.
@@ -78,12 +77,12 @@ def nominate(custom, ns, name, want, status=None):
     server-side apply as `kueue-admission`; a value written with a merge patch (an "Update" managedFields entry,
     even under the same manager name) is not removed by that apply and the API server then rejects Kueue's patch
     ("clusterName and nominatedClusterNames are mutually exclusive"): the manager Workload stays Pending forever
-    (measured 2026-10-07, Kueue 0.20). docs: kueue.sigs.k8s.io/docs/concepts/multikueue "Workload Dispatching".
+    (Kueue 0.20). docs: kueue.sigs.k8s.io/docs/concepts/multikueue "Workload Dispatching".
 
     The same manager name owns Kueue's quota reservation (`status.admission`) and the admission-check states
     (`status.admissionChecks`): an apply that names only nominatedClusterNames drops them (the server treats
     the omitted fields as released by this manager), the manager scheduler re-admits the workload and, after a
-    retry, the API server rejects the apply ("admissionChecks[0].state: Required value"; measured 2026-10-08).
+    retry, the API server rejects the apply ("admissionChecks[0].state: Required value").
     The apply therefore restates those fields exactly as read.
     """
     keep = {k: status[k] for k in KEPT_STATUS if status and status.get(k)}
@@ -181,7 +180,7 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         pool = clusters[cname]["pools"][fname]
         cap = CAP_RANK.get(pool.get("capacity", "spot"), 3)
         # what the run costs per hour: its GPUs on a node that is up with room, else the whole node the pool
-        # would boot (a 1-GPU run on an 8-GPU pool pays eight GPUs; measured 2026-10-09: it booted a full node)
+        # would boot (a 1-GPU run on an 8-GPU pool pays eight GPUs: it boots a full node)
         node = int(pool.get("gpus_per_node") or 1)
         eff = price * (max(gpus, 1) if is_free else max(max(gpus, 1), node))
         if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then cost (mirrored in services/api/placement.py)
@@ -238,7 +237,7 @@ def pvc_of(template: dict) -> str | None:
     """The claim behind the pod's `work` volume, None when it is not a claim (multi-node runs scratch on an emptyDir).
     Other claims of the pod are never the dispatcher's: a multi-node run with `checkpoints: shared` mounts the
     tenant's `scratch-shared` claim (charts/tenant), which the sweeper deleted as an "orphan" when it was taken for
-    the work volume (test fleet, 2026-10-09, docs/VERIFICATION.md)."""
+    the work volume (docs/VERIFICATION.md)."""
     for v in (template.get("spec") or {}).get("volumes") or []:
         if v.get("name") == WORK_VOLUME and v.get("persistentVolumeClaim", {}).get("claimName"):
             return v["persistentVolumeClaim"]["claimName"]

@@ -12,11 +12,15 @@ one Kubernetes Job per operation (`docs/JOBS.md`), list the `parameters` a clien
 offers, and carry `deployments.<cluster>.parameters` (pool, image, tuning) plus
 `price_per_gpu_hour` for billing. `container-run` is the generic single-node class (any image and command),
 `distributed-run` the multi-node one, `hello-run` the CPU smoke test. The platform ships only these;
-models are an input (`terraform.tfvars` `models`, or `POST /v1/models`), see README.md "Deploy a model".
+models are runtime input through `POST /v1/models` (README.md "Day 2"; nothing about a model is in `terraform.tfvars`).
 An application layer (a scientific-AI product, a chat product, a team's fine-tuning) brings its own models
 through that API; none is part of the platform.
 
 ## Catalog entry
+
+The entry below is the internal shape: what `services/api/models.py` (`to_entry`) produces from a model
+definition and what the renderers read. A client writes the definition of docs/API.md "Models" (its `scaling`
+vocabulary is docs/API.md "Scaling"); the built-in run classes in this directory are written in this shape by hand.
 
 ```yaml
 id: <dns-name>                 # InferenceService name, namespace `models`
@@ -42,9 +46,7 @@ runtime:                       # runtime settings (services/api/render_endpoint.
   volumes: [{ name: cache, mountPath: /cache, sizeLimit: 8Gi }]
   weights:                     # optional: weights on the region's shared filesystem (PVC models/weights-shared, subPath <path>)
     sharedFilesystem: { enabled: true, path: <id>, mountPath: /weights }
-    env: { HF_HOME: /weights } # or NIM_CACHE_PATH, whatever the runtime reads
-                               # hub only until the eu-south1 filesystem quota (compute.filesystem.size.network-ssd)
-                               # is granted: eu-south1 has no `weights-shared` claim, the pod would stay Pending
+    env: { HF_HOME: /weights } # or NIM_CACHE_PATH, whatever the runtime reads; needs the region's weights filesystem
   readinessProbe: { path: /readyz }
 deployments:                   # one key per cluster directory; values override `runtime`
   hub:       { pool: h100-spot-1x, priorityClassName: serverless2-interactive }
@@ -57,24 +59,17 @@ deployments:                   # one key per cluster directory; values override 
    user the container runs as (`crane config <image>`). Private images: pull
    secret in namespace `models` (NGC: `ngc`, created from your NGC API key
    with username `$oauthtoken`; the key stays outside git).
-2. Images must live in a registry the region's nodes can pull from. Nodes only
-   pull from registries in their own project: mirror into the regional registry
-   (`nebius registry create --parent-id <project> --name serverless2-models`,
-   `crane auth login cr.<region>.nebius.cloud -u iam -p "$(nebius iam get-access-token)"`,
-   `regctl registry set cr.<region>.nebius.cloud --blob-chunk 67108864 --blob-max 268435456`,
-   `regctl image copy --platform linux/amd64 <src>@sha256:... cr.<region>.nebius.cloud/<registry-id-without-prefix>/<repo>:<tag>`)
-   and put the regional reference in `deployments.<cluster>.image`.
-   `crane copy` fails on multi-GiB layers (monolithic PATCH, "unexpected EOF");
-   regctl with 64 MiB chunks does ~47 MiB/s. The IAM token expires after
-   about 40 minutes: log in again and rerun (pushed blobs are skipped).
+2. Reference the image through the fleet's logical registry host
+   (`registry.serverless2.local/<alias>/<path>`, `docs/IMAGES.md`): every cluster's cache fetches it from the
+   source registry or an upstream on first pull, nothing is mirrored per region.
    Set `deployments.<cluster>.paused: true` to prune a model from a cluster
    without deleting its entry.
 3. Write the catalog entry; keep `maxReplicas` 1 to 2 (the GPU pools are shared)
    and `minReplicas: 0` unless the measured cold start is unacceptable for the
    class. Requests may only use `nvidia.com/gpu`, `cpu`, `memory`
    (the Kueue ClusterQueues cover nothing else).
-4. Check rendering locally with `.venv-api/bin/python services/api/models.py render <cluster> < catalog/models/<id>.yaml` (the API's renderer; `helm template <id> charts/endpoint -f catalog/models/<id>.yaml --set cluster=<cluster>` is the reference rendering). Run `make check`, then apply the Terraform models stage through `stack.sh` to deploy bundled entries.
-5. Customer-created models use `POST /v1/models` (admin key). The API stores desired state/history before applying this same chart and retrying regional copies; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
+4. Check rendering locally with `.venv-api/bin/python services/api/models.py render <cluster> < catalog/models/<id>.yaml` (the API's renderer, `services/api/render_endpoint.py`), then `make check`. The built-in classes are read at API start; a changed file reaches a fleet with the next API image.
+5. Models are created with `POST /v1/models` (admin key). The API stores desired state and history before rendering the objects on each cluster and retries a failed cluster; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
 6. Verify a cold and warm request through the predictor's external HTTPS host with a permitted key. OpenAI API-managed models register their LiteLLM group during reconciliation. See `docs/EDGE.md` and `docs/OPERATIONS.md`.
 
 ## Pitfalls (measured)
@@ -82,7 +77,7 @@ deployments:                   # one key per cluster directory; values override 
 - `minReplicas` must be in `spec.predictor`; the Knative annotation alone is
   overridden to 1. `initial-scale` is 1, so every new revision starts one pod.
 - WebSocket scale-from-zero works: the activator holds the upgrade request
-  until the pod is ready (hub: 195 s with a 9 GiB image pull); keep the
+  until the pod is ready (195 s with a 9 GiB image pull); keep the
   client's open timeout above the cold start.
 - vLLM and NeMo need `/dev/shm` as an emptyDir (`shm.enabled`).
 - The `kserve/huggingfaceserver:v0.20.0` tag is CPU-only torch; use `-gpu`.

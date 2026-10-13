@@ -187,7 +187,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         terms.append({"key": f"{LABEL}/local-nvme", "operator": "In", "values": ["true"]})
         # only regions with an NVMe pool are candidates for the dispatcher: Kueue ignores an affinity key that
         # no flavor of a cluster declares, so a worker without such a pool would admit the run and leave its pod
-        # Pending for ever (measured 2026-10-08/09; the flavor of a local_nvme pool carries the label since then)
+        # Pending for ever (the flavor of a local_nvme pool carries the label)
         nvme_regions = sorted({p["region"] for p in (kube.fleet().get("pools") or {}).values() if p.get("local_nvme") in (True, "true")})
         if kube.fleet().get("pools") and not nvme_regions:
             raise HTTPException(400, "scratch local-nvme needs a pool with local_nvme = true; this fleet has none (docs/FLEET.md \"Local NVMe\")")
@@ -203,7 +203,7 @@ def build_run(name: str, model: dict, params: dict, tenant: str, label: str | No
         pod["imagePullSecrets"] = [{"name": r["imagePullSecret"]}]
     # the queue follows the class actually asked for: the pinned class, else the first of the run's (narrowed) class
     # list, else the model's own profile; a gpu_preference without per-class images used to keep the model's queue
-    # and so landed every run on the model's first class (new fleet qualification, 2026-10-12)
+    # and so landed every run on the model's first class
     classes_here = (placement or {}).get("classes") or []
     profile = f"prefer-{gpu_class}" if gpu_class else (f"prefer-{classes_here[0]}" if classes_here else ((placement or {}).get("profile") or profile_of(model)))
     if gpu_class and placement:
@@ -318,7 +318,7 @@ def _multinode(name: str, model: dict, r: dict, values: dict, pod: dict, nodes: 
         # every InfiniBand NIC of the node through DRA (DeviceClass ib.networking.nebius.ai, DraNet on the node image).
         # No capability: RDMA pins memory, which RLIMIT_MEMLOCK bounds, and the GPU nodes' container runtime runs
         # with an unlimited memlock limit (cloud-init + node-config), so `drop: [ALL]` under PSA baseline holds
-        # (measured 2026-10-08, docs/JOBS.md "Multi-node runs").
+        # (docs/JOBS.md "Multi-node runs").
         pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
         main["resources"]["claims"] = [{"name": "ib"}]
     pod["subdomain"] = name
@@ -600,7 +600,7 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int) -> list[dict]:
             raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
         except (urllib3.exceptions.HTTPError, OSError) as e:
             # a region that cannot be reached (gone, or its endpoint down) must not hide every other region's
-            # operations (the console showed 500 for every tenant while a region was being replaced, 2026-10-10)
+            # operations (the console showed 500 for every tenant while a region was being replaced)
             log.warning("operations: region %s unreachable, skipped: %s", r, str(e)[:160])
             continue
         for p in pods:

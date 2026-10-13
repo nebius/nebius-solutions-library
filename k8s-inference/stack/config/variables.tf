@@ -31,7 +31,7 @@ variable "fleet" {
     # NVIDIA GPU Operator (Nebius marketplace chart, clusters/common/apps/gpu-operator.yaml) installs the driver,
     # the container toolkit, the device plugin and GPU feature discovery on every GPU node; the fleet's own
     # nvidia-device-plugin release is then not installed. driver_version = the driver the operator installs
-    # (an image tag of the marketplace driver image; 580.173.02 is what the cuda13.0 preset ships on 2026-10);
+    # (an image tag of the marketplace driver image; 580.173.02 is what the cuda13.0 preset ships);
     # kernel_module = open | proprietary | auto (GPUDirect Storage needs the open modules); gds = GPUDirect
     # Storage (the nvidia-fs module next to the driver). network_operator: the NVIDIA Network Operator (DOCA
     # drivers for the nodes' Mellanox NICs) is installed before the GPU Operator on every worker cluster (the
@@ -151,8 +151,8 @@ variable "fleet" {
         # interconnect = infiniband: the pool's nodes join one Nebius GPU cluster (nebius_compute_v1_gpu_cluster,
         # one per pool) on `infiniband_fabric`, so multi-node jobs run over InfiniBand; needs a full-node preset
         # the platform allows clustering for (8gpu-* on H100/H200/B200/B300, 4gpu-* on GB300; preflight checks
-        # the platform's `allow_gpu_clustering`). Fabrics per region (docs.nebius.com/compute/clusters/gpu,
-        # 2026-10): eu-north1 fabric-2/3/4/6, eu-north2-a; eu-west1 fabric-5; eu-west2 eu-west2-a; uk-south1
+        # the platform's `allow_gpu_clustering`). Fabrics per region (docs.nebius.com/compute/clusters/gpu):
+        # eu-north1 fabric-2/3/4/6, eu-north2-a; eu-west1 fabric-5; eu-west2 eu-west2-a; uk-south1
         # uk-south1-a; us-central1 us-central1-a/-b; us-north1 us-north1-a; me-west1 me-west1-a. Nodes get the
         # label serverless2.nebius/interconnect=infiniband and the pool's Kueue flavor carries it, so a job
         # class can require it. A reservation (capacity block) must be on the same fabric.
@@ -199,7 +199,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.33")
+        api        = optional(string, "0.11.34")
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.14")
         ops        = optional(string, "0.1.11")
@@ -208,7 +208,7 @@ variable "fleet" {
 
     # USD per GPU-hour by platform (list prices); the scheduler orders pools by these and the cost export
     # prices node time with them. Reservations have zero marginal cost. The default covers every current
-    # Nebius GPU platform (nebius.com/prices, 2026-10); an entry given here replaces the default one.
+    # Nebius GPU platform (nebius.com/prices); an entry given here replaces the default one.
     prices = optional(map(object({
       on_demand = number
       spot      = number
@@ -264,12 +264,12 @@ variable "fleet" {
     }), {})
 
     # Secret values never go into this file: they are read from the environment at apply time, by the
-    # variable NAMES given here. stack.sh refuses to run while a named variable is unset; a name set to null
-    # switches that feature off (ngc_api_key_env = null: no NIM access, no NGC pull Secrets).
+    # variable NAMES given here. stack.sh refuses to run while a named variable is unset; an empty name ("")
+    # switches that feature off (ngc_api_key_env = "": no NIM access, no NGC pull Secrets).
     secrets = optional(object({
-      ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache); null = off
-      hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes); null = off
-      registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams; null = off
+      ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache); "" = off
+      hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes); "" = off
+      registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams; "" = off
       mysterybox_credentials_secret = optional(string)                         # pre-provisioned subject-credentials.json, per cluster
       workload_secrets = optional(map(object({
         namespace        = string
@@ -359,7 +359,7 @@ variable "fleet" {
   }
   validation {
     # Let's Encrypt refuses accounts whose contact is example.com/.test/.invalid (400 invalidContact), and then
-    # no certificate is ever issued: port 443 stays dark on every cluster (measured on a fresh fleet, 2026-10-08).
+    # no certificate is ever issued: port 443 stays dark on every cluster.
     condition     = var.fleet.edge.mode != "public" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.fleet.edge.acme.email)) && !can(regex("@(example\\.(com|net|org)|.*\\.(test|invalid|localhost))$", var.fleet.edge.acme.email))
     error_message = "edge.acme.email: a real mailbox for the Let's Encrypt account (renewal and incident mail); example.com, .test and .invalid are refused by the ACME server and leave the gateway without a certificate."
   }

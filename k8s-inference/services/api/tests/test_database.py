@@ -172,3 +172,83 @@ def test_receipt_cannot_be_reassigned_to_another_key(database):
         billing.record_spend(keys.key_hash(b), 1, "hub/uid", 100)
 
 
+
+
+# ---- imported keys and per-key limits (migration 8) ----
+LEGACY = {"hash": "b" * 64, "alias": "legacy", "tenant": "demo", "principal_id": "p-1", "models": [], "scopes": ["invoke:sync", "run:submit"],
+          "budget_requests": 2, "budget_gpu_seconds": 1000, "max_concurrent": 1, "rate_limit": {"requests": 2, "window_s": 3600}}
+
+
+def test_import_is_idempotent_all_or_nothing_and_never_overwrites(database):
+    db.migrate()
+    from fastapi import HTTPException
+    assert keys.import_records([LEGACY], "demo", "admin", dry_run=True)["inserted"] == ["demo-legacy"]
+    assert keys.info("b" * 64) is None                                                             # a dry run wrote nothing
+    r = keys.import_records([LEGACY], "demo", "admin")
+    assert r["inserted"] == ["demo-legacy"] and r["not_mirrored"] == ["demo-legacy"]
+    i = keys.info("b" * 64)
+    assert i["scopes"] == ["invoke:sync", "run:submit"] and i["budget_requests"] == 2.0 and i["rate_limit"] == {"requests": 2, "window_s": 3600}
+    assert i["metadata"]["role"] == "user" and i["metadata"]["legacy"]["principal_id"] == "p-1" and i["created_by"] == "import:admin"
+    assert keys.import_records([LEGACY], "demo", "admin")["unchanged"] == ["demo-legacy"]               # byte for byte: unchanged
+    with pytest.raises(HTTPException) as e:                                                         # same key, other limits: a conflict
+        keys.import_records([{**LEGACY, "budget_requests": 3}, {**LEGACY, "hash": "c" * 64, "alias": "new"}], "demo", "admin")
+    assert e.value.status_code == 409 and e.value.detail["conflicts"][0]["alias"] == "demo-legacy"
+    assert keys.info("c" * 64) is None                                                             # ... and the batch wrote nothing
+    with pytest.raises(HTTPException) as e:                                                         # the hash under another alias
+        keys.import_records([{**LEGACY, "alias": "other"}], "demo", "admin")
+    assert e.value.status_code == 409 and "exists as demo/demo-legacy" in e.value.detail["conflicts"][0]["reason"]
+    with pytest.raises(HTTPException) as e:                                                         # the alias with another hash
+        keys.import_records([{**LEGACY, "hash": "d" * 64}], "demo", "admin")
+    assert e.value.status_code == 409 and "another hash" in e.value.detail["conflicts"][0]["reason"]
+    with pytest.raises(HTTPException) as e:                                                         # invalid records: 400, nothing written
+        keys.import_records([{**LEGACY, "hash": "e" * 64, "alias": "x", "tenant": "other"}], "demo", "admin")
+    assert e.value.status_code == 400
+    r = keys.import_records([{**LEGACY, "hash": "f" * 64, "alias": "blocked", "scopes": ["invoke:sync", "mcp.invoke"]}], "demo", "admin")
+    assert r["blocked_for_unknown_scope"] == [{"alias": "demo-blocked", "scopes": ["mcp.invoke"]}] and keys.info("f" * 64)["blocked"] is True
+
+
+def test_admission_holds_every_limit_in_the_key_units(database):
+    db.migrate()
+    keys.import_records([LEGACY], "demo", "admin")
+    h = "b" * 64
+    assert keys.admit(h, "op-1", "demo", gpu_seconds=600)["active"] == 1
+    assert keys.admit(h, "op-1", "demo", gpu_seconds=600)["replay"] is True                        # the same idempotent operation counts once
+    with pytest.raises(keys.KeyLimit) as e:                                                         # max_concurrent 1
+        keys.admit(h, "op-2", "demo")
+    assert e.value.status == 429 and "concurrency" in e.value.detail
+    assert keys.release("op-1", 450) is True and keys.release("op-1", 450) is False                 # measured, idempotent
+    i = keys.info(h)
+    assert i["spent_requests"] == 1.0 and i["spent_gpu_seconds"] == 450.0
+    with pytest.raises(keys.KeyLimit) as e:                                                         # 450 spent + 600 > 1000 GPU seconds
+        keys.admit(h, "op-3", "demo", gpu_seconds=600)
+    assert e.value.status == 402 and "GPU-second" in e.value.detail
+    assert keys.admit(h, "op-3", "demo", gpu_seconds=500)["active"] == 1
+    keys.release("op-3", None)                                                                     # cancelled: nothing measured, the request spent
+    with pytest.raises(keys.KeyLimit) as e:                                                         # request budget 2: spent
+        keys.admit(h, "op-4", "demo")
+    assert e.value.status == 402 and "request budget" in e.value.detail
+    assert keys.admit(h, "op-4", "demo", counts_request=False)["active"] == 1                       # a non-request reservation still fits
+    keys.release("op-4", 0)
+    # the rate window: a key with a larger request budget hits its window
+    keys.import_records([{**LEGACY, "hash": "9" * 64, "alias": "rate", "budget_requests": None, "max_concurrent": None, "budget_gpu_seconds": None}], "demo", "admin")
+    for n in range(2):
+        keys.release(f"r-{n}", 0) if keys.admit("9" * 64, f"r-{n}", "demo") else None
+    with pytest.raises(keys.KeyLimit) as e:
+        keys.admit("9" * 64, "r-3", "demo")
+    assert e.value.status == 429 and "2 requests per 3600 s" in e.value.detail
+    assert keys.stale_reservations(0) == [] and keys.admit("9" * 64, "r-5", "demo", counts_request=False) and keys.stale_reservations(0) == [("r-5", "demo")]
+
+
+def test_two_replicas_cannot_both_take_the_last_slot(database):
+    db.migrate()
+    keys.import_records([{**LEGACY, "hash": "7" * 64, "alias": "race", "max_concurrent": 1, "budget_requests": None, "budget_gpu_seconds": None, "rate_limit": None}], "demo", "admin")
+    import threading
+    results = []
+    def take(n):
+        try:
+            keys.admit("7" * 64, f"race-{n}", "demo"); results.append("ok")
+        except keys.KeyLimit:
+            results.append("full")
+    ts = [threading.Thread(target=take, args=(n,)) for n in range(6)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert sorted(results) == ["full"] * 5 + ["ok"]

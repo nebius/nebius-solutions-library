@@ -6,14 +6,7 @@ The deployment owner is Terraform (`stack.sh`). Helm owns upstream controllers; 
 
 Follow the root README for bootstrap, credentials and the cloud and platform stages. Chart versions are declared once in `clusters/common/apps/*.yaml`; cluster-specific native values are computed in `stack/platform/stage.tf`. Terraform 1.12+ is required by the shared External Secrets modules.
 
-Before a change, run `make check` and the UI tests/build. PostgreSQL regression tests run when `TEST_DATABASE_URL` points to a disposable database; CI supplies a PostgreSQL service. These checks create no cloud resources.
-
-For an existing platform state using `alekc/kubectl`, back up the state and run the following against each initialized platform backend before upgrading. The reused MysteryBox module requires the library's `gavinbunney/kubectl` provider. Resource addresses remain unchanged.
-
-```sh
-terraform -chdir=stack/platform state replace-provider registry.terraform.io/alekc/kubectl registry.terraform.io/gavinbunney/kubectl
-terraform -chdir=stack/platform init -upgrade
-```
+Before a change, run `make check`. PostgreSQL regression tests run when `TEST_DATABASE_URL` points to a disposable database; CI supplies a PostgreSQL service. These checks create no cloud resources.
 
 Review the plan for every cluster. Do not accept unexpected database, volume or bucket replacement. Publish changed platform images before applying their version tags. CRD-bearing charts precede dependent charts through explicit Terraform waves.
 
@@ -21,9 +14,9 @@ Review the plan for every cluster. Do not accept unexpected database, volume or 
 
 `POST /v1/models`, `PUT /v1/models/{id}` and `DELETE /v1/models/{id}` require an admin key and the control API. A write commits the definition, monotonic history and a pending deployment record in one transaction before contacting a worker. The API attempts deployment immediately; a response with `pending: true` means the desired definition was saved and deployment will be retried every 15 seconds. Multiple API replicas serialize reconciliation through a database advisory lock.
 
-Retries apply the same endpoint chart, certificates, LiteLLM groups and regional catalogue copies. Old regions remain in the cleanup record until the change completes. A concurrent newer generation cannot be removed by an older reconciliation. Deleting and recreating an ID continues its version history. Send `If-Match: <version>` with replace/delete to reject a stale edit with 409.
+Retries render the same endpoint objects, certificates and LiteLLM groups. Old regions remain in the cleanup record until the change completes. A concurrent newer generation cannot be removed by an older reconciliation. Deleting and recreating an ID continues its version history. Send `If-Match: <version>` with replace/delete to reject a stale edit with 409.
 
-Inspect API logs and the `model_changes` table for queued errors. Restoring worker access allows reconciliation to resume; no manual catalogue edits or database rollback are needed. Bundled/terraform-managed classes remain read-only in the UI.
+Inspect API logs and the `model_changes` table for queued errors. Restoring worker access allows reconciliation to resume; no manual catalogue edits or database rollback are needed. The built-in classes remain read-only (409 on writes).
 
 Jobs use Kubernetes Jobs or JobSet. An idempotent replay repairs a missing per-operation PVC or Secret; reusing the key with a different rendered job returns 409. A resumed run remains in the original region so its checkpoint volume is available. PVC contents survive pod preemption but not deletion of the volume; local NVMe scratch is disposable. Attempt records and outputs are uploaded to the tenant's Object Storage bucket.
 
@@ -33,8 +26,6 @@ The fleet database owns the keys (`keys`: tenant, role, budget, spend, models, e
 
 Completed GPU jobs are charged in the fleet database (`charges`, the billing CronJob on the control cluster). `(region, Kubernetes Job UID)` is the unique charge identity. Insertion of the receipt and the atomic increment of `keys.spend` commit together. Retrying after an annotation failure never charges twice; concurrent charges and admin edits cannot overwrite one another. A charge of a key revoked meanwhile stays in the ledger under the key's hash and the run counts as billed. The Job annotation is a display receipt, not the deduplication authority. Unknown prices or an unavailable database defer accounting with an error. Nothing reads or writes LiteLLM's tables: a LiteLLM upgrade needs a proxy smoke test and the key drills, no schema check.
 
-Upgrading a fleet from the releases that kept keys in LiteLLM: the control API imports every LiteLLM key once at its first start (hash, alias, tenant, role, budget, spend, expiry, block flag, pass-through routes; never overwriting a row), falls back to LiteLLM's `/key/info` for a key not imported yet, and re-registers every LiteLLM model group with the router key. No key changes for anyone; the former platform-internal key is not imported (delete it in LiteLLM by hand, docs/OPERATIONS.md).
-
 Jobs snapshot regional pool rates at submission, including explicitly configured model prices. Attempt records include the admitted pool, so API-created GPU jobs retain a price after model edits/deletion. Legacy jobs without snapshots use their catalogue's regional price. GPU usage is charged after completion; this is metering, not a reservation system or a hard cap on already running work. API authorization caches key state for a short configurable interval (`AUTH_CACHE_S`).
 
 ## Secrets and TLS
@@ -43,7 +34,7 @@ Use `env_secrets: ["app-credentials"]` in a model definition to reference worklo
 
 Generated infrastructure credentials still appear in sensitive Terraform state (the managed PostgreSQL bootstrap password among them, `stack/cloud/database.tf`; it moves to a write-only attribute once the Nebius provider offers one for `bootstrap.user_password`, Terraform 1.11+ ephemeral values). Restrict and encrypt the remote state bucket, retain recoverable versions, and limit its operators. MysteryBox payloads stay outside model definitions and Terraform values. Literal environment values are accepted for ordinary configuration; secrets belong in Secret references. Only admins can read full model specs/history.
 
-Database clients verify the server certificate and hostname against the Nebius MSP CA, which the platform stage fetches from `storage.eu-north1.nebius.cloud/msp-certs/ca.pem` and mounts as `/etc/ssl/msp/ca.pem` (no system bundle carries it; measured 2026-10-09: `certificate verify failed` without it). The API's own HTTPS clients (regional forwards, LiteLLM) read the optional bundle through `SSL_CERT_FILE`. `trust_bundle_pem` optionally supplies a complete PEM trust bundle, mounted over the image's system CA bundle for the API, billing, database bootstrap and LiteLLM. It must include both public roots and any private roots needed by the fleet. There is no TLS verification bypass.
+Database clients verify the server certificate and hostname against the Nebius MSP CA, which the platform stage fetches from `storage.eu-north1.nebius.cloud/msp-certs/ca.pem` and mounts as `/etc/ssl/msp/ca.pem` (no system bundle carries it; without it the connection fails with `certificate verify failed`). The API's own HTTPS clients (the regions' gateways, LiteLLM) read the optional bundle through `SSL_CERT_FILE`. `trust_bundle_pem` optionally supplies a complete PEM trust bundle, mounted over the image's system CA bundle for the API, billing, database bootstrap and LiteLLM. It must include both public roots and any private roots needed by the fleet. There is no TLS verification bypass.
 
 Public gateways use configured DNS and cert-manager ACME. Internal gateways require `edge.domain`, `edge.private_ca_secret` (`tls.crt`/`tls.key` in `cert-manager`) and the fleet trust bundle. They use a private CA ClusterIssuer and do not install public ACME issuers. Clients/browsers must trust that CA. See `EDGE.md`.
 
@@ -61,7 +52,7 @@ Spot-node recovery and credential rotation remain in `services/ops`. Review thei
 
 ## Release acceptance and destruction
 
-Local/CI validation is necessary but does not prove a fresh Managed PostgreSQL deployment, real certificate issuance, MultiKueue failover, GPU preemption/resume or backup restoration. The previously reported fresh deployment was blocked by PostgreSQL quota; repeat those integration drills on an authorized test fleet before a customer production release. Also complete the organization's security review and agree an availability SLO.
+Local/CI validation is necessary but does not prove a fresh Managed PostgreSQL deployment, real certificate issuance, MultiKueue failover, GPU preemption/resume or backup restoration. Run those integration drills on a non-production fleet before a customer production release. Also complete the organization's security review and agree an availability SLO.
 
 After a real deployment, verify unauthorized/forbidden endpoint calls, allowed-key HTTP/WebSocket traffic, scale from zero, pending regional recovery, one charged/retried GPU operation, dispatcher leader replacement, Redis failure behavior, TLS rejection of an untrusted CA, log persistence and database restore.
 

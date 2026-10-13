@@ -3,7 +3,7 @@
 # applied server-side, one kubectl_manifest per object in the component's wave (clusters/common/apps `wave`),
 # next to the upstream Helm releases. Never a Helm release: Helm would want its ownership labels on every object,
 # while server-side apply through the kubectl provider owns them as they are. The resources are keyed
-# <group or _>/<Kind>/<namespace or _>/<name>, the ids the kustomize render used until 2026-10-11, so every object
+# <group or _>/<Kind>/<namespace or _>/<name>, the ids the earlier kustomize render used, so every object
 # keeps its state address; tools/check.sh proves the render equal to stack/platform/tests/golden.
 data "helm_template" "platform" {
   name         = "platform"
@@ -163,7 +163,7 @@ locals {
       spec = {
         parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
         # a chat call through LiteLLM waits for the endpoint's cold start like the API route does (charts/platform/templates/api);
-        # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model (test fleet, 2026-10-09)
+        # Envoy's default of 15 s answered "504 upstream request timeout" on a scaled-to-zero 72B model
         hostnames = [try(local.hostnames.litellm, "")]
         rules     = [{ backendRefs = [{ name = "litellm", port = 4000 }], timeouts = { request = "630s", backendRequest = "630s" } }]
       }

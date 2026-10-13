@@ -29,7 +29,7 @@ managerConfig:
       preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
     # DRA, same mapping as the workers (clusters/common/values/kueue.yaml): the manager resolves a multi-node run's
     # InfiniBand claim template (charged as nebius.ai/infiniband x count) before MultiKueue dispatches it; without the
-    # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped" (test fleet, 2026-10-09)
+    # mapping the workload stays "DRAResourcesUnresolved: DeviceClass ib.networking.nebius.ai is not mapped"
     resources:
       deviceClassMappings:
         - name: nebius.ai/infiniband

@@ -42,12 +42,12 @@ ORDER=$(pq '" ".join(p["order"])')
 # Secret inputs: terraform.tfvars `secrets` names the environment variables; each becomes TF_VAR_<input> of the
 # platform stage. A named variable that is unset stops here: nothing is planned or applied without it (an apply
 # without the NGC key would otherwise delete the NGC Secrets and the cache's credentials; set the name to null in the
-# tfvars to run a fleet without that secret on purpose).
+# tfvars to "" to run a fleet without that secret on purpose).
 secret_inputs() {
   local pair input name missing=0
   for pair in $(pq '" ".join(f"{k}={v}" for k, v in p["secrets"].items() if v)'); do
     input="${pair%%=*}"; name="${pair#*=}"
-    if [ -z "${!name:-}" ]; then echo "!! $name is not set (terraform.tfvars secrets: $input); export it or set the name to null" >&2; missing=1
+    if [ -z "${!name:-}" ]; then echo "!! $name is not set (terraform.tfvars secrets: $input); export it or set the name to \"\" in the tfvars" >&2; missing=1
     else export "TF_VAR_$input=${!name}"; fi
   done
   [ "$missing" = 0 ] || exit 4

@@ -63,9 +63,9 @@ nebius --profile <sa profile> logging query --project-id <project> --bucket sp_m
 # labels.sourceIPs_0 is what the allow-list sees; labels.user_username who it was
 ```
 
-Guesses fail: an allow-list built from the NAT addresses that `ifconfig.me` and the gateway access log
-report locked the operator host out of a cluster within seconds (recovered in half a minute by applying an
-empty list, which needs only the Nebius API). Procedure for a change: apply on one worker first with an
+Guesses fail: an allow-list built from the NAT addresses that `ifconfig.me` or the gateway access log
+report locks the operator host out of the cluster within seconds; the way back is an empty list, which needs
+only the Nebius API. Procedure for a change: apply on one worker first with an
 automatic check in the same shell (`kubectl --context <worker> get nodes --request-timeout=20s` three
 times, plus a `curl` through the customer API to an operation there; on failure re-apply with the previous
 list), then the other clusters. If the operator host's router or the clusters' NAT pools change, the
@@ -198,7 +198,7 @@ API gets `DATABASE_URL` from `api/database` key `platform_url`.
 The password is `random_password.database` of the cloud stage (output `secrets.database_password`).
 
 **Keys** live in `platform.keys` (docs/API.md "Keys"): the tenants' keys of `terraform.tfvars` are written by
-the models stage (one Job `api/key-<tenant>-<name>` running `python -m keys bootstrap` of the API image), the
+the platform stage (one Job `api/key-<tenant>-<name>` running `python -m keys bootstrap` of the API image), the
 rest through the API. Each is mirrored into LiteLLM (same value) for the OpenAI route; a mirror that drifted
 (LiteLLM restored from an older backup) is repaired by the next `PATCH` of the key or by re-running the
 bootstrap Job (`-replace` it). **The router key** (`api/router-key`, docs/API.md "Model groups") is the key
@@ -215,7 +215,7 @@ continuous WAL for point-in-time recovery inside that window. Nothing runs in th
 nebius msp postgresql v1alpha1 backup list --parent-id <control project id>          # the backups of the project
 nebius msp postgresql v1alpha1 cluster get-for-backup --id <cluster id>              # the configuration to restore with
 nebius msp postgresql v1alpha1 cluster restore --parent-id <control project id> --network-id <vpc network id> \
-  --backup-id <backup id> --recovery-time 2026-10-09T10:00:00Z --name <fleet>-db-restored ...   # a NEW cluster from a backup (PITR)
+  --backup-id <backup id> --recovery-time <RFC 3339 time> --name <fleet>-db-restored ...   # a NEW cluster from a backup (PITR)
 ```
 
 The Nebius console (Managed PostgreSQL, the cluster, "Backups") offers the same. A restore creates a new
@@ -287,10 +287,9 @@ with `policyTypes: [Ingress, Egress]`, ingress from `podSelector: {}`, egress to
 ### API RBAC
 
 `charts/platform/templates/api/api.yaml` holds everything the `api` ServiceAccount may do: ClusterRole
-`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `charts/platform/templates/api-agent`)
+`serverless2-api-tenant` (jobs, pods, Secret `tenant-storage`; defined in `charts/platform/templates/tenant-clusterrole`)
 bound per tenant namespace by the RoleBinding `charts/tenant` renders; Role `serverless2-api-endpoints` in
-`models` (inferenceservices get/list/patch, pods); read-only Roles `serverless2-api-templates` in the
-template namespaces (`api`); one ClusterRole to list tenant namespaces (billing).
+`models` (inferenceservices get/list/patch, pods); one ClusterRole to list tenant namespaces (billing).
 
 ### Tenants (`tenants.<name>` in the tfvars, `stack/cloud/tenants.tf`, `stack/platform/tenants.tf`, `charts/tenant`)
 
@@ -305,8 +304,8 @@ identity (`job-runner`), the API binding, one Kueue LocalQueue per scheduling pr
 `prefer-<class>`), the network policy and, on the control cluster, the namespace, queues and API binding
 only. Secrets in the tenant namespace (never in git): workers `tenant-storage` and `s3` (this region's
 bucket and key), `s3-fleet` (the hub region's bucket and key, used by fleet-placed runs), `ngc`; control
-`tenant-storage` (the hub region's bucket). The LiteLLM keys (budget, allowed models and pass-through
-routes) are created on the control cluster: `./stack.sh output platform control -json tenant_keys` prints them. Adding a region
+`tenant-storage` (the hub region's bucket). The tenant keys (budget, allowed models) are written into the fleet
+database on the control cluster: `./stack.sh output platform control -json tenant_keys` prints them. Adding a region
 to a tenant or changing the retention is a tfvars change plus a re-apply; removing a tenant is removing the
 block (with `protect_data = true` the bucket stays and must be emptied by hand first).
 
@@ -363,7 +362,7 @@ cache fetches them from the source registry on first use.
 - CI (`.github/workflows/k8s-inference.yml` at the library's root) runs on every pull request and push
   that touches the solution: `terraform fmt`/`validate` of every stage, `helm template` of the charts with
   the example's values, every manifest rendered, the API and dispatcher tests, and
-  build, and a `trivy` scan of the five images built from `services/*/Dockerfile` and `ui/Dockerfile`
+  build, and a `trivy` scan of the four images built from `services/*/Dockerfile`
   (fails on CRITICAL, unfixed ignored). The ops image pins its tools by version and SHA-256
   (`services/ops/Dockerfile`).
 - Cadence: third-party chart versions (`clusters/common/apps/*.yaml`) and image bases are reviewed

@@ -4,50 +4,51 @@
 
 How a workload (endpoint pod or job) ends up on a GPU, and what a model
 declares to steer that. Three layers, all existing projects, one small
-dispatcher of our own (`services/dispatcher`, about 540 lines, plus the InfiniBand floor (230) and a 70-line price feed).
+dispatcher of our own (`services/dispatcher`: the ranking loop, the InfiniBand floor and a price feed).
 
 | Layer | Decides | Project |
 |---|---|---|
 | In a cluster: which pool (GPU class, spot/reserved) | Kueue ResourceFlavors in ClusterQueue order, `flavorFungibility` | Kueue 0.20 |
 | Across clusters: which region/cluster | Kueue MultiKueue with an external dispatcher that ranks clusters by preference, free quota and live price | Kueue MultiKueue + `services/dispatcher` |
-| Nodes | node-group autoscaler per pool (0..max from `fleet.yaml`); InfiniBand pools: the dispatcher moves the pool's floor for multi-node runs (below) | Nebius mk8s + `services/dispatcher` |
+| Nodes | node-group autoscaler per pool (`min_nodes`..`max_nodes` of the pool); InfiniBand pools: the dispatcher moves the pool's floor for multi-node runs (below) | Nebius mk8s + `services/dispatcher` |
 
 ## What a model declares
 
-Endpoint entries (`runtime` block; every setting and its default: `services/api/render_endpoint.py` DEFAULTS):
+A model is defined through the API (`POST /v1/models`, docs/API.md "Models"); the catalog ships only the
+generic run classes (`catalog/models`). What steers placement in a definition:
 
-```yaml
-runtime:
-  image: <registry>/<repo>:<tag>          # must run on every pool the queue may choose
-  queue:
-    name: prefer-h100                     # LocalQueue in `models` = preference profile; omit to pin
-    priorityClass: customer-batch         # Kueue WorkloadPriorityClass
-  pool: h100-spot-1x                      # pinned placement when queue.name is unset
-  images:                                 # per-pool image, applied only when pinned (pool known at render time)
-    h100-spot-1x: <registry>/<repo>:<tag>-h100
-    rtx6000-spot-1x: <registry>/<repo>:<tag>-rtx6000
+```json
+{"id": "chat", "kind": "endpoint", "image": "vllm/vllm-openai:v0.11.0",
+ "gpu": {"count": 1, "classes": ["h100", "l40s"]},            // preferred first
+ "images": {"l40s": "vllm/vllm-openai:v0.11.0-l40s"},         // optional: one image per GPU class
+ "regions": ["eu-north1"],                                     // default: every region with a pool of a class
+ "deployments": {"eu-north1": {"variants": [{"name": "spot", "pool": "h100-spot-1x", "min": 0, "max": 4}]}},
+ "nodes": 1, "interconnect": "none"}                           // multi-node endpoints: docs/API.md
 ```
 
-- `queue.name` set: predictor pods carry `kueue.x-k8s.io/queue-name` (KServe
-  copies predictor labels to the Knative revision pods), the `models`
-  namespace is Kueue-managed (`serverless2.nebius/kueue: managed`,
-  `charts/platform/templates/scheduling/namespaces.yaml`), so every replica is
-  gated at creation, gets quota from the ClusterQueue behind the LocalQueue
-  and is released with the pool's `nodeSelector` and tolerations injected.
-  The chart renders no pool `nodeSelector` in this mode.
-- `queue.name` unset: the chart pins `nodeSelector: serverless2.nebius/pool:
-  <pool>` as before and, when `images.<pool>` exists, uses that image.
-- Run classes declare `gpu.classes` (preferred first): the API sets the
+- Endpoints are **pinned**: for every region of the model the API picks the pool at definition time
+  (the pools of the model's classes, reserved before on-demand before spot; for `nodes > 1` a pool whose
+  preset has `gpu.count` GPUs per node; never a tenant's dedicated pool) and renders the deployment with
+  `nodeSelector: serverless2.nebius/pool: <pool>` and the image of that pool's class (`images.<class>`,
+  else `image`); `deployments.<region>.variants` pin explicitly, one deployment per variant
+  (docs/API.md "Variants"). Every setting and its default: `services/api/render_endpoint.py` DEFAULTS.
+  The renderer can also hand endpoint pods to Kueue (`queue.name`: the `models` namespace is
+  Kueue-managed, `serverless2.nebius/kueue: managed` in
+  `charts/platform/templates/scheduling/namespaces.yaml`, so every replica is gated at creation, gets
+  quota from the ClusterQueue behind the LocalQueue and is released with the pool's `nodeSelector` and
+  tolerations injected); the API does not use that mode, so warm endpoints are the static
+  `endpoint_floor_gpus` of their pool (docs/FLEET.md).
+- Runs declare `gpu.classes` (preferred first): the API sets the
   queue label to `prefer-<first class>` and a `nodeAffinity` over the fleet
   pools of all listed classes (so a fallback never lands on an unsupported
   GPU); image references are the same in every region (`docs/IMAGES.md`).
   `docs/JOBS.md`.
 
-Preference profiles are the ClusterQueues `charts/fleet` renders from
-`fleet.yaml` (`docs/FLEET.md`): `default` and one `prefer-<gpu_class>` per
+Preference profiles are the ClusterQueues `charts/fleet` renders from the
+fleet definition (`docs/FLEET.md`): `default` and one `prefer-<gpu_class>` per
 class, on every worker (flavor order = the preference) and on the MultiKueue
 manager (same names, with the MultiKueue admission check). A LocalQueue in
-the tenant or `models` namespace points at one of them; the dispatcher reads
+the tenant namespace points at one of them; the dispatcher reads
 the profile from the manager ClusterQueue name. "If the GPU type is busy use
 another one; wait if all are busy" is Kueue's flavor fungibility inside a
 cluster and the dispatcher's ranking across clusters.
@@ -66,34 +67,30 @@ job:
 ```
 
 Kueue picks the pool at admission and a Job's image cannot change afterwards (see "Not possible"
-below), so for such a class the GPU class is chosen **at submission** (option A of
-the design review of 2026-10-09): the API ranks the pools of the fleet document (`fleet-prices`) the way the
-dispatcher ranks clusters (`services/api/placement.py` mirrors `rank()` below: the class preference,
-reserved before on-demand before spot, then the cost of the run on the node the pool would boot at its list
-price, so a 1-GPU run does not pick an 8-GPU pool; the model's regions, the caller's region as a pin when
-given, a tenant's dedicated pools for that tenant only), renders the Job with the best class's image, limits
-its node affinity to that class's pools and queues it on that class's profile (`prefer-<class>`). The
-operation and every attempt record carry the class (`gpu_class`, plus the image under `image`). The run may
-still move between regions of its class while it waits (MultiKueue), and a resume keeps the class: the
-checkpoints were written by that image. What the API does not see is free quota right now and the live spot
-quote; until api 0.11.13 it asked the dispatcher for them over HTTP (`GET /v1/rank`), a round trip, a
-Service and a timeout whose only gain was that signal, while the queue waited for the preferred class
-either way. A class without a pool in the fleet document is skipped; with no pool at all the preferred class
-is taken and the queue waits for it.
+below), so for such a class the GPU class is chosen **at submission**: the API ranks the pools of the
+fleet document (`fleet-prices`) the way the dispatcher ranks clusters (`services/api/placement.py` mirrors
+`rank()` below: the class preference, reserved before on-demand before spot, then the cost of the run on
+the node the pool would boot at its list price, so a 1-GPU run does not pick an 8-GPU pool; the model's
+regions, the caller's region as a pin when given, a tenant's dedicated pools for that tenant only),
+renders the Job with the best class's image, limits its node affinity to that class's pools and queues it
+on that class's profile (`prefer-<class>`). The operation and every attempt record carry the class
+(`gpu_class`, plus the image under `image`). The run may still move between regions of its class while
+it waits (MultiKueue), and a resume keeps the class: the checkpoints were written by that image. What the
+API does not see is free quota right now and the live spot quote; it does not ask the dispatcher for
+them (a round trip, a Service and a timeout whose only gain would be that signal, while the queue waits
+for the preferred class either way). A class without a pool in the fleet document is skipped; with no
+pool at all the preferred class is taken and the queue waits for it.
 
-The trade-off, by design: a run with per-class images waits for its class instead of switching
-class while queued. A class with one image keeps today's behaviour (free class switching at queue
-time). The documented follow-up "A+" re-renders a run that has not started after N minutes for the
-next class in its preference list (cancel the gated Job, render again with the next class's image,
-record the switch as an attempt, switch only downward in the list and at most a bounded number of
-times); it is not built, because it adds a control loop with retry semantics for a situation that
-has not hurt yet. `services/api/placement.py`.
+The trade-off, by design: a run with per-class images waits for its class instead of switching class
+while queued, unless it names `execution.placement.fallback_wait_s` ("Fallback to the next class"
+below), which re-renders it for the next class after the wait. A class with one image keeps free class
+switching at queue time.
 
 ## Cross-cluster dispatch (`services/dispatcher`)
 
 Kueue MultiKueue in external-dispatcher mode (`multiKueue.dispatcherName:
-serverless2.nebius/cost-dispatcher` in the manager's Kueue config, commented
-block in `clusters/common/values/kueue.yaml`): Kueue creates the Workload on
+serverless2.nebius/cost-dispatcher` in the manager's Kueue config,
+`clusters/control/values/kueue.yaml`): Kueue creates the Workload on
 the manager and waits for `status.nominatedClusterNames`; the dispatcher sets
 it; Kueue then copies the job to the nominated worker(s), the first worker
 that admits wins and `status.clusterName` is fixed.
@@ -102,13 +99,13 @@ Every `INTERVAL_S` (15 s) the dispatcher, for each Workload with quota reserved
 and the MultiKueue admission check pending:
 
 1. Candidates are `(region id, pool)` pairs from the `fleet-prices`
-   ConfigMap (`pools.yaml`, rendered by `charts/fleet` from `fleet.yaml`:
-   class, capacity type, list price, project, platform, preset) whose GPU
-   class the profile allows: `prefer-<class>` = that class first, then the
-   other classes by their cheapest pool; `default` = any class. A
-   `serverless2.nebius/region` label on the Workload (region id such as
-   `eu-south1`, or the region name from the MultiKueueCluster label)
-   restricts candidates to that cluster (resume, see below).
+   ConfigMap (`pools.yaml`, rendered by `charts/fleet` from the fleet
+   definition: class, capacity type, list price, project, platform, preset)
+   whose GPU class the profile allows: `prefer-<class>` = that class first,
+   then the other classes by their cheapest pool; `default` = any class. A
+   `serverless2.nebius/region` label on the Workload (a region id, or the
+   region name from the MultiKueueCluster label) restricts candidates to that
+   cluster (resume, see below).
 2. A candidate is free when the worker's `default` ClusterQueue has enough
    unused nominal `nvidia.com/gpu` quota in that pool's flavor (read through
    the MultiKueueCluster kubeconfig Secrets; nominal only, borrowing is
@@ -124,37 +121,33 @@ and the MultiKueue admission check pending:
    appended; nominations are never withdrawn (Kueue's external-dispatcher
    contract).
 
-Nominations are written with SERVER-SIDE APPLY as field manager `kueue-admission`
-(dispatcher 0.1.5; 0.1.4 shipped the call on a client that rejected the apply content type): Kueue admits a MultiKueue workload by setting `status.clusterName`
-and clearing `nominatedClusterNames` in one server-side apply under that manager, and a
+Nominations are written with SERVER-SIDE APPLY as field manager `kueue-admission`,
+restating `status.admission` and `status.admissionChecks` as read. Both details are
+load-bearing: Kueue admits a MultiKueue workload by setting `status.clusterName` and
+clearing `nominatedClusterNames` in one server-side apply under that manager, and a
 value written with a merge patch (an "Update" managedFields entry, even under the same
 manager name) survives that apply, so the API server rejects Kueue's patch
 ("clusterName and nominatedClusterNames are mutually exclusive") and the manager
-Workload stays Pending for its whole life (dispatcher 0.1.2/0.1.3, 2026-10-07). The apply
-restates `status.admission` and `status.admissionChecks` as read (dispatcher 0.1.6): the same
-manager name owns Kueue's quota reservation and the check states, and an apply that names
-only `nominatedClusterNames` releases them, so the manager scheduler re-admitted the
-workload, copied it to a cluster that was not nominated, and after the resulting retry the
-next apply was rejected ("admissionChecks[0].state: Required value") for ever (measured
-2026-10-08 on the fresh-deploy test fleet, docs/VERIFICATION.md). Prices:
-the `price-feed` CronJob (every 10 min) asks the Nebius price calculator for
+Workload stays Pending for its whole life; and the same manager name owns Kueue's quota
+reservation and the check states, so an apply that names only `nominatedClusterNames`
+releases them, the manager scheduler re-admits the workload, copies it to a cluster
+that was not nominated, and after the resulting retry every next apply is rejected
+("admissionChecks[0].state: Required value").
+
+Prices: the `price-feed` CronJob (every 10 min) asks the Nebius price calculator for
 each spot/on-demand pool of `fleet-prices` (`nebius billing v1alpha1
 calculator estimate`; for spot a preemptible VM that follows the spot price:
 `--resource-spec-compute-instance-spec-preemptible-on-preemption STOP
 --resource-spec-compute-instance-spec-follows-spot-price`, the current quote,
-which Nebius moves every 15 minutes since dynamic spot pricing started on
-2026-10-08) and writes `spot.json` (USD per GPU-hour, keyed `<region
-id>/<pool>`) into the ConfigMap `kueue-system/spot-prices`, which it creates
-on first run (runtime-owned, outside Terraform). Until
-2026-10-09 the feed asked with `--preemptible-priority 1`, a field the API
-deprecated on 2026-05-11; the CLI 0.12 rejects it (exit 4), so the feed wrote
-an empty map and every spot pool was ranked at its list price (seen on the
-a test fleet, dispatcher 0.1.8). Quotes seen on 2026-10-09 for the 8-GPU
-B300 preset following the spot price: eu-west2 7.92 USD/h (0.99 per
-GPU-hour), us-north1 28, uk-south1 75.92; regular 76 everywhere. Measured
-2026-10-07: H100 1-GPU preset 4.5 on-demand, 2.15 spot. The calculator needs
-an SA key: Secret `kueue-system/price-feed-nebius-sa` (optional mount;
-without it the feed logs failures and list prices are used).
+which Nebius moves every 15 minutes) and writes `spot.json` (USD per GPU-hour,
+keyed `<region id>/<pool>`) into the ConfigMap `kueue-system/spot-prices`, which it
+creates on first run (runtime-owned, outside Terraform). The feed must not pass the
+deprecated `--preemptible-priority`: the CLI rejects it (exit 4), the feed would write
+an empty map and every spot pool would be ranked at its list price. Quotes for the
+same preset differ by an order of magnitude between regions, which is what the
+cross-region ranking is for. The calculator needs an SA key: Secret
+`kueue-system/price-feed-nebius-sa` (optional mount; without it the feed logs
+failures and list prices are used).
 
 Spot pools in the ranking: a spot pool is a candidate like any other, with no
 waiting period; inside one GPU class it sorts after the class's reserved and
@@ -167,24 +160,26 @@ checkpoint volume; local NVMe scratch (`scratch: local-nvme`) does not
 survive a preemption (docs/FLEET.md "Spot capacity").
 
 Packaging: `charts/platform/templates/dispatcher` (Deployment, CronJob,
-RBAC; image `serverless2/dispatcher:0.1.1` from `services/dispatcher/
-Dockerfile`, the ops image's Nebius CLI on `python:3.12-slim`), overlay
-`clusters/control/apps/overlays/dispatcher`, app spec staged in
-`clusters/common/apps-staged/dispatcher.yaml` until the control cluster
-exists (same cut-over as `fleet.yaml`).
+RBAC; the dispatcher image, `images.versions.dispatcher`, from
+`services/dispatcher/Dockerfile`: the ops image's Nebius CLI on
+`python:3.12-slim`), installed by the platform stage on the control cluster.
+`services/dispatcher/tests` covers the `fleet-prices` parsing,
+profile-from-queue-name, preference, fallback class, cheapest with live
+price, nothing-free, region pin, multi-GPU quota, renomination timing and
+the InfiniBand floor.
 
 Decisions are logged (`kubectl -n kueue-system logs deploy/dispatcher`) as
 `<ns>/<workload> profile=... pin=... gpus=N -> [clusters] best=(cluster,
 flavor, price, free)`.
 
-## InfiniBand pools grow on demand (2026-10-11)
+## InfiniBand pools grow on demand
 
 The Nebius cluster autoscaler never adds an InfiniBand node: it simulates the new node without the DRA
 attributes of its RDMA NICs, so a pod that claims them never triggers a scale-up, from zero or from one
 (`cannot allocate all claims`, `CEL runtime error: no such key: ifName`; docs/JOBS.md "Multi-node runs").
-Until now an operator raised the pool's `min_nodes` in `terraform.tfvars` and applied the cloud stage before
-every multi-node run. The dispatcher's elected replica does it now (`services/dispatcher/infiniband.py`, every
-reconcile cycle, 15 s), per worker cluster:
+Without help an operator would raise the pool's `min_nodes` in `terraform.tfvars` and apply the cloud stage
+before every multi-node run. The dispatcher's elected replica does it instead
+(`services/dispatcher/infiniband.py`, every reconcile cycle, 15 s), per worker cluster:
 
 1. **Demand** per InfiniBand pool = the largest node count any one multi-node run or endpoint needs there now.
    Runs: the worker's Kueue Workloads whose pod template requires the node label
@@ -235,16 +230,14 @@ its nodes exist; that is what makes the floor move).
 Every image reference names the logical host `registry.serverless2.local`
 (`docs/IMAGES.md`): on each node containerd resolves it to the node's Spegel
 peers and then to the cluster's Zot pull-through cache, which fetches from
-the source registry (fleet.yaml `images.source`, our builds), NGC, GHCR,
-Docker Hub, Quay or registry.k8s.io on demand and keeps the layers in the
-region. A Job therefore contains nothing that depends on the region it lands
-in: every fleet run is created unpinned and the dispatcher places it at
-queue time, re-nominating the next cluster every `RENOMINATE_AFTER_S` while it
-waits (measured 2026-10-07: eu-south1 on Hold -> hub nominated after 300 s,
-MultiKueue ran the Job there). The region the API reports is the cluster that
-ADMITTED the run (Workload `status.clusterName`); a nomination is not a
-placement. The work volume is created where the run is admitted, never at
-nomination (`services/dispatcher`).
+the source registry (`images.source`), NGC, GHCR, Docker Hub, Quay or
+registry.k8s.io on demand and keeps the layers in the region. A Job therefore
+contains nothing that depends on the region it lands in: every fleet run is
+created unpinned and the dispatcher places it at queue time, re-nominating
+the next cluster every `RENOMINATE_AFTER_S` while it waits. The region the
+API reports is the cluster that ADMITTED the run (Workload
+`status.clusterName`); a nomination is not a placement. The work volume is
+created where the run is admitted, never at nomination (`services/dispatcher`).
 
 ## Resume in the same region
 
@@ -266,22 +259,6 @@ kubectl get clusterqueue default -o jsonpath='{.status.flavorsUsage}'   # per-fl
 kubectl -n kueue-system get cm spot-prices -o jsonpath='{.data.spot\.json}'
 ```
 
-## Verified on the hub (2026-10-07)
-
-- Pod in a managed namespace with `kueue.x-k8s.io/queue-name` and
-  `nvidia.com/gpu: 1`, no nodeSelector: Workload admitted in flavor
-  `h100-spot-1x`, pod released with `nodeSelector serverless2.nebius/pool:
-  h100-spot-1x` and the `nvidia.com/gpu` toleration injected; after deleting
-  the pod the Workload is gone and `flavorsUsage` is back to 0. The Knative
-  path is the same pod integration (Kueue's `deployment` integration only
-  propagates the label to the pod template); verify one catalog model with
-  `queue.name` after merge.
-- Ranking: `services/dispatcher/tests` (11 cases) covers the
-  `fleet-prices` parsing, profile-from-queue-name, preference, fallback
-  class, cheapest with live price, nothing-free, region pin, multi-GPU
-  quota, renomination timing; a smoke run against the chart-rendered
-  `pools.yaml` of today's fleet gives `prefer-h100` with H100 busy ->
-  eu-south1 RTX PRO 6000 (cheapest free class), `prefer-l40s` -> hub L40S.
 ## Fallback to the next class
 
 A run that names `execution.placement.gpu_preference` and `fallback_wait_s` (docs/JOBS.md "Execution options") is
@@ -300,15 +277,7 @@ A resume with `checkpoint_ref` (docs/JOBS.md "Attempts and finalization") goes t
 optional `gpu_class`: the new attempt gets that class's image, a fresh volume where it lands, and the pinned model
 revision (`serverless2.nebius/model-version`), never a newer definition.
 
-- Manual end-to-end test of MultiKueue placement:
-  set `multiKueue.dispatcherName` on the manager's Kueue, create the
-  MultiKueueCluster Secrets, move `fleet.yaml` and `dispatcher.yaml` from
-  `clusters/common/apps-staged`, submit a Job to a LocalQueue on
-  `prefer-rtx-pro-6000`, expect `nominatedClusterNames: [eu-south1]` within
-  15 s and admission on eu-south1; then label a Job
-  `serverless2.nebius/region: hub` and expect nomination of `hub` only.
-
-## Automatic recovery after infrastructure loss (2026-10-12)
+## Automatic recovery after infrastructure loss
 
 Opt-in per run: `execution.recovery.on_infrastructure_loss: recover` (docs/JOBS.md "Execution options"; the default
 `retry` and `fail` are unchanged). The Job keeps the `retry` policy, so a disruption first gets the Kubernetes Job
@@ -359,29 +328,27 @@ the run then legitimately continues where it was.
 
 ## Not possible: swapping the image after Kueue picked the pool
 
-Measured 2026-10-07 with Kyverno 3.9.1 on the hub: a mutating policy that
-sets the container image from `serverless2.nebius/image.<pool>` annotations
-when the pool `nodeSelector` appears works on CREATE (pinned pods), but on the
-UPDATE in which Kueue injects the nodeSelector and removes the gate, Kueue's
-pod integration compares the pod spec with the Workload's pod set, finds the
-image changed, logs `No matching Workload; restoring pod templates according
-to existent Workload` and deletes the pod (Kueue `jobframework.
-EquivalentToWorkload` compares the pod template including images; Workload
-pod sets are immutable once quota is reserved). The same holds for Jobs.
-Therefore per-GPU image tags are decided before the Job exists: for endpoints
-by the pinned pool (`images.<pool>`), for runs by the class chosen at submission
-("Per-GPU images for runs" above). A Kueue-placed workload with one image must
-run on every pool its profile allows. Kyverno was removed again; nothing of it
-remains on the hub.
+Tried with a Kyverno mutating policy that sets the container image from
+`serverless2.nebius/image.<pool>` annotations when the pool `nodeSelector`
+appears: it works on CREATE (pinned pods), but on the UPDATE in which Kueue
+injects the nodeSelector and removes the gate, Kueue's pod integration
+compares the pod spec with the Workload's pod set, finds the image changed,
+logs `No matching Workload; restoring pod templates according to existent
+Workload` and deletes the pod (Kueue `jobframework.EquivalentToWorkload`
+compares the pod template including images; Workload pod sets are immutable
+once quota is reserved). The same holds for Jobs. Therefore per-GPU image
+tags are decided before the Job exists: for endpoints by the pinned pool
+(the image of its class, or the variant's), for runs by the class chosen at
+submission ("Per-GPU images for runs" above). A Kueue-placed workload with
+one image must run on every pool its profile allows. Kyverno is not part of
+the solution.
 
-## Terraform solution (2026-10-08): tenant inputs
+## Tenants and single-cluster mode
 
-`tenants.<name>.gpu_quota`, `fair_share_weight` and `dedicated_pools` exist in the tfvars schema. The
-charts render the shared profile queues for every tenant (all tenants share the fleet's `default` and
-`prefer-<class>` ClusterQueues, which is the right side of Kueue's reclaim semantics: priority across
-queues with separate floors starves the lower queue); per-tenant ClusterQueues in the cohort (nominal 0,
-`borrowingLimit = gpu_quota`, `fairSharing.weight`, flavors restricted to `dedicated_pools`) are the
-documented design for those inputs and are not rendered yet (the inputs are accepted, validated and
-carried on the tenant release values). Kueue's fair-share usage sums resource magnitudes without
-normalisation; set weights per GPU class, not per CPU/memory. The MultiKueue manager cannot be its own
-worker: that is why `control_plane.dedicated = false` is a single-cluster mode without MultiKueue.
+`tenants.<name>.gpu_quota`, `fair_share_weight` and `dedicated_pools` render per-tenant ClusterQueues
+in the cohort (nominal 0, `borrowingLimit = gpu_quota`, `fairSharing.weight`, dedicated pools as the
+tenant's own nominal quota; `charts/fleet/templates/worker-queues.yaml`, docs/FLEET.md "Tenants").
+Kueue's fair-share usage sums resource magnitudes without normalisation; set weights per GPU class,
+not per CPU/memory. The MultiKueue manager cannot be its own worker: that is why
+`control_plane.dedicated = false` is a single-cluster mode without MultiKueue and without the
+dispatcher (runs are created and admitted in the one cluster).

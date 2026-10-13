@@ -48,7 +48,7 @@ resource "kubernetes_secret_v1" "fleet_ca" {
   depends_on = [helm_release.wave0]
 }
 
-# When the fleet CA changes (regenerated, or the cloud state rewritten by an older checkout, seen 2026-10-10), the
+# When the fleet CA changes (regenerated, or the cloud state rewritten by an older checkout), the
 # leaf certificates cert-manager issued from the previous CA stay valid for their holders but no longer match the
 # trust bundle: this re-issues them (cert-manager recreates a deleted TLS Secret at once) on every CA change.
 resource "terraform_data" "reissue_on_ca_change" {

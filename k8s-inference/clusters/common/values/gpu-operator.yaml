@@ -11,7 +11,7 @@ dcgmExporter:
 # One NVIDIADriver per GPU platform (the chart's own list, repeated here so the fleet can extend it): the platform
 # stage appends a profile for every platform of this cluster's pools that is missing below (a regional variant such
 # as gpu-rtx6000-a inherits the manager settings of its longest-prefix sibling), stack/platform/stage.tf. A node whose
-# instance-type matches no profile never gets a driver and stays at zero allocatable GPUs (eu-south1, 2026-10-12).
+# instance-type matches no profile never gets a driver and stays at zero allocatable GPUs.
 nebius:
   nvidiaDriverCRDPatch:
     profiles:

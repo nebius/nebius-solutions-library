@@ -1,7 +1,7 @@
 # Tenants on this cluster (terraform.tfvars `tenants`): the namespace with its queues, identity and policies
 # (charts/tenant), the storage Secrets from the buckets the cloud stage created, the NGC pull Secret and, on
-# the control cluster, the LiteLLM API keys and the optional apply-time acceptance probe. Until 2026-10-11 a
-# third stage (`models`) did this after the platform stage, one state per cluster; docs/OPERATIONS.md
+# the control cluster, the LiteLLM API keys and the optional apply-time acceptance probe. In the earlier
+# three-stage layout a third stage (`models`) did this after the platform stage, one state per cluster; docs/OPERATIONS.md
 # "Upgrading to the two-stage layout" moves that state here.
 locals {
   all_regions = sort(keys(local.f.regions))

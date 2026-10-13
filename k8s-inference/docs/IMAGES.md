@@ -3,12 +3,12 @@
 *For operators: how images reach the nodes (source registry, per-cluster cache, peer-to-peer layers, pre-pull) and how to add or mirror one.*
 
 Every image a workload uses is named through one logical registry host,
-`registry.serverless2.local` (fleet.yaml `images.host`). The reference is the
-same in every region; what differs is where the bytes come from:
+`registry.serverless2.local` (`terraform.tfvars` `images.host`). The reference
+is the same in every region; what differs is where the bytes come from:
 
 ```
-build host ── docker buildx --push ──▶ source registry (fleet.yaml images.source,
-                                       Nebius Container Registry serverless2-models, hub project)
+build host ── docker buildx --push ──▶ source registry (images.source: by default the Container
+                                       Registry the cloud stage creates in the hub project)
                                                  │
    nvcr.io  ghcr.io  docker.io  quay.io  registry.k8s.io   (public upstreams, NGC with a key)
         │       │        │         │          │           │
@@ -27,11 +27,11 @@ build host ── docker buildx --push ──▶ source registry (fleet.yaml ima
 ```
 
 Naming: `registry.serverless2.local/<alias>/<path>`, where the alias picks the
-upstream (fleet.yaml `images.upstreams`, plus `nebius` = `images.source`):
+upstream (`images.upstreams`, plus `nebius` = `images.source`):
 
 | reference | comes from |
 |---|---|
-| `registry.serverless2.local/nebius/serverless2/api:0.7.1` | `<images.source>/serverless2/api:0.7.1` (our builds) |
+| `registry.serverless2.local/nebius/serverless2/api:<tag>` | `<images.source>/serverless2/api:<tag>` (the platform images, tags from `images.versions`) |
 | `registry.serverless2.local/nebius/my-model:1.0` | `<images.source>/my-model:1.0` (your own images) |
 | `registry.serverless2.local/nvcr/<org>/<image>:<tag>` | `nvcr.io/<org>/<image>:<tag>` (NGC key in the cache, no pull Secret on pods) |
 | `registry.serverless2.local/docker/library/busybox:1.36` | Docker Hub official image |
@@ -39,32 +39,35 @@ upstream (fleet.yaml `images.upstreams`, plus `nebius` = `images.source`):
 | `registry.serverless2.local/ghcr/<org>/<repo>:<tag>` | ghcr.io |
 
 Digests are preserved end to end (`...@sha256:` references work, Zot syncs by
-digest), so a catalog entry can pin a digest and the cache serves exactly it.
+digest), so a model can pin a digest and the cache serves exactly it.
 
 ## Components (all existing tools; the only custom pieces are one DaemonSet and the Zot config template)
 
 | piece | what | where in the repo |
 |---|---|---|
-| Zot 2.1.22 (CNCF) | pull-through cache: sync extension `onDemand` from every upstream, `docker2s2` compat, anonymous read only (pushes get 401), GC + retention (tags not pulled for `images.cache.keep_days` are dropped, untagged after 24 h), Prometheus metrics | app `clusters/common/apps/zot.yaml` (chart `zot` 0.1.128), values `clusters/common/values/zot.yaml` (+ `clusters/control/values/zot.yaml`: 100 Gi), config rendered by `charts/fleet/templates/image-cache.yaml` from fleet.yaml `images` into ConfigMap `registry/zot-config` |
+| Zot 2.1.22 (CNCF) | pull-through cache: sync extension `onDemand` from every upstream, `docker2s2` compat, anonymous read only (pushes get 401), GC + retention (tags not pulled for `images.cache.keep_days` are dropped, untagged after 24 h), Prometheus metrics | app `clusters/common/apps/zot.yaml` (chart `zot` 0.1.128), values `clusters/common/values/zot.yaml`, config rendered by `charts/fleet/templates/image-cache.yaml` from the `images` block into ConfigMap `registry/zot-config` |
 | Spegel 0.7.4 (CNCF sandbox) | peer-to-peer distribution of layers between the nodes of a cluster, and the writer of containerd's `hosts.toml` for the logical host and the public registries (`additionalMirrorTargets` = the Zot NodePort) | app `clusters/common/apps/spegel.yaml` (native OCI chart), values `clusters/common/values/spegel.yaml` |
 | node-config DaemonSet | containerd on the GPU node images has no registry `config_path`: a drop-in `/etc/containerd/conf.d/serverless2-registry.toml` (`config_path`, `discard_unpacked_layers = false`) and one containerd restart per node, through the host's systemd (`hostPID`, privileged init container; the CPU images already ship the setting and are left alone) | `charts/platform/templates/node-config`, app `node-config` |
-| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"cr.eu-north1.nebius.cloud": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | written by the platform stage (`stack/platform/secrets.tf`) from the key `stack/scripts/registry-static-key.sh` issues; by hand: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
+| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"<source registry host>": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | written by the platform stage (`stack/platform/secrets.tf`) from the key `stack/scripts/registry-static-key.sh` issues; by hand: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
 | Knative | `registries-skipping-tag-resolving: registry.serverless2.local` (the host resolves on nodes, not in the cluster network) | `charts/platform/templates/knative-serving/knative-serving.yaml` |
 
-No per-region image rewriting exists any more: `services/api` renders the
-catalog's references as they are, the dispatcher places every run at queue
-time (`docs/SCHEDULING.md`), per-region registries and the `mirror-image` Job
-are retired. The `eu-south1` Nebius registry `serverless2-models` of that
-region is no longer used by anything.
+There is no per-region image rewriting: `services/api` renders references as
+written (a plain reference such as `vllm/vllm-openai:v0.11.0` is normalised
+onto the logical host, `services/api/models.py`), and the dispatcher places
+every run at queue time (`docs/SCHEDULING.md`), so nothing in a Job depends
+on the region it lands in.
 
 ## Pushing an image
 
-Build once, push to the source registry, reference it through the host:
+The cloud stage creates the source registry (`<name>-images` in the hub project; `images.source` to use an
+existing one). `tools/images.sh build <registry>` builds and pushes the four platform images (api,
+dispatcher, jobs, ops) once, tagged by `images.versions`; `tools/images.sh copy <from> <to>` copies them
+from another registry without a build. Any other image is the same three steps: build once, push to the
+source registry, reference it through the host:
 
 ```sh
-SRC=$(python3 -c 'import yaml; print(yaml.safe_load(open("fleet.yaml"))["fleet"]["images"]["source"])')
-docker buildx build --push --platform linux/amd64 -t $SRC/serverless2/api:0.7.1 -f services/api/Dockerfile .
-# reference: registry.serverless2.local/nebius/serverless2/api:0.7.1
+docker buildx build --push --platform linux/amd64 -t <images.source>/my-model:1.0 .
+# reference: registry.serverless2.local/nebius/my-model:1.0
 ```
 
 The ops image pins the Nebius CLI and crane by version and SHA-256
@@ -73,16 +76,17 @@ The ops image pins the Nebius CLI and crane by version and SHA-256
 sets both the version and the sum, and the build fails on a mismatch.
 
 Tags are immutable by convention: the caches keep what they have synced and do
-not re-check an existing tag upstream. A new build is a new tag (every
-`services/*` README bumps a version); the pre-pull list and the manifests name
-the tag.
+not re-check an existing tag upstream. A new build is a new tag; `images.versions`
+names the platform tags in use, and the pre-pull list and the model definitions
+name theirs.
 
 ## Switching the source registry
 
-1. Copy the images in use into the new registry (same paths), e.g. with a Job
-   on the hub (`services/ops` image: `crane copy <old>/<path> <new>/<path>`; the
-   ops SA mints the tokens), or `crane copy` with a static key from a laptop.
-2. Change the one key: fleet.yaml `images.source`. Terraform updates
+1. Copy the images in use into the new registry (same paths), with
+   `tools/images.sh copy <old> <new>` for the platform images, a Job in the
+   cluster (`services/ops` image: `crane copy <old>/<path> <new>/<path>`; the
+   ops SA mints the tokens) or `crane copy` with a static key from a laptop.
+2. Change the one key: `images.source` in `terraform.tfvars`. Terraform updates
    `registry/zot-config` on every cluster; Zot picks the new upstream up for
    every repository it does not already hold (rotate the `zot` StatefulSet to
    apply at once: `kubectl -n registry rollout restart statefulset/zot`).
@@ -91,25 +95,34 @@ the tag.
 
 ## Warm-up and sizing
 
-- `clusters/<cluster>/values/fleet.yaml` `prepull.images` is the per-GPU-pool
-  pre-pull DaemonSet (charts/fleet) AND the cache's warm-up set: the first node
-  of a pool pulls the catalog's images through the cache (which fetches them
-  from the upstream once), later nodes get them from the peers.
-- Cache size: fleet.yaml `images.cache.size_gib` (1 TiB per GPU region,
-  network-ssd, about USD 100/month per region at list price), overridable per
-  cluster with `image_cache_size_gib` in the control block or a region block
+- The pre-pull list (`charts/fleet` `prepull.images`, derived per cluster by the
+  config stage from the bundled run classes' images) is the per-GPU-pool
+  pre-pull DaemonSet AND the cache's warm-up set: the first node of a pool
+  pulls those images through the cache (which fetches them from the upstream
+  once), later nodes get them from the peers.
+- Cache size: `images.cache.size_gib` (1 TiB per GPU region, network-ssd,
+  about USD 100/month per region at list price), overridable per cluster with
+  `image_cache_size_gib` in the `control_plane` block or a region block
   (control: 100 Gi). The claim `registry/zot-pvc-zot-0` is rendered by
   `charts/fleet` (image-cache.yaml) and referenced by the Zot StatefulSet
   (`pvc.create: false`), so a new cluster gets it before Zot starts and the
   StatefulSet mounts a separately owned cache claim, preserving it across chart upgrades.
+- Orders of magnitude on a GPU node, through the logical host: a 500 MB image
+  pulls in 20 to 30 s cold (the cache fetching it from the source registry)
+  and in under 10 s once a peer or the cache has it; a 16 GB NIM image takes
+  about ten minutes for the cache to sync from NGC (containerd's first request
+  ends `NotFound` while the sync runs, the kubelet's retry pulls from the
+  cache) and about three and a half minutes on the next node of the cluster.
+  Pre-pull what a cold start must not wait for.
 
 ## Adding an upstream
 
-Add an alias to fleet.yaml `images.upstreams` (`<alias>: https://<host>`), add
-its credentials to `registry/zot-sync-credentials` when it needs any, and
+Add an alias to `images.upstreams` (`<alias> = "https://<host>"`), add its
+credentials to `registry/zot-sync-credentials` when it needs any
+(`REGISTRY_CREDENTIALS` in the environment at apply time, `secrets` block), and
 reference `registry.serverless2.local/<alias>/<path>`.
 
-## The setting at boot (Terraform, applied 2026-10-07)
+## The setting at boot
 
 Two files are written by cloud-init on every GPU node (`stack/modules/cluster/main.tf`,
 `gpu_cloud_init`): the containerd drop-in below, and the mirror file
@@ -117,19 +130,15 @@ Two files are written by cloud-init on every GPU node (`stack/modules/cluster/ma
 Zot NodePort on the node itself (`server = "http://127.0.0.1:30500"`). Spegel
 rewrites that file with its peers once it runs (it keeps a copy under
 `certs.d/_backup`). Without the second file the first pulls of a fresh node, which
-happen before Spegel has started, fell back to DNS for the logical host and sat in
-the kubelet's pull back-off for minutes (measured 2026-10-07, hub H100 pool).
+happen before Spegel has started, fall back to DNS for the logical host and sit in
+the kubelet's pull back-off for minutes.
 
-A fresh GPU node pulls its first workload image before the `node-config`
-DaemonSet has restarted containerd (one failed pull, retried by the kubelet
-about 10 s later: measured 2 min 5 s from node creation to a running job
-container; with several pods landing at once the kubelet's pull back-off
-stretched that to minutes on 2026-10-07). Since 2026-10-07 the same drop-in is
-written by cloud-init in the GPU node-group template (`stack/modules/cluster/main.tf`,
-`gpu_cloud_init`, next to the `weights` mount), so a fresh node's first pulls
-already go through the cache. The DaemonSet stays as the catch-all and does
-nothing on a node that already has the setting (same marker file). The
-cloud-init fragment Terraform renders:
+The `node-config` DaemonSet is the catch-all for a node that lacks the drop-in: such
+a node pulls its first workload image before the DaemonSet has restarted containerd
+(one failed pull, retried by the kubelet about 10 s later; with several pods landing
+at once the kubelet's pull back-off stretches that to minutes). It does nothing on a
+node that already has the setting (same marker file). The cloud-init fragment
+Terraform renders:
 
 ```yaml
 #cloud-config
@@ -149,19 +158,7 @@ runcmd:
   - systemctl restart containerd
 ```
 
-## Measured (2026-10-07; details in docs/VERIFICATION.md)
-
-| pull on a node, through the logical host | time |
-|---|---|
-| `docker/library/busybox:1.36` (2 MB), cold (Zot fetched it from Docker Hub) | 0.9 s |
-| `nebius/serverless2/jobs:0.1.3` (44 MB; 0.1.4 since 2026-10-08), cold (from the source registry) | 2.4 s hub, 4.6 s eu-south1 |
-| a 518 MB solver image, cold, hub | 20.9 s |
-| same, eu-south1 GPU node, cache warm (Zot sync from the hub registry took 12 s before) | 29 s first node, 7.8 s re-pull |
-| same, fresh eu-south1 spot node (a run landing there), cache warm | 12.3 s |
-| a 16.4 GB NIM image, cold: Zot fetches from NGC | 9 min 38 s sync; containerd's first request ends `NotFound` at that moment, the kubelet's retry pulls from the cache |
-| same, second GPU node of the cluster (cache + Spegel peer) | 3 min 27 s |
-
-## Pitfalls found on the way
+## Pitfalls
 
 - Spegel's chart has post-delete hook objects (`spegel-cleanup`); rendering
   the chart with `helm template` without `--no-hooks` and applying the output
@@ -170,20 +167,19 @@ runcmd:
 - containerd's `config_path` is read at start. On the GPU node images it is not
   set, and the node image's `config.toml` already defines the
   `cri.containerd` table: a drop-in under `conf.d` is the only safe way to add
-  settings (defining a table twice makes containerd refuse to start and the
-  node goes NotReady; one hub L40S node was lost to that during development and
-  replaced by the autoscaler).
+  settings (defining a table twice makes containerd refuse to start, the
+  node goes NotReady and the autoscaler replaces it).
 - `systemctl` through `chroot` fails from a container ("Failed to connect to
   bus"); the DaemonSet uses `hostPID` and `nsenter -t 1`.
 - The Spegel hostPort (30020) is not reachable on the loopback address through
   Cilium; containerd falls through to the NodePort (30021) within its 200 ms
   dial timeout, which costs nothing noticeable.
 
-## The cache as an add-on (`images.cache.enabled`, 2026-10-11)
+## The cache as an add-on (`images.cache.enabled`)
 
-The cache is on by default and is what the test fleet runs. `images.cache = { enabled = false }` in the tfvars
-leaves it out of a fleet whose nodes can reach their registries directly and that does not need the
-per-region warm layer: no Zot release, no `registry` namespace, no cache claim, no registry static key
+The cache is on by default. `images.cache = { enabled = false }` in the tfvars leaves it out of a fleet
+whose nodes can reach their registries directly and that does not need the per-region warm layer: no Zot
+release, no `registry` namespace, no cache claim, no registry static key
 (`stack/scripts/registry-static-key.sh` is not run, Secret `registry/zot-sync-credentials` is not written),
 no `node-config` DaemonSet and no containerd drop-in in the GPU pools' cloud-init (`stack/modules/cluster`:
 a change of this flag rolls the GPU pools), and Knative's `registries-skipping-tag-resolving` lists `nvcr.io`
@@ -196,23 +192,12 @@ containerd reads `certs.d`; the GPU node images lack that setting without the dr
 | the platform images (`images.versions`) | `registry.serverless2.local/nebius/serverless2/<component>:<tag>` | `<images.source>/serverless2/<component>:<tag>`, exactly the tags `tools/images.sh build` pushes (`<registry>/serverless2/<component>:<tag>`, `images.sh list` shows them); nothing to re-tag |
 | the bundled classes (`catalog/models`) and the pre-pull list | as written in the catalog (`registry.serverless2.local/docker/library/busybox:1.36`) | rewritten once by `stack/config` to the upstream (`docker.io/library/busybox:1.36`) |
 | a model defined through the API (`image: vllm/vllm-openai:v0.11.0`) | normalised to `registry.serverless2.local/docker/vllm/vllm-openai:v0.11.0` (`services/api/models.py`) | left as written (`IMAGES_HOST` is empty on the API) |
-| helper images of the stage (curl, postgres, the snapshot operator) | through the cache | `docker.io/...`, `ghcr.io/...` |
+| helper images of the platform stage (curl, the postgres client) | through the cache | `docker.io/...`, `ghcr.io/...` |
 
 What the operator then provides: the platform images in a registry the nodes can pull from. The Managed
 Kubernetes node identity (`<cluster>-nodepull`, `stack/modules/cluster`) has `viewer` on its own project, so
 the fleet's registry in the hub project is reachable from the hub region's nodes; a region in another
 project needs read access on the hub project's registry for its node identity (or `images.source` pointing at a
 registry of its own, filled with `tools/images.sh copy`), and private upstreams (NGC) need a pull Secret on
-the pods, which the platform does not add. Nothing of this was exercised on a live fleet (the test fleet keeps
-the cache); the setting is validated by rendering: `make check` renders both charts with the cache off.
-
-## Terraform solution (2026-10-08)
-
-The cloud stage creates the source registry (`<name>-images` in the hub project, `images.source` to use
-an existing one); `tools/images.sh build <registry>` pushes the five platform images once (or
-`tools/images.sh copy <from> <to>` copies them), tagged by `images.versions`. The platform stage renders
-the cache configuration from the tfvars through `charts/fleet`, writes the cache credential Secret
-(a static Container Registry key of the ops service account issued once per operator by
-`stack/scripts/registry-static-key.sh`, cached under `stack/.secrets/`; NGC and other private upstreams
-from the environment) and the containerd mirror files come from the GPU pools' cloud-init
-(`stack/modules/cluster`). Every image reference stays `registry.serverless2.local/<alias>/<path>`.
+the pods, which the platform does not add. The setting is validated by rendering (`make check` renders both
+charts with the cache off), not on a live fleet.

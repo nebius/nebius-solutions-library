@@ -16,7 +16,7 @@ metadata:
 # NEVER name a LocalQueue in `models` `default`: Kueue's LocalQueueDefaulting then injects
 # kueue.x-k8s.io/queue-name=default into every Deployment of the namespace on update, and its validating
 # webhook rejects the update as an immutable-label change, so the Knative predictor
-# Deployments could no longer be changed (seen 2026-10-07 on both workers, docs/ARCHITECTURE.md).
+# Deployments could no longer be changed (docs/ARCHITECTURE.md).
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:

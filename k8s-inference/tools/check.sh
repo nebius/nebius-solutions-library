@@ -169,7 +169,7 @@ EOF2
   # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: the objects
   # (names, namespaces, labels, every field) and their components (the wave, hence the state address) must be
   # equal, so that an apply changes nothing on a live cluster. The golden set was first written from the kustomize
-  # bases plus the stage's JSON patches that the chart replaced (2026-10-11); UPDATE_GOLDEN=1 rewrites it from the
+  # bases plus the stage's JSON patches that the chart replaced; UPDATE_GOLDEN=1 rewrites it from the
   # chart after a deliberate change, and the diff of the golden files in the review shows exactly what changes.
   step "charts/platform: the render of every cluster equals its golden set (stack/platform/tests/golden)"
   for cid in $clusters; do

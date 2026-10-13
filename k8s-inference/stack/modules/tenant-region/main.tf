@@ -68,7 +68,7 @@ resource "terraform_data" "empty_bucket" {
     secret   = nebius_iam_v2_access_key.tenant.status.secret
   }
   # the key's access comes from the group membership (bucket policy): `destroy` must empty the bucket before
-  # the membership goes (seen 2026-10-09: 403 from the provisioner after the membership was destroyed first)
+  # the membership goes (403 from the provisioner when the membership is destroyed first)
   depends_on = [nebius_iam_v1_group_membership.tenant]
   provisioner "local-exec" {
     when    = destroy

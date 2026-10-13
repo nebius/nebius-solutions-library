@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # After the Kueue release is uninstalled: remove the two aggregated ClusterRoles the kube-controller-manager
 # re-creates while Helm deletes the roles that feed them (clusterrole-aggregation-controller, server-side
-# apply). Helm's uninstall --wait never sees them gone and times out after 15 minutes (measured 2026-10-08);
+# apply). Helm's uninstall --wait never sees them gone and times out after 15 minutes;
 # the release is therefore uninstalled without waiting, and this script runs at destroy time right after it:
 # it waits until no contributing role is left, then deletes the stale aggregated roles so a later
 # `apply platform` on the same cluster does not hit "resource already exists".

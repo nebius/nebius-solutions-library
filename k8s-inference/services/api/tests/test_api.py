@@ -9,7 +9,7 @@ os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"   # async endpoint calls
 import pytest, yaml
 from fastapi.testclient import TestClient
 from kubernetes.client.rest import ApiException
-import app as appmod, auth, catalog, config, jobs, kube, models, render, status
+import app as appmod, auth, catalog, config, jobs, keys, kube, models, render, status
 from config import RUNNER_IMAGE
 
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
@@ -592,7 +592,8 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
     assert r.status_code == 200 and r.json()["result"] == {"choices": []} and r.json()["operation"]["region"] == "eu-north1"
     url, sent, headers = calls[0]
     assert url == "https://llm-example-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
-    assert sent == {"messages": [], "model": "llm"} and headers == {"Authorization": "Bearer sk-good"}
+    assert sent == {"messages": [], "model": "llm"}
+    assert headers == {"Authorization": "Bearer sk-good", appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"))}   # the hook counts this call once
 
 
 ADMIN_INFO = {**KEY_INFO, "metadata": {**KEY_INFO["metadata"], "role": "admin"}}
@@ -626,6 +627,13 @@ class FakeKeys:
 
     def info(self, h): return self._info(h) if h in self.rows else None
     def list_tenant(self, tenant): return [self._info(h) for h, r in sorted(self.rows.items()) if r["tenant"] == tenant]
+    # admission and import (keys.py migration 8): recorded, never refused here; the database tests hold the real rules
+    def admit(self, h, operation, tenant, gpu_seconds=0.0, counts_request=True):
+        self.calls.append(("admit", operation, gpu_seconds, counts_request)); return {"operation": operation, "replay": False}
+    def release(self, operation, gpu_seconds=None): self.calls.append(("release", operation, gpu_seconds)); return True
+    def stale_reservations(self, older_than_s): return list(getattr(self, "stale", []))
+    def import_records(self, records, tenant, by, dry_run=False):
+        self.calls.append(("import", tenant, by, dry_run, len(records))); return {"dry_run": dry_run, "inserted": [r.get("alias") for r in records], "unchanged": [], "conflicts": []}
 
     def create(self, tenant, alias, budget=None, models=None, expires_days=None, role="user", metadata=None, by=None, value=None):
         self.calls.append(("create", alias))
@@ -658,7 +666,7 @@ class FakeKeys:
 def fake_keys(monkeypatch):
     import keys, db
     fk = FakeKeys()
-    for name in ("info", "list_tenant", "create", "update", "revoke"):
+    for name in ("info", "list_tenant", "create", "update", "revoke", "admit", "release", "stale_reservations", "import_records"):
         monkeypatch.setattr(keys, name, getattr(fk, name))
     monkeypatch.setattr(db, "enabled", lambda: True)          # the fleet API: it has the database
     return fk
@@ -1142,6 +1150,10 @@ def admin_keys(monkeypatch):
     fdb = FakeDB()
     for name in ("enabled", "list_models", "get_model", "upsert_model", "delete_model", "history", "pending_changes", "finish_change", "reconciler"):
         monkeypatch.setattr(db, name, getattr(fdb, name))
+    import keys as keys_mod                       # admission reservations live in the database too: recorded, never refused here
+    monkeypatch.setattr(keys_mod, "admit", lambda h, op, tenant, gpu_seconds=0.0, counts_request=True: {"operation": op, "replay": False})
+    monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: True)
+    monkeypatch.setattr(keys_mod, "stale_reservations", lambda older_than_s: [])
     monkeypatch.setattr(m, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io", "eu-south1": "203.0.113.20.sslip.io"})
     auth.forget("sk-admin"); auth.forget("sk-good")
     catalog.invalidate()

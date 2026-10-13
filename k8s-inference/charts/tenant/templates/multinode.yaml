@@ -10,7 +10,7 @@ Multi-node runs (docs/JOBS.md "Multi-node runs"), worker clusters only:
 {{- $c := include "tenant.cluster" . | fromYaml -}}
 {{- /* The claim templates exist on the manager too: Kueue there resolves a multi-node run's claim template
        (DRA accounting) before MultiKueue hands the JobSet to a worker; without them the workload stays
-       "DRAResourcesUnresolved" (test fleet, 2026-10-09). The scratch volume below is worker-only. */ -}}
+       "DRAResourcesUnresolved". The scratch volume below is worker-only. */ -}}
 {{- if .Values.infiniband }}
 {{- range $n := .Values.infinibandClaimCounts }}
 ---

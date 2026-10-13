@@ -7,7 +7,7 @@
 # other auth key of that service account older than $RETIRE_AFTER_DAYS (default 7; a key file that
 # a pod still mounts is at most one rotation old). With $BACKUP_S3_SECRET=<ns>/<name> also rotate
 # the S3 access key of the SA behind the first Secret (its consumer must re-read the Secret) and delete
-# that SA's other access keys older than the same age (unused since 2026-10-09: no in-cluster backups).
+# that SA's other access keys older than the same age (unused: no in-cluster backups).
 # Weekly CronJob charts/platform/templates/ops/rotate-nebius-keys.yaml (overlays set SECRETS).
 set -eu
 : "${SECRETS:?space-separated Secret names}"

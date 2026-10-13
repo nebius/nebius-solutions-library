@@ -2,8 +2,8 @@
 # The acceptance probe of a fleet (README.md quick start, docs/OPERATIONS.md "Checks after any change"): with a tenant
 # key, lists the models, runs the built-in run class `acceptance.model` (hello-run) to SUCCEEDED and, with
 # `acceptance.example_endpoint` (or --example), defines the example endpoint `llm-example` through the API with the
-# first admin key and calls it once (a cold start in a fresh region pulls a 10 GB image: up to 11 min measured
-# 2026-10-09; the call is retried for 20 minutes). Exit 0 = the fleet serves runs and endpoints end to end.
+# first admin key and calls it once (a cold start in a fresh region pulls a 10 GB image: up to 11 min measured;
+# the call is retried for 20 minutes). Exit 0 = the fleet serves runs and endpoints end to end.
 #
 #   tools/verify.sh [--example | --no-example]   from the operator machine: the inputs come from the platform stage of
 #                                                the control cluster (`./stack.sh output platform control -json acceptance`)

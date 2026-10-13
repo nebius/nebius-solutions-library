@@ -39,10 +39,10 @@ API ("Models" below), on the fleet API only. Admission limits are not in the API
 runs (the fleet's profile queues), the key's budget bounds every call ("Keys" below; LiteLLM's own `rpm_limit` and
 `max_budget` on its OpenAI route), and an
 Envoy Gateway global rate limit caps each key (distinct `Authorization` header, counted in Redis
-across replicas): 600 requests per minute on the API route, 3000 per minute on the predictor hosts.
-
-MCP (later): one tool per model operation generated from the model's OpenAPI spec; long calls use
-the MCP Tasks extension with the same operation id.
+across replicas): 600 requests per minute on the API route, 3000 per minute on the predictor hosts. Two bounds
+are the API's own: a call's `timeout_s` is 1 s to 7 days (a sync call waits, a run has a deadline, no longer), and
+the `input` of a run or an async call is at most 60 KB (413 above it: pass large inputs by reference, an artifact
+upload or a binding).
 
 ## Models
 
@@ -77,10 +77,9 @@ policy back, so a read never has to guess a default. Rendering onto Knative: `co
 
 What happens on a write: the definition goes into the fleet database (table `models`: id, kind, spec, the
 rendered entry, version, `managed_by`, created/updated by and at) and every write into `models_history`;
-the API renders the endpoint on every cluster of the model's regions (`services/api/render_endpoint.py`
-is the reference rendering of the same objects, kept for one release), registers an
-OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway hostname in that region,
-and writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of every other region.
+the API renders the endpoint on every cluster of the model's regions (`services/api/render_endpoint.py`;
+server-side apply through the api-agent identities of the regions) and registers an
+OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway hostname in that region.
 `PUT` replaces the definition (version + 1), `DELETE` removes the endpoint everywhere and keeps the last
 version in the history, `GET /v1/models/{model}/history` lists the versions (admin key).
 
@@ -119,8 +118,7 @@ the tenant's area on the region's shared filesystem mounted into every run of th
 ### Loading large weights
 
 vLLM's default loader reads one safetensors shard at a time, about 170 MB/s from the shared filesystem; its
-Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB in 2.6 min on a B300 node,
-2026-10-10). Put `--load-format runai_streamer --model-loader-extra-config '{"concurrency": 32}'` into the command
+Run:ai streamer loads the same files with many streams at about 5 GB/s (806 GB in 2.6 min on a B300 node). Put `--load-format runai_streamer --model-loader-extra-config '{"concurrency": 32}'` into the command
 of any vLLM endpoint whose weights live on the filesystem, and `VLLM_CACHE_ROOT=/weights/vllm-cache` in its env so
 the torch.compile cache survives a restart (the first start of a trillion-parameter model spends about 25 min there).
 
@@ -132,11 +130,42 @@ model allow-list (empty = every model), budget in USD (null = unlimited), spend,
 API checks the key on every request (hash lookup, cached `AUTH_CACHE_S` = 30 s): blocked, expired and
 budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke`, the operations and the
 gateway's authorize hook of every endpoint hostname. The first keys of a fleet are the tenants' `keys` of
-`terraform.tfvars` (the models stage writes them with `python -m keys bootstrap`, `./stack.sh output models
+`terraform.tfvars` (the platform stage writes them with `python -m keys bootstrap`, `./stack.sh output platform
 control -json tenant_keys` prints them); an admin key then mints user keys of its tenant through
 `POST /v1/keys` (budget, models, `expires_days`), edits them (`PATCH`) and revokes them (`DELETE`), on the
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
 the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
+
+**Scopes and limits beyond the USD budget.** A key may carry `scopes` (what it may do; empty = everything of its
+role): `invoke:sync`, `invoke:async`, `run:submit`, `run:control` (cancel, resume, export), `read:catalog`,
+`read:operations`, `read:results`, `read:logs`, `read:metrics`, `artifacts:write`. Every direct path checks its
+scope (403 `key scope <x> required`), the gateway's authorize hook included. Three further limits, each in its own
+unit and nullable (null = unbounded): `budget_requests` (remaining calls), `budget_gpu_seconds` (remaining GPU
+seconds) and `max_concurrent` (operations in flight), plus `rate_limit` `{requests, window_s}`. They are enforced
+at admission in one database transaction per key (`keys.admit`: the key row is locked, so two API replicas never
+admit past a limit together): a call or run takes a slot and a request; a run on a key with a GPU-second budget
+reserves its GPUs times its `timeout_s` (such a key must give `timeout_s` on a GPU run, 400 otherwise) and the
+measured GPU seconds replace the reservation when the attempt is billed; a sync call holds its slot for the
+call. One `:invoke` and the gateway authorization of its own proxied call count once; a call that reaches an
+endpoint hostname directly counts once at the hook; a replay with the same `Idempotency-Key` counts once.
+Exhausted budgets answer 402, a full concurrency slot or rate window 429. `GET /v1/keys/me` shows the limits,
+what was spent against them, and for imported keys the legacy `principal_id` and metadata.
+
+**Importing keys.** `POST /v1/keys:import` (an admin key; the keys of its own tenant only) and
+`python -m keys import <file.json>` (an operator with database access) take pre-hashed records
+(`{"keys": [{"hash", "alias", "tenant", "principal_id", "models", "scopes", "budget_usd", "budget_requests",
+"budget_gpu_seconds", "max_concurrent", "rate_limit", "expires", "blocked", "preview", "metadata",
+"created_at"}], "dry_run": false}`): the sha256 of the exact bearer value, never the value, so an existing
+client keeps its key without rotation. The import is idempotent and all-or-nothing: a new hash and alias is
+inserted, the same key with every field equal is unchanged, anything else (the hash under another alias or
+tenant, the alias with another hash, the same key with changed limits, grants or principal) is a conflict and
+the whole batch is refused with 409 and the list; invalid records are 400 with per-record reasons; `dry_run`
+reports the classification and writes nothing. Imported keys are user keys; a scope the platform does not know
+imports the key blocked (reported under `blocked_for_unknown_scope`) rather than widening it; grants for
+models not deployed yet are kept as written; the role, limits and grants of an existing key are changed through
+`PATCH /v1/keys/<alias>`, never by an import. Imported keys have no LiteLLM mirror (there is no value to
+mirror): they work on the API and the endpoint hostnames, not on LiteLLM's own route (`not_mirrored` in the
+report).
 
 ## Waiting runs
 
@@ -230,7 +259,7 @@ so without a custom image use vLLM's Ray-free data-parallel mode instead (one fu
 tensor-parallel inside the node; the leader serves, the workers run `--headless`): leader
 `vllm serve ... --tensor-parallel-size 8 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-address $(hostname -i) --data-parallel-rpc-port 13345 --port 8000`,
 workers `... --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-start-rank $LWS_WORKER_INDEX --headless`
-(verified with Kimi K3 on two B300 nodes, 2026-10-10). Over Ethernet the pods get `NCCL_IB_DISABLE=1`: the nodes
+(verified with Kimi K3 on two B300 nodes). Over Ethernet the pods get `NCCL_IB_DISABLE=1`: the nodes
 carry Mellanox NICs the pod does not hold, and NCCL's InfiniBand transport fails with "unhandled system error" otherwise.
 
 Placement: the pool whose preset has exactly `gpu.count` GPUs per node, reserved before on-demand before spot;
@@ -242,8 +271,8 @@ restores `min_nodes` after it is stopped (docs/SCHEDULING.md "InfiniBand pools g
 boot after `scaling.min` goes to 1 and a start takes the usual few minutes longer than on a pool with nodes up.
 
 Start and stop, no autoscaling in between: `scaling.min` 1 starts the replica group (the nodes boot, the drivers
-install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; a client's Start/Stop control
-and `PATCH /v1/endpoints/{id} {"scaling": {"min": 1}}` do that. `scaling.idle_s` stops it after that many seconds
+install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it;
+`PATCH /v1/endpoints/{id} {"scaling": {"min": 1}}` does that. `scaling.idle_s` stops it after that many seconds
 without a request, measured by the API's reconcile loop from the later of the last authorized request (the
 gateway's authorize call stamps the LeaderWorkerSet in every region of the model) and the moment the leader became Ready; the stop is a normal definition
 write (history entry by `idle-shutdown`). A call to a stopped or starting multi-node endpoint gets 503 with that
@@ -253,23 +282,4 @@ a one-pod endpoint.
 
 Start-up time: every endpoint (both kinds) reports `startup_s`, `started_at` and `ready_at` of its newest pod
 (`GET /v1/endpoints`): pod created to Ready, which includes a cold node's boot and driver install, the image pull
-and the model load; the Endpoints dashboard shows it as a table by model.
-
-## Internal substrate shape (documented, not served)
-
-The internal shape mirrors public `nebius.ai.v1` Endpoint and Job plus the
-extensions below. It is what the provider adapter writes into KServe objects and
-Kubernetes Jobs, and it is the gap list for the Serverless and Token Factory teams.
-
-Endpoint extensions: `scaling {min_replicas, max_replicas, target_concurrency,
-scale_to_zero_after}`, `fast_start {policy}`, `capacity {pool_ref, placement:
-RESERVED|SPOT|ANY, max_spot_price, region}`, `routing {hostname, private}`,
-`status {replicas_ready, in_flight, last_cold_start, preemption_events}`.
-
-Job extensions: `queue {priority_class, max_queue_seconds}`, `resources
-{nodes, gpus_per_node}`, `retry {max_attempts, resume_from_checkpoint,
-checkpoint_path}`, `capacity {placement, max_spot_price, region}`, `status
-{QUEUED|ADMITTED|RUNNING|PREEMPTED|SUCCEEDED|FAILED, attempts[]}`.
-
-Pool: `platform, preset, gpus_per_node, capacity_type RESERVED|SPOT,
-min_nodes, max_nodes, reservation_ids[], pricing_policy_id, region`.
+and the model load; the Grafana dashboard "Endpoints" shows it as a table by model.

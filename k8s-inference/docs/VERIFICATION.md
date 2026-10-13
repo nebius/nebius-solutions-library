@@ -12,7 +12,37 @@ dynamics solver as the GPU batch job (185k atoms, 5000 steps, about 3 minutes on
 image as the large private-registry endpoint (16 GB), a streaming WebSocket endpoint, and a 0.5B
 parameter chat model served by vLLM as the OpenAI endpoint.
 
-## Fresh deployment of the two-stage layout: a second fleet from the PR branch (2026-10-12 17:30-18:50 UTC, deployed and operated by the Scientific AI migration lane, read here from its coordination record)
+## What was verified live, what only renders, what was never exercised
+
+The dated sections below are the evidence; this table is the index. "Verified" means exercised on a real
+fleet with the result recorded here; "rendered only" means the Terraform plan or the chart render was checked
+and the configuration was never applied to a cluster; "never exercised" means neither.
+
+| Feature | Status | Where |
+|---|---|---|
+| Fresh deployment from `terraform.tfvars` (cloud, platform, models stages; destroy) | verified | 2026-10-08 (twice), 2026-10-09, 2026-10-12 (a second fleet) |
+| Acceptance probe (`hello-run`, then the example endpoint through the edge) | verified | 2026-10-08, 2026-10-09, 2026-10-11 (apply-time) |
+| Preemption and resume (pod loss, VM stop; `:resume` on the same volume and with a portable checkpoint) | verified | 2026-10-07, 2026-10-09, 2026-10-11 |
+| Cross-region dispatch (cost-aware placement, queue-time re-dispatch, capacity fallback) | verified | 2026-10-07, 2026-10-08, 2026-10-11 |
+| Multi-node InfiniBand JobSets (2 x 8 H100, NCCL over the fabric, 16-GPU model as a run) | verified | 2026-10-08, 2026-10-09, 2026-10-10, 2026-10-11 |
+| Multi-node endpoints (`nodes` > 1, a LeaderWorkerSet; trillion-parameter model on two nodes) | verified | 2026-10-10, 2026-10-11 |
+| Automatic recovery after infrastructure loss (`recovery: recover`, fenced records) | verified | 2026-10-12 |
+| Application finalizer (`job.finalize`, `:export` after a "delivery pending" exit code) | unit-tested; verified on a second fleet by its application team | not recorded here |
+| Image cache on (pull-through, peer distribution, cold-pull timings) | verified | 2026-10-07 |
+| Image cache off | rendered only | - |
+| `edge.mode = "internal"` (private CA, no public gateway address) | rendered only | - |
+| Single-cluster mode (no dedicated control cluster) | rendered only | - |
+| Workload secrets through External Secrets / MysteryBox | never exercised | - |
+| Reserved capacity blocks | ordering only (reserved pools are ranked first; no reserved pool was ever held) | 2026-10-10 "Endpoint placement" |
+| Backup restore of the managed database | recipe only (docs/OPERATIONS.md) | - |
+| Gateway rate limits | configured, not load-tested | - |
+| Tenant queues, fair sharing, dedicated pools, shared data | verified | 2026-10-11 |
+| Variants and request routing | verified | 2026-10-11 |
+| GPU drivers from the NVIDIA GPU Operator | verified | 2026-10-10 |
+| Local NVMe scratch (8-GPU B300 preset) | verified | 2026-10-09 |
+| Keys: create, edit, budget exhaustion, revocation, tenant isolation | verified | 2026-10-11 |
+
+## Fresh deployment of the two-stage layout: a second fleet from the PR branch (2026-10-12 17:30-18:50 UTC, deployed and operated by the application team of a second fleet, read here from their record)
 
 | Check | Result |
 |---|---|
@@ -22,7 +52,7 @@ parameter chat model served by vLLM as the OpenAI endpoint.
 | Kubernetes API allow-lists | the audit log showed the operator's calls from a different address than the host believes it has; lists tightened in place one cluster at a time with the same-shell check (the documented procedure) |
 | Placement defects found and fixed | `allowed_clusters` without a top-level region was refused against the implicit default region (0.11.25); a `gpu_preference` on a generic single-image class kept the model's queue and spanned every pool, so H100, H200 and L40S probes all scaled the H100 pool (0.11.26: the queue and the pool affinity follow the preference); custom cluster ids (`north`, `south`) were unknown to the API, breaking admitted cancellation, logs, metrics and the attempt-record token review (0.11.26 + fleet chart 0.1.5: `clusters.yaml` maps ids to regions); the GPU Operator chart had no driver profile for `gpu-rtx6000-a`, leaving the RTX node without a driver (one NVIDIADriver per pool platform, longest-prefix sibling for the manager settings) |
 | GPU qualification | all four classes SUCCEEDED with the physical device matching the requested class and 65 536 CUDA outputs each through the API's logs; the south request that had queued ran after the driver profile landed, without node replacement; admitted cancellation terminal in both regions with no worker pods left and no successor (the south run ended CANCELLED at 18:52:44 UTC); every GPU node autoscaled back to zero by 18:51 with no manual floors, the CPU foundation remaining |
-| Shared fleets | s2pr2 and the customer cluster untouched throughout (read-only plans only) |
+| Shared fleets | the test fleet and the customer cluster untouched throughout (read-only plans only) |
 
 ## Automatic recovery after infrastructure loss (2026-10-12 14:15-14:40 UTC, the same test fleet)
 
@@ -98,7 +128,7 @@ the console's Edit button) as api 0.11.9 / ui 0.6.2.
 | Stable handle across fallback | three RTX-preferring runs with the pool full: the third was moved to L40S after 60 s; `GET` on the original handle answered 200 with the successor's state (`requested_id` the original, `resumed_from`, the fallback reason); the list shows the original as SUPERSEDED with its `successor`; the original's Workload is deactivated and its Job suspended |
 | No success without a record | an application run that exited 0 without RESULT.json became EXPORT_FAILED ("no finalization record"), its volume Bound and kept; the uploader logged "volume kept: delivery not acknowledged (export=n/a ack=200 result=no)" |
 | Pointer handoff and abrupt loss | an application run on RTX PRO 6000 (us-central1) published `CHECKPOINT.json` every step; the uploader recorded each new pointer through the fenced path and wrote `CHECKPOINT.ack.json` (generation, epoch, revision), which the run printed (generation 12 acknowledged while computing step 14); the pod was force-deleted with grace period 0; the operation went FAILED (`recovery: fail`) with `checkpoint_ref app://fold-ckpt/gen-14`, generation 14, attempt PREEMPTED; `POST :resume {"gpu_class": "l40s"}` without a checkpoint reference used the acknowledged pointer: the new attempt ran on L40S in eu-north1 with the L40S image, a fresh volume and `CHECKPOINT_REF=app://fold-ckpt/gen-14`, and continued at step 15 |
-| Key editing | `PATCH /v1/keys/sciai-worker` raised the budget to 75, restricted the models and set a 30-day expiry; the fresh list and the key's own `/v1/keys/me` showed the new limit; restored afterwards |
+| Key editing | `PATCH /v1/keys/<tenant>-worker` raised the budget to 75, restricted the models and set a 30-day expiry; the fresh list and the key's own `/v1/keys/me` showed the new limit; restored afterwards |
 
 ## Execution options, attempt lifecycle, portable retries (2026-10-11 12:00-13:00 UTC, the same test fleet)
 
@@ -113,8 +143,8 @@ class, writing checkpoints and a RESULT.json).
 
 | Check | Result |
 |---|---|
-| Application I/O, identity, binding, profile (one run) | the pod ran as `identity-customer-a`; the main container had no Kubernetes token, a projected token with `aud: ["sts.amazonaws.com"]` and `iss: https://oidc.mk8s.api.nebius.cloud/<hub cluster id>`, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` set; the binding's files were readable under `/var/run/serverless2/private`; an allowed FQDN (the storage host) was reachable, the world (1.1.1.1:443) and the metadata service were denied, DNS worked; `PUT` of the binding while the run slept changed the file within 75 s without a restart; RESULT.json made the run SUCCEEDED with `result_ref`, `checkpoint_ref`, `epoch 1`, `revision`, `cluster`, the image digest; `?since=<revision>` answered 304, `since=<revision-1>` 200; `/result` lists no artifacts |
-| Tenant without a bucket | `tenant-sciai` on every cluster with the runner identity, `identity-customer-a`, the profile queues (incl. `prefer-l40s`, `prefer-rtx-pro-6000`), the profile's CiliumNetworkPolicy and no `s3`/`tenant-storage` Secret; keys minted as usual |
+| Application I/O, identity, binding, profile (one run) | the pod ran as `identity-customer-a`; the main container had no Kubernetes token, a projected token with `aud: ["sts.amazonaws.com"]` and `iss: https://oidc.mk8s.api.nebius.cloud/<hub cluster id>`, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` set; the binding's files were readable under `/var/run/serverless2/private`; an allowed FQDN (the storage host) was reachable, a public internet address (port 443) and the metadata service were denied, DNS worked; `PUT` of the binding while the run slept changed the file within 75 s without a restart; RESULT.json made the run SUCCEEDED with `result_ref`, `checkpoint_ref`, `epoch 1`, `revision`, `cluster`, the image digest; `?since=<revision>` answered 304, `since=<revision-1>` 200; `/result` lists no artifacts |
+| Tenant without a bucket | the bucket-less tenant's namespace on every cluster with the runner identity, `identity-customer-a`, the profile queues (incl. `prefer-l40s`, `prefer-rtx-pro-6000`), the profile's CiliumNetworkPolicy and no `s3`/`tenant-storage` Secret; keys minted as usual |
 | Attempt records and fencing | the uploader's records reached the API with its pod-bound token (`POST /internal/attempts` 200); a run cancelled while running reported CANCELLED with its attempt `cancelled` and a bumped revision; a late `succeeded` posted with the cancelled pod's own token (captured with kubectl exec before the cancel) was refused with 409 "finalization refused"; a bogus token got 401. A resumed run continued the chain at epoch 2 under the original root |
 | Exit 0 is not delivery | a managed-I/O run under the demo profile with no destinations finished its command, the uploader could not reach the bucket, the operation became EXPORT_FAILED (`export_state failed`, resumable, volume kept); after the profile got the storage host (`apply models hub`, one policy change), `POST :export` ran the transfer alone (`<id>-x1`, no GPU, no fetch) and delivered the outputs, STATUS.json last, then released the volume (a second `:export` is refused with 409 once the volume is gone). The rule that a delivered retry closes the original operation (`exported_by`) is unit-tested; on the fleet the retry's record predates the root fix below, so the original still shows its own EXPORT_FAILED history. Found on the way: the uploader died on an unset variable after a failed export and in record mode (fixed in jobs 0.1.13); records of resumed runs joined the wrong root through the worker's mirror (fixed in api 0.11.8) |
 | Per-class images and fallback | three `fold-double` runs with `gpu_preference [rtx-pro-6000, l40s]`, `allowed_clusters [us-central1, eu-north1]`, `fallback_wait_s 60` and an RTX pool of two nodes: two ran on RTX PRO 6000 in us-central1 with `busybox:1.36`, the third was moved by the control API after the bound to L40S in eu-north1 (`busybox:1.37`, queue `prefer-l40s`, `reason` "rtx-pro-6000 -> l40s after 60 s without capacity", `resumed_from` the original); both pools scaled from zero (RTX node about 5 min, L40S about 4 min) |
@@ -206,18 +236,18 @@ schedulable 9 min after the DOCA driver finished building. Side effect of the sl
 driverless H100 node built its driver, the warm-spare placeholder was Pending and the cluster autoscaler added a second
 H100 node (both within `max_nodes`); the autoscaler removed it ten minutes later.
 
-## Owner's evaluation round (2026-10-10, the same test fleet)
+## Evaluation round from the console (2026-10-10, the same test fleet)
 
 | Finding (from the console) | Cause | Fix, verified |
 |---|---|---|
 | 504 on a cold start from the console | the console's route had Envoy's 15 s default; the API route waits 630 s | the console route carries the same timeouts; a cold start from the console answers (68 s on the warm node) |
 | "monitoring not available" on every finished run | the worker's Job is deleted at completion (MultiKueue); the regional API answered 404 | metrics and logs of a completed run come from Prometheus and Loki, scoped to the caller's namespace; the console picks the smallest window that covers the run and the rate interval follows the step (a 1-minute job shows series) |
 | 500 on the jobs page | a region being replaced was unreachable; the listing raised on the first failure | an unreachable region is skipped with a warning; listing and lookup stay up |
-| scaling controls disabled on every endpoint | the owner flag came from an InferenceService label nothing set | the flag comes from the model record; every endpoint defined through the API is editable |
+| scaling controls disabled on every endpoint | the editable flag came from an InferenceService label nothing set | the flag comes from the model record; every endpoint defined through the API is editable |
 | no fleet view | - | a Fleet page: clusters (region, project, roles, Kubernetes version, nodes, API and Grafana) and pools per region with ready nodes and GPUs in use (`GET /v1/fleet?live=true`) |
 | two regions added day-2 had no HTTPS | their gateways' public IPs answered only from inside Nebius: Let's Encrypt timed out, no certificate, no port 443, the control plane could not forward | GPU regions' gateways and model endpoints carry certificates of a fleet CA the cloud stage generates; the control plane and LiteLLM trust it; leaf certificates re-issue and trust refreshes on a CA change; ACME stays for the control cluster. Verified: four regions with fleet-CA certificates, the control API reaches every region, LiteLLM answers through a region's gateway, run monitoring works for eu-north2 |
 
-Also found on the live fleet: a parallel lane applying from an older checkout rewrote the cloud state (the fleet CA
+Also found on the live fleet: a parallel apply from an older checkout rewrote the cloud state (the fleet CA
 vanished once) and left two stale state locks; the platform stage now re-issues certificates on a CA change,
 and the rule is one checkout at HEAD per fleet (`docs/EDGE.md`, the handover). Images at the end of the day:
 api 0.10.12, dispatcher 0.2.6, jobs 0.1.10, ops 0.1.11, ui 0.5.4.
@@ -297,12 +327,19 @@ autoscaler never adds InfiniBand nodes (its simulated node has no DRA attributes
 image is used as given (callers name the cache's form of the reference themselves); there is no endpoint
 form for a model over several nodes yet.
 
+*Superseded* (the record above stands as measured that day; the limits it names were lifted by later work on
+the same fleet, see the dated sections above): the dispatcher raises an InfiniBand pool's floor itself and
+returns it to 0 after the last multi-node workload (2026-10-11, "InfiniBand pools grow on demand"); run
+classes mount model weights (`job.weights`, 2026-10-11 "Model weights for runs") and shared data (`job.data`,
+2026-10-11 "Shared data for runs"); a run's image is rewritten to the fleet's registry host; endpoints over
+several nodes exist (`nodes` > 1, a LeaderWorkerSet; 2026-10-10 "Multi-node endpoints").
+
 Cost of the day: about 42 GPU-hours of H100 spot (0.79 USD per GPU-hour) and 7 GPU-hours of B300 spot
 (0.99), roughly 42 USD.
 
 ## Fresh deployment from `terraform.tfvars` (2026-10-08, three clusters, two GPU regions)
 
-A second fleet was brought up from nothing with the Terraform solution in the owner's projects, never
+A second fleet was brought up from nothing with the Terraform solution in separate projects, never
 touching the reference fleet, and destroyed again: a dedicated control cluster in eu-north1, a region
 in eu-north1 with one `gpu-h100-sxm` 1-GPU spot pool (price cap 2.15), a region in eu-west2 with one
 `gpu-b300-sxm` 1-GPU spot pool, 256 GiB weights filesystems and caches, one tenant with one key, the
@@ -353,7 +390,7 @@ bootstrap failed on a second run (a wrong key in the membership check).
 |---|---|
 | control path | `distributed-run` with `nodes: 2` and no GPUs: one JobSet of two indexed pods, one Kueue Workload with a pod set of 2 admitted on the preferred class, rank environment (`MASTER_ADDR`, `NODE_RANK`, `NNODES`, `WORLD_SIZE`) correct in both pods, rank 0 uploads outputs, both pods write attempt records, SUCCEEDED in 75 s |
 | fabric NICs in pods | the node group needs `gpu_settings.dra = true`: Nebius's DraNet driver then publishes the 8 NDR ports per node and a pod claims them through a `ResourceClaimTemplate`; without it the NICs exist on the node but no claim can be satisfied |
-| scale from zero | the autoscaler cannot satisfy DRA claims for an empty pool; InfiniBand pools require `min_nodes >= 1` (validated in the schema) |
+| scale from zero | the autoscaler cannot satisfy DRA claims for an empty pool; InfiniBand pools required `min_nodes >= 1` (validated in the schema) that day. *Superseded*: the dispatcher raises the pool floor itself when a multi-node run queues and lowers it afterwards (2026-10-11, "InfiniBand pools grow on demand"); `min_nodes 0` is the normal setting |
 | NCCL over the fabric | `NET/IB` virtual devices on every rank, GPU Direct RDMA enabled; a 1 GiB all-reduce over 16 GPUs on 2 nodes at **436 GB/s** bus bandwidth (Nebius calls above 300 stable) |
 | preemption | restart-all exercised twice: a lost rank restarts the whole set from the last checkpoint |
 | cost | about USD 13 to 34 for about 80 minutes of 2 x 8 H100 spot; pool, GPU cluster and pricing policy destroyed afterwards, Terraform plan clean |
@@ -369,8 +406,9 @@ bootstrap failed on a second run (a wrong key in the membership check).
 | a pitfall | restarting containerd on nodes that already run InfiniBand pods took the runtime down until the pool rolled; roll pools through Terraform instead |
 
 The limits of multi-node runs are in `docs/JOBS.md` "Limits of multi-node runs" (one run = one pool = one
-GPU cluster = one fabric; 8-GPU presets only; `min_nodes >= 1`; exact-count NIC claims; restart-all on
-preemption; the fabric table per platform and region).
+GPU cluster = one fabric; 8-GPU presets only; exact-count NIC claims; restart-all on preemption; the fabric
+table per platform and region). The `min_nodes >= 1` rule of that day is superseded: the dispatcher manages
+the floor (see above).
 
 ## Per-GPU images for runs (2026-10-09, reference fleet)
 

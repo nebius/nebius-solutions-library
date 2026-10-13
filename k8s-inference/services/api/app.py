@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import asyncio, json, time, urllib.parse, uuid
+import asyncio, hashlib, hmac, json, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -12,7 +12,7 @@ import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs
 log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
-from auth import Principal, _principal, allows_model, check_budget, check_model, forget, forget_hash, principal
+from auth import Principal, _principal, allows_model, check_budget, check_model, check_scope, forget, forget_hash, principal
 import render
 import status
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, SYNC_TIMEOUT_S
@@ -52,7 +52,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.33", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.34", lifespan=_lifespan)
 
 
 INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
@@ -67,6 +67,59 @@ class InvokeRequest(BaseModel):
     priority: str | None = None
     timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
     execution: ExecutionSpec | None = None     # docs/JOBS.md "Execution options" (runs only)
+
+
+ADMITTED_HEADER = "x-serverless2-admitted"     # the API's own proxied call to a gateway: the hook must not count it again
+RESERVATION_STALE_S = 3600                        # a reservation whose Job is gone this long after creation is released
+
+
+def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> None:
+    """Reserve the slot, the request and the GPU seconds of `operation` on the caller's key (keys.admit); nothing
+    without the database, nothing for the router key (it carries no budget)."""
+    if not db.enabled() or p.role == keys.ROUTER["role"]:
+        return
+    try:
+        keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request)
+    except keys.KeyLimit as e:
+        raise HTTPException(e.status, e.detail)
+
+
+def _release(operation: str, gpu_seconds: float | None = None) -> None:
+    if db.enabled():
+        try:
+            keys.release(operation, gpu_seconds)
+        except Exception as e:  # noqa: BLE001 - the reconciler's sweep releases what this missed
+            log.warning("release of %s: %s", operation, e)
+
+
+def _job_gpus(job: dict) -> int:
+    """GPUs a rendered Job (or JobSet) holds while it runs: nvidia.com/gpu over its containers times its parallelism."""
+    def pods(spec: dict) -> int:
+        tmpl = (spec.get("template") or {}).get("spec") or {}
+        n = 0
+        for c in (tmpl.get("containers") or []) + (tmpl.get("initContainers") or []):
+            res = (c.get("resources") or {})
+            n += int(str((res.get("limits") or {}).get("nvidia.com/gpu") or (res.get("requests") or {}).get("nvidia.com/gpu") or 0))
+        return n * int(spec.get("parallelism") or 1)
+    if job.get("kind") == "JobSet":
+        return sum(pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1) for rj in (job.get("spec") or {}).get("replicatedJobs") or [])
+    return pods(job.get("spec") or {})
+
+
+def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
+    """GPU seconds a run may take: its GPUs times its enforced timeout, for a key with a finite GPU-second budget
+    (such a key must give timeout_s on a GPU run); unbounded keys and CPU-only runs reserve nothing."""
+    if p.info.get("budget_gpu_seconds") is None or gpus == 0:
+        return 0.0
+    if not req.timeout_s:
+        raise HTTPException(400, "this key has a GPU-second budget: give timeout_s so the run's reservation is bounded")
+    return float(gpus * req.timeout_s)
+
+
+def _admitted_token(key_hash: str) -> str:
+    """HMAC the gateway hook verifies on the API's own proxied calls (one API call + its gateway authorization is one
+    logical request); the router key is the shared secret of this fleet."""
+    return hmac.new((cfg.ROUTER_KEY or "").encode(), key_hash.encode(), hashlib.sha256).hexdigest()
 
 
 class ResumeRequest(BaseModel):
@@ -211,6 +264,7 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
 
 @app.get("/v1/models")
 def list_models(p: Principal = Depends(principal)):
+    check_scope(p, "read:catalog")
     return [_public(m, p) for m in catalog.all_models().values() if allows_model(p, m["name"])]
 
 
@@ -498,9 +552,27 @@ async def _reconcile_loop():
             await asyncio.to_thread(fallback_switch)
             await asyncio.to_thread(recovery_switch)
             await asyncio.to_thread(reconcile_models)
+            await asyncio.to_thread(release_stale_reservations)
         except Exception:
             log.exception("model reconciliation unavailable")
         await asyncio.sleep(15)
+
+
+def release_stale_reservations() -> list[str]:
+    """A key reservation whose operation no longer exists (a Job deleted before billing accounted it, a submission
+    that failed after admission) is released after RESERVATION_STALE_S with nothing measured; billing releases the
+    rest with the attempt's GPU seconds. Control API only. Returns the operations released."""
+    if not db.enabled():
+        return []
+    out = []
+    for operation, tenant in keys.stale_reservations(RESERVATION_STALE_S):
+        try:
+            jobs.find(f"{cfg.TENANT_NS_PREFIX}{tenant}", operation)
+        except HTTPException as e:
+            if e.status_code == 404:
+                keys.release(operation, None)
+                out.append(operation)
+    return out
 
 
 def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None = None) -> dict:
@@ -564,6 +636,7 @@ def model_history(model: str, p: Principal = Depends(principal)):
 
 @app.get("/v1/models/{model}")
 def get_model(model: str, p: Principal = Depends(principal)):
+    check_scope(p, "read:catalog")
     check_model(p, model)
     return _public(_model(model), p)
 
@@ -581,14 +654,23 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
     p = await _principal(key, allow_router=True)       # LiteLLM's deployments call here with the fleet's router key
-    await asyncio.to_thread(_authorize_model, p, model)      # catalog (database) and Kubernetes calls: off the event loop
+    token = request.headers.get(ADMITTED_HEADER, "")
+    admitted = bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
+    await asyncio.to_thread(_authorize_model, p, model, admitted)      # catalog (database) and Kubernetes calls: off the event loop
     return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
 
 
-def _authorize_model(p: Principal, model: str) -> None:
+def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
     m = catalog.get(model) or _endpoint_model(model)
     check_model(p, m["name"])
     check_budget(p)
+    check_scope(p, "invoke:sync")
+    if not admitted and p.role != keys.ROUTER["role"]:
+        # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is
+        # not held: the hook cannot see the call end); the API's own proxied call was admitted already
+        gid = f"gw-{uuid.uuid4().hex[:12]}"
+        _admit(p, gid)
+        _release(gid, 0.0)
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
     if int(m.get("nodes") or 1) > 1:
@@ -611,13 +693,19 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
     mode = req.mode or m["mode"]
     if mode not in m["modes"]:
         raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
+    check_scope(p, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"))
     region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
     if region not in m["regions"]:
         raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
     if req.execution and mode != "run":
         raise HTTPException(400, "execution options apply to runs only")
     if mode == "sync":
-        return await _sync(m, req, p, region)
+        sid = f"sync-{uuid.uuid4().hex[:12]}"
+        await asyncio.to_thread(_admit, p, sid)                      # a slot and a request for the duration of the call
+        try:
+            return await _sync(m, req, p, region)
+        finally:
+            await asyncio.to_thread(_release, sid, 0.0)
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
         raise HTTPException(413, f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)")
     # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
@@ -654,6 +742,9 @@ def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: s
             defaults.setdefault("output_prefix", "")
         job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
                              gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
+    # admission on the caller's key, from the rendered Job (its real GPU count): a slot, a request and, for a key with a
+    # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
+    _admit(p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0)
     created_job, created = jobs.create(p.namespace, job, region, secret)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
 
@@ -737,7 +828,7 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
             raise HTTPException(503, f"sync calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
         cfg.refresh_trust()
         v = _variant_for(m, req.input, region)
-        url, headers = f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}", {"Authorization": f"Bearer {p.key}"}
+        url, headers = f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}", {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key))}
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
@@ -768,6 +859,7 @@ def _price(job: dict) -> float | None:
 
 @app.get("/v1/operations")
 def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le=500), model: str | None = None):
+    check_scope(p, "read:operations")
     return [jobs.normalise(j, _price(j)) for j in jobs.list_ops(p.namespace, p.tenant, model, limit)]
 
 
@@ -908,6 +1000,7 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
 def get_operation(id: str, since: int | None = None, p: Principal = Depends(principal)):
     """`since=<revision>`: 304 while nothing about the operation's attempts changed (polling cursor; the live
     pod state is still re-read on every 200)."""
+    check_scope(p, "read:operations")
     job, region = _owned(p, id)
     op = _operation(p, job, id, region)
     if since is not None and op.get("revision") and op["revision"] <= since and op["status"] not in ("QUEUED", "RUNNING"):
@@ -917,6 +1010,7 @@ def get_operation(id: str, since: int | None = None, p: Principal = Depends(prin
 
 @app.get("/v1/operations/{id}/result")
 def get_result(id: str, p: Principal = Depends(principal)):
+    check_scope(p, "read:results")
     job, region = _owned(p, id)
     op = _operation(p, job, id, region)
     res = {"operation_id": id, "status": op["status"], "region": region, "error": op.get("error"),
@@ -935,6 +1029,7 @@ def get_result(id: str, p: Principal = Depends(principal)):
 def export_again(id: str, p: Principal = Depends(principal)):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
+    check_scope(p, "read:results"); check_scope(p, "run:control")
     orig, region = _owned(p, id)
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:                          # a previous retry's handle: the retry is of the compute attempt, never of a retry
@@ -1007,6 +1102,7 @@ def _home(job: dict) -> str:
 
 @app.post("/v1/operations/{id}:cancel")
 def cancel(id: str, p: Principal = Depends(principal)):
+    check_scope(p, "run:control")
     job, region = _owned(p, id)
     if job.get("_synthetic"):
         raise HTTPException(409, f"operation {id} is over; nothing to cancel")
@@ -1030,6 +1126,7 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
+    check_scope(p, "run:submit"); check_scope(p, "run:control")
     orig, region = _owned(p, id)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
@@ -1050,6 +1147,7 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
 # ---- bindings: confidential inputs for runs (docs/JOBS.md "Execution options") ----
 @app.put("/v1/bindings/{ref}")
 def put_binding(ref: str, req: BindingRequest, p: Principal = Depends(principal)):
+    check_scope(p, "artifacts:write")
     return execution.put_binding(p.namespace, p.tenant, ref, req.data)
 
 
@@ -1067,6 +1165,7 @@ def delete_binding(ref: str, p: Principal = Depends(principal)):
 
 @app.post("/v1/artifacts/uploads", status_code=201)
 def upload(req: UploadRequest, p: Principal = Depends(principal)):
+    check_scope(p, "artifacts:write")
     return artifacts.presign_upload(p.namespace, req.filename, req.content_type, min(req.expires_s, 7 * 86400), req.region)
 
 
@@ -1127,6 +1226,7 @@ def _variants_public(m: dict, region: str) -> list[dict]:
 
 @app.get("/v1/endpoints")
 def list_endpoints(region: str | None = None, p: Principal = Depends(principal)):
+    check_scope(p, "read:catalog")
     served_regions = kube.regions()
     if region and region not in served_regions:
         raise HTTPException(400, f"region {region} is not served by this API")
@@ -1153,6 +1253,7 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
 
 @app.get("/v1/endpoints/{id}")
 def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(principal)):
+    check_scope(p, "read:catalog")
     m = _endpoint_model(id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
@@ -1199,6 +1300,7 @@ def _endpoint_region(m: dict, region: str | None) -> str:
 @app.get("/v1/endpoints/{id}/metrics")
 async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h", end: float | None = None,
                            p: Principal = Depends(principal)):
+    check_scope(p, "read:metrics")
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
@@ -1208,6 +1310,7 @@ async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h"
 @app.get("/v1/endpoints/{id}/logs")
 async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", search: str = Query("", max_length=200),
                         limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+    check_scope(p, "read:logs")
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
@@ -1225,6 +1328,7 @@ def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
 
 @app.get("/v1/operations/{id}/metrics")
 async def operation_metrics(id: str, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)):
+    check_scope(p, "read:metrics")
     region, _ = await asyncio.to_thread(_monitored, p, id)
     return await monitoring.metrics("job", p.namespace, id, region or REGION, range, end)
 
@@ -1232,6 +1336,7 @@ async def operation_metrics(id: str, range: str = "1h", end: float | None = None
 @app.get("/v1/operations/{id}/logs")
 async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
                          limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+    check_scope(p, "read:logs")
     region, kind = await asyncio.to_thread(_monitored, p, id)
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
@@ -1262,6 +1367,19 @@ def create_key(req: KeyRequest, p: Principal = Depends(admin)):
     meta = {"allowed_passthrough_routes": (p.info.get("metadata") or {}).get("allowed_passthrough_routes", [])}
     value, i = keys.create(p.tenant, f"{p.tenant}-{req.alias}", req.budget, req.models, req.expires_days, metadata=meta, by=p.info.get("key_alias"))
     return {**_key_public(i, p.tenant), "key": value}
+
+
+class KeyImportRequest(BaseModel):
+    keys: list[dict]
+    dry_run: bool = False
+
+
+@app.post("/v1/keys:import")
+def import_keys(req: KeyImportRequest, p: Principal = Depends(admin)):
+    """Pre-hashed keys of the admin's tenant (docs/API.md "Importing keys"): idempotent, all-or-nothing, nothing
+    overwritten, conflicts refused (409 with the list), unknown scopes block the key; `dry_run` classifies only."""
+    _fleet_only()
+    return keys.import_records(req.keys, p.tenant, p.info.get("key_alias") or p.info.get("key_name"), req.dry_run)
 
 
 @app.patch("/v1/keys/{alias}")

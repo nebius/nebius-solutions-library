@@ -10,18 +10,33 @@ Roles: `user`, `admin` (key management, model definitions) and `router`: the per
 deployments call the gateway with (ROUTER_KEY, Secret api/router-key), accepted by the gateway's authorize
 hook only, every model, no budget, never billed.
 
+Per-key limits beyond the USD budget (migration 8): `scopes` (what a key may do; empty = everything), `max_concurrent`
+(operations in flight), `budget_requests` and `budget_gpu_seconds` (remaining counts in their own units, never
+converted), `rate_limit` ({requests, window_s}). `admit` reserves a slot, a request and the GPU seconds a run may take
+in one transaction per key (`for update` serialises the API replicas); `release` accounts the measured value when the
+attempt is billed. Imported keys (`import_records`, `POST /v1/keys:import`, `python -m keys import`) arrive pre-hashed:
+no plaintext, no rotation, nothing overwritten, conflicts refused, unknown scopes block the key.
+
 CLI: `python -m keys bootstrap` (KEY = the value, KEY_SPEC = JSON {alias, tenant, role, budget, models, routes})
-creates or updates one key straight in the database: the models stage runs it once per tenant key of
-terraform.tfvars, before any admin key exists that could mint through the API.
+creates or updates one key straight in the database: the platform stage runs it once per tenant key of
+terraform.tfvars, before any admin key exists that could mint through the API. `python -m keys import <file.json>`
+imports pre-hashed keys ({"tenant": ..., "dry_run": bool, "keys": [...]}) for an operator with database access.
 """
-import hashlib, json, logging, os, secrets, string, sys, time
+import hashlib, json, logging, os, re, secrets, string, sys, time
 from datetime import datetime, timedelta, timezone
 import db
 from config import LITELLM_MASTER_KEY, LITELLM_URL
 
 log = logging.getLogger("keys")
 ROUTER = {"tenant": "platform", "alias": "router", "role": "router"}
-COLS = "hash, alias, tenant, role, models, budget, spend, expires, blocked, preview, metadata, created_at, created_by, updated_at"
+COLS = ("hash, alias, tenant, role, models, budget, spend, expires, blocked, preview, metadata, created_at, created_by, updated_at, "
+        "scopes, max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit")
+# what a key may do; an empty list on a key means everything (keys created before scopes existed, Terraform's keys)
+SCOPES = ("invoke:sync", "invoke:async", "run:submit", "run:control", "read:catalog", "read:operations", "read:results",
+          "read:logs", "read:metrics", "artifacts:write")
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+METADATA_MAX_BYTES = 8192
 _ALNUM = string.ascii_letters + string.digits
 
 
@@ -53,10 +68,14 @@ def _when(s) -> datetime | None:
 def _info(r) -> dict:
     """A key as the API's Principal carries it: the shape LiteLLM's /key/info returned, kept so that nothing above
     auth.py changed when the keys moved into the fleet database."""
-    h, alias, tenant, role, models, budget, spend, expires, blocked, prev, meta, created, by, _updated = r
-    return {"token": h, "key_name": prev, "key_alias": alias, "max_budget": float(budget) if budget is not None else None,
+    (h, alias, tenant, role, models, budget, spend, expires, blocked, prev, meta, created, by, _updated,
+     scopes, max_c, b_req, b_gpu, s_req, s_gpu, rate) = r
+    num = lambda x: float(x) if x is not None else None  # noqa: E731
+    return {"token": h, "key_name": prev, "key_alias": alias, "max_budget": num(budget),
             "spend": float(spend or 0), "models": list(models or []), "expires": _iso(expires), "blocked": bool(blocked),
-            "created_at": _iso(created), "created_by": by, "metadata": {"tenant": tenant, "role": role, **(meta or {})}}
+            "created_at": _iso(created), "created_by": by, "metadata": {"tenant": tenant, "role": role, **(meta or {})},
+            "scopes": list(scopes or []), "max_concurrent": max_c, "budget_requests": num(b_req), "budget_gpu_seconds": num(b_gpu),
+            "spent_requests": float(s_req or 0), "spent_gpu_seconds": float(s_gpu or 0), "rate_limit": rate}
 
 
 def info(h: str) -> dict | None:
@@ -191,6 +210,218 @@ def bootstrap(value: str, alias: str, tenant: str, role: str = "user", budget: f
 
 
 
+# ---- import of pre-hashed keys (docs/API.md "Importing keys") -------------------------------------------
+def _num(v, name, errors, integer=False):
+    if v is None:
+        return None
+    try:
+        out = int(v) if integer else float(v)
+    except (TypeError, ValueError):
+        errors.append(f"{name} is not a number"); return None
+    if out < 0 or (integer and out < 1 and name == "max_concurrent"):
+        errors.append(f"{name} must be positive"); return None
+    return out
+
+
+def validate_records(records: list, tenant: str) -> tuple[list[dict], list[dict]]:
+    """Pure: (rows, errors). A row is the normalised key as it would be stored; errors name the record index and
+    every reason. A record with scopes S2 does not know is a row with `blocked = True` and `unknown_scopes` (it
+    imports, but cannot act until an admin narrows it: never a silent widening). Roles are `user` only."""
+    rows, errors = [], []
+    if not isinstance(records, list):
+        return [], [{"index": None, "errors": ["keys must be a list"]}]
+    for i, r in enumerate(records):
+        e = []
+        if not isinstance(r, dict):
+            errors.append({"index": i, "errors": ["record must be an object"]}); continue
+        h = str(r.get("hash") or "")
+        if not HASH_RE.match(h):
+            e.append("hash must be 64 lowercase hex characters (sha256 of the exact bearer value)")
+        alias = str(r.get("alias") or "")
+        if alias and not alias.startswith(f"{tenant}-"):
+            alias = f"{tenant}-{alias}"
+        if not ALIAS_RE.match(alias):
+            e.append("alias must be 1-120 characters of letters, digits, dot, dash, underscore")
+        if r.get("tenant") != tenant:
+            e.append(f"tenant must be {tenant}")
+        if r.get("role") not in (None, "user"):
+            e.append("imported keys are user keys (role must be user or absent)")
+        if not r.get("principal_id"):
+            e.append("principal_id is required (the stable legacy principal)")
+        models = r.get("models")
+        if not isinstance(models, list) or not all(isinstance(m, str) and m for m in models):
+            e.append("models must be a list of model ids ([] = every model)"); models = []
+        scopes = r.get("scopes")
+        if not isinstance(scopes, list) or not all(isinstance(x, str) and x for x in scopes):
+            e.append("scopes must be a list of scope names"); scopes = []
+        unknown = sorted(set(scopes) - set(SCOPES))
+        budget = _num(r.get("budget_usd"), "budget_usd", e)
+        b_req = _num(r.get("budget_requests"), "budget_requests", e)
+        b_gpu = _num(r.get("budget_gpu_seconds"), "budget_gpu_seconds", e)
+        max_c = _num(r.get("max_concurrent"), "max_concurrent", e, integer=True)
+        rate = r.get("rate_limit")
+        if rate is not None:
+            if not isinstance(rate, dict) or _num(rate.get("requests"), "rate_limit.requests", e, True) in (None, 0) \
+                    or _num(rate.get("window_s"), "rate_limit.window_s", e, True) in (None, 0):
+                e.append("rate_limit must be {requests >= 1, window_s >= 1} (the legacy units, never converted)"); rate = None
+            else:
+                rate = {"requests": int(rate["requests"]), "window_s": int(rate["window_s"])}
+        expires = created = None
+        try:
+            expires = _when(r.get("expires"))
+        except ValueError:
+            e.append("expires must be RFC 3339")
+        try:
+            created = _when(r.get("created_at"))
+        except ValueError:
+            e.append("created_at must be RFC 3339")
+        meta = r.get("metadata") or {}
+        if not isinstance(meta, dict):
+            e.append("metadata must be an object"); meta = {}
+        legacy = {**meta, "principal_id": r.get("principal_id"), "tenant_id": r.get("legacy_tenant_id")}
+        if unknown:
+            legacy["unenforced_scopes"] = unknown
+        metadata = {"allowed_passthrough_routes": list(r.get("routes") or []), "legacy": legacy}
+        if len(json.dumps(metadata)) > METADATA_MAX_BYTES:
+            e.append(f"metadata exceeds {METADATA_MAX_BYTES} bytes")
+        if e:
+            errors.append({"index": i, "hash": h[:8], "errors": e}); continue
+        rows.append({"hash": h, "alias": alias, "tenant": tenant, "role": "user", "models": sorted(models), "scopes": sorted(scopes),
+                     "budget": budget, "budget_requests": b_req, "budget_gpu_seconds": b_gpu, "max_concurrent": max_c, "rate_limit": rate,
+                     "expires": expires, "blocked": bool(r.get("blocked")) or bool(unknown), "preview": r.get("preview"),
+                     "metadata": metadata, "created_at": created, "unknown_scopes": unknown})
+    seen_h, seen_a = set(), set()
+    for row in rows:
+        if row["hash"] in seen_h:
+            errors.append({"index": None, "hash": row["hash"][:8], "errors": ["duplicate hash in the batch"]})
+        if row["alias"] in seen_a:
+            errors.append({"index": None, "hash": row["hash"][:8], "errors": [f"duplicate alias {row['alias']} in the batch"]})
+        seen_h.add(row["hash"]); seen_a.add(row["alias"])
+    return rows, errors
+
+
+def _stored_view(r) -> dict:
+    """The stored row in the shape validate_records produces, for the byte-for-byte comparison."""
+    i = _info(r)
+    meta = i["metadata"]
+    return {"hash": i["token"], "alias": i["key_alias"], "tenant": meta["tenant"], "role": meta["role"], "models": sorted(i["models"]),
+            "scopes": sorted(i["scopes"]), "budget": i["max_budget"], "budget_requests": i["budget_requests"],
+            "budget_gpu_seconds": i["budget_gpu_seconds"], "max_concurrent": i["max_concurrent"], "rate_limit": i["rate_limit"],
+            "expires": _when(i["expires"]), "blocked": i["blocked"], "preview": i["key_name"],
+            "metadata": {"allowed_passthrough_routes": list(meta.get("allowed_passthrough_routes") or []), "legacy": meta.get("legacy") or {}}}
+
+
+def equivalent(stored: dict, row: dict) -> bool:
+    keys_ = ("alias", "tenant", "role", "models", "scopes", "budget", "budget_requests", "budget_gpu_seconds", "max_concurrent",
+             "rate_limit", "expires", "blocked", "preview", "metadata")
+    return all(stored.get(k) == row.get(k) for k in keys_)
+
+
+class _DryRun(Exception):
+    pass
+
+
+def import_records(records: list, tenant: str, by: str | None, dry_run: bool = False) -> dict:
+    """Idempotent, transactional, all-or-nothing. Every record is classified against the table under row locks:
+    new hash and new alias -> inserted; the same hash under the same alias with every field equal -> unchanged;
+    anything else (the hash under another alias or tenant, the alias with another hash, the same key with changed
+    limits, grants or principal) -> conflict, and the whole batch is refused with the list. `dry_run` reports the
+    classification and writes nothing. Returns the report; raises HTTPException 400 (invalid records) or 409 (conflicts)."""
+    from fastapi import HTTPException
+    rows, errors = validate_records(records, tenant)
+    if errors:
+        raise HTTPException(400, {"message": "invalid records; nothing imported", "errors": errors})
+    report = {"dry_run": dry_run, "inserted": [], "unchanged": [], "conflicts": [], "blocked_for_unknown_scope": [], "not_mirrored": []}
+    try:
+        with db.pool().connection() as c, c.transaction():
+            for row in rows:
+                by_hash = c.execute(f"select {COLS} from keys where hash = %s for update", (row["hash"],)).fetchone()
+                by_alias = c.execute(f"select {COLS} from keys where tenant = %s and alias = %s for update", (tenant, row["alias"])).fetchone()
+                if by_hash is None and by_alias is None:
+                    c.execute("""insert into keys (hash, alias, tenant, role, models, budget, expires, blocked, preview, metadata, created_at, created_by,
+                                                   scopes, max_concurrent, budget_requests, budget_gpu_seconds, rate_limit)
+                                 values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, now()), %s, %s, %s, %s, %s, %s)""",
+                              (row["hash"], row["alias"], tenant, "user", json.dumps(row["models"]), row["budget"], row["expires"], row["blocked"],
+                               row["preview"], json.dumps(row["metadata"]), row["created_at"], f"import:{by or 'operator'}", json.dumps(row["scopes"]),
+                               row["max_concurrent"], row["budget_requests"], row["budget_gpu_seconds"], json.dumps(row["rate_limit"]) if row["rate_limit"] else None))
+                    report["inserted"].append(row["alias"])
+                    report["not_mirrored"].append(row["alias"])          # no plaintext: LiteLLM's route cannot know this key
+                    if row["unknown_scopes"]:
+                        report["blocked_for_unknown_scope"].append({"alias": row["alias"], "scopes": row["unknown_scopes"]})
+                elif by_hash is not None and by_alias is not None and by_hash[0] == by_alias[0]:
+                    if equivalent(_stored_view(by_hash), row):
+                        report["unchanged"].append(row["alias"])
+                    else:
+                        report["conflicts"].append({"alias": row["alias"], "reason": "the key exists with other limits, grants or principal; change it with PATCH /v1/keys/<alias>, an import never overwrites"})
+                elif by_hash is not None:
+                    report["conflicts"].append({"alias": row["alias"], "reason": f"the hash exists as {by_hash[2]}/{by_hash[1]}"})
+                else:
+                    report["conflicts"].append({"alias": row["alias"], "reason": "the alias exists with another hash"})
+            if report["conflicts"]:
+                raise HTTPException(409, {"message": "conflicts; nothing imported", **report})
+            if dry_run:
+                raise _DryRun()
+    except _DryRun:
+        pass
+    return report
+
+
+# ---- admission: a slot, a request and the GPU seconds a run may take, reserved per key in one transaction ----
+class KeyLimit(Exception):
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
+
+
+def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
+    """Reserve what `operation` will take from the key: one concurrency slot and (unless `counts_request` is false)
+    one request against the request budget and the rate window, plus `gpu_seconds` against the GPU-second budget.
+    The key row is locked, so two API replicas never admit past a limit together; a reservation that already exists
+    (a replay with the same idempotency key) counts once. Raises KeyLimit(402 | 429)."""
+    with db.pool().connection() as c, c.transaction():
+        k = c.execute("select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit from keys where hash = %s for update", (h,)).fetchone()
+        if k is None:
+            raise KeyLimit(401, "invalid API key")
+        if c.execute("select 1 from key_reservations where operation = %s", (operation,)).fetchone():
+            return {"operation": operation, "replay": True}
+        max_c, b_req, b_gpu, s_req, s_gpu, rate = k
+        active, r_req, r_gpu = c.execute("select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)).fetchone()
+        if max_c is not None and active >= max_c:
+            raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+        req = 1 if counts_request else 0
+        if b_req is not None and req and float(s_req) + float(r_req) + req > float(b_req):
+            raise KeyLimit(402, "key request budget exhausted")
+        if b_gpu is not None and float(s_gpu) + float(r_gpu) + gpu_seconds > float(b_gpu):
+            raise KeyLimit(402, f"key GPU-second budget exhausted ({max(0.0, float(b_gpu) - float(s_gpu) - float(r_gpu)):.0f} s left, {gpu_seconds:.0f} s needed)")
+        if rate and req:
+            n = c.execute("select count(*) from key_calls where key_hash = %s and at > now() - make_interval(secs => %s)", (h, rate["window_s"])).fetchone()[0]
+            if n >= rate["requests"]:
+                raise KeyLimit(429, f"key rate limit reached ({rate['requests']} requests per {rate['window_s']} s)")
+            c.execute("delete from key_calls where key_hash = %s and at <= now() - make_interval(secs => %s)", (h, rate["window_s"]))
+            c.execute("insert into key_calls (key_hash) values (%s)", (h,))
+        c.execute("insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, %s)",
+                  (operation, h, tenant, gpu_seconds, req))
+        return {"operation": operation, "replay": False, "active": int(active) + 1}
+
+
+def release(operation: str, gpu_seconds: float | None = None) -> bool:
+    """The operation is done: its slot goes, its request count and the measured GPU seconds (`gpu_seconds`; None =
+    nothing measured: a cancelled, failed-at-admission or CPU-only attempt) become spent. Idempotent."""
+    with db.pool().connection() as c, c.transaction():
+        r = c.execute("delete from key_reservations where operation = %s returning key_hash, requests", (operation,)).fetchone()
+        if r is None:
+            return False
+        c.execute("update keys set spent_requests = spent_requests + %s, spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
+                  (r[1], float(gpu_seconds or 0), r[0]))
+        return True
+
+
+def stale_reservations(older_than_s: int) -> list[tuple[str, str]]:
+    """(operation, tenant) of reservations older than `older_than_s`: the reconciler releases those whose Job is gone."""
+    with db.pool().connection() as c:
+        return [(r[0], r[1]) for r in c.execute("select operation, tenant from key_reservations where created_at < now() - make_interval(secs => %s)", (older_than_s,)).fetchall()]
+
+
 # ---- the LiteLLM mirror (best effort; the fleet database is the source of truth) ----------------------
 def _litellm(method: str, path: str, body: dict) -> int:
     """Status code of a LiteLLM admin call, 0 when LiteLLM is unreachable; never raises."""
@@ -236,8 +467,13 @@ def mirror_delete(h: str) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", stream=sys.stdout)
+    if sys.argv[1:2] == ["import"]:
+        doc = json.load(open(sys.argv[2]))
+        db.migrate()
+        print(json.dumps(import_records(doc["keys"], doc["tenant"], "cli", bool(doc.get("dry_run"))), indent=1))
+        sys.exit(0)
     if sys.argv[1:2] != ["bootstrap"]:
-        sys.exit("usage: python -m keys bootstrap   (env KEY, KEY_SPEC)")
+        sys.exit("usage: python -m keys bootstrap   (env KEY, KEY_SPEC) | python -m keys import <file.json>")
     spec, value = json.loads(os.environ["KEY_SPEC"]), os.environ["KEY"]
     for attempt in range(60):            # the managed database may still be coming up
         try:

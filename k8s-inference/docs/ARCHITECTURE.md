@@ -88,8 +88,8 @@ and `routing` (`API.md` "Variants") are implemented.
 
 ## One API
 
-The control cluster's API is the fleet's one API (api 0.11.18; before, every GPU region ran a second API
-Deployment that forwarded, copied and looked keys up). It holds the fleet database and the regions' kubeconfigs
+The control cluster's API is the fleet's one API; no GPU region runs an API of its own. It holds the fleet
+database and the regions' kubeconfigs
 (the `api-agent` identities): it renders endpoints and creates runs in the regions, reads their pods, and
 reads Prometheus and Loki of a region through that cluster's API server proxy (`/api/v1/namespaces/monitoring/
 services/<name>:<port>/proxy`, Role `serverless2-api-agent-monitoring`). A region's gateway authorizes every
@@ -97,8 +97,8 @@ endpoint call against it: the endpoint's SecurityPolicy targets the Envoy Gatewa
 endpoint is the API's public hostname on port 443, validated by a `BackendTLSPolicy` (system roots: the
 control cluster's certificate is ACME; the trust bundle in internal mode). Envoy keeps the original request's
 authority on an ext-auth call, so the control cluster's https listener carries no hostname and the route
-`api-authorize` serves `/internal/authorize` under any host. Measured on the test fleet (2026-10-11, hub and
-control in eu-north1): the cross-cluster ext-auth adds about 5 ms per call over a route without
+`api-authorize` serves `/internal/authorize` under any host. With the GPU region and the control cluster in the
+same Nebius region, the cross-cluster ext-auth adds about 5 ms per call over a route without
 authorization (median 173 ms to 178 ms end to end); a distant region adds its round trip once per call
 (Envoy keeps the connection open). A sync `:invoke` for an endpoint in another region is proxied to the
 endpoint's gateway hostname with the caller's key (the same hostname LiteLLM uses), so that gateway checks the
@@ -178,10 +178,10 @@ Pinned versions live in `clusters/common/apps/*.yaml`, one list for every cluste
 
 | Piece | Where | Size | Why upstream does not cover it |
 |---|---|---|---|
-| Customer API | `services/api` | about 2,000 lines of Python with tests | one API over KServe, Jobs and LiteLLM: idempotency, status normalisation, resume, artifacts, tenancy |
-| Cost dispatcher and price feed | `services/dispatcher` | about 900 lines | Kueue's MultiKueue needs an external dispatcher to place by price across regions |
-| Job runner | `services/jobs` | about 150 lines of shell | fetch inputs, upload outputs and attempt records, call an endpoint |
-| Ops image | `services/ops` | about 100 lines of shell | recover stopped spot VMs, Nebius CLI with service-account profiles |
+| Customer API | `services/api` | about 6,400 lines of Python (tests apart) | one API over KServe, Jobs and LiteLLM: idempotency, status normalisation, resume, artifacts, tenancy |
+| Cost dispatcher and price feed | `services/dispatcher` | about 950 lines of Python | Kueue's MultiKueue needs an external dispatcher to place by price across regions |
+| Job runner | `services/jobs` | about 220 lines of shell | fetch inputs, upload outputs and attempt records, call an endpoint |
+| Ops image | `services/ops` | about 150 lines of shell | recover stopped spot VMs, Nebius CLI with service-account profiles |
 | Three charts | `charts/fleet`, `charts/platform`, `charts/tenant` | Helm | queues and cache from the fleet definition, the platform's own manifests, one tenant |
 
 ## Multi-region in one sentence each

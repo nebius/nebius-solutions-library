@@ -28,7 +28,7 @@ def estimate(project: str, platform: str, preset: str, spot: bool):
            "--resource-spec-compute-instance-spec-resources-preset", preset]
     if spot:
         # the current spot quote: a preemptible VM following the spot price (the old `priority` field has no
-        # effect since 2026-05; quotes move every 15 min, so this feed runs on a short schedule)
+        # effect any more; quotes move every 15 min, so this feed runs on a short schedule)
         cmd += ["--resource-spec-compute-instance-spec-preemptible-on-preemption", "STOP",
                 "--resource-spec-compute-instance-spec-follows-spot-price"]
     try:

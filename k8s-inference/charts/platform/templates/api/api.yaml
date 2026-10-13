@@ -183,7 +183,7 @@ spec:
 # The authorizer for the GPU regions' gateways under any host: Envoy keeps the original request's authority on an
 # ext-auth call (the endpoint's hostname, `<model>-predictor.models.<region host>`), so the route cannot be bound to
 # this cluster's hostnames (the https listener of the control cluster therefore carries no hostname, templates/gateway).
-# Measured on the test fleet 2026-10-11: the cross-cluster ext-auth adds ~5 ms to a call (same region); a distant
+# Measured: the cross-cluster ext-auth adds ~5 ms to a call (same region); a distant
 # region adds its round trip once per call (Envoy keeps the connection).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

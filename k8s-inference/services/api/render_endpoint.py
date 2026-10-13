@@ -356,7 +356,7 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
         env += [{"name": "NCCL_IB_HCA", "value": "mlx5"}, {"name": "NCCL_SOCKET_IFNAME", "value": "eth0"}, {"name": "UCX_NET_DEVICES", "value": "eth0"}]
     else:
         # Ethernet between the nodes: NCCL must not try the InfiniBand transport (the nodes carry Mellanox NICs, the
-        # pod holds none: "unhandled system error" at communicator setup on B300, 2026-10-10)
+        # pod holds none: "unhandled system error" at communicator setup on B300)
         env += [{"name": "NCCL_SOCKET_IFNAME", "value": "eth0"}, {"name": "NCCL_IB_DISABLE", "value": "1"}]
     # the model's own entries win over the platform defaults (one entry per name: server-side apply refuses duplicates)
     own = list(v.get("env") or []) + _weights_env(v)
@@ -451,7 +451,7 @@ def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
             "spec": {"targetSelectors": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute",
                                           "matchLabels": {"serving.knative.dev/route": f"{name}-predictor"},
                                           "matchExpressions": [{"key": "networking.knative.dev/visibility", "operator": "NotIn", "values": ["cluster-local"]}]}],
-                     "extAuth": {"failOpen": False, "timeout": "10s", "headersToExtAuth": ["authorization", "sec-websocket-protocol"],
+                     "extAuth": {"failOpen": False, "timeout": "10s", "headersToExtAuth": ["authorization", "sec-websocket-protocol", "x-serverless2-admitted"],
                                  "http": {"path": f"/internal/authorize/{v.get('modelId') or name}",
                                           "backendRefs": [api],
                                           "headersToBackend": ["x-serverless2-tenant", "x-serverless2-key-alias"]}}}}

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.33
+  version: 0.11.34
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
     Auth: `Authorization: Bearer <API key>` on every request (keys in the fleet
@@ -20,7 +20,8 @@ security: [{ bearer: [] }]
 paths:
   /v1/fleet:
     get:
-      summary: Available regions, GPU classes and placement mode (authenticated)
+      summary: Available regions, GPU classes, pools, the caller's tenant and the execution capabilities (authenticated)
+      parameters: [{ $ref: "#/components/parameters/live" }]
       responses: { "200": { description: Fleet configuration, content: { application/json: { schema: { $ref: "#/components/schemas/FleetInfo" } } } } }
   /v1/endpoints/{id}/metrics:
     get:
@@ -57,12 +58,12 @@ paths:
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Model" } } } }, "404": { $ref: "#/components/responses/Error" } }
     put:
       summary: Replace a model defined through this API (admin key); endpoints roll to the new definition
-      parameters: [{ $ref: "#/components/parameters/model" }]
+      parameters: [{ $ref: "#/components/parameters/model" }, { $ref: "#/components/parameters/ifMatch" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelSpec" } } } }
       responses: { "200": { description: replaced; the new version is in the history }, "409": { description: a built-in class } }
     delete:
       summary: Delete a model defined through this API (admin key); its endpoints are removed from every region
-      parameters: [{ $ref: "#/components/parameters/model" }]
+      parameters: [{ $ref: "#/components/parameters/model" }, { $ref: "#/components/parameters/ifMatch" }]
       responses: { "204": { description: deleted; the last version stays in the history }, "404": { $ref: "#/components/responses/Error" }, "409": { description: a built-in class } }
   /v1/models/{model}/history:
     get:
@@ -87,21 +88,24 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "413": { description: "async/run: the input exceeds 60000 bytes; pass large inputs by reference", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: "an unknown field in `execution` or `scaling` (the request models forbid extras)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "429": { description: "tenant limit reached (max_concurrent_operations, submissions_per_minute from the key metadata; defaults 10 and 20); Retry-After header", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "502": { $ref: "#/components/responses/Error" }
-        "503": { description: key service unavailable after retries, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: "key service unavailable after retries; sync: a multi-node endpoint that is not started", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "504": { description: "sync: the endpoint did not answer within timeout_s", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v1/operations:
     get:
       summary: List the tenant's operations (newest first)
       parameters:
-        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
         - { name: model, in: query, schema: { type: string } }
       responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Operation" } } } } } }
   /v1/operations/{id}:
     get:
-      summary: Operation status
-      parameters: [{ $ref: "#/components/parameters/id" }]
-      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" } }
+      summary: Operation status (a handle that fallback or recovery superseded answers with its current successor and `requested_id`)
+      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/since" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "304": { description: "`since` given and nothing about the operation's attempts changed since that revision (finished operations only)" }, "404": { $ref: "#/components/responses/Error" }, "410": { description: the operation ran in a region that is no longer part of this fleet, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } } }
   /v1/operations/{id}/result:
     get:
       summary: Operation result (inline) or artifact links (presigned, 1 h)
@@ -112,9 +116,9 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/operations/{id}:cancel:
     post:
-      summary: Cancel an operation (a queued one is deleted, a running one is stopped and kept with status CANCELLED)
-      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/idem" }]
-      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" } }
+      summary: Cancel an operation (a queued one is deleted, a running one is stopped and kept with status CANCELLED; a superseded handle cancels its live successor; a root with an active finalizer stops the finalizer)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" }, "409": { description: the operation is over (served from its durable record), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } } }
   /v1/bindings:
     get:
       summary: The tenant's bindings (confidential inputs for runs; references, bound operation and keys, never the data)
@@ -123,7 +127,7 @@ paths:
     put:
       summary: Create or replace a binding (docs/JOBS.md "Execution options"); a replacement refreshes a running attempt's files
       parameters: [{ name: ref, in: path, required: true, schema: { type: string } }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [data], properties: { data: { type: object, additionalProperties: { type: string } } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BindingRequest" } } } }
       responses: { "200": { description: binding, content: { application/json: { schema: { $ref: "#/components/schemas/Binding" } } } }, "400": { $ref: "#/components/responses/Error" } }
     delete:
       summary: Revoke a binding (a bound attempt's files are emptied first)
@@ -131,9 +135,9 @@ paths:
       responses: { "204": { description: revoked }, "404": { $ref: "#/components/responses/Error" } }
   /v1/operations/{id}:export:
     post:
-      summary: Export an EXPORT_FAILED run again (the kept work volume is transferred once more; the simulation is not rerun)
+      summary: Export an EXPORT_FAILED run again (the kept work volume is transferred once more; the simulation is not rerun), or run the model's application finalizer on a FAILED application-I/O run whose exit code it declares
       parameters: [{ $ref: "#/components/parameters/id" }]
-      responses: { "202": { description: export operation, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "409": { $ref: "#/components/responses/Error" } }
+      responses: { "202": { description: "export (or finalizer) operation `<id>-x<n>`", content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "200": { description: "the active export or finalizer already exists", content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }, "404": { $ref: "#/components/responses/Error" }, "409": { $ref: "#/components/responses/Error" } }
   /v1/operations/{id}:resume:
     post:
       summary: Resume a FAILED or CANCELLED run from its checkpoints (Idempotency-Key replays one continuation; a body may name checkpoint_ref and gpu_class)
@@ -143,7 +147,8 @@ paths:
         operation. 409 when the operation is still queued or running, or when its volume is gone
         (successful runs release it). Preempted attempts resume on their own; this is for runs that
         exhausted their retries, were cancelled, or failed for a reason that has since been fixed.
-      parameters: [{ $ref: "#/components/parameters/id" }]
+      parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/idem" }]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: "#/components/schemas/ResumeRequest" } } } }
       responses:
         "202": { description: resumed operation, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
         "200": { description: the resumed operation already exists, content: { application/json: { schema: { $ref: "#/components/schemas/Operation" } } } }
@@ -153,7 +158,6 @@ paths:
   /v1/artifacts/uploads:
     post:
       summary: Presigned PUT URL in the tenant bucket
-      parameters: [{ $ref: "#/components/parameters/idem" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/UploadRequest" } } } }
       responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Upload" } } } } }
   /v1/artifacts/{uri}:
@@ -174,33 +178,26 @@ paths:
     patch:
       summary: Persist scaling on an API-managed definition and reconcile every region (admin key). Fleet-managed endpoints are read-only.
       parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/region" }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                min_replicas: { type: integer, minimum: 0 }
-                max_replicas: { type: integer, minimum: 1 }
-                target_concurrency: { type: integer, minimum: 1, description: "The per-replica scale target the endpoint reports: scaling.container_concurrency under concurrency_utilization, scaling.target under requests_per_second" }
-                scale_to_zero_after_s: { type: integer, minimum: 0 }
-                scaling: { $ref: "#/components/schemas/ScalingSpec" }
-                timeout_s: { type: integer, minimum: 1, maximum: 600 }
-      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ScalingRequest" } } } }
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }, "403": { $ref: "#/components/responses/Error" }, "404": { $ref: "#/components/responses/Error" }, "422": { description: minimum replicas exceed the maximum, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } } }
   /v1/keys:
     get:
       summary: Keys of the caller's tenant (admin key)
       responses: { "200": { description: ok, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ApiKey" } } } } } }
     post:
       summary: Create a key in the caller's tenant (admin key); the key itself is returned once
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [alias], properties: { alias: { type: string }, budget: { type: number, default: 10 }, models: { type: array, items: { type: string } }, expires_days: { type: integer } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/KeyRequest" } } } }
       responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } } }
+  /v1/keys:import:
+    post:
+      summary: "Import pre-hashed keys into the caller's tenant (admin key, fleet API): idempotent, all-or-nothing, nothing overwritten (docs/API.md \"Importing keys\")"
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/KeyImportRequest" } } } }
+      responses: { "200": { description: the classification report (with dry_run nothing is written), content: { application/json: { schema: { $ref: "#/components/schemas/KeyImportReport" } } } }, "400": { description: invalid records; nothing imported }, "409": { description: "conflicts; nothing imported (the report is in `detail`)" } }
   /v1/keys/{alias}:
     patch:
       summary: Change a key's budget, allowed models or expiry (admin key); the key value and its spend stay
       parameters: [{ name: alias, in: path, required: true, schema: { type: string } }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { budget: { type: number, minimum: 0 }, models: { type: array, items: { type: string } }, expires_days: { type: integer, minimum: 0, description: "days from now; 0 = never" } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/KeyUpdate" } } } }
       responses: { "200": { description: the key, content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } }, "404": { $ref: "#/components/responses/Error" } }
     delete:
       summary: Revoke a key by alias (admin key)
@@ -224,19 +221,490 @@ components:
     model: { name: model, in: path, required: true, schema: { type: string } }
     id: { name: id, in: path, required: true, schema: { type: string } }
     idem: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+    ifMatch: { name: If-Match, in: header, required: false, schema: { type: integer }, description: "the model version the write expects (GET /v1/models/{model}/history); 409 when it moved" }
+    since: { name: since, in: query, schema: { type: integer }, description: "polling cursor: the `revision` of the last response; 304 while nothing about the attempts changed and the operation is finished" }
+    live: { name: live, in: query, schema: { type: boolean, default: false }, description: "add what is up right now: ready nodes and GPUs in use per pool, the tenant's queue usage per region, the clusters" }
   responses:
     Error: { description: error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
-    Binding:
+    # Request bodies (Pydantic models of services/api/app.py, execution.py and models.py); tests/test_openapi_schemas.py
+    # holds their property names equal to the code's, and the response shapes below to what the code returns.
+    BindingRequest:
       type: object
-      properties: { ref: { type: string }, operation: { type: string, nullable: true }, keys: { type: array, items: { type: string } }, updated_at: { type: string, nullable: true } }
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { type: object, additionalProperties: { type: string }, description: "file name -> content, 1 to 64 KiB in total; delivered under /var/run/serverless2/private" }
+    ExecutionSpec:
+      description: "Execution options of a run (docs/JOBS.md \"Execution options\"); runs only, an unknown field is a 422"
+      type: object
+      additionalProperties: false
+      properties:
+        io_mode: { type: string, enum: [managed, application], default: managed, description: "managed: the tenant bucket, fetch and uploader; application: the run does its own I/O, the uploader only records the attempt" }
+        profile_ref: { type: [string, "null"], description: "an execution profile of the tenant (its network policy); GET /v1/fleet lists them" }
+        workload_identity_ref: { type: [string, "null"], description: "an identity of the tenant: the pod runs as identity-<ref> with a projected OIDC token" }
+        private_input_ref: { type: [string, "null"], description: "a binding (PUT /v1/bindings/{ref}) delivered to the main container as files" }
+        placement: { $ref: "#/components/schemas/PlacementSpec" }
+        recovery: { $ref: "#/components/schemas/RecoverySpec" }
+    PlacementSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        gpu_preference: { type: [array, "null"], items: { type: string }, description: "narrows and orders the model's GPU classes" }
+        allowed_clusters: { type: [array, "null"], items: { type: string }, description: "narrows the model's regions (cluster ids or region names)" }
+        fallback_wait_s: { type: [integer, "null"], minimum: 0, maximum: 604800, description: "move to the next class of the preference after this long without capacity (docs/SCHEDULING.md)" }
+    RecoverySpec:
+      type: object
+      additionalProperties: false
+      properties:
+        on_infrastructure_loss: { type: string, enum: [retry, fail, recover], default: retry }
+        checkpoint_ref: { type: [string, "null"], maxLength: 1024, description: "handed to the run as CHECKPOINT_REF" }
+        max_recoveries: { type: [integer, "null"], minimum: 1, maximum: 3, description: "recover only: automatic continuations per root (default 1)" }
+        wait_s: { type: [integer, "null"], minimum: 0, maximum: 86400, description: "recover only: time to come back on its own class first (default 300)" }
+        deadline_s: { type: [integer, "null"], minimum: 60, maximum: 604800, description: "recover only: no recovery past root.created_at + deadline_s" }
+    InvokeRequest:
+      type: object
+      properties:
+        name: { type: [string, "null"], description: free-text label stored on the operation }
+        mode: { oneOf: [{ $ref: "#/components/schemas/Mode" }, { type: "null" }] }
+        input: { type: object, additionalProperties: true, description: "sync/async: the request body sent to the endpoint; run: the model's parameters (unknown names are a 400)" }
+        region: { type: [string, "null"], description: "run mode: pin the job to one of the model's regions (optional: the dispatcher picks the cheapest free region by the model's GPU preference; single-cluster mode: its own region). sync/async: the region whose endpoint answers (default: the model's first region); an endpoint in another region than the API's cluster is called through that region's gateway with the caller's key" }
+        priority: { type: [string, "null"], enum: [low, normal, high, null] }
+        timeout_s: { type: [integer, "null"], minimum: 1, maximum: 604800, description: sync wait budget (default 600) or run deadline }
+        execution: { oneOf: [{ $ref: "#/components/schemas/ExecutionSpec" }, { type: "null" }] }
+    ResumeRequest:
+      type: object
+      properties:
+        checkpoint_ref: { type: [string, "null"], maxLength: 1024, description: "a portable checkpoint the application restores itself: the volume and the region are not needed; without it the newest acknowledged pointer is used when another gpu_class is asked for" }
+        gpu_class: { type: [string, "null"], description: "continue on another of the model's GPU classes (its image); needs a checkpoint reference" }
+    UploadRequest:
+      type: object
+      required: [filename]
+      properties:
+        filename: { type: string }
+        content_type: { type: string, default: application/octet-stream }
+        expires_s: { type: integer, default: 3600, description: capped at 7 days }
+        region: { type: string, description: "which regional tenant bucket receives the upload (default: the API's region)" }
+    ScalingRequest:
+      description: "PATCH /v1/endpoints/{id}: each field is optional and only the given ones change; the first four are shorthands for scaling.min, scaling.max, scaling.target or scaling.container_concurrency, scaling.idle_s"
+      type: object
+      properties:
+        min_replicas: { type: [integer, "null"], minimum: 0 }
+        max_replicas: { type: [integer, "null"], minimum: 1 }
+        target_concurrency: { type: [integer, "null"], minimum: 1, description: "The per-replica scale target the endpoint reports: scaling.container_concurrency under concurrency_utilization, scaling.target under requests_per_second" }
+        scale_to_zero_after_s: { type: [integer, "null"], minimum: 0 }
+        scaling: { oneOf: [{ $ref: "#/components/schemas/ScalingSpec" }, { type: "null" }] }
+        timeout_s: { type: [integer, "null"], minimum: 1, maximum: 600 }
+    KeyRequest:
+      type: object
+      required: [alias]
+      properties:
+        alias: { type: string, description: "the key's alias within the tenant (stored as <tenant>-<alias>)" }
+        budget: { type: number, default: 10 }
+        models: { type: array, items: { type: string }, description: "allow-list; empty: every model" }
+        expires_days: { type: [integer, "null"] }
+    KeyUpdate:
+      type: object
+      properties:
+        budget: { type: [number, "null"], minimum: 0 }
+        models: { type: [array, "null"], items: { type: string } }
+        expires_days: { type: [integer, "null"], minimum: 0, description: "days from now; 0 = never" }
+    KeyImportRequest:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          description: "pre-hashed key records (services/api/keys.py validate_records)"
+          items:
+            type: object
+            required: [hash, alias, tenant, principal_id]
+            properties:
+              hash: { type: string, description: "sha256 of the exact bearer value, 64 lowercase hex characters" }
+              alias: { type: string }
+              tenant: { type: string, description: must be the caller's tenant }
+              role: { type: string, enum: [user] }
+              principal_id: { type: string, description: the stable legacy principal }
+              models: { type: array, items: { type: string } }
+              scopes: { type: array, items: { type: string } }
+              budget_usd: { type: number }
+              budget_requests: { type: number }
+              budget_gpu_seconds: { type: number }
+              max_concurrent: { type: integer }
+              rate_limit: { type: object, properties: { requests: { type: integer }, window_s: { type: integer } } }
+              expires: { type: string, description: RFC 3339 }
+        dry_run: { type: boolean, default: false, description: classify only, write nothing }
+    KeyImportReport:
+      type: object
+      properties:
+        dry_run: { type: boolean }
+        inserted: { type: array, items: { type: string }, description: aliases }
+        unchanged: { type: array, items: { type: string }, description: "aliases already stored byte-for-byte equal" }
+        conflicts: { type: array, items: { type: object, properties: { alias: { type: string }, reason: { type: string } } } }
+        blocked_for_unknown_scope: { type: array, items: { type: object, properties: { alias: { type: string }, scopes: { type: array, items: { type: string } } } } }
+        not_mirrored: { type: array, items: { type: string }, description: "imported without a plaintext: LiteLLM's route cannot serve them" }
+    ScalingSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        min: { type: integer, minimum: 0, default: 0, description: "Pod floor per region; 0 enables scale to zero. Multi-node endpoints: 1 starts the replica group, 0 stops it" }
+        max: { type: integer, minimum: 1, default: 1 }
+        metric: { type: string, enum: [concurrency_utilization, requests_per_second], default: concurrency_utilization, description: "How demand is measured per replica: concurrency_utilization scales on a percentage of container_concurrency, requests_per_second on a request rate" }
+        target: { type: integer, minimum: 1, description: "concurrency_utilization: 1–100 percent of container_concurrency (default 100); requests_per_second: requests/s per replica (default 5). The effective concurrency target may be fractional (replica concurrency 1 at 70 % is 0.7; Knative 1.23 supports down to 0.01)." }
+        container_concurrency: { type: integer, minimum: 0, maximum: 1000, description: "Hard concurrent-request limit per replica. concurrency_utilization requires at least 1 (default 1); requests_per_second has no limit (always 0)." }
+        cooldown_s: { type: integer, minimum: 0, maximum: 3600, default: 0, description: "Delay before scale-down; does not block scale-up" }
+        window_s: { type: integer, minimum: 6, maximum: 300, default: 30, description: "Evaluation interval: the metrics averaging window in seconds. The internal autoscaler tick is separate." }
+        idle_s: { type: integer, minimum: 0, maximum: 3600, default: 120, description: "Retention of the last pod after the decision to scale to zero; multi-node endpoints: the idle shutdown delay" }
+    ModelSpec:
+      description: "A model as the console form defines it (services/api/models.py `validate` and `to_entry`); kept in the fleet database with its history. The API accepts any field and models.py validates the ones it knows; the test suite holds this list equal to what models.py reads."
+      type: object
+      required: [id]
+      additionalProperties: true
+      properties:
+        id: { type: string, description: "lowercase letters, digits and dashes; the model name in the API, the console and LiteLLM" }
+        kind: { type: string, enum: [endpoint, job], default: endpoint }
+        image: { type: [string, "null"], description: "any registry (vllm/vllm-openai:v0.11.0, nvcr.io/nim/..., your own); pulled through the fleet's image cache. Required unless images.default is given" }
+        images: { type: object, description: "image per GPU class, {default: ..., h100: ...}: endpoints get the class's image per deployment, run classes choose the class at submission (docs/SCHEDULING.md)", additionalProperties: { type: string } }
+        command: { description: "entrypoint command: a list, or a string run by /bin/sh -c", oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+        worker_command: { description: "multi-node endpoints: the command of the worker pods (default: the leader's)", oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+        args: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        env_secrets: { type: array, items: { type: string }, description: "Kubernetes Secret names in the workload namespace, exposed as environment (docs/RELIABILITY.md)" }
+        pod_metadata: { type: object, description: "extra labels and annotations on the pods ({labels: {}, annotations: {}})", properties: { labels: { type: object, additionalProperties: { type: string } }, annotations: { type: object, additionalProperties: { type: string } } } }
+        automount_service_account_token: { type: boolean, description: "endpoints only: mount the ServiceAccount token (default false)" }
+        port: { type: integer, default: 8080, description: "endpoints: the container port" }
+        protocol: { type: string, enum: [http, openai, websocket, grpc], default: http }
+        path: { type: string, description: "endpoints: the request path the API forwards to (default by protocol: /v1/chat/completions for openai, / otherwise)" }
+        health_path: { type: string, description: "endpoints: readiness probe path" }
+        served_model: { type: string, description: "openai endpoints: the model name the server expects in requests; injected when callers omit it" }
+        example: { type: object, additionalProperties: true, description: "a valid request body of the endpoint (at most 16 KiB): the console's Test request tab, GET /v1/endpoints" }
+        gpu: { type: object, properties: { count: { type: integer, default: 1, description: "GPUs per replica (endpoints) or per node (multi-node) or per run" }, classes: { type: array, items: { type: string }, description: "GPU classes of the fleet, preferred first (h100, h200, b300, l40s, rtx-pro-6000, ...)" } } }
+        nodes: { type: integer, minimum: 1, default: 1, description: "endpoints: whole nodes per replica group; > 1 renders a LeaderWorkerSet (docs/API.md \"Multi-node endpoints\")" }
+        interconnect: { type: string, enum: [none, preferred, required], default: none, description: "multi-node endpoints: InfiniBand between the nodes" }
+        resources: { type: object, properties: { cpu: { type: string, default: "4" }, memory: { type: string, default: 16Gi } } }
+        scaling: { $ref: "#/components/schemas/ScalingSpec" }
+        timeout_s: { type: integer, default: 600 }
+        shm_gib: { type: integer, default: 1 }
+        pull_secret: { type: string, description: "name of an image pull Secret in the models namespace (private registries)" }
+        weights: { type: object, description: "a directory on the region's shared weights filesystem, mounted into the container (endpoints and run classes)", properties: { path: { type: string }, mount_path: { type: string, default: /weights }, env: { type: object, additionalProperties: { type: string } } } }
+        data: { type: object, description: "jobs: a directory of the tenant's shared data mounted into the run (docs/JOBS.md \"Shared data\")", properties: { path: { type: string }, mount_path: { type: string, default: /data }, readonly: { type: boolean, default: true } } }
+        regions: { type: array, items: { type: string }, description: "where the endpoint runs / the job may run; default: every region with a pool of a listed class" }
+        deployments: { type: object, description: "endpoints: per-region variants {<region>: {variants: [{name, pool, min, max, image}]}} (docs/API.md \"Variants\")", additionalProperties: { type: object, properties: { variants: { type: array, items: { type: object, required: [pool], properties: { name: { type: string }, pool: { type: string }, min: { type: integer, minimum: 0 }, max: { type: integer, minimum: 0 }, image: { type: string } } } } } } }
+        routing: { type: object, description: "endpoints with variants: {field: <request field, dotted>, map: {<value>: <variant>}, default: priority | <variant>}", properties: { field: { type: string }, map: { type: object, additionalProperties: { type: string } }, default: { type: string } } }
+        display_name: { type: string }
+        description: { type: string }
+        task: { type: string, description: "a free-text category shown in the catalog (default custom)" }
+        cpu: { type: string, description: "jobs: CPU per run" }
+        memory: { type: string, description: "jobs: memory per run" }
+        disk_gi: { type: integer, description: "jobs: size of the per-run work volume" }
+        grace_seconds: { type: integer, description: "jobs: seconds after SIGTERM to checkpoint" }
+        scratch: { type: string, enum: [network, local-nvme] }
+        parameters: { type: array, items: { type: object }, description: "jobs: input parameters the console form offers ({name, type, label, default})" }
+        finalize: { type: object, description: "jobs with application I/O: the model-owned command that re-delivers from the kept work volume after the compute ended with one of on_exit_codes (docs/JOBS.md \"Finalization by the application\"); run through POST :export", properties: { command: { oneOf: [{ type: string }, { type: array, items: { type: string } }] }, on_exit_codes: { type: array, items: { type: integer } }, timeout_s: { type: integer }, cpu: { type: string }, memory: { type: string } } }
+    Error:
+      type: object
+      properties: { detail: { type: string } }
+    Mode: { type: string, enum: [sync, async, run] }
+    OperationStatus:
+      type: string
+      enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, PREEMPTED, FINALIZING, EXPORT_FAILED, SUPERSEDED]
+      description: "docs/JOBS.md \"Status mapping\". FINALIZING: the run ended, its delivery (export or finalizer) is not confirmed yet; EXPORT_FAILED: it ended without a confirmed delivery (volume kept, :export retries); SUPERSEDED: fallback or recovery moved the run, `successor` is the live operation; PREEMPTED: an operation served from its durable record whose last attempt was interrupted"
+    AttemptStatus: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, PREEMPTED, CANCELLED] }
+    ExportState: { type: [string, "null"], enum: [succeeded, failed, n/a, null], description: "the uploader's export of the attempt: n/a for application-managed I/O (the finalization record counts instead)" }
+    Model:
+      type: object
+      required: [id, name, modes, default_mode, regions]
+      properties:
+        id: { type: string, description: model id, e.g. llm-example, batch-example }
+        name: { type: string }
+        description: { type: string }
+        modes: { type: array, items: { $ref: "#/components/schemas/Mode" } }
+        default_mode: { $ref: "#/components/schemas/Mode" }
+        gpu: { description: "the class and count as text (\"1x H100\"), {count, classes} for an API-defined model, or none", oneOf: [{ type: string }, { type: object, properties: { count: { type: integer }, classes: { type: array, items: { type: string } } } }] }
+        price: { type: string, example: $0.05 / call }
+        price_per_call: { type: [number, "null"] }
+        regions:
+          type: array
+          items:
+            type: object
+            description: "the endpoint's live state per region (kube.endpoint_status); run classes report every region ready"
+            properties:
+              region: { type: string }
+              status: { type: string, enum: [ready, scaled-to-zero, deploying, error, unavailable] }
+              replicas_ready: { type: [integer, "null"], description: "Observed regional replica count; null if the region is unavailable" }
+              reason: { type: string, description: "status error: Knative gave up on the newest revision (its reason and message)" }
+              nodes: { type: integer, description: "multi-node endpoints: nodes per replica group" }
+              pods_ready: { type: integer, description: "multi-node endpoints: ready pods over every node" }
+              startup_s: { type: integer, description: "the newest pod: created -> Ready, in seconds" }
+              started_at: { type: string, format: date-time, description: the newest pod's creation time }
+              ready_at: { type: string, format: date-time, description: when the newest pod became Ready }
+              last_request_at: { type: string, format: date-time, description: "multi-node endpoints: the last authorized request (idle shutdown reads it)" }
+        image: { type: [string, "null"] }
+        protocol: { type: [string, "null"], example: openai }
+        cold_start_s: { type: [number, "null"] }
+        cold_start_class: { type: [string, "null"] }
+        endpoints: { type: [object, "null"], additionalProperties: { type: string }, description: "endpoints: the paths the model serves ({chat|invoke, ready})" }
+        task: { type: [string, "null"] }
+        managed_by: { type: string, enum: [git, catalog, terraform, api], description: "api: defined through POST /v1/models (editable); other values: a built-in class of the solution" }
+        spec: { description: "the stored ModelSpec of an API-defined model; null for other callers than admins and for built-in classes", oneOf: [{ $ref: "#/components/schemas/ModelSpec" }, { type: "null" }] }
+        example: { type: [object, "null"], additionalProperties: true, description: "a valid request body of the endpoint (the console's Test request tab)" }
+        parameters:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name: { type: string }
+              type: { type: string, enum: [string, number, boolean, select, text, file] }
+              label: { type: string }
+              default: {}
+              options: { type: array, items: { type: string } }
+              required: { type: boolean }
+              help: { type: string }
+    SyncResponse:
+      type: object
+      required: [result, operation]
+      properties:
+        result: { description: the endpoint's JSON response }
+        operation: { $ref: "#/components/schemas/Operation" }
+    Attempt:
+      description: "One attempt of a run: a pod, or the uploader's record of a pod that preemption deleted (services/api/status.py `_attempts`); the chain view adds `operation`, `image` and `gpu_seconds`"
+      type: object
+      properties:
+        index: { type: integer, description: 1-based, oldest first }
+        attempt_id: { type: [string, "null"], description: the pod name }
+        attempt_role: { type: string, enum: [run, export, finalize], description: "run: the compute; export: a transfer-only retry; finalize: the application finalizer" }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        status: { $ref: "#/components/schemas/AttemptStatus" }
+        node: { type: [string, "null"], description: node name }
+        gpu_class: { type: [string, "null"], description: "the GPU class the attempt ran on (run classes with per-class images)" }
+        reason: { type: [string, "null"] }
+        exit_code: { type: [integer, "null"] }
+        epoch: { type: integer, description: "the position of the attempt's operation in its resume chain (1 = the root)" }
+        export_state: { $ref: "#/components/schemas/ExportState" }
+        result_ref: { type: [string, "null"], description: "application I/O: the result reference of the finalization record (RESULT.json)" }
+        checkpoint_ref: { type: [string, "null"], description: "the newest checkpoint pointer the attempt acknowledged" }
+        image_digest: { type: [string, "null"] }
+        operation: { type: string, description: "chain view: the operation the attempt belongs to" }
+        image: { type: [string, "null"], description: "chain view: the pinned image of the attempt's record" }
+        gpu_seconds: { type: [number, "null"], description: "chain view: measured GPU time of the attempt; null while unknown (no end record)" }
+    ChainMember:
+      description: "One operation of a resume/fallback/recovery chain (docs/API.md \"Chains\")"
+      type: object
+      properties:
+        id: { type: string }
+        created_at: { type: string, format: date-time }
+        status: { $ref: "#/components/schemas/OperationStatus" }
+        gpu_class: { type: [string, "null"] }
+        cluster: { type: [string, "null"] }
+        reason: { type: [string, "null"], description: "why this member exists: the fallback or recovery note of the member it replaced" }
+        gpu_seconds: { type: [number, "null"], description: "measured GPU time of the member's attempts; null when an attempt's time is unknown" }
+        gpu_seconds_complete: { type: boolean }
+        cost: { type: [number, "null"] }
+    Operation:
+      description: "The one shape of an operation (services/api/status.py `normalise`), plus the lifecycle fields from the attempt records (services/api/attempts.py `lifecycle`) and, on a chain member, the chain view (services/api/app.py `_chain`, `_finalizers`)"
+      type: object
+      required: [id, model, mode, status, region, created_at]
+      properties:
+        id: { type: string, description: Kubernetes Job name }
+        name: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        mode: { $ref: "#/components/schemas/Mode" }
+        status: { $ref: "#/components/schemas/OperationStatus" }
+        phase: { type: [string, "null"], enum: [waiting_for_admission, waiting_for_node, starting, null], description: "QUEUED only: what the run waits for (docs/API.md); `reason` carries the bounded message" }
+        reason: { type: [string, "null"], description: "QUEUED: why it waits; a moved run: the fallback or recovery note (\"rtx-pro-6000 -> l40s after 60 s without capacity\"); an expired Job: that it is served from its durable record" }
+        region: { type: [string, "null"], description: "region whose cluster runs the job; null while a fleet-placed run waits for a region. Fleet-placed runs keep inputs and outputs in the tenant's hub-region bucket, regional ones in that region's bucket" }
+        cluster: { type: [string, "null"], description: "the configured id of the cluster that admitted the run (the record's, else the Workload's); the region is the Nebius region" }
+        tenant: { type: string }
+        profile: { type: string, description: "scheduling profile (Kueue queue): prefer-<gpu class> from the model's first GPU class, or default" }
+        priority: { type: string }
+        created_at: { type: [string, "null"], format: date-time, description: "chain view: the root's creation time" }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        duration_s: { type: [number, "null"] }
+        timeout_s: { type: [integer, "null"] }
+        attempts: { type: array, items: { $ref: "#/components/schemas/Attempt" }, description: "chain view: every attempt of every member" }
+        logs_url: { type: [string, "null"], description: Grafana Explore (Loki) query over the operation's pods }
+        error: { type: [string, "null"] }
+        input: { type: object, additionalProperties: true }
+        execution: { description: "the resolved execution block of a run (names only; docs/JOBS.md \"Execution options\")", oneOf: [{ type: object, additionalProperties: true }, { type: "null" }] }
+        resumed_from: { type: [string, "null"], description: root operation this one resumes (same volume, same region) }
+        resumable: { type: boolean, description: "run that ended FAILED, CANCELLED or EXPORT_FAILED; `:resume` still needs its volume to exist (or a checkpoint_ref)" }
+        gpu_class: { type: [string, "null"], description: "run classes with one image per GPU class: the class chosen at submission (the run waits for it; a resume keeps it)" }
+        image: { type: [string, "null"], description: "the image that class got" }
+        nodes: { type: integer, description: "nodes of a multi-node run (1 otherwise)" }
+        interconnect: { type: [string, "null"], description: "multi-node runs: none | preferred | required" }
+        cost: { type: [number, "null"], description: "sync/async: the model's price per call; run: GPU-seconds x deployments.<region>.price_per_gpu_hour, charged to the key's spend in the fleet database within two minutes of completion; chain view: the sum over the chain" }
+        gpu_seconds: { type: [number, "null"], description: "run only: main container running time x GPUs summed over all attempts; chain view: the measured total over the chain" }
+        gpu_seconds_complete: { type: boolean, description: "chain view: every attempt's GPU time is on record" }
+        successor: { type: [string, "null"], description: "SUPERSEDED: the operation that continues this one" }
+        recovered_from: { type: [string, "null"], description: "a recovery successor: the operation it continues" }
+        requested_id: { type: string, description: "the caller's handle when it was superseded: this response is its current successor" }
+        root_operation_id: { type: string, description: the root of the resume chain }
+        successor_created_at: { type: [string, "null"], format: date-time, description: "chain view: when the newest successor was created" }
+        chain: { type: array, items: { $ref: "#/components/schemas/ChainMember" }, description: "chain view: every member, oldest first" }
+        attempt_id: { type: [string, "null"], description: the newest attempt's pod }
+        attempt_role: { type: [string, "null"], enum: [run, export, finalize, null] }
+        epoch: { type: [integer, "null"], description: the newest attempt's epoch }
+        revision: { type: integer, description: "polling cursor over the attempt records (`since`)" }
+        export_state: { $ref: "#/components/schemas/ExportState" }
+        exported_by: { type: string, description: "a transfer-only retry or finalizer (`<id>-x<n>`) delivered this operation's results" }
+        result_ref: { type: [string, "null"] }
+        checkpoint_ref: { type: [string, "null"], description: the newest acknowledged checkpoint pointer }
+        checkpoint_generation: { type: [integer, "null"] }
+        image_digest: { type: [string, "null"] }
+        finalize_attempts: { type: integer, description: "FAILED/EXPORT_FAILED application runs: how many application finalizers ran" }
+        finalizing_by: { type: string, description: "FINALIZING: the active finalizer operation" }
+    Artifact:
+      type: object
+      required: [name, url]
+      properties: { name: { type: string }, uri: { type: string }, url: { type: string, description: presigned GET }, size_bytes: { type: integer } }
+    OperationResult:
+      type: object
+      required: [operation_id, status]
+      properties:
+        operation_id: { type: string }
+        status: { $ref: "#/components/schemas/OperationStatus" }
+        region: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        export_state: { $ref: "#/components/schemas/ExportState" }
+        result_ref: { type: [string, "null"] }
+        checkpoint_ref: { type: [string, "null"] }
+        result: { description: inline result (async endpoint response) }
+        artifacts: { type: array, items: { $ref: "#/components/schemas/Artifact" }, description: "run outputs of managed I/O; empty for application I/O" }
+    Upload:
+      type: object
+      required: [uri, url, method, expires_at]
+      properties:
+        uri: { type: string, description: "s3://<tenant bucket>/uploads/<uuid>/<filename>; pass this in invoke input" }
+        url: { type: string, description: presigned PUT URL }
+        method: { type: string, enum: [PUT] }
+        headers: { type: object, additionalProperties: { type: string } }
+        expires_at: { type: string, format: date-time }
+    EndpointScaling:
+      description: "The scaling policy an endpoint reports: a ScalingSpec read back from Knative (API-managed definitions: the saved policy); a multi-node endpoint reports `metric: none` with min/max 0 or 1 and idle_s"
+      type: object
+      properties:
+        min: { type: integer }
+        max: { type: integer }
+        metric: { type: string, enum: [concurrency_utilization, requests_per_second, none] }
+        target: { type: integer }
+        container_concurrency: { type: integer }
+        cooldown_s: { type: integer }
+        window_s: { type: integer }
+        idle_s: { type: integer }
+    EndpointVariant:
+      type: object
+      properties:
+        name: { type: string }
+        id: { type: string, description: the variant's InferenceService name }
+        pool: { type: [string, "null"] }
+        min: { type: [integer, "null"] }
+        max: { type: [integer, "null"] }
+        image: { type: [string, "null"] }
+        status: { type: [string, "null"], enum: [ready, scaled-to-zero, deploying, error, unavailable, null] }
+        replicas_ready: { type: [integer, "null"] }
+    Endpoint:
+      description: "A deployed endpoint in one region (services/api/endpoints.py `to_public`): a KServe InferenceService or, for `nodes` > 1, a LeaderWorkerSet. A region the API cannot read answers the short unavailable form (id, name, model, region, status, replicas_ready, gpu, managed_by, url)"
+      type: object
+      required: [id, name, model, region, url, status, replicas_ready]
+      properties:
+        id: { type: string, description: InferenceService (or LeaderWorkerSet) name }
+        name: { type: string }
+        model: { type: string }
+        region: { type: string }
+        url: { type: string }
+        status: { type: string, enum: [ready, scaled-to-zero, deploying, error, unavailable], description: "error: Knative gave up on the newest revision, or the region could not be read" }
+        replicas_ready: { type: [integer, "null"] }
+        nodes: { type: integer, description: "nodes per replica group (1 for a single-node endpoint)" }
+        interconnect: { type: string, description: "multi-node endpoints: none | preferred | required" }
+        pods_ready: { type: [integer, "null"], description: "multi-node endpoints: ready pods over every node" }
+        last_request_at: { type: [string, "null"], format: date-time, description: "multi-node endpoints: the last authorized request" }
+        startup_s: { type: [integer, "null"], description: "the newest pod: created -> Ready, in seconds" }
+        started_at: { type: [string, "null"], format: date-time }
+        ready_at: { type: [string, "null"], format: date-time }
+        example: { type: [object, "null"], additionalProperties: true, description: a valid request body }
+        min_replicas: { type: integer }
+        max_replicas: { type: integer }
+        scale_to_zero_after_s: { type: integer }
+        target_concurrency: { type: [integer, "null"], description: "The per-replica scale target (scaling.container_concurrency or, for requests_per_second, scaling.target); null for a multi-node endpoint" }
+        scaling: { $ref: "#/components/schemas/EndpointScaling" }
+        timeout_s: { type: integer }
+        gpu: { description: "the class and count as text, {count, classes} for an API-defined model, or none", oneOf: [{ type: string }, { type: object }] }
+        image: { type: [string, "null"] }
+        cpu: { type: [string, "null"] }
+        memory: { type: [string, "null"] }
+        protocol: { type: [string, "null"] }
+        created_at: { type: [string, "null"] }
+        managed_by: { type: string, enum: [git, catalog, terraform, api], description: "api: editable saved definition; other values: managed by fleet configuration" }
+        variants: { type: array, items: { $ref: "#/components/schemas/EndpointVariant" }, description: "endpoints with more than one variant in the region" }
+        routing: { type: [object, "null"], description: "with variants: the model's routing block", additionalProperties: true }
+    FleetPool:
+      type: object
+      properties:
+        region: { type: string, description: the Nebius region }
+        cluster: { type: [string, "null"], description: the configured cluster id }
+        pool: { type: string }
+        gpu_class: { type: [string, "null"] }
+        platform: { type: [string, "null"] }
+        preset: { type: [string, "null"] }
+        gpus_per_node: { type: integer }
+        capacity: { type: [string, "null"], description: "spot | ondemand | reserved" }
+        usd_per_gpu_hour: { type: [number, "null"] }
+        max_nodes: { type: [integer, "null"] }
+        interconnect: { type: [string, "null"] }
+        local_nvme: { type: boolean }
+        nodes_ready: { type: [integer, "null"], description: "live=true: ready nodes; null when the region cannot be read" }
+        gpus_total: { type: [integer, "null"], description: "live=true: allocatable GPUs on the ready nodes" }
+        gpus_used: { type: [integer, "null"], description: "live=true: GPUs held by running pods; null without cluster-wide pod read" }
+    FleetCluster:
+      type: object
+      properties:
+        id: { type: string, description: "the configured cluster id, or control" }
+        region: { type: string }
+        project: { type: [string, "null"] }
+        roles: { type: array, items: { type: string, enum: [control, manager, worker] } }
+        api_url: { type: [string, "null"], description: "the fleet's one API, on the control cluster" }
+        grafana_url: { type: [string, "null"] }
+        reachable: { type: boolean }
+        nodes_ready: { type: [integer, "null"] }
+        gpu_nodes_ready: { type: [integer, "null"] }
+        kubernetes_version: { type: [string, "null"] }
+    FleetTenant:
+      type: object
+      properties:
+        name: { type: string }
+        gpu_quota: { type: [integer, "null"], description: "the tenant's GPU cap per pool (terraform.tfvars tenants.<name>.gpu_quota)" }
+        fair_share_weight: { type: number }
+        dedicated_pools: { type: array, items: { type: string } }
+        usage: { type: object, description: "live=true: per region, what the tenant's queues hold", additionalProperties: { type: object, properties: { gpus_by_pool: { type: object, additionalProperties: { type: integer } }, admitted: { type: integer }, pending: { type: integer } } } }
+    ExecutionCapabilities:
+      description: "What this tenant may ask for in `execution` (services/api/execution.py `capabilities`)"
+      type: object
+      properties:
+        io_modes: { type: array, items: { type: string, enum: [managed, application] } }
+        identities: { type: array, items: { type: string } }
+        execution_profiles: { type: array, items: { type: string } }
+        oidc_issuers: { type: object, additionalProperties: { type: string }, description: "region -> the cluster's OIDC issuer of workload-identity tokens" }
+        private_input_dir: { type: string }
+        identity_token_file: { type: string }
+        finalize: { type: object, properties: { roles: { type: array, items: { type: string } }, max_retries: { type: integer }, trigger: { type: string }, declared_by: { type: string } } }
+        recovery: { type: object, properties: { on_infrastructure_loss: { type: array, items: { type: string } }, max_recoveries: { type: integer }, defaults: { type: object, properties: { max_recoveries: { type: integer }, wait_s: { type: integer } } }, requires: { type: string } } }
     FleetInfo:
       type: object
       properties:
         regions: { type: array, items: { type: string } }
         gpu_classes: { type: array, items: { type: string } }
         fleet_manager: { type: boolean }
-        region: { type: string }
+        region: { type: string, description: the API's own region }
+        execution: { $ref: "#/components/schemas/ExecutionCapabilities" }
+        pools: { type: array, items: { $ref: "#/components/schemas/FleetPool" } }
+        tenant: { $ref: "#/components/schemas/FleetTenant" }
+        clusters: { type: array, items: { $ref: "#/components/schemas/FleetCluster" }, description: "live=true only" }
+    Binding:
+      type: object
+      properties: { ref: { type: string }, operation: { type: [string, "null"], description: the operation the binding is bound to }, keys: { type: array, items: { type: string } }, updated_at: { type: [string, "null"] } }
     Metrics:
       type: object
       properties:
@@ -276,208 +744,27 @@ components:
               line: { type: string }
               pod: { type: string }
               container: { type: string }
-    ModelSpec:
-      description: A model as the console form defines it (services/api/models.py); kept in the fleet database with its history. Reserved for later, accepted and stored, not acted on yet - `images` (image per GPU class), `deployments.<region>.variants`, `routing`.
-      type: object
-      required: [id, image]
-      properties:
-        id: { type: string, description: "lowercase letters, digits and dashes; the model name in the API, the console and LiteLLM" }
-        kind: { type: string, enum: [endpoint, job], default: endpoint }
-        image: { type: string, description: "any registry (vllm/vllm-openai:v0.11.0, nvcr.io/nim/..., your own); pulled through the fleet's image cache" }
-        images: { type: object, description: "reserved: image per GPU class, {default: ..., h100: ...}", additionalProperties: { type: string } }
-        command: { description: "entrypoint command: a list, or a string run by /bin/sh -c", oneOf: [{ type: string }, { type: array, items: { type: string } }] }
-        args: { type: array, items: { type: string } }
-        env: { type: object, additionalProperties: { type: string } }
-        port: { type: integer, default: 8080, description: "endpoints: the container port" }
-        protocol: { type: string, enum: [http, openai, websocket, grpc], default: http }
-        path: { type: string, description: "endpoints: the request path the API forwards to (default by protocol: /v1/chat/completions for openai, / otherwise)" }
-        health_path: { type: string, description: "endpoints: readiness probe path" }
-        served_model: { type: string, description: "openai endpoints: the model name the server expects in requests; injected when callers omit it" }
-        gpu: { type: object, properties: { count: { type: integer, default: 1 }, classes: { type: array, items: { type: string }, description: "GPU classes of the fleet, preferred first (h100, h200, b300, l40s, rtx-pro-6000, ...)" } } }
-        resources: { type: object, properties: { cpu: { type: string, default: "4" }, memory: { type: string, default: 16Gi } } }
-        scaling: { $ref: "#/components/schemas/ScalingSpec" }
-        timeout_s: { type: integer, default: 600 }
-        shm_gib: { type: integer, default: 1 }
-        pull_secret: { type: string, description: "name of an image pull Secret in the models namespace (private registries)" }
-        weights: { type: object, description: "a directory on the region's shared weights filesystem, mounted into the container", properties: { path: { type: string }, mount_path: { type: string, default: /weights }, env: { type: object, additionalProperties: { type: string } } } }
-        regions: { type: array, items: { type: string }, description: "where the endpoint runs / the job may run; default: every region with a pool of a listed class" }
-        display_name: { type: string }
-        description: { type: string }
-        cpu: { type: string, description: "jobs: CPU per run" }
-        memory: { type: string, description: "jobs: memory per run" }
-        disk_gi: { type: integer, description: "jobs: size of the per-run work volume" }
-        grace_seconds: { type: integer, description: "jobs: seconds after SIGTERM to checkpoint" }
-        scratch: { type: string, enum: [network, local-nvme] }
-        parameters: { type: array, items: { type: object }, description: "jobs: input parameters the console form offers ({name, type, label, default})" }
-        routing: { type: object, description: "reserved" }
-    Error:
-      type: object
-      properties: { detail: { type: string } }
-    Mode: { type: string, enum: [sync, async, run] }
-    OperationStatus: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
-    Model:
-      type: object
-      required: [id, name, modes, default_mode, regions]
-      properties:
-        id: { type: string, description: model id, e.g. llm-example, batch-example }
-        name: { type: string }
-        description: { type: string }
-        modes: { type: array, items: { $ref: "#/components/schemas/Mode" } }
-        default_mode: { $ref: "#/components/schemas/Mode" }
-        gpu: { type: string, example: 1x H100 }
-        price: { type: string, example: $0.05 / call }
-        price_per_call: { type: number }
-        regions: { type: array, items: { type: object, properties: { region: { type: string }, status: { type: string, enum: [ready, scaled-to-zero, deploying, unavailable] }, replicas_ready: { type: [integer, "null"], description: "Observed regional replica count; null if the region is unavailable" } } } }
-        image: { type: string }
-        protocol: { type: string, example: openai-chat }
-        cold_start_s: { type: number }
-        parameters:
-          type: array
-          items:
-            type: object
-            required: [name, type]
-            properties:
-              name: { type: string }
-              type: { type: string, enum: [string, number, boolean, select, text, file] }
-              label: { type: string }
-              default: {}
-              options: { type: array, items: { type: string } }
-              required: { type: boolean }
-              help: { type: string }
-    InvokeRequest:
-      type: object
-      properties:
-        name: { type: string, description: free-text label stored on the operation }
-        mode: { $ref: "#/components/schemas/Mode" }
-        input: { type: object, additionalProperties: true, description: "sync/async: the request body sent to the endpoint; run: the model's parameters (unknown names are a 400)" }
-        region: { type: string, description: "run mode: pin the job to one of the model's regions (optional: the dispatcher picks the cheapest free region by the model's GPU preference; single-cluster mode: its own region). sync/async: the region whose endpoint answers (default: the model's first region); an endpoint in another region than the API's cluster is called through that region's gateway with the caller's key" }
-        priority: { type: string, enum: [low, normal, high] }
-        timeout_s: { type: integer, description: sync wait budget (default 600) or run deadline }
-    SyncResponse:
-      type: object
-      required: [result, operation]
-      properties:
-        result: { description: the endpoint's JSON response }
-        operation: { $ref: "#/components/schemas/Operation" }
-    Attempt:
-      type: object
-      properties:
-        index: { type: integer }
-        started_at: { type: string, format: date-time }
-        ended_at: { type: string, format: date-time }
-        status: { type: string, enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, PREEMPTED] }
-        node: { type: string, description: node name }
-        gpu_class: { type: [string, "null"], description: "the GPU class the attempt ran on (run classes with per-class images)" }
-        reason: { type: string }
-        exit_code: { type: integer }
-    Operation:
-      type: object
-      required: [id, model, mode, status, region, created_at]
-      properties:
-        id: { type: string, description: Kubernetes Job name }
-        name: { type: string }
-        model: { type: string }
-        mode: { $ref: "#/components/schemas/Mode" }
-        status: { $ref: "#/components/schemas/OperationStatus" }
-        region: { type: [string, "null"], description: "region whose cluster runs the job; null while a fleet-placed run waits for a region. Fleet-placed runs keep inputs and outputs in the tenant's hub-region bucket, regional ones in that region's bucket" }
-        profile: { type: string, description: "scheduling profile (Kueue queue): prefer-<gpu class> from the model's first GPU class, or default" }
-        resumed_from: { type: string, description: root operation this one resumes (same volume, same region) }
-        resumable: { type: boolean, description: "run that ended FAILED or CANCELLED; `:resume` still needs its volume to exist" }
-        priority: { type: string }
-        created_at: { type: string, format: date-time }
-        started_at: { type: string, format: date-time }
-        ended_at: { type: string, format: date-time }
-        duration_s: { type: number }
-        timeout_s: { type: integer }
-        attempts: { type: array, items: { $ref: "#/components/schemas/Attempt" } }
-        gpu_class: { type: [string, "null"], description: "run classes with one image per GPU class: the class chosen at submission (the run waits for it; a resume keeps it)" }
-        image: { type: [string, "null"], description: "the image that class got" }
-        logs_url: { type: string, description: Grafana Explore (Loki) query over the operation's pods }
-        error: { type: string }
-        input: { type: object, additionalProperties: true }
-        cost: { type: number, description: "sync/async: the model's price per call; run: GPU-seconds x deployments.<region>.price_per_gpu_hour, charged to the key's spend in the fleet database within two minutes of completion" }
-        gpu_seconds: { type: number, description: run only, main container running time x GPUs summed over all attempts }
-        tenant: { type: string }
-    Artifact:
-      type: object
-      required: [name, url]
-      properties: { name: { type: string }, uri: { type: string }, url: { type: string, description: presigned GET }, size_bytes: { type: integer } }
-    OperationResult:
-      type: object
-      required: [operation_id, status]
-      properties:
-        operation_id: { type: string }
-        status: { $ref: "#/components/schemas/OperationStatus" }
-        region: { type: string }
-        result: { description: inline result (sync/async endpoint response) }
-        artifacts: { type: array, items: { $ref: "#/components/schemas/Artifact" } }
-        error: { type: string }
-    UploadRequest:
-      type: object
-      required: [filename]
-      properties:
-        filename: { type: string }
-        content_type: { type: string, default: application/octet-stream }
-        expires_s: { type: integer, default: 3600 }
-        region: { type: string, default: eu-north1, description: which regional tenant bucket receives the upload }
-    Upload:
-      type: object
-      required: [uri, url, method, expires_at]
-      properties:
-        uri: { type: string, description: "s3://<tenant bucket>/uploads/<uuid>/<filename>; pass this in invoke input" }
-        url: { type: string, description: presigned PUT URL }
-        method: { type: string, enum: [PUT] }
-        headers: { type: object, additionalProperties: { type: string } }
-        expires_at: { type: string, format: date-time }
-    ScalingSpec:
-      type: object
-      additionalProperties: false
-      properties:
-        min: { type: integer, minimum: 0, default: 0, description: "Pod floor per region; 0 enables scale to zero" }
-        max: { type: integer, minimum: 1, default: 1 }
-        metric: { type: string, enum: [concurrency_utilization, requests_per_second], default: concurrency_utilization, description: "How demand is measured per replica: concurrency_utilization scales on a percentage of container_concurrency, requests_per_second on a request rate" }
-        target: { type: integer, minimum: 1, description: "concurrency_utilization: 1–100 percent of container_concurrency (default 100); requests_per_second: requests/s per replica (default 5). The effective concurrency target may be fractional (replica concurrency 1 at 70 % is 0.7; Knative 1.23 supports down to 0.01)." }
-        container_concurrency: { type: integer, minimum: 0, maximum: 1000, description: "Hard concurrent-request limit per replica. concurrency_utilization requires at least 1 (default 1); requests_per_second has no limit (always 0)." }
-        cooldown_s: { type: integer, minimum: 0, maximum: 3600, default: 0, description: "Delay before scale-down; does not block scale-up" }
-        window_s: { type: integer, minimum: 6, maximum: 300, default: 30, description: "Evaluation interval: the metrics averaging window in seconds. The internal autoscaler tick is separate." }
-        idle_s: { type: integer, minimum: 0, maximum: 3600, default: 120, description: "Retention of the last pod after the decision to scale to zero" }
-    Endpoint:
-      type: object
-      required: [id, name, model, region, url, status, replicas_ready]
-      properties:
-        id: { type: string, description: InferenceService name }
-        name: { type: string }
-        model: { type: string }
-        region: { type: string }
-        url: { type: string }
-        status: { type: string, enum: [ready, scaled-to-zero, deploying, error, unavailable] }
-        replicas_ready: { type: [integer, "null"] }
-        min_replicas: { type: integer }
-        max_replicas: { type: integer }
-        scale_to_zero_after_s: { type: integer }
-        target_concurrency: { type: [integer, "null"], description: "The per-replica scale target (scaling.container_concurrency or, for requests_per_second, scaling.target); null for a multi-node endpoint" }
-        scaling: { $ref: "#/components/schemas/ScalingSpec" }
-        timeout_s: { type: integer }
-        placement: { type: [string, "null"], enum: [RESERVED, SPOT, ANY, null] }
-        gpu: { type: string }
-        image: { type: [string, "null"] }
-        cpu: { type: [string, "null"] }
-        memory: { type: [string, "null"] }
-        protocol: { type: string }
-        created_at: { type: string }
-        managed_by: { type: string, enum: [git, catalog, terraform, api], description: "api: editable saved definition; other values: managed by fleet configuration" }
     ApiKey:
       type: object
       properties:
         id: { type: string, description: the alias }
         key: { type: string, description: only on creation }
-        role: { type: string, enum: [user, admin] }
+        role: { type: string, enum: [user, admin, router] }
         key_preview: { type: string }
         alias: { type: string }
         tenant: { type: string }
-        budget: { type: number }
+        budget: { type: [number, "null"] }
         spend: { type: number }
         models: { type: array, items: { type: string } }
-        created_at: { type: string }
-        expires_at: { type: string }
-        status: { type: string, enum: [active, exhausted, expired] }
+        created_at: { type: [string, "null"] }
+        expires_at: { type: [string, "null"] }
+        status: { type: string, enum: [active, exhausted, expired], description: "exhausted: the USD budget, the request budget or the GPU-seconds budget is spent" }
+        scopes: { type: array, items: { type: string }, description: "GET /v1/keys/me: the key's scopes (imported keys)" }
+        max_concurrent: { type: [integer, "null"], description: "GET /v1/keys/me: concurrent operations the key may hold" }
+        budget_requests: { type: [number, "null"], description: "GET /v1/keys/me: request budget" }
+        spent_requests: { type: number, description: "GET /v1/keys/me" }
+        budget_gpu_seconds: { type: [number, "null"], description: "GET /v1/keys/me: GPU-seconds budget" }
+        spent_gpu_seconds: { type: number, description: "GET /v1/keys/me" }
+        rate_limit: { type: [object, "null"], properties: { requests: { type: integer }, window_s: { type: integer } }, description: "GET /v1/keys/me" }
+        principal_id: { type: [string, "null"], description: "GET /v1/keys/me: the legacy principal of an imported key" }
+        legacy: { type: [object, "null"], additionalProperties: true, description: "GET /v1/keys/me: the imported key's legacy metadata" }

@@ -1,4 +1,4 @@
-# 3.12-slim as of 2026-10: pinned by digest so that a rebuild gets the same base; the tag is the one resolved by `crane digest`
+# 3.12-slim pinned by digest so that a rebuild gets the same base; the tag is the one resolved by `crane digest`
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 # Debian security updates of the base image (trivy in CI fails on a fixed CRITICAL)
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*

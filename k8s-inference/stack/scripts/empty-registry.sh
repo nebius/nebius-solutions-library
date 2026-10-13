@@ -2,7 +2,7 @@
 # Delete every image from the fleet's registry so Terraform can delete the registry (Nebius refuses while any
 # artifact remains: "Please remove all artifacts from registry!"). Runs at destroy time from the cloud stage.
 # Uses the Registry service's image API through the Nebius CLI: deleting tags with crane/docker is not enough,
-# the registry keeps the manifest objects (measured 2026-10-08: 10 artifacts left after every tag was gone).
+# the registry keeps the manifest objects (10 artifacts were left after every tag was gone).
 #
 #   stack/scripts/empty-registry.sh <registry id>      (the Nebius CLI's active profile)
 set -euo pipefail

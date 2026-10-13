@@ -140,7 +140,7 @@ resource "terraform_data" "empty_logs" {
     secret   = nebius_iam_v2_access_key.backups.status.secret
   }
   # the key's access comes from the ops group (bucket policy): `destroy` empties the bucket before the
-  # membership goes (seen 2026-10-09: 403 from the provisioner after the membership was destroyed first)
+  # membership goes (403 from the provisioner when the membership is destroyed first)
   depends_on = [nebius_iam_v1_group_membership.ops]
   provisioner "local-exec" {
     when    = destroy
@@ -161,7 +161,7 @@ resource "terraform_data" "empty_backups" {
     secret   = nebius_iam_v2_access_key.backups.status.secret
   }
   # the key's access comes from the ops group (bucket policy): `destroy` empties the bucket before the
-  # membership goes (seen 2026-10-09: 403 from the provisioner after the membership was destroyed first)
+  # membership goes (403 from the provisioner when the membership is destroyed first)
   depends_on = [nebius_iam_v1_group_membership.ops]
   provisioner "local-exec" {
     when    = destroy

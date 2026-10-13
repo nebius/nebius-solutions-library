@@ -1,8 +1,8 @@
 """InfiniBand pools that grow on demand (docs/SCHEDULING.md "InfiniBand pools grow on demand").
 
 The Nebius cluster autoscaler never adds an InfiniBand node: it simulates the new node without the DRA attributes
-of its RDMA NICs, so a pod that claims them never triggers a scale-up (docs/JOBS.md "Multi-node runs"; measured
-2026-10-08 and 2026-10-09). Until now an operator raised the pool's `min_nodes` by hand before a multi-node run.
+of its RDMA NICs, so a pod that claims them never triggers a scale-up (docs/JOBS.md "Multi-node runs").
+Without this an operator would raise the pool's `min_nodes` by hand before a multi-node run.
 The dispatcher's elected replica does it instead, every reconcile cycle, per worker cluster:
   1. demand per InfiniBand pool = the largest node count any one multi-node run or endpoint there needs now:
      Kueue Workloads (the JobSets of multi-node runs) whose pod template requires the node label

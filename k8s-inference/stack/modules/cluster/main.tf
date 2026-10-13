@@ -134,7 +134,7 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     # Host-local NVMe of the preset: passed through and, in kubelet-ephemeral mode, formatted by Managed
     # Kubernetes as the kubelet's ephemeral storage (emptyDir, image layers); raw = devices left untouched.
     # (the API requires passthrough_group.requested; a platform/preset without local disks rejects the node group
-    # with "passthrough_group.requested is invalid": H100 1x/8x in eu-north1 did on 2026-10-08, B200/B300 presets ship NVMe)
+    # with "passthrough_group.requested is invalid": H100 1x/8x in eu-north1 do, B200/B300 presets ship NVMe)
     local_disks = each.value.local_nvme ? {
       passthrough_group = { requested = true }
       config            = each.value.local_nvme_mode == "kubelet-ephemeral" ? { kubelet_ephemeral = true } : { none = true }
@@ -309,7 +309,7 @@ locals {
       "     fs.inotify.max_user_instances = 8192",
       "     fs.inotify.max_user_watches = 1048576",
       # Unlimited memlock on the container runtime: RDMA memory registration (NCCL over InfiniBand) is bounded by
-      # RLIMIT_MEMLOCK (8 MiB on the node image, measured 2026-10-08); lifted on the containerd unit, every container
+      # RLIMIT_MEMLOCK (8 MiB on the node image); lifted on the containerd unit, every container
       # inherits it and multi-node runs need no CAP_IPC_LOCK (docs/JOBS.md "Multi-node runs").
       " - path: /etc/systemd/system/containerd.service.d/serverless2-memlock.conf",
       "   content: |",

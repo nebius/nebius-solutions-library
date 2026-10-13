@@ -1,6 +1,6 @@
 # Helm values for the dcgm-exporter-l40s Application (worker clusters): the DCGM exporter release for L40S nodes only.
 # On Nebius L40S VMs the DCGM profiling module cannot watch the DCGM_FI_PROF_* fields and the exporter exits
-# (verified 2026-10-07 on the hub L40S pool); this release ships the chart's default counters with those fields
+# (verified on an L40S pool); this release ships the chart's default counters with those fields
 # commented out, the regular dcgm-exporter release excludes L40S nodes. Otherwise identical to dcgm-exporter.yaml.
 # Own namespace monitoring-l40s: the chart hard-codes the names of its counters ConfigMap (exporter-metrics-config-map)
 # and Role (dcgm-exporter-read-cm), so two releases in one namespace overwrite each other. Prometheus selects

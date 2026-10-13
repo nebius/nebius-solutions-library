@@ -3,7 +3,7 @@
 # (endpoints defined through the API are not Terraform resources; the acceptance probe's example endpoint (tools/verify.sh) is
 # one of them) while the KServe controller is still there to run their finalizers, then strip the finalizers
 # of whatever is left. Without this the CRD deletion waits for ever on a finalizer nobody clears and the
-# kserve-crd uninstall times out (measured 2026-10-09).
+# kserve-crd uninstall times out.
 #
 #   KUBE_SERVER=https://<endpoint> KUBE_CA=<pem> NEBIUS_IAM_TOKEN=<token> stack/scripts/kserve-drain.sh
 set -euo pipefail

@@ -100,7 +100,7 @@ locals {
     dedicated  = local.dedicated
     clusters   = { for id, c in local.clusters : id => { region = c.region, project_id = c.project_id, roles = local.roles[id] } }
     # apply order: the workers first (they publish the identities the manager consumes), then the control cluster;
-    # the tenant buckets every cluster needs are cloud-stage resources since 2026-10-11, so no worker depends on another
+    # the tenant buckets every cluster needs are cloud-stage resources, so no worker depends on another
     order = concat([for id in local.cluster_ids : id if !local.roles[id].control], [for id in local.cluster_ids : id if local.roles[id].control])
     state = { bucket = local.state_bucket, region = local.state_region, endpoint = local.state_endpoint }
     # the environment variables that carry secret inputs (terraform.tfvars `secrets`), by platform-stage variable name
@@ -144,7 +144,7 @@ locals {
 # is a function of the tfvars and the cloud facts, so tools/check.sh renders the same objects without a cloud.
 locals {
   # `try` rather than a conditional: the live outputs and the placeholders are objects of different shapes, which a
-  # conditional refuses ("inconsistent conditional result types" on a live plan, 2026-10-11)
+  # conditional refuses ("inconsistent conditional result types" on a live plan)
   cloud_facts = {
     clusters = try(var.cloud.clusters, local.cloud_placeholder.clusters)
     hub      = try(var.cloud.hub, local.cloud_placeholder.hub)
@@ -251,7 +251,7 @@ locals {
   # and, before it, the Network Operator replace the fleet's nvidia-device-plugin release when gpu_operator.enabled
   # (docs/FLEET.md "GPU drivers"). The Network Operator goes wherever the GPU Operator goes unless
   # gpu_operator.network_operator = false: the Nebius driver profiles of every SXM platform wait for MOFED on nodes
-  # with a Mellanox NIC (2026-10-10: a B300 node without InfiniBand waited forever without it).
+  # with a Mellanox NIC (a B300 node without InfiniBand waited forever without it).
   apps_dir = "${path.module}/../../clusters/common/apps"
   apps_all = { for f in fileset(local.apps_dir, "*.yaml") : trimsuffix(f, ".yaml") => yamldecode(file("${local.apps_dir}/${f}")) }
   # The image cache (docs/IMAGES.md): the Zot release and the containerd DaemonSet exist only with it; Spegel stays.

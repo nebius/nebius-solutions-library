@@ -111,7 +111,7 @@ upload() {   # $1 = status
   # UPLOAD_EXCLUDES is a string of aws filters ("--exclude checkpoint/*", quotes allowed): split it like a shell
   # line with globbing OFF. Unquoted $UPLOAD_EXCLUDES expanded `checkpoint/*` against /work into `checkpoint/hf`,
   # which excludes that one entry and uploads everything below it: a multi-node run with shared checkpoints
-  # pushed its 470 GB weight cache to the bucket (test fleet, 2026-10-09, docs/VERIFICATION.md).
+  # pushed its 470 GB weight cache to the bucket (docs/VERIFICATION.md).
   set -f; eval "set -- ${UPLOAD_EXCLUDES:-}"
   aws s3 sync /work/ "${OUTPUT_PREFIX%/}/" --no-progress --exclude 'in/*' --exclude '.inputs-fetched' --exclude 'lost+found/*' --exclude 'STATUS.json' "$@" 2>&1 | tail -n 30
   local rc=${PIPESTATUS[0]}
@@ -138,7 +138,7 @@ while true; do
   if main_alive; then
     if [ "$SEEN" = 0 ]; then
       # the attempt is on record from its first second: a node that dies without warning (a stopped spot VM
-      # sends no SIGTERM, measured 2026-10-09 on a B300 spot node) leaves this "started" record, which the
+      # sends no SIGTERM, measured on a B300 spot node) leaves this "started" record, which the
       # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
       record started
       [ "$MODE" = record ] || aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true

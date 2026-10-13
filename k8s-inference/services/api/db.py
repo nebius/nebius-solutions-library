@@ -121,6 +121,32 @@ create table if not exists operation_marks (
     """
     alter table attempts add column if not exists cluster text;
     """,
+    # 8: per-key scopes and limits beyond the USD budget (docs/API.md "Keys"): a request-count budget, a GPU-second
+    # budget, a concurrency limit and a rate limit in the key's own units; reservations hold a slot and the GPU seconds
+    # a run may take until its attempt is accounted; key_calls counts requests per key for the rate window.
+    """
+    alter table keys add column if not exists scopes jsonb not null default '[]';
+    alter table keys add column if not exists max_concurrent integer;
+    alter table keys add column if not exists budget_requests numeric;
+    alter table keys add column if not exists budget_gpu_seconds numeric;
+    alter table keys add column if not exists spent_requests numeric not null default 0;
+    alter table keys add column if not exists spent_gpu_seconds numeric not null default 0;
+    alter table keys add column if not exists rate_limit jsonb;
+    create table if not exists key_reservations (
+        operation   text primary key,
+        key_hash    text not null,
+        tenant      text not null,
+        gpu_seconds numeric not null default 0,
+        requests    integer not null default 1,
+        created_at  timestamptz not null default now()
+    );
+    create index if not exists key_reservations_key on key_reservations (key_hash);
+    create table if not exists key_calls (
+        key_hash text not null,
+        at       timestamptz not null default now()
+    );
+    create index if not exists key_calls_key_at on key_calls (key_hash, at);
+    """,
 ]
 
 _pool = None

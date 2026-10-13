@@ -54,7 +54,7 @@ RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius
 # rate limit) as https://<model>-predictor.<ns>.<domain>, never to the predictor Service (no call may skip the key check).
 ENDPOINT_DOMAIN = os.environ.get("ENDPOINT_DOMAIN", "")
 # curl --connect-to <host>:443:<this>:443 keeps the TLS name and routes the connection to the gateway's in-cluster
-# Service instead of the public IP (measured 2026-10-08: both work from a tenant pod on mk8s; the Service avoids the
+# Service instead of the public IP (both work from a tenant pod on mk8s; the Service avoids the
 # NAT hop and keeps working if the public IP is firewalled). Empty = connect to the public IP.
 ENDPOINT_CONNECT_TO = os.environ.get("ENDPOINT_CONNECT_TO", "knative-external.envoy-gateway-system.svc:443")
 KUEUE_NAMESPACE = os.environ.get("KUEUE_NAMESPACE", "kueue-system")

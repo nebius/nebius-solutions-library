@@ -9,7 +9,7 @@ through the API. You get one API for models, three ways to run them (always-on e
 queued endpoint calls, long jobs with checkpoints), queueing across regions by cost, fast cold starts
 through a per-region image cache, tenants with API keys and budgets, and the usual operations stack.
 Everything inside the clusters is an upstream Helm chart or a small manifest; the own code is the API,
-the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
+the cost dispatcher and the job runner (about 8,000 lines of Python and shell).
 
 | You get | How it is built |
 |---|---|
@@ -85,7 +85,7 @@ and their limits.
   `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
 - Optional: an NVIDIA NGC key for NIM images, a Hugging Face token for gated weights. They are read from
   environment variables (`secrets.*_env` names them), never written into the tfvars; `./stack.sh` refuses to plan
-  or apply while a named variable is unset (set the name to `null` to run a fleet without that secret), so a
+  or apply while a named variable is unset (set the name to `""` to run a fleet without that secret), so a
   forgotten export can never delete the Secrets it feeds. Like every generated credential they end up in the
   platform's Terraform state, so keep the state bucket private (`docs/SECURITY.md`).
 
@@ -98,7 +98,7 @@ cp terraform.tfvars.example terraform.tfvars   # 1. name, projects, subnets, poo
 stack/bootstrap/state-bucket.sh                # 2. once: the Terraform state bucket and its credentials
 ./stack.sh preflight                           # 3. every pool against the Nebius compatibility matrix and quotas
 ./stack.sh apply cloud                         # 4. clusters, pools, filesystems, IPs, identities, registry, the database (about 15 min)
-tools/images.sh build                          # 5. build and push the five platform images to the fleet's registry
+tools/images.sh build                          # 5. build and push the four platform images to the fleet's registry
 ./stack.sh apply                               # 6. the platform, tenants and keys on every cluster (workers first, control last)
 ./stack.sh output platform control             # 7. URLs; tenant keys: ./stack.sh output platform control -json tenant_keys
 tools/verify.sh                                # 8. the acceptance probe: a run, then the example model created through the API and called
@@ -152,7 +152,7 @@ through the API only.
 | `prices` | USD per GPU-hour per platform: the scheduling order and the cost reports |
 | `edge` | public or internal gateways, optional domain, allowed source CIDRs, ACME email, API rate limit |
 | `observability` | retention, alert webhook, cost export |
-| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials (`null` = that feature off; an unset named variable stops `stack.sh`) |
+| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials (`""` = that feature off; an unset named variable stops `stack.sh`) |
 | `tenants.<name>` | regions, output retention, keys with budgets, optional GPU quota, fair share, dedicated pools, image allow-list |
 | `acceptance` | the probe `tools/verify.sh` runs after the apply (or, with `probe = true`, a Job at apply time): one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
 
@@ -262,7 +262,7 @@ that nobody assumes it does:
   gateway to LiteLLM, the API and the model pods, and between the control cluster and the workers over
   the Kubernetes APIs, cross the VPC in the clear except where the endpoint itself is TLS (Kubernetes API
   servers, the managed database). No service mesh is installed.
-- **No scanning of user images.** CI scans the five platform images with `trivy`; the images tenants
+- **No scanning of user images.** CI scans the four platform images with `trivy`; the images tenants
   register through the API are pulled and run as they are. Scan them before you register them.
 - **Not reviewed for customer-facing use.** A formal security review is due before anyone outside your
   organisation gets a key.
@@ -290,6 +290,9 @@ that nobody assumes it does:
 
 ## Repository layout
 
+Reading order: this README, then `terraform.tfvars.example`, `stack/config/variables.tf`, `docs/ARCHITECTURE.md`,
+then the topic docs in `docs/`.
+
 | Path | Content |
 |---|---|
 | `terraform.tfvars.example`, `stack.sh`, `Makefile` | the one input, the stage driver, short names for the everyday commands |
@@ -302,7 +305,7 @@ that nobody assumes it does:
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
 | `services/api`, `services/dispatcher`, `services/jobs`, `services/ops` | the own code: API, dispatcher and price feed, job runner, ops image (an operator console over this API is a separate project, not part of the solution) |
 | `tools/` | build or copy the platform images, the quality gate, the acceptance probe (`verify.sh`) |
-| `docs/` | architecture, API, jobs, scheduling, images, edge, observability, operations, requirements, verification, security pre-review |
+| `docs/` | architecture, API, jobs, scheduling, fleet, images, edge, observability, operations, reliability, security, verification |
 
 ## Everyday commands
 
@@ -318,13 +321,13 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.33 |
+| `services/api` image | 0.11.34 |
 | `services/dispatcher` image | 0.2.12 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |
 | `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.3 |
-| `charts/tenant` | 0.3.0 |
+| `charts/tenant` | 0.3.2 |
 
 ## License
 

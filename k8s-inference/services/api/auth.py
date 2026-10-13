@@ -27,11 +27,18 @@ class Principal:
 
     def public(self) -> dict:
         i = self.info
-        exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
+        exhausted = (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]) \
+            or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"]) \
+            or (i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"])
+        legacy = (i.get("metadata") or {}).get("legacy") or {}
         return {"id": i.get("token") or i.get("key_name"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"),
                 "tenant": self.tenant, "budget": i.get("max_budget"), "spend": i.get("spend", 0), "models": i.get("models", []),
                 "created_at": i.get("created_at"), "expires_at": i.get("expires"),
-                "status": "exhausted" if exhausted else "active", "role": self.role}
+                "status": "exhausted" if exhausted else "active", "role": self.role,
+                "scopes": i.get("scopes") or [], "max_concurrent": i.get("max_concurrent"),
+                "budget_requests": i.get("budget_requests"), "spent_requests": i.get("spent_requests") or 0,
+                "budget_gpu_seconds": i.get("budget_gpu_seconds"), "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
+                "rate_limit": i.get("rate_limit"), "principal_id": legacy.get("principal_id"), "legacy": legacy or None}
 
 
 async def _fetch(url: str, headers: dict, params: dict | None = None) -> dict | None:
@@ -95,9 +102,21 @@ async def principal(authorization: str = Header(default="")) -> Principal:
 
 
 def check_budget(p: Principal) -> None:
+    """The cached view (a fast refusal); `keys.admit` holds the exact, transactional check at admission."""
     i = p.info
     if i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]:
         raise HTTPException(402, "key budget exhausted")
+    if i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"]:
+        raise HTTPException(402, "key request budget exhausted")
+    if i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]:
+        raise HTTPException(402, "key GPU-second budget exhausted")
+
+
+def check_scope(p: Principal, scope: str) -> None:
+    """A key with scopes may do only what they name (keys.SCOPES); a key without scopes may do everything of its role."""
+    scopes = p.info.get("scopes") or []
+    if scopes and scope not in scopes:
+        raise HTTPException(403, f"key scope {scope} required")
 
 
 def check_model(p: Principal, model: str) -> None:

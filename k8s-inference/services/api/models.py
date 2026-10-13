@@ -117,8 +117,8 @@ def _env_list(env: dict | None) -> list[dict]:
 
 
 def cluster_id() -> str:
-    """The fleet's id of this API's cluster (fleet-prices `region` of its pools; `hub` on the reference fleet, the
-    region name in the Terraform solution): the key of `deployments` and the chart's `cluster` value."""
+    """The fleet's id of this API's cluster (fleet-prices `region` of its pools: `hub`, or the region name in the
+    Terraform solution): the key of `deployments` and the chart's `cluster` value."""
     for p in kube.fleet()["pools"].values():
         cid = p.get("region") or REGION
         if kube.cluster_region(cid) == REGION:
@@ -147,7 +147,7 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
     """The pool an endpoint of these classes is pinned to on a cluster: the first class that has a pool there
     whose nodes carry at least `count` GPUs (an 8-GPU replica never fits a 1-GPU preset); among those, reserved
     pools first (a reservation is paid for whether it serves or not), then the smallest fitting preset (a 1-GPU
-    model must not boot an 8-GPU on-demand node, 2026-10-10), then on-demand before spot, plain pools before
+    model must not boot an 8-GPU on-demand node), then on-demand before spot, plain pools before
     InfiniBand ones (those nodes are for multi-node runs), then by name. A multi-node endpoint (`nodes` > 1) takes
     whole nodes: only pools whose preset has exactly `count` GPUs; `interconnect` required = InfiniBand pools only,
     preferred = those first."""
@@ -420,7 +420,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             job["args"] = s["args"]
         if (fz := s.get("finalize")) is not None:
             # the model-owned finalizer (docs/JOBS.md "Finalization by the application"): a fixed command in the model's
-            # own image that re-delivers from the kept work volume after the scientific compute ended with one of
+            # own image that re-delivers from the kept work volume after the run's compute ended with one of
             # `on_exit_codes`; never a caller-supplied executable, never a GPU
             if not isinstance(fz, dict) or not str(fz.get("command") or "").strip():
                 raise HTTPException(400, "finalize: {command (required), on_exit_codes (default [75]), timeout_s (60..86400), cpu, memory}")
