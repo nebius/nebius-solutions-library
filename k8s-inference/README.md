@@ -322,13 +322,13 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.53 |
+| `services/api` image | 0.11.54 |
 | `services/dispatcher` image | 0.2.12 |
-| `services/jobs` image | 0.1.19 |
+| `services/jobs` image | 0.1.20 |
 | `services/ops` image | 0.1.12 |
 | `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.4 |
-| `charts/tenant` | 0.3.2 |
+| `charts/tenant` | 0.3.3 |
 
 ## License
 

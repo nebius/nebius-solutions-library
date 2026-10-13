@@ -806,6 +806,14 @@ def run_member(operation: str) -> dict | None:
     }
 
 
+def reservation_key(operation: str) -> str | None:
+    """The key hash holding a live reservation for `operation` (its slot: admitted, not released); None otherwise. The
+    gateway hook's proof that an admitted operation is active."""
+    with _connection() as c:
+        r = c.execute("select key_hash from key_reservations where operation = %s", (operation,)).fetchone()
+    return r[0] if r else None
+
+
 def run_members(root: str) -> list[dict]:
     """The members of a run, oldest first (empty: no ledger for this root)."""
     with _connection() as c:

@@ -330,7 +330,7 @@ POST /v1/models/md-class:invoke
 | limits | a stage is a single-node run (no JobSet); stages are not endpoint calls; after the graph closed, no new stage attaches but the stages' lineages may still be continued (the slot is re-acquired as for any closed run); the gate reads durable attempt records, so a dependency that delivered through a retry or finalizer counts once that is on record |
 
 What the gate changes on a waiting Job is limited to what Kubernetes allows on a never-started suspended Job
-(KEP-2926): the queue and waiting labels and the pod template's `serverless2.nebius/dependency-results`
+(KEP-2926): the queue label (from the waiting queue to the stage's profile, which Kueue allows while the Job is suspended; it recreates the Workload) and the waiting label and the pod template's `serverless2.nebius/dependency-results`
 annotation, which the main container reads through the downward API. The results are the operations' `result_ref`s
 (bucket prefixes for managed I/O, the application's references for application I/O); the stage's own access to
 them is its own (its bucket credentials, its identity or its binding), as for any run.

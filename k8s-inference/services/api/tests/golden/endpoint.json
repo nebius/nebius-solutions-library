@@ -8,7 +8,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "chat-authorization",
-   "sha256": "18bc44ca717db3d8e1fcb0bc26fc1aeae495c01c59b989799133d09e4034450e"
+   "sha256": "9e0fb7367cb8ac32b34b68aa607e42f3c289ebe0f5213502ff4df3db9403bdbe"
   },
   {
    "kind": "InferenceService",
@@ -18,7 +18,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "chat-spot-authorization",
-   "sha256": "1c0267b98e615efd773eeb5ca2f9bf2f6eadbe3255ba8dab79b803b56c4c5f04"
+   "sha256": "62a8abb983037bdcba3bbdc39a1da17654cf5846802c8dc6f95f19b62d529aad"
   },
   {
    "kind": "InferenceService",
@@ -28,7 +28,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "chat-cheap-authorization",
-   "sha256": "02ab82e64467d4a2829a1c37fa10a458e0d7b8b6e0b4d194ada22039c6eda33a"
+   "sha256": "7eea1c6cf896333a637b68896d9278ed0a3f5eb2ccb2ffdd9923b86ee632384e"
   }
  ],
  "http-example-hub": [
@@ -40,7 +40,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "http-example-authorization",
-   "sha256": "58bf573cbef01779a512223a715545ed00c4da857c65eaba15dd7397814bd9dc"
+   "sha256": "965d6ee845a061633a6ee2611153fdf1fb72b03417928f064b01347bf4cdaa20"
   }
  ],
  "ib-hub": [
@@ -62,7 +62,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "ib-authorization",
-   "sha256": "105edd77e82da21d2671ae2cb52d6ea6cd8605b7707e5ce4ba0f143d02a05a2b"
+   "sha256": "c6cd54f03185c9f39cca4403c05b5f8063210ecb20ba545a53711e6d22a5adf9"
   }
  ],
  "kimi-k3-us-central1": [
@@ -84,7 +84,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "kimi-k3-authorization",
-   "sha256": "50d72692535662f3caeffc49dfc755ac56d08e3271383a17f908cacd159b6161"
+   "sha256": "a0d88e746b12baa2f236399355430c02ad3e6cd932e0fc71503c59d04b17f69f"
   }
  ],
  "kueue-example-hub": [
@@ -96,7 +96,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "kueue-example-authorization",
-   "sha256": "0c7d3a2a660d7ddfb146e3018a668c5b11c4f0aaa12247da061d2f90102515a1"
+   "sha256": "70868df9b808ac7eea6957209c776b995015122dc64e362082cd2f6673c66f2e"
   }
  ],
  "llm-example-eu-south1": [
@@ -108,7 +108,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "llm-example-authorization",
-   "sha256": "55b04891d9134a6a0b956935cd0027b523eb405e47c79a513332d923981c6f63"
+   "sha256": "fdbd6a1a19edc8043454c7d47b75e644bfb1926615f97da9066166c70494a96b"
   }
  ],
  "llm-example-hub": [
@@ -120,7 +120,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "llm-example-authorization",
-   "sha256": "a12f527aca145559fd333357412a1f96128d316b61bc47e309052208465a3809"
+   "sha256": "2dff82a093f4b300e140c8f7450f3945e021407a3adeba8fe5a6c78f86b1e816"
   }
  ],
  "metadata-endpoint-hub": [
@@ -132,7 +132,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "metadata-endpoint-authorization",
-   "sha256": "613d45ad94d6b768117cefed688c5e3f158ae4593b0690bf881a4eb4aa13207a"
+   "sha256": "cb407453eae7fd7d37e1bb558d87dc11d63e9168064151082fde6f6cccd63073"
   }
  ],
  "my-llm-hub": [
@@ -144,7 +144,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "my-llm-authorization",
-   "sha256": "293f77351434d386ad9dab620181e08b4a046a2b791a99d01c310b90da11141f"
+   "sha256": "33593ebf76804e757d5029a5c94dcd345a3ac4968713550aac060a3f2f45c02e"
   }
  ],
  "scaling-demo-hub": [
@@ -156,7 +156,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "scaling-demo-authorization",
-   "sha256": "94544fe56ec7bcee10e975a5ddb152f9931c0e98dee2a65672b0ab4fc17ed559"
+   "sha256": "23fec6e62b57c194895b00327890ba805c968d72411c2ae628bc77c53c65153e"
   }
  ],
  "storage-example-hub": [
@@ -183,7 +183,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "storage-example-authorization",
-   "sha256": "458365a9d4343e72ec214a22d122c26345e030650d6d9cacc160a8d8defb5721"
+   "sha256": "619b9ecfbf917562c5063e6ae08c911bf19152f40696f7de56809c19a6a4b9a3"
   }
  ],
  "ws-example-eu-south1": [
@@ -195,7 +195,7 @@
   {
    "kind": "SecurityPolicy",
    "name": "ws-example-authorization",
-   "sha256": "87e0b60583be63b09be99bb6ebab10c714c830fd72ef4f7b4583ebb03702ad5b"
+   "sha256": "cf2743374ba8985e8fcc901f5512501797b80c257d3a657eeaf15bfa970f11fe"
   }
  ]
 }

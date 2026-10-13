@@ -643,6 +643,8 @@ def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
                     "authorization",
                     "sec-websocket-protocol",
                     "x-serverless2-admitted",
+                    "x-serverless2-operation",  # an endpoint call's caller names its operation and attempt: the
+                    "x-serverless2-attempt",  # admission token is verified against them (docs/API.md "Endpoint calls")
                     "x-serverless2-session-claim",  # a live session's claim (docs/API.md "Sessions")
                     "x-serverless2-session",  # a client must not supply these: the hook refuses them
                     "x-serverless2-connection",

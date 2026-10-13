@@ -30,6 +30,11 @@ PRIV="${PRIVATE_INPUT_DIR:-}"
 curl_auth=()
 [ -n "${AUTH_HEADER:-}" ] && curl_auth+=(-H "Authorization: $AUTH_HEADER")
 [ -n "${ADMITTED:-}" ] && curl_auth+=(-H "x-serverless2-admitted: $ADMITTED")
+# the admission is bound to this operation and attempt (docs/API.md "Endpoint calls"): the gateway's hook verifies the
+# token against the operation and checks that the operation is active, owned by this key, and that this attempt is
+# its live pod; the headers name them, the token proves them
+[ -n "${ADMITTED:-}" ] && [ -n "${OPERATION:-}" ] && curl_auth+=(-H "x-serverless2-operation: $OPERATION")
+[ -n "${ADMITTED:-}" ] && [ -n "${POD_NAME:-}" ] && curl_auth+=(-H "x-serverless2-attempt: $POD_NAME")
 [ -n "${CONNECT_TO:-}" ] && curl_auth+=(--connect-to "$CONNECT_TO")
 
 backoff() {   # exponential, BACKOFF_BASE (5 s) x 2^n, capped at BACKOFF_MAX (300 s)

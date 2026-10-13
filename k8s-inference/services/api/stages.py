@@ -31,6 +31,11 @@ from resilience import retry
 log = logging.getLogger("api")
 LABEL = cfg.LABEL
 QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+# The queue a waiting stage names: a LocalQueue that never exists in any tenant namespace (charts/tenant refuses a
+# profile of this name). Kueue creates a Workload for it that is never admitted and holds no quota, and keeps the Job
+# suspended; the label must be present, because Kueue's LocalQueueDefaulting injects `default` into a label-less Job
+# when the namespace has a LocalQueue `default` (the tenants' default profile), which admitted a waiting stage on API51.
+WAITING_QUEUE = "serverless2-stage-waiting"
 WAITING = f"{LABEL}/stage-waiting"  # label "true" while the stage waits for its dependencies
 STAGE_ROOT = f"{LABEL}/stage-root"  # label: the root the stage belongs to
 STAGE_ID = f"{LABEL}/stage"  # annotation: the stage's declared id
@@ -56,13 +61,14 @@ def dependencies(graph: dict, stage: str) -> list[str]:
 
 
 def mark_waiting(job: dict, root: str, stage: str, deps: list[str]) -> None:
-    """Turn a rendered run into a waiting stage: suspended, no Kueue queue (Kueue leaves a Job without the queue
-    label alone), stage labels and annotations, and the main container's DEPENDENCY_RESULTS from the pod template's
-    annotation (filled by the gate). A JobSet stage is refused (its template is not patchable the same way)."""
+    """Turn a rendered run into a waiting stage: suspended, its Kueue queue label naming a queue that does not exist
+    (WAITING_QUEUE: no admission, no quota; the gate later sets the real profile, allowed while the Job is suspended),
+    stage labels and annotations, and the main container's DEPENDENCY_RESULTS from the pod template's annotation
+    (filled by the gate). A JobSet stage is refused (its template is not patchable the same way)."""
     if job.get("kind") != "Job":
         raise HTTPException(400, "a stage must be a single-node run (multi-node stages are not supported)")
     md = job["metadata"]
-    md.setdefault("labels", {}).pop(QUEUE_LABEL, None)
+    md.setdefault("labels", {})[QUEUE_LABEL] = WAITING_QUEUE  # never a real queue: Kueue admits nothing for it
     md["labels"][WAITING] = "true"
     md["labels"][STAGE_ROOT] = root
     md.setdefault("annotations", {})[STAGE_ID] = stage

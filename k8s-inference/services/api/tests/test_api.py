@@ -1043,10 +1043,12 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
     url, sent, headers = calls[0]
     assert url == "https://llm-example-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
     assert sent == {"messages": [], "model": "llm"}
-    assert headers == {
+    sid = headers[appmod.OPERATION_HEADER]
+    assert sid.startswith("sync-") and headers == {
         "Authorization": "Bearer sk-good",
-        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"), "llm-example"),
-    }  # the hook counts this call once; the token is bound to the key and the model
+        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"), "llm-example", sid),
+        appmod.OPERATION_HEADER: sid,
+    }  # the hook counts this call once; the token is bound to the key, the model and this call's admission
 
 
 def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
@@ -1174,6 +1176,8 @@ class FakeKeys:
     # admission and import (keys.py migration 8): recorded, never refused here; the database tests hold the real rules
     def admit(self, h, operation, tenant, gpu_seconds=0.0, counts_request=True, run_member=False):
         self.calls.append(("admit", operation, gpu_seconds, counts_request))
+        self.reservations = getattr(self, "reservations", {})
+        self.reservations[operation] = h
         if run_member:
             self.members = getattr(self, "members", [])
             if not any(m["operation"] == operation for m in self.members):
@@ -1182,7 +1186,11 @@ class FakeKeys:
 
     def release(self, operation, gpu_seconds=None):
         self.calls.append(("release", operation, gpu_seconds))
+        getattr(self, "reservations", {}).pop(operation, None)
         return True
+
+    def reservation_key(self, operation):
+        return getattr(self, "reservations", {}).get(operation)
 
     def abandon(self, operation, h):
         self.calls.append(("abandon", operation))
@@ -1420,6 +1428,7 @@ def fake_keys(monkeypatch):
         "run_members",
         "stage_head",
         "member_of",
+        "reservation_key",
         "declare_graph",
         "graph_of",
         "open_graphs",
@@ -2324,15 +2333,17 @@ def admin_keys(monkeypatch):
     import keys as keys_mod  # admission reservations live in the database too: recorded, never refused here
 
     ledger: list = []  # the run ledger (migration 11): recorded in memory, never refused here
+    reservations: dict = {}  # operation -> key hash while admitted (keys.reservation_key)
     monkeypatch.setattr(
         keys_mod,
         "admit",
         lambda h, op, tenant, gpu_seconds=0.0, counts_request=True, run_member=False: (
             (ledger.append({"operation": op, "root": op, "predecessor": None}) if run_member else None)
+            or reservations.__setitem__(op, h)
             or {"operation": op, "replay": False}
         ),
     )
-    monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: True)
+    monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: reservations.pop(op, None) or True)
     operation_owners = {}
     monkeypatch.setattr(
         keys_mod,
@@ -2350,6 +2361,7 @@ def admin_keys(monkeypatch):
     )
     monkeypatch.setattr(keys_mod, "stage_head", lambda root, stage: None)
     monkeypatch.setattr(keys_mod, "member_of", lambda op: None)
+    monkeypatch.setattr(keys_mod, "reservation_key", lambda op: reservations.get(op))
     monkeypatch.setattr(keys_mod, "graph_of", lambda root: None)
     monkeypatch.setattr(
         keys_mod,

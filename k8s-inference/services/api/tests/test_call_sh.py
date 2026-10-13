@@ -23,7 +23,8 @@ for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     -X) method=${args[$((i+1))]}; ((i++));;
     -o) out=${args[$((i+1))]}; ((i++));;
-    -D|-H|--max-time|--connect-to|-w) ((i++));;
+    -H) [ -n "${HEADERS:-}" ] && echo "${args[$((i+1))]}" >> "$HEADERS"; ((i++));;
+    -D|--max-time|--connect-to|-w) ((i++));;
     --data-binary) data=${args[$((i+1))]}; ((i++));;
     -sS|-s) ;;
     *) [[ "${args[$i]}" == http* ]] && url=${args[$i]};;
@@ -242,3 +243,24 @@ def test_a_captured_endpoint_error_is_delivered_but_never_a_success(tmp_path):
         )
         assert r.returncode == code, (status, r.stdout)
         assert json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
+
+
+def test_caller_names_its_operation_and_attempt_next_to_the_admission(tmp_path):
+    """With an admission token the caller sends x-serverless2-operation and x-serverless2-attempt on every gateway call
+    (readiness and the POST): the hook verifies the token against them (docs/API.md "Endpoint calls")."""
+    headers = tmp_path / "headers.txt"
+    script = [
+        "GET https://ep.example/health 200 ok",
+        'POST https://ep.example/v1/chat 200 {"choices":[]}',
+        "PUT https://objects.example/put/response 200",
+        "PUT https://objects.example/put/call 200",
+    ]
+    r, _work, calls = _run(tmp_path, BINDING, script, env={"ADMITTED": "tok", "HEADERS": str(headers)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    sent = headers.read_text().splitlines()
+    assert sent.count("x-serverless2-admitted: tok") >= 2  # the readiness GET and the POST
+    assert sent.count("x-serverless2-operation: op-1") >= 2 and sent.count("x-serverless2-attempt: op-1-abc") >= 2
+    # without an admission token nothing names an operation (a direct call stays a direct call)
+    headers.write_text("")
+    r, _work, _calls = _run(tmp_path / "plain", BINDING, script, env={"ADMITTED": "", "HEADERS": str(headers)})
+    assert r.returncode == 0 and "x-serverless2-operation" not in headers.read_text()

@@ -183,14 +183,20 @@ def test_read_only_weights_mount_read_only_without_a_prepare_step(client):  # th
 
 
 def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client, admin_keys, fake_keys, monkeypatch):
-    """The hook (the rendered SecurityPolicy forwards x-serverless2-admitted) honours an admitted endpoint call of an
-    asynchronous-only key for the readiness GET and the one inference POST: the admission token is bound to the key
-    and the model; without it, or for another model, or on a direct call, the key needs invoke:sync as before (API51
-    ADMET: readiness GET 403 "key scope invoke:sync required", zero inference POST)."""
+    """The hook (the rendered SecurityPolicy forwards x-serverless2-admitted, -operation and -attempt) honours an
+    admitted endpoint call of an asynchronous-only key for the readiness GET and the one inference POST, on an exact
+    bounded proof: the token is the HMAC for the key, the model and the operation; the operation holds a live
+    reservation on that key; its Job is that key's and that model's and not over; the attempt is one of its live pods.
+    Without it, or for another operation, model or key, or a terminal operation, or a pod that is not the Job's, the
+    key needs invoke:sync as before (API51 ADMET: readiness GET 403, zero inference POST). The key-only and key+model
+    tokens of earlier releases pass only with ADMITTED_LEGACY."""
     c, cl = client
     _tenant(monkeypatch)
     monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
+    monkeypatch.setattr(api.cfg, "ADMITTED_LEGACY", False)
     monkeypatch.setattr(api.kube, "stamp_last_request", lambda *a, **k: None)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)  # no cancel mark (the fake fleet database)
+    api._admission_cache.clear()
 
     async def info(key):
         base = {**KEY_INFO, "max_budget": None, "metadata": {"tenant": "demo", "legacy": {"principal_id": "p1"}}}
@@ -201,54 +207,80 @@ def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client
         )
 
     monkeypatch.setattr(auth, "key_info", info)
+    import keys
+
     A = {"Authorization": "Bearer sk-async"}
     data = {"request.json": "{}", "response_url": "https://objects.example/put/r", "result_ref": "app://r"}
     assert c.put("/v1/bindings/call-1", json={"data": data}, headers=A).status_code == 200  # the caller's own binding
-    # the asynchronous-only key submits its endpoint call: the rendered caller carries a model-bound admission token
     body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-1"}}
     r = c.post("/v1/models/llm-example:invoke", json=body, headers=A)
     assert r.status_code == 202, r.text
     oid = r.json()["id"]
+    h = keys.key_hash("sk-async")
     token = cl.secrets[(NS, f"{oid}-auth")]["stringData"]["admitted"]
-    import keys
-
-    assert token == api._admitted_token(keys.key_hash("sk-async"), "llm-example")
+    assert token == api._admitted_token(h, "llm-example", oid)
+    assert fake_keys.reservation_key(oid) == h  # admitted: the live reservation the hook checks
     assert (
         c.post("/v1/models/llm-example:invoke", json={"input": {"messages": []}}, headers=A).status_code == 403
     )  # sync
-    # the gateway: readiness GET and inference POST with the admission token pass; nothing is counted again
-    admitted = {**A, "x-serverless2-admitted": token}
+    caller = pod(oid, "Running")
+    caller["metadata"]["labels"]["serverless2.nebius/mode"] = "async"
+    cl.pods.append(caller)
+    attempt = caller["metadata"]["name"]
+    ok = {**A, "x-serverless2-admitted": token, "x-serverless2-operation": oid, "x-serverless2-attempt": attempt}
     before = len([x for x in fake_keys.calls if x[0] == "admit"])
-    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=admitted).status_code == 200
-    assert c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=admitted).status_code == 200
-    assert len([x for x in fake_keys.calls if x[0] == "admit"]) == before
-    # without the token, with a forged one, or with the token of another model: invoke:sync is required
-    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=A).status_code == 403
-    assert (
-        c.get(
-            "/internal/authorize/llm-example/v1/health/ready", headers={**A, "x-serverless2-admitted": "x"}
-        ).status_code
-        == 403
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 200
+    assert c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=ok).status_code == 200
+    assert len([x for x in fake_keys.calls if x[0] == "admit"]) == before  # nothing counted again
+
+    # every weaker or wrong proof is a direct call: invoke:sync required
+    def denied(**changes):
+        hdr = {**ok, **changes}
+        hdr = {k: v for k, v in hdr.items() if v is not None}
+        api._admission_cache.clear()
+        return c.get("/internal/authorize/llm-example/v1/health/ready", headers=hdr).status_code == 403
+
+    assert denied(**{"x-serverless2-admitted": None, "x-serverless2-operation": None, "x-serverless2-attempt": None})
+    assert denied(**{"x-serverless2-admitted": "forged"})
+    assert denied(
+        **{
+            "x-serverless2-operation": "op-other",
+            "x-serverless2-admitted": api._admitted_token(h, "llm-example", "op-other"),
+        }
     )
-    other = api._admitted_token(keys.key_hash("sk-async"), "http-example")
+    assert denied(**{"x-serverless2-attempt": "not-a-pod-of-it"})
+    assert denied(**{"x-serverless2-attempt": None})
+    assert denied(**{"x-serverless2-admitted": api._admitted_token(h, "http-example", oid)})  # another model's
+    assert denied(
+        **{"x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-good"), "llm-example", oid)}
+    )  # another key's
+    assert denied(**{"x-serverless2-admitted": api._admitted_token(h, "llm-example")})  # key+model (0.11.53 form)
+    assert denied(**{"x-serverless2-admitted": api._admitted_token(h)})  # key-only (up to 0.11.52)
+    # live state fails closed after a previously successful hook call, with the identity still cached: a cancel mark,
+    # then a released reservation (terminal, billed) each close the gate at once
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 200  # cached identity
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: (1, "2026-10-13T22:50:00Z", None))
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 403
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 200
+    fake_keys.release(oid, 0.0)
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 403
+    # and a terminal Job with its identity no longer cached
+    fake_keys.admit(h, oid, "demo")
+    api._admission_cache.clear()
+    cl.jobs[(NS, oid)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 403
+    cl.jobs[(NS, oid)]["status"] = {}
+    fake_keys.release(oid, 0.0)
+    # the transitional switch: the earlier forms pass while the API51-rendered callers drain
+    monkeypatch.setattr(api.cfg, "ADMITTED_LEGACY", True)
+    legacy = {**A, "x-serverless2-admitted": api._admitted_token(h)}
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=legacy).status_code == 200
     assert (
         c.get(
-            "/internal/authorize/llm-example/v1/health/ready", headers={**A, "x-serverless2-admitted": other}
-        ).status_code
-        == 403
-    )
-    # a key of another principal cannot use the token: it is bound to the key hash
-    assert (
-        c.get(
-            "/internal/authorize/llm-example/v1/health/ready", headers={**H, "x-serverless2-admitted": token}
+            "/internal/authorize/llm-example/v1/health/ready",
+            headers={**A, "x-serverless2-admitted": api._admitted_token(h, "llm-example")},
         ).status_code
         == 200
-    )  # sk-good has no scopes: everything of its role; the token is simply not theirs
-    stolen = {
-        "Authorization": "Bearer sk-async",
-        "x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-good"), "llm-example"),
-    }
-    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=stolen).status_code == 403
-    # the key-only token of releases before 0.11.53 is still honoured for the callers they rendered
-    legacy = {**A, "x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-async"))}
-    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=legacy).status_code == 200
+    )

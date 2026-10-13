@@ -35,6 +35,7 @@ import render
 import schemas
 import sessions
 import stages
+import status
 from auth import (
     Principal,
     _principal,
@@ -112,7 +113,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.53", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.54", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -287,23 +288,77 @@ def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
     return float(gpus * req.timeout_s)
 
 
-def _admitted_token(key_hash: str, model: str | None = None) -> str:
-    """HMAC the gateway hook verifies on the API's own admitted calls (a proxied synchronous call, an endpoint call's
-    caller): one API admission + its gateway authorization is one logical request. Bound to the key and, when given,
-    the model the admission was for (`<key hash>:<model>`), so an admission token of one model opens no other; the
-    router key is the shared secret of this fleet."""
-    msg = f"{key_hash}:{model}" if model else key_hash
+OPERATION_HEADER = "x-serverless2-operation"  # the admitted operation a caller names (with its token)
+ATTEMPT_HEADER = "x-serverless2-attempt"  # the caller's pod (an endpoint call's attempt)
+_admission_cache: dict[tuple, float] = {}  # (operation, attempt, key hash) -> verified until (the readiness loop polls)
+ADMISSION_CACHE_S = 30
+
+
+def _admitted_token(key_hash: str, model: str | None = None, operation: str | None = None) -> str:
+    """HMAC the gateway hook verifies on the API's own admitted calls: one API admission + its gateway authorization
+    is one logical request. Bound to the key, the model and the operation the admission was for
+    (`<key hash>:<model>:<operation>`: a proxied synchronous call's `sync-…` admission, an endpoint call's operation);
+    the router key is the shared secret of this fleet. The shorter forms are the tokens of releases up to 0.11.53."""
+    msg = ":".join(x for x in (key_hash, model, operation) if x)
     return hmac.new((cfg.ROUTER_KEY or "").encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
-def _is_admitted(token: str, key_hash: str, model: str) -> bool:
-    """A valid admission token for this key and model; the key-only form of releases before 0.11.53 is still accepted
-    for the callers rendered by them (removed with the next jobs image)."""
+def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: str) -> bool:
+    """An exact, bounded proof that the gateway call is the API's own admitted call (docs/API.md "Endpoint calls"): the
+    token is the HMAC for this key, this model and the operation named; the operation holds a live reservation on
+    this key (admitted, not released: the ledger); for an endpoint call's caller the operation's Job is this key's,
+    this model's and not over, and the attempt named is one of its live pods. The reservation and the cancel fence
+    are read on every call; only the identity (Job, owner, pod) is remembered for ADMISSION_CACHE_S (the caller's
+    readiness loop), so a release or a cancel closes the gate at once. ADMITTED_LEGACY accepts the key-only and
+    key+model tokens of releases up to 0.11.53 for the callers they rendered."""
     if not cfg.ROUTER_KEY or not token:
         return False
-    return hmac.compare_digest(token, _admitted_token(key_hash, model)) or hmac.compare_digest(
-        token, _admitted_token(key_hash)
-    )
+    key_hash = keys.key_hash(p.key)
+    if operation and hmac.compare_digest(token, _admitted_token(key_hash, model, operation)):
+        # the live state, on every call (never cached): the reservation and the cancel fence
+        if db.enabled():
+            try:
+                if keys.reservation_key(operation) != key_hash:
+                    return False  # not admitted on this key, or released already (terminal, cancelled, billed)
+                if not operation.startswith("sync-") and attempts.enabled():
+                    marks = attempts._marks(operation)
+                    if marks and marks[1]:
+                        return False  # cancelled: no fresh work for a cancelled operation
+            except Exception as e:  # noqa: BLE001 - no proof without the ledger
+                log.warning("admission check of %s: %s", operation, e)
+                return False
+        if operation.startswith("sync-"):
+            return True
+        # the identity, cached ADMISSION_CACHE_S (immutable while it holds): the operation's Job is this key's and this
+        # model's, not over, and the attempt named is one of its live pods
+        now = time.time()
+        if _admission_cache.get((operation, attempt, key_hash), 0) > now:
+            return True
+        try:
+            job, region = jobs.find(p.namespace, operation)
+        except HTTPException:
+            return False
+        md = job["metadata"]
+        if (md.get("annotations") or {}).get(f"{cfg.LABEL}/key") != key_hash:
+            return False
+        if (md.get("labels") or {}).get(f"{cfg.LABEL}/model") != model or status.finished(job):
+            return False
+        if not attempt:
+            return False
+        pods = [
+            x
+            for x in (job.get("_pods") or [])
+            if x["metadata"]["name"] == attempt and (x.get("status") or {}).get("phase") in ("Pending", "Running")
+        ]
+        if not pods:
+            return False
+        _admission_cache[(operation, attempt, key_hash)] = now + ADMISSION_CACHE_S
+        return True
+    if cfg.ADMITTED_LEGACY:
+        return hmac.compare_digest(token, _admitted_token(key_hash, model)) or hmac.compare_digest(
+            token, _admitted_token(key_hash)
+        )
+    return False
 
 
 def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
@@ -644,21 +699,26 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
     await asyncio.to_thread(
-        _authorize_model, p, model, token
+        _authorize_model,
+        p,
+        model,
+        token,
+        request.headers.get(OPERATION_HEADER, ""),
+        request.headers.get(ATTEMPT_HEADER, ""),
     )  # catalog (database) and Kubernetes calls: off the event loop
     return JSONResponse(
         {}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")}
     )
 
 
-def _authorize_model(p: Principal, model: str, token: str = "") -> None:
+def _authorize_model(p: Principal, model: str, token: str = "", operation: str = "", attempt: str = "") -> None:
     """The gateway's authorization of a call to an endpoint: the key's model allow-list and budget always; a direct
     call needs `invoke:sync` and is counted here; the API's own admitted call (the admission token bound to this key
     and model: a proxied synchronous call, or an endpoint call's caller probing readiness and posting its one
     inference) was counted at admission and needs the scope that admission had, `invoke:sync` or `invoke:async`: an
     asynchronous-only key reaches its own endpoint call, nothing else."""
     m = catalog.get(model) or _endpoint_model(model)
-    admitted = _is_admitted(token, keys.key_hash(p.key), m["name"]) if p.role != keys.ROUTER["role"] else False
+    admitted = _is_admitted(p, token, m["name"], operation, attempt) if p.role != keys.ROUTER["role"] else False
     authorize(p, m["name"], ("invoke:sync", "invoke:async") if admitted else "invoke:sync", budget=True)
     _endpoint_limits(p, "gateway", admitted)
     if m["mode"] == "run":
@@ -721,7 +781,7 @@ async def invoke(
         sid = f"sync-{uuid.uuid4().hex[:12]}"
         await asyncio.to_thread(_admit, p, sid)  # a slot and a request for the duration of the call
         try:
-            return await _sync(m, req, p, region)
+            return await _sync(m, req, p, region, sid)
         finally:
             await asyncio.to_thread(_release, sid, None)  # no per-request GPU measurement exists for shared endpoints
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
@@ -789,7 +849,7 @@ def _invoke_job(
             region,
             ex=ex,
             key_hash=billing.key_hash(p.key),
-            admitted=_admitted_token(keys.key_hash(p.key), m["name"]) if cfg.ROUTER_KEY else None,
+            admitted=_admitted_token(keys.key_hash(p.key), m["name"], name) if cfg.ROUTER_KEY else None,
         )
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
@@ -1040,7 +1100,7 @@ def _class_for(
     return cls
 
 
-async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
+async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str, admission: str = ""):
     """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget, spend and the
     per-call price are enforced there); else straight to the predictor Service when the endpoint runs on this
     cluster, and through the region's gateway hostname (the one LiteLLM uses, TLS on the fleet CA) with the caller's
@@ -1074,7 +1134,11 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
         v = _variant_for(m, req.input, region)
         url, headers = (
             f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}",
-            {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key), m["name"])},
+            {
+                "Authorization": f"Bearer {p.key}",
+                ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key), m["name"], admission),
+                OPERATION_HEADER: admission,
+            },
         )
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

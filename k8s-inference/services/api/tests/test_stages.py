@@ -113,7 +113,8 @@ def test_stage_waits_without_queue_and_runs_after_its_dependencies(world):
         names[sid] = r.json()["id"]
         assert names[sid] == f"{root}-s-{sid}"
         job = cl.jobs[(NS, names[sid])]
-        assert job["spec"]["suspend"] is True and "kueue.x-k8s.io/queue-name" not in job["metadata"]["labels"]
+        assert job["spec"]["suspend"] is True
+        assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == stages.WAITING_QUEUE  # never a real queue
         assert job["metadata"]["labels"][stages.WAITING] == "true"
         assert job["metadata"]["labels"][stages.STAGE_ROOT] == root
         assert _main_env(job)["DEPENDENCY_RESULTS"]["valueFrom"]["fieldRef"]["fieldPath"].endswith(
@@ -480,3 +481,17 @@ def test_completed_graph_stage_replays_its_head_and_nothing_new_attaches(world):
     assert (NS, f"{root}-s-gpu-1") not in cl.jobs and len([x for x in fk.calls if x[0] == "prepare"]) == 1
     fk.graphs[root]["cancelled_at"] = "now"
     assert _submit(c, root, "gpu-0").status_code == 409 and _submit(c, root, "gpu-1").status_code == 409
+
+
+def test_waiting_stage_names_a_queue_that_never_exists(world):
+    """Kueue's LocalQueueDefaulting injects `default` into a Job without a queue label when the namespace has a
+    LocalQueue `default` (API51: a waiting stage was admitted, unsuspended and ran without its bindings). A waiting
+    stage therefore always carries the queue label, naming a queue no tenant chart renders; the gate replaces it."""
+    c, cl, fk, rows, _cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    labels = cl.jobs[(NS, g0)]["metadata"]["labels"]
+    assert labels["kueue.x-k8s.io/queue-name"] == "serverless2-stage-waiting" == stages.WAITING_QUEUE
+    assert stages.WAITING_QUEUE != "default"
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    assert labels["kueue.x-k8s.io/queue-name"] == labels["serverless2.nebius/profile"] != stages.WAITING_QUEUE

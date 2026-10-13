@@ -159,8 +159,16 @@ def test_direct_gateway_cannot_bypass_concurrency_and_unconfigured_hmac(client, 
     forged = api._admitted_token(keys.key_hash("sk-good"))
     assert c.get("/internal/authorize/llm-example", headers={**H, api.ADMITTED_HEADER: forged}).status_code == 501
     monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
-    token = api._admitted_token(keys.key_hash("sk-good"))
-    assert c.get("/internal/authorize/llm-example", headers={**H, api.ADMITTED_HEADER: token}).status_code == 200
+    fake_keys.admit(keys.key_hash("sk-good"), "sync-own", "demo")  # the API's own admission the token is bound to
+    fake_keys.calls.clear()
+    token = api._admitted_token(keys.key_hash("sk-good"), "llm-example", "sync-own")
+    assert (
+        c.get(
+            "/internal/authorize/llm-example",
+            headers={**H, api.ADMITTED_HEADER: token, api.OPERATION_HEADER: "sync-own"},
+        ).status_code
+        == 200
+    )
     assert not fake_keys.calls
 
 

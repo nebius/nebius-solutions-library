@@ -3,7 +3,7 @@ name: tenant
 description: One tenant namespace per cluster - namespace, run-pod identity, API binding, one Kueue LocalQueue per scheduling profile, network policy; on the control cluster (MultiKueue manager) namespace, queues and API binding only. Secrets come from the platform stage (stack/platform/tenants.tf), not from this chart.
 type: application
 kubeVersion: ">= 1.31.0-0"
-version: 0.3.2
+version: 0.3.3
 maintainers:
   - name: Nebius solutions library
     url: https://github.com/nebius/nebius-solutions-library

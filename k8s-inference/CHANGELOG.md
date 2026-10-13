@@ -4,6 +4,21 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.54, jobs 0.1.20, tenant chart 0.3.3
+
+- The admission an endpoint call's caller presents at the gateway (`x-serverless2-admitted`) is an exact proof of the
+  active operation: the token is the HMAC of the key, the model and the operation; the caller names the operation and
+  its attempt (`x-serverless2-operation`, `x-serverless2-attempt`, jobs 0.1.20); the hook checks, on every call, that
+  the operation holds a live reservation on that key and is not cancelled, and (remembered 30 s) that its Job is that
+  key's and that model's, not over, and that the attempt is one of its live pods. A release, a cancel or a terminal
+  Job closes the gate at once. A proxied synchronous call is bound to its own `sync-…` admission. The key-only and
+  key+model tokens of releases up to 0.11.53 are accepted only with `admitted_legacy = true` (terraform.tfvars), off by
+  default. Endpoint SecurityPolicies forward the two headers (re-rendered on the next model apply).
+- A waiting stage carries the Kueue queue label naming a queue that never exists (`serverless2-stage-waiting`) instead
+  of no label: with a LocalQueue `default` in the tenant namespace Kueue's LocalQueueDefaulting injected `default` into
+  the label-less Job and admitted the stage before its dependencies and bindings (API51, op-976ec83a3939e974-s-gpu-0).
+  The gate sets the real profile when the stage is admitted; charts/tenant refuses a profile of the waiting queue's name.
+
 ## api 0.11.53
 
 - The gateway's authorization hook honours the API's own admitted endpoint call for the scope the admission had: an
