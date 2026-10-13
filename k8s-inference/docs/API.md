@@ -42,7 +42,7 @@ runs (the fleet's profile queues), the key's budget bounds every call ("Keys" be
 `max_budget` on its OpenAI route), and an
 Envoy Gateway global rate limit caps each key (distinct `Authorization` header, counted in Redis
 across replicas): 600 requests per minute on the API route, 3000 per minute on the predictor hosts. Two bounds
-are the API's own: a call's `timeout_s` is 1 s to 7 days (a sync call waits, a run has a deadline, no longer), and
+are the API's own: a call's `timeout_s` is 1 s to 14 days (a run has a deadline, no longer: the long-run contract, a 14-day MD run with a GPU-second budget needs its explicit timeout; a sync call waits, bounded by the API's own proxy timeout), and
 the `input` of a run or an async call is at most 60 KB (413 above it: pass large inputs by reference, an artifact
 upload or a binding).
 

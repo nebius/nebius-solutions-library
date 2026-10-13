@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 from config import REGION
 
-INVOKE_TIMEOUT_MAX_S = 7 * 86400
+INVOKE_TIMEOUT_MAX_S = 14 * 86400  # the long-run contract: 14-day MD runs with an explicit, budgeted timeout
 RECOVERY_MAX = 3
 
 
@@ -59,8 +59,8 @@ class RecoverySpec(BaseModel):
     )  # `recover` only: automatic continuations per root
     wait_s: int | None = Field(default=None, ge=0, le=86400)  # `recover` only: time to come back on its own class first
     deadline_s: int | None = Field(
-        default=None, ge=60, le=7 * 86400
-    )  # `recover` only: no recovery past root.created_at + deadline_s
+        default=None, ge=60, le=14 * 86400
+    )  # `recover` only: no recovery past root.created_at + deadline_s (a 14-day run may recover until its end)
 
 
 MAX_STAGES = 256

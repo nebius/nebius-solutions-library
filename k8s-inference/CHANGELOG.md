@@ -4,6 +4,12 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.56
+
+- `timeout_s` of a run and `recovery.deadline_s` accept up to 14 days (7 before): the long-run contract (14-day MD
+  runs, registered with 1209600 s) holds for a GPU-budgeted key, which needs the explicit timeout for its bound. No
+  quota, limit or default changes; the graph deadline (14 days default, 30 max) is unchanged.
+
 ## api 0.11.55
 
 - Delegated stages (docs/JOBS.md "Delegated stages"): a run class carries an operator-owned `delegates` list; a graph
