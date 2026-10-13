@@ -4,6 +4,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.53
+
+- The gateway's authorization hook honours the API's own admitted endpoint call for the scope the admission had: an
+  asynchronous-only key (`invoke:async`) reaches its own endpoint call's readiness probe and inference POST; a direct
+  call still needs `invoke:sync` and is counted at the hook. The admission token (`x-serverless2-admitted`) is bound
+  to the key and the model (`HMAC(router key, <key hash>:<model>)`): a token of one model opens no other, another
+  key cannot use it; the key-only form of earlier releases is still accepted for the callers they rendered (removed
+  with the next jobs image). (API51 ADMET: readiness GET 403 "key scope invoke:sync required".)
+
 ## api 0.11.52
 
 - A public run class (`POST /v1/models`, kind job) takes separate limits and node-local scratch: `cpu_limit`,

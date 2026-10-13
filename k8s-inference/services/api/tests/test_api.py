@@ -1045,8 +1045,8 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
     assert sent == {"messages": [], "model": "llm"}
     assert headers == {
         "Authorization": "Bearer sk-good",
-        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good")),
-    }  # the hook counts this call once
+        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"), "llm-example"),
+    }  # the hook counts this call once; the token is bound to the key and the model
 
 
 def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):

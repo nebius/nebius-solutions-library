@@ -97,7 +97,7 @@ def test_private_call_job_carries_no_request_and_delivers_itself(client, monkeyp
     assert up["UPLOAD_MODE"]["value"] == "record" and "OUTPUT_PREFIX" not in up and "envFrom" not in _uploader(job)
     secret = cluster.secrets[("tenant-demo", f"{oid}-auth")]
     assert secret["stringData"]["authorization"] == "Bearer sk-good"
-    assert secret["stringData"]["admitted"] == api._admitted_token(api.keys.key_hash("sk-good"))
+    assert secret["stringData"]["admitted"] == api._admitted_token(api.keys.key_hash("sk-good"), "llm-example")
     assert "sk-good" not in json.dumps(job) and "objects.example" not in json.dumps(job)
     # the binding is bound to this operation; another call cannot take it
     assert (

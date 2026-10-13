@@ -180,3 +180,75 @@ def test_read_only_weights_mount_read_only_without_a_prepare_step(client):  # th
     v["weights"]["sharedFilesystem"].update({"prepare": True, "readOnly": False, "prepareImage": "busybox"})
     assert render_endpoint._weights_prepare(v)[0]["name"] == "weights-prepare"
     assert next(m for m in render_endpoint._volume_mounts(v) if m["name"] == "weights")["readOnly"] is False
+
+
+def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client, admin_keys, fake_keys, monkeypatch):
+    """The hook (the rendered SecurityPolicy forwards x-serverless2-admitted) honours an admitted endpoint call of an
+    asynchronous-only key for the readiness GET and the one inference POST: the admission token is bound to the key
+    and the model; without it, or for another model, or on a direct call, the key needs invoke:sync as before (API51
+    ADMET: readiness GET 403 "key scope invoke:sync required", zero inference POST)."""
+    c, cl = client
+    _tenant(monkeypatch)
+    monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
+    monkeypatch.setattr(api.kube, "stamp_last_request", lambda *a, **k: None)
+
+    async def info(key):
+        base = {**KEY_INFO, "max_budget": None, "metadata": {"tenant": "demo", "legacy": {"principal_id": "p1"}}}
+        return (
+            {**base, "scopes": ["invoke:async", "read:operations", "artifacts:write"]}
+            if key == "sk-async"
+            else dict(base)
+        )
+
+    monkeypatch.setattr(auth, "key_info", info)
+    A = {"Authorization": "Bearer sk-async"}
+    data = {"request.json": "{}", "response_url": "https://objects.example/put/r", "result_ref": "app://r"}
+    assert c.put("/v1/bindings/call-1", json={"data": data}, headers=A).status_code == 200  # the caller's own binding
+    # the asynchronous-only key submits its endpoint call: the rendered caller carries a model-bound admission token
+    body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-1"}}
+    r = c.post("/v1/models/llm-example:invoke", json=body, headers=A)
+    assert r.status_code == 202, r.text
+    oid = r.json()["id"]
+    token = cl.secrets[(NS, f"{oid}-auth")]["stringData"]["admitted"]
+    import keys
+
+    assert token == api._admitted_token(keys.key_hash("sk-async"), "llm-example")
+    assert (
+        c.post("/v1/models/llm-example:invoke", json={"input": {"messages": []}}, headers=A).status_code == 403
+    )  # sync
+    # the gateway: readiness GET and inference POST with the admission token pass; nothing is counted again
+    admitted = {**A, "x-serverless2-admitted": token}
+    before = len([x for x in fake_keys.calls if x[0] == "admit"])
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=admitted).status_code == 200
+    assert c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=admitted).status_code == 200
+    assert len([x for x in fake_keys.calls if x[0] == "admit"]) == before
+    # without the token, with a forged one, or with the token of another model: invoke:sync is required
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=A).status_code == 403
+    assert (
+        c.get(
+            "/internal/authorize/llm-example/v1/health/ready", headers={**A, "x-serverless2-admitted": "x"}
+        ).status_code
+        == 403
+    )
+    other = api._admitted_token(keys.key_hash("sk-async"), "http-example")
+    assert (
+        c.get(
+            "/internal/authorize/llm-example/v1/health/ready", headers={**A, "x-serverless2-admitted": other}
+        ).status_code
+        == 403
+    )
+    # a key of another principal cannot use the token: it is bound to the key hash
+    assert (
+        c.get(
+            "/internal/authorize/llm-example/v1/health/ready", headers={**H, "x-serverless2-admitted": token}
+        ).status_code
+        == 200
+    )  # sk-good has no scopes: everything of its role; the token is simply not theirs
+    stolen = {
+        "Authorization": "Bearer sk-async",
+        "x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-good"), "llm-example"),
+    }
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=stolen).status_code == 403
+    # the key-only token of releases before 0.11.53 is still honoured for the callers they rendered
+    legacy = {**A, "x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-async"))}
+    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=legacy).status_code == 200

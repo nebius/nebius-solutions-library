@@ -135,11 +135,13 @@ def check_budget(p: Principal) -> None:
         raise HTTPException(402, "key GPU-second budget exhausted")
 
 
-def check_scope(p: Principal, scope: str) -> None:
-    """A key with scopes may do only what they name (keys.SCOPES); a key without scopes may do everything of its role."""
+def check_scope(p: Principal, scope: str | tuple[str, ...]) -> None:
+    """A key with scopes may do only what they name (keys.SCOPES); a key without scopes may do everything of its role.
+    A tuple: any one of them suffices."""
     scopes = p.info.get("scopes") or []
-    if scopes and scope not in scopes:
-        raise HTTPException(403, f"key scope {scope} required")
+    wanted = scope if isinstance(scope, tuple) else (scope,)
+    if scopes and not any(w in scopes for w in wanted):
+        raise HTTPException(403, f"key scope {' or '.join(wanted)} required")
 
 
 def check_model(p: Principal, model: str) -> None:
@@ -163,7 +165,7 @@ def scoped(*scopes: str):
     return dependency
 
 
-def authorize(p: Principal, model: str, scope: str, *, budget: bool = False) -> None:
+def authorize(p: Principal, model: str, scope: str | tuple[str, ...], *, budget: bool = False) -> None:
     """Shared model policy for API invokes and the model gateway's authorization hook."""
     check_model(p, model)
     if budget:

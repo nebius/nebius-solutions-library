@@ -112,7 +112,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.52", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.53", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -287,10 +287,23 @@ def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
     return float(gpus * req.timeout_s)
 
 
-def _admitted_token(key_hash: str) -> str:
-    """HMAC the gateway hook verifies on the API's own proxied calls (one API call + its gateway authorization is one
-    logical request); the router key is the shared secret of this fleet."""
-    return hmac.new((cfg.ROUTER_KEY or "").encode(), key_hash.encode(), hashlib.sha256).hexdigest()
+def _admitted_token(key_hash: str, model: str | None = None) -> str:
+    """HMAC the gateway hook verifies on the API's own admitted calls (a proxied synchronous call, an endpoint call's
+    caller): one API admission + its gateway authorization is one logical request. Bound to the key and, when given,
+    the model the admission was for (`<key hash>:<model>`), so an admission token of one model opens no other; the
+    router key is the shared secret of this fleet."""
+    msg = f"{key_hash}:{model}" if model else key_hash
+    return hmac.new((cfg.ROUTER_KEY or "").encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _is_admitted(token: str, key_hash: str, model: str) -> bool:
+    """A valid admission token for this key and model; the key-only form of releases before 0.11.53 is still accepted
+    for the callers rendered by them (removed with the next jobs image)."""
+    if not cfg.ROUTER_KEY or not token:
+        return False
+    return hmac.compare_digest(token, _admitted_token(key_hash, model)) or hmac.compare_digest(
+        token, _admitted_token(key_hash)
+    )
 
 
 def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
@@ -630,20 +643,23 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
         key = f"Bearer {token}" if token else ""
     p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
-    admitted = (
-        bool(cfg.ROUTER_KEY) and bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
-    )
     await asyncio.to_thread(
-        _authorize_model, p, model, admitted
+        _authorize_model, p, model, token
     )  # catalog (database) and Kubernetes calls: off the event loop
     return JSONResponse(
         {}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")}
     )
 
 
-def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
+def _authorize_model(p: Principal, model: str, token: str = "") -> None:
+    """The gateway's authorization of a call to an endpoint: the key's model allow-list and budget always; a direct
+    call needs `invoke:sync` and is counted here; the API's own admitted call (the admission token bound to this key
+    and model: a proxied synchronous call, or an endpoint call's caller probing readiness and posting its one
+    inference) was counted at admission and needs the scope that admission had, `invoke:sync` or `invoke:async`: an
+    asynchronous-only key reaches its own endpoint call, nothing else."""
     m = catalog.get(model) or _endpoint_model(model)
-    authorize(p, m["name"], "invoke:sync", budget=True)
+    admitted = _is_admitted(token, keys.key_hash(p.key), m["name"]) if p.role != keys.ROUTER["role"] else False
+    authorize(p, m["name"], ("invoke:sync", "invoke:async") if admitted else "invoke:sync", budget=True)
     _endpoint_limits(p, "gateway", admitted)
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
@@ -773,7 +789,7 @@ def _invoke_job(
             region,
             ex=ex,
             key_hash=billing.key_hash(p.key),
-            admitted=_admitted_token(keys.key_hash(p.key)) if cfg.ROUTER_KEY else None,
+            admitted=_admitted_token(keys.key_hash(p.key), m["name"]) if cfg.ROUTER_KEY else None,
         )
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
@@ -1058,7 +1074,7 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
         v = _variant_for(m, req.input, region)
         url, headers = (
             f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}",
-            {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key))},
+            {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key), m["name"])},
         )
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

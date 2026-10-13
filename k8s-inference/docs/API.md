@@ -169,7 +169,7 @@ before it started settles at zero. The slot closes when no member is active; a l
 it (concurrency re-checked, no second request). `GET /v1/keys/me` reports `usage`: operations in flight, reserved and
 unknown GPU seconds. A key with any finite limit is admitted on the synchronous and run paths: a shared endpoint
 cannot measure a key's GPU time, so a finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint
-call cannot hold a concurrency slot (501 unless the call is the API's own admitted proxy); bounded asynchronous calls
+call cannot hold a concurrency slot (501 unless the call is the API's own admitted proxy: `x-serverless2-admitted`, an HMAC bound to the key and the model, which also lets an `invoke:async`-only key's endpoint call probe readiness and post its one inference through the gateway); bounded asynchronous calls
 answer 501 until the durable async call exists. Unbounded keys and keys created through `POST /v1/keys` are not
 affected.
 
