@@ -611,6 +611,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             **(
                 {"ephemeralStorageLimit": str(s["ephemeral_storage_limit"])} if s.get("ephemeral_storage_limit") else {}
             ),
+            # run classes a graph rooted here may bind stages to (docs/JOBS.md "Delegated stages"): operator-owned
+            **({"delegates": [str(x) for x in s["delegates"]]} if s.get("delegates") else {}),
             "pvcSizeGi": int(s.get("disk_gi", 50)),
             "graceSeconds": int(s.get("grace_seconds", 300)),
             "scratch": s.get("scratch", "network"),

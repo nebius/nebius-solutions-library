@@ -837,16 +837,19 @@ def run_members(root: str) -> list[dict]:
 
 
 # ---- stage graphs (docs/JOBS.md "Stage composition") ----------------------------------------------------------
-def declare_graph(root: str, tenant: str, owner: str, stages: dict, deadline_at=None) -> None:
-    """Seal the stages of a root at its submission (idempotent for a replay of the same root)."""
+def declare_graph(
+    root: str, tenant: str, owner: str, stages: dict, deadline_at=None, models: dict | None = None
+) -> None:
+    """Seal the stages of a root at its submission (idempotent for a replay of the same root); `models` binds declared
+    stages to the model they will run on (docs/JOBS.md "Delegated stages")."""
     with _connection() as c, c.transaction():
         c.execute(
-            "insert into run_graphs (root, tenant, owner, stages, deadline_at) values (%s, %s, %s, %s, %s) on conflict (root) do nothing",
-            (root, tenant, owner, json.dumps(stages), deadline_at),
+            "insert into run_graphs (root, tenant, owner, stages, deadline_at, models) values (%s, %s, %s, %s, %s, %s) on conflict (root) do nothing",
+            (root, tenant, owner, json.dumps(stages), deadline_at, json.dumps(models or {})),
         )
 
 
-_GRAPH_COLUMNS = "root, stages, deadline_at, cancelled_at, closed_at, reason, tenant, owner, sealed_at"
+_GRAPH_COLUMNS = "root, stages, deadline_at, cancelled_at, closed_at, reason, tenant, owner, sealed_at, models"
 
 
 def _graph(r) -> dict:
@@ -860,6 +863,7 @@ def _graph(r) -> dict:
         "tenant": r[6],
         "owner": r[7],
         "sealed_at": r[8],
+        "models": r[9] or {},
     }
 
 

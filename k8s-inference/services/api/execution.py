@@ -191,6 +191,12 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         raise HTTPException(400, "execution.graph declares a root's stages; execution.stage submits one: not both")
     if spec.graph:
         ex["graph"] = validate_graph(spec.graph.stages, spec.graph.deadline_s)
+        import catalog  # a stage may only be bound to a run class that exists (docs/JOBS.md "Delegated stages")
+
+        for sid, mid in (ex["graph"].get("models") or {}).items():
+            bound = catalog.get(mid)
+            if not bound or bound.get("mode") != "run":
+                raise HTTPException(400, f"execution.graph.stages[{sid!r}].model: {mid!r} is not a run class")
     if spec.stage:
         if not (STAGE_ID.match(spec.stage.id) and _ref(spec.stage.root, "stage.root")):
             raise HTTPException(400, "execution.stage: id (letters, digits, -) and root are required")
@@ -221,6 +227,20 @@ def validate_graph(stages: dict, deadline_s: int | None) -> dict:
     `root`, no self-dependency, no duplicate dependency. Returns the resolved block."""
     if not stages or len(stages) > MAX_STAGES:
         raise HTTPException(400, f"execution.graph.stages: 1 to {MAX_STAGES} stages")
+    models: dict[str, str] = {}
+    flat: dict[str, list] = {}
+    for sid, decl in stages.items():
+        if isinstance(decl, dict):
+            flat[sid] = list(decl.get("depends_on") or [])
+            if decl.get("model"):
+                models[sid] = str(decl["model"])
+        elif hasattr(decl, "depends_on"):
+            flat[sid] = list(decl.depends_on or [])
+            if getattr(decl, "model", None):
+                models[sid] = str(decl.model)
+        else:
+            flat[sid] = decl
+    stages = flat
     for sid, deps in stages.items():
         if sid == ROOT_STAGE or not STAGE_ID.match(sid):
             raise HTTPException(400, f"execution.graph.stages: stage id {sid!r} (letters, digits, -; not 'root')")
@@ -248,6 +268,8 @@ def validate_graph(stages: dict, deadline_s: int | None) -> dict:
     for sid in stages:
         visit(sid, [])
     out = {"stages": {sid: list(deps) for sid, deps in stages.items()}}
+    if models:
+        out["models"] = models
     if deadline_s:
         out["deadline_s"] = int(deadline_s)
     return out

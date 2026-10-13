@@ -1273,7 +1273,7 @@ class FakeKeys:
         self._graphs = getattr(self, "_graphs", {})
         return self._graphs
 
-    def declare_graph(self, root, tenant, owner, stages, deadline_at=None):
+    def declare_graph(self, root, tenant, owner, stages, deadline_at=None, models=None):
         self.calls.append(("graph", root, sorted(stages)))
         self.graphs.setdefault(
             root,
@@ -1282,6 +1282,7 @@ class FakeKeys:
                 "tenant": tenant,
                 "owner": owner,
                 "stages": stages,
+                "models": dict(models or {}),
                 "deadline_at": deadline_at,
                 "cancelled_at": None,
                 "closed_at": None,

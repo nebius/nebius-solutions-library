@@ -93,6 +93,7 @@ def normalise(doc: dict) -> dict:
         )
     if m["mode"] == "run":
         m["job"] = dict(m.get("job") or {})  # image, command, gpu, cpu, memory, ... (docs/JOBS.md)
+        m["delegates"] = [str(x) for x in (m["job"].get("delegates") or [])]  # docs/JOBS.md "Delegated stages"
         images = m["job"].get("images")  # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs")
         if isinstance(images, dict) and images.get("default") and not m["job"].get("image"):
             m["job"]["image"] = images["default"]

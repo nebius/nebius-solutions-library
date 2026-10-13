@@ -113,7 +113,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.54", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.55", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -757,7 +757,13 @@ async def invoke(
 ):
     m = _model(model)
     mode = req.mode or m["mode"]
-    authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
+    if mode == "run" and req.execution and req.execution.stage and not allows_model(p, model):
+        # a stage on a model the key is not granted: only as a delegated stage of a root the operator's run class
+        # delegates to (docs/JOBS.md "Delegated stages"); the declaration alone confers nothing
+        _require_delegation(p, model, req.execution.stage.root, req.execution.stage.id)
+        authorize(p, model, "run:submit", budget=True, model_check=False)
+    else:
+        authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
     if mode not in m["modes"]:
         raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
     if mode == "run":
@@ -899,6 +905,30 @@ def _invoke_job(
     )  # a replay: its current state
 
 
+def _require_delegation(p: Principal, model: str, root: str, stage: str) -> None:
+    """A stage on a model the caller's key is not granted is allowed only when every one of these holds: the root's graph
+    exists in this tenant and belongs to this owner, is open, and declared this stage bound to exactly this model; the
+    root's run class (operator-owned) lists this model among its `delegates`; the root holds a live reservation on the
+    caller's key (the same key, still admitted). Nothing is granted beyond that graph."""
+    if not db.enabled():
+        raise HTTPException(403, f"model {model} is not granted to this key")
+    g = keys.graph_of(root)
+    if g is None or g["tenant"] != p.tenant or g["owner"] != p.owner:
+        raise HTTPException(403, f"model {model} is not granted to this key (no delegating root {root} of yours)")
+    if g.get("cancelled_at") or g.get("closed_at"):
+        raise HTTPException(403, f"model {model} is not granted to this key (the graph of {root} is over)")
+    if (g.get("models") or {}).get(stage) != model:
+        raise HTTPException(
+            403, f"model {model} is not granted to this key (stage {stage!r} of {root} is not declared on it)"
+        )
+    record = keys.operation_owner(root)
+    root_model = _model(record[2]) if record else None
+    if not root_model or model not in (root_model.get("delegates") or []):
+        raise HTTPException(403, f"model {model} is not granted to this key (the root's class does not delegate to it)")
+    if keys.reservation_key(root) != keys.key_hash(p.key):
+        raise HTTPException(403, f"model {model} is not granted to this key (root {root} is not active on this key)")
+
+
 def _stage_request(
     ex: dict | None, mode: str, p: Principal, idempotency_key: str | None
 ) -> tuple[dict | None, dict | None]:
@@ -980,7 +1010,7 @@ def _create_admitted(p, name, job, region, secret, req, mode, stage: dict | None
         deadline = datetime.now(timezone.utc) + timedelta(
             seconds=int(ex["graph"].get("deadline_s") or stages.DEFAULT_DEADLINE_S)
         )
-        keys.declare_graph(name, p.tenant, p.owner, ex["graph"]["stages"], deadline)
+        keys.declare_graph(name, p.tenant, p.owner, ex["graph"]["stages"], deadline, ex["graph"].get("models"))
     try:
         created_job, created = jobs.create(p.namespace, job, region, secret)
     except Exception:
@@ -1438,6 +1468,9 @@ def _delivered(op: dict, name: str, root: str) -> dict:
     out = {
         "export_state": last.get("export_state") or "succeeded",
         "exported_by": last["operation"],
+        # the delivering attempt: what a consumer of the result (a dependent stage, DEPENDENCY_RESULTS) must name
+        "exported_by_attempt_id": last.get("pod"),
+        "exported_by_epoch": last.get("epoch"),
         "result_ref": last.get("result_ref") or op.get("result_ref"),
     }
     if last.get("exit_code") in (2, 5) or (last["status"] != "succeeded" and last.get("exit_code")):

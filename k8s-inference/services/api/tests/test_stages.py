@@ -154,8 +154,15 @@ def test_stage_waits_without_queue_and_runs_after_its_dependencies(world):
             == job["metadata"]["labels"]["serverless2.nebius/profile"]
         )
         assert stages.WAITING not in job["metadata"]["labels"]
-        assert json.loads(job["spec"]["template"]["metadata"]["annotations"][stages.RESULTS]) == {
-            "root": {"operation": root, "result_ref": "s3://b/root", "attempt_id": f"{root}-a"}
+        bound = json.loads(job["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])
+        assert bound == {
+            "root": {
+                "operation": root,
+                "producer": root,
+                "result_ref": "s3://b/root",
+                "attempt_id": f"{root}-a",
+                "epoch": None,
+            }
         }
         assert job["spec"]["suspend"] is True  # Kueue unsuspends when it admits
     assert stages.is_waiting(cl.jobs[(NS, names["collect"])])
@@ -249,7 +256,13 @@ def test_failed_dependency_holds_its_dependents_until_resumed_or_cancelled(world
     _succeed(cl, rows, succ, "s3://b/g1-again")
     assert reconciliation.gate_stages() == [f"{col}:admitted"]
     bound = json.loads(cl.jobs[(NS, col)]["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])
-    assert bound["gpu-1"] == {"operation": succ, "result_ref": "s3://b/g1-again", "attempt_id": f"{succ}-a"}
+    assert bound["gpu-1"] == {
+        "operation": succ,
+        "producer": succ,
+        "result_ref": "s3://b/g1-again",
+        "attempt_id": f"{succ}-a",
+        "epoch": None,
+    }
     op = c.get(f"/v1/operations/{root}", headers=H).json()
     g1_view = next(s for s in op["graph"]["stages"] if s["id"] == "gpu-1")
     assert g1_view["status"] == "SUCCEEDED" and g1_view["operation"] == succ and g1_view["continuations"] == 1
@@ -495,3 +508,135 @@ def test_waiting_stage_names_a_queue_that_never_exists(world):
     _succeed(cl, rows, root, "s3://b/root")
     reconciliation.gate_stages()
     assert labels["kueue.x-k8s.io/queue-name"] == labels["serverless2.nebius/profile"] != stages.WAITING_QUEUE
+
+
+def test_dependency_delivered_by_a_finalizer_names_the_delivering_attempt(world):
+    """A dependency whose compute attempt failed delivery and whose CPU finalizer (`<op>-x1`) delivered: the bound
+    result names the delivering operation, attempt and epoch (never the compute attempt next to the finalizer's
+    receipt), and `producer` the lineage member; the root's graph view shows `delivered_by`."""
+    c, cl, fk, rows, _cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    col = _submit(c, root, "collect").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _succeed(cl, rows, g1, "s3://b/g1")
+    # gpu-0: compute done, delivery failed (exit 75 -> FAILED, export failed), then its finalizer delivered
+    cl.jobs[(NS, g0)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    rows.append({**_record(g0, f"{g0}-a", st="failed", exit_code=75, export="failed"), "tenant": "demo", "root": g0})
+    assert reconciliation.gate_stages() == []  # waits: FAILED, resumable / finalizable
+    rows.append(
+        {
+            **_record(f"{g0}-x1", f"{g0}-x1-b", export="succeeded", result_ref="s3://b/g0-final", epoch=2),
+            "tenant": "demo",
+            "root": g0,
+            "role": "finalize",
+        }
+    )
+    assert reconciliation.gate_stages() == [f"{col}:admitted"]
+    bound = json.loads(cl.jobs[(NS, col)]["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])
+    assert bound["gpu-0"] == {
+        "operation": f"{g0}-x1",
+        "producer": g0,
+        "result_ref": "s3://b/g0-final",
+        "attempt_id": f"{g0}-x1-b",
+        "epoch": 2,
+    }
+    assert bound["gpu-1"]["operation"] == g1 and bound["gpu-1"]["attempt_id"] == f"{g1}-a"
+    view = {s["id"]: s for s in c.get(f"/v1/operations/{root}", headers=H).json()["graph"]["stages"]}
+    assert view["gpu-0"]["status"] == "SUCCEEDED" and view["gpu-0"]["delivered_by"] == f"{g0}-x1"
+    assert view["gpu-0"]["attempt_id"] == f"{g0}-x1-b" and view["gpu-0"]["epoch"] == 2
+    assert view["gpu-1"]["delivered_by"] is None
+    own = c.get(f"/v1/operations/{g0}", headers=H).json()
+    assert (
+        own["exported_by"] == f"{g0}-x1"
+        and own["exported_by_attempt_id"] == f"{g0}-x1-b"
+        and own["exported_by_epoch"] == 2
+    )
+
+
+def test_delegated_stage_needs_operator_delegation_declaration_owner_and_live_root(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """A stage on a model the key is not granted runs only as a delegated stage (docs/JOBS.md "Delegated stages"):
+    the root's run class lists the model in `delegates` (operator-owned), the graph declared the stage on exactly that
+    model, the caller is the root's owner on the root's key, the root is active. A declaration alone confers nothing;
+    a direct :invoke of the model stays 403."""
+    c, cl = client
+    import catalog
+
+    base = catalog.get("hello-run")
+    delegating = {**base, "delegates": ["container-run"]}
+    plain = catalog.get("container-run")
+    monkeypatch.setattr(
+        catalog, "get", lambda mid: delegating if mid == "hello-run" else plain if mid == "container-run" else None
+    )
+    monkeypatch.setattr(catalog, "require", lambda mid: catalog.get(mid) or (_ for _ in ()).throw(Exception(mid)))
+    import app as appmod
+
+    monkeypatch.setattr(appmod, "_model", lambda mid: catalog.get(mid))
+    granted_root_only = {
+        **KEY_INFO,
+        "max_budget": None,
+        "models": ["hello-run"],
+        "metadata": {"tenant": "demo", "legacy": {"principal_id": "p1"}},
+    }
+    other = {**granted_root_only, "metadata": {"tenant": "demo", "legacy": {"principal_id": "p2"}}}
+    _auth(monkeypatch, {"sk-good": granted_root_only, "sk-other": other})
+    monkeypatch.setattr(attempts, "enabled", lambda: False)
+    graph = {"stages": {"gpu-0": {"depends_on": [], "model": "container-run"}, "plain": []}}
+    r = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}, "execution": {"graph": graph}})
+    assert r.status_code == 202, r.text
+    root = r.json()["id"]
+    assert fake_keys.graphs[root]["models"] == {"gpu-0": "container-run"}
+    inp = {"image": "img", "command": "echo"}
+    # a direct run of the ungranted model: 403, declaration or not
+    assert c.post("/v1/models/container-run:invoke", headers=H, json={"input": inp}).status_code == 403
+    # the delegated stage: allowed, on the root's key, as a member of the root's run
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        headers=H,
+        json={"input": inp, "execution": {"stage": {"root": root, "id": "gpu-0"}}},
+    )
+    assert r.status_code == 202, r.text
+    sid = r.json()["id"]
+    assert [x[1:3] for x in fake_keys.calls if x[0] == "prepare"] == [(root, sid)]
+    assert c.get(f"/v1/operations/{sid}", headers=H).status_code == 200  # the owner reads its delegated stage
+    assert c.get(f"/v1/operations/{sid}", headers=P2).status_code == 404
+    # a stage declared without a model binding: the key's own grants decide (403 here)
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        headers=H,
+        json={"input": inp, "execution": {"stage": {"root": root, "id": "plain"}}},
+    )
+    assert r.status_code == 403 and "not declared on it" in r.text
+    # another owner, a model the root class does not delegate to, a closed graph: all refused
+    assert (
+        c.post(
+            "/v1/models/container-run:invoke",
+            headers=P2,
+            json={"input": inp, "execution": {"stage": {"root": root, "id": "gpu-0"}}},
+        ).status_code
+        == 403
+    )
+    delegating["delegates"] = []
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        headers=H,
+        json={"input": inp, "execution": {"stage": {"root": root, "id": "gpu-0"}}},
+    )
+    assert r.status_code == 403 and "does not delegate" in r.text
+    delegating["delegates"] = ["container-run"]
+    fake_keys.release(root, 0.0)  # the root not active on the key any more
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        headers=H,
+        json={"input": inp, "execution": {"stage": {"root": root, "id": "gpu-0"}}},
+    )
+    assert r.status_code == 403 and "not active" in r.text
+    # the declaration is validated at the root: a stage may only be bound to a run class that exists
+    bad = {"stages": {"x": {"depends_on": [], "model": "no-such-model"}}}
+    assert (
+        c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}, "execution": {"graph": bad}}).status_code
+        == 400
+    )

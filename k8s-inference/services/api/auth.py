@@ -165,9 +165,13 @@ def scoped(*scopes: str):
     return dependency
 
 
-def authorize(p: Principal, model: str, scope: str | tuple[str, ...], *, budget: bool = False) -> None:
-    """Shared model policy for API invokes and the model gateway's authorization hook."""
-    check_model(p, model)
+def authorize(
+    p: Principal, model: str, scope: str | tuple[str, ...], *, budget: bool = False, model_check: bool = True
+) -> None:
+    """Shared model policy for API invokes and the model gateway's authorization hook. `model_check=False` only for a
+    delegated stage (app._require_delegation verified the delegation first)."""
+    if model_check:
+        check_model(p, model)
     if budget:
         check_budget(p)
     check_scope(p, scope)
@@ -194,8 +198,27 @@ def check_operation_owner(p: Principal, job: dict) -> None:
         # key is evidence; sharing its tenant/bucket is not.
         if ann.get(f"{cfg.LABEL}/key") != keys.key_hash(p.key):
             raise missing
-    if model and not allows_model(p, model):
+    if model and not allows_model(p, model) and not _delegated_stage(labels, ann, model):
         raise missing
+
+
+def _delegated_stage(labels: dict, ann: dict, model: str) -> bool:
+    """An owner's stage on a model the key is not granted (docs/JOBS.md "Delegated stages") stays readable by the owner:
+    the Job is a stage of a graph that declared it on this model and whose root class delegates to it."""
+    root = labels.get(f"{cfg.LABEL}/stage-root")
+    stage = ann.get(f"{cfg.LABEL}/stage")
+    if not root or not stage or not db.enabled():
+        return False
+    g = keys.graph_of(root)
+    if not g or (g.get("models") or {}).get(stage) != model:
+        return False
+    record = keys.operation_owner(root)
+    if not record:
+        return False
+    import catalog
+
+    root_model = catalog.get(record[2])
+    return bool(root_model and model in (root_model.get("delegates") or []))
 
 
 def may_read_operation(p: Principal, job: dict) -> bool:

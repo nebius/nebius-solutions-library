@@ -61,7 +61,7 @@ shape of a model definition: a container plus a few knobs.
 
 `protocol` is `openai | http | websocket | grpc`; `gpu.classes` lists the classes the image runs on,
 preferred first; `regions` defaults to every region with a pool of one of the classes; `kind: job`
-defines a run class instead (`cpu`, `memory`, `cpu_limit`, `memory_limit`, `ephemeral_storage`, `ephemeral_storage_limit`, `disk_gi`, `scratch`, `parameters`; requests are what the scheduler guarantees, limits what a container may grow to). The full field list is
+defines a run class instead (`cpu`, `memory`, `cpu_limit`, `memory_limit`, `ephemeral_storage`, `ephemeral_storage_limit`, `disk_gi`, `scratch`, `parameters`, `delegates`; requests are what the scheduler guarantees, limits what a container may grow to; `delegates` names the run classes a graph rooted on this class may bind stages to, docs/JOBS.md "Delegated stages"). The full field list is
 the module docstring of `services/api/models.py`; the response schema is `Model` in `services/api/schemas.py`.
 
 ### Scaling

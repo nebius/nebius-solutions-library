@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.55
+
+- Delegated stages (docs/JOBS.md "Delegated stages"): a run class carries an operator-owned `delegates` list; a graph
+  declares a stage bound to a model (`{"depends_on": [], "model": …}`); the root's owner may then submit that stage on
+  a model the key is not granted when the root class delegates to it, the graph is open and the root is active on the
+  key (`run:submit` required); nothing else changes, the declaration alone confers nothing. Ledger migration 15.
+- Dependency results and delivery metadata name the delivering operation, attempt and epoch (`DEPENDENCY_RESULTS`
+  `operation`/`attempt_id`/`epoch` with `producer`; the handle's `exported_by_attempt_id`/`exported_by_epoch`; the
+  graph view's `delivered_by`), never a compute attempt next to a finalizer's receipt.
+
 ## api 0.11.54, jobs 0.1.20, tenant chart 0.3.3
 
 - The admission an endpoint call's caller presents at the gateway (`x-serverless2-admitted`) is an exact proof of the

@@ -780,3 +780,17 @@ def _try(fn):
         return fn()
     except HTTPException as e:
         return e
+
+
+def test_graph_declaration_keeps_the_stage_model_bindings(database):
+    """Migration 15: the models a graph bound its stages to (docs/JOBS.md "Delegated stages") are sealed with the
+    graph, idempotent for a replay, empty for a graph declared without bindings."""
+    db.migrate()
+    h = "a" * 64
+    _bounded(h, budget_gpu_seconds=None)
+    keys.admit(h, "root-m", "demo", run_member=True)
+    keys.declare_graph("root-m", "demo", "owner-1", {"gpu": [], "collect": ["gpu"]}, None, {"gpu": "fold-gpu"})
+    keys.declare_graph("root-m", "demo", "owner-1", {"gpu": []}, None, {"gpu": "other"})  # a replay: the first stands
+    assert keys.graph_of("root-m")["models"] == {"gpu": "fold-gpu"}
+    keys.declare_graph("root-n", "demo", "owner-1", {"a": []})
+    assert keys.graph_of("root-n")["models"] == {}

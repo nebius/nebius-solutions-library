@@ -71,10 +71,19 @@ class GraphSpec(BaseModel):
     (`root` = the root's own run). Sealed: no stage attaches later. Acyclic, at most MAX_STAGES stages."""
 
     model_config = ConfigDict(extra="forbid")
-    stages: dict[str, list[str]]
+    stages: dict[str, "list[str] | StageDecl"]
     deadline_s: int | None = Field(
         default=None, ge=60, le=30 * 86400
     )  # stages still waiting after it are cancelled (default 14 days)
+
+
+class StageDecl(BaseModel):
+    """A declared stage: its dependencies and, optionally, the model it is bound to (docs/JOBS.md "Delegated stages":
+    the root's owner may then submit it on that model when the root's run class delegates to it)."""
+
+    model_config = ConfigDict(extra="forbid")
+    depends_on: list[str] = Field(default_factory=list)
+    model: str | None = None
 
 
 class StageSpec(BaseModel):
@@ -360,6 +369,9 @@ class ModelSpec(BaseModel):
     memory_limit: SkipValidation[str | None] = None  # a limit above the request is not guaranteed memory
     ephemeral_storage: SkipValidation[str | None] = None  # node-local scratch request (the kubelet's ephemeral storage)
     ephemeral_storage_limit: SkipValidation[str | None] = None  # = the request unless given
+    delegates: SkipValidation[list[str] | None] = (
+        None  # run classes a graph of this root may bind stages to (operator-owned)
+    )
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
     scratch: SkipValidation[Literal["network", "local-nvme"] | None] = None
@@ -465,7 +477,11 @@ class GraphStage(BaseModel):
     depends_on: list[str] | None = None
     operation: str | None = None
     status: str | None = None
-    attempt_id: str | None = None
+    attempt_id: str | None = None  # the delivering attempt (of `delivered_by` when a finalizer or retry delivered)
+    epoch: int | None = None
+    delivered_by: str | None = None
+    result_ref: str | None = None
+    continuations: int | None = None
     reason: str | None = None
 
 
@@ -524,6 +540,8 @@ class Operation(BaseModel):
     revision: int | None = None
     export_state: ExportState | None = None
     exported_by: str | None = None
+    exported_by_attempt_id: str | None = None  # the delivering attempt (an export retry or finalizer that delivered)
+    exported_by_epoch: int | None = None
     result_ref: str | None = None
     checkpoint_ref: str | None = None
     checkpoint_generation: int | None = None

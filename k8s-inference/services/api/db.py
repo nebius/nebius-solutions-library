@@ -249,6 +249,11 @@ create table if not exists operation_marks (
     create index if not exists sessions_open on sessions (state) where state <> 'ended';
     create index if not exists sessions_owner on sessions (tenant, owner, created_at desc);
     """,
+    # 15: the model each declared stage is bound to (docs/JOBS.md "Delegated stages"): the operator's delegate list on
+    # the root's run class, intersected with this, lets the root's owner submit a stage on a model its key is not granted
+    """
+    alter table run_graphs add column if not exists models jsonb not null default '{}'::jsonb;
+    """,
 ]
 
 _pool = None
