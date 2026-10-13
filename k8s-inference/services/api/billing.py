@@ -37,9 +37,8 @@ def cost_of(
     region label (regional path, pinned fleet runs), else `region`, the cluster the pods ran in
     (a worker's copy of a fleet-placed run carries no label)."""
     gpu_s = gpu_seconds(job, records)
-    region = job["metadata"].get("labels", {}).get(f"{LABEL}/region") or region or ""
     rates = json.loads(job["metadata"].get("annotations", {}).get(f"{LABEL}/billing-rates", "{}"))
-    regional = rates.get(region, {})
+    regional = _rates_for(rates, job["metadata"].get("labels", {}).get(f"{LABEL}/region"), region)
     usd = 0.0
     for attempt in _attempts(job.get("_pods", []), records, job["metadata"]["name"]):
         seconds = (_secs(attempt["started_at"], attempt["ended_at"]) or 0) * attempt["_gpus"]
@@ -54,6 +53,28 @@ def cost_of(
     if gpu_s and not regional:
         raise ValueError("GPU run has no price snapshot; accounting deferred")
     return gpu_s, round(usd, 6)
+
+
+def _rates_for(rates: dict, label: str | None, region: str | None) -> dict:
+    """The price snapshot of the cluster the run ran in. The snapshot (`billing-rates`, written at submission) is keyed
+    by Nebius region; the Job's region label is a cluster id when the run was pinned to its admitting cluster (a
+    resume on the kept volume, `_pin_to_worker`: `north`), a region name when it was placed by region, so the label
+    is resolved through the fleet document (`kube.cluster_region`: `north` -> `eu-north1`, a region maps to itself)
+    before the lookup; the raw label stands for a snapshot that was keyed by it. Nothing is guessed: no matching key
+    -> no prices -> "accounting deferred" (unknown), never a zero."""
+    candidates: list[str] = []
+    if label:
+        candidates.append(label)
+        try:
+            candidates.append(kube.cluster_region(label))
+        except Exception:  # noqa: BLE001 - no fleet document here: the raw label and the caller's region remain
+            pass
+    if region:
+        candidates.append(region)
+    for key in candidates:
+        if key in rates:
+            return rates[key]
+    return {}
 
 
 def measured_usage(job: dict, records: list | None = None) -> float | None:

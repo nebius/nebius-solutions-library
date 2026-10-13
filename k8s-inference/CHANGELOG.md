@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.58
+
+- Billing prices a run pinned to its admitting cluster (a resume on the kept volume: region label `north`, a cluster
+  id) by resolving the label to the Nebius region the rate snapshot is keyed by (`kube.cluster_region`), as a run
+  placed by region already was; no matching key still defers accounting as unknown (never zero). On API54 both
+  resumed members of a graph stayed accounting-active ("GPU attempt has no verified pool price") while their original
+  siblings settled.
+
 ## api 0.11.57
 
 - Bounded retries (docs/JOBS.md "Retries"): a run class's `retry: {max_attempts, on_exit_codes}` and a request's
