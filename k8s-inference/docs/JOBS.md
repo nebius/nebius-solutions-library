@@ -361,7 +361,9 @@ max_attempts - 1`), any other non-zero exit fails the run at once, disruptions s
 on_infrastructure_loss: fail` makes them fatal), the finalizer's "delivery pending" exit codes still ahead of it. Every
 attempt is a pod of the same Job: the same operation, member, reservation and GPU bound (GPUs x `timeout_s` covers all
 of them), the same attempt records and epochs; nothing is admitted, reserved or recomputed again, a successful sibling
-stage is untouched. `max_attempts` 1..10; single-node runs only (a multi-node run restarts as a whole). The retained
+stage is untouched. `max_attempts` counts pods that ended with an exit in `on_exit_codes` only: a disruption is never an attempt, so a
+run may be preempted any number of times and still have its `max_attempts` application attempts (it is not a cap on
+total pods). `max_attempts` 1..10; single-node runs only (a multi-node run restarts as a whole). The retained
 scientific policy is `{"max_attempts": 2, "on_exit_codes": [137, 143]}` with `graceSeconds: 60`.
 
 ## Attempts and finalization
