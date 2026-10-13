@@ -963,11 +963,16 @@
     "name": "tenant-egress-world"
    },
    "spec": {
-    "description": "tenant pods without an execution profile may reach the world",
+    "description": "tenant pods without an execution profile may reach the world, never the instance metadata service",
     "egress": [
      {
-      "toEntities": [
-       "world"
+      "toCIDRSet": [
+       {
+        "cidr": "0.0.0.0/0",
+        "except": [
+         "169.254.0.0/16"
+        ]
+       }
       ]
      }
     ],

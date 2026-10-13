@@ -154,7 +154,6 @@ metadata: { name: api, namespace: api }
 spec:
   parentRefs:
     - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: https }
-    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
   hostnames: [{{ .Values.hostnames.api | quote }}]
   rules:
     - matches: [{ path: { type: PathPrefix, value: /internal/attempts } }]   # run pods post their attempt records with a pod-bound token (services/api/attempts.py)
@@ -165,6 +164,19 @@ spec:
       filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]
       timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+---
+# Port 80 of the API hostname only redirects to HTTPS: a bearer key never travels in clear. cert-manager's ACME
+# challenge route on the same listener matches a longer path (/.well-known/acme-challenge/<token>) and takes
+# precedence, so issuance keeps working.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api-redirect, namespace: api }
+spec:
+  parentRefs:
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
+  hostnames: [{{ .Values.hostnames.api | quote }}]
+  rules:
+    - filters: [{ type: RequestRedirect, requestRedirect: { scheme: https, statusCode: 301 } }]
 ---
 # The authorizer for the GPU regions' gateways under any host: Envoy keeps the original request's authority on an
 # ext-auth call (the endpoint's hostname, `<model>-predictor.models.<region host>`), so the route cannot be bound to

@@ -4,9 +4,9 @@
 # to verify run tokens and to read Prometheus and Loki through the API server proxy (the console's metrics and
 # logs per region). Cluster-wide it may only read namespaces, nodes and pods; everything else is granted per
 # tenant namespace by a RoleBinding to `serverless2-api-tenant` that onboarding creates.
-# Credentials are never static: `python -m onboarding bootstrap --region <region>` seeds a 48 h
-# TokenRequest token as a kubeconfig in the hub Secret api/region-kubeconfigs, and the hub CronJob
-# rotate it by re-applying the platform stage (docs/OPERATIONS.md "Rotation").
+# Its credential is a long-lived ServiceAccount token the platform stage mints on this cluster and hands to the
+# control cluster through its state (stack/platform/secrets.tf); rotate it with `terraform apply -replace` of that
+# Secret (docs/OPERATIONS.md "Rotation"). Read access to the state bucket therefore equals this identity.
 apiVersion: v1
 kind: Namespace
 metadata: { name: api }

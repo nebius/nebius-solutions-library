@@ -23,15 +23,22 @@ resource "kubernetes_namespace_v1" "ns" {
   }
 }
 
-# Environment-provided secrets (names from terraform.tfvars `secrets`; empty when unset).
-data "external" "env" {
-  program = ["bash", "${path.module}/../scripts/env.sh", local.f.secrets.ngc_api_key_env, local.f.secrets.hf_token_env, local.f.secrets.registry_credentials_env]
+# Secret inputs (config.tf: sensitive variables stack.sh fills from the environment variables named in
+# terraform.tfvars `secrets`; a name set to null switches the feature off; a named variable that is unset stops
+# stack.sh before any plan). The booleans below are what `count` reads: a sensitive value itself cannot drive it.
+locals {
+  ngc_key        = local.f.secrets.ngc_api_key_env == null ? "" : coalesce(var.ngc_api_key, "")
+  hf_token       = local.f.secrets.hf_token_env == null ? "" : coalesce(var.hf_token, "")
+  extra_registry = local.f.secrets.registry_credentials_env == null || coalesce(var.registry_credentials, "") == "" ? {} : jsondecode(var.registry_credentials)
+  ngc_on         = nonsensitive(local.ngc_key != "")
+  hf_on          = nonsensitive(local.hf_token != "")
 }
 
-locals {
-  ngc_key        = data.external.env.result.ngc
-  hf_token       = data.external.env.result.hf
-  extra_registry = data.external.env.result.registries == "" ? {} : jsondecode(data.external.env.result.registries)
+check "secret_inputs_present" {
+  assert {
+    condition     = (local.f.secrets.ngc_api_key_env == null || local.ngc_key != "") && (local.f.secrets.hf_token_env == null || local.hf_token != "")
+    error_message = "A secret named in terraform.tfvars `secrets` is empty: export it (stack.sh maps it to TF_VAR_ngc_api_key / TF_VAR_hf_token) or set its name to null to run without it. Nothing is applied with a missing secret."
+  }
 }
 
 # Ops service account credentials of this cluster's project (the ops image's nebius profile).
@@ -106,7 +113,7 @@ resource "kubernetes_secret_v1" "litellm_master" {
 
 # NGC: pull Secret and API key in the models namespace (NIM images, seed-weights), when a key is given.
 resource "kubernetes_secret_v1" "ngc_pull" {
-  count = local.ngc_key != "" && local.role.worker ? 1 : 0
+  count = local.ngc_on && local.role.worker ? 1 : 0
   metadata {
     name      = "ngc"
     namespace = "models"
@@ -117,7 +124,7 @@ resource "kubernetes_secret_v1" "ngc_pull" {
 }
 
 resource "kubernetes_secret_v1" "ngc_api_key" {
-  count = local.ngc_key != "" && local.role.worker ? 1 : 0
+  count = local.ngc_on && local.role.worker ? 1 : 0
   metadata {
     name      = "ngc-api-key"
     namespace = "models"
@@ -127,7 +134,7 @@ resource "kubernetes_secret_v1" "ngc_api_key" {
 }
 
 resource "kubernetes_secret_v1" "hf_token" {
-  count = local.hf_token != "" && local.role.worker ? 1 : 0
+  count = local.hf_on && local.role.worker ? 1 : 0
   metadata {
     name      = "hf-token"
     namespace = "models"
@@ -154,7 +161,7 @@ locals {
   registry_host = split("/", local.cloud.hub.registry)[0]
   zot_credentials = merge(
     { (local.registry_host) = { username = "iam", password = try(data.external.registry_key[0].result.key, "") } },
-    local.ngc_key == "" ? {} : { "nvcr.io" = { username = "$oauthtoken", password = local.ngc_key } },
+    local.ngc_on == false ? {} : { "nvcr.io" = { username = "$oauthtoken", password = local.ngc_key } },
     local.extra_registry,
   )
 }

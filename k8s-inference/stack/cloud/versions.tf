@@ -5,7 +5,7 @@ terraform {
   required_providers {
     nebius = {
       source  = "nebius/nebius"
-      version = ">= 0.6.23"
+      version = "~> 0.6.23"
     }
     random = { source = "hashicorp/random", version = "~> 3.6" }
     tls    = { source = "hashicorp/tls", version = "~> 4.0" }

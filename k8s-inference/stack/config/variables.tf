@@ -283,11 +283,12 @@ variable "fleet" {
     }), {})
 
     # Secret values never go into this file: they are read from the environment at apply time, by the
-    # variable NAMES given here (unset = the feature stays off).
+    # variable NAMES given here. stack.sh refuses to run while a named variable is unset; a name set to null
+    # switches that feature off (ngc_api_key_env = null: no NIM access, no NGC pull Secrets).
     secrets = optional(object({
-      ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache)
-      hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes)
-      registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams
+      ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache); null = off
+      hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes); null = off
+      registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams; null = off
       mysterybox_credentials_secret = optional(string)                         # pre-provisioned subject-credentials.json, per cluster
       workload_secrets = optional(map(object({
         namespace        = string

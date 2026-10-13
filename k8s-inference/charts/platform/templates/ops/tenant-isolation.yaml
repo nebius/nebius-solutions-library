@@ -37,16 +37,20 @@ spec:
 # execution profile (label serverless2.nebius/execution-profile, docs/JOBS.md "Execution options"): such a pod reaches
 # only the destinations its profile's policy names (charts/tenant execution.yaml). Cilium policies are allow-lists
 # that add up, so the restriction is "not selected here", not a deny rule.
+# "The world" is every address outside the cluster EXCEPT the instance metadata service (169.254.0.0/16): a tenant
+# container must never read the node's identity token there. A CIDR rule never matches cluster-internal endpoints
+# (they have their own identities), so this does not widen access to other namespaces.
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:
   name: tenant-egress-world
 spec:
-  description: tenant pods without an execution profile may reach the world
+  description: tenant pods without an execution profile may reach the world, never the instance metadata service
   endpointSelector:
     matchExpressions:
       - { key: io.cilium.k8s.namespace.labels.serverless2.nebius/tenant, operator: Exists }
       - { key: serverless2.nebius/execution-profile, operator: DoesNotExist }
   egress:
-    - toEntities: [world]
+    - toCIDRSet:
+        - { cidr: 0.0.0.0/0, except: [169.254.0.0/16] }
 {{- end }}

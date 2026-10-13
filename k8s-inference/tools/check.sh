@@ -188,7 +188,29 @@ EOF2
   # the sweeper preserved everything), and the rule stays read-only (`get` is kept next to `list`: the single-Job read
   # of earlier versions, harmless and already granted on live clusters).
   step "charts/platform: the dispatcher ClusterRole covers the batch/jobs calls of services/dispatcher/dispatcher.py"
+  # Security invariants of the rendered platform (what a reviewer of a public reference checks first): tenant pods
+  # never reach the instance metadata service, and the API hostname is served over HTTPS only (port 80 redirects).
+  step "charts/platform: tenant egress excludes the metadata service; the API route is HTTPS-only with a redirect"
   echo "$clusters" > "$TMP/clusters.txt"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF4'
+import sys, yaml
+tmp = sys.argv[1]
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    for o in objs:
+        if o["kind"] in ("CiliumClusterwideNetworkPolicy", "CiliumNetworkPolicy"):
+            for rule in o["spec"].get("egress") or []:
+                assert "world" not in (rule.get("toEntities") or []), f"{cid}: {o['metadata']['name']} grants egress to the world entity (the metadata service is part of it)"
+                for c in rule.get("toCIDRSet") or []:
+                    if c["cidr"] in ("0.0.0.0/0", "::/0"):
+                        assert "169.254.0.0/16" in (c.get("except") or []), f"{cid}: {o['metadata']['name']} allows 0.0.0.0/0 without excluding 169.254.0.0/16"
+    routes = {o["metadata"]["name"]: o for o in objs if o["kind"] == "HTTPRoute" and o["metadata"]["namespace"] == "api"}
+    if "api" in routes:
+        assert all(p.get("sectionName") == "https" for p in routes["api"]["spec"]["parentRefs"]), f"{cid}: the api HTTPRoute attaches to a non-HTTPS listener"
+        assert "api-redirect" in routes and any(f.get("type") == "RequestRedirect" and f["requestRedirect"].get("scheme") == "https"
+                                                for r in routes["api-redirect"]["spec"]["rules"] for f in r.get("filters", [])), f"{cid}: no HTTPS redirect route for the API hostname"
+        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect")
+EOF4
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF3'
 import re, sys, yaml
 tmp, root = sys.argv[1], sys.argv[2]

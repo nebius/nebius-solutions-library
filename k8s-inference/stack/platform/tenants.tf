@@ -90,7 +90,7 @@ resource "kubernetes_secret_v1" "s3_fleet" {
 }
 
 resource "kubernetes_secret_v1" "ngc" {
-  for_each = local.role.worker && local.ngc_key != "" ? local.tenants : {}
+  for_each = local.role.worker && local.ngc_on ? local.tenants : {}
   metadata {
     name      = "ngc"
     namespace = "tenant-${each.key}"
@@ -118,6 +118,18 @@ resource "random_password" "key" {
   special  = false
 }
 
+# The value reaches the Job through a Secret: a Job's pod spec (readable by anyone who may read Jobs or pods in
+# `api`) carries only the reference. The Jobs are kept (no TTL) so that an apply never re-runs them.
+resource "kubernetes_secret_v1" "key" {
+  for_each = local.keys
+  metadata {
+    name      = "key-${each.key}"
+    namespace = "api"
+  }
+  data       = { KEY = "sk-${random_password.key[each.key].result}" }
+  depends_on = [kubernetes_namespace_v1.ns]
+}
+
 resource "kubernetes_job_v1" "key" {
   for_each = local.keys
   metadata {
@@ -135,8 +147,13 @@ resource "kubernetes_job_v1" "key" {
           image   = local.image.api
           command = ["python", "-m", "keys", "bootstrap"]
           env {
-            name  = "KEY"
-            value = "sk-${random_password.key[each.key].result}"
+            name = "KEY"
+            value_from {
+              secret_key_ref {
+                name = "key-${each.key}"
+                key  = "KEY"
+              }
+            }
           }
           env {
             name = "KEY_SPEC"
@@ -186,7 +203,7 @@ resource "kubernetes_job_v1" "key" {
   }
   wait_for_completion = true
   timeouts { create = "20m" }
-  depends_on = [helm_release.wave3, kubernetes_secret_v1.database, kubernetes_config_map_v1.trust, kubernetes_secret_v1.litellm_master]
+  depends_on = [helm_release.wave3, kubernetes_secret_v1.database, kubernetes_config_map_v1.trust, kubernetes_secret_v1.litellm_master, kubernetes_secret_v1.key]
 }
 
 # ---------------------------------------------------------------------------
@@ -227,6 +244,16 @@ resource "kubernetes_config_map_v1" "probe" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
+resource "kubernetes_secret_v1" "probe" {
+  count = local.probe_on ? 1 : 0
+  metadata {
+    name      = "acceptance-probe"
+    namespace = "api"
+  }
+  data       = { KEY = local.acceptance.key, ADMIN_KEY = coalesce(local.acceptance.admin_key, "") }
+  depends_on = [kubernetes_namespace_v1.ns]
+}
+
 resource "kubernetes_job_v1" "probe" {
   count = local.probe_on ? 1 : 0
   metadata {
@@ -249,12 +276,22 @@ resource "kubernetes_job_v1" "probe" {
             value = local.acceptance.api_url
           }
           env {
-            name  = "KEY"
-            value = local.acceptance.key
+            name = "KEY"
+            value_from {
+              secret_key_ref {
+                name = "acceptance-probe"
+                key  = "KEY"
+              }
+            }
           }
           env {
-            name  = "ADMIN_KEY"
-            value = coalesce(local.acceptance.admin_key, "")
+            name = "ADMIN_KEY"
+            value_from {
+              secret_key_ref {
+                name = "acceptance-probe"
+                key  = "ADMIN_KEY"
+              }
+            }
           }
           env {
             name  = "MODEL"
@@ -283,5 +320,5 @@ resource "kubernetes_job_v1" "probe" {
   }
   wait_for_completion = true
   timeouts { create = "40m" }
-  depends_on = [kubernetes_job_v1.key, kubernetes_secret_v1.tenant_storage, helm_release.tenant, kubectl_manifest.control_extras, kubernetes_config_map_v1.probe]
+  depends_on = [kubernetes_job_v1.key, kubernetes_secret_v1.tenant_storage, helm_release.tenant, kubectl_manifest.control_extras, kubernetes_config_map_v1.probe, kubernetes_secret_v1.probe]
 }

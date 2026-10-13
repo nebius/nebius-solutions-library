@@ -5,6 +5,12 @@
 # (`trust_bundle_pem`) that replaces the system roots. Never an insecure TLS switch.
 data "http" "msp_ca" {
   url = local.f.msp_ca_url
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200 && strcontains(self.response_body, "BEGIN CERTIFICATE")
+      error_message = "${local.f.msp_ca_url} did not return a PEM certificate (HTTP ${self.status_code}); the trust bundle is not written from an error page."
+    }
+  }
 }
 
 locals {

@@ -3,7 +3,6 @@
 kubeconfig*
 *.secret.*
 node_modules/
-.terraform.lock.hcl
 .venv-api/
 __pycache__/
 

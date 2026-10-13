@@ -1,8 +1,9 @@
 {{- if index .Values.components "fleet-access" }}
 # Identity of the Kueue MultiKueue manager (control cluster) on this worker: the rules of Kueue's documented
 # create-multikueue-kubeconfig.sh for the integrations this fleet uses (batch/job, jobset) plus the Workloads.
-# The control cluster holds a 48 h TokenRequest token of it as kueue-system/multikueue-<cluster id>
-# (MultiKueueCluster, charts/fleet), minted by the platform stage (stack/platform/secrets.tf, long-lived; rotate with `terraform apply -replace`).
+# The control cluster holds a long-lived ServiceAccount token of it as kueue-system/multikueue-<cluster id>
+# (MultiKueueCluster, charts/fleet), minted by the platform stage (stack/platform/secrets.tf) and carried through its
+# state; rotate with `terraform apply -replace` of that Secret (docs/OPERATIONS.md "Rotation").
 apiVersion: v1
 kind: ServiceAccount
 metadata: { name: multikueue, namespace: kueue-system }

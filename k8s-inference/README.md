@@ -84,8 +84,10 @@ and their limits.
   validated with 0.6.67), `helm`, `kubectl`, and `docker buildx` or `crane` for the platform images. The AWS CLI (`aws`) only for
   `./stack.sh destroy` with `protect_data = false`: it empties the buckets Terraform is about to delete.
 - Optional: an NVIDIA NGC key for NIM images, a Hugging Face token for gated weights. They are read from
-  environment variables (`secrets.*_env` names them), never written into the tfvars; like every generated
-  credential they end up in the platform's Terraform state, so keep the state bucket private (`docs/SECURITY.md`).
+  environment variables (`secrets.*_env` names them), never written into the tfvars; `./stack.sh` refuses to plan
+  or apply while a named variable is unset (set the name to `null` to run a fleet without that secret), so a
+  forgotten export can never delete the Secrets it feeds. Like every generated credential they end up in the
+  platform's Terraform state, so keep the state bucket private (`docs/SECURITY.md`).
 
 ## Quick start
 
@@ -150,7 +152,7 @@ through the API only.
 | `prices` | USD per GPU-hour per platform: the scheduling order and the cost reports |
 | `edge` | public or internal gateways, optional domain, allowed source CIDRs, ACME email, API rate limit |
 | `observability` | retention, alert webhook, cost export |
-| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials |
+| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials (`null` = that feature off; an unset named variable stops `stack.sh`) |
 | `tenants.<name>` | regions, output retention, keys with budgets, optional GPU quota, fair share, dedicated pools, image allow-list |
 | `acceptance` | the probe `tools/verify.sh` runs after the apply (or, with `probe = true`, a Job at apply time): one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
 
@@ -325,7 +327,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.7 |
-| `charts/platform` | 0.1.2 |
+| `charts/platform` | 0.1.3 |
 | `charts/tenant` | 0.3.0 |
 
 ## License
