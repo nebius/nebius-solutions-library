@@ -415,6 +415,24 @@ def _validate_variants(s: dict, kind: str) -> None:
         routing.setdefault("default", "priority")
 
 
+def _retry_policy(r) -> dict:
+    """`retry: {max_attempts 1..10, on_exit_codes [1..255] (default [137, 143])}` of a run class spec."""
+    from schemas import RETRY_MAX_ATTEMPTS
+
+    if not isinstance(r, dict) or "max_attempts" not in r:
+        raise HTTPException(400, "retry: {max_attempts (1..10), on_exit_codes (default [137, 143])}")
+    try:
+        n = int(r["max_attempts"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "retry.max_attempts: 1..10")
+    if not 1 <= n <= RETRY_MAX_ATTEMPTS:
+        raise HTTPException(400, "retry.max_attempts: 1..10")
+    codes = r.get("on_exit_codes", [137, 143])
+    if not isinstance(codes, list) or not codes or any(not isinstance(c, int) or not 1 <= c <= 255 for c in codes):
+        raise HTTPException(400, "retry.on_exit_codes: a non-empty list of exit codes 1..255")
+    return {"maxAttempts": n, "onExitCodes": sorted(set(codes))}
+
+
 def to_entry(spec: dict, managed_by: str = "api") -> dict:
     """Catalog entry (catalog/README.md schema) for a spec; the chart and the job renderer read this."""
     s = validate(spec)
@@ -613,6 +631,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             ),
             # run classes a graph rooted here may bind stages to (docs/JOBS.md "Delegated stages"): operator-owned
             **({"delegates": [str(x) for x in s["delegates"]]} if s.get("delegates") else {}),
+            # the class's bounded retry policy (docs/JOBS.md "Retries"): {maxAttempts, onExitCodes}
+            **({"retry": _retry_policy(s["retry"])} if s.get("retry") is not None else {}),
             "pvcSizeGi": int(s.get("disk_gi", 50)),
             "graceSeconds": int(s.get("grace_seconds", 300)),
             "scratch": s.get("scratch", "network"),

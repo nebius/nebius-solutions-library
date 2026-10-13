@@ -333,3 +333,78 @@ def test_multinode_fleet_run_without_execution_block_submits(client, monkeypatch
     assert r.status_code == 202, r.text
     js = fake.custom[("tenant-demo", "jobsets", r.json()["id"])]
     assert jobs.placement_regions(js) == ["eu-north1"] or jobs.placement_regions(js) == []
+
+
+def test_bounded_retry_policy_counts_only_the_named_exits_within_the_same_job():
+    """docs/JOBS.md "Retries": `execution.retry` (or the class's `retry`) renders at most max_attempts pods of the same
+    Job: an exit in on_exit_codes (137/143 by default, the retained scientific policy) is counted against
+    backoffLimit = max_attempts - 1, any other non-zero exit fails the Job at once, a disruption stays ignored (the
+    platform's own replacement, never an attempt); a finalizer's FailJob codes stay first. The same Job, member and
+    reservation: nothing is admitted again."""
+    job = _run(_ex(retry={"max_attempts": 2}))
+    assert job["spec"]["backoffLimit"] == 1
+    rules = job["spec"]["podFailurePolicy"]["rules"]
+    assert rules[0] == {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]}
+    assert rules[1] == {
+        "action": "Count",
+        "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]},
+    }
+    assert rules[2] == {
+        "action": "FailJob",
+        "onExitCodes": {"containerName": "main", "operator": "NotIn", "values": [0, 137, 143]},
+    }
+    # custom codes, one attempt only: nothing is retried, every non-zero exit fails
+    job = _run(_ex(retry={"max_attempts": 1, "on_exit_codes": [75, 137]}))
+    assert job["spec"]["backoffLimit"] == 0
+    assert job["spec"]["podFailurePolicy"]["rules"][1]["onExitCodes"]["values"] == [75, 137]
+    # the default (no policy): the platform's own rules, unchanged
+    plain = _run(_ex())
+    assert plain["spec"]["backoffLimit"] == 3 and plain["spec"]["podFailurePolicy"]["rules"][1]["action"] == "Ignore"
+    # recovery `fail` and a retry policy together: the disruption is fatal, the named exits still count
+    job = _run(_ex(retry={"max_attempts": 2}, recovery={"on_infrastructure_loss": "fail"}))
+    rules = job["spec"]["podFailurePolicy"]["rules"]
+    assert rules[0]["action"] == "FailJob" and "onPodConditions" in rules[0] and job["spec"]["backoffLimit"] == 1
+    with pytest.raises(Exception):
+        _ex(retry={"max_attempts": 11})
+    with pytest.raises(HTTPException):
+        _ex(retry={"max_attempts": 2, "on_exit_codes": [0]})
+
+
+def test_run_class_retry_policy_is_the_default_and_the_request_overrides_it(monkeypatch):
+    """A run class registered with `retry: {max_attempts: 2}` renders the policy for every run of the class; a request's
+    `execution.retry` overrides it; a finalizer's FailJob codes stay ahead of the retry rules."""
+    import kube
+    import models
+    from test_api import FLEET
+
+    monkeypatch.setattr(kube, "fleet", lambda: FLEET)
+    spec = {
+        "id": "fold-r",
+        "kind": "job",
+        "image": "img",
+        "command": "fold",
+        "gpu": {"count": 1, "classes": ["h100"]},
+        "retry": {"max_attempts": 2},
+        "finalize": {"command": "deliver", "on_exit_codes": [75]},
+    }
+    entry = models.to_entry(spec)
+    assert entry["job"]["retry"] == {"maxAttempts": 2, "onExitCodes": [137, 143]}
+    m = catalog.normalise(entry)
+    job = jobs.build_run("op-fold-r", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"})
+    rules = job["spec"]["podFailurePolicy"]["rules"]
+    assert job["spec"]["backoffLimit"] == 1
+    assert rules[0] == {
+        "action": "FailJob",
+        "onExitCodes": {"containerName": "main", "operator": "In", "values": [75]},
+    }  # delivery pending: the finalizer's, never a retry
+    assert rules[2]["action"] == "Count" and rules[2]["onExitCodes"]["values"] == [137, 143]
+    ex = execution.resolve(execution.ExecutionSpec(retry={"max_attempts": 3, "on_exit_codes": [143]}), "tenant-demo", m)
+    job = jobs.build_run(
+        "op-fold-r2", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"}, ex=ex
+    )
+    assert job["spec"]["backoffLimit"] == 2 and job["spec"]["podFailurePolicy"]["rules"][2]["onExitCodes"][
+        "values"
+    ] == [143]
+    for bad in ({"max_attempts": 0}, {"max_attempts": 2, "on_exit_codes": []}, {"on_exit_codes": [137]}, "2"):
+        with pytest.raises(HTTPException):
+            models.to_entry({**spec, "retry": bad})

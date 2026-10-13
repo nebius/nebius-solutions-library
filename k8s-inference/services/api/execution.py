@@ -108,6 +108,8 @@ def capabilities(ns: str, region: str = REGION) -> dict:
                 "refresh_token",
             ],
         },
+        # bounded application retries of one run (docs/JOBS.md "Retries"): the same Job, member and reservation
+        "retry": {"max_attempts": [1, 10], "default_exit_codes": [137, 143]},
         # automatic continuation after a confirmed infrastructure loss (docs/SCHEDULING.md): what a caller may ask for
         # application finalizer (docs/JOBS.md "Finalization by the application"): the model-owned command that re-delivers
         "finalize": {
@@ -201,6 +203,11 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         if not (STAGE_ID.match(spec.stage.id) and _ref(spec.stage.root, "stage.root")):
             raise HTTPException(400, "execution.stage: id (letters, digits, -) and root are required")
         ex["stage"] = {"root": spec.stage.root, "id": spec.stage.id}
+    if spec.retry:
+        codes = sorted({int(c) for c in spec.retry.on_exit_codes})
+        if not codes or any(not 1 <= c <= 255 for c in codes):
+            raise HTTPException(400, "execution.retry.on_exit_codes: a non-empty list of exit codes 1..255")
+        ex["retry"] = {"max_attempts": int(spec.retry.max_attempts), "on_exit_codes": codes}
     if spec.recovery:
         ex["recovery"] = {"on_infrastructure_loss": spec.recovery.on_infrastructure_loss}
         if spec.recovery.checkpoint_ref:
@@ -421,6 +428,35 @@ def apply_job(job: dict, ex: dict) -> None:
         job["spec"]["podFailurePolicy"] = {
             "rules": [{"action": "FailJob", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]}]
         }
+
+
+def apply_retry(job: dict, retry: dict) -> None:
+    """A bounded retry policy on a single-node run's Job (docs/JOBS.md "Retries"): at most `max_attempts` pods of this
+    Job, each after an exit in `on_exit_codes` (counted against backoffLimit = max_attempts - 1); any other non-zero
+    exit fails the Job at once; a disruption (node drain, preemption) keeps the platform's own rule (ignored: never an
+    attempt, unless recovery `fail` made it fatal). Rules the run class put first (the finalizer's FailJob codes) stay
+    first. The same Job, member, reservation and GPU bound: nothing is admitted or reserved again."""
+    if job.get("kind") != "Job":
+        raise HTTPException(400, "execution.retry applies to single-node runs (a multi-node run restarts as a whole)")
+    codes = list(retry["on_exit_codes"])
+    rules = job["spec"].setdefault("podFailurePolicy", {}).get("rules") or []
+    leading = [r for r in rules if r.get("action") == "FailJob" and "onExitCodes" in r]  # the finalizer's codes
+    disruption = next(
+        (r for r in rules if any(c.get("type") == "DisruptionTarget" for c in r.get("onPodConditions") or [])),
+        {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},
+    )
+    job["spec"]["backoffLimit"] = int(retry["max_attempts"]) - 1
+    job["spec"]["podFailurePolicy"] = {
+        "rules": leading
+        + [
+            disruption,
+            {"action": "Count", "onExitCodes": {"containerName": "main", "operator": "In", "values": codes}},
+            {
+                "action": "FailJob",
+                "onExitCodes": {"containerName": "main", "operator": "NotIn", "values": sorted({0, *codes})},
+            },
+        ]
+    }
 
 
 # ---- bindings: confidential inputs delivered per operation ------------------------------------------------------

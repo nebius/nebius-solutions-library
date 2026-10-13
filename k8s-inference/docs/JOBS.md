@@ -24,6 +24,7 @@ job:
   gpu: "{{gpus}}"                 # nvidia.com/gpu request = limit (0 = CPU job)
   cpu: "8"                        # request; cpuLimit optional (many solvers run without one: a CFS quota throttles them)
   memory: 64Gi                    # request = limit (memoryLimit overrides the limit: what the container may grow to, not guaranteed memory)
+  retry: { maxAttempts: 2, onExitCodes: [137, 143] }   # optional (docs/JOBS.md "Retries"): the class's bounded retry policy; without it the platform's rules below
   ephemeralStorage: 200Gi         # optional: the kubelet's node-local scratch (the writable layer, emptyDirs, /work on local-nvme); ephemeralStorageLimit optional (= the request)
   pvcSizeGi: 100                  # the work volume (/work), ReadWriteOnce, regional
   shm: 16Gi                       # /dev/shm emptyDir
@@ -291,6 +292,7 @@ identity or profile does not exist for a caller.
 | `workload_identity_ref` | an identity of the tenant: the pod runs as the ServiceAccount `identity-<ref>` (same Role as the runner, nothing more) and the main container gets a projected token with the identity's audience at `/var/run/secrets/workload-identity/token` (`AWS_WEB_IDENTITY_TOKEN_FILE` set, plus the identity's `env`, e.g. `AWS_ROLE_ARN`). The kubelet mints it per pod and renews it; a storage provider trusts the cluster's OIDC issuer (`GET /v1/fleet` `execution.oidc_issuers`, Nebius Managed Kubernetes publishes `https://oidc.mk8s.api.nebius.cloud/<cluster id>`) and its own role/trust policy enforces the permitted bucket, paths and actions. The token's subject is the ServiceAccount, so two runs with the same identity are the same principal to the provider; a narrower grant is the provider's (or the application's) to enforce |
 | `private_input_ref` | a binding of the tenant (`PUT /v1/bindings/<ref>` with string data: credentials where no federation exists, a sensitive manifest): copied into a per-operation Secret and mounted read-only into the main container only, under `/var/run/serverless2/private/<key>` (`PRIVATE_INPUT_DIR`). A binding serves one operation and that operation's resumes (another operation gets 409: a new job needs a new grant); a new `PUT` refreshes the files of a running attempt within the kubelet's sync period (no restart); `DELETE` empties them first, then removes everything. Nothing of it enters the Job, the operation's response or the logs |
 | `placement` | `gpu_preference` narrows and orders the model's GPU classes (a class the model does not list is an error), `allowed_clusters` narrows its regions; `fallback_wait_s` bounds how long the run waits for its first choice before the next class is tried (docs/SCHEDULING.md) |
+| `retry` | bounded application retries of this run, within the same Job (one member, one reservation, one GPU bound): `{"max_attempts": 2, "on_exit_codes": [137, 143]}` renders at most two pods, a replacement only after an exit in `on_exit_codes` (the retained scientific policy's SIGKILL/SIGTERM exits by default), any other non-zero exit fails the run at once; infrastructure disruptions stay the platform's (ignored, never an attempt). Overrides the run class's own `retry` policy (docs/JOBS.md "Retries"); single-node runs only |
 | `recovery` | `on_infrastructure_loss: retry` (default: a replacement attempt on the same volume, as above) `fail` (the operation fails on a disruption; resume it with a checkpoint reference) or `recover` (opt-in: after a confirmed infrastructure loss the control API continues the run from its newest acknowledged checkpoint pointer on the next class of its preference, docs/SCHEDULING.md "Automatic recovery after infrastructure loss"; `max_recoveries` 1..3 default 1, `wait_s` default 300, `deadline_s`: the successor inherits the root's remaining deadline). `checkpoint_ref` reaches the run as `CHECKPOINT_REF`; `POST /v1/operations/<id>:resume` with `{"checkpoint_ref": ..., "gpu_class": ...}` resumes a run from a portable checkpoint the application restores itself: no previous volume, any permitted cluster, optionally another class and therefore that class's image |
 
 Every run pod, with or without the block, mounts the runner's Kubernetes token into the uploader only
@@ -347,6 +349,20 @@ What the gate changes on a waiting Job is limited to what Kubernetes allows on a
 annotation, which the main container reads through the downward API. The results are the operations' `result_ref`s
 (bucket prefixes for managed I/O, the application's references for application I/O); the stage's own access to
 them is its own (its bucket credentials, its identity or its binding), as for any run.
+
+## Retries
+
+Without a policy a run keeps the platform's rules: a disruption (node drain, preemption) and a SIGKILL/SIGTERM exit
+(137/143) are ignored and the pod is replaced, any other failure counts against `JOB_BACKOFF_LIMIT` (3). A run class
+may carry its own bounded policy (`retry: {maxAttempts, onExitCodes}` in the job block, `retry: {max_attempts,
+on_exit_codes}` on `POST /v1/models`), and a request may override it with `execution.retry`: at most `max_attempts`
+pods of the same Job, a replacement only after an exit in `on_exit_codes` (counted against `backoffLimit =
+max_attempts - 1`), any other non-zero exit fails the run at once, disruptions still ignored (unless `recovery:
+on_infrastructure_loss: fail` makes them fatal), the finalizer's "delivery pending" exit codes still ahead of it. Every
+attempt is a pod of the same Job: the same operation, member, reservation and GPU bound (GPUs x `timeout_s` covers all
+of them), the same attempt records and epochs; nothing is admitted, reserved or recomputed again, a successful sibling
+stage is untouched. `max_attempts` 1..10; single-node runs only (a multi-node run restarts as a whole). The retained
+scientific policy is `{"max_attempts": 2, "on_exit_codes": [137, 143]}` with `graceSeconds: 60`.
 
 ## Attempts and finalization
 

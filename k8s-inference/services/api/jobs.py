@@ -371,6 +371,8 @@ def build_run(
     if ex:
         execution.apply_run(pod, r, ex, name, S3_ENV_SECRET)  # io mode, identity, private input, profile (docs/JOBS.md)
     if nodes > 1:
+        if (ex or {}).get("retry") or _class_retry(r):
+            raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
     _mount_data(r, pod, [main])
     _mount_weights(r, pod, [main])
@@ -390,7 +392,21 @@ def build_run(
         )
     if ex:
         execution.apply_job(job, ex)
+    retry = (ex or {}).get("retry") or _class_retry(r)
+    if retry:
+        execution.apply_retry(job, retry)  # the request's policy, else the class's (docs/JOBS.md "Retries")
     return job
+
+
+def _class_retry(r: dict) -> dict | None:
+    """A run class's own retry policy (`retry: {maxAttempts, onExitCodes}` in the job block)."""
+    pol = r.get("retry")
+    if not isinstance(pol, dict) or not pol.get("maxAttempts"):
+        return None
+    return {
+        "max_attempts": int(pol["maxAttempts"]),
+        "on_exit_codes": [int(c) for c in pol.get("onExitCodes") or [137, 143]],
+    }
 
 
 # ---------------------------------------------------------------------------------------------------------------

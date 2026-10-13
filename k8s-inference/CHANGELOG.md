@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.57
+
+- Bounded retries (docs/JOBS.md "Retries"): a run class's `retry: {max_attempts, on_exit_codes}` and a request's
+  `execution.retry` render at most `max_attempts` pods of the same Job, a replacement only after an exit in
+  `on_exit_codes` (137/143 by default: the retained scientific policy), any other non-zero exit failing the run at once,
+  disruptions still the platform's; the same member, reservation and GPU bound, no second retry owner. `GET /v1/fleet`
+  → `execution.retry`. Single-node runs only.
+
 ## api 0.11.56
 
 - `timeout_s` of a run and `recovery.deadline_s` accept up to 14 days (7 before): the long-run contract (14-day MD

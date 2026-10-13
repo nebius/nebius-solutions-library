@@ -94,6 +94,19 @@ class StageSpec(BaseModel):
     id: str
 
 
+RETRY_MAX_ATTEMPTS = 10
+
+
+class RetrySpec(BaseModel):
+    """Bounded application retries of one run (docs/JOBS.md "Retries"): at most `max_attempts` pods of the same Job, a
+    replacement only after an exit code in `on_exit_codes` (137/143 by default: the retained scientific policy); any
+    other non-zero exit fails the run at once. Infrastructure disruptions stay the platform's (never counted)."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_attempts: int = Field(ge=1, le=RETRY_MAX_ATTEMPTS)
+    on_exit_codes: list[int] = Field(default_factory=lambda: [137, 143])
+
+
 class ExecutionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")  # an unknown execution field is an error, never silently ignored
     io_mode: Literal["managed", "application"] = "managed"
@@ -104,6 +117,7 @@ class ExecutionSpec(BaseModel):
     recovery: RecoverySpec | None = None
     graph: GraphSpec | None = None
     stage: StageSpec | None = None
+    retry: RetrySpec | None = None  # docs/JOBS.md "Retries": overrides the run class's own policy
 
 
 class BindingRequest(BaseModel):
@@ -371,6 +385,9 @@ class ModelSpec(BaseModel):
     ephemeral_storage_limit: SkipValidation[str | None] = None  # = the request unless given
     delegates: SkipValidation[list[str] | None] = (
         None  # run classes a graph of this root may bind stages to (operator-owned)
+    )
+    retry: SkipValidation[dict[str, Any] | None] = (
+        None  # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
     )
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
@@ -708,6 +725,11 @@ class ExecutionCapabilitiesAsyncPrivateIO(BaseModel):
     binding_keys: list[str] | None = None
 
 
+class ExecutionCapabilitiesRetry(BaseModel):
+    max_attempts: list[int] | None = None  # [min, max]
+    default_exit_codes: list[int] | None = None
+
+
 class ExecutionCapabilities(BaseModel):
     io_modes: list[Literal["managed", "application"]] | None = None
     async_private_io: ExecutionCapabilitiesAsyncPrivateIO | None = None
@@ -718,6 +740,7 @@ class ExecutionCapabilities(BaseModel):
     identity_token_file: str | None = None
     finalize: ExecutionCapabilitiesFinalize | None = None
     recovery: ExecutionCapabilitiesRecovery | None = None
+    retry: ExecutionCapabilitiesRetry | None = None  # docs/JOBS.md "Retries"
 
 
 class FleetInfo(BaseModel):
