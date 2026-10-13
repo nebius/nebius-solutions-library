@@ -222,6 +222,13 @@ terminal only with its stages; a stage carries `stage` (`root`, `id`, `depends_o
 `phase: waiting_for_dependencies`. The rules (sealed graph, one operation per stage, same owner and key, the gate,
 failure, cancel, deadline) are in docs/JOBS.md "Stage composition".
 
+## Weights of an endpoint
+
+`weights: {path, mount_path, env, read_only, prepare}` on an API-managed model (`POST /v1/models`): the region's
+shared weights filesystem under `path` (the model id by default) at `mount_path` (`/weights`). `read_only: true` mounts
+a verified, immutable payload readOnly and skips the prepare step that would create and open the directory;
+`prepare` overrides that step explicitly. Defaults: writable, prepared.
+
 ## Variants
 
 One endpoint may run as several deployments in a region behind its one name, in priority order: a warm floor on

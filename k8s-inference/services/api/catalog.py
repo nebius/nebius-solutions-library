@@ -31,6 +31,11 @@ def _load() -> dict:
 def normalise(doc: dict) -> dict:
     m = dict(doc)
     rt, price, gpu = m.get("runtime") or {}, m.get("price") or {}, m.get("gpu") or {}
+    # the readiness path (an API-managed model's `health_path`, published as endpoints.ready) is kept for the callers
+    # that probe the endpoint before their one inference POST (jobs.build_async READY_URL); the probe endpoints
+    # themselves are not callable endpoints
+    if not m.get("health_path") and (m.get("endpoints") or {}).get("ready"):
+        m["health_path"] = m["endpoints"]["ready"]
     eps = {k: v for k, v in (m.get("endpoints") or {}).items() if k not in ("ready", "live", "metrics")}
     m["name"] = m["id"]
     m["display_name"] = m.get("displayName", m["id"])

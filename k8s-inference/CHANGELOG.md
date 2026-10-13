@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.51
+
+- An endpoint call's caller carries the fleet's CA bundle (the system roots plus the CAs the API itself trusts, the
+  fleet CA of the regional gateways among them: public CA material in the call's own Secret, mounted read-only,
+  `CURL_CA_BUNDLE`/`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`AWS_CA_BUNDLE`): a fleet-CA-signed gateway verifies, public
+  hosts keep verifying, never an insecure switch; nothing is projected on a fleet with public certificates everywhere.
+- An API-managed model's readiness path (`health_path`, published as `endpoints.ready`) survives catalog normalisation:
+  the caller probes it (`READY_URL`) instead of the endpoint's root.
+- A chain's attempts are each member's own (live pods and records per member): a cancelled parent's handle shows its
+  running resumed child RUNNING, as the child's own handle does.
+- Weights of an endpoint: `read_only: true` mounts the verified payload readOnly and skips the prepare step (`prepare`
+  explicit when needed); defaults unchanged.
+
 ## api 0.11.50
 
 - Live sessions (docs/API.md "Sessions"), off unless `sessions.enabled` in terraform.tfvars: `POST /v1/models/<id>:session`

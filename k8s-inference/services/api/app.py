@@ -112,7 +112,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.50", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.51", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1222,10 +1222,20 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         key=lambda j: str(j["metadata"].get("creationTimestamp") or ""),
     )
     name = job["metadata"]["name"]
-    all_attempts = st._attempts(job.get("_pods", []), rows)  # every member's records; the live pods are this member's
+    # every member's attempts from that member's own live pods and records (a member listed without pods, or expired,
+    # stands on its records alone); the queried member's pods are the ones its handle already carries
+    pods_by_member = {m["metadata"]["name"]: m.get("_pods") or [] for m in members}
+    pods_by_member[name] = job.get("_pods") or pods_by_member.get(name) or []
+    all_attempts = []
+    for mid, pods in pods_by_member.items():
+        for a in st._attempts(pods, rows, name=mid):
+            a["operation"] = mid
+            all_attempts.append(a)
+    for a in st._attempts([], [r for r in rows if r.get("operation") not in pods_by_member]):
+        a["operation"] = (by_pod.get(a.get("attempt_id")) or {}).get("operation") or name  # an expired member
+        all_attempts.append(a)
     for a in all_attempts:
         r = by_pod.get(a.get("attempt_id")) or {}
-        a["operation"] = r.get("operation") or name
         a["attempt_role"] = r.get("role") or a.get("attempt_role") or "run"
         a["image"] = r.get("image")
         d = st._secs(a.get("started_at"), a.get("ended_at"))

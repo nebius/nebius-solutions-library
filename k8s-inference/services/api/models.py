@@ -505,11 +505,14 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             runtime["imagePullSecrets"] = [s["pull_secret"]]
         w = s.get("weights") or {}
         if w:
+            read_only = bool(w.get("read_only"))
             runtime["weights"] = {
                 "sharedFilesystem": {
                     "enabled": True,
                     "path": w.get("path", mid),
                     "mountPath": w.get("mount_path", "/weights"),
+                    "readOnly": read_only,
+                    "prepare": w["prepare"] if w.get("prepare") is not None else not read_only,
                 },
                 "env": dict(w.get("env") or {}),
             }

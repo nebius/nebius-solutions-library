@@ -273,6 +273,8 @@ class WeightsSpec(BaseModel):
     path: str | None = None
     mount_path: str | None = None
     env: dict[str, str] | None = None
+    read_only: bool | None = None  # a verified, immutable payload: mounted readOnly, no prepare step (default false)
+    prepare: bool | None = None  # the init step that creates the directory (default: not read_only)
 
 
 class DataSpec(BaseModel):
