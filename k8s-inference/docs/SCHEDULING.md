@@ -121,6 +121,19 @@ and the MultiKueue admission check pending:
    appended; nominations are never withdrawn (Kueue's external-dispatcher
    contract).
 
+Kueue's own incremental dispatcher (`kueue.x-k8s.io/multikueue-dispatcher-incremental`, beta since
+Kueue 0.19, nominating `MultiKueueConfig.spec.clusters` in configuration order, three clusters per
+five-minute round by default, `multiKueue.incrementalDispatcherConfig.stepSize: 1` for one) was
+evaluated against this dispatcher and is not used. The fleet's `MultiKueueConfig` already lists the
+regions in list-price order per profile, so the mode is one Kueue configuration change away, but it
+would not remove the dispatcher (the volume pass and the InfiniBand floors stay), and it does not
+know the region pin: a same-volume resume (`serverless2.nebius/region`) would be nominated by the
+static order, admitted elsewhere, and the volume pass would create an empty work volume there,
+restarting the run from scratch without an error. It also replaces the live free-quota check and
+the spot quotes with a static order. The dispatcher already nominates incrementally, one cluster per
+`RENOMINATE_AFTER_S` round, at most `INTERVAL_S` after quota reservation, so the native mode gains
+seconds of admission latency at best.
+
 Nominations are written with SERVER-SIDE APPLY as field manager `kueue-admission`,
 restating `status.admission` and `status.admissionChecks` as read. Both details are
 load-bearing: Kueue admits a MultiKueue workload by setting `status.clusterName` and

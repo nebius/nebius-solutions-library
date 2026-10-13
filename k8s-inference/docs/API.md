@@ -292,6 +292,17 @@ explanation. The Service and the gateway route of the leader carry a KServe pred
 (`<id>-predictor.models.<domain>`), so authorization, the certificate, LiteLLM and `:invoke` are the same as for
 a one-pod endpoint.
 
+KServe's `LLMInferenceService` (the llm-d integration; multi-node on a LeaderWorkerSet, prefill/decode
+disaggregation, KV-cache-aware routing, Workload Variant Autoscaler) was evaluated for this path and is
+not used. It is a separate KServe install (`kserve-llmisvc-crd`, `kserve-llmisvc-resources` and the runtime
+configs, not in the fleet) and brings the Gateway API Inference Extension (an InferencePool and an endpoint
+picker per service), Envoy AI Gateway, and for scaling WVA with a Prometheus Adapter or KEDA (scale-to-zero only
+through KEDA); its LeaderWorkerSet size follows `parallelism.data / dataLocal` and its HTTPRoute and Gateway
+are its own, so the variant routing, the authorizer on the predictor route, the fleet certificate and the
+request-based idle shutdown above would each need a second implementation. The rendered LeaderWorkerSet
+serves the same vLLM recipes with one object and no further controllers; the LLM-specific features of
+`LLMInferenceService` are the reason to revisit it.
+
 Start-up time: every endpoint (both kinds) reports `startup_s`, `started_at` and `ready_at` of its newest pod
 (`GET /v1/endpoints`): pod created to Ready, which includes a cold node's boot and driver install, the image pull
 and the model load; the Grafana dashboard "Endpoints" shows it as a table by model.
