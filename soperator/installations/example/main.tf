@@ -142,24 +142,32 @@ locals {
 
   # Terraform creates at most one topology of each supported type. Additional
   # custom topologies can only be supplied through Helm values overrides.
+  #
+  # The cluster-default topology drives Slurm node ranking (TopologyParam=BlockAsNodeRank,SwitchAsNodeRank)
+  # and serves partitions without an explicit topology.
+  # Pick the most specific topology the configured NodeSets support:
+  # - block-nvl72 when any GB300 NodeSet exists,
+  # - tree-ib for other GPU NodeSets,
+  # - flat for CPU-only clusters.
+  # gb300_enabled implies gpu_enabled, so exactly one topology is the default.
   slurm_named_topologies = concat(
     [{
       name            = "flat"
-      cluster_default = true
+      cluster_default = !local.gpu_enabled
       type            = "flat"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }],
     local.gpu_enabled ? [{
       name            = "tree-ib"
-      cluster_default = false
+      cluster_default = !local.gb300_enabled
       type            = "tree"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }] : [],
     local.gb300_enabled ? [{
       name            = "block-nvl72"
-      cluster_default = false
+      cluster_default = true
       type            = "block"
       block_sizes     = [coalesce(var.slurm_topology_block_size, local.gb300_nodes_per_nodegroup)]
       nodeset_refs = [
