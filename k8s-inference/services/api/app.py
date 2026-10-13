@@ -52,7 +52,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.37", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.38", lifespan=_lifespan)
 
 
 INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
@@ -958,7 +958,15 @@ def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le
     # the durable attempt records of every listed operation in one query (a pod the worker cluster removed after
     # delivery leaves no live evidence of it; the records are what GET /v1/operations/{id} reports from)
     rows = attempts.for_operations({_root(j) for j in mine}) if attempts.enabled() else {}
-    return [jobs.normalise(j, _price(j), [r for r in rows.get(_root(j), []) if r["operation"] == j["metadata"]["name"]]) for j in mine]
+    marks = attempts.marks_for({j["metadata"]["name"] for j in mine}) if attempts.enabled() else {}
+    out = []
+    for j in mine:
+        name, root = j["metadata"]["name"], _root(j)
+        op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
+        if attempts.enabled():
+            op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name)))
+        out.append(op)
+    return out
 
 
 def _root(job: dict) -> str:

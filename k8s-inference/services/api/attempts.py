@@ -223,13 +223,22 @@ def _marks(operation: str):
         return c.execute("select revision, cancelled_at, successor from operation_marks where operation = %s", (operation,)).fetchone()
 
 
-def lifecycle(operation: str, root: str, rows: list[dict]) -> dict:
+def marks_for(operations: set[str]) -> dict[str, tuple]:
+    """`_marks` for many operations in one query (the operation list)."""
+    if not enabled() or not operations:
+        return {}
+    with db.pool().connection() as c:
+        rows = c.execute("select operation, revision, cancelled_at, successor from operation_marks where operation = any(%s)", (list(operations),)).fetchall()
+    return {r[0]: tuple(r[1:]) for r in rows}
+
+
+def lifecycle(operation: str, root: str, rows: list[dict], marks: tuple | None | bool = False) -> dict:
     """The lifecycle fields of an operation (docs/API.md): root, newest attempt and epoch, revision cursor, export
-    and finalization state."""
+    and finalization state. `marks`: the operation's mark row when the caller fetched it already (`marks_for`)."""
     mine = [r for r in rows if r["operation"] == operation]
     latest = mine[-1] if mine else None
     revision = max([r.get("revision") or 0 for r in rows] + [0])
-    m = _marks(operation)
+    m = _marks(operation) if marks is False else marks
     if m:
         revision = max(revision, m[0] or 0)
     return {"root_operation_id": root, "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,

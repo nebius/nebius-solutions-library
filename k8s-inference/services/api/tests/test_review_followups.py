@@ -132,10 +132,15 @@ def test_operation_list_and_replays_report_from_the_durable_records(client, monk
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == op else [])
     monkeypatch.setattr(attempts, "for_operations", lambda roots: queried.append(set(roots)) or {op: rows})
+    monkeypatch.setattr(attempts, "marks_for", lambda names: queried.append(set(names)) or {op: (5, None, None)})
     one = c.get(f"/v1/operations/{op}", headers=H).json()
     assert one["status"] == "SUCCEEDED" and one["export_state"] == "succeeded"
     listed = {o["id"]: o for o in c.get("/v1/operations", headers=H).json()}
-    assert listed[op]["status"] == "SUCCEEDED" and listed[op]["attempts"][0]["export_state"] == "succeeded" and queried == [{op}]
+    assert listed[op]["status"] == "SUCCEEDED" and listed[op]["attempts"][0]["export_state"] == "succeeded" and queried == [{op}, {op}]
+    # the lifecycle fields of the list are the single lookup's (records and marks fetched once for the whole list)
+    assert {k: listed[op][k] for k in ("export_state", "root_operation_id", "attempt_id", "epoch", "result_ref", "attempt_role")} == \
+           {k: one[k] for k in ("export_state", "root_operation_id", "attempt_id", "epoch", "result_ref", "attempt_role")}
+    assert listed[op]["revision"] == 5
     replay = c.post("/v1/models/hello-run:invoke", json=body, headers={**H, "Idempotency-Key": "review-replay"})
     assert replay.status_code == 200 and replay.json()["id"] == op and replay.json()["status"] == "SUCCEEDED" and replay.json()["export_state"] == "succeeded"
     # without records on file (no database) the list projects from the Job as before
