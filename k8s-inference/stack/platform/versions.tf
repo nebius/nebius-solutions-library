@@ -4,7 +4,7 @@ terraform {
   required_providers {
     nebius = {
       source  = "nebius/nebius"
-      version = "~> 0.6.23"
+      version = ">= 0.6.23"
     }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 3.0" }
     helm       = { source = "hashicorp/helm", version = "~> 3.0" }

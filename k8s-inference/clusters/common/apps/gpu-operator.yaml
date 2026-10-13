@@ -10,7 +10,7 @@ namespace: nvidia-gpu-operator
 wave: '1'
 placement: worker
 kind: helm
-repoURL: cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/chart
+repoURL: cr.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/chart
 chart: gpu-operator
 version: v25.10.0
 helmValues: 'true'

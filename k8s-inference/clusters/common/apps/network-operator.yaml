@@ -9,7 +9,7 @@ namespace: nvidia-network-operator
 wave: '0'
 placement: worker
 kind: helm
-repoURL: cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-network-operator/chart
+repoURL: cr.nebius.cloud/marketplace/nebius/nvidia-network-operator/chart
 chart: network-operator
 version: 25.7.0
 helmValues: 'true'

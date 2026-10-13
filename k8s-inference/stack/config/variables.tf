@@ -79,8 +79,8 @@ variable "fleet" {
       image_cache_size_gib = optional(number, 100)
       # The fleet database: Nebius Managed Service for PostgreSQL in this project and region, databases
       # `platform` (model definitions, the API) and `litellm` (keys, budgets, spend). Backups are the
-      # service's (retention below). The service exists in eu-north1, eu-west1, eu-west2, me-west1,
-      # us-central1 and uk-south1 (docs.nebius.com/postgresql): the control plane must be in one of them.
+      # service's (retention below). The control plane must be in a region where the service is available
+      # (docs.nebius.com/postgresql); the provider refuses the cluster otherwise.
       database = optional(object({
         platform            = optional(string, "cpu-e2")
         preset              = optional(string, "2vcpu-8gb")
@@ -91,7 +91,7 @@ variable "fleet" {
       }), {})
     })
 
-    # GPU regions (Kueue workers). Key = Nebius region name (eu-north1, eu-south1, ...). `id` is the short
+    # GPU regions (Kueue workers). Key = Nebius region name. `id` is the short
     # cluster id used in names, catalog `deployments.<id>`, queue and state keys (default: the region name).
     regions = map(object({
       id         = optional(string)
@@ -151,9 +151,8 @@ variable "fleet" {
         # interconnect = infiniband: the pool's nodes join one Nebius GPU cluster (nebius_compute_v1_gpu_cluster,
         # one per pool) on `infiniband_fabric`, so multi-node jobs run over InfiniBand; needs a full-node preset
         # the platform allows clustering for (8gpu-* on H100/H200/B200/B300, 4gpu-* on GB300; preflight checks
-        # the platform's `allow_gpu_clustering`). Fabrics per region (docs.nebius.com/compute/clusters/gpu):
-        # eu-north1 fabric-2/3/4/6, eu-north2-a; eu-west1 fabric-5; eu-west2 eu-west2-a; uk-south1
-        # uk-south1-a; us-central1 us-central1-a/-b; us-north1 us-north1-a; me-west1 me-west1-a. Nodes get the
+        # the platform's `allow_gpu_clustering`). The fabric names per region are in docs.nebius.com/compute/clusters/gpu;
+        # preflight checks the one given against the region's list. Nodes get the
         # label serverless2.nebius/interconnect=infiniband and the pool's Kueue flavor carries it, so a job
         # class can require it. A reservation (capacity block) must be on the same fabric.
         interconnect      = optional(string, "none")
@@ -366,10 +365,6 @@ variable "fleet" {
   validation {
     condition     = !var.fleet.acceptance.example_endpoint || !var.fleet.acceptance.probe || anytrue(flatten([for tn, t in var.fleet.tenants : [for kn, k in t.keys : k.admin]]))
     error_message = "acceptance.example_endpoint defines the example model through the API, which needs a tenant key with admin = true (or set example_endpoint = false)."
-  }
-  validation {
-    condition     = contains(["eu-north1", "eu-west1", "eu-west2", "me-west1", "us-central1", "uk-south1"], var.fleet.control_plane.region)
-    error_message = "control_plane.region: the fleet database is Nebius Managed PostgreSQL, which exists in eu-north1, eu-west1, eu-west2, me-west1, us-central1 and uk-south1 only (docs.nebius.com/postgresql)."
   }
   validation {
     condition     = var.fleet.control_plane.dedicated || length(var.fleet.regions) == 1
