@@ -370,11 +370,29 @@ OWNER_ANNOTATION = f"{LABEL}/owner"
 def _owned_by(secret: dict, owner: str | None, admin: bool) -> bool:
     """The binding is the caller's: its owner annotation (the stable principal the API records on every operation,
     auth.Principal.owner) equals the caller's. An admin may act on any binding of the tenant. A binding without an
-    owner (written before owners existed) belongs to nobody an ordinary caller can be: it is re-created by its owner."""
+    owner (written before owners existed) belongs to the principal of the operation it is bound to, when the fleet
+    database knows that owner (the in-flight runs of the day owners arrived); unbound, it is nobody's to an ordinary
+    caller: its owner re-creates it."""
     if admin:
         return True
-    current = (secret["metadata"].get("annotations") or {}).get(OWNER_ANNOTATION)
-    return bool(owner) and current == owner
+    if not owner:
+        return False
+    ann = secret["metadata"].get("annotations") or {}
+    current = ann.get(OWNER_ANNOTATION)
+    if current:
+        return current == owner
+    bound = ann.get(f"{LABEL}/operation")
+    return bool(bound) and _operation_owner(bound) == owner
+
+
+def _operation_owner(operation: str) -> str | None:
+    import db
+    import keys
+
+    if not db.enabled():
+        return None
+    rec = keys.operation_owner(operation)
+    return rec[1] if rec else None
 
 
 def put_binding(
@@ -562,16 +580,44 @@ def deliver(
         raise HTTPException(
             409, f"binding {ref!r} is bound to operation {bound}; a new operation needs its own binding"
         )
-    if not bound:
+    if not bound or (owner and not ann.get(OWNER_ANNOTATION)):
+        # the claim (and, for a binding from before owners existed, the owner it continues under) is written with the
+        # Secret's resourceVersion: two operations claiming one binding at once cannot both win (the loser re-reads
+        # and finds it bound to the other: 409)
+        claim = dict(ann)
+        claim[f"{LABEL}/operation"] = root
+        if owner:
+            claim.setdefault(OWNER_ANNOTATION, owner)
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": BINDING_PREFIX + ref,
+                "labels": binding["metadata"].get("labels"),
+                "annotations": claim,
+                **(
+                    {"resourceVersion": str(binding["metadata"]["resourceVersion"])}
+                    if binding["metadata"].get("resourceVersion")
+                    else {}
+                ),
+            },
+            "data": binding.get("data") or {},
+        }
         try:
-            retry(
-                kube.core(region).patch_namespaced_secret,
-                BINDING_PREFIX + ref,
-                ns,
-                {"metadata": {"annotations": {f"{LABEL}/operation": root}}},
-            )
+            retry(kube.core(region).replace_namespaced_secret, BINDING_PREFIX + ref, ns, body)
         except ApiException as e:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+            if e.status == 409:
+                again = _secret(region, ns, BINDING_PREFIX + ref) or {}
+                now_bound = (again.get("metadata", {}).get("annotations") or {}).get(f"{LABEL}/operation")
+                if now_bound == root:
+                    binding = again
+                else:
+                    raise HTTPException(
+                        409,
+                        f"binding {ref!r} was claimed concurrently (by {now_bound}); a new operation needs its own binding",
+                    )
+            else:
+                raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
     copy = {
         "apiVersion": "v1",
         "kind": "Secret",

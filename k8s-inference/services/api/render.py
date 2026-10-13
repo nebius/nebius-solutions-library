@@ -175,6 +175,10 @@ def _uploader(
         {"name": "GPU_CLASS", "value": gpu_class or ""},
         {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
         {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+        # the operation's mode and model, from the pod's own labels: recorded with every attempt (migration 12), so an
+        # operation whose Job is gone keeps its provenance
+        {"name": "OPERATION_MODE", "valueFrom": {"fieldRef": {"fieldPath": f"metadata.labels['{LABEL}/mode']"}}},
+        {"name": "MODEL", "valueFrom": {"fieldRef": {"fieldPath": f"metadata.labels['{LABEL}/model']"}}},
     ]
     if pvc:
         env.append({"name": "PVC_NAME", "value": pvc})

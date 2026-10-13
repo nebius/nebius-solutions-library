@@ -1,0 +1,212 @@
+"""The endpoint caller (services/jobs/bin/call.sh) with application I/O, driven with a stub curl: readiness first, one
+inference POST, the frozen call.json schema, unknown outcomes never re-posted, transfer-only retries, delivery."""
+
+import json
+import os
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+CALL = Path(__file__).resolve().parents[2] / "jobs" / "bin" / "call.sh"
+pytestmark = pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None, reason="bash and jq are needed"
+)
+
+STUB = r"""#!/bin/bash
+# a scripted curl: SCRIPT lists "<method-or-GET> <url-substring> <code> [<body>]" lines consumed in order per matching call;
+# every invocation is appended to CALLS
+args=("$@"); method=GET; out=/dev/null; url=""; data=""
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    -X) method=${args[$((i+1))]}; ((i++));;
+    -o) out=${args[$((i+1))]}; ((i++));;
+    -D|-H|--max-time|--connect-to|-w) ((i++));;
+    --data-binary) data=${args[$((i+1))]}; ((i++));;
+    -sS|-s) ;;
+    *) [[ "${args[$i]}" == http* ]] && url=${args[$i]};;
+  esac
+done
+echo "$method $url ${data:0:160}" >> "$CALLS"
+line=$(grep -n -m1 "^$method [^ ]*$(printf '%s' "$url" | sed 's/[^a-zA-Z0-9/:.?=_-]//g' | cut -c1-200)" "$SCRIPT" 2>/dev/null | head -1)
+if [ -z "$line" ]; then line=$(grep -n -m1 "^$method \* " "$SCRIPT" | head -1); fi
+[ -n "$line" ] || { echo "no script for $method $url" >&2; exit 7; }
+n=${line%%:*}; spec=${line#*:}
+sed -i "${n}d" "$SCRIPT"
+code=$(echo "$spec" | awk '{print $3}'); body=$(echo "$spec" | cut -d' ' -f4-)
+[ "$out" != /dev/null ] && printf '%s' "$body" > "$out"
+[ "$code" = 000 ] && exit 7
+printf '%s 0.5 1.5 %s' "$code" "${#body}"
+exit 0
+"""
+
+
+def _run(tmp_path, binding, script, env=None, work_files=None):
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    for name, content in (work_files or {}).items():
+        (work / name).write_text(content)
+    priv = tmp_path / "private"
+    priv.mkdir(exist_ok=True)
+    for k, v in binding.items():
+        (priv / k).write_text(v)
+    bin_ = tmp_path / "bin"
+    bin_.mkdir(exist_ok=True)
+    stub = bin_ / "curl"
+    stub.write_text(STUB)
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    calls, scr = tmp_path / "calls.txt", tmp_path / "script.txt"
+    calls.write_text("")
+    scr.write_text("\n".join(script) + "\n")
+    e = {
+        **os.environ,
+        "PATH": f"{bin_}:{os.environ['PATH']}",
+        "CALLS": str(calls),
+        "SCRIPT": str(scr),
+        "PRIVATE_INPUT_DIR": str(priv),
+        "IO_MODE": "application",
+        "URL": "https://ep.example/v1/chat",
+        "READY_URL": "https://ep.example/health",
+        "OPERATION": "op-1",
+        "POD_NAME": "op-1-abc",
+        "AUTH_HEADER": "Bearer k",
+        "ADMITTED": "t",
+        "BACKOFF_BASE": "0",
+        **(env or {}),
+    }
+    # call.sh does `cd /work`: run it in a shell that maps /work to the temp directory through a wrapper
+    wrapper = tmp_path / "run.sh"
+    wrapper.write_text(
+        f'#!/bin/bash\nsed "s#cd /work || exit 1#cd {work} || exit 1#" {CALL} > {tmp_path}/call.sh\nexec bash {tmp_path}/call.sh\n'
+    )
+    r = subprocess.run(["bash", str(wrapper)], env=e, capture_output=True, text=True, timeout=120)
+    return r, work, calls.read_text().splitlines()
+
+
+BINDING = {
+    "request.json": '{"messages": []}',
+    "response_url": "https://objects.example/put/response",
+    "call_url": "https://objects.example/put/call",
+    "result_ref": "app://results/1",
+}
+
+
+def test_readiness_then_one_post_then_delivery_with_the_frozen_schema(tmp_path):
+    script = [
+        "GET https://ep.example/health 503",
+        "GET https://ep.example/health 200 ok",
+        'POST https://ep.example/v1/chat 200 {"choices":[]}',
+        "PUT https://objects.example/put/response 200",
+        "PUT https://objects.example/put/call 200",
+    ]
+    r, work, calls = _run(tmp_path, BINDING, script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [c.split()[0] for c in calls] == ["GET", "GET", "POST", "PUT", "PUT"]
+    call = json.loads((work / "call.json").read_text())
+    assert call["capture_complete"] is True and call["http_status"] == 200 and call["attempt_id"] == "op-1-abc"
+    assert set(call["timings"]) == {"posted_at", "first_byte_at", "completed_at", "duration_s"}
+    assert call["timings"]["first_byte_at"].endswith("Z") and "T" in call["timings"]["posted_at"]
+    assert (work / "response.bin").read_text() == '{"choices":[]}' and call["sha256"]
+    assert json.loads((work / "RESULT.json").read_text()) == {
+        "result_ref": "app://results/1",
+        "export": "succeeded",
+        "capture_attempt_id": "op-1-abc",
+    }
+
+
+def test_no_response_is_unknown_and_never_posted_again(tmp_path):
+    script = ["GET https://ep.example/health 200 ok", "POST https://ep.example/v1/chat 000"]
+    r, work, calls = _run(tmp_path, BINDING, script)
+    assert r.returncode == 4 and [c.split()[0] for c in calls] == ["GET", "POST"]
+    call = json.loads((work / "call.json").read_text())
+    assert call["capture_complete"] is False and call["outcome"] == "unknown"
+    assert json.loads((work / "RESULT.json").read_text())["export"] == "failed"
+    # a retried pod of the same operation: the marker stands, nothing is posted
+    script = ["GET https://ep.example/health 200 ok", 'POST https://ep.example/v1/chat 200 {"x":1}']
+    r2, work2, calls2 = _run(tmp_path, BINDING, script, work_files={"posted.json": (work / "posted.json").read_text()})
+    assert r2.returncode == 4 and calls2 == []
+    assert "unknown" in r2.stdout
+
+
+def test_empty_gateway_timeout_is_unknown_and_a_429_is_asked_again(tmp_path):
+    script = ["GET https://ep.example/health 200 ok", "POST https://ep.example/v1/chat 504"]
+    r, work, calls = _run(tmp_path, BINDING, script)
+    assert r.returncode == 4 and len([c for c in calls if c.startswith("POST")]) == 1
+    script = [
+        "GET https://ep.example/health 200 ok",
+        "POST https://ep.example/v1/chat 429",
+        'POST https://ep.example/v1/chat 200 {"ok":1}',
+        "PUT https://objects.example/put/response 200",
+        "PUT https://objects.example/put/call 200",
+    ]
+    r, work, calls = _run(tmp_path / "second", BINDING, script)
+    assert r.returncode == 0 and len([c for c in calls if c.startswith("POST")]) == 2
+
+
+def test_delivered_4xx_fails_the_call_and_a_failed_upload_keeps_the_capture(tmp_path):
+    script = [
+        "GET https://ep.example/health 200 ok",
+        'POST https://ep.example/v1/chat 422 {"error":"bad input"}',
+        "PUT https://objects.example/put/response 200",
+        "PUT https://objects.example/put/call 200",
+    ]
+    r, work, calls = _run(tmp_path, BINDING, script)
+    assert r.returncode == 2 and json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
+    assert json.loads((work / "call.json").read_text())["http_status"] == 422
+    script = [
+        "GET https://ep.example/health 200 ok",
+        'POST https://ep.example/v1/chat 200 {"ok":1}',
+        "PUT https://objects.example/put/response 500",
+        "PUT https://objects.example/put/response 500",
+        "PUT https://objects.example/put/response 500",
+        "PUT https://objects.example/put/response 500",
+        "PUT https://objects.example/put/response 500",
+        "PUT https://objects.example/put/response 500",
+    ]
+    r, work, calls = _run(tmp_path / "second", BINDING, script, env={"CALL_TIMEOUT": "10"})
+    assert r.returncode == 0 and json.loads((work / "RESULT.json").read_text())["export"] == "failed"
+    assert (work / "response.bin").exists() and json.loads((work / "call.json").read_text())["capture_complete"] is True
+
+
+def test_transfer_only_delivers_a_complete_capture_and_refuses_an_incomplete_one(tmp_path):
+    capture = {
+        "operation_id": "op-1",
+        "attempt_id": "op-1-old",
+        "http_status": 200,
+        "content_type": "application/json",
+        "capture_complete": True,
+    }
+    script = ["PUT https://objects.example/put/response 200", "PUT https://objects.example/put/call 200"]
+    r, work, calls = _run(
+        tmp_path,
+        BINDING,
+        script,
+        env={"TRANSFER_ONLY": "1"},
+        work_files={"call.json": json.dumps(capture), "response.bin": "{}"},
+    )
+    assert r.returncode == 0 and [c.split()[0] for c in calls] == ["PUT", "PUT"]
+    assert json.loads((work / "RESULT.json").read_text())["capture_attempt_id"] == "op-1-old"
+    r, work, calls = _run(tmp_path / "second", BINDING, [], env={"TRANSFER_ONLY": "1"})
+    assert r.returncode == 3 and calls == [] and json.loads((work / "RESULT.json").read_text())["export"] == "failed"
+
+
+def test_refresh_supplies_the_urls_with_the_identity_header(tmp_path):
+    binding = {**BINDING, "refresh_url": "https://app.example/refresh", "refresh_token": "rt"}
+    del binding["response_url"]
+    del binding["call_url"]
+    ident = tmp_path / "token"
+    ident.write_text("projected")
+    script = [
+        "GET https://ep.example/health 200 ok",
+        'POST https://app.example/refresh 200 {"input_url":"","response_url":"https://objects.example/fresh/response","call_url":"https://objects.example/fresh/call"}',
+        'POST https://ep.example/v1/chat 200 {"ok":1}',
+        'POST https://app.example/refresh 200 {"response_url":"https://objects.example/fresh/response","call_url":"https://objects.example/fresh/call"}',
+        "PUT https://objects.example/fresh/response 200",
+        "PUT https://objects.example/fresh/call 200",
+    ]
+    r, work, calls = _run(tmp_path, binding, script, env={"IDENTITY_TOKEN_FILE": str(ident)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    refreshes = [c for c in calls if "app.example/refresh" in c]
+    assert len(refreshes) == 2 and '"phase":"input"' in refreshes[0] and '"phase":"output"' in refreshes[1]

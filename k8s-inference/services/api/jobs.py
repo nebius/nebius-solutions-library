@@ -698,6 +698,12 @@ def build_async(
         inp = {}
         if transfer_only:
             env.append({"name": "TRANSFER_ONLY", "value": "1"})
+        elif not model.get("litellm_route"):
+            # the readiness probe before the one inference POST: the endpoint's health path, else an idempotent GET
+            # on the OpenAI models listing or the endpoint's root, through the same gateway
+            base = url[: len(url) - len(model["endpoint_path"])] if url.endswith(model["endpoint_path"]) else url
+            probe = model.get("health_path") or ("/v1/models" if model.get("protocol") == "openai" else "/")
+            env.append({"name": "READY_URL", "value": base + probe})
     else:
         env.append({"name": "REQUEST_BODY", "value": json.dumps(inp)})
     if admitted:
@@ -738,9 +744,14 @@ def build_async(
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(ASYNC_PVC_SIZE_GI)
     job = _job_shell(name, meta, pod, timeout_s)
     job["spec"]["backoffLimit"] = 6
-    # a 4xx from the endpoint is the caller's error (call.sh exit 2): fail the Job, no pod retries
+    # a 4xx from the endpoint is the caller's error (call.sh exit 2): fail the Job, no pod retries; with application
+    # I/O also an unknown inference outcome (exit 4) and nothing to export (exit 3): never a second inference POST
     job["spec"]["podFailurePolicy"]["rules"].insert(
-        0, {"action": "FailJob", "onExitCodes": {"containerName": "main", "operator": "In", "values": [2]}}
+        0,
+        {
+            "action": "FailJob",
+            "onExitCodes": {"containerName": "main", "operator": "In", "values": [2, 3, 4] if ex else [2]},
+        },
     )
     secret = {
         "apiVersion": "v1",

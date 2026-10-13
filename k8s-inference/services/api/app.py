@@ -110,7 +110,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.41", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.42", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -959,11 +959,18 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
             rows = [r for r in attempts.for_operation(current) if r["operation"] == current and r["tenant"] == p.tenant]
             if not rows and previous is not None:
                 return previous  # a verified owner's successor is not created yet
+            last = rows[-1] if rows else {}
             synthetic_job = {
                 "metadata": {
                     "name": current,
-                    "labels": {f"{cfg.LABEL}/tenant": p.tenant, f"{cfg.LABEL}/mode": "run"},
-                    "annotations": {f"{cfg.LABEL}/resumed-from": rows[-1]["root"] if rows else current},
+                    "labels": {
+                        f"{cfg.LABEL}/tenant": p.tenant,
+                        f"{cfg.LABEL}/mode": last.get("mode") or "run",
+                        **(
+                            {f"{cfg.LABEL}/model": last["model"]} if last.get("model") else {}
+                        ),  # the allow-list applies
+                    },
+                    "annotations": {f"{cfg.LABEL}/resumed-from": last.get("root") or current},
                 }
             }
             _check_operation_owner(p, synthetic_job)
@@ -1089,8 +1096,14 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
         for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
         if _may_read_operation(p, j)
         and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
-        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
+        and (
+            (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
+            or (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async"
+        )
     ]
+    role = (
+        "export" if xs and (xs[0]["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async" else "finalize"
+    )
     out: dict = {"finalize_attempts": len(xs)}
     active = [
         j
@@ -1110,7 +1123,7 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
                 "error": None,
                 "attempt_id": latest.get("pod") if latest else None,
                 "epoch": latest.get("epoch") if latest else None,
-                "attempt_role": "finalize",
+                "attempt_role": role,
                 "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region")))
                 if latest
                 else out.get("cluster"),
@@ -1140,11 +1153,9 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         op.update(
             _chain(p, op, job, root)
         )  # a chain member, a followed handle, or a root with retries/successors on record
-    if (
-        op["status"] in ("FAILED", "EXPORT_FAILED")
-        and attempts.enabled()
-        and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "run"
-    ):
+    if op["status"] in ("FAILED", "EXPORT_FAILED") and attempts.enabled():
+        # a run's application finalizer, or an endpoint call's transfer-only retry: while one runs, the root's handle
+        # shows FINALIZING and the active attempt (the identity a refresh broker verifies against the pod's token)
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
         # a transfer-only retry or an application finalizer (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md
@@ -1207,10 +1218,17 @@ def get_result(id: str, p: Principal = Depends(scoped("read:results"))):
         return JSONResponse(res, status_code=409)
     prefix = jobs.output_prefix(job)
     application = (op.get("execution") or {}).get("io_mode") == "application"
-    if op["mode"] == "async":
+    if op["mode"] == "async" and not application:
         res["result"] = artifacts.read_json(
             p.namespace, f"operations/{id}/out/response.json", region or REGION, prefix=prefix
         )
+    elif op["mode"] == "async":
+        # application-owned output (docs/JOBS.md "Endpoint calls with private input and application-owned output"): the
+        # capture is in the application's storage; `result_ref` names it, `export_state` says it arrived; a FAILED
+        # call (the endpoint answered 4xx) is delivered the same way and reports both
+        res["result"] = None
+        res["exported_by"] = op.get("exported_by")
+        res["capture_attempt_id"] = op.get("attempt_id")
     res["artifacts"] = (
         artifacts.list_outputs(p.namespace, id, region or REGION, prefix)
         if op["mode"] == "run" and not application

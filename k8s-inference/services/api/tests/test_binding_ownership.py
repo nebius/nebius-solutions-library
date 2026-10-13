@@ -97,3 +97,58 @@ def test_replacement_is_a_compare_and_swap_and_owners_never_change(client, monke
     monkeypatch.setattr(ex, "tenant_config", lambda *a, **k: {"identities": {}, "execution_profiles": {}})
     assert c.post("/v1/models/hello-run:invoke", json=body, headers=P1).status_code == 404
     assert json.loads(json.dumps(c.get("/v1/bindings", headers=ADMIN).json()))[0]["owner"] is None
+
+
+def test_claim_is_a_compare_and_swap_and_in_flight_ownerless_bindings_continue(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """Two operations claiming one binding at once: one wins, the other sees 409. A binding written before owners
+    existed and bound to a running operation continues under that operation's owner (its continuations deliver), while
+    another principal still cannot touch it."""
+    c, cluster = client
+    _two(monkeypatch)
+    monkeypatch.setattr(ex, "tenant_config", lambda *a, **k: {"identities": {}, "execution_profiles": {}})
+    # an ownerless binding bound to p1's running operation (the state of the day before the fence)
+    r = c.put("/v1/bindings/legacy", json={"data": {"input.json": "private"}}, headers=P1)
+    body = {"mode": "run", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "legacy"}}
+    oid = c.post("/v1/models/hello-run:invoke", json=body, headers=P1).json()["id"]
+    sec = cluster.secrets[("tenant-demo", "binding-legacy")]
+    del sec["metadata"]["annotations"][ex.OWNER_ANNOTATION]
+    assert sec["metadata"]["annotations"]["serverless2.nebius/operation"] == oid
+    # p2 cannot see, replace or revoke it; p1 can (the durable owner of the bound operation is p1)
+    assert (
+        c.get("/v1/bindings", headers=P2).json() == []
+        and c.put("/v1/bindings/legacy", json={"data": {"input.json": "x"}}, headers=P2).status_code == 404
+    )
+    assert [b["ref"] for b in c.get("/v1/bindings", headers=P1).json()] == ["legacy"]
+    # p1's continuation delivers the binding again and the owner is adopted on the way
+    cluster.jobs[("tenant-demo", oid)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    r = c.post(f"/v1/operations/{oid}:resume", headers=P1, json={})
+    assert r.status_code == 202, r.text
+    assert cluster.secrets[("tenant-demo", f"{r.json()['id']}-private")]["data"] == {"input.json": "private"}
+    adopted = cluster.secrets[("tenant-demo", "binding-legacy")]["metadata"][
+        "annotations"
+    ]  # the claim replaced the Secret
+    assert adopted[ex.OWNER_ANNOTATION] == c.get("/v1/bindings", headers=P1).json()[0]["owner"]
+    # the claim races: a concurrent writer changed the Secret between read and replace
+    c.put("/v1/bindings/raced", json={"data": {"input.json": "private"}}, headers=P1)
+    raced = cluster.secrets[("tenant-demo", "binding-raced")]
+    raced["metadata"]["resourceVersion"] = "7"
+    real_replace = cluster.replace_namespaced_secret
+
+    def conflict_once(name, ns, body):
+        if name == "binding-raced" and not getattr(conflict_once, "done", False):
+            conflict_once.done = True
+            raced["metadata"]["annotations"]["serverless2.nebius/operation"] = "op-other"
+            from kubernetes.client.rest import ApiException
+
+            raise ApiException(status=409, reason="Conflict")
+        return real_replace(name, ns, body)
+
+    monkeypatch.setattr(cluster, "replace_namespaced_secret", conflict_once)
+    r = c.post(
+        "/v1/models/hello-run:invoke",
+        json={**body, "execution": {**body["execution"], "private_input_ref": "raced"}},
+        headers={**P1, "Idempotency-Key": "race"},
+    )
+    assert r.status_code == 409 and "claimed concurrently" in r.json()["detail"]

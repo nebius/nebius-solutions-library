@@ -12,9 +12,10 @@
 # result_ref is handed to the uploader's attempt record through RESULT.json. The capture is written to the retained
 # work volume first (response.bin, then call.json last: the completion marker) and uploaded after; a failed upload
 # leaves export=failed for the record (EXPORT_FAILED) and the capture on the volume for a transfer-only retry
-# (TRANSFER_ONLY=1: no inference, upload what is captured; nothing complete -> exit 3). A 502/503/504 with no
-# response is retried like a saturated endpoint (the gateway admits the call once more under the same admission
-# token); a response with any status is a capture: inference that may have run is never repeated silently.
+# (TRANSFER_ONLY=1: no inference, upload what is captured; nothing complete -> exit 3). Readiness is probed first
+# with an idempotent GET (READY_URL) so the one inference POST meets an endpoint that answers; the POST is made
+# exactly once per operation (posted.json is the marker): no response means an unknown outcome (exit 4, FAILED),
+# never a second POST; a response with any status is a capture and is delivered.
 #
 # The URL is the endpoint's gateway hostname (TLS verified, key in AUTH_HEADER, ADMITTED = the API's admission token
 # so the gateway hook counts the call once); CONNECT_TO (host:443:svc:443) routes the connection to the gateway's
@@ -29,7 +30,11 @@ curl_auth=()
 [ -n "${ADMITTED:-}" ] && curl_auth+=(-H "x-serverless2-admitted: $ADMITTED")
 [ -n "${CONNECT_TO:-}" ] && curl_auth+=(--connect-to "$CONNECT_TO")
 
-backoff() { local e=$1; [ "$e" -gt 6 ] && e=6; local s=$(( 5 * (1 << e) )); [ $s -gt 300 ] && s=300; sleep $s; }
+backoff() {   # exponential, BACKOFF_BASE (5 s) x 2^n, capped at BACKOFF_MAX (300 s)
+  local e=$1; [ "$e" -gt 6 ] && e=6
+  local s=$(( ${BACKOFF_BASE:-5} * (1 << e) )); [ "$s" -gt "${BACKOFF_MAX:-300}" ] && s=${BACKOFF_MAX:-300}
+  sleep "$s"
+}
 
 binding() { [ -n "$PRIV" ] && [ -f "$PRIV/$1" ] && cat "$PRIV/$1"; }
 
@@ -143,36 +148,67 @@ else
   finish failed "the binding has neither request.json nor input_url"; exit 2
 fi
 
+# exactly one inference POST per operation: a previous attempt of this pod's Job that posted and died leaves
+# posted.json without call.json; its outcome is unknown and is never re-posted (exit 4: the operation FAILS with that
+# error, nothing to export; the application decides whether to submit again)
+if [ -f posted.json ]; then
+  echo "a previous attempt posted the request ($(jq -r '.attempt_id' posted.json) at $(jq -r '.posted_at' posted.json)) and left no capture: the inference outcome is unknown; not posting again"
+  jq -cn --arg op "${OPERATION:-}" --arg a "$(jq -r '.attempt_id' posted.json)" '{operation_id:$op, attempt_id:$a, http_status:0, capture_complete:false, outcome:"unknown"}' > call.json.tmp && mv call.json.tmp call.json
+  finish failed "inference outcome unknown: the request was posted by a previous attempt and no response was captured"
+  echo "inference outcome unknown (posted, no response captured)" > /dev/termination-log 2>/dev/null
+  exit 4
+fi
+
+# readiness first, with an idempotent GET through the same gateway (a cold or scaled-to-zero endpoint is woken by it and
+# answers when it serves); the inference POST goes to an endpoint that answers, so the edge never cuts a cold start
+if [ -n "${READY_URL:-}" ]; then
+  n=0
+  while :; do
+    code=$(curl -sS -o out/ready.txt -w '%{http_code}' "$READY_URL" "${curl_auth[@]}" --max-time 120 2>out/ready_error.txt) || code=000
+    n=$((n + 1)); echo "$(date -u +%FT%TZ) readiness probe $n -> HTTP $code"
+    case "$code" in 2*|405) break;; 401|403) echo "readiness probe refused ($code): $(head -c 200 out/ready.txt)"; finish failed "the endpoint refused the call's key ($code)"; exit 2;; esac
+    backoff $n
+  done
+fi
+
 n=0
 while :; do
-  posted=$(date -u +%FT%T.%3NZ)
+  posted_epoch=$(date -u +%s)
+  jq -cn --arg a "${POD_NAME:-$(hostname)}" --argjson e "$posted_epoch" '{attempt_id:$a, posted_at:($e|todate)}' > posted.json.tmp && mv posted.json.tmp posted.json
   code=$(curl -sS -o response.bin -D headers.txt -w '%{http_code} %{time_starttransfer} %{time_total} %{size_download}' -X POST "$URL" \
          -H 'Content-Type: application/json' "${curl_auth[@]}" --data-binary @request.bin --max-time "${CALL_TIMEOUT:-3600}" 2>out/last_error.txt) || code="000 0 0 0"
   read -r http t_first t_total size <<< "$code"
-  n=$((n + 1)); echo "$(date -u +%FT%TZ) attempt $n -> HTTP $http (${t_total}s, ${size} bytes)"
-  case "$http" in
-    000|502|503|504)
-      # no response from the endpoint (not ready, saturated, or the edge gave up before the first byte): wait and ask
-      # again; the endpoint saw the same admitted call, the operation's deadline bounds the waiting
-      [ -s response.bin ] && [ "$http" != 000 ] && break;;
-    408|429) ;;
-    *) break;;
-  esac
-  backoff $n
+  n=$((n + 1)); echo "$(date -u +%FT%TZ) inference POST $n -> HTTP $http (${t_total}s, ${size} bytes)"
+  if [ "$http" = 429 ] && [ "$n" -lt 30 ]; then
+    rm -f posted.json; backoff $n; continue   # rejected at the edge before the model (per-key rate window): safe to ask again
+  fi
+  break
 done
+if [ "$http" = 000 ] || { [ "$size" = 0 ] && [ "${http:0:1}" = 5 ]; }; then
+  # no response: the connection broke or the edge gave up before the first byte; the model may have run: unknown
+  jq -cn --arg op "${OPERATION:-}" --arg a "${POD_NAME:-$(hostname)}" --argjson st "${http:-0}" --argjson e "$posted_epoch" \
+     '{operation_id:$op, attempt_id:$a, http_status:$st, capture_complete:false, outcome:"unknown", timings:{posted_at:($e|todate)}}' > call.json.tmp && mv call.json.tmp call.json
+  finish failed "inference outcome unknown: no response was captured (HTTP $http, $(head -c 200 out/last_error.txt | tr '\n' ' '))"
+  echo "inference outcome unknown (HTTP $http, no response captured)" > /dev/termination-log 2>/dev/null
+  exit 4
+fi
 ctype=$(grep -i '^content-type:' headers.txt | tail -1 | cut -d' ' -f2- | tr -d '\r')
 sha=$(sha256sum response.bin | cut -d' ' -f1)
-completed=$(date -u +%FT%T.%3NZ)
+completed_epoch=$(date -u +%s)
 jq -cn --arg op "${OPERATION:-}" --arg a "${POD_NAME:-$(hostname)}" --argjson st "${http:-0}" --arg ct "${ctype:-application/octet-stream}" \
-   --argjson sz "$(stat -c %s response.bin)" --arg sha "$sha" --arg p "$posted" --arg c "$completed" --argjson tf "${t_first:-0}" --argjson tt "${t_total:-0}" \
+   --argjson sz "$(stat -c %s response.bin)" --arg sha "$sha" --argjson p "$posted_epoch" --argjson c "$completed_epoch" --argjson tf "${t_first:-0}" --argjson tt "${t_total:-0}" \
    '{operation_id:$op, attempt_id:$a, http_status:$st, content_type:$ct, size_bytes:$sz, sha256:$sha,
-     timings:{posted_at:$p, first_byte_s:$tf, completed_at:$c, duration_s:$tt}, capture_complete:true}' > call.json.tmp && mv call.json.tmp call.json
+     timings:{posted_at:($p|todate), first_byte_at:(($p + ($tf|floor))|todate), completed_at:($c|todate), duration_s:$tt}, capture_complete:true}' > call.json.tmp && mv call.json.tmp call.json
 CAPTURE_ATTEMPT="${POD_NAME:-$(hostname)}"
 case "$http" in
   2*) ;;
   4*) echo "the endpoint answered $http (the caller's error): the response is captured and delivered as is";;
   *) echo "the endpoint answered $http: captured and delivered as is";;
 esac
-if deliver; then finish succeeded; [ "${http:0:1}" = 4 ] && exit 2; exit 0; fi
+if deliver; then
+  finish succeeded
+  if [ "${http:0:1}" = 4 ]; then echo "endpoint answered HTTP $http (delivered)" > /dev/termination-log 2>/dev/null; exit 2; fi
+  exit 0
+fi
 finish failed "upload of the capture failed; the capture is kept on the work volume for POST /v1/operations/<id>:export"
 exit 0

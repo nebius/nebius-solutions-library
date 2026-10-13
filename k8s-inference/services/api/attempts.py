@@ -125,10 +125,13 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         )
         c.execute(
             """insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
-                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster)
-                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s)
+                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster,
+                        mode, model, io_mode)
+                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s)
                      on conflict (operation, pod) do update set
                         cluster = coalesce(excluded.cluster, attempts.cluster),
+                        mode = coalesce(excluded.mode, attempts.mode), model = coalesce(excluded.model, attempts.model),
+                        io_mode = coalesce(excluded.io_mode, attempts.io_mode),
                         status = excluded.status, exit_code = excluded.exit_code, node = coalesce(excluded.node, attempts.node),
                         pool = coalesce(excluded.pool, attempts.pool), image = coalesce(excluded.image, attempts.image),
                         image_digest = coalesce(excluded.image_digest, attempts.image_digest),
@@ -162,6 +165,9 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                 int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
                 str(body.get("role") or "run"),
                 body.get("cluster") or None,
+                body.get("mode") or None,
+                body.get("model") or None,
+                body.get("io_mode") or None,
             ),
         )
         return _row(c, operation, pod)
@@ -169,7 +175,8 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
 
 COLS = (
     "operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
-    "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster"
+    "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster, "
+    "mode, model, io_mode"
 )
 
 
@@ -289,8 +296,9 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     return {
         "id": operation,
         "name": None,
-        "model": None,
-        "mode": "run",
+        # provenance that outlives the Job (migration 12): the operation's mode, model and I/O mode
+        "model": last.get("model"),
+        "mode": last.get("mode") or "run",
         "status": status,
         "region": last.get("region"),
         "tenant": tenant,
@@ -306,7 +314,7 @@ def synthesize(operation: str, tenant: str) -> dict | None:
         "image": last.get("image"),
         "resumable": False,
         "nodes": 1,
-        "execution": None,
+        "execution": {"io_mode": last["io_mode"]} if last.get("io_mode") else None,
         "reason": "the Job object expired; this is the durable record",
         "cost": None,
         "gpu_seconds": None,

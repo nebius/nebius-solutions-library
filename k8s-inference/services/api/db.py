@@ -189,6 +189,14 @@ create table if not exists operation_marks (
     create index if not exists key_run_members_root on key_run_members (root, created_at);
     create index if not exists key_run_members_key_state on key_run_members (key_hash, state);
     """,
+    # 12: the provenance an operation keeps after its Job is gone (attempts.synthesize): its mode (run | async), its
+    # model and its I/O mode, so the durable result path stays the operation's (application-owned output is never
+    # read from the platform bucket) and the key's model allow-list still applies
+    """
+    alter table attempts add column if not exists mode text;
+    alter table attempts add column if not exists model text;
+    alter table attempts add column if not exists io_mode text;
+    """,
 ]
 
 _pool = None

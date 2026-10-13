@@ -540,3 +540,55 @@ def test_late_record_of_a_replaced_attempt_closes_accounting_without_promoting(d
             "root-a",
             {"operation": "root", "status": "succeeded", "gpus": 1, "ended_at": "2026-10-13T08:00:26Z"},
         )
+
+
+def test_durable_rows_keep_mode_model_and_io_mode(database):
+    """An operation whose Job is gone keeps its provenance (migration 12): an application-I/O endpoint call stays an
+    async application call (its result is its reference, never the platform bucket) and its model still applies."""
+    db.migrate()
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "op-call-a",
+        {
+            "operation": "op-call",
+            "status": "started",
+            "gpus": 0,
+            "mode": "async",
+            "model": "llm-example",
+            "io_mode": "application",
+        },
+    )
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "op-call-a",
+        {
+            "operation": "op-call",
+            "status": "succeeded",
+            "gpus": 0,
+            "export": "succeeded",
+            "result_ref": "app://r/1",
+            "ended_at": "2026-10-13T20:00:00Z",
+            "io_mode": "application",
+        },
+    )
+    rows = attempts.for_operation("op-call")
+    assert rows[-1]["mode"] == "async" and rows[-1]["model"] == "llm-example" and rows[-1]["io_mode"] == "application"
+    op = attempts.synthesize("op-call", "demo")
+    assert op["mode"] == "async" and op["model"] == "llm-example" and op["execution"] == {"io_mode": "application"}
+    assert op["status"] == "SUCCEEDED" and op["result_ref"] == "app://r/1"
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "op-run-a",
+        {
+            "operation": "op-run",
+            "status": "failed",
+            "gpus": 1,
+            "started_at": "2026-10-13T19:00:00Z",
+            "ended_at": "2026-10-13T19:10:00Z",
+        },
+    )
+    plain = attempts.synthesize("op-run", "demo")
+    assert plain["mode"] == "run" and plain["execution"] is None and plain["model"] is None

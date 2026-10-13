@@ -214,3 +214,95 @@ def test_bounded_key_is_admitted_on_async_calls_and_the_fleet_declares_the_contr
     marker = fleet["execution"]["async_private_io"]
     assert marker["version"] == 1 and marker["refresh"] is True and marker["retained_export"] is True
     assert "refresh_url" in marker["binding_keys"] and "result_ref" in marker["binding_keys"]
+
+
+def test_application_result_is_the_reference_and_an_export_retry_is_followed(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    c, cluster = client
+    _tenant(monkeypatch)
+    _bind(c, "call-5")
+    body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-5"}}
+    oid = c.post("/v1/models/llm-example:invoke", json=body, headers=H).json()["id"]
+    job = cluster.jobs[("tenant-demo", oid)]
+    job["status"] = {"conditions": [{"type": "Complete", "status": "True"}], "completionTime": "2026-10-13T08:00:00Z"}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
+    rows = [{**_record(oid, f"{oid}-a", export="failed"), "operation": oid, "io_mode": "application"}]
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
+    read = []
+    monkeypatch.setattr(api.artifacts, "read_json", lambda *a, **k: read.append(a) or {"never": True})
+    res = c.get(f"/v1/operations/{oid}/result", headers=H).json()
+    assert res["status"] == "EXPORT_FAILED" and res["result"] is None and read == []  # never the platform bucket
+    x1 = c.post(f"/v1/operations/{oid}:export", headers=H).json()["id"]
+    rows.append({**_record(x1, f"{x1}-b", st="started", export=None), "operation": x1, "root": oid})
+    rows[-1].pop("ended_at")
+    got = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert (
+        got["status"] == "FINALIZING"
+        and got["finalizing_by"] == x1
+        and got["attempt_id"] == f"{x1}-b"
+        and got["attempt_role"] == "export"
+    )
+    rows[-1].update(
+        {
+            "status": "succeeded",
+            "export_state": "succeeded",
+            "result_ref": "app://results/run-7",
+            "ended_at": "2026-10-13T08:10:00Z",
+        }
+    )
+    cluster.jobs[("tenant-demo", x1)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    res = c.get(f"/v1/operations/{oid}/result", headers=H).json()
+    assert res["status"] == "SUCCEEDED" and res["result_ref"] == "app://results/run-7" and res["exported_by"] == x1
+
+
+def test_a_gone_private_call_keeps_its_provenance_on_the_durable_path(client, admin_keys, fake_keys, monkeypatch):
+    """After the Job is gone the operation is served from its rows: an application call's result is its reference (no
+    platform bucket read), another principal still gets 404, and the key's model allow-list still applies."""
+    c, _ = client
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    oid = "op-llm-example-gone"
+    rows = [
+        {
+            **_record(oid, f"{oid}-a", export="succeeded", result_ref="app://results/9"),
+            "operation": oid,
+            "root": oid,
+            "tenant": "demo",
+            "mode": "async",
+            "model": "llm-example",
+            "io_mode": "application",
+        }
+    ]
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == oid else [])
+    synth = {
+        "id": oid,
+        "mode": "async",
+        "model": "llm-example",
+        "status": "SUCCEEDED",
+        "execution": {"io_mode": "application"},
+        "result_ref": "app://results/9",
+        "export_state": "succeeded",
+        "attempts": [],
+        "region": "eu-north1",
+    }
+    monkeypatch.setattr(attempts, "synthesize", lambda operation, tenant: dict(synth) if operation == oid else None)
+    read = []
+    monkeypatch.setattr(api.artifacts, "read_json", lambda *a, **k: read.append(a) or {"never": True})
+    fake_keys.owners[oid] = ("demo", auth.Principal("sk-good", "demo", KEY_INFO).owner, "llm-example")
+    res = c.get(f"/v1/operations/{oid}/result", headers=H)
+    assert res.status_code == 200, res.text
+    assert res.json()["result_ref"] == "app://results/9" and res.json()["result"] is None and read == []
+    other = {**KEY_INFO, "max_budget": None, "metadata": {"tenant": "demo", "legacy": {"principal_id": "someone-else"}}}
+    restricted = {**KEY_INFO, "models": ["hello-run"]}
+
+    async def info(key):
+        return dict({"sk-other": other, "sk-restricted": restricted, "sk-good": KEY_INFO}[key])
+
+    monkeypatch.setattr(auth, "key_info", info)
+    assert c.get(f"/v1/operations/{oid}/result", headers={"Authorization": "Bearer sk-other"}).status_code == 404
+    fake_keys.owners.pop(oid, None)  # no durable owner record: the model allow-list alone still fences the key
+    assert c.get(f"/v1/operations/{oid}/result", headers={"Authorization": "Bearer sk-restricted"}).status_code == 404
