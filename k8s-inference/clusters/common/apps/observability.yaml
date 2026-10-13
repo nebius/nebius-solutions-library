@@ -2,6 +2,5 @@ name: observability
 component: observability
 namespace: monitoring
 wave: '2'
-hubOnly: 'false'
 placement: all
 kind: manifests

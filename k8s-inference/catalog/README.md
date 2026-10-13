@@ -2,7 +2,7 @@
 
 One file per model in `catalog/models/<id>.yaml`, one schema for endpoints and
 run classes (the API reads this directory; `services/api/catalog.py`).
-Endpoints are defined through the API (`POST /v1/models`), which renders the endpoint's objects (`services/api/render_endpoint.py`; `charts/endpoint` is the reference rendering) with the
+Endpoints are defined through the API (`POST /v1/models`), which renders the endpoint's objects (`services/api/render_endpoint.py`) with the
 entry as its values file, once per cluster named in its `deployments` (and not `paused`); this directory
 holds the built-in run classes only. Nothing is rendered into the repository. Run-class
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
@@ -32,7 +32,7 @@ concurrency: 1                 # sessions/requests one replica handles at once
 coldStartClass: fast | medium | slow     # informational
 price: { unit: call | audio-minute | 1k-tokens, usd: 0.05 }
 scaleToZero: true
-runtime:                       # charts/endpoint values (see charts/endpoint/values.yaml)
+runtime:                       # runtime settings (services/api/render_endpoint.py DEFAULTS lists every one with its default)
   image: <registry>/<repo>@sha256:...
   command: [...]; args: [...]; env: [...]
   resources: { gpu: 1, cpu: "4", memory: 16Gi }
@@ -42,7 +42,7 @@ runtime:                       # charts/endpoint values (see charts/endpoint/val
   volumes: [{ name: cache, mountPath: /cache, sizeLimit: 8Gi }]
   weights:                     # optional: weights on the region's shared filesystem (PVC models/weights-shared, subPath <path>)
     sharedFilesystem: { enabled: true, path: <id>, mountPath: /weights }
-    env: { HF_HOME: /weights } # or NIM_CACHE_PATH, whatever the runtime reads; charts/endpoint/README.md
+    env: { HF_HOME: /weights } # or NIM_CACHE_PATH, whatever the runtime reads
                                # hub only until the eu-south1 filesystem quota (compute.filesystem.size.network-ssd)
                                # is granted: eu-south1 has no `weights-shared` claim, the pod would stay Pending
   readinessProbe: { path: /readyz }

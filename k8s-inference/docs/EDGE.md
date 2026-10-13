@@ -26,7 +26,7 @@ Tenant policies permit gateway/API access and the existing artifact path, while 
 
 Validate policy attachment, an allowed key, another model's key, an exhausted key, a blocked key, a WebSocket handshake and an untrusted certificate on a test fleet. Check both regional and control API paths. Gateway proxy replicas and disruption budgets are configured in the shared gateway manifests; test node-drain behavior against the customer's availability requirement.
 
-Image pre-pull, Zot/Spegel caching and shared weights remain independent of gateway policy; see `IMAGES.md` and `charts/endpoint/README.md`.
+Image pre-pull, Zot/Spegel caching and shared weights remain independent of gateway policy; see `IMAGES.md`.
 
 ## Certificates of the GPU regions: the fleet CA (2026-10-10)
 

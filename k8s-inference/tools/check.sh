@@ -31,7 +31,6 @@ render() { # a Terraform expression over terraform.tfvars.example (or TFVARS_EXA
 check_terraform() {
   step "terraform fmt"
   terraform fmt -check -recursive "$ROOT/stack"
-  [ -d "$ROOT/infra" ] && terraform fmt -check -recursive "$ROOT/infra"
   step "terraform validate: every stage and module"
   for d in stack/config stack/cloud stack/platform stack/modules/cluster stack/modules/tenant-region; do
     tf "$d" init -backend=false -input=false > /dev/null
@@ -110,7 +109,6 @@ PYEOF2
     for f in "$TMP"/endpoint-*-"$cid".yaml; do
       [ -f "$f" ] || continue
       "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$f" > /dev/null; echo "   ok render_endpoint $(basename "$f" .yaml)"
-      helm template m "$ROOT/charts/endpoint" -f "$f" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint $(basename "$f" .yaml)"
     done
   done
   step "example model (stack/platform/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
@@ -133,7 +131,6 @@ json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"
 EOF
   for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
     "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$TMP/llm-example.yaml" > /dev/null; echo "   ok render_endpoint llm-example $cid"
-    helm template llm-example "$ROOT/charts/endpoint" -f "$TMP/llm-example.yaml" --set "cluster=$cid" > /dev/null; echo "   ok charts/endpoint llm-example $cid"
   done
   # The image cache as an add-on (docs/IMAGES.md): the example with `images.cache.enabled = false` renders both charts
   # without the cache's objects and with the platform images pulled from the registry itself.

@@ -50,7 +50,7 @@ from typing import Literal
 from kubernetes.client.rest import ApiException
 import db, kube, render_endpoint
 from pod_metadata import normalise as normalise_pod_metadata
-from config import ACME_ISSUER, API_NAMESPACE, MODELS_ISSUER, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION, ROUTER_KEY
+from config import MODELS_ISSUER, ENDPOINT_DOMAIN, ENDPOINT_DOMAINS, GATEWAY_NAMESPACE, IMAGES_HOST, INFINIBAND_CLAIM_TEMPLATE, MODELS_CERTIFICATE, IMAGES_SOURCE, LABEL, LITELLM_MASTER_KEY, LITELLM_URL, MODELS_NAMESPACE, MULTINODE_MAX_NODES, REGION, ROUTER_KEY
 from resilience import retry
 
 log = logging.getLogger("api")
@@ -167,37 +167,6 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
     return None
 
 
-# The raw Knative vocabulary this API accepted before 0.11.12: `metric: concurrency | rps` with a raw per-replica
-# scale target and a separate `utilization_percent`; a block without a metric meant raw concurrency. Definitions
-# written then are still in the fleet database and in the regional ConfigMap copies.
-RAW_METRICS = {"concurrency": "concurrency_utilization", "rps": "requests_per_second"}
-
-
-def native_scaling(scaling: dict, stored: bool = False) -> dict:
-    """The ONE place that reads a scaling block written in the raw Knative vocabulary (RAW_METRICS) and returns the
-    native ScalingSpec policy that renders the same Knative scale target: raw concurrency T at U % becomes replica
-    concurrency T with target U % (T is then also the hard per-replica limit, as for every native policy); raw rps T at
-    U % becomes T x U / 100 requests/s. Native blocks pass through unchanged. `stored`: a block read back from the fleet
-    database or a ConfigMap copy, where a missing metric meant raw concurrency; every definition written since carries
-    its metric, so new input without one is native (`validate` fills the native defaults)."""
-    sc = dict(scaling or {})
-    if stored:
-        sc.pop("buffer", None)   # the ready-replica buffer (api 0.10.2 to 0.11.13) is gone; a stored definition may still carry it
-    metric = sc.get("metric")
-    if metric not in RAW_METRICS and not (metric is None and (stored or "utilization_percent" in sc)):
-        return sc
-    try:
-        target, utilization = int(sc.get("target") or 4), int(sc.pop("utilization_percent", None) or 70)   # the raw defaults
-    except (TypeError, ValueError):
-        return sc                                                      # ScalingSpec reports the bad value
-    if RAW_METRICS.get(metric) == "requests_per_second":
-        sc.update(metric="requests_per_second", target=max(1, round(target * utilization / 100)), container_concurrency=0)
-    else:
-        sc.update(metric="concurrency_utilization", target=utilization, container_concurrency=target)
-    if isinstance(sc.get("window_s"), int) and sc["window_s"] > 300:
-        sc["window_s"] = 300                                           # the raw window went up to 3600 s; native is 6-300 s
-    return sc
-
 
 def validate(spec: dict) -> dict:
     s = dict(spec or {})
@@ -236,7 +205,7 @@ def validate(spec: dict) -> dict:
         if not isinstance(s.get("port", 8080), int):
             raise HTTPException(400, "port: an integer")
         try:
-            scaling = ScalingSpec.model_validate(native_scaling(s.get("scaling") or {})).model_dump(exclude_none=True)
+            scaling = ScalingSpec.model_validate(s.get("scaling") or {}).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(400, f"scaling: {exc.errors()[0]['msg']}") from exc
         if scaling.get("min", 0) > scaling.get("max", 1):
@@ -486,17 +455,8 @@ def list_runtime() -> dict[str, dict]:
     """Runtime catalog entries: {id: entry}, from the database (empty without one: the bundled classes only)."""
     if not db.enabled():
         return {}
-    return {mid: _stored({**row["entry"], "version": row["version"]}) for mid, row in db.list_models().items()}
+    return {mid: {**row["entry"], "version": row["version"]} for mid, row in db.list_models().items()}
 
-
-def _stored(entry: dict) -> dict:
-    """A stored entry as the API serves it: an endpoint definition written under the raw Knative vocabulary reads in
-    the native one (`native_scaling`), so its public shape, a partial update and the idle shutdown all see one
-    vocabulary. The entry's rendered `runtime` is untouched: the reconciler re-applies it as it was rendered."""
-    spec = entry.get("spec") or {}
-    if spec.get("kind", "endpoint") == "endpoint" and isinstance(spec.get("scaling"), dict):
-        entry = {**entry, "spec": {**spec, "scaling": native_scaling(spec["scaling"], stored=True)}}
-    return entry
 
 
 # ---- rendering: the endpoint's objects (render_endpoint.py), applied with server-side apply --------------
@@ -698,5 +658,5 @@ if __name__ == "__main__":
         print(yaml.safe_dump(to_entry(json.load(sys.stdin)), sort_keys=False))
     elif len(sys.argv) >= 3 and sys.argv[1] == "render":
         kube.cluster_region = lambda c: c
-        endpoint_domain = lambda region: sys.argv[sys.argv.index("--domain") + 1] if "--domain" in sys.argv else ""   # noqa: E731
+        ENDPOINT_DOMAINS[sys.argv[2]] = sys.argv[sys.argv.index("--domain") + 1] if "--domain" in sys.argv else ""
         print(yaml.safe_dump_all(render(yaml.safe_load(sys.stdin) or {}, sys.argv[2]), sort_keys=False))

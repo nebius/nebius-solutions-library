@@ -9,7 +9,7 @@ from kubernetes.client.rest import ApiException
 import artifacts, attempts, catalog, db, execution, jobs, keys, kube
 from config import LABEL
 from resilience import retry
-from status import _attempts, _secs
+from status import _attempts, _secs, finished, gpu_seconds
 
 log = logging.getLogger("billing")
 BILLED, KEY = f"{LABEL}/billed", f"{LABEL}/key"
@@ -21,12 +21,9 @@ def cost_of(job: dict, model: dict | None, records: list | None = None, region: 
     uploader's attempt files for pods that preemption deleted). The price is the region's: the Job's
     region label (regional path, pinned fleet runs), else `region`, the cluster the pods ran in
     (a worker's copy of a fleet-placed run carries no label)."""
-    gpu_s = jobs.gpu_seconds(job, records)
+    gpu_s = gpu_seconds(job, records)
     region = job["metadata"].get("labels", {}).get(f"{LABEL}/region") or region or ""
     rates = json.loads(job["metadata"].get("annotations", {}).get(f"{LABEL}/billing-rates", "{}"))
-    legacy = ((model or {}).get("deployments", {}).get(region) or {}).get("price_per_gpu_hour")
-    if not rates and legacy is not None:
-        return gpu_s, round(gpu_s / 3600 * float(legacy), 6)
     regional = rates.get(region, {})
     usd = 0.0
     for attempt in _attempts(job.get("_pods", []), records, job["metadata"]["name"]):
@@ -96,7 +93,7 @@ async def bill_once() -> int:
             pods, clusters = None, None
             for job in items:
                 ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
-                if BILLED in ann or KEY not in ann or not jobs.finished(job) or jobs.is_mirror(job):
+                if BILLED in ann or KEY not in ann or not finished(job) or jobs.is_mirror(job):
                     continue                  # a worker's copy of a manager Job is transient; the manager's Job is billed
                 price_region = region
                 if jobs.is_manager_job(job):

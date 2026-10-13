@@ -7,7 +7,6 @@ name: network-operator
 component: network-operator
 namespace: nvidia-network-operator
 wave: '0'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-network-operator/chart

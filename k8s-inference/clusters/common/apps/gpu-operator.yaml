@@ -8,7 +8,6 @@ name: gpu-operator
 component: gpu-operator
 namespace: nvidia-gpu-operator
 wave: '1'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/chart

@@ -9,7 +9,7 @@ os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"   # async endpoint calls
 import pytest, yaml
 from fastapi.testclient import TestClient
 from kubernetes.client.rest import ApiException
-import app as appmod, auth, catalog, jobs, kube, models
+import app as appmod, auth, catalog, config, jobs, kube, models, render, status
 from config import RUNNER_IMAGE
 
 KEY_INFO = {"key_name": "sk-...abcd", "key_alias": "tenant-demo", "spend": 0.1, "max_budget": 10.0, "models": [],
@@ -448,12 +448,12 @@ def test_render_and_build_run(cluster):
     assert {e["name"]: e["value"] for e in main["env"]}["CHECKPOINT_DIR"] == "/work/checkpoint" and cr["spec"]["template"]["spec"]["priorityClassName"] == "serverless2-batch-priority"
     assert cr["metadata"]["annotations"][f"{L}/pvc-size-gi"] == "100" and cr["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ngc"}]
     monkeypatch_urls = {"eu-north1": "https://grafana.example"}
-    jobs.GRAFANA_URLS.update(monkeypatch_urls)
+    config.GRAFANA_URLS.update(monkeypatch_urls)
     try:
-        assert jobs.logs_url("tenant-demo", "op-c", "eu-north1").startswith("https://grafana.example/explore?orgId=1&left=")
+        assert status.logs_url("tenant-demo", "op-c", "eu-north1").startswith("https://grafana.example/explore?orgId=1&left=")
     finally:
-        jobs.GRAFANA_URLS.clear()
-    assert jobs.op_name("demo", "batch-example", "k") == jobs.op_name("demo", "batch-example", "k") != jobs.op_name("demo", "batch-example", "k2")
+        config.GRAFANA_URLS.clear()
+    assert render.op_name("demo", "batch-example", "k") == render.op_name("demo", "batch-example", "k") != render.op_name("demo", "batch-example", "k2")
 
 
 def test_normalise_status_and_attempts():
@@ -465,7 +465,7 @@ def test_normalise_status_and_attempts():
     op = jobs.normalise(job, 2.0, [{"operation": "op-1", "pod": "op-1-suc", "status": "succeeded", "export": "succeeded", "gpus": 1}])   # delivery on record
     assert op["status"] == "SUCCEEDED" and op["duration_s"] == 1284.0 and op["cost"] == 2.0 and op["input"] == {"nsteps": "5"} and op["resumable"] is False
     assert [a["status"] for a in op["attempts"]] == ["PREEMPTED", "SUCCEEDED"] and op["attempts"][0]["reason"] == "node is being drained" and op["attempts"][0]["exit_code"] == 137
-    assert jobs.gpu_seconds(job) == 486.0 + 788.0
+    assert status.gpu_seconds(job) == 486.0 + 788.0
     job["status"] = {"startTime": "2026-10-05T18:49:23Z", "conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded", "message": "Job has reached the specified backoff limit"}]}
     job["_pods"] = [pod("op-1", "Failed", "2026-10-05T18:49:23Z", "2026-10-05T18:57:29Z", 1)]
     op = jobs.normalise(job)
@@ -488,7 +488,7 @@ def test_normalise_status_and_attempts():
     op = jobs.normalise(job, None, records)
     assert [(a["index"], a["status"], a["node"]) for a in op["attempts"]] == [(1, "PREEMPTED", "node-0"), (2, "RUNNING", "node-1")]
     assert op["attempts"][0]["reason"] == "pod deleted (preempted)" and "_gpus" not in op["attempts"][0]
-    assert jobs.gpu_seconds(job, records) == 600.0                      # the other operation's record is not ours
+    assert status.gpu_seconds(job, records) == 600.0                      # the other operation's record is not ours
     # a node that died without warning leaves only the uploader's "started" record (jobs 0.1.8): the attempt is
     # shown as preempted with no end and bills nothing
     records.append({"operation": "op-1", "pod": "op-1-lost", "node": "node-9", "status": "started", "exit_code": None, "gpus": 8,
@@ -496,7 +496,7 @@ def test_normalise_status_and_attempts():
     op = jobs.normalise(job, None, records)
     lost = op["attempts"][0]
     assert (lost["status"], lost["node"], lost["ended_at"], lost["reason"]) == ("PREEMPTED", "node-9", None, "node lost without warning (no end record)")
-    assert jobs.gpu_seconds(job, records) == 600.0
+    assert status.gpu_seconds(job, records) == 600.0
 
 
 def test_resume_reuses_the_volume_in_the_same_region(client):
@@ -703,45 +703,6 @@ def test_key_management_needs_the_fleet_database(client, monkeypatch):
     assert r.status_code == 409 and "fleet database" in r.json()["detail"]
 
 
-def test_key_lookup_database_and_litellm_fallback(monkeypatch):
-    """auth.key_info: the fleet database first (hash lookup); LiteLLM's /key/info answers for a key it does not
-    hold yet. Unknown everywhere: 401; LiteLLM down for such a key: 503."""
-    import asyncio, db, keys
-    import httpx
-    from fastapi import HTTPException
-    auth._cache.clear()
-    store = {keys.key_hash("sk-db"): {"key_alias": "demo-db", "metadata": {"tenant": "demo"}}}
-    monkeypatch.setattr(db, "enabled", lambda: True)
-    monkeypatch.setattr(keys, "info", lambda h: store.get(h))
-    monkeypatch.setattr(auth, "LITELLM_MASTER_KEY", "sk-master")
-    seen = []
-
-    class FakeClient:
-        def __init__(self, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def get(self, url, params=None, headers=None):
-            seen.append(url)
-            if url.endswith("/key/info"):
-                if params["key"] == "sk-legacy":
-                    return httpx.Response(200, json={"info": {"key_alias": "demo-legacy", "metadata": {"tenant": "demo"}}})
-                return httpx.Response(401, json={})
-            raise AssertionError(url)
-    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
-    assert asyncio.run(auth.key_info("sk-db"))["key_alias"] == "demo-db" and seen == []               # the database answered
-    assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy"                          # not imported yet: LiteLLM, read-only
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(auth.key_info("sk-nope"))
-    assert e.value.status_code == 401
-    assert asyncio.run(auth.key_info("sk-legacy"))["key_alias"] == "demo-legacy" and seen.count("http://litellm.litellm.svc:4000/key/info") == 2   # cached
-    # after the import LiteLLM is not asked again: its /key/info still answers for a key deleted from both
-    monkeypatch.setattr(auth, "litellm_fallback", False)
-    auth._cache.clear()
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(auth.key_info("sk-legacy"))
-    assert e.value.status_code == 401 and seen.count("http://litellm.litellm.svc:4000/key/info") == 2
-    auth._cache.clear()
-
 
 def test_router_key_is_accepted_at_the_gateway_only(client, monkeypatch):
     """LiteLLM's deployments call the endpoints' hostnames with the fleet's router key: the authorize hook lets it
@@ -766,7 +727,8 @@ def test_billing_once(cluster, monkeypatch):
     """The CronJob entry point bills finished, unbilled runs exactly once (annotation guard), no claim protocol."""
     import asyncio, billing
     done = {"metadata": {"name": "op-b", "uid": "uid-op-b", "namespace": "tenant-demo", "labels": {f"{L}/region": "eu-south1", f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo"},
-                         "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work", f"{L}/resumed-from": "op-root", f"{L}/execution": "{}"}},
+                         "annotations": {f"{L}/key": "deadbeef", f"{L}/pvc": "op-b-work", f"{L}/resumed-from": "op-root", f"{L}/execution": "{}",
+                                         f"{L}/billing-rates": json.dumps({"eu-south1": {"rtx6000-spot": 1.6}})}},   # the price snapshot every run carries
             "spec": {}, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}
     cluster.jobs[("tenant-demo", "op-b")] = done
     cluster.pvcs[("tenant-demo", "op-b-work")] = {"metadata": {"name": "op-b-work"}}      # the uploader was preempted before releasing it
@@ -1406,47 +1368,11 @@ def test_scaling_controls_render_and_persist_across_regions(client, admin_keys, 
     assert c.put("/v1/models/scaling-demo", json=saved, headers=ADMIN).status_code == 200
     assert north.custom[key]["spec"]["predictor"]["scaleMetric"] == "concurrency"
     assert c.patch("/v1/endpoints/scaling-demo", json=patch, headers=H).status_code == 403
-    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN).status_code == 422   # gone since 0.11.14
-    admin_keys.rows["scaling-demo"]["spec"]["scaling"]["buffer"] = 1                                                  # ... but an older release may have stored it
-    admin_keys.rows["scaling-demo"]["entry"]["spec"]["scaling"]["buffer"] = 1
-    appmod.catalog.invalidate()
-    assert "buffer" not in c.get("/v1/models/scaling-demo", headers=ADMIN).json()["spec"]["scaling"]
-    r = c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"cooldown_s": 5}}, headers=ADMIN)
-    assert r.status_code == 200 and "buffer" not in r.json()["scaling"] and "buffer" not in admin_keys.rows["scaling-demo"]["spec"]["scaling"], r.text
+    assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"buffer": 1}}, headers=ADMIN).status_code == 422   # not a scaling field
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"window_s": 5}}, headers=ADMIN).status_code == 422
     assert c.patch("/v1/endpoints/scaling-demo", json={"scaling": {"metric": "rps"}}, headers=ADMIN).status_code == 422   # not a public name
-    assert admin_keys.rows["scaling-demo"]["version"] == 4
+    assert admin_keys.rows["scaling-demo"]["version"] == 3
 
-
-def test_stored_raw_knative_scaling_reads_as_native(client, admin_keys, monkeypatch):
-    """Definitions written before 0.11.12 carry the raw Knative vocabulary (`metric: concurrency | rps`,
-    `utilization_percent`, or no metric at all, which meant raw concurrency). They are read in the native vocabulary
-    (models.py `native_scaling`): the public shape, a partial update and the re-render all see one vocabulary."""
-    c, fake = client
-    monkeypatch.setattr(kube, "isvc", lambda name, ns, region=None: fake.custom.get((ns, "inferenceservices", name)))
-    for mid, raw, native in (
-        ("raw-rps", {"min": 0, "max": 2, "metric": "rps", "target": 10, "utilization_percent": 50, "window_s": 600},
-         {"min": 0, "max": 2, "metric": "requests_per_second", "target": 5, "container_concurrency": 0, "window_s": 300}),
-        ("raw-default", {"min": 0, "max": 1, "idle_s": 1800},                   # no metric: raw concurrency 4 at Knative's 70 %
-         {"min": 0, "max": 1, "idle_s": 1800, "metric": "concurrency_utilization", "target": 70, "container_concurrency": 4}),
-    ):
-        assert c.post("/v1/models", json={"id": mid, "image": "nginx", "regions": ["eu-north1"]}, headers=ADMIN).status_code == 201
-        admin_keys.rows[mid]["spec"]["scaling"] = dict(raw)                   # as an older release stored it
-        admin_keys.rows[mid]["entry"]["spec"]["scaling"] = dict(raw)
-        appmod.catalog.invalidate()
-        assert c.get(f"/v1/models/{mid}", headers=ADMIN).json()["spec"]["scaling"] == native
-        r = c.patch(f"/v1/endpoints/{mid}", json={"scaling": {"cooldown_s": 15}}, headers=ADMIN)
-        assert r.status_code == 200, r.text
-        public = r.json()["scaling"]                                         # the saved policy over what Knative reports
-        assert {k: public[k] for k in native} == native and public["cooldown_s"] == 15
-        assert admin_keys.rows[mid]["spec"]["scaling"] == {"window_s": 30, **native, "cooldown_s": 15}   # stored complete
-        pred = fake.custom[("models", "inferenceservices", mid)]["spec"]["predictor"]
-        annotations = fake.custom[("models", "inferenceservices", mid)]["metadata"]["annotations"]
-        if mid == "raw-rps":
-            assert pred["scaleMetric"] == "rps" and pred["scaleTarget"] == 5 and annotations["autoscaling.knative.dev/target-utilization-percentage"] == "100"
-        else:   # the same Knative scale target as before, now also the per-replica limit
-            assert pred["scaleMetric"] == "concurrency" and pred["scaleTarget"] == 4 and pred["containerConcurrency"] == 4
-            assert annotations["autoscaling.knative.dev/target-utilization-percentage"] == "70"
 
 
 @pytest.mark.parametrize("scaling", [

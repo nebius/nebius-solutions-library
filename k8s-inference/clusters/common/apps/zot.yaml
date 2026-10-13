@@ -7,7 +7,6 @@ name: zot
 component: zot
 namespace: registry
 wave: '1'
-hubOnly: 'false'
 placement: all
 kind: helm
 repoURL: https://zotregistry.dev/helm-charts

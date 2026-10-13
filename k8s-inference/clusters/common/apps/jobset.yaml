@@ -2,7 +2,6 @@ name: jobset
 component: jobset
 namespace: jobset-system
 wave: '1'
-hubOnly: 'false'
 placement: all
 kind: helm
 repoURL: registry.k8s.io/jobset/charts

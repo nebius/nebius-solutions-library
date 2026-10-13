@@ -2,7 +2,6 @@ name: cert-manager
 component: cert-manager
 namespace: cert-manager
 wave: '0'
-hubOnly: 'false'
 placement: all
 kind: helm
 repoURL: https://charts.jetstack.io

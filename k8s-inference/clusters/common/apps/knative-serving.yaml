@@ -2,6 +2,5 @@ name: knative-serving
 component: knative-serving
 namespace: knative-serving
 wave: '2'
-hubOnly: 'false'
 placement: worker
 kind: manifests

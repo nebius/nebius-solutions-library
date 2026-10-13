@@ -9,7 +9,6 @@ name: overprovisioner
 component: overprovisioner
 namespace: models
 wave: '1'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: https://charts.deliveryhero.io/

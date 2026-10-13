@@ -5,7 +5,6 @@ name: lws
 component: lws
 namespace: lws-system
 wave: '0'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: registry.k8s.io/lws/charts

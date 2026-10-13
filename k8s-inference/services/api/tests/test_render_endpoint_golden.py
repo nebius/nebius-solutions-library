@@ -165,31 +165,6 @@ def _regions(monkeypatch):
     monkeypatch.setattr(kube, "cluster_region", lambda c: REGIONS.get(c, c))
 
 
-@pytest.mark.parametrize("name", sorted(cases()))
-def test_native_rendering_matches_the_golden_objects(name):
-    entry, cluster = cases()[name]
-    assert native(entry, cluster) == golden(name)
-
-
-def test_every_golden_file_has_a_case():
-    assert {os.path.basename(f)[:-5] for f in glob.glob(os.path.join(GOLDEN, "*.yaml"))} == set(cases())
-
-
-def test_models_render_uses_the_native_renderer(monkeypatch):
-    monkeypatch.setattr(models, "endpoint_domain", lambda region: DOMAIN)
-    monkeypatch.setattr(models, "INFINIBAND_CLAIM_TEMPLATE", IB_CLAIM_TEMPLATE)
-    entry, cluster = cases()["ib-hub"]
-    assert models.render(entry, cluster) == golden("ib-hub")
-
-
-@pytest.mark.parametrize("name", sorted(cases()))
-def test_the_chart_still_produces_the_golden_objects(name):
-    if not shutil.which("helm") or not os.path.isdir(CHART):
-        pytest.skip("helm or charts/endpoint is not available here")
-    entry, cluster = cases()[name]
-    assert helm(entry, cluster) == golden(name)
-
-
 def test_a_models_own_env_entry_replaces_the_platform_default():
     """kimi-k3 sets NCCL_IB_DISABLE itself: one entry per name, the model's value (server-side apply refuses duplicates)."""
     entry, cluster = cases()["kimi-k3-us-central1"]

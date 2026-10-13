@@ -2,7 +2,6 @@ name: kserve
 component: kserve
 namespace: kserve
 wave: '3'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: ghcr.io/kserve/charts

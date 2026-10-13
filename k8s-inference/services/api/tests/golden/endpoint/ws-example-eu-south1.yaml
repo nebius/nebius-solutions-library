@@ -6,8 +6,6 @@ metadata:
   labels:
     app.kubernetes.io/name: ws-example
     app.kubernetes.io/instance: ws-example
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: ws-example
     serverless2.nebius/protocol: websocket
@@ -100,8 +98,6 @@ metadata:
   labels:
     app.kubernetes.io/name: ws-example
     app.kubernetes.io/instance: ws-example
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: ws-example
     serverless2.nebius/protocol: websocket

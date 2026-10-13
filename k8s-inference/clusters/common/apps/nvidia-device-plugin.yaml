@@ -5,7 +5,6 @@ name: nvidia-device-plugin
 component: nvidia-device-plugin
 namespace: nvidia-device-plugin
 wave: '0'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: https://nvidia.github.io/k8s-device-plugin

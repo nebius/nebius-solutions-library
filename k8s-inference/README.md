@@ -281,8 +281,7 @@ that nobody assumes it does:
 - A run stays `QUEUED` with no queue on its Workload: the catalog entry prefers a GPU class no pool declares;
   `preflight` reports such entries.
 - `destroy platform <id>` seems stuck on `kueue-batch-admin-role`/`kueue-batch-user-role`: the destroy
-  removes those two aggregated roles itself after the Kueue release (`stack/scripts/kueue-uninstall-cleanup.sh`);
-  on a fleet created before 2026-10-09 delete them by hand once.
+  removes those two aggregated roles itself after the Kueue release (`stack/scripts/kueue-uninstall-cleanup.sh`).
 - `cilium-operator` with one replica Pending: Nebius runs two; keep `system_pool.node_count = 2`.
 - The first pull of a multi-GB model image in a region takes minutes (the cache syncs it once); the
   pre-pull warms the images of the built-in classes per pool, a model's image is cached at its first pull.
@@ -300,10 +299,9 @@ that nobody assumes it does:
 | `clusters/common/apps`, `clusters/common/values` | the chart list with pinned versions, the Helm values of the upstream charts |
 | `charts/platform` | the platform's own manifests (API, gateway, Knative, observability, ops, scheduling, identities), one component per directory, rendered per cluster from values and applied object by object; its render is held equal to `stack/platform/tests/golden` by `make check` |
 | `charts/fleet`, `charts/tenant` | queues and cache from the fleet definition; one tenant namespace |
-| `charts/endpoint` | the reference rendering of one endpoint; the API renders endpoints natively (`services/api/render_endpoint.py`), the chart stays one release with golden tests holding the two equal |
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
 | `services/api`, `services/dispatcher`, `services/jobs`, `services/ops` | the own code: API, dispatcher and price feed, job runner, ops image (an operator console over this API is a separate project, not part of the solution) |
-| `tools/` | build or copy the platform images, the quality gate, the acceptance probe (`verify.sh`), the library sync |
+| `tools/` | build or copy the platform images, the quality gate, the acceptance probe (`verify.sh`) |
 | `docs/` | architecture, API, jobs, scheduling, images, edge, observability, operations, requirements, verification, security pre-review |
 
 ## Everyday commands
@@ -324,7 +322,6 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `services/dispatcher` image | 0.2.12 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |
-| `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.3 |
 | `charts/tenant` | 0.3.0 |

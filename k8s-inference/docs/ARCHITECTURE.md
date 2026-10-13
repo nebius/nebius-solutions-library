@@ -78,8 +78,7 @@ catalog entry and:
 1. stores spec and entry in table `models` and the write in `models_history` (`GET /v1/models/{id}/history`);
 2. renders the endpoint on every cluster of the model's regions natively (`services/api/render_endpoint.py`:
    InferenceService or LeaderWorkerSet with its Service and HTTPRoute, SecurityPolicy, claims; server-side
-   apply through the api-agent identities: Role `serverless2-api-agent-models`). `charts/endpoint` is the
-   reference rendering of the same objects, kept for one release with golden tests that hold the two equal;
+   apply through the api-agent identities: Role `serverless2-api-agent-models`).
 3. registers an OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway
    hostname under that region's domain (`ENDPOINT_DOMAINS`).
 
@@ -162,7 +161,7 @@ the shared checkpoint directory. `JOBS.md` has the details and the limits.
 |---|---|---|
 | Clusters, nodes, capacity | Nebius Managed Kubernetes, node groups with the autoscaler, spot pricing policies, capacity blocks, GPU clusters for InfiniBand | `stack/modules/cluster` |
 | Ingress, TLS, key check | Envoy Gateway, cert-manager (Let's Encrypt, the fleet CA), ext-auth to the fleet API (a `Backend` on the GPU regions) | `EDGE.md` |
-| Endpoints | KServe on Knative Serving | `services/api/render_endpoint.py` (`charts/endpoint` is the reference rendering), `catalog/models` |
+| Endpoints | KServe on Knative Serving | `services/api/render_endpoint.py`, `catalog/models` |
 | Fleet database | Nebius Managed Service for PostgreSQL, databases `platform` and `litellm` | `stack/cloud/database.tf`, `stack/platform/database.tf`; `OPERATIONS.md` "Database" |
 | Model definitions | the control API, `services/api/models.py`, `render_endpoint.py` and `db.py` | `POST/PUT/DELETE /v1/models`, history per model |
 | Keys, budgets, GPU charges | the fleet database (`keys`, `charges`), `services/api/keys.py` | keys per tenant, mirrored into LiteLLM for its OpenAI route and pass-through routes with a price |
@@ -183,7 +182,7 @@ Pinned versions live in `clusters/common/apps/*.yaml`, one list for every cluste
 | Cost dispatcher and price feed | `services/dispatcher` | about 900 lines | Kueue's MultiKueue needs an external dispatcher to place by price across regions |
 | Job runner | `services/jobs` | about 150 lines of shell | fetch inputs, upload outputs and attempt records, call an endpoint |
 | Ops image | `services/ops` | about 100 lines of shell | recover stopped spot VMs, Nebius CLI with service-account profiles |
-| Three charts | `charts/fleet`, `charts/endpoint`, `charts/tenant` | Helm | queues and cache from the fleet definition, one endpoint, one tenant |
+| Three charts | `charts/fleet`, `charts/platform`, `charts/tenant` | Helm | queues and cache from the fleet definition, the platform's own manifests, one tenant |
 
 ## Multi-region in one sentence each
 

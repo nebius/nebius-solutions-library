@@ -5,6 +5,5 @@ name: node-config
 component: node-config
 namespace: spegel
 wave: '0'
-hubOnly: 'false'
 placement: all
 kind: manifests

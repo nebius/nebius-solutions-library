@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 import db, kube
-from config import LABEL, REGION, TENANT_NS_PREFIX
+from config import REGION, TENANT_NS_PREFIX
 from resilience import retry
 
 log = logging.getLogger("api.attempts")

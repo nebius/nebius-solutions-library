@@ -6,8 +6,6 @@ metadata:
   labels:
     app.kubernetes.io/name: metadata-endpoint
     app.kubernetes.io/instance: metadata-endpoint
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: metadata-endpoint
     serverless2.nebius/protocol: http
@@ -72,8 +70,6 @@ metadata:
   labels:
     app.kubernetes.io/name: metadata-endpoint
     app.kubernetes.io/instance: metadata-endpoint
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: metadata-endpoint
     serverless2.nebius/protocol: http

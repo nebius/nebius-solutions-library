@@ -17,7 +17,7 @@ variables {
   gpu_pools = {
     gpu = {
       platform      = "gpu-h100-sxm", preset = "1gpu-16vcpu-200gb", gpu_class = "h100"
-      capacity      = { type = "on-demand", reservation_ids = [] }
+      capacity      = { type = "on_demand", reservation_ids = [] }
       min_nodes     = 0, max_nodes = 1, endpoint_floor_gpus = 0
       driver_preset = "cuda13.0", boot_disk_gib = 512
       local_nvme    = false, local_nvme_mode = "kubelet-ephemeral"
@@ -84,7 +84,7 @@ run "gpu_operator_leaves_the_driver_preset_out" {
     gpu_pools = {
       gpu = {
         platform      = "gpu-h100-sxm", preset = "1gpu-16vcpu-200gb", gpu_class = "h100"
-        capacity      = { type = "on-demand", reservation_ids = [] }
+        capacity      = { type = "on_demand", reservation_ids = [] }
         min_nodes     = 0, max_nodes = 1, endpoint_floor_gpus = 0
         driver_preset = "cuda13.0", boot_disk_gib = 512
         local_nvme    = false, local_nvme_mode = "kubelet-ephemeral"
@@ -92,7 +92,7 @@ run "gpu_operator_leaves_the_driver_preset_out" {
       }
       ib = {
         platform      = "gpu-h100-sxm", preset = "8gpu-128vcpu-1600gb", gpu_class = "h100"
-        capacity      = { type = "on-demand", reservation_ids = [] }
+        capacity      = { type = "on_demand", reservation_ids = [] }
         min_nodes     = 0, max_nodes = 2, endpoint_floor_gpus = 0
         driver_preset = "cuda13.0", boot_disk_gib = 512
         local_nvme    = false, local_nvme_mode = "kubelet-ephemeral"

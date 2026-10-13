@@ -18,24 +18,23 @@ back; pods, logs and billing come from the worker. Image references are fleet-wi
 host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the region it lands in."""
 import json
 from fastapi import HTTPException
-from kubernetes import client
 import logging
 import urllib3
 from kubernetes.client.rest import ApiException
 
 log = logging.getLogger("api.jobs")
 import kube
-from config import (EXECUTOR_SA, GRAFANA_URLS, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_GI, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL,
-                    ENDPOINT_CONNECT_TO, LITELLM_URL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION, RUNNER_IMAGE, S3_ENV_SECRET,
+from config import (EXECUTOR_SA, JOB_BACKOFF_LIMIT, JOB_PVC_SIZE_GI, JOB_TTL_S, LABEL,
+                    ENDPOINT_CONNECT_TO, LITELLM_URL, MULTIKUEUE_MANAGED_BY, REGION, RUNNER_IMAGE, S3_ENV_SECRET,
                     INFINIBAND_CLAIM_TEMPLATE, INFINIBAND_ENV, JOBSET_GROUP, JOBSET_NAME_LABEL, JOBSET_PLURAL, JOBSET_VERSION,
                     MULTINODE_MAX_NODES, SHARED_SCRATCH_PVC, WEIGHTS_SHARED_PVC)
 from resilience import retry
 from pod_metadata import normalise as normalise_pod_metadata
 import execution
-from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, RUNNER_SECURITY_CONTEXT, TOKEN, _job_shell, _meta,
-                    _pod_failure_policy, _render, _uploader, class_images, gpu_classes, image_for_class, op_name, profile_of)
-from status import (PHASE, RECORD_STATUS, _attempts, _gpus, _main_state, _secs, _ts, finished, gpu_seconds, is_jobset, is_manager_job,
-                    is_mirror, logs_url, normalise)
+from render import (CONTAINER_HARDENING, POD_SECURITY_CONTEXT, PRIORITY_CLASS, RUNNER_SECURITY_CONTEXT, _job_shell, _meta,
+                    _render, _uploader, class_images, gpu_classes, image_for_class, profile_of)
+from status import (is_jobset, is_manager_job,
+                    is_mirror, normalise)
 
 def _mount_data(r: dict, pod: dict, containers: list) -> None:
     """`job.data` (docs/JOBS.md "Shared data"): a directory of the tenant's area on the region's shared filesystem

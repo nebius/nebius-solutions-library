@@ -7,14 +7,9 @@ one variant in, the objects out:
     SecurityPolicy (the gateway's authorization of the endpoint's routes)
     PersistentVolumeClaim per `persistentVolumes`, LocalModelCache when enabled
 
-This replaces `helm template charts/endpoint` (api 0.11.14): the chart is kept in the repository for one release
-as the reference rendering, and services/api/tests/test_render_endpoint_golden.py holds the objects it produced
-for every fixture, so the two cannot drift while both exist. Hence the shapes below reproduce the chart exactly,
-including its value semantics: the chart's `values.yaml` defaults under the entry (DEFAULTS), the entry's
-`runtime` merged over them and `deployments.<cluster>` over that (maps deep-merged, lists and scalars replaced),
-and the standard Helm labels the chart stamped (`app.kubernetes.io/managed-by: Helm`, `helm.sh/chart`): a
-re-rendered endpoint applied with server-side apply changes nothing on the live objects. Those two labels go
-with the chart.
+services/api/tests/test_render_endpoint_golden.py holds the objects rendered for every fixture. Value semantics:
+the defaults under the entry (DEFAULTS, every setting with its default), the entry's `runtime` merged over them and
+`deployments.<cluster>` over that (maps deep-merged, lists and scalars replaced).
 
 Pure functions, no I/O: `render(entry, cluster, domain, ib_claim_template, variant, api_backend)`; `models.render`
 calls it once per variant. `api_backend`: the gateway's ext-auth target is the Envoy Gateway `Backend` api/api
@@ -27,11 +22,10 @@ from fastapi import HTTPException
 
 from config import IMAGES_HOST, LABEL
 
-CHART = "endpoint-0.1.3"             # charts/endpoint Chart.yaml: the `helm.sh/chart` label the chart stamped
 POOL_LABEL = f"{LABEL}/pool"
 MODELS_NAMESPACE_DEFAULT = "models"
 
-# charts/endpoint/values.yaml: every setting with its default. The entry's top level, then `runtime`, then
+# Every setting with its default. The entry's top level, then `runtime`, then
 # `deployments.<cluster>` override these (see `values`).
 DEFAULTS: dict = {
     "name": "", "namespace": MODELS_NAMESPACE_DEFAULT, "labels": {}, "annotations": {}, "podMetadata": {},
@@ -166,8 +160,8 @@ def values(entry: dict, cluster: str, domain: str, ib_claim_template: str, varia
 def _labels(v: dict) -> dict:
     """Metadata labels of every object: the standard Helm set plus the serverless2 labels the API and the
     dispatcher select on, the Kueue priority class, and the entry's own labels (which win)."""
-    out = {"app.kubernetes.io/name": v["name"], "app.kubernetes.io/instance": v["name"], "app.kubernetes.io/managed-by": "Helm",
-           "helm.sh/chart": CHART, "app.kubernetes.io/part-of": "serverless2", f"{LABEL}/model": v.get("modelId") or v["name"]}
+    out = {"app.kubernetes.io/name": v["name"], "app.kubernetes.io/instance": v["name"],
+           "app.kubernetes.io/part-of": "serverless2", f"{LABEL}/model": v.get("modelId") or v["name"]}
     if v.get("variant"):
         out[f"{LABEL}/variant"] = v["variant"]
     out[f"{LABEL}/protocol"] = v.get("protocol")

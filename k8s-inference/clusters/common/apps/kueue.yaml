@@ -2,7 +2,6 @@ name: kueue
 component: kueue
 namespace: kueue-system
 wave: '1'
-hubOnly: 'false'
 placement: all
 kind: helm
 repoURL: registry.k8s.io/kueue/charts

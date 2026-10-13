@@ -2,7 +2,6 @@ name: dcgm-exporter
 component: dcgm-exporter
 namespace: monitoring
 wave: '2'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: https://nvidia.github.io/dcgm-exporter/helm-charts

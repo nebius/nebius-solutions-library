@@ -25,7 +25,6 @@ locals {
     allowed_cidrs        = local.f.control_plane.allowed_cidrs
     service_cidrs        = local.f.control_plane.service_cidrs
     weights_filesystem   = { enabled = false, size_gib = 0, type = "NETWORK_SSD", mount_on_system = false }
-    gpu_snapshot         = { enabled = false, namespace = "gpu-snapshot-system", chart = "", repository = null, version = null, values_yaml = "{}", storage_node_selector = { "serverless2.nebius/snapshot-store" = "true" }, checkpoints_gib = 256 }
     image_cache_size_gib = local.f.control_plane.image_cache_size_gib
     pools                = {}
     role                 = "control"

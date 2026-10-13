@@ -2,6 +2,5 @@ name: scheduling
 component: scheduling
 namespace: kueue-system
 wave: '1'
-hubOnly: 'false'
 placement: all
 kind: manifests

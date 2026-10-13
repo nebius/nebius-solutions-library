@@ -8,14 +8,10 @@ on the pool at its list price. The Job is rendered with the chosen class's image
 profile. It may still move between regions of the class while it waits (MultiKueue), and a resume keeps the class.
 Runs whose class has one image are not affected: they keep switching class at queue time.
 
-What this does NOT know, by design: whether a pool has free quota right now and the live spot quote. The dispatcher
-used to answer that over HTTP (`GET /v1/rank`, removed in api 0.11.14 / dispatcher 0.2.9); the round trip, its
-Service, its timeout and its fallback bought only that signal, and the queue still waits for the preferred class
-either way. Without the signal every pool is costed as if it had to boot a node, which is the dispatcher's own
-rule for a pool that is not free (a 1-GPU run does not pick an 8-GPU pool over a 1-GPU one).
-
-The option "re-render a waiting run for the next class after N minutes" (A+ in the design review of 2026-10-09)
-is documented, not built."""
+What this does NOT know, by design: whether a pool has free quota right now and the live spot quote. Without that
+signal every pool is costed as if it had to boot a node, which is the dispatcher's own rule for a pool that is not
+free (a 1-GPU run does not pick an 8-GPU pool over a 1-GPU one), and the queue waits for the preferred class either
+way."""
 import kube
 from render import class_images, gpu_classes
 

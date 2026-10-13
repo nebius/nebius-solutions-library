@@ -2,6 +2,5 @@ name: api
 component: api
 namespace: api
 wave: '3'
-hubOnly: 'false'
 placement: control
 kind: manifests

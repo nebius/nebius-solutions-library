@@ -14,8 +14,7 @@ dispatcher of our own (`services/dispatcher`, about 540 lines, plus the InfiniBa
 
 ## What a model declares
 
-Endpoint entries (`catalog/models/<id>.yaml`, `runtime` block, see
-`charts/endpoint/values.yaml`):
+Endpoint entries (`runtime` block; every setting and its default: `services/api/render_endpoint.py` DEFAULTS):
 
 ```yaml
 runtime:

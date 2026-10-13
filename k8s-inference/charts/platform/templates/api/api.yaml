@@ -69,9 +69,10 @@ subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
 # endpoints live only in `models`: read, scale (patch) for admin keys, pods for the replica count. On the control
 # cluster the Role is rendered under a name the RoleBinding does not reference (the control API deploys endpoints
 # through the regions' api-agent identities, never here); kept so that a live cluster sees no object change.
+{{- if .Values.role.worker }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: { name: serverless2-api-endpoints{{ if not .Values.role.worker }}-unused{{ end }}, namespace: models }
+metadata: { name: serverless2-api-endpoints, namespace: models }
 rules:
   - apiGroups: [gateway.networking.k8s.io]
     resources: [httproutes]
@@ -101,8 +102,9 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: { name: serverless2-api-endpoints, namespace: models }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-endpoints{{ if not .Values.role.worker }}-unused{{ end }} }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-endpoints }
 subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

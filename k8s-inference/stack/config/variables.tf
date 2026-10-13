@@ -41,7 +41,7 @@ variable "fleet" {
       enabled          = optional(bool, false)
       driver_version   = optional(string, "580.173.02")
       kernel_module    = optional(string, "open")
-      gds              = optional(bool, true)
+      gds              = optional(bool, false)
       network_operator = optional(bool)
     }), {})
 
@@ -113,24 +113,6 @@ variable "fleet" {
         # CPU snapshot operator must retain storage access when GPUs scale to zero.
         # Off by default; enabling rolls only the system pool at cloud apply.
         mount_on_system = optional(bool, false)
-      }), {})
-      # Preview startup snapshots. Defaults leave every existing workload alone.
-      # Custom values use the snapshot chart's own schema; credentials
-      # belong in Secrets, never this field. The namespace is Terraform-owned.
-      gpu_snapshot = optional(object({
-        enabled   = optional(bool, false)
-        namespace = optional(string, "gpu-snapshot-system")
-        # A packaged local chart, or repository + chart + version. The backend
-        # lives separately; this library does not publish its implementation.
-        chart                 = optional(string, "")
-        repository            = optional(string)
-        version               = optional(string)
-        values_yaml           = optional(string, "{}")
-        storage_node_selector = optional(map(string), { "serverless2.nebius/snapshot-store" = "true" })
-        # nominal capacity of the checkpoint claim on the shared filesystem (a static volume: the number is
-        # bookkeeping, the filesystem's real size applies, and a bound claim cannot be resized, so it does
-        # NOT follow weights_filesystem.size_gib; 2026-10-10: growing the filesystem broke the release)
-        checkpoints_gib = optional(number, 256)
       }), {})
       image_cache_size_gib = optional(number) # default images.cache.size_gib
       # GPU node pools. capacity.type: spot (max_price caps the USD per GPU-hour, null follows the spot

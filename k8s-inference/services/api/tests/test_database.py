@@ -172,39 +172,3 @@ def test_receipt_cannot_be_reassigned_to_another_key(database):
         billing.record_spend(keys.key_hash(b), 1, "hub/uid", 100)
 
 
-def test_bootstrap_router_and_litellm_import(database, monkeypatch):
-    db.migrate()
-    # Terraform's bootstrap: idempotent, settings follow the spec, spend stays, a rotated value replaces the row in place
-    i = keys.bootstrap("sk-tf1", "demo-admin", "demo", "admin", 100, [], ["/models/llm/chat"])
-    assert i["metadata"] == {"tenant": "demo", "role": "admin", "allowed_passthrough_routes": ["/models/llm/chat"]} and i["max_budget"] == 100
-    billing.record_spend(keys.key_hash("sk-tf1"), 2, "hub/x", 10)
-    assert keys.bootstrap("sk-tf1", "demo-admin", "demo", "admin", 100, [], ["/models/llm/chat"])["spend"] == 2
-    r = keys.bootstrap("sk-tf2", "demo-admin", "demo", "admin", 50, ["llm-example"], [])
-    assert r["spend"] == 2 and r["max_budget"] == 50 and keys.info(keys.key_hash("sk-tf1")) is None and keys.info(keys.key_hash("sk-tf2"))
-    # the router key: upserted at every start, a rotated value replaces it
-    keys.ensure_router("sk-router1"); keys.ensure_router("sk-router1"); keys.ensure_router("sk-router2")
-    assert keys.info(keys.key_hash("sk-router1")) is None
-    router = keys.info(keys.key_hash("sk-router2"))
-    assert router["metadata"] == {"tenant": "platform", "role": "router"} and router["max_budget"] is None and router["models"] == []
-    # the one-time import of LiteLLM's keys: tenant keys with their spend, skipping the former internal key; never overwriting
-    import httpx
-    page = {"keys": [
-        {"token": "h-legacy", "key_alias": "demo-legacy", "key_name": "sk-...9999", "max_budget": 10, "spend": 3.25, "models": ["x"], "blocked": True,
-         "expires": "2030-01-01T00:00:00Z", "created_at": "2026-10-01T10:00:00+00:00", "metadata": {"tenant": "demo", "allowed_passthrough_routes": ["/r"]}},
-        {"token": "h-internal", "key_alias": "platform-internal", "metadata": {"tenant": "platform", "role": "internal"}},
-        {"token": "h-orphan", "key_alias": "no-tenant", "metadata": {}},
-        {"token": keys.key_hash("sk-tf2"), "key_alias": "demo-admin", "spend": 999, "metadata": {"tenant": "demo", "role": "admin"}},
-    ], "total_pages": 1}
-    class FakeLLM:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def get(self, url, params=None, headers=None): return httpx.Response(200, json=page)
-    monkeypatch.setattr(httpx, "Client", FakeLLM)
-    monkeypatch.setattr(keys, "LITELLM_MASTER_KEY", "sk-master")
-    monkeypatch.setattr(keys, "_litellm", lambda *a: 200)
-    assert keys.import_litellm() == 1 and keys.import_litellm() == 0
-    legacy = keys.info("h-legacy")
-    assert legacy["spend"] == 3.25 and legacy["blocked"] and legacy["models"] == ["x"] and legacy["expires"].startswith("2030-01-01")
-    assert legacy["metadata"] == {"tenant": "demo", "role": "user", "allowed_passthrough_routes": ["/r"]} and legacy["created_at"].startswith("2026-10-01")
-    assert keys.info(keys.key_hash("sk-tf2"))["spend"] == 2 and keys.info("h-internal") is None and keys.info("h-orphan") is None

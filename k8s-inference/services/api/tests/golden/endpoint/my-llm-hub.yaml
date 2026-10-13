@@ -6,8 +6,6 @@ metadata:
   labels:
     app.kubernetes.io/name: my-llm
     app.kubernetes.io/instance: my-llm
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: my-llm
     serverless2.nebius/protocol: openai
@@ -104,8 +102,6 @@ metadata:
   labels:
     app.kubernetes.io/name: my-llm
     app.kubernetes.io/instance: my-llm
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: endpoint-0.1.3
     app.kubernetes.io/part-of: serverless2
     serverless2.nebius/model: my-llm
     serverless2.nebius/protocol: openai

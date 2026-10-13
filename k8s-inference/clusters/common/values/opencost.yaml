@@ -1,7 +1,7 @@
 # Helm values for the opencost Application (every cluster); version pinned in clusters/common/apps/opencost.yaml.
 # OpenCost reads the stack Prometheus and prices nodes with a custom Nebius price list (CPU/RAM per vCPU-h and GiB-h from
 # docs.nebius.com/compute/resources/pricing); the GPU price per GPU-hour and the cluster id are per cluster in
-# clusters/<cluster>/values/opencost.yaml (the numbers of fleet.yaml prices); spot prices apply to nodes labelled
+# the platform stage's per-cluster values (the tfvars prices); spot prices apply to nodes labelled
 # serverless2.nebius/capacity=spot. The allocation API feeds the daily cost report and the Grafana OpenCost dashboards.
 opencost:
   prometheus:

@@ -189,42 +189,6 @@ def bootstrap(value: str, alias: str, tenant: str, role: str = "user", budget: f
     return i
 
 
-def import_litellm() -> int:
-    """Once at API start: every key LiteLLM holds that the table does not, with its hash, alias, tenant, role, budget,
-    spend, expiry, block flag and pass-through routes, so an upgrade changes no key for anyone. Keys without a
-    tenant and LiteLLM-internal keys (role `internal`, the former platform key of the model groups) are skipped.
-    Never overwrites a row: the table is the source of truth. Returns the number of keys imported."""
-    if not LITELLM_MASTER_KEY:
-        return 0
-    import httpx
-    found, page = [], 1
-    with httpx.Client(timeout=20) as c:
-        while True:
-            r = c.get(f"{LITELLM_URL}/key/list", params={"return_full_object": "true", "size": 100, "page": page},
-                      headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
-            if r.status_code >= 300:
-                raise RuntimeError(f"litellm /key/list: {r.status_code} {r.text[:160]}")
-            data = r.json()
-            items = [k for k in data.get("keys", []) if isinstance(k, dict)]
-            found += items
-            if len(items) < 100 or page >= int(data.get("total_pages") or 1):
-                break
-            page += 1
-    n = 0
-    with db.pool().connection() as c, c.transaction():
-        for k in found:
-            meta = k.get("metadata") or {}
-            if not k.get("token") or not meta.get("tenant") or meta.get("role") == "internal":
-                continue
-            extra = {x: v for x, v in meta.items() if x not in ("tenant", "role")}
-            row = c.execute("""insert into keys (hash, alias, tenant, role, models, budget, spend, expires, blocked, preview, metadata, created_at, created_by)
-                               values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, now()), 'litellm-import')
-                               on conflict do nothing returning hash""",
-                            (k["token"], k.get("key_alias") or k["token"][:12], meta["tenant"], meta.get("role") or "user", json.dumps(k.get("models") or []),
-                             k.get("max_budget"), k.get("spend") or 0, _when(k.get("expires")), bool(k.get("blocked")), k.get("key_name"),
-                             json.dumps(extra), _when(k.get("created_at")))).fetchone()
-            n += 1 if row else 0
-    return n
 
 
 # ---- the LiteLLM mirror (best effort; the fleet database is the source of truth) ----------------------

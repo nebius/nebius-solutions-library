@@ -140,7 +140,7 @@ cloud stage creates the Nebius Compute shared filesystem, attaches it to every G
 nodes at `/mnt/weights` through cloud-init). Pods reach it through the static ReadWriteMany
 PersistentVolume + claim `models/weights-shared` that the platform stage renders (Knative allows hostPath
 only read-only). A model opts in with `weights.sharedFilesystem: {enabled: true, path: <id>, mountPath: ...}`
-plus the env vars its runtime reads (`charts/endpoint/README.md`); the pod then mounts the claim with
+plus the env vars its runtime reads (`services/api/render_endpoint.py`); the pod then mounts the claim with
 subPath `<id>` (`/mnt/weights/<id>` on the node) and keeps its cache there across scale-to-zero and node
 replacement. Nothing is deleted automatically: a model's directory is removed by hand when the model goes.
 A region needs the quota `compute.filesystem.size.network-ssd` before `weights_filesystem` is enabled;
@@ -206,12 +206,6 @@ the model groups of OpenAI endpoints call the gateway with; the API upserts its 
 `router`), so rotation is the `-replace` of the table above. A compromised router key only lets its holder
 call the endpoints through the edge; rotate it.
 
-**Upgrading from the LiteLLM-keyed releases** (api <= 0.11.15): nothing to run by hand. At its first start
-the control API applies migration 5, imports every LiteLLM key once (the keys keep their values, budgets and
-spend), creates the router key and re-registers every LiteLLM model group with it. Afterwards delete the
-former platform key in LiteLLM (`POST /key/delete {"key_aliases": ["platform-internal"]}` with the master
-key; Terraform removes its Secrets); the old GPU receipts stay in `litellm.serverless_gpu_charges` for the
-record (already-billed runs carry the `billed` annotation and are never charged again).
 
 **Backups and point-in-time restore** are the service's: a daily backup in the window starting at
 `backup_window_start` (03:00 UTC by default), kept for `backup_retention` (14 days by default), with
@@ -334,14 +328,6 @@ block (with `protect_data = true` the bucket stays and must be emptied by hand f
   any host). The API's own cluster uses the Service api/api. A region's metrics and logs come
   through that cluster's API server proxy (Role `serverless2-api-agent-monitoring`): `kubectl auth can-i get
   services/proxy -n monitoring --as=system:serviceaccount:api:api-agent` there must say yes.
-  Upgrading a fleet deployed before 2026-10-11: the control cluster's https listener must lose its `hostname`
-  (the chart renders none there; the regions' ext-auth calls arrive under the endpoint's own host). Server-side
-  apply removes the field only when the platform stage's field manager owns it; if `kubectl -n
-  envoy-gateway-system get gateway serverless2-external -o jsonpath='{.spec.listeners[1].hostname}'` still
-  prints the wildcard after the apply (another manager touched the field), remove it once by hand:
-  `kubectl -n envoy-gateway-system patch gateway serverless2-external --type=json -p
-  '[{"op":"remove","path":"/spec/listeners/1/hostname"}]'`. Until then every endpoint call on a GPU region
-  answers 404 (the ext-auth connection to the control gateway fails its TLS handshake).
 - **Rate limits** live in `charts/platform/templates/api/api.yaml` (API route) and
   `charts/platform/templates/gateway/ratelimit.yaml` (everything else), counted by the Envoy rate-limit
   service (`envoy-gateway-system`, deployed by the chart when `config.envoyGateway.rateLimit` is set) in
@@ -401,56 +387,6 @@ kubectl get ccnp tenant-isolation -o jsonpath='{.status.conditions[0].status}'
 tools/verify.sh                                                   # the acceptance probe: hello-run, then the example endpoint through the API
 ```
 
-## Upgrading to the two-stage layout
-
-Fleets deployed before 2026-10-11 have a third stage, `models`, with one state per cluster
-(`models/<cluster id>.tfstate`): the tenant buckets, service accounts and S3 keys of each region
-(`module.tenant_region["<tenant>"]`), the tenant releases and Secrets, the LiteLLM key Jobs and the acceptance
-probe. The cloud stage owns the buckets now (`module.tenant_region["<tenant>/<region>"]` in
-`cloud/fleet.tfstate`, `stack/cloud/tenants.tf`) and the platform stage of each cluster the rest
-(`stack/platform/tenants.tf`, same resource addresses). A root module cannot `moved` a resource into another
-root's state: the move is a `terraform state mv` between state files, before the first apply of the new
-checkout, with the old checkout's `stack.sh` for the models states (the new one has no `models` stage; the
-state keys are `models/<cluster id>.tfstate` in the state bucket). Nothing in the cloud or the clusters is
-touched by it; afterwards `./stack.sh plan` must show no replacement and no re-creation (a different plan
-means a wrong address: fix the state, do not apply). The Secrets and Jobs move from the models stage's
-Kubernetes provider 2.x to the platform stage's 3.x; `kubernetes_secret_v1` and `kubernetes_job_v1` carry the
-same resource schema version in both (0 and 1), so the move needs no state upgrade.
-
-```sh
-OLD=<checkout of the three-stage layout>; NEW=<this checkout>      # same terraform.tfvars, same state bucket credentials
-# 1. pull the states once: the models state of every cluster, the cloud state, the platform state of every cluster
-for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state pull) > models-$id.tfstate; done
-(cd $NEW && ./stack.sh tf cloud -- state pull) > cloud.tfstate
-for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state pull) > platform-$id.tfstate; done
-# 2. per tenant and worker region: the bucket, identity and key to the cloud state
-#    (<region> is the Nebius region name, eu-north1; <cluster id> the region's cluster id, hub)
-terraform state mv -state=models-hub.tfstate -state-out=cloud.tfstate \
-  'module.tenant_region["demo"]' 'module.tenant_region["demo/eu-north1"]'
-# 3. per cluster: the tenant release, Secrets, keys and probe to that cluster's platform state (same addresses)
-for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' 'kubernetes_secret_v1.s3["demo"]' \
-         'kubernetes_secret_v1.s3_fleet["demo"]' 'kubernetes_secret_v1.ngc["demo"]'; do          # workers: all of them; control: tenant_storage only
-  terraform state mv -state=models-hub.tfstate -state-out=platform-hub.tfstate "$r" "$r"; done
-for r in 'helm_release.tenant["demo"]' 'kubernetes_secret_v1.tenant_storage["demo"]' \
-         'random_password.key["demo-default"]' 'kubernetes_job_v1.key["demo-default"]' \
-         'random_password.key["demo-admin"]' 'kubernetes_job_v1.key["demo-admin"]'; do   # control: one pair per key
-  terraform state mv -state=models-control.tfstate -state-out=platform-control.tfstate "$r" "$r"; done
-# 4. push the cloud and platform states back (their serials were incremented by the moves; `-force` is never needed)
-(cd $NEW && ./stack.sh tf cloud -- state push ../cloud.tfstate)
-for id in hub control; do (cd $NEW && ./stack.sh tf platform $id -- state push ../platform-$id.tfstate); done
-# 5. every models state now holds at most the probe Job (acceptance-probe in namespace api, re-created by
-#    tools/verify.sh's Job form when wanted): remove its entries and delete the state objects from the bucket
-for id in hub control; do (cd $OLD && ./stack.sh tf models $id -- state list); done   # must list nothing but kubernetes_job_v1.probe[0]
-kubectl -n api delete job acceptance-probe --ignore-not-found                         # the control cluster
-# `aws s3 rm s3://<state bucket>/models/<id>.tfstate` for each cluster, with the state-bucket credentials
-# 6. no replacement planned, then apply: the cloud stage adds the `tenant_storage` output, the platform stages
-#    adopt the moved resources (the tenant release gets its new chart version, the Secrets keep their values)
-(cd $NEW && ./stack.sh plan && ./stack.sh apply)
-```
-
-With `protect_data = true` the moved bucket keeps its `prevent_destroy`; a bucket that is not moved before the
-apply is planned for creation (name taken: the apply fails, nothing is lost). A tenant release that is not moved
-is planned for creation and the Helm install fails on the existing release name: move it, do not delete it.
 
 ## Reliability and upgrades
 

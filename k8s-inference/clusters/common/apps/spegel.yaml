@@ -6,7 +6,6 @@ name: spegel
 component: spegel
 namespace: spegel
 wave: '0'
-hubOnly: 'false'
 placement: all
 kind: helm
 repoURL: ghcr.io/spegel-org/helm-charts

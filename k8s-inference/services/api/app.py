@@ -13,7 +13,8 @@ log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
 from auth import Principal, _principal, allows_model, check_budget, check_model, forget, forget_hash, principal
-import auth
+import render
+import status
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, SYNC_TIMEOUT_S
 
 def check_placeholders() -> None:
@@ -26,24 +27,11 @@ def check_placeholders() -> None:
         raise RuntimeError(f"placeholder hostnames in {', '.join(bad)}: set them per cluster (stack/platform/stage.tf)")
 
 
-async def _import_keys() -> None:
-    """Keys LiteLLM still holds alone (a fleet upgraded from the LiteLLM-keyed releases) come into the fleet database
-    once; LiteLLM may still be starting with us, so this retries for a while. Until it succeeds, auth.key_info falls
-    back to LiteLLM per key."""
-    for attempt in range(30):
-        try:
-            log.info("imported %s key(s) from LiteLLM", await asyncio.to_thread(keys.import_litellm))
-            auth.litellm_fallback = False
-            return
-        except Exception as e:  # noqa: BLE001 - LiteLLM not up yet, or unreachable
-            log.warning("key import from LiteLLM failed (attempt %s): %s", attempt + 1, e)
-            await asyncio.sleep(min(60, 5 * (attempt + 1)))
-
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """The control API owns the fleet database schema (services/api/db.py MIGRATIONS), applied at startup; it also
-    holds the keys (services/api/keys.py): the router key of this fleet, and every key LiteLLM held before."""
+    holds the keys (services/api/keys.py): the router key of this fleet."""
     check_placeholders()
     tasks = []
     if db.enabled():
@@ -52,8 +40,7 @@ async def _lifespan(_app: FastAPI):
             keys.ensure_router(cfg.ROUTER_KEY)
         else:
             log.warning("ROUTER_KEY is not set: LiteLLM model groups are not registered")
-        log.info("queued %s model(s) for a re-render after start", db.requeue_all())   # re-registers every LiteLLM group with the router key
-        tasks = [asyncio.create_task(_import_keys()), asyncio.create_task(_reconcile_loop())]
+        tasks = [asyncio.create_task(_reconcile_loop())]
     try:
         yield
     finally:
@@ -366,7 +353,7 @@ def fallback_switch() -> list[str]:
         for job in items:
             ann = job["metadata"].get("annotations") or {}
             wait = ann.get(f"{cfg.LABEL}/fallback-wait-s")
-            if wait is None or not jobs.is_manager_job(job) or jobs.finished(job) or ann.get(f"{cfg.LABEL}/successor"):
+            if wait is None or not jobs.is_manager_job(job) or status.finished(job) or ann.get(f"{cfg.LABEL}/successor"):
                 continue
             created = datetime.fromisoformat(str(job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
             if (now - created).total_seconds() < int(wait):
@@ -435,7 +422,7 @@ def recovery_switch() -> list[str]:
             except ValueError:
                 ex = {}
             rec = ex.get("recovery") or {}
-            if rec.get("on_infrastructure_loss") != "recover" or not jobs.is_manager_job(item) or jobs.finished(item) \
+            if rec.get("on_infrastructure_loss") != "recover" or not jobs.is_manager_job(item) or status.finished(item) \
                     or ann.get(f"{cfg.LABEL}/successor") or ann.get(f"{cfg.LABEL}/cancelled"):
                 continue
             try:
@@ -640,7 +627,7 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
 def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None):
     # admission: Kueue (profile queues) bounds concurrent runs; LiteLLM rpm/budget bound async calls;
     # the gateway BackendTrafficPolicy caps request rates. Nothing is counted here.
-    name = jobs.op_name(p.tenant, model, idempotency_key)
+    name = render.op_name(p.tenant, model, idempotency_key)
     timeout = req.timeout_s          # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None

@@ -73,13 +73,11 @@ scales on `target` requests/s per replica (default 5) with no concurrency limit;
 to scale to zero. The API writes the complete
 policy back, so a read never has to guess a default. Rendering onto Knative: `concurrency_utilization` is the
 `concurrency` metric with `container_concurrency` as the scale target and `target` as its utilization percentage;
-`requests_per_second` is the `rps` metric at 100 % with `containerConcurrency` 0. Definitions stored under the raw
-Knative names the API accepted before 0.11.12 (`metric: concurrency | rps`, `utilization_percent`) are read in this
-vocabulary (`services/api/models.py` `native_scaling`).
+`requests_per_second` is the `rps` metric at 100 % with `containerConcurrency` 0.
 
 What happens on a write: the definition goes into the fleet database (table `models`: id, kind, spec, the
 rendered entry, version, `managed_by`, created/updated by and at) and every write into `models_history`;
-the API renders the endpoint on every cluster of the model's regions (`services/api/render_endpoint.py`; `charts/endpoint`
+the API renders the endpoint on every cluster of the model's regions (`services/api/render_endpoint.py`
 is the reference rendering of the same objects, kept for one release), registers an
 OpenAI endpoint as a LiteLLM model group whose `api_base` is the endpoint's gateway hostname in that region,
 and writes a read-only ConfigMap copy `catalog-<id>` into the `api` namespace of every other region.

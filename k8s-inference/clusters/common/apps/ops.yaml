@@ -2,6 +2,5 @@ name: ops
 component: ops
 namespace: ops
 wave: '2'
-hubOnly: 'false'
 placement: all
 kind: manifests

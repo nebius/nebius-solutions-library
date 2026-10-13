@@ -1,7 +1,7 @@
 """Read regional KServe InferenceServices. Scaling writes persist through model definitions;
 fleet-managed objects are read-only through the customer API."""
 import re
-from config import LABEL, PUBLIC_API_URL, REGION
+from config import PUBLIC_API_URL, REGION
 import kube
 
 

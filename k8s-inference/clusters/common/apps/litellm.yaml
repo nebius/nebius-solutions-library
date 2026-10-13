@@ -2,7 +2,6 @@ name: litellm
 component: litellm
 namespace: litellm
 wave: '3'
-hubOnly: 'true'
 placement: control
 kind: helm
 repoURL: ghcr.io/berriai

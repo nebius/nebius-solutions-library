@@ -2,7 +2,6 @@ name: kserve-crd
 component: kserve-crd
 namespace: kserve
 wave: '2'
-hubOnly: 'false'
 placement: worker
 kind: helm
 repoURL: ghcr.io/kserve/charts
