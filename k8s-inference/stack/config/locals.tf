@@ -232,6 +232,11 @@ locals {
     { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
     { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
     { name = "IMAGES_SOURCE", value = local.images_source },
+    # live sessions (docs/API.md "Sessions"): off unless `sessions.enabled`
+    { name = "SESSIONS_ENABLED", value = local.f.sessions.enabled ? "true" : "false" },
+    { name = "SESSION_CLAIM_TTL_S", value = tostring(local.f.sessions.claim_ttl_s) },
+    { name = "SESSION_ATTACH_WAIT_S", value = tostring(local.f.sessions.attach_wait_s) },
+    { name = "SESSION_TOKEN_AUDIENCE", value = local.f.sessions.token_audience },
     # the gateway domain of every GPU region: the endpoints' hostnames (LiteLLM, sync calls for another region, async calls)
     { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
     { name = "ACME_ISSUER", value = local.certificate_issuer[id] },

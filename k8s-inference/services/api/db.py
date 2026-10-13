@@ -215,6 +215,40 @@ create table if not exists operation_marks (
     alter table key_run_members add column if not exists stage text;
     alter table key_run_members add column if not exists note text;
     """,
+    # 14: live sessions (docs/API.md "Sessions"): one admitted stream = one claim, one connection, one worker pod
+    """
+    create table if not exists sessions (
+        id                  text primary key,
+        tenant              text not null,
+        owner               text not null,
+        key_hash            text not null,
+        model               text not null,
+        cluster             text,
+        region              text not null,
+        state               text not null default 'claimed',
+        claim_hash          text not null,
+        connection          text,
+        pod                 text,
+        pod_namespace       text,
+        pod_uid             text,
+        worker_session_id   text,
+        gpu_bound           numeric not null default 0,
+        created_at          timestamptz not null default now(),
+        expires_at          timestamptz not null,
+        deadline_at         timestamptz not null,
+        bound_at            timestamptz,
+        attached_at         timestamptz,
+        cancel_requested_at timestamptz,
+        cancel_reason       text,
+        ended_at            timestamptz,
+        outcome             text,
+        gpu_seconds         numeric,
+        usage               text,
+        settled_at          timestamptz
+    );
+    create index if not exists sessions_open on sessions (state) where state <> 'ended';
+    create index if not exists sessions_owner on sessions (tenant, owner, created_at desc);
+    """,
 ]
 
 _pool = None

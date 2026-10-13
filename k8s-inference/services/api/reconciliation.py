@@ -394,6 +394,7 @@ async def _reconcile_loop():
             await asyncio.to_thread(reconcile_models)
             await asyncio.to_thread(release_stale_reservations)
             await asyncio.to_thread(gate_stages)
+            await asyncio.to_thread(sweep_sessions)
             await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -408,6 +409,14 @@ def gate_stages() -> list[str]:
     import stages
 
     return stages.gate()
+
+
+def sweep_sessions() -> list[str]:
+    """Live sessions (docs/API.md "Sessions"): expired claims, unattached bindings, deadlines, lost workers, unsettled
+    ends (sessions.sweep). Nothing without the feature or the database."""
+    import sessions
+
+    return sessions.sweep()
 
 
 def release_stale_reservations() -> list[str]:

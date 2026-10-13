@@ -683,3 +683,100 @@ def test_stage_graph_members_bypass_the_head_rule_and_hold_the_run_open(database
     assert e.value.status == 409 and "cancelled" in e.value.detail
     assert keys.prepare_run_member("root2", "root2-s-a", None, 0, None, kind="stage", stage="a")["replay"] is True
     assert keys.cancel_graph("nope", "x") is False
+
+
+def test_sessions_bind_once_attach_release_once_and_sweep(database, monkeypatch):
+    """Live sessions on the ledger (keys.py migration 14, docs/API.md "Sessions"): admission as a run's root; the claim
+    binds exactly once across concurrent presentations; attach only for the bound connection, once, idempotent for the
+    same pod; release by the attached pod only, measured or unknown, settled once; cancel of a claimed session ends it
+    at zero; the sweep expires unbound claims at zero, ends unattached bindings unknown (fenced), requests cancel at the
+    deadline, ends sessions whose pod is gone unknown, and settles what a crash left."""
+    import config as cfg
+    import sessions
+
+    db.migrate()
+    monkeypatch.setattr(cfg, "SESSIONS_ENABLED", True)
+    monkeypatch.setattr(cfg, "SESSION_CLAIM_TTL_S", 120)
+    monkeypatch.setattr(cfg, "SESSION_ATTACH_WAIT_S", 60)
+    h = "f" * 64
+    _bounded(h, budget_gpu_seconds=10000, max_concurrent=1)
+    s = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 2)
+    sid, token = s["id"], s["claim_token"]
+    assert s["status"] == "claimed" and s["usage"] is None and keys.run_members(sid)[0]["gpu_bound"] == 1200.0
+    with pytest.raises(keys.KeyLimit) as e:  # the slot is held
+        sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 2)
+    assert e.value.status == 429
+    with pytest.raises(HTTPException) as e:
+        sessions.bind(token, "other-model")
+    assert e.value.status_code == 401
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: _try(lambda: sessions.bind(token, "stt")), range(4)))
+    bound = [r for r in results if isinstance(r, dict)]
+    assert len(bound) == 1 and all(getattr(r, "status_code", None) == 401 for r in results if r not in bound)
+    connection = bound[0]["connection"]
+    me = {"pod": "stt-predictor-abc", "namespace": "models", "uid": "uid-1", "region": "eu-north1"}
+    other = {"pod": "stt-predictor-xyz", "namespace": "models", "uid": "uid-2", "region": "eu-north1"}
+    with pytest.raises(HTTPException) as e:
+        sessions.attach(sid, "not-the-connection", me, "w-1")
+    assert e.value.status_code == 409
+    a = sessions.attach(sid, connection, me, "w-1")
+    assert a["state"] == "attached" and a["pod_uid"] == "uid-1"
+    assert sessions.attach(sid, connection, me, "w-1")["state"] == "attached"  # the same worker's retry (lost ACK)
+    with pytest.raises(HTTPException) as e:  # a second worker never takes it
+        sessions.attach(sid, connection, other, "w-2")
+    assert e.value.status_code == 409
+    with pytest.raises(HTTPException) as e:  # only the attached pod releases
+        sessions.release(sid, other, "done", 1.0)
+    assert e.value.status_code == 409
+    sessions.cancel(sid, "cancelled by the owner")  # a request: still attached, slot held
+    assert sessions.get(sid)["state"] == "attached" and sessions.get(sid)["cancel_requested_at"] is not None
+    assert _reservation(sid) is not None
+    r = sessions.release(sid, me, "cancelled", None)  # unmetered: unknown, the bound stays against the budget
+    assert r["state"] == "ended" and r["usage"] == "unknown" and r["settled_at"] is not None
+    assert sessions.release(sid, me, "cancelled", None)["settled_at"] == r["settled_at"]  # idempotent, settled once
+    assert _reservation(sid) is None and keys.run_usage(h)["unknown_gpu_seconds"] == 1200.0
+    assert keys.info(h)["spent_requests"] == 1
+    with pytest.raises(HTTPException) as e:  # fenced: nothing attaches to an ended session
+        sessions.attach(sid, connection, me, "w-1")
+    assert e.value.status_code == 409
+    # a claimed session cancelled before any connection: ended at zero, the slot free
+    s2 = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 0)
+    assert sessions.cancel(s2["id"], "cancelled by the owner")["outcome"] == "cancelled"
+    assert _reservation(s2["id"]) is None and sessions.get(s2["id"])["usage"] == "none"
+    with pytest.raises(HTTPException):
+        sessions.bind(s2["claim_token"], "stt")
+    # the sweep: an expired claim, an unattached binding, a deadline, a lost worker, an unsettled end
+    s3 = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 0)
+    with db.pool().connection() as c:
+        c.execute("update sessions set expires_at = now() - interval '1 second' where id = %s", (s3["id"],))
+    assert f"{s3['id']}:expired" in sessions.sweep() and sessions.get(s3["id"])["usage"] == "none"
+    s4 = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 1)
+    sessions.bind(s4["claim_token"], "stt")
+    with db.pool().connection() as c:
+        c.execute("update sessions set bound_at = now() - interval '2 minutes' where id = %s", (s4["id"],))
+    assert f"{s4['id']}:unattached" in sessions.sweep()
+    g = sessions.get(s4["id"])
+    assert g["state"] == "ended" and g["usage"] == "unknown" and g["settled_at"] is not None
+    with pytest.raises(HTTPException):  # a late attach is fenced for good
+        sessions.attach(s4["id"], g["connection"], me, "w")
+    s5 = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 1)
+    b5 = sessions.bind(s5["claim_token"], "stt")
+    sessions.attach(s5["id"], b5["connection"], me, "w-5")
+    monkeypatch.setattr(sessions, "_worker_gone", lambda s: False)
+    with db.pool().connection() as c:
+        c.execute("update sessions set deadline_at = now() - interval '1 second' where id = %s", (s5["id"],))
+    assert f"{s5['id']}:cancel-requested" in sessions.sweep()
+    assert sessions.get(s5["id"])["state"] == "attached" and sessions.get(s5["id"])["cancel_reason"] == "deadline"
+    monkeypatch.setattr(sessions, "_worker_gone", lambda s: s["pod_uid"] == "uid-1")  # the exact pod is gone
+    assert f"{s5['id']}:worker-lost" in sessions.sweep()
+    assert sessions.get(s5["id"])["usage"] == "unknown" and _reservation(s5["id"]) is None
+    with db.pool().connection() as c:  # a crash between the end and the settlement: the sweep settles once
+        c.execute("update sessions set settled_at = null where id = %s", (s5["id"],))
+    assert f"{s5['id']}:settled" in sessions.sweep() and sessions.sweep() == []
+
+
+def _try(fn):
+    try:
+        return fn()
+    except HTTPException as e:
+        return e

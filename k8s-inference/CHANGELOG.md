@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.50
+
+- Live sessions (docs/API.md "Sessions"), off unless `sessions.enabled` in terraform.tfvars: `POST /v1/models/<id>:session`
+  admits a stream on the key (slot, request, GPU bound) and answers a one-time claim; the gateway hook binds the claim
+  exactly once (compare-and-swap, WebSocket subprotocol or `x-serverless2-session-claim` header), injects the session and
+  connection ids and refuses client-supplied ones; the worker pod attaches with its verified identity (TokenReview, pod
+  UID, the endpoint's own pod) before any GPU work and releases after its cleanup with measured or unknown usage; owner
+  cancel, deadline and disconnect are requests; the reconciler ends expired claims, unattached bindings and sessions
+  whose pod is gone (unknown), and settles once. Ledger migration 14 (`sessions`); endpoint SecurityPolicies carry the
+  session headers (re-rendered on the next model apply).
+
 ## api 0.11.49
 
 - A stage of a closed graph (every stage settled) replays as its durable lineage head (200) instead of 409; a stage never

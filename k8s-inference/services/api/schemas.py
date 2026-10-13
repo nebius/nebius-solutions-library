@@ -112,6 +112,49 @@ class InvokeRequest(BaseModel):
     execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs; endpoint calls: docs/API.md)
 
 
+class SessionRequest(BaseModel):
+    """`POST /v1/models/{model}:session` (docs/API.md "Sessions")."""
+
+    model_config = ConfigDict(extra="forbid")
+    timeout_s: int = Field(default=3600, ge=60, le=86400)  # the session's deadline from its creation
+    region: str | None = None  # a cluster id or region of the model's deployments (docs/API.md)
+
+
+class Session(BaseModel):
+    id: str
+    model: str
+    cluster: str | None = None
+    region: str
+    status: Literal["claimed", "bound", "attached", "ended"]
+    outcome: str | None = None
+    cancel_requested: bool
+    cancel_reason: str | None = None
+    attached: bool
+    worker_session_id: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    deadline_at: str | None = None
+    bound_at: str | None = None
+    attached_at: str | None = None
+    ended_at: str | None = None
+    gpu_seconds: float | None = None
+    usage: str | None = None
+    claim_token: str | None = None  # on creation only
+
+
+class SessionAttach(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    connection: str
+    worker_session_id: str | None = Field(default=None, max_length=200)
+
+
+class SessionRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    connection: str
+    outcome: Literal["done", "cancelled", "disconnected", "busy", "error"]
+    gpu_seconds: float | None = Field(default=None, ge=0)  # null = unknown (no metering): the bound stays
+
+
 class ResumeRequest(BaseModel):
     checkpoint_ref: str | None = Field(
         default=None, max_length=1024

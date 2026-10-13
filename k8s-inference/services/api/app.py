@@ -33,6 +33,7 @@ import monitoring
 import placement as placing
 import render
 import schemas
+import sessions
 import stages
 from auth import (
     Principal,
@@ -111,7 +112,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.49", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.50", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -600,6 +601,25 @@ def get_model(model: str, p: Principal = Depends(scoped("read:catalog"))):
 )
 async def authorize_endpoint(model: str, request: Request, path: str = ""):
     """Envoy prefixes the original URI with a model identity fixed by the endpoint's SecurityPolicy."""
+    if sessions.enabled():
+        if any(request.headers.get(h) for h in sessions.INJECTED):
+            # only the hook sets these towards the worker; a client that sends them is forging a worker identity
+            raise HTTPException(403, "x-serverless2-session / x-serverless2-connection are not client headers")
+        claim = sessions.claim_of(request.headers)
+        if claim:
+            # a live session (docs/API.md "Sessions"): the claim binds exactly once, the session already holds the
+            # key's slot and request; the worker learns the session and connection ids from the injected headers
+            m = catalog.get(model) or _endpoint_model(model)
+            s = await asyncio.to_thread(sessions.bind, claim, m["name"])
+            return JSONResponse(
+                {},
+                headers={
+                    "x-serverless2-tenant": s["tenant"],
+                    "x-serverless2-key-alias": "",
+                    sessions.SESSION_HEADER: s["id"],
+                    sessions.CONNECTION_HEADER: s["connection"],
+                },
+            )
     key = request.headers.get("authorization", "")
     if not key.lower().startswith("bearer "):
         token = request.query_params.get("api_key", "")
@@ -1576,6 +1596,113 @@ def _cluster_of(region: str) -> str:
 def _home(job: dict) -> str:
     """The cluster the operation's Job object lives in: the manager for fleet-placed runs."""
     return REGION if jobs.is_manager_job(job) else (job.get("_region") or REGION)
+
+
+# ---- live sessions (docs/API.md "Sessions") -----------------------------------------------------------------------
+@app.post("/v1/models/{model}:session", responses={202: {"model": schemas.Session}}, status_code=202)
+def create_session(
+    model: str, req: schemas.SessionRequest | None = None, p: Principal = Depends(scoped("invoke:sync"))
+):
+    """An admitted stream to an endpoint: the key's slot and request are taken now (and, for a key with a GPU-second
+    budget, the endpoint's GPUs x timeout_s); the answer carries a one-time claim token the connection presents
+    (`Sec-WebSocket-Protocol: s2-session.<token>` or `x-serverless2-session-claim`) within SESSION_CLAIM_TTL_S."""
+    sessions.require()
+    req = req or schemas.SessionRequest()
+    m = _model(model)
+    authorize(p, m["name"], "invoke:sync", budget=True)
+    if m["mode"] == "run":
+        raise HTTPException(400, "sessions are streams to an endpoint; this model is a run class")
+    if p.role == keys.ROUTER["role"]:
+        raise HTTPException(403, "the router key opens no sessions")
+    cluster, region = _deployment_of(m, req.region)
+    try:
+        return sessions.create(
+            keys.key_hash(p.key),
+            p.tenant,
+            p.owner,
+            m["name"],
+            cluster,
+            region,
+            req.timeout_s,
+            sessions.gpus_per_replica(m),
+        )
+    except keys.KeyLimit as e:
+        raise HTTPException(e.status, e.detail)
+
+
+def _owned_session(p: Principal, id: str) -> dict:
+    s = sessions.get(id)
+    if s is None or s["tenant"] != p.tenant or s["owner"] != p.owner:
+        raise HTTPException(404, f"session {id}: not found")
+    return s
+
+
+@app.get("/v1/sessions", responses={200: {"model": list[schemas.Session]}})
+def list_sessions(limit: int = Query(default=100, ge=1, le=500), p: Principal = Depends(scoped("read:operations"))):
+    sessions.require()
+    return sessions.list_owner(p.tenant, p.owner, limit)
+
+
+@app.get("/v1/sessions/{id}", responses={200: {"model": schemas.Session}})
+def get_session(id: str, p: Principal = Depends(scoped("read:operations"))):
+    sessions.require()
+    return sessions.public(_owned_session(p, id))
+
+
+@app.post("/v1/sessions/{id}:cancel", responses={200: {"model": schemas.Session}})
+def cancel_session(id: str, p: Principal = Depends(scoped("invoke:sync"))):
+    """A cancellation request: a session nobody bound ends now; a bound or attached one keeps its slot until its
+    worker releases it after cleanup or its pod is confirmed gone (the reconciler)."""
+    sessions.require()
+    _owned_session(p, id)
+    return sessions.public(sessions.cancel(id, "cancelled by the owner"))
+
+
+async def _worker_session(id: str, authorization: str) -> tuple[dict, dict]:
+    """The session and the verified identity of the worker pod calling with its own bound ServiceAccount token."""
+    sessions.require()
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "a worker calls with its pod's ServiceAccount token")
+    s = sessions.get(id)
+    if s is None:
+        raise HTTPException(404, "no such session")
+    worker = await asyncio.to_thread(sessions.verify_worker, authorization[7:].strip(), s, _endpoint_model)
+    return s, worker
+
+
+@app.post("/internal/sessions/{id}:attach", include_in_schema=False)
+async def attach_session(id: str, body: schemas.SessionAttach, authorization: str = Header(default="")):
+    """The worker that accepted the connection, before any decoder, reset or GPU work: `bound -> attached` for the
+    connection id the hook injected; a retry with the same (connection, pod) is idempotent; after the attach wait,
+    a cancel or the deadline it fails for good."""
+    _s, worker = await _worker_session(id, authorization)
+    s = await asyncio.to_thread(sessions.attach, id, body.connection, worker, body.worker_session_id)
+    return {**sessions.public(s), "connection": s["connection"]}
+
+
+@app.post("/internal/sessions/{id}:release", include_in_schema=False)
+async def release_session(id: str, body: schemas.SessionRelease, authorization: str = Header(default="")):
+    """The attached worker, after its own post-done cleanup: the only release of an attached session (besides
+    confirmed pod loss). `gpu_seconds` null = unknown (unmetered): the bound stays against the budget."""
+    s, worker = await _worker_session(id, authorization)
+    if s.get("connection") and body.connection != s["connection"]:
+        raise HTTPException(409, "not this session's connection")
+    return sessions.public(await asyncio.to_thread(sessions.release, id, worker, body.outcome, body.gpu_seconds))
+
+
+@app.get("/internal/sessions/{id}", include_in_schema=False)
+async def watch_session(id: str, authorization: str = Header(default="")):
+    """The attached worker's view (only it may watch): status, `cancel_requested`, the deadline."""
+    s, worker = await _worker_session(id, authorization)
+    if s["state"] != "attached" or s["pod_uid"] != worker["uid"]:
+        raise HTTPException(403, "only the attached worker watches its session")
+    return {
+        "id": id,
+        "status": s["state"],
+        "cancel_requested": s["cancel_requested_at"] is not None,
+        "cancel_reason": s["cancel_reason"],
+        "deadline_at": sessions._ts(s["deadline_at"]),
+    }
 
 
 @app.post("/v1/operations/{id}:cancel", responses={200: {"model": schemas.Operation}})

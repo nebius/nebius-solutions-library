@@ -639,11 +639,23 @@ def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
             "extAuth": {
                 "failOpen": False,
                 "timeout": "10s",
-                "headersToExtAuth": ["authorization", "sec-websocket-protocol", "x-serverless2-admitted"],
+                "headersToExtAuth": [
+                    "authorization",
+                    "sec-websocket-protocol",
+                    "x-serverless2-admitted",
+                    "x-serverless2-session-claim",  # a live session's claim (docs/API.md "Sessions")
+                    "x-serverless2-session",  # a client must not supply these: the hook refuses them
+                    "x-serverless2-connection",
+                ],
                 "http": {
                     "path": f"/internal/authorize/{v.get('modelId') or name}",
                     "backendRefs": [api],
-                    "headersToBackend": ["x-serverless2-tenant", "x-serverless2-key-alias"],
+                    "headersToBackend": [
+                        "x-serverless2-tenant",
+                        "x-serverless2-key-alias",
+                        "x-serverless2-session",  # set by the hook on a bound session (overrides anything a client sent)
+                        "x-serverless2-connection",
+                    ],
                 },
             },
         },
