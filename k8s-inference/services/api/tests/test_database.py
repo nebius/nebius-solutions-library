@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
 
+import attempts
 import billing
 import db
 import keys
@@ -398,3 +399,144 @@ def test_rotation_back_to_a_previous_value_does_not_revoke_the_active_mirror(dat
     assert calls[1:] == [("/key/delete", {"keys": [keys.key_hash(new)]})]
     with db.pool().connection() as c:
         assert c.execute("select count(*) from retired_mirrors").fetchone()[0] == 0
+
+
+def _bounded(h: str, **limits):
+    keys.import_records(
+        [
+            {
+                **LEGACY,
+                "hash": h,
+                "alias": "run-" + h[:4],
+                "max_concurrent": 1,
+                "budget_requests": 5,
+                "budget_gpu_seconds": 1000,
+                "rate_limit": None,
+                **limits,
+            }
+        ],
+        "demo",
+        "admin",
+    )
+
+
+def _reservation(root="root"):
+    with db.pool().connection() as c:
+        return c.execute(
+            "select key_hash, gpu_seconds, requests from key_reservations where operation = %s", (root,)
+        ).fetchone()
+
+
+def test_run_ledger_one_root_slot_members_measured_and_unknown(database):
+    """One reservation per run: the root takes the slot and the request once; continuations join after the head with
+    their own GPU bound; measured settlement becomes spend, an unmeasured GPU attempt stays `unknown` against the
+    budget; the slot closes when no member is active and a later manual continuation re-acquires it."""
+    db.migrate()
+    h = "c" * 64
+    _bounded(h)
+    assert keys.admit(h, "root", "demo", gpu_seconds=600, run_member=True)["active"] == 1
+    assert keys.run_members("root")[0]["gpu_bound"] == 600.0 and keys.run_head("root") == "root"
+    with pytest.raises(keys.KeyLimit) as e:  # the head rule: a continuation follows the head, nothing else
+        keys.prepare_run_member("root", "root-r1", "root-x9", 1, 100)
+    assert e.value.status == 409 and "head" in e.value.detail
+    with pytest.raises(keys.KeyLimit) as e:  # 600 reserved + 500 > 1000 GPU seconds
+        keys.prepare_run_member("root", "root-r1", "root", 1, 500)
+    assert e.value.status == 402
+    with pytest.raises(keys.KeyLimit) as e:  # a GPU continuation on a GPU-second budget needs a bound
+        keys.prepare_run_member("root", "root-r1", "root", 1, None)
+    assert e.value.status == 400
+    m = keys.prepare_run_member("root", "root-r1", "root", 1, 300)
+    assert m["gpu_bound"] == 300.0 and m["key_hash"] == h
+    assert keys.prepare_run_member("root", "root-r1", "root", 1, 300)["replay"] is True  # idempotent member
+    assert _reservation() == (h, 900, 1) and keys.run_head("root") == "root-r1"
+    assert keys.info(h)["spent_requests"] == 0  # the request is spent when the run closes, once
+    # the root's attempt settles measured: spend; the slot stays while the successor is active
+    assert keys.release("root", 450) is True
+    i = keys.info(h)
+    assert i["spent_gpu_seconds"] == 450.0 and _reservation() == (h, 300, 1)
+    # the successor ends without a trustworthy measurement: unknown, its bound stays against the budget, the slot goes
+    s = keys.settle_run_member("root-r1", None)
+    assert s["state"] == "unknown" and s["closed"] is True and _reservation() is None
+    assert keys.run_usage(h) == {"active_operations": 0, "reserved_gpu_seconds": 0.0, "unknown_gpu_seconds": 300.0}
+    assert keys.info(h)["spent_requests"] == 1
+    with pytest.raises(keys.KeyLimit) as e:  # 450 spent + 300 unknown + 300 > 1000
+        keys.admit(h, "other", "demo", gpu_seconds=300, run_member=True)
+    assert e.value.status == 402
+    # a manual continuation of the closed run re-acquires the slot: no second request, concurrency re-checked
+    keys.admit(h, "busy", "demo", run_member=True)
+    with pytest.raises(keys.KeyLimit) as e:
+        keys.prepare_run_member("root", "root-r2", "root-r1", 1, 100)
+    assert e.value.status == 429
+    keys.release("busy", 0)
+    m = keys.prepare_run_member("root", "root-r2", "root-r1", 1, 100, transfer_only=True)
+    assert m["gpu_bound"] == 0.0 and _reservation() == (h, 0, 0)
+    assert keys.settle_run_member("root-r2", 0.0)["closed"] is True
+    assert keys.info(h)["spent_requests"] == 2  # root and busy: one request each; the continuation none
+    # the operator settles the unknown attempt later
+    assert keys.settle_unknown("root-r1", 120) is True and keys.settle_unknown("root-r1", 1) is False
+    assert keys.info(h)["spent_gpu_seconds"] == 570.0 and keys.run_usage(h)["unknown_gpu_seconds"] == 0.0
+
+
+def test_run_ledger_rechecks_the_original_key_and_rolls_back_a_lost_create(database):
+    db.migrate()
+    h = "d" * 64
+    _bounded(h, budget_gpu_seconds=None)
+    keys.admit(h, "root", "demo", run_member=True)
+    keys.block("demo", "demo-run-dddd")
+    with pytest.raises(keys.KeyLimit) as e:
+        keys.prepare_run_member("root", "root-r1", "root", 1, 100)
+    assert e.value.status == 403
+    keys.block("demo", "demo-run-dddd", False)
+    keys.prepare_run_member("root", "root-r1", "root", 1, 100)
+    assert keys.rollback_run_member("root-r1") is True and keys.run_head("root") == "root"
+    assert keys.rollback_run_member("root") is False  # the root is never rolled back here
+    assert _reservation() is not None
+    assert keys.release("root", 0) is True and _reservation() is None
+    # a key that is not the run's cannot continue it: the ledger admits on the root's key only
+    with db.pool().connection() as c:
+        assert c.execute("select key_hash from key_run_members where operation = 'root'").fetchone()[0] == h
+
+
+def test_late_record_of_a_replaced_attempt_closes_accounting_without_promoting(database):
+    """Handoff failure 1: after epoch 2 started, epoch 1's own interruption still records its end (for accounting),
+    but no pointer or result of it is kept and a late start or success stays refused."""
+    db.migrate()
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "root-a",
+        {"operation": "root", "status": "started", "gpus": 1, "started_at": "2026-10-13T08:00:00Z"},
+    )
+    attempts.mark_successor("root", "root-r1")
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "root-r1-a",
+        {"operation": "root-r1", "root": "root", "status": "started", "gpus": 1, "started_at": "2026-10-13T08:00:30Z"},
+    )
+    closed = attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "root-a",
+        {
+            "operation": "root",
+            "status": "interrupted",
+            "gpus": 1,
+            "ended_at": "2026-10-13T08:00:25Z",
+            "checkpoint_ref": "app://must-not-promote",
+            "result_ref": "app://must-not-promote",
+        },
+    )
+    assert (
+        closed["ended_at"]
+        and not closed["result_ref"]
+        and not closed["checkpoint_ref"]
+        and closed["status"] == "interrupted"
+    )
+    with pytest.raises(HTTPException, match="409"):
+        attempts.record(
+            "eu-north1",
+            "tenant-demo",
+            "root-a",
+            {"operation": "root", "status": "succeeded", "gpus": 1, "ended_at": "2026-10-13T08:00:26Z"},
+        )

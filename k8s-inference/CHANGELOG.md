@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.40
+
+- Continuations of a run on a bounded key (resume, export retry, finalizer, fallback, recovery) are admitted on the
+  run's ledger (migration 11 `key_run_members`): one slot and one request per run, members after the current head
+  with their own GPU bound, measured settlement, unknown GPU time kept against the budget and reported on
+  `GET /v1/keys/me` (`usage`); the 501s of these paths are gone (docs/API.md "Keys").
+- A replaced attempt may still close its accounting (interrupted or failed) without promoting a pointer or result;
+  an unmeasured GPU attempt is billed as unknown, never as zero; a run cancelled before it started settles at zero.
+- A fallback fences the original (suspend, successor mark, Workload deactivated) before its successor is created, and
+  restores it when the successor cannot be created.
+- API rollouts keep in-flight synchronous calls: surge-only rolling update, a termination grace period (chart value
+  `api.terminationGracePeriodSeconds`), a preStop pause and uvicorn's graceful shutdown.
+
 ## Initial release
 
 The Kubernetes inference fleet solution: a control cluster and one cluster per GPU region from one

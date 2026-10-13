@@ -99,8 +99,15 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         ).fetchone()
         cancelled = (marks[0],) if marks else None
         epoch = cur[0] if cur else top + 1
-        if epoch < top:  # any record from a replaced attempt, pointers included
-            raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
+        if epoch < top:
+            # a replaced attempt: its own end (interruption or failure, with its measured time) may still close the
+            # accounting of an attempt already on record; it promotes nothing (no pointer, generation or result) and
+            # changes no operation status; a late start, progress or success of a replaced attempt is refused
+            if not cur or status not in ("interrupted", "failed"):
+                raise HTTPException(
+                    409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused"
+                )
+            body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
         if marks and marks[1]:
             # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
             # publish progress (a start or pointer record) or a final success; its own interruption or failure may

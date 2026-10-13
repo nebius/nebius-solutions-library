@@ -153,15 +153,25 @@ endpoint hostname directly counts once at the hook; a replay with the same `Idem
 Exhausted budgets answer 402, a full concurrency slot or rate window 429. `GET /v1/keys/me` shows the limits,
 what was spent against them, and for imported keys the legacy `principal_id` and metadata.
 
-**Ownership and the paths a bounded key cannot take yet.** Every operation records its owner (the key's principal,
-migration 9), so a key never reads, cancels, resumes or exports another principal's operations even inside the same
-tenant namespace; an idempotency key is scoped to its owner; a reservation is refunded when the Job's creation fails
-after admission. A key with any finite limit (`max_concurrent`, `budget_requests`, `budget_gpu_seconds`,
-`rate_limit`) is admitted on the synchronous and run paths only: a shared endpoint cannot measure a key's GPU time, so a
-finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint call cannot hold a concurrency slot
-(501 unless the call is the API's own admitted proxy); bounded asynchronous calls and continuations (resume, export,
-fallback, recovery) answer 501 until the reservation transfers to the successor. Unbounded keys and keys created
-through `POST /v1/keys` are not affected.
+**Ownership and continuations.** Every operation records its owner (the key's principal, migration 9), so a key
+never reads, cancels, resumes or exports another principal's operations even inside the same tenant namespace; an
+idempotency key is scoped to its owner (the same request under the same key from another key of the same principal
+is a replay of the existing operation, on its original billing key); a reservation is refunded when the Job's
+creation fails after admission. A run is one logical operation for the key's limits (migration 11, the run ledger):
+the root takes the slot and the request once; every continuation (resume, export retry, application finalizer,
+fallback, automatic recovery) joins the root's reservation as a member after the run's current head (a continuation
+of anything but the head is 409), on the root's original key, which is checked again (blocked 403, expired 401); a
+computing member with a GPU-second budget reserves its GPUs x timeout (402 when it does not fit next to what is
+reserved and unknown), a transfer-only member nothing. Billing settles each member with its measured GPU seconds; a
+GPU attempt that ended without a trustworthy measurement (a lost worker) stays `unknown`: its bound keeps counting
+against the budget until an operator settles it (`keys.settle_unknown`), it is never charged as zero. A run cancelled
+before it started settles at zero. The slot closes when no member is active; a later manual continuation re-acquires
+it (concurrency re-checked, no second request). `GET /v1/keys/me` reports `usage`: operations in flight, reserved and
+unknown GPU seconds. A key with any finite limit is admitted on the synchronous and run paths: a shared endpoint
+cannot measure a key's GPU time, so a finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint
+call cannot hold a concurrency slot (501 unless the call is the API's own admitted proxy); bounded asynchronous calls
+answer 501 until the durable async call exists. Unbounded keys and keys created through `POST /v1/keys` are not
+affected.
 
 **Importing keys.** `POST /v1/keys:import` (an admin key; the keys of its own tenant only) and
 `python -m keys import <file.json>` (an operator with database access) take pre-hashed records

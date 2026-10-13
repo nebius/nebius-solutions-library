@@ -642,7 +642,9 @@ class KeyLimit(Exception):
         self.status, self.detail = status, detail
 
 
-def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
+def admit(
+    h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_request: bool = True, run_member: bool = False
+) -> dict:
     """Reserve what `operation` will take from the key: one concurrency slot and (unless `counts_request` is false)
     one request against the request budget and the rate window, plus `gpu_seconds` against the GPU-second budget.
     The key row is locked, so two API replicas never admit past a limit together; a reservation that already exists
@@ -666,6 +668,9 @@ def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_
             "select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s",
             (h,),
         ).fetchone()
+        r_gpu = float(r_gpu) + _unknown_gpu(
+            c, h
+        )  # attempts that ran without a trustworthy measurement keep their bound
         if max_c is not None and active >= max_c:
             raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
         req = 1 if counts_request else 0
@@ -692,6 +697,12 @@ def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_
             "insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, %s)",
             (operation, h, tenant, gpu_seconds, req),
         )
+        if run_member:
+            # the root of a logical run (docs/API.md "Keys"): its continuations join this reservation as members
+            c.execute(
+                "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound) values (%s, %s, null, %s, %s, %s) on conflict do nothing",
+                (operation, operation, h, tenant, gpu_seconds),
+            )
         return {"operation": operation, "replay": False, "active": int(active) + 1}
 
 
@@ -749,8 +760,11 @@ def operation_owner(operation: str) -> tuple[str, str, str] | None:
 
 def release(operation: str, gpu_seconds: float | None = None) -> bool:
     """The operation is done: its slot goes, its request count and the measured GPU seconds (`gpu_seconds`; None =
-    nothing measured: a cancelled, failed-at-admission or CPU-only attempt) become spent. Idempotent."""
-    with db.pool().connection() as c, c.transaction():
+    nothing measured: a cancelled, failed-at-admission or CPU-only attempt) become spent. Idempotent. A member of a
+    logical run settles through the run's ledger (settle_run_member): its root's slot goes only with the run."""
+    with _connection() as c, c.transaction():
+        if c.execute("select 1 from key_run_members where operation = %s", (operation,)).fetchone():
+            return bool(settle_run_member(operation, gpu_seconds).get("settled"))
         r = c.execute(
             "delete from key_reservations where operation = %s returning key_hash, requests", (operation,)
         ).fetchone()
@@ -761,6 +775,231 @@ def release(operation: str, gpu_seconds: float | None = None) -> bool:
             (r[1], float(gpu_seconds or 0), r[0]),
         )
         return True
+
+
+# ---- the ledger of a logical run: one reservation per root, members per continuation (docs/API.md "Keys") ------
+def _unknown_gpu(c, h: str) -> float:
+    return float(
+        c.execute(
+            "select coalesce(sum(gpu_bound), 0) from key_run_members where key_hash = %s and state = 'unknown'", (h,)
+        ).fetchone()[0]
+    )
+
+
+def run_member(operation: str) -> dict | None:
+    with _connection() as c:
+        r = c.execute(
+            "select operation, root, predecessor, key_hash, tenant, gpu_bound, gpu_seconds, state from key_run_members where operation = %s",
+            (operation,),
+        ).fetchone()
+    if r is None:
+        return None
+    return {
+        "operation": r[0],
+        "root": r[1],
+        "predecessor": r[2],
+        "key_hash": r[3],
+        "tenant": r[4],
+        "gpu_bound": float(r[5]),
+        "gpu_seconds": float(r[6]) if r[6] is not None else None,
+        "state": r[7],
+    }
+
+
+def run_members(root: str) -> list[dict]:
+    """The members of a run, oldest first (empty: no ledger for this root)."""
+    with _connection() as c:
+        rows = c.execute(
+            "select operation, predecessor, gpu_bound, gpu_seconds, state from key_run_members where root = %s order by created_at, operation",
+            (root,),
+        ).fetchall()
+    return [
+        {
+            "operation": r[0],
+            "predecessor": r[1],
+            "gpu_bound": float(r[2]),
+            "gpu_seconds": float(r[3]) if r[3] is not None else None,
+            "state": r[4],
+        }
+        for r in rows
+    ]
+
+
+def run_head(root: str) -> str | None:
+    """The member a continuation may follow: the newest member of the run (active, settled or unknown); None when the
+    run has no ledger (an unbounded key admitted before the ledger existed, or no database)."""
+    with _connection() as c:
+        r = c.execute(
+            "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
+            (root,),
+        ).fetchone()
+    return r[0] if r else None
+
+
+def prepare_run_member(
+    root: str, operation: str, predecessor: str | None, gpus: int, timeout_s: int | None, transfer_only: bool = False
+) -> dict:
+    """Admit a continuation of the run `root` (resume, export retry, finalizer, fallback, recovery) as member
+    `operation` on the root's original key, before its Job exists: the key must still be valid (not blocked, not
+    expired); `predecessor` must be the run's current head (one chain, one head; a transfer-only member may follow a
+    terminal head); the member's GPU bound (gpus x timeout for a key with a GPU-second budget, else 0) must fit the
+    budget next to everything reserved and unknown; the root's slot is reused while the run is open and re-acquired
+    (concurrency re-checked, no second request, no rate call) when the run had closed. Idempotent for the same
+    member. Raises KeyLimit(400 | 401 | 402 | 403 | 409 | 429)."""
+    with _connection() as c, c.transaction():
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        own = c.execute(
+            "select key_hash, tenant from key_run_members where operation = %s and root = %s", (root, root)
+        ).fetchone()
+        if own is None:
+            raise KeyLimit(409, f"run {root} has no reservation ledger; it cannot be continued on a bounded key")
+        h, tenant = own
+        if c.execute("select 1 from key_run_members where operation = %s", (operation,)).fetchone():
+            return {"operation": operation, "replay": True}
+        k = c.execute(
+            "select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, blocked, expires from keys where hash = %s for update",
+            (h,),
+        ).fetchone()
+        if k is None:
+            raise KeyLimit(401, "the run's key no longer exists")
+        max_c, _b_req, b_gpu, _s_req, s_gpu, blocked, expires = k
+        if blocked:
+            raise KeyLimit(403, "the run's key is blocked")
+        if expires is not None and expires < datetime.now(timezone.utc):
+            raise KeyLimit(401, "the run's key has expired")
+        head = c.execute(
+            "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
+            (root,),
+        ).fetchone()[0]
+        if predecessor != head:
+            raise KeyLimit(409, f"only the current run head may be continued ({head}, not {predecessor})")
+        bound = 0.0
+        if b_gpu is not None and gpus > 0 and not transfer_only:
+            if not timeout_s:
+                raise KeyLimit(400, "this key has a GPU-second budget: the continuation needs a bounded timeout")
+            bound = float(gpus * int(timeout_s))
+        reserved = c.execute(
+            "select coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)
+        ).fetchone()[0]
+        if b_gpu is not None and bound and float(s_gpu) + float(reserved) + _unknown_gpu(c, h) + bound > float(b_gpu):
+            raise KeyLimit(402, "key GPU-second budget exhausted for the continuation")
+        res = c.execute("select gpu_seconds from key_reservations where operation = %s for update", (root,)).fetchone()
+        if res is None:  # the run had closed (every member settled): the continuation re-acquires the slot
+            active = c.execute("select count(*) from key_reservations where key_hash = %s", (h,)).fetchone()[0]
+            if max_c is not None and active >= max_c:
+                raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+            c.execute(
+                "insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, 0)",
+                (root, h, tenant, bound),
+            )
+        else:
+            c.execute("update key_reservations set gpu_seconds = gpu_seconds + %s where operation = %s", (bound, root))
+        c.execute(
+            "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound) values (%s, %s, %s, %s, %s, %s)",
+            (operation, root, predecessor, h, tenant, bound),
+        )
+        return {"operation": operation, "replay": False, "gpu_bound": bound, "key_hash": h}
+
+
+def _close_run_if_idle(c, root: str) -> bool:
+    """No active member left: the run's slot goes and its request count is spent. Returns whether it closed now."""
+    if c.execute("select 1 from key_run_members where root = %s and state = 'active' limit 1", (root,)).fetchone():
+        return False
+    r = c.execute("delete from key_reservations where operation = %s returning key_hash, requests", (root,)).fetchone()
+    if r is None:
+        return False
+    c.execute("update keys set spent_requests = spent_requests + %s, updated_at = now() where hash = %s", (r[1], r[0]))
+    return True
+
+
+def settle_run_member(operation: str, gpu_seconds: float | None) -> dict:
+    """A member's attempt is over: `gpu_seconds` measured (spent; its bound leaves the reservation) or None (nothing
+    trustworthy was measured: the member is `unknown` and its bound stays counted against the budget, outside the
+    slot). The run's slot closes when no member is active. Idempotent."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select root, key_hash, gpu_bound, state from key_run_members where operation = %s for update", (operation,)
+        ).fetchone()
+        if m is None:
+            return {"settled": False, "reason": "no member"}
+        root, h, bound, state = m
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        if state != "active":
+            return {"settled": False, "state": state, "closed": _close_run_if_idle(c, root)}
+        if gpu_seconds is None:
+            c.execute(
+                "update key_run_members set state = 'unknown', settled_at = now() where operation = %s", (operation,)
+            )
+        else:
+            c.execute(
+                "update key_run_members set state = 'settled', gpu_seconds = %s, settled_at = now() where operation = %s",
+                (float(gpu_seconds), operation),
+            )
+            c.execute(
+                "update keys set spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
+                (float(gpu_seconds), h),
+            )
+        c.execute(
+            "update key_reservations set gpu_seconds = greatest(gpu_seconds - %s, 0) where operation = %s",
+            (bound, root),
+        )
+        return {
+            "settled": True,
+            "state": "unknown" if gpu_seconds is None else "settled",
+            "closed": _close_run_if_idle(c, root),
+        }
+
+
+def settle_unknown(operation: str, gpu_seconds: float) -> bool:
+    """An operator's later measurement of an `unknown` member (a lost worker's attempt): it becomes spend. False
+    when the member is not unknown."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select key_hash from key_run_members where operation = %s and state = 'unknown' for update", (operation,)
+        ).fetchone()
+        if m is None:
+            return False
+        c.execute(
+            "update key_run_members set state = 'settled', gpu_seconds = %s, settled_at = now() where operation = %s",
+            (float(gpu_seconds), operation),
+        )
+        c.execute(
+            "update keys set spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
+            (float(gpu_seconds), m[0]),
+        )
+        return True
+
+
+def rollback_run_member(operation: str) -> bool:
+    """The continuation's Job was never created (a confirmed absence after a failed create): the member goes and its
+    bound leaves the reservation; the run closes when nothing else is active. Never for a member whose Job may exist."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select root, gpu_bound from key_run_members where operation = %s and state = 'active' and predecessor is not null for update",
+            (operation,),
+        ).fetchone()
+        if m is None:
+            return False
+        root, bound = m
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        c.execute("delete from key_run_members where operation = %s", (operation,))
+        c.execute(
+            "update key_reservations set gpu_seconds = greatest(gpu_seconds - %s, 0) where operation = %s",
+            (bound, root),
+        )
+        _close_run_if_idle(c, root)
+        return True
+
+
+def run_usage(h: str) -> dict:
+    """What a key holds beyond its spend: reserved GPU seconds (bounds of active work), unknown GPU seconds (attempts
+    without a trustworthy measurement) and the operations in flight."""
+    with _connection() as c:
+        active, reserved = c.execute(
+            "select count(*), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)
+        ).fetchone()
+        unknown = _unknown_gpu(c, h)
+    return {"active_operations": int(active), "reserved_gpu_seconds": float(reserved), "unknown_gpu_seconds": unknown}
 
 
 def stale_reservations(older_than_s: int) -> list[tuple[str, str]]:

@@ -169,6 +169,26 @@ create table if not exists operation_marks (
         retired_at timestamptz not null default now()
     );
     """,
+    # 11: the members of a logical run (the root and every continuation: resume, export retry, finalizer, fallback,
+    # recovery) under the root's one reservation (keys.prepare_run_member / settle_run_member); a member's GPU bound
+    # stays reserved while it is active, becomes spend when measured, and stays on record as `unknown` when nothing
+    # trustworthy was measured (never zero by assumption)
+    """
+    create table if not exists key_run_members (
+        operation   text primary key,
+        root        text not null,
+        predecessor text,
+        key_hash    text not null,
+        tenant      text not null,
+        gpu_bound   numeric not null default 0,
+        gpu_seconds numeric,
+        state       text not null default 'active',
+        created_at  timestamptz not null default now(),
+        settled_at  timestamptz
+    );
+    create index if not exists key_run_members_root on key_run_members (root, created_at);
+    create index if not exists key_run_members_key_state on key_run_members (key_hash, state);
+    """,
 ]
 
 _pool = None

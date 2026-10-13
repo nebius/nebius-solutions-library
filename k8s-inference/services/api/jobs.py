@@ -1047,7 +1047,7 @@ def _pin_to_worker(job: dict, orig: dict) -> None:
 
 
 def export_again(
-    ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None
+    ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None, admit=None
 ) -> tuple[dict, bool]:
     """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
     exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization"). With `finalize`
@@ -1187,11 +1187,13 @@ def export_again(
     job["spec"]["template"]["metadata"].setdefault("labels", {})[f"{LABEL}/attempt-role"] = role
     if finalize:
         job["metadata"]["annotations"][f"{LABEL}/finalize-of"] = str((finalize.get("attempt") or {}).get("pod") or name)
+    if admit:
+        admit(job)
     return create(ns, job, region)
 
 
 def switch_class(
-    ns: str, name: str, region: str, model: dict, defaults: dict, next_class: str, remaining: list[str]
+    ns: str, name: str, region: str, model: dict, defaults: dict, next_class: str, remaining: list[str], admit=None
 ) -> tuple[dict, bool]:
     """Fallback placement (docs/SCHEDULING.md "Fallback to the next class"): a QUEUED fleet run that waited longer than
     its `fallback_wait_s` for its class is deleted on the manager (nothing ran) and created again as `<root>-rN` for
@@ -1255,13 +1257,11 @@ def switch_class(
     job["metadata"]["annotations"][f"{LABEL}/fallback"] = (
         f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
     )
-    created, was_created = create(ns, job, region)
-    # the original stays as a readable handle that names its successor (status SUPERSEDED): its Workload is
-    # deactivated so Kueue never admits it, and the fleet database keeps the link past the Job's lifetime
-    try:
-        kube.deactivate_workload(ns, md.get("uid", ""), region)
-    except Exception as e:  # noqa: BLE001 - the Job is suspended below either way
-        log.warning("fallback: deactivate workload of %s/%s: %s", ns, name, e)
+    # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
+    execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region])
+    # the original is fenced BEFORE its successor exists: suspended and named after its successor (a readable handle,
+    # status SUPERSEDED), its Workload deactivated so Kueue never admits it; only then is the successor admitted on the
+    # run's ledger and created, so the two can never run together. A failed admission or create restores the original.
     try:
         retry(
             kube.batch(region).patch_namespaced_job,
@@ -1272,6 +1272,26 @@ def switch_class(
     except ApiException as e:
         if e.status != 404:
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    try:
+        kube.deactivate_workload(ns, md.get("uid", ""), region)
+    except Exception as e:  # noqa: BLE001 - the Job is suspended either way
+        log.warning("fallback: deactivate workload of %s/%s: %s", ns, name, e)
+    try:
+        if admit:
+            admit(job)
+        created, was_created = create(ns, job, region)
+    except Exception:
+        try:  # nothing was created: the original queues on as before
+            retry(
+                kube.batch(region).patch_namespaced_job,
+                name,
+                ns,
+                {"metadata": {"annotations": {f"{LABEL}/successor": None}}, "spec": {"suspend": False}},
+            )
+            kube.activate_workload(ns, md.get("uid", ""), region)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fallback: restoring %s/%s after a failed successor: %s", ns, name, e)
+        raise
     import attempts
 
     attempts.mark_successor(name, new)
@@ -1300,6 +1320,7 @@ def recover(
     remaining: list[str],
     loss: str,
     timeout_s: int | None = None,
+    admit=None,
 ) -> tuple[dict, bool]:
     """Automatic recovery after a confirmed infrastructure loss (docs/SCHEDULING.md "Automatic recovery after
     infrastructure loss"): the original is fenced first (successor mark in the fleet database: every further record of
@@ -1340,7 +1361,7 @@ def recover(
     job_ann = {f"{LABEL}/recovered-from": name, f"{LABEL}/recovery": reason}
     orig["metadata"]["annotations"] = {**ann, f"{LABEL}/execution": json.dumps(ex, sort_keys=True)}
     created, was_created = _resume_from(
-        orig, ns, name, region, model, placement, pointer, next_class, idem, job_ann, timeout_s
+        orig, ns, name, region, model, placement, pointer, next_class, idem, job_ann, timeout_s, admit
     )
     try:
         retry(
@@ -1367,6 +1388,7 @@ def _resume_from(
     idem: str,
     job_ann: dict,
     timeout_s: int | None,
+    admit=None,
 ) -> tuple[dict, bool]:
     """resume() on an already-read original (its execution annotation adjusted by the caller); `timeout_s` is the
     root's remaining deadline when the request set `recovery.deadline_s` (the successor never gets a fresh full budget)."""
@@ -1384,6 +1406,7 @@ def _resume_from(
         superseding=job_ann,
         _orig=orig,
         timeout_s=timeout_s,
+        admit=admit,
     )
 
 
@@ -1401,6 +1424,7 @@ def resume(
     superseding: dict | None = None,
     _orig: dict | None = None,
     timeout_s: int | None = None,
+    admit=None,
 ) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
     original PVC (same region: the volume is regional), linked through the resumed-from annotation.
@@ -1516,4 +1540,6 @@ def resume(
             for m in c.get("volumeMounts", []):
                 if m["name"] == "checkpoints":
                     m["subPath"] = f"checkpoints/{root}"
+    if admit:
+        admit(job)  # the run's ledger admits the member before its Job exists (app.continuation_admission)
     return create(ns, job, region)

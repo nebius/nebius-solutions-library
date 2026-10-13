@@ -41,6 +41,8 @@ regional gateway may answer on port 80 only from inside Nebius, so Let's Encrypt
 plane cannot forward to it over HTTPS. A browser on a regional
 Grafana sees a certificate warning (operator use); clients and the API talk to the control cluster
 only. `edge.regional_certificates = "acme"` restores per-region Let's Encrypt where the gateways are public.
+Another hostname served behind the control gateway, such as a console deployed next to the API as
+`app.<gateway host>`, goes into `edge.extra_hostnames`: it is added to that certificate.
 
 Rotation: when the fleet CA changes (a new fleet, or the cloud state rewritten from another checkout), the
 platform stage re-issues every region's leaf certificates (`terraform_data.reissue_on_ca_change`), LiteLLM

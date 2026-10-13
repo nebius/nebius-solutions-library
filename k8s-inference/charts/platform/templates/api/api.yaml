@@ -112,16 +112,23 @@ metadata: { name: api, namespace: api }
 spec:
   replicas: 2
   selector: { matchLabels: { app: api } }
+  # a roll keeps every in-flight request: no replica goes before its replacement is ready, and a stopping pod finishes
+  # the synchronous calls it proxies (up to SYNC_TIMEOUT_S plus the time its endpoint takes to drain) before it exits
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   template:
     metadata: { labels: { app: api } }
     spec:
       serviceAccountName: api
       securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       containers:
         - name: api
           image: {{ .Values.images.api }}
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
           ports: [{ containerPort: 8080 }]
+          # the endpoints controller needs a moment to take a stopping pod out of the Service before uvicorn stops
+          # accepting; then uvicorn serves what it holds until the graceful timeout (services/api/Dockerfile)
+          lifecycle: { preStop: { exec: { command: [sleep, "5"] } } }
           # the whole environment is a value (services/api/config.py lists the variables): REGION (`control` on a
           # dedicated control cluster, the region's name in single-cluster mode), the public hostnames (the API refuses
           # to start while a value still carries example.invalid), LITELLM_URL, REGION_KUBECONFIGS, the fleet database

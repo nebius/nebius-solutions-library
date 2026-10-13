@@ -110,7 +110,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.39", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.40", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -119,15 +119,87 @@ INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annot
 ADMITTED_HEADER = "x-serverless2-admitted"  # the API's own proxied call to a gateway: the hook must not count it again
 
 
-def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
+def _admit(
+    p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True, run_member: bool = False
+) -> dict:
     """Reserve the slot, the request and the GPU seconds of `operation` on the caller's key (keys.admit); nothing
-    without the database, nothing for the router key (it carries no budget)."""
+    without the database, nothing for the router key (it carries no budget). `run_member`: the operation is the root
+    of a logical run whose continuations join its reservation (keys.prepare_run_member)."""
     if not db.enabled() or p.role == keys.ROUTER["role"]:
         return {"replay": False}
     try:
-        return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request)
+        return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request, run_member)
     except keys.KeyLimit as e:
         raise HTTPException(e.status, e.detail)
+
+
+def _job_deadline(job: dict) -> int | None:
+    """The enforced wall-clock bound of a rendered Job or JobSet (its activeDeadlineSeconds; a JobSet's is on its
+    replicated Jobs)."""
+    spec = job.get("spec") or {}
+    if job.get("kind") == "JobSet":
+        ds = [
+            int(((rj.get("template") or {}).get("spec") or {}).get("activeDeadlineSeconds") or 0)
+            for rj in spec.get("replicatedJobs") or []
+        ]
+        return max(ds) if ds and max(ds) else None
+    d = spec.get("activeDeadlineSeconds")
+    return int(d) if d else None
+
+
+def continuation_admission(root: str, predecessor: str | None, transfer_only: bool = False):
+    """The admission a continuation builder calls with its rendered Job, right before creating it: the member joins
+    the run's reservation on the root's original key (keys.prepare_run_member: key still valid, current head, budget
+    for its GPU bound, the slot reused or re-acquired). The returned callable raises HTTPException with the ledger's
+    status."""
+
+    def admit(job: dict) -> None:
+        try:
+            keys.prepare_run_member(
+                root, job["metadata"]["name"], predecessor, _job_gpus(job), _job_deadline(job), transfer_only
+            )
+        except keys.KeyLimit as e:
+            raise HTTPException(e.status, e.detail)
+
+    return admit
+
+
+def continue_run(root: str, build, transfer_only: bool = False):
+    """Run a continuation builder (jobs.resume/export_again/switch_class/recover, given as a callable taking the
+    admission callback) under the run's ledger: the new member follows the current head; a builder that fails after
+    admission with no Job created rolls the member back. Without a ledger for the root (no database, a run admitted
+    before the ledger existed) the builder runs unadmitted, as for an unbounded key."""
+    if not db.enabled():
+        return build(None)
+    head = keys.run_head(root)
+    if head is None:
+        return build(None)
+    pending: dict = {}
+
+    def admit(job: dict) -> None:
+        continuation_admission(root, head, transfer_only)(job)
+        pending["name"] = job["metadata"]["name"]
+
+    try:
+        return build(admit)
+    except Exception:
+        if pending.get("name"):
+            try:
+                keys.rollback_run_member(pending["name"])  # the builder raised at create: no Job exists
+            except Exception as e:  # noqa: BLE001
+                log.warning("rollback of continuation %s: %s", pending["name"], e)
+        raise
+
+
+def settle_deleted(job: dict) -> None:
+    """A run cancelled before it ever started (jobs.cancel deleted it): its member measured nothing and held no GPU
+    (never-started is the evidence, not an absent pod): settled at zero, the run closes when nothing else is active."""
+    if not db.enabled() or (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled") != "deleted":
+        return
+    try:
+        keys.settle_run_member(job["metadata"]["name"], 0.0)
+    except Exception as e:  # noqa: BLE001 - the reconciler's sweep settles what this missed
+        log.warning("settlement of cancelled %s: %s", job["metadata"]["name"], e)
 
 
 def _release(operation: str, gpu_seconds: float | None = None) -> None:
@@ -204,18 +276,6 @@ def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
         raise HTTPException(
             501,
             "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke",
-        )
-
-
-def _continuation_limits(p: Principal) -> None:
-    # Resume/export/recovery currently create a new Job outside _create_admitted.
-    # Do not let that re-entry path bypass a migrated key's reserved units.
-    if any(
-        p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "budget_gpu_seconds", "rate_limit")
-    ):
-        raise HTTPException(
-            501,
-            "bounded key continuations require reservation transfer; resume/export/fallback/recovery are not yet supported",
         )
 
 
@@ -498,7 +558,10 @@ def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
 @app.get("/v1/keys/me", responses={200: {"model": schemas.ApiKey}})
 def key_me(p: Principal = Depends(principal)):
     forget(p.key)
-    return p.public()
+    out = p.public()
+    if db.enabled() and p.role != keys.ROUTER["role"]:
+        out["usage"] = keys.run_usage(keys.key_hash(p.key))
+    return out
 
 
 @app.post(
@@ -548,11 +611,6 @@ def _invoke_job(
     timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
-    if ex and (
-        (ex.get("placement") or {}).get("fallback_wait_s") is not None
-        or (ex.get("recovery") or {}).get("on_infrastructure_loss") == "recover"
-    ):
-        _continuation_limits(p)
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
     if allowed and req.region and req.region not in allowed:
         # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
@@ -624,7 +682,9 @@ def _create_admitted(p, name, job, region, secret, req, mode):
         _check_operation_owner(p, existing)
         reservation = {"replay": True}
     else:
-        reservation = _admit(p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0)
+        reservation = _admit(
+            p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0, run_member=(mode == "run")
+        )
     try:
         created_job, created = jobs.create(p.namespace, job, region, secret)
     except Exception:
@@ -1138,7 +1198,6 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
     orig, region = _owned(p, id)
-    _continuation_limits(p)
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
@@ -1177,13 +1236,19 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
                 else ""
             ),
         )
-    job, created = jobs.export_again(
-        p.namespace,
-        orig["metadata"]["name"],
-        _home(orig),
-        m,
-        catalog.region_params(m, region) if region else {},
-        finalize=finalize,
+    root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or orig["metadata"]["name"]
+    job, created = continue_run(
+        root,
+        lambda admit: jobs.export_again(
+            p.namespace,
+            orig["metadata"]["name"],
+            _home(orig),
+            m,
+            catalog.region_params(m, region) if region else {},
+            finalize=finalize,
+            admit=admit,
+        ),
+        transfer_only=True,
     )
     return _continued(p, job, created, region)
 
@@ -1244,7 +1309,9 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
         job, _ = _owned(p, op["finalizing_by"], follow=False)
         current = job["metadata"]["name"]
     attempts.mark_cancelled(current)  # a late "succeeded" from the cancelled attempt is refused from now on
-    op = jobs.normalise(jobs.cancel(p.namespace, current, _home(job)))
+    cancelled = jobs.cancel(p.namespace, current, _home(job))
+    settle_deleted(cancelled)
+    op = jobs.normalise(cancelled)
     if op["status"] in ("QUEUED", "RUNNING"):
         op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
     return op
@@ -1265,7 +1332,6 @@ def resume(
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
     orig, region = _owned(p, id)
-    _continuation_limits(p)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
@@ -1288,17 +1354,21 @@ def resume(
     )
     if req.gpu_class and placement:
         placement["classes"] = [req.gpu_class]
-    job, created = jobs.resume(
-        p.namespace,
-        orig["metadata"]["name"],
-        _home(orig),
-        m,
-        catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
-        placement,
-        checkpoint_ref=req.checkpoint_ref,
-        gpu_class=req.gpu_class,
-        idem=idempotency_key,
-        pointer=pointer,
+    job, created = continue_run(
+        root,
+        lambda admit: jobs.resume(
+            p.namespace,
+            orig["metadata"]["name"],
+            _home(orig),
+            m,
+            catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
+            placement,
+            checkpoint_ref=req.checkpoint_ref,
+            gpu_class=req.gpu_class,
+            idem=idempotency_key,
+            pointer=pointer,
+            admit=admit,
+        ),
     )
     return _continued(p, job, created, region)
 

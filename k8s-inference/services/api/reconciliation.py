@@ -150,6 +150,18 @@ def idle_shutdown() -> list[str]:
     return stopped
 
 
+def continue_run(root: str, build, transfer_only: bool = False):
+    from app import continue_run as _continue_run  # app imports this module; resolved at call time
+
+    return _continue_run(root, build, transfer_only)
+
+
+def settle_deleted(job: dict) -> None:
+    from app import settle_deleted as _settle_deleted
+
+    _settle_deleted(job)
+
+
 def fallback_switch() -> list[str]:
     """Fleet runs that asked for `placement.fallback_wait_s` and are still unplaced after it: moved to the next class of
     their preference (jobs.switch_class). Returns the new operation ids. Control API only."""
@@ -196,8 +208,19 @@ def fallback_switch() -> list[str]:
                 if not remaining:
                     continue  # the last class of the preference: keep waiting
                 m = catalog.require(job["metadata"]["labels"].get(f"{cfg.LABEL}/model", ""))
-                new, _ = jobs.switch_class(
-                    ns, job["metadata"]["name"], REGION, m, catalog.fleet_params(m), remaining[0], remaining
+                root = ann.get(f"{cfg.LABEL}/resumed-from") or job["metadata"]["name"]
+                new, _ = continue_run(
+                    root,
+                    lambda admit: jobs.switch_class(
+                        ns,
+                        job["metadata"]["name"],
+                        REGION,
+                        m,
+                        catalog.fleet_params(m),
+                        remaining[0],
+                        remaining,
+                        admit=admit,
+                    ),
                 )
                 moved.append(new["metadata"]["name"])
                 log.info(
@@ -320,23 +343,27 @@ def recovery_switch() -> list[str]:
                     or {}
                 )
                 placement["classes"] = [next_class]
-                new, created = jobs.recover(
-                    ns,
-                    name,
-                    REGION,
-                    m,
-                    placement,
-                    pointer,
-                    int(lost.get("epoch") or 0),
-                    next_class,
-                    remaining or [next_class],
-                    why,
-                    timeout_s=remaining_s,
+                new, created = continue_run(
+                    root,
+                    lambda admit: jobs.recover(
+                        ns,
+                        name,
+                        REGION,
+                        m,
+                        placement,
+                        pointer,
+                        int(lost.get("epoch") or 0),
+                        next_class,
+                        remaining or [next_class],
+                        why,
+                        timeout_s=remaining_s,
+                        admit=admit,
+                    ),
                 )
                 marks = attempts._marks(name)
                 if marks and marks[1]:  # cancelled while we were moving it: cancel the successor, too
                     attempts.mark_cancelled(new["metadata"]["name"])
-                    jobs.cancel(ns, new["metadata"]["name"], REGION)  # never started: deleted
+                    settle_deleted(jobs.cancel(ns, new["metadata"]["name"], REGION))  # never started: deleted
                     _annotate(
                         ns,
                         name,
@@ -374,16 +401,37 @@ async def _reconcile_loop():
 
 def release_stale_reservations() -> list[str]:
     """A key reservation whose operation no longer exists (a Job deleted before billing accounted it, a submission
-    that failed after admission) is released after RESERVATION_STALE_S with nothing measured; billing releases the
-    rest with the attempt's GPU seconds. Control API only. Returns the operations released."""
+    that failed after admission) is released after RESERVATION_STALE_S; billing releases the rest with the attempt's
+    GPU seconds. A run's reservation is its root's: it goes when every member's Job is gone, each member settled at
+    zero when it never held a GPU (no bound) and as `unknown` otherwise (a GPU attempt that vanished unmeasured is
+    not zero). Control API only. Returns `<operation>` for a released reservation, `<operation>:unknown` for one
+    whose GPU time stays on record."""
     if not db.enabled():
         return []
     out = []
     for operation, tenant in keys.stale_reservations(RESERVATION_STALE_S):
-        try:
-            jobs.find(f"{cfg.TENANT_NS_PREFIX}{tenant}", operation)
-        except HTTPException as e:
-            if e.status_code == 404:
-                keys.release(operation, None)
-                out.append(operation)
+        ns = f"{cfg.TENANT_NS_PREFIX}{tenant}"
+        members = keys.run_members(operation) if hasattr(keys, "run_members") else []
+        if not members:
+            try:
+                jobs.find(ns, operation)
+            except HTTPException as e:
+                if e.status_code == 404:
+                    keys.release(operation, None)
+                    out.append(operation)
+            continue
+        unknown = False
+        for m in members:
+            if m["state"] != "active":
+                continue
+            try:
+                jobs.find(ns, m["operation"])
+                break  # a member's Job still exists: billing settles it
+            except HTTPException as e:
+                if e.status_code != 404:
+                    break
+            keys.settle_run_member(m["operation"], 0.0 if not m["gpu_bound"] else None)
+            unknown = unknown or bool(m["gpu_bound"])
+        else:
+            out.append(f"{operation}:unknown" if unknown else operation)
     return out

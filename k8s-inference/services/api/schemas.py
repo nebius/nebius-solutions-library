@@ -654,6 +654,15 @@ class RateLimit(BaseModel):
     window_s: int | None = None
 
 
+class KeyUsage(BaseModel):
+    """What the key holds beyond its spend (docs/API.md "Keys"): operations in flight, GPU seconds reserved by active
+    work, GPU seconds of attempts that ended without a trustworthy measurement (kept against the budget)."""
+
+    active_operations: int | None = None
+    reserved_gpu_seconds: float | None = None
+    unknown_gpu_seconds: float | None = None
+
+
 class ApiKey(BaseModel):
     id: str | None = None
     key: str | None = None
@@ -676,6 +685,7 @@ class ApiKey(BaseModel):
     rate_limit: RateLimit | None = None
     principal_id: str | None = None
     legacy: dict[str, Any] | None = None
+    usage: KeyUsage | None = None
 
 
 class ModelWrite(BaseModel):

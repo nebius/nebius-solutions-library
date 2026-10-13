@@ -181,6 +181,33 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     return len(items)
 
 
+def activate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
+    """Undo deactivate_workload: Kueue `spec.active = true` on the run's manager Workload (a fallback whose successor could
+    not be created lets the original queue on). Returns the number of Workloads patched."""
+    try:
+        items = retry(
+            api(region).list_namespaced_custom_object,
+            "kueue.x-k8s.io",
+            "v1beta2",
+            ns,
+            "workloads",
+            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+        ).get("items", [])
+    except ApiException:
+        return 0
+    for w in items:
+        retry(
+            api(region).patch_namespaced_custom_object,
+            "kueue.x-k8s.io",
+            "v1beta2",
+            ns,
+            "workloads",
+            w["metadata"]["name"],
+            {"spec": {"active": True}},
+        )
+    return len(items)
+
+
 def workload_reasons(ns: str) -> dict[str, str]:
     """Job uid -> why its Workload is not admitted (the condition messages Kueue writes): what a QUEUED operation
     reports as `reason`."""

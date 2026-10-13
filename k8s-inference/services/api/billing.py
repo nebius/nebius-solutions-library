@@ -56,6 +56,29 @@ def cost_of(
     return gpu_s, round(usd, 6)
 
 
+def measured_usage(job: dict, records: list | None = None) -> float | None:
+    """The run's GPU seconds when every GPU attempt was measured: a valid start and end, a finite non-negative
+    duration and a GPU count; None when a GPU attempt lacks any of them (a lost worker, a record cut short): unknown
+    is reported as unknown, never as zero. A run without GPUs measures zero."""
+    attempts_ = _attempts(job.get("_pods", []), records, job.get("metadata", {}).get("name"))
+    job_gpus = 0
+    spec = job.get("spec") or {}
+    for c in ((spec.get("template") or {}).get("spec") or {}).get("containers") or []:
+        job_gpus += int(str(((c.get("resources") or {}).get("limits") or {}).get("nvidia.com/gpu") or 0))
+    total = 0.0
+    for a in attempts_:
+        gpus = a.get("_gpus") or 0
+        if not gpus:
+            continue
+        d = _secs(a.get("started_at"), a.get("ended_at"))
+        if d is None or d < 0 or d != d or d == float("inf"):
+            return None
+        total += d * gpus
+    if job_gpus and not any(a.get("_gpus") for a in attempts_):
+        return None  # a GPU run with no measured attempt at all: nothing trustworthy to settle
+    return round(total, 1)
+
+
 def record_spend(token: str, usd: float, operation: str, gpu_s: float) -> float | None:
     if not db.enabled():
         raise RuntimeError("DATABASE_URL is required; GPU accounting fails closed")
@@ -148,12 +171,23 @@ async def bill_once() -> int:
                 if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
                     release_volume(job, ns, region)  # delivered: the volume may go (an EXPORT_FAILED run keeps it)
                 try:
-                    gpu_s, usd = cost_of(
-                        job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region
-                    )
                     identity = job["metadata"].get("uid")
                     if not identity:
                         raise ValueError("job UID is required for accounting")
+                    measured = measured_usage(job, records)
+                    if measured is None:
+                        # nothing trustworthy to charge: the key's reservation stays on record as unknown GPU time
+                        # (keys.settle_run_member None); an operator settles it later (keys.settle_unknown)
+                        if db.enabled():
+                            keys.release(name, None)
+                        done = {BILLED: "unknown", f"{LABEL}/gpu-seconds": "unknown"}
+                        _annotate(region, ns, name, done, job)
+                        log.warning("billing %s/%s: GPU time not measured; reservation kept as unknown", region, name)
+                        n += 1
+                        continue
+                    gpu_s, usd = cost_of(
+                        job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region
+                    )
                     total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
                     if db.enabled():
                         keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)

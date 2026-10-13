@@ -198,7 +198,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.39")
+        api        = optional(string, "0.11.40")
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.15")
         ops        = optional(string, "0.1.12")
@@ -245,6 +245,9 @@ variable "fleet" {
       # the gateway, so port 80 of every regional gateway must answer the internet). The control cluster's
       # public hostnames always use ACME in `public` mode.
       regional_certificates = optional(string, "fleet-ca")
+      # Further public hostnames on the control cluster's certificate, under the gateway host (<ip>.sslip.io or the
+      # domain): what else answers behind the gateway, e.g. a console deployed next to the API as app.<gateway host>.
+      extra_hostnames = optional(list(string), [])
       acme = optional(object({
         email   = optional(string, "")
         staging = optional(bool, false)

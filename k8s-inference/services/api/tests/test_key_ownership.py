@@ -98,27 +98,40 @@ def test_operation_model_grant_is_checked_on_reads(client, admin_keys, fake_keys
     assert c.get("/v1/operations", headers=H).json() == []
 
 
-@pytest.mark.parametrize("action", ["resume", "export"])
-def test_bounded_continuation_does_not_bypass_admission(client, admin_keys, fake_keys, monkeypatch, action):
-    c, _ = client
+def test_bounded_continuation_is_admitted_on_the_run_ledger(client, admin_keys, fake_keys, monkeypatch):
+    """A bounded key's resume joins the run's reservation as a member after the current head (keys.prepare_run_member,
+    docs/API.md "Keys"); it is not refused and not admitted as a second run."""
+    c, cluster = client
     auth_as(monkeypatch, {"sk-good": principal_info("p1", max_concurrent=1)})
     created = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}})
     assert created.status_code == 202
-    result = c.post(f"/v1/operations/{created.json()['id']}:{action}", headers=H, json={})
-    assert result.status_code == 501 and "reservation transfer" in result.json()["detail"]
+    oid = created.json()["id"]
+    assert [m["operation"] for m in fake_keys.members] == [oid]  # the root member, admitted with the run
+    cluster.jobs[("tenant-demo", oid)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    result = c.post(f"/v1/operations/{oid}:resume", headers=H, json={})
+    assert result.status_code == 202, result.text
+    successor = result.json()["id"]
+    prepared = [x for x in fake_keys.calls if x[0] == "prepare"]
+    assert prepared == [
+        ("prepare", oid, successor, oid, 0, None, False)
+    ]  # root, member, predecessor = head, GPUs, bound, compute
+    assert len([x for x in fake_keys.calls if x[0] == "admit"]) == 1  # no second run admission
 
 
 @pytest.mark.parametrize(
     "execution", [{"placement": {"fallback_wait_s": 0}}, {"recovery": {"on_infrastructure_loss": "recover"}}]
 )
-def test_bounded_auto_continuation_is_not_admitted(client, admin_keys, fake_keys, monkeypatch, execution):
+def test_bounded_auto_continuation_is_accepted(client, admin_keys, fake_keys, monkeypatch, execution):
+    """A bounded key may ask for automatic fallback or recovery: the successor is admitted on the run's ledger when the
+    platform creates it (reconciliation.continue_run), so the submission is accepted."""
     import execution as ex
 
     c, _ = client
     auth_as(monkeypatch, {"sk-good": principal_info("p1", budget_requests=10)})
     monkeypatch.setattr(ex, "tenant_config", lambda *a, **k: {"identities": {}, "execution_profiles": {}})
     result = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}, "execution": execution})
-    assert result.status_code == 501 and not fake_keys.calls
+    assert result.status_code == 202, result.text
+    assert [x[0] for x in fake_keys.calls] == ["admit"]
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
