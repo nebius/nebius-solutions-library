@@ -94,7 +94,7 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
 
 checkpoint_changed() {   # the application published a new checkpoint pointer (CHECKPOINT.json content changed)
   [ -f /work/CHECKPOINT.json ] || return 1
-  local now; now=$(cat /work/CHECKPOINT.json 2>/dev/null | tr -d '\n')
+  local now; now=$(tr -d '\n' 2>/dev/null < /work/CHECKPOINT.json)
   [ "$now" != "$CKPT_SEEN" ] || return 1
   CKPT_SEEN="$now"; return 0
 }
@@ -131,7 +131,7 @@ upload() {   # $1 = status
   aws s3 cp STATUS.json "${OUTPUT_PREFIX%/}/STATUS.json" --no-progress 2>&1 | tail -n 1
   echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
-# shellcheck disable=SC2329 # invoked by the TERM trap
+# shellcheck disable=SC2317,SC2329 # invoked by the TERM trap (diagnostic varies by ShellCheck version)
 on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; EXIT=""; upload interrupted; }
 trap on_term TERM
 
