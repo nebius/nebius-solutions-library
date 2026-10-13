@@ -8,11 +8,11 @@ role:                          # what this cluster is (stack/config/locals.tf `r
   manager: false               # the Kueue MultiKueue manager and the cost dispatcher (dedicated control cluster)
   worker: true                 # a GPU region
 # Components rendered on this cluster: template directory -> true (api, edge, gateway, knative-serving, node-config,
-# observability, ops, scheduling, ui, dispatcher, api-agent, fleet-access, tenant-clusterrole). The platform stage
+# observability, ops, scheduling, grafana-route, dispatcher, api-agent, fleet-access, tenant-clusterrole). The platform stage
 # derives it from clusters/common/apps/*.yaml (kind: manifests, `placement`) plus the identities of the cluster's role.
 components: {}                 # Helm merges maps, so the defaults list nothing: the stage names every component it renders
 host: example.invalid          # the gateway domain of this cluster: <gateway ip>.sslip.io or <cluster id>.<edge.domain>
-hostnames:                     # the public hostnames on it (api, app and litellm exist on the control cluster only: app and litellm are routes the stage renders)
+hostnames:                     # the public hostnames on it (api and litellm exist on the control cluster only: litellm is a route the stage renders)
   api: api.example.invalid
   grafana: grafana.example.invalid
 edge:
@@ -56,5 +56,5 @@ ops:
     projectId: project-example
     clusterId: mk8scluster-example
   rotateKeys: false            # in-cluster rotation of ops/nebius-sa (off: keys are Terraform resources, docs/OPERATIONS.md)
-ui:
-  grafanaPublic: true          # edge.grafana_public: the Grafana route on the external (true) or the internal gateway
+grafanaRoute:
+  public: true                 # edge.grafana_public: the Grafana route on the external (true) or the internal gateway

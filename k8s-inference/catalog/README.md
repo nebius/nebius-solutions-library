@@ -8,7 +8,7 @@ holds the built-in run classes only. Nothing is rendered into the repository. Ru
 entries (`mode: run`, no runtime) carry a `job` block (image, or `images` with one image per GPU
 class, command, GPUs, CPU, memory, work volume size, `scratch: network | local-nvme`; `{{name}}`
 placeholders; `docs/SCHEDULING.md` "Per-GPU images for runs") that the API renders into
-one Kubernetes Job per operation (`docs/JOBS.md`), list the `parameters` the UI
+one Kubernetes Job per operation (`docs/JOBS.md`), list the `parameters` a client
 offers, and carry `deployments.<cluster>.parameters` (pool, image, tuning) plus
 `price_per_gpu_hour` for billing. `container-run` is the generic single-node class (any image and command),
 `distributed-run` the multi-node one, `hello-run` the CPU smoke test. The platform ships only these;
@@ -74,7 +74,7 @@ deployments:                   # one key per cluster directory; values override 
    class. Requests may only use `nvidia.com/gpu`, `cpu`, `memory`
    (the Kueue ClusterQueues cover nothing else).
 4. Check rendering locally with `.venv-api/bin/python services/api/models.py render <cluster> < catalog/models/<id>.yaml` (the API's renderer; `helm template <id> charts/endpoint -f catalog/models/<id>.yaml --set cluster=<cluster>` is the reference rendering). Run `make check`, then apply the Terraform models stage through `stack.sh` to deploy bundled entries.
-5. Customer-created models use `POST /v1/models` (admin key) or the UI. The API stores desired state/history before applying this same chart and retrying regional copies; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
+5. Customer-created models use `POST /v1/models` (admin key). The API stores desired state/history before applying this same chart and retrying regional copies; there is no controller watching Git. Use `env_secrets` for credentials and `If-Match` for guarded updates.
 6. Verify a cold and warm request through the predictor's external HTTPS host with a permitted key. OpenAI API-managed models register their LiteLLM group during reconciliation. See `docs/EDGE.md` and `docs/OPERATIONS.md`.
 
 ## Pitfalls (measured)

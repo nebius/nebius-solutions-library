@@ -18,7 +18,7 @@ its ownership labels on every object, and the templates add no labels of their o
 | `knative-serving` | 2 | worker | the KnativeServing CR with this cluster's gateway domain |
 | `api` | 3 | all | the customer API (`services/api`): identity and RBAC, the Deployment with its environment and image, the Service, the route on the cluster's `api.` hostname, the per-key rate limit |
 | `edge` | 3 | worker | the ReferenceGrant the endpoint SecurityPolicies need |
-| `ui` | 3 | all | the Grafana route (external or internal gateway, `edge.grafana_public`) |
+| `grafana-route` | 3 | all | the Grafana route (external or internal gateway, `edge.grafana_public`) |
 | `api-agent`, `fleet-access`, `tenant-clusterrole` | before the waves | worker (`tenant-clusterrole` also control) | the identities the control cluster holds tokens of (the fleet API's `api-agent`, Kueue's `multikueue`) and the ClusterRole bound in every tenant namespace |
 
 `values.yaml` documents every value. `tools/check.sh` renders the chart for every cluster of

@@ -22,5 +22,5 @@ apply:        ## bring the fleet up (or update it): every stage in order
 destroy:      ## tear the fleet down: every stage in reverse
 	./stack.sh destroy
 
-images:       ## build and push the five platform images to the fleet's registry
+images:       ## build and push the four platform images to the fleet's registry
 	tools/images.sh build

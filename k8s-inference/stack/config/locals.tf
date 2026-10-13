@@ -189,7 +189,7 @@ locals {
   # the API, the console and LiteLLM are the control cluster's; a GPU region's gateway carries Grafana and the endpoints
   hostnames_of = { for id, c in local.clusters : id => merge(
     { grafana = "grafana.${local.host_of[id]}" },
-    local.roles[id].control ? { api = "api.${local.host_of[id]}", app = "app.${local.host_of[id]}", litellm = "litellm.${local.host_of[id]}" } : {}
+    local.roles[id].control ? { api = "api.${local.host_of[id]}", litellm = "litellm.${local.host_of[id]}" } : {}
   ) }
   api_host = "api.${local.control_host}"
   grafana_urls = join(",", concat(
@@ -306,6 +306,6 @@ locals {
       recoverStoppedNodes = r.worker ? { enabled = true, projectId = local.clusters[id].project_id, clusterId = local.cloud_facts.clusters[id].cluster_id } : { enabled = false, projectId = "project-example", clusterId = "mk8scluster-example" }
       rotateKeys          = false
     }
-    ui = { grafanaPublic = local.f.edge.grafana_public }
+    grafanaRoute = { public = local.f.edge.grafana_public }
   } }
 }

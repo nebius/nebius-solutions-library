@@ -1352,13 +1352,13 @@
    }
   }
  },
- "gateway.networking.k8s.io/HTTPRoute/monitoring/ui-grafana": {
-  "component": "ui",
+ "gateway.networking.k8s.io/HTTPRoute/monitoring/grafana": {
+  "component": "grafana-route",
   "object": {
    "apiVersion": "gateway.networking.k8s.io/v1",
    "kind": "HTTPRoute",
    "metadata": {
-    "name": "ui-grafana",
+    "name": "grafana",
     "namespace": "monitoring"
    },
    "spec": {

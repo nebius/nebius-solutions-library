@@ -156,49 +156,8 @@ locals {
     }
   } : {}
 
-  # Control plane only: the console, the billing CronJob, LiteLLM UI route.
+  # Control plane only: the LiteLLM route and the billing CronJob.
   extras_control = { for k, v in {
-    ui_app = {
-      apiVersion = "apps/v1", kind = "Deployment"
-      metadata   = { name = "ui-app", namespace = "ui-app", labels = { app = "ui-app" } }
-      spec = {
-        replicas = 2, selector = { matchLabels = { app = "ui-app" } }
-        template = {
-          metadata = { labels = { app = "ui-app" } }
-          spec = {
-            securityContext = { runAsNonRoot = true, runAsUser = 101, seccompProfile = { type = "RuntimeDefault" } }
-            containers = [{
-              name = "nginx", image = local.image.ui, ports = [{ name = "http", containerPort = 8080 }]
-              env = [
-                { name = "API_UPSTREAM", value = "http://api.api.svc.cluster.local:80" },
-                { name = "DNS_RESOLVER", value = data.kubernetes_service_v1.coredns.spec[0].cluster_ip },
-                # served to the browser at /config.json (ui/src/config.ts): the public API and the Grafana of every cluster
-                { name = "PUBLIC_API_URL", value = "https://api.${local.control_host}" }, # the fleet's one API (control); locals are evaluated on every cluster
-                { name = "GRAFANA_URLS", value = local.grafana_urls },
-              ]
-              resources       = { requests = { cpu = "20m", memory = "32Mi" }, limits = { cpu = "200m", memory = "128Mi" } }
-              readinessProbe  = { httpGet = { path = "/healthz", port = "http" }, periodSeconds = 5 }
-              livenessProbe   = { httpGet = { path = "/healthz", port = "http" }, periodSeconds = 20 }
-              securityContext = { allowPrivilegeEscalation = false, capabilities = { drop = ["ALL"] } }
-            }]
-          }
-        }
-      }
-    }
-    ui_app_svc = {
-      apiVersion = "v1", kind = "Service", metadata = { name = "ui-app", namespace = "ui-app" }
-      spec       = { selector = { app = "ui-app" }, ports = [{ name = "http", port = 80, targetPort = "http" }] }
-    }
-    ui_app_route = {
-      apiVersion = "gateway.networking.k8s.io/v1", kind = "HTTPRoute", metadata = { name = "ui-app", namespace = "ui-app" }
-      spec = {
-        parentRefs = [{ name = "serverless2-external", namespace = "envoy-gateway-system", sectionName = "https" }]
-        hostnames  = [try(local.hostnames.app, "")]
-        # the console proxies model calls to the API: a sync call waits for a cold start, like the API route (Envoy's
-        # default is 15 s: the console got 504 on every cold start, measured 2026-10-10)
-        rules = [{ backendRefs = [{ name = "ui-app", port = 80 }], timeouts = { request = "630s", backendRequest = "630s" } }]
-      }
-    }
     litellm_route = {
       apiVersion = "gateway.networking.k8s.io/v1", kind = "HTTPRoute", metadata = { name = "ui-litellm", namespace = "litellm" }
       spec = {
@@ -242,13 +201,6 @@ locals {
       }
     }
   } : k => v if local.role.control }
-}
-
-data "kubernetes_service_v1" "coredns" {
-  metadata {
-    name      = "coredns"
-    namespace = "kube-system"
-  }
 }
 
 resource "kubectl_manifest" "extras1" {

@@ -331,7 +331,7 @@ block (with `protect_data = true` the bucket stays and must be emptied by hand f
   -o yaml` (Accepted; "backend api/api not found" means the Backend API is off); on the control cluster
   `curl -sk https://<any name resolving to the control gateway>/internal/authorize/<model> -H 'Authorization:
   Bearer <key>'` answers 200 for an allowed key, 401/403 otherwise (the route `api-authorize` serves it under
-  any host). The API's own cluster uses the Service api/api. The console's metrics and logs of a region come
+  any host). The API's own cluster uses the Service api/api. A region's metrics and logs come
   through that cluster's API server proxy (Role `serverless2-api-agent-monitoring`): `kubectl auth can-i get
   services/proxy -n monitoring --as=system:serviceaccount:api:api-agent` there must say yes.
   Upgrading a fleet deployed before 2026-10-11: the control cluster's https listener must lose its `hostname`
@@ -376,7 +376,7 @@ cache fetches them from the source registry on first use.
 
 - CI (`.github/workflows/k8s-inference.yml` at the library's root) runs on every pull request and push
   that touches the solution: `terraform fmt`/`validate` of every stage, `helm template` of the charts with
-  the example's values, every manifest rendered, the API and dispatcher tests, the console's tests and
+  the example's values, every manifest rendered, the API and dispatcher tests, and
   build, and a `trivy` scan of the five images built from `services/*/Dockerfile` and `ui/Dockerfile`
   (fails on CRITICAL, unfixed ignored). The ops image pins its tools by version and SHA-256
   (`services/ops/Dockerfile`).

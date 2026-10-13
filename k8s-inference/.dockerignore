@@ -6,7 +6,6 @@
 **/__pycache__
 **/.terraform
 **/node_modules
-ui/dist
 stack
 clusters
 docs

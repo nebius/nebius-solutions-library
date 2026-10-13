@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# The five platform images (api, dispatcher, jobs, ops, ui) in the fleet's own registry (README.md, step 5), tagged
+# The four platform images (api, dispatcher, jobs, ops) in the fleet's own registry (README.md, step 5), tagged
 # <registry>/serverless2/<component>:<tag>. Every cluster's cache pulls them from there as
 # registry.serverless2.local/nebius/serverless2/<component>:<tag>; without the cache (images.cache.enabled = false)
 # the manifests name <registry>/serverless2/<component>:<tag> itself, the same tags (docs/IMAGES.md).
 #
-#   tools/images.sh build [<registry>]              build and push all five with docker buildx
-#   tools/images.sh copy <from-registry> [<registry>]   copy the five tags from another registry (crane, no build)
+#   tools/images.sh build [<registry>]              build and push all four with docker buildx
+#   tools/images.sh copy <from-registry> [<registry>]   copy the four tags from another registry (crane, no build)
 #   tools/images.sh list [<registry>]               the tags present in the registry
 #
 # <registry> is a prefix such as cr.eu-north1.nebius.cloud/<registry id>. Omitted, it is read from the cloud
@@ -21,7 +21,7 @@ usage() { sed -n 2,12p "$0" >&2; exit 2; }
 # component=tag pairs, ops first: the dispatcher image copies the Nebius CLI from the ops image.
 versions() {
   (cd "$ROOT/stack/config" && terraform init -input=false > /dev/null && echo 'jsonencode(var.fleet.images.versions)' | terraform console -var-file="$TFVARS") \
-    | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); order=["ops","api","dispatcher","jobs","ui"]; print(" ".join(f"{k}={d[k]}" for k in order))'
+    | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); order=["ops","api","dispatcher","jobs"]; print(" ".join(f"{k}={d[k]}" for k in order))'
 }
 
 registry() { # the argument, else the registry the cloud stage created
@@ -36,7 +36,6 @@ case "$cmd" in
     for kv in $(versions); do
       c="${kv%%=*}"; t="${kv#*=}"
       case "$c" in
-        ui)   ctx="$ROOT/ui";           df="$ROOT/ui/Dockerfile" ;;
         api)  ctx="$ROOT";              df="$ROOT/services/api/Dockerfile" ;;   # needs catalog/models in the build context
         *)    ctx="$ROOT/services/$c";  df="$ROOT/services/$c/Dockerfile" ;;
       esac

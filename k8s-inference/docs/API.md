@@ -18,7 +18,7 @@ POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on th
 POST   /v1/artifacts/uploads         presigned upload URL scoped to the tenant prefix
 GET    /v1/artifacts/{uri}           presigned download of a tenant object
 GET    /v1/endpoints[/{id}]          the endpoints of the catalog models per region (`region=`); PATCH scaling (admin key)
-GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry: the console's Edit button)
+GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry)
 Idempotency-Key header on every mutating call
 ```
 
@@ -47,7 +47,7 @@ the MCP Tasks extension with the same operation id.
 ## Models
 
 A model is defined through the API, never in `terraform.tfvars`. `POST /v1/models` (admin key) takes the
-shape of the console's "New model" form: a container plus a few knobs.
+shape of a model definition: a container plus a few knobs.
 
 ```json
 {"id": "my-llm", "kind": "endpoint",
@@ -98,7 +98,7 @@ rate limit of the edge (`SecurityPolicy model-key-check`) counts those calls aga
 the caller. Every other API route refuses the router key (403). Without the Secret the API deploys the
 endpoint and registers no group (a warning in the write's response and in the log): the endpoint still
 answers through `POST /v1/models/{model}:invoke` and its gateway hostname with any tenant key. The router
-key is never returned by the API or shown in the console.
+key is never returned by the API.
 
 Accounting is split by entry point: a call that enters through LiteLLM (`/v1/chat/completions` on the
 `litellm.` host) is accounted by LiteLLM on its own record of the key (tokens, `max_budget`, `rpm_limit`);
@@ -113,7 +113,7 @@ writes with 409 too. `images` (per GPU class, `docs/SCHEDULING.md`), `deployment
 
 The acceptance probe (`tools/verify.sh`) uses this path: with `acceptance.example_endpoint = true` (the
 default) it creates `llm-example` with the first admin key, waits for it, calls it once and leaves it as
-the first model of the console.
+the first model of the fleet.
 
 Run classes may declare `data: {"path": "refdb/uniref", "mount_path": "/data", "readonly": true}`: a directory of
 the tenant's area on the region's shared filesystem mounted into every run of the class (docs/JOBS.md "Shared data").
@@ -244,7 +244,7 @@ restores `min_nodes` after it is stopped (docs/SCHEDULING.md "InfiniBand pools g
 boot after `scaling.min` goes to 1 and a start takes the usual few minutes longer than on a pool with nodes up.
 
 Start and stop, no autoscaling in between: `scaling.min` 1 starts the replica group (the nodes boot, the drivers
-install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; the console's Start/Stop button
+install, the weights load: 10-20 minutes for a trillion-parameter model), 0 stops it; a client's Start/Stop control
 and `PATCH /v1/endpoints/{id} {"scaling": {"min": 1}}` do that. `scaling.idle_s` stops it after that many seconds
 without a request, measured by the API's reconcile loop from the later of the last authorized request (the
 gateway's authorize call stamps the LeaderWorkerSet in every region of the model) and the moment the leader became Ready; the stop is a normal definition
@@ -255,7 +255,7 @@ a one-pod endpoint.
 
 Start-up time: every endpoint (both kinds) reports `startup_s`, `started_at` and `ready_at` of its newest pod
 (`GET /v1/endpoints`): pod created to Ready, which includes a cold node's boot and driver install, the image pull
-and the model load; the console shows it as "Last start-up", the Endpoints dashboard as a table by model.
+and the model load; the Endpoints dashboard shows it as a table by model.
 
 ## Internal substrate shape (documented, not served)
 

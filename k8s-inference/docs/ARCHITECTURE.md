@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart TB
-    client["Customer / console UI<br/>API key"]
+    client["Customer client<br/>API key"]
 
     subgraph control["Control cluster (CPU only, optional but default)"]
         gwc["Envoy gateway<br/>TLS, key check, rate limit"]
@@ -70,7 +70,7 @@ some regions only, the control plane must be in one of them.
 ## Model definitions
 
 A model is runtime input, not Terraform input. The control API (the only API with `DATABASE_URL`, from
-Secret `api/database`) takes `POST /v1/models` from the console's "New model" form or from a client with
+Secret `api/database`) takes `POST /v1/models` from a client with
 an admin key, validates the spec (a container plus a few knobs: image, command, args, env, port,
 protocol, GPU count and classes, scaling, regions, weights; `services/api/models.py`), turns it into a
 catalog entry and:
@@ -184,7 +184,6 @@ Pinned versions live in `clusters/common/apps/*.yaml`, one list for every cluste
 | Job runner | `services/jobs` | about 150 lines of shell | fetch inputs, upload outputs and attempt records, call an endpoint |
 | Ops image | `services/ops` | about 100 lines of shell | recover stopped spot VMs, Nebius CLI with service-account profiles |
 | Three charts | `charts/fleet`, `charts/endpoint`, `charts/tenant` | Helm | queues and cache from the fleet definition, one endpoint, one tenant |
-| Console | `ui` | TypeScript | a tenant's view over the customer API |
 
 ## Multi-region in one sentence each
 

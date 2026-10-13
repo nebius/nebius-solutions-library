@@ -230,7 +230,7 @@ lower the retention or move the chunk store to Object Storage.
 - The managed PostgreSQL of the solution exposes no exporter to the cluster;
   its host metrics and backups are in the Nebius console. No `cnpg_*` series
   on a fleet built from the solution.
-- Envoy Gateway emits per-cluster stats for the api/ui/operator HTTPRoutes but
+- Envoy Gateway emits per-cluster stats for the api/operator HTTPRoutes but
   not for the Knative-managed HTTPRoutes; endpoint traffic is on the
   queue-proxy and activator panels instead.
 - Kueue ClusterQueue quota/usage metrics (`kueue_cluster_queue_resource_*`)

@@ -5,7 +5,7 @@ people who run it afterwards.*
 
 This Terraform solution brings up a complete, multi-region GPU inference platform in a Nebius tenant from
 one file, `terraform.tfvars`. The tfvars describe the infrastructure only; models are added afterwards
-through the console or the API. You get one API for models, three ways to run them (always-on endpoints,
+through the API. You get one API for models, three ways to run them (always-on endpoints,
 queued endpoint calls, long jobs with checkpoints), queueing across regions by cost, fast cold starts
 through a per-region image cache, tenants with API keys and budgets, and the usual operations stack.
 Everything inside the clusters is an upstream Helm chart or a small manifest; the own code is the API,
@@ -14,7 +14,7 @@ the cost dispatcher and the job runner (about 3,000 lines of Python and shell).
 | You get | How it is built |
 |---|---|
 | One API for models: invoke, poll, fetch, cancel, resume | `services/api` behind API keys (fleet database) and an Envoy gateway; `docs/API.md` |
-| Any container as a model; the platform ships none | a container description per model, given through the console or `POST /v1/models`, stored in the fleet database and rendered by the API as a KServe endpoint or as a job template |
+| Any container as a model; the platform ships none | a container description per model, given through `POST /v1/models`, stored in the fleet database and rendered by the API as a KServe endpoint or as a job template |
 | Endpoints that scale to zero, with a warm floor if you want one, and warm spare nodes per pool (`warm_nodes`) that any model can start on without an instance boot | KServe on Knative, one `InferenceService` per model and region; placeholder pods of negative priority hold the spares |
 | Queued endpoint calls and long jobs that survive spot preemption | Kubernetes Jobs with a checkpoint volume; Kueue admits them, `docs/JOBS.md` |
 | Multi-node jobs over InfiniBand | JobSet on a pool whose nodes form a Nebius GPU cluster; optional per pool |
@@ -57,7 +57,7 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
                      tools/verify.sh           after the apply: the acceptance probe (a run, then the example model created through the API and called)
 ```
 
-- **Control cluster** (CPU only, the default): the customer API, LiteLLM, the console, the Kueue MultiKueue
+- **Control cluster** (CPU only, the default): the customer API, LiteLLM, the Kueue MultiKueue
   manager with the cost dispatcher and price feed, Grafana. Next to it, in the same project and region, the
   fleet database: one Nebius Managed Service for PostgreSQL cluster (`<fleet>-db`, private access only) with
   the databases `platform` (model definitions and their history, keys, budgets, spend, the GPU ledger; owned
@@ -107,11 +107,11 @@ tools/verify.sh                                # 8. the acceptance probe: a run,
 The platform ships no models, only three generic job classes (`hello-run`, `container-run`,
 `distributed-run`). A model is a container you describe: any image from Docker Hub, NGC, GHCR, Quay or the
 fleet's own registry, pulled through the per-region cache. Nothing about a model is in the tfvars: you add
-models through the console ("New model") or `POST /v1/models` with an admin key, and the platform keeps
+models through `POST /v1/models` with an admin key, and the platform keeps
 them in its database. The acceptance probe (`tools/verify.sh`, step 8; `acceptance.probe = true` in the
 tfvars runs it as a Job at apply time instead) creates the first one for you, `llm-example` (a stock
 `vllm/vllm-openai:v0.11.0` container serving a small public chat model, `HuggingFaceTB/SmolLM2-360M-Instruct`, on one GPU of the fleet's first
-GPU class, scaled to zero when idle), calls it, and leaves it as the first model of the console. Then call
+GPU class, scaled to zero when idle), calls it, and leaves it as the first model of the fleet. Then call
 a model yourself:
 
 ```sh
@@ -171,8 +171,8 @@ platform ("Day 2" below).
 
 ## Day 2
 
-- **Add a model**: no Terraform. Open the console (`app.<control host>`) and fill in "New model", or
-  `POST /v1/models` on the fleet's API (the control cluster's `api.` host) with an admin key: a container
+- **Add a model**: no Terraform. `POST /v1/models` on the fleet's API (the control cluster's `api.` host)
+  with an admin key: a container
   plus a few knobs (image, command and args, env, port, protocol `openai | http | websocket | grpc`, GPU
   count and classes, scaling, regions, weights; the full list is the docstring of `services/api/models.py`).
   The API stores the definition in the fleet database with its history, renders the endpoint on every
@@ -302,7 +302,7 @@ that nobody assumes it does:
 | `charts/fleet`, `charts/tenant` | queues and cache from the fleet definition; one tenant namespace |
 | `charts/endpoint` | the reference rendering of one endpoint; the API renders endpoints natively (`services/api/render_endpoint.py`), the chart stays one release with golden tests holding the two equal |
 | `catalog/models` | the generic job classes (`hello-run`, `container-run`, `distributed-run`); models are defined through the API and stored in the fleet database |
-| `services/api`, `services/dispatcher`, `services/jobs`, `services/ops`, `ui` | the own code: API, dispatcher and price feed, job runner, ops image, console |
+| `services/api`, `services/dispatcher`, `services/jobs`, `services/ops` | the own code: API, dispatcher and price feed, job runner, ops image (an operator console over this API is a separate project, not part of the solution) |
 | `tools/` | build or copy the platform images, the quality gate, the acceptance probe (`verify.sh`), the library sync |
 | `docs/` | architecture, API, jobs, scheduling, images, edge, observability, operations, requirements, verification, security pre-review |
 
@@ -324,7 +324,6 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `services/dispatcher` image | 0.2.12 |
 | `services/jobs` image | 0.1.14 |
 | `services/ops` image | 0.1.11 |
-| `ui` image | 0.6.5 |
 | `charts/endpoint` | 0.1.3 (reference rendering; the API renders endpoints natively since api 0.11.15) |
 | `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.3 |

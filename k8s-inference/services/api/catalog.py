@@ -133,7 +133,7 @@ def fleet_params(m: dict) -> dict:
 
 
 def to_public(m: dict, region_status: list | None = None) -> dict:
-    """Shape of docs/API.md and ui/src/api/types.ts Model."""
+    """Shape of docs/API.md Model."""
     price = m.get("price") or (f"${m['price_per_call']} / call" if m.get("price_per_call") is not None else "metered")
     return {
         "id": m["name"], "name": m["display_name"], "description": m.get("description", ""),

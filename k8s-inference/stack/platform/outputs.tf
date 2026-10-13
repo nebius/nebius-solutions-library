@@ -5,7 +5,6 @@ output "gateway_ip" { value = local.cluster.gateway_ip }
 output "hostnames" { value = local.hostnames }
 output "api_url" { value = try("https://${local.hostnames.api}", null) } # the control cluster's; null on a GPU region
 output "grafana_url" { value = "https://${local.hostnames.grafana}" }
-output "ui_url" { value = local.role.control ? "https://${local.hostnames.app}" : null }
 output "litellm_url" { value = local.role.control ? "https://${local.hostnames.litellm}" : null }
 output "tenant_namespace_prefix" { value = "tenant-" }
 output "kueue_namespace" { value = "kueue-system" }

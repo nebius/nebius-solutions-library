@@ -221,7 +221,6 @@ variable "fleet" {
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.14")
         ops        = optional(string, "0.1.11")
-        ui         = optional(string, "0.6.5")
       }), {})
     }), {})
 

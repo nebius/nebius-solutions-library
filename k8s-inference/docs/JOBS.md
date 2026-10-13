@@ -53,7 +53,7 @@ operation reports it as `gpu_class` and `image`, and a resume keeps it.
 
 Three run classes ship: `container-run` (any image and command; the generic job class),
 `hello-run` (CPU smoke test). Application layers define their own run classes through the model API.
-`parameters` is what the UI shows and what `input` may contain (unknown names, or a missing
+`parameters` is what a client shows and what `input` may contain (unknown names, or a missing
 `required` one, are a 400); `deployments.<cluster>.parameters` are per-region defaults the caller
 never sees (pool, in-region image, tuning). `input_prefix` and `output_prefix` are always accepted;
 the API sets `output_prefix` to `s3://<tenant bucket of the region>/operations/<id>`.

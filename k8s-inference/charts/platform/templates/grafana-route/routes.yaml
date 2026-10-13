@@ -1,14 +1,14 @@
-{{- if index .Values.components "ui" }}
+{{- if index .Values.components "grafana-route" }}
 # Operator Grafana route (on the internal gateway when `edge.grafana_public = false`); the platform stage renders
-# the console and LiteLLM routes of the control cluster itself (stack/platform/manifests.tf).
+# the LiteLLM route of the control cluster itself (stack/platform/manifests.tf).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: ui-grafana
+  name: grafana
   namespace: monitoring
 spec:
   parentRefs:
-  - name: {{ if .Values.ui.grafanaPublic }}serverless2-external{{ else }}serverless2-internal{{ end }}
+  - name: {{ if .Values.grafanaRoute.public }}serverless2-external{{ else }}serverless2-internal{{ end }}
     namespace: envoy-gateway-system
     sectionName: https
   hostnames:

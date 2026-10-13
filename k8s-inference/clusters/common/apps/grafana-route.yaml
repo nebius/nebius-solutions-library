@@ -1,5 +1,5 @@
-name: ui
-component: ui
+name: grafana-route
+component: grafana-route
 namespace: envoy-gateway-system
 wave: '3'
 hubOnly: 'false'
