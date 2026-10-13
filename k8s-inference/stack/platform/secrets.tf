@@ -27,16 +27,21 @@ resource "kubernetes_namespace_v1" "ns" {
 # terraform.tfvars `secrets`; an empty name switches the feature off; a named variable that is unset stops
 # stack.sh before any plan). The booleans below are what `count` reads: a sensitive value itself cannot drive it.
 locals {
-  ngc_key        = coalesce(local.f.secrets.ngc_api_key_env, "") == "" ? "" : coalesce(var.ngc_api_key, "")
-  hf_token       = coalesce(local.f.secrets.hf_token_env, "") == "" ? "" : coalesce(var.hf_token, "")
-  extra_registry = coalesce(local.f.secrets.registry_credentials_env, "") == "" || coalesce(var.registry_credentials, "") == "" ? {} : jsondecode(var.registry_credentials)
+  # an empty name in the tfvars switches the secret off (null never reaches here: the schema's defaults apply);
+  # coalesce() is not used on these: it rejects an all-empty call
+  ngc_off        = local.f.secrets.ngc_api_key_env == null || local.f.secrets.ngc_api_key_env == ""
+  hf_off         = local.f.secrets.hf_token_env == null || local.f.secrets.hf_token_env == ""
+  registry_off   = local.f.secrets.registry_credentials_env == null || local.f.secrets.registry_credentials_env == ""
+  ngc_key        = local.ngc_off || var.ngc_api_key == null ? "" : var.ngc_api_key
+  hf_token       = local.hf_off || var.hf_token == null ? "" : var.hf_token
+  extra_registry = local.registry_off || var.registry_credentials == null || var.registry_credentials == "" ? {} : jsondecode(var.registry_credentials)
   ngc_on         = nonsensitive(local.ngc_key != "")
   hf_on          = nonsensitive(local.hf_token != "")
 }
 
 check "secret_inputs_present" {
   assert {
-    condition     = (coalesce(local.f.secrets.ngc_api_key_env, "") == "" || local.ngc_key != "") && (coalesce(local.f.secrets.hf_token_env, "") == "" || local.hf_token != "")
+    condition     = (local.ngc_off || local.ngc_key != "") && (local.hf_off || local.hf_token != "")
     error_message = "A secret named in terraform.tfvars `secrets` is empty: export it (stack.sh maps it to TF_VAR_ngc_api_key / TF_VAR_hf_token) or set its name to \"\" to run without it. Nothing is applied with a missing secret."
   }
 }
