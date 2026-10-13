@@ -85,7 +85,7 @@ class InvokeRequest(BaseModel):
     region: str | None = None
     priority: str | None = None
     timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
-    execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs only)
+    execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs; endpoint calls: docs/API.md)
 
 
 class ResumeRequest(BaseModel):
@@ -584,8 +584,18 @@ class ExecutionCapabilitiesRecovery(BaseModel):
     requires: str | None = None
 
 
+class ExecutionCapabilitiesAsyncPrivateIO(BaseModel):
+    """Endpoint calls with private input and application-owned output (docs/JOBS.md): present when the API has them."""
+
+    version: int | None = None
+    refresh: bool | None = None
+    retained_export: bool | None = None
+    binding_keys: list[str] | None = None
+
+
 class ExecutionCapabilities(BaseModel):
     io_modes: list[Literal["managed", "application"]] | None = None
+    async_private_io: ExecutionCapabilitiesAsyncPrivateIO | None = None
     identities: list[str] | None = None
     execution_profiles: list[str] | None = None
     oidc_issuers: dict[str, str] | None = None
@@ -611,6 +621,8 @@ class Binding(BaseModel):
     operation: str | None = None
     keys: list[str] | None = None
     updated_at: str | None = None
+    owner: str | None = None
+    revision: str | None = None
 
 
 class MetricSeries(BaseModel):

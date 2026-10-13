@@ -289,9 +289,12 @@ def test_cleanup_of_finished_attempt_preserves_live_successor_and_binding(client
     c, fake = client
     assert c.put("/v1/bindings/cleanup-input", json={"data": {"input.json": "private"}}, headers=H).status_code == 200
     ex = {"private_input_ref": "cleanup-input"}
-    execution.deliver(ex, "op-root", "op-root", "tenant-demo", "demo", ["eu-north1"])
-    execution.deliver(ex, "op-root-r1", "op-root", "tenant-demo", "demo", ["eu-north1"])
-    execution.deliver(ex, "op-root-r2", "op-root", "tenant-demo", "demo", ["eu-north1"])
+    owner = fake.secrets[("tenant-demo", "binding-cleanup-input")]["metadata"]["annotations"][
+        execution.OWNER_ANNOTATION
+    ]
+    execution.deliver(ex, "op-root", "op-root", "tenant-demo", "demo", ["eu-north1"], owner=owner)
+    execution.deliver(ex, "op-root-r1", "op-root", "tenant-demo", "demo", ["eu-north1"], owner=owner)
+    execution.deliver(ex, "op-root-r2", "op-root", "tenant-demo", "demo", ["eu-north1"], owner=owner)
     execution.sweep_copies("tenant-demo", "op-root-r1")
     assert ("tenant-demo", "op-root-r1-private") not in fake.secrets
     execution.sweep_copies("tenant-demo", "op-root")

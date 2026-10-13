@@ -235,7 +235,10 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
                 "EXPORT_FAILED",
                 "the run ended without a finalization record (RESULT.json): its results are not confirmed",
             )
-        elif labels.get(f"{LABEL}/mode") == "run" and (not last or last.get("export_state") is None):
+        elif (
+            labels.get(f"{LABEL}/mode") == "run"
+            or (labels.get(f"{LABEL}/mode") == "async" and execution.get("io_mode") == "application")
+        ) and (not last or last.get("export_state") is None):
             # exit 0 without a delivery record is not delivered: the uploader may still be exporting or posting
             # (FINALIZING), after the grace period the delivery is unconfirmed (docs/JOBS.md "Attempts and finalization")
             if age is not None and age > FINALIZING_GRACE_S:

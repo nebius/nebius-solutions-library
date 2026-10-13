@@ -103,7 +103,12 @@ upload() {   # $1 = status
   local st="$1"                                 # the positional parameters are replaced below (UPLOAD_EXCLUDES)
   cd /work || return
   record "$st"
-  if [ "$MODE" = record ]; then EXPORT="n/a"; record "$st"; echo "RECORD $(date -u +%FT%TZ) status=$st (application-managed I/O: nothing exported)"; return; fi
+  if [ "$MODE" = record ]; then
+    # application-managed I/O: the run (or the endpoint caller, docs/API.md "Endpoint calls") delivered its own output;
+    # RESULT.json may say how that went (export: succeeded | failed), else the platform exported nothing (n/a)
+    EXPORT=$(jq -r '.export // "n/a"' /work/RESULT.json 2>/dev/null || echo n/a); [ -n "$EXPORT" ] || EXPORT="n/a"
+    record "$st"; echo "RECORD $(date -u +%FT%TZ) status=$st export=$EXPORT (application-managed I/O)"; return
+  fi
   # multi-node runs (UPLOAD_SCOPE=rank0, docs/JOBS.md): every pod records its attempt, only rank 0 publishes the
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then

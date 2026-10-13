@@ -110,7 +110,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.40", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.41", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -271,11 +271,6 @@ def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
     if mode == "gateway" and not admitted and p.info.get("max_concurrent") is not None:
         raise HTTPException(
             501, "direct endpoints cannot hold per-key concurrency reservations; use the synchronous API invoke path"
-        )
-    if mode == "async" and any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "rate_limit")):
-        raise HTTPException(
-            501,
-            "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke",
         )
 
 
@@ -582,8 +577,10 @@ async def invoke(
     region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
     if region not in m["regions"]:
         raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
-    if req.execution and mode != "run":
-        raise HTTPException(400, "execution options apply to runs only")
+    if req.execution and mode == "sync":
+        raise HTTPException(
+            400, "execution options apply to runs and asynchronous endpoint calls, not to synchronous calls"
+        )
     if mode != "run":
         _endpoint_limits(p, mode)
     if mode == "sync":
@@ -610,7 +607,20 @@ def _invoke_job(
     name = render.op_name(p.owner, model, idempotency_key)
     timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
-    ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
+    ex = execution.resolve(req.execution, p.namespace, m) if mode in ("run", "async") else None
+    if mode == "async" and ex:
+        # an endpoint call with private input and application-owned output (docs/API.md "Endpoint calls")
+        if ex.get("placement") or ex.get("recovery"):
+            raise HTTPException(400, "execution.placement and execution.recovery apply to runs, not to endpoint calls")
+        if ex.get("io_mode") == "application" and not ex.get("private_input_ref"):
+            raise HTTPException(
+                400,
+                "an application-I/O endpoint call takes its request and its destination from a binding: give private_input_ref",
+            )
+        if ex.get("private_input_ref") and req.input:
+            raise HTTPException(
+                400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
+            )
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
     if allowed and req.region and req.region not in allowed:
         # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
@@ -619,9 +629,24 @@ def _invoke_job(
     if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
         raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
     if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
-        output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
+        application = bool(ex and ex.get("io_mode") == "application")
+        output_prefix = (
+            "" if application else f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
+        )
         job, secret = jobs.build_async(
-            name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region
+            name,
+            m,
+            req.input,
+            p.tenant,
+            p.key,
+            req.name,
+            idempotency_key,
+            timeout,
+            output_prefix,
+            region,
+            ex=ex,
+            key_hash=billing.key_hash(p.key),
+            admitted=_admitted_token(keys.key_hash(p.key)) if cfg.ROUTER_KEY else None,
         )
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
@@ -683,7 +708,10 @@ def _create_admitted(p, name, job, region, secret, req, mode):
         reservation = {"replay": True}
     else:
         reservation = _admit(
-            p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0, run_member=(mode == "run")
+            p,
+            name,
+            _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0,
+            run_member=mode in ("run", "async"),  # a run or an endpoint call: its continuations join this reservation
         )
     try:
         created_job, created = jobs.create(p.namespace, job, region, secret)
@@ -1207,6 +1235,18 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
         active, _ = _owned(p, op["finalizing_by"], follow=False)
         return JSONResponse(jobs.normalise(active, _price(active)), status_code=200)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
+    if op["mode"] == "async":
+        if op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
+            raise HTTPException(
+                409, f"operation {id} is {op['status']}; only an EXPORT_FAILED endpoint call is delivered again"
+            )
+        root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or orig["metadata"]["name"]
+        job, created = continue_run(
+            root,
+            lambda admit: jobs.export_async(p.namespace, orig["metadata"]["name"], _home(orig), m, admit=admit),
+            transfer_only=True,
+        )
+        return _continued(p, job, created, region)
     finalize = None
     fz = (m.get("job") or {}).get("finalize")
     if op["status"] == "FAILED" and fz and (op.get("execution") or {}).get("io_mode") == "application":
@@ -1383,18 +1423,26 @@ def _continued(p: Principal, job: dict, created: bool, region: str | None) -> JS
 
 # ---- bindings: confidential inputs for runs (docs/JOBS.md "Execution options") ----
 @app.put("/v1/bindings/{ref}", responses={200: {"model": schemas.Binding}})
-def put_binding(ref: str, req: BindingRequest, p: Principal = Depends(scoped("artifacts:write"))):
-    return execution.put_binding(p.namespace, p.tenant, ref, req.data)
+def put_binding(
+    ref: str,
+    req: BindingRequest,
+    p: Principal = Depends(scoped("artifacts:write")),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+):
+    """Create or replace the caller's binding. A binding belongs to the principal that created it: another principal
+    of the tenant cannot read, replace, revoke or consume it (404); an admin may. `If-Match: <revision>` makes the
+    replacement a compare-and-swap (409 when the binding changed meanwhile)."""
+    return execution.put_binding(p.namespace, p.tenant, ref, req.data, p.owner, p.role == "admin", if_match)
 
 
 @app.get("/v1/bindings", responses={200: {"model": list[schemas.Binding]}})
 def list_bindings(p: Principal = Depends(principal)):
-    return execution.list_bindings(p.namespace)
+    return execution.list_bindings(p.namespace, p.owner, p.role == "admin")
 
 
 @app.delete("/v1/bindings/{ref}", status_code=204)
 def delete_binding(ref: str, p: Principal = Depends(scoped("artifacts:write"))):
-    if not execution.delete_binding(p.namespace, ref):
+    if not execution.delete_binding(p.namespace, ref, p.owner, p.role == "admin"):
         raise HTTPException(404, f"binding {ref}: not found")
     return None
 

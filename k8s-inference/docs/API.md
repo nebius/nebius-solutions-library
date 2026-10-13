@@ -243,11 +243,13 @@ runs; a region without variants keeps the automatic pool choice. A redefinition 
 removes its service, its LiteLLM deployment and, once Knative has torn its routes down, its authorizer; a dropped
 warm variant holds no GPUs beyond that.
 
-## Bindings and execution options (runs)
+## Bindings and execution options (runs, and endpoint calls with private I/O)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the
 tenant; `GET /v1/bindings` lists them (reference, bound operation, keys; never the data); `DELETE /v1/bindings/{ref}`
-revokes one (both need `artifacts:write`). A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
+revokes one (both need `artifacts:write`). An endpoint call (`mode: async`) may name a binding too: its request and
+its output destination then come from the binding (docs/JOBS.md "Endpoint calls with private input and
+application-owned output"). A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
 (`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
 profiles, the regions' OIDC issuers, the `recovery` policies and bounds the fleet supports, the application `finalize`

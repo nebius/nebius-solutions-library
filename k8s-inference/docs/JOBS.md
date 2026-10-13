@@ -462,6 +462,34 @@ operation without pod retries). The uploader puts `out/response.json` and `out/c
 bucket; `GET /v1/operations/{id}/result` returns the response inline from there. The request body
 names the served model as the endpoint expects it (`served_model`, injected when the caller omits `model`).
 
+### Endpoint calls with private input and application-owned output
+
+An endpoint call may carry the `execution` block of a run (`io_mode: application`, `private_input_ref`,
+`workload_identity_ref`, `profile_ref`; no placement or recovery): the request and the destination then come from
+the binding, never from the Job, and the capture goes to the application's own storage, never to the platform bucket.
+`GET /v1/fleet` → `execution.async_private_io` says an API supports it. The binding's files:
+
+| key | meaning |
+|---|---|
+| `request.json` or `input_url` | the body to POST (inline, 64 KiB bound), or a URL to fetch it from at transfer time |
+| `response_url`, `call_url` | presigned PUT URLs for the capture (`response.bin`, `call.json`) |
+| `result_ref` | the application's stable reference to the delivered result (opaque; returned as `result_ref`) |
+| `refresh_url`, `refresh_token` (optional) | the caller POSTs `{"operation_id", "attempt_id", "phase": "input"\|"output"}` with `Authorization: Bearer <refresh_token>` and, with an identity, `X-Workload-Identity: <projected token>`; the answer carries fresh `input_url` / `response_url` / `call_url` |
+
+With `refresh_url` every transfer asks the application for URLs at that moment (a queued call outlives a URL minted
+at submission); static URLs work too. The caller (`call.sh`) fetches the input, POSTs it through the endpoint's
+gateway with the key and the API's admission token (`x-serverless2-admitted`: the hook counts the call once), waits
+through 502/503/504 without a response (an endpoint still starting), and captures whatever the endpoint answered as
+`response.bin` plus `call.json` (`operation_id`, `attempt_id`, `http_status`, `content_type`, `size_bytes`, `sha256`,
+`timings`, `capture_complete`), written to the call's retained work volume first, `call.json` last. Then it uploads
+both and writes `RESULT.json` with the `result_ref` for the uploader's attempt record: the operation is `SUCCEEDED`
+only with that record; a failed upload is `EXPORT_FAILED` with the capture kept, and `POST /v1/operations/{id}:export`
+renders the caller again on the same volume with `TRANSFER_ONLY=1`: it delivers the complete capture and never calls the
+endpoint again (no complete capture: the retry fails with "nothing to export"). A 4xx from the endpoint is captured and
+delivered as well, and the operation is `FAILED` (the caller's error). The endpoint's pods receive an HTTP request and
+nothing else: no URL, token or credential of the binding reaches them. The call's reservation on the key (slot and
+request, docs/API.md "Keys") is released by the billing pass when the Job ends; a continuation joins it as a member.
+
 ## Status mapping
 
 `EXPORT_FAILED`: the run itself succeeded, its delivery did not (see "Attempts and finalization"); resumable and

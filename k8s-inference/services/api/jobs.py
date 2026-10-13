@@ -649,12 +649,21 @@ def build_async(
     timeout_s: int | None,
     output_prefix: str,
     region: str = REGION,
+    ex: dict | None = None,
+    key_hash: str | None = None,
+    admitted: str | None = None,
+    pvc: str | None = None,
+    transfer_only: bool = False,
 ) -> tuple[dict, dict]:
     """(Job, Secret): a queued endpoint call through LiteLLM's pass-through route when the model has
     one (spend lands on the caller's key), else through the gateway of the endpoint's region with the caller's key
     (TLS, key check, per-key rate limit: the same path as an external client; never the predictor
     Service, so no call skips the key check or the accounting). The Job runs in that region (services/api/app.py
-    `invoke` creates it there). The key goes into a per-operation Secret owned by the Job, never into the Job spec."""
+    `invoke` creates it there). The key goes into a per-operation Secret owned by the Job, never into the Job spec;
+    `admitted` (the API's admission token) goes next to it, so the gateway hook counts the call once.
+    `ex` (docs/API.md "Endpoint calls"): private input through a binding, application-owned output, the capture on a
+    retained work volume (`<name>-work`); `transfer_only` re-renders the caller on the original's volume (`pvc`) to
+    deliver a complete capture again without calling the endpoint."""
     import models as runtime_models
 
     env = []
@@ -677,13 +686,27 @@ def build_async(
         inp = {**inp, "model": model["served_model"]}  # callers know the catalog id, not the served name
     env += [
         {"name": "URL", "value": url},
-        {"name": "REQUEST_BODY", "value": json.dumps(inp)},
+        {"name": "OPERATION", "value": name},
+        {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
         {
             "name": "AUTH_HEADER",
             "valueFrom": {"secretKeyRef": {"name": secret_name, "key": "authorization", "optional": True}},
         },
-        {"name": "CALL_TIMEOUT", "value": str(min(timeout_s or 3600, 3600))},
+        {"name": "CALL_TIMEOUT", "value": str(min(timeout_s or 3600, 3600) if not ex else (timeout_s or 3600))},
     ]
+    if ex:  # the request lives in the binding, never in the Job (docs/API.md "Endpoint calls")
+        inp = {}
+        if transfer_only:
+            env.append({"name": "TRANSFER_ONLY", "value": "1"})
+    else:
+        env.append({"name": "REQUEST_BODY", "value": json.dumps(inp)})
+    if admitted:
+        env.append(
+            {
+                "name": "ADMITTED",
+                "valueFrom": {"secretKeyRef": {"name": secret_name, "key": "admitted", "optional": True}},
+            }
+        )
     main = {
         "name": "main",
         "image": RUNNER_IMAGE,
@@ -693,16 +716,26 @@ def build_async(
         "volumeMounts": [{"name": "work", "mountPath": "/work"}],
         "securityContext": RUNNER_SECURITY_CONTEXT,
     }
+    work = pvc or (f"{name}-work" if ex else None)
     pod = {
         "restartPolicy": "Never",
         "serviceAccountName": EXECUTOR_SA,
         "terminationGracePeriodSeconds": 60,
         "priorityClassName": "serverless2-batch",
         "securityContext": POD_SECURITY_CONTEXT,
-        "containers": [main, _uploader(name, region, output_prefix, None)],
-        "volumes": [{"name": "work", "emptyDir": {"sizeLimit": "1Gi"}}],
+        "containers": [main, _uploader(name, region, output_prefix, work)],
+        "volumes": [
+            {"name": "work", "persistentVolumeClaim": {"claimName": work}}
+            if work
+            else {"name": "work", "emptyDir": {"sizeLimit": "1Gi"}}
+        ],
     }
-    meta = _meta(name, tenant, model["name"], "async", region, label, inp, idem, None, None)
+    if ex:
+        execution.apply_async(pod, ex, name)
+    meta = _meta(name, tenant, model["name"], "async", region, label, inp, idem, None, key_hash, execution=ex)
+    if work:  # the capture is retained for a transfer-only export retry (create() makes the claim with the Job)
+        meta["annotations"][f"{LABEL}/pvc"] = work
+        meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(ASYNC_PVC_SIZE_GI)
     job = _job_shell(name, meta, pod, timeout_s)
     job["spec"]["backoffLimit"] = 6
     # a 4xx from the endpoint is the caller's error (call.sh exit 2): fail the Job, no pod retries
@@ -713,9 +746,78 @@ def build_async(
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": {"name": secret_name, "labels": {f"{LABEL}/tenant": tenant}},
-        "stringData": {"authorization": auth},
+        "stringData": {"authorization": auth, **({"admitted": admitted} if admitted else {})},
     }
     return job, secret
+
+
+ASYNC_PVC_SIZE_GI = 2
+
+
+def export_async(ns: str, name: str, region: str, model: dict, admit=None) -> tuple[dict, bool]:
+    """Transfer-only retry of an endpoint call with application-owned output (docs/API.md "Endpoint calls"): the
+    caller rendered again on the original's retained work volume with TRANSFER_ONLY=1, so it delivers the complete
+    capture once more and never calls the endpoint; `<root>-x<n>` like a run's export retry."""
+    orig = get(ns, name, region)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    pvc = ann.get(f"{LABEL}/pvc")
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
+    except ValueError:
+        ex = None
+    if not pvc or not ex or ex.get("io_mode") != "application":
+        raise HTTPException(409, f"operation {name} kept no capture to export (not an application-I/O endpoint call)")
+    try:
+        retry(kube.core(region).read_namespaced_persistent_volume_claim, pvc, ns)
+    except ApiException as e:
+        raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    n = 1 + sum(
+        1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x")
+    )
+    if n > EXPORT_RETRIES_MAX:
+        raise HTTPException(409, f"operation {root}: {EXPORT_RETRIES_MAX} export retries used; submit a new call")
+    new = f"{root}-x{n}"
+    auth_secret = _secret_copy(ns, f"{name}-auth", region)
+    job, secret = build_async(
+        new,
+        model,
+        {},
+        labels[f"{LABEL}/tenant"],
+        "",
+        ann.get(f"{LABEL}/name"),
+        None,
+        3600,
+        "",
+        region,
+        ex=ex,
+        key_hash=ann.get(f"{LABEL}/key"),
+        pvc=pvc,
+        transfer_only=True,
+    )
+    secret["stringData"] = auth_secret  # the original's key and admission token, never a new one
+    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
+    _inherit_owner(job, ann)
+    if admit:
+        admit(job)
+    return create(ns, job, region, secret)
+
+
+def _secret_copy(ns: str, name: str, region: str) -> dict:
+    try:
+        s = retry(kube.core(region).read_namespaced_secret, name, ns)
+    except ApiException as e:
+        raise HTTPException(
+            409 if e.status == 404 else 502, f"the call's credentials Secret {name} is gone; submit a new call"
+        )
+    import base64
+
+    raw = s if isinstance(s, dict) else kube.core(region).api_client.sanitize_for_serialization(s)
+    if raw.get("stringData"):
+        return dict(raw["stringData"])
+    return {k: base64.b64decode(v).decode() for k, v in (raw.get("data") or {}).items()}
 
 
 def check_image_allowed(ns: str, image: str, region: str = REGION) -> None:
@@ -739,6 +841,30 @@ def output_prefix(job: dict) -> str | None:
     return None
 
 
+def _inherit_owner(job: dict, ann: dict) -> None:
+    """A continuation belongs to the original's principal: the owner annotation follows it onto the successor (the
+    durable record is by root; the annotation keeps the fence intact on an API without the database)."""
+    owner = ann.get(f"{LABEL}/owner")
+    if owner:
+        job["metadata"]["annotations"][f"{LABEL}/owner"] = owner
+
+
+def operation_owner(ann: dict, root: str) -> str | None:
+    """The stable principal an operation belongs to: its own annotation (the submitting call writes it), else the
+    root's durable record (continuations are rendered without it)."""
+    owner = ann.get(f"{LABEL}/owner")
+    if owner:
+        return owner
+    import db
+    import keys
+
+    if db.enabled():
+        rec = keys.operation_owner(root)
+        if rec:
+            return rec[1]
+    return None
+
+
 def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None) -> tuple[dict, bool]:
     """Returns (job, created). AlreadyExists -> the existing one (idempotent replay). The per-operation
     PVC and Secret are owned by the Job (garbage-collected with it). A manager Job gets no PVC here: the
@@ -752,13 +878,15 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     # can start the Job. Keeping this here prevents a new path from creating an unstartable successor.
     ann = job["metadata"]["annotations"]
     ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
+    root = ann.get(f"{LABEL}/resumed-from") or name
     execution.deliver(
         ex,
         name,
-        ann.get(f"{LABEL}/resumed-from") or name,
+        root,
         ns,
         job["metadata"]["labels"][f"{LABEL}/tenant"],
         placement_regions(job) or [region],
+        owner=operation_owner(ann, root),
     )
     was_created = True
     try:
@@ -1182,6 +1310,7 @@ def export_again(
     _pin_to_worker(job, orig)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
     job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
+    _inherit_owner(job, ann)
     # the role is the platform's statement about this Job: the API stamps every attempt record of it with it
     job["metadata"]["annotations"][f"{LABEL}/attempt-role"] = role
     job["spec"]["template"]["metadata"].setdefault("labels", {})[f"{LABEL}/attempt-role"] = role
@@ -1254,11 +1383,14 @@ def switch_class(
         ex=ex,
     )
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    _inherit_owner(job, ann)
     job["metadata"]["annotations"][f"{LABEL}/fallback"] = (
         f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
     )
     # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
-    execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region])
+    execution.deliver(
+        ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
+    )
     # the original is fenced BEFORE its successor exists: suspended and named after its successor (a readable handle,
     # status SUPERSEDED), its Workload deactivated so Kueue never admits it; only then is the successor admitted on the
     # run's ledger and created, so the two can never run together. A failed admission or create restores the original.
@@ -1345,7 +1477,7 @@ def recover(
     ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
     # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
     regions = [r for r in placement.get("regions") or [] if r] or [region]
-    execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], regions)
+    execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], regions, owner=operation_owner(ann, root))
     attempts.mark_successor(name, new)  # fence 1: no record of the original from now on
     try:
         kube.deactivate_workload(ns, md.get("uid", ""), region)  # fence 2: the worker's copy and its pods go
@@ -1529,6 +1661,7 @@ def resume(
         ex=ex,
     )
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    _inherit_owner(job, ann)
     if idem:
         job["metadata"]["annotations"][f"{LABEL}/idempotency-key"] = idem
     if superseding:  # automatic recovery: the successor says where it comes from and why (status.py `reason`)

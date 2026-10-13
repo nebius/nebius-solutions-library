@@ -130,7 +130,8 @@ async def bill_once() -> int:
                 b = kube.batch(region)
                 items = [
                     b.api_client.sanitize_for_serialization(j)
-                    for j in retry(b.list_namespaced_job, ns, label_selector=f"{LABEL}/mode=run").items
+                    for mode in ("run", "async")  # runs are metered; endpoint calls release their key reservation
+                    for j in retry(b.list_namespaced_job, ns, label_selector=f"{LABEL}/mode={mode}").items
                 ]
                 items += jobs.list_jobsets(ns, region, f"{LABEL}/mode=run")  # multi-node runs (docs/JOBS.md)
             except ApiException as e:
@@ -141,6 +142,19 @@ async def bill_once() -> int:
                 ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
                 if BILLED in ann or KEY not in ann or not finished(job) or jobs.is_mirror(job):
                     continue  # a worker's copy of a manager Job is transient; the manager's Job is billed
+                if job["metadata"].get("labels", {}).get(f"{LABEL}/mode") == "async":
+                    # an endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md
+                    # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here
+                    try:
+                        if db.enabled():
+                            keys.release(name, 0.0)
+                        _annotate(region, ns, name, {BILLED: "0", f"{LABEL}/gpu-seconds": "0"}, job)
+                        if f"{LABEL}/execution" in ann:
+                            execution.sweep_copies(ns, name)
+                        n += 1
+                    except Exception as e:  # noqa: BLE001 - retried on the next run
+                        log.warning("settlement of endpoint call %s failed: %s", name, e)
+                    continue
                 price_region = region
                 if jobs.is_manager_job(job):
                     if clusters is None:

@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.41
+
+- Endpoint calls with private input and application-owned output (docs/JOBS.md "Endpoint calls with private input and
+  application-owned output"): the `execution` block on `mode: async`; the request and the destination from a binding
+  (`request.json` or `input_url`; `response_url`, `call_url`, `result_ref`; optional per-attempt `refresh_url` with
+  `refresh_token` and the projected identity); the capture (`response.bin`, `call.json`) on a retained work volume,
+  delivered by the caller; `EXPORT_FAILED` and a transfer-only `:export` on the retained capture; the gateway hook
+  counts the call once (`x-serverless2-admitted`). `GET /v1/fleet` → `execution.async_private_io`.
+- Bounded keys are admitted on asynchronous endpoint calls (slot and request; the billing pass releases them).
+- Bindings belong to the principal that created them: another principal of the tenant cannot list, replace, revoke
+  or consume them (404), continuations inherit the owner, replacement is a compare-and-swap (`If-Match: <revision>`),
+  an admin may act on any binding. jobs 0.1.16: `call.sh` with application I/O and transfer-only retries, `upload.sh`
+  reports the application's export state.
+
 ## api 0.11.40
 
 - Continuations of a run on a bounded key (resume, export retry, finalizer, fallback, recovery) are admitted on the
