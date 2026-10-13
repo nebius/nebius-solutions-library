@@ -214,6 +214,14 @@ is guessed); `chain` one entry per member (`id`, `created_at`, `status`, `gpu_cl
 (`gpu_seconds_complete: false` while an attempt has no end record); `successor_created_at` when the newest successor
 was created (its own first attempt may wait for capacity). An operation outside a chain carries none of these fields.
 
+## Stages
+
+A root that declared `execution.graph` carries `graph` on its handle (`status`, `stages[]` with `id`,
+`depends_on`, `operation`, `status`, `attempt_id`, `result_ref`, `reason`, `deadline_at`, `cancelled`) and is
+terminal only with its stages; a stage carries `stage` (`root`, `id`, `depends_on`, `reason`) and waits with
+`phase: waiting_for_dependencies`. The rules (sealed graph, one operation per stage, same owner and key, the gate,
+failure, cancel, deadline) are in docs/JOBS.md "Stage composition".
+
 ## Variants
 
 One endpoint may run as several deployments in a region behind its one name, in priority order: a warm floor on

@@ -63,6 +63,26 @@ class RecoverySpec(BaseModel):
     )  # `recover` only: no recovery past root.created_at + deadline_s
 
 
+MAX_STAGES = 64
+
+
+class GraphSpec(BaseModel):
+    """The stages a root declares at submission (docs/JOBS.md "Stage composition"): stage id -> the stages it depends on
+    (`root` = the root's own run). Sealed: no stage attaches later. Acyclic, at most MAX_STAGES stages."""
+
+    model_config = ConfigDict(extra="forbid")
+    stages: dict[str, list[str]]
+    deadline_s: int | None = Field(default=None, ge=60, le=7 * 86400)  # stages still waiting after it are cancelled
+
+
+class StageSpec(BaseModel):
+    """A run that is one declared stage of a root's graph: admitted only after its dependencies delivered."""
+
+    model_config = ConfigDict(extra="forbid")
+    root: str
+    id: str
+
+
 class ExecutionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")  # an unknown execution field is an error, never silently ignored
     io_mode: Literal["managed", "application"] = "managed"
@@ -71,6 +91,8 @@ class ExecutionSpec(BaseModel):
     private_input_ref: str | None = None
     placement: PlacementSpec | None = None
     recovery: RecoverySpec | None = None
+    graph: GraphSpec | None = None
+    stage: StageSpec | None = None
 
 
 class BindingRequest(BaseModel):
@@ -387,6 +409,24 @@ class ChainMember(BaseModel):
     cost: float | None = None
 
 
+class GraphStage(BaseModel):
+    id: str | None = None
+    depends_on: list[str] | None = None
+    operation: str | None = None
+    status: str | None = None
+    attempt_id: str | None = None
+    reason: str | None = None
+
+
+class GraphStatus(BaseModel):
+    """A root's declared stages and where each stands (docs/JOBS.md "Stage composition")."""
+
+    status: str | None = None
+    stages: list[GraphStage] | None = None
+    deadline_at: str | None = None
+    cancelled: bool | None = None
+
+
 class Operation(BaseModel):
     id: str
     name: str | None = None
@@ -410,6 +450,8 @@ class Operation(BaseModel):
     error: str | None = None
     input: dict[str, Any] | None = None
     execution: dict[str, Any] | None = None
+    graph: GraphStatus | None = None  # a root that declared stages
+    stage: GraphStage | None = None  # a run that is a stage of a root's graph
     resumed_from: str | None = None
     resumable: bool | None = None
     gpu_class: str | None = None

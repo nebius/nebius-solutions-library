@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import uuid
 from contextlib import asynccontextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -33,6 +33,7 @@ import monitoring
 import placement as placing
 import render
 import schemas
+import stages
 from auth import (
     Principal,
     _principal,
@@ -110,7 +111,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.45", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.46", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -661,10 +662,17 @@ def _invoke_job(
 ):
     # Imported principal keys share an idempotency namespace only with the same
     # principal; a tenant's shared bucket never shares private operation state.
-    name = render.op_name(p.owner, model, idempotency_key)
     timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode in ("run", "async") else None
+    stage, graph = _stage_request(ex, mode, p, idempotency_key)
+    if stage:
+        name = stages.stage_name(stage["root"], stage["id"])
+        done = _settled_stage(p, graph, stage)
+        if done is not None:
+            return JSONResponse(done, status_code=200)  # a stage that ran is never run again: its durable state
+    else:
+        name = render.op_name(p.owner, model, idempotency_key)
     if mode == "async" and ex:
         # an endpoint call with private input and application-owned output (docs/API.md "Endpoint calls")
         if ex.get("placement") or ex.get("recovery"):
@@ -737,13 +745,15 @@ def _invoke_job(
     # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
     ann = job["metadata"].setdefault("annotations", {})
     ann[f"{cfg.LABEL}/owner"] = p.owner
+    if stage:
+        stages.mark_waiting(job, stage["root"], stage["id"], stages.dependencies(graph, stage["id"]))
     if db.enabled():
         try:
             keys.own_operation(name, p.tenant, p.owner, model)
         except keys.KeyLimit as e:
             raise HTTPException(e.status, e.detail)
     with keys.operation_lock(name) if db.enabled() else nullcontext():
-        created_job, created = _create_admitted(p, name, job, region, secret, req, mode)
+        created_job, created = _create_admitted(p, name, job, region, secret, req, mode, stage=stage)
     if created:
         return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202)
     return JSONResponse(
@@ -751,7 +761,57 @@ def _invoke_job(
     )  # a replay: its current state
 
 
-def _create_admitted(p, name, job, region, secret, req, mode):
+def _stage_request(
+    ex: dict | None, mode: str, p: Principal, idempotency_key: str | None
+) -> tuple[dict | None, dict | None]:
+    """A submission that is a declared stage of a root's graph (docs/JOBS.md "Stage composition"): the root's graph
+    must exist in this tenant, belong to the same owner, declare the stage, and still be open. Returns (stage, graph)
+    or (None, None) for an ordinary submission."""
+    stage = (ex or {}).get("stage")
+    if not stage:
+        return None, None
+    if mode != "run":
+        raise HTTPException(400, "execution.stage: a stage is a run (not an endpoint call)")
+    if not db.enabled():
+        raise HTTPException(409, "stage composition needs the control API's ledger (no database here)")
+    if idempotency_key:
+        raise HTTPException(400, "a stage's identity is its root and id: no Idempotency-Key")
+    g = keys.graph_of(stage["root"])
+    if g is None or g["tenant"] != p.tenant:
+        raise HTTPException(404, f"operation {stage['root']}: no stage graph (declare execution.graph on the root)")
+    if g["owner"] != p.owner:
+        raise HTTPException(403, f"operation {stage['root']}: the stages of a graph belong to its root's owner")
+    if stage["id"] not in (g["stages"] or {}):
+        raise HTTPException(400, f"stage {stage['id']!r} is not declared by {stage['root']} ({sorted(g['stages'])})")
+    if g.get("cancelled_at") or g.get("closed_at"):
+        raise HTTPException(
+            409,
+            f"the graph of {stage['root']} is {'cancelled' if g.get('cancelled_at') else 'closed'}: no stage attaches",
+        )
+    return stage, g
+
+
+def _settled_stage(p: Principal, g: dict, stage: dict) -> dict | None:
+    """A stage whose member already settled (ran, was cancelled) is not run again: its current state, or None when
+    the stage has no settled member (a replay of an active stage is the Job's replay)."""
+    name = stages.stage_name(stage["root"], stage["id"])
+    m = next(
+        (m for m in keys.run_members(stage["root"]) if m.get("kind") == "stage" and m.get("stage") == stage["id"]), None
+    )
+    if m is None or m["state"] == "active":
+        return None
+    try:
+        job, region = _owned(p, name)
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        raise HTTPException(
+            409, f"stage {stage['id']!r} of {stage['root']} already ran ({m['state']}); nothing durable remains"
+        )
+    return _operation(p, job, name, region)
+
+
+def _create_admitted(p, name, job, region, secret, req, mode, stage: dict | None = None):
     """Called under the per-operation database lock; a refund cannot race a replay."""
     # Existing Jobs already own their admission, including terminal replays.
     try:
@@ -763,6 +823,15 @@ def _create_admitted(p, name, job, region, secret, req, mode):
     if existing:
         _check_operation_owner(p, existing)
         reservation = {"replay": True}
+    elif stage:
+        # a declared stage joins its root's run on the root's key (keys.prepare_run_member kind=stage: the key still
+        # valid, its GPU bound within the budget next to its siblings, the root's slot shared; no head rule)
+        try:
+            reservation = keys.prepare_run_member(
+                stage["root"], name, None, _job_gpus(job), _job_deadline(job), kind="stage", stage=stage["id"]
+            )
+        except keys.KeyLimit as e:
+            raise HTTPException(e.status, e.detail)
     else:
         reservation = _admit(
             p,
@@ -770,6 +839,14 @@ def _create_admitted(p, name, job, region, secret, req, mode):
             _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0,
             run_member=mode in ("run", "async"),  # a run or an endpoint call: its continuations join this reservation
         )
+    ex = json.loads((job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/execution") or "null") or {}
+    if db.enabled() and ex.get("graph") and not reservation.get("replay"):
+        # the root's stages are sealed with its admission (docs/JOBS.md "Stage composition"); the run stays open
+        # (slot, request) until every declared stage settled or the graph is cancelled
+        deadline = datetime.now(timezone.utc) + timedelta(
+            seconds=int(ex["graph"].get("deadline_s") or stages.DEFAULT_DEADLINE_S)
+        )
+        keys.declare_graph(name, p.tenant, p.owner, ex["graph"]["stages"], deadline)
     try:
         created_job, created = jobs.create(p.namespace, job, region, secret)
     except Exception:
@@ -780,7 +857,10 @@ def _create_admitted(p, name, job, region, secret, req, mode):
                 jobs.get(p.namespace, name, region)
             except HTTPException as missing:
                 if missing.status_code == 404:
-                    keys.abandon(name, keys.key_hash(p.key))
+                    if stage:
+                        keys.rollback_run_member(name)
+                    else:
+                        keys.abandon(name, keys.key_hash(p.key))
             except Exception:
                 pass
         raise
@@ -1255,7 +1335,20 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
         op.update(_delivered(op, name, root))  # a retry or finalizer that delivered closes the original
+    _stage_fields(p, op, job, root)
     return op
+
+
+def _stage_fields(p: Principal, op: dict, job: dict, root: str) -> None:
+    """Stage composition on the handle (docs/JOBS.md "Stage composition"): a root with a graph reports its stages and
+    is terminal only with them; a stage reports its root, dependencies and why it still waits."""
+    if st := stages.stage_of(job):
+        op["stage"] = {k: v for k, v in st.items() if k != "waiting"}
+    if not db.enabled():
+        return
+    g = keys.graph_of(root)
+    if g and g["tenant"] == p.tenant:
+        stages.apply_to_root(op, stages.graph_view(p.namespace, g))
 
 
 @app.get("/v1/operations/{id}", responses={200: {"model": schemas.Operation}})
@@ -1458,6 +1551,15 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
     op = jobs.normalise(cancelled)
     if op["status"] in ("QUEUED", "RUNNING"):
         op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
+    root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    if db.enabled() and (g := keys.graph_of(root)) and not g.get("cancelled_at"):
+        # the root of a graph: every stage goes with it, nothing attaches any more (docs/JOBS.md "Stage composition")
+        why = f"cancelled by the caller with root {root}"
+        names = stages.cancel_members(p.namespace, root, why)
+        keys.cancel_graph(root, why)
+        op["graph"] = stages.graph_view(p.namespace, keys.graph_of(root))
+        op["status"] = "CANCELLED"
+        log.info("cancel %s: stages cancelled: %s", root, names)
     return op
 
 

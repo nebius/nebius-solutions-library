@@ -192,6 +192,9 @@ def _waiting(job: dict, region: str | None) -> tuple[str, str | None]:
     condition message, `_reason`), else `waiting_for_node` while its newest pod has no node (the scheduler's
     `PodScheduled` message: a pool scaling from zero, a full pool) or no pod exists yet, else `starting` (a container
     is waiting: image pull, the init containers). Bounded text, read from the pod the API already lists: no Events."""
+    labels, ann = job.get("metadata", {}).get("labels") or {}, job.get("metadata", {}).get("annotations") or {}
+    if labels.get(f"{LABEL}/stage-waiting") == "true":  # docs/JOBS.md "Stage composition": not handed to Kueue yet
+        return "waiting_for_dependencies", ann.get(f"{LABEL}/stage-waiting-reason") or "waiting for its dependencies"
     if job.get("_reason") is not None or (is_manager_job(job) and not job.get("_cluster")):
         return "waiting_for_admission", job.get("_reason")
     pods = job.get("_pods") or []

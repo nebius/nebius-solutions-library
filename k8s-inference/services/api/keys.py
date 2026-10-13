@@ -810,7 +810,7 @@ def run_members(root: str) -> list[dict]:
     """The members of a run, oldest first (empty: no ledger for this root)."""
     with _connection() as c:
         rows = c.execute(
-            "select operation, predecessor, gpu_bound, gpu_seconds, state from key_run_members where root = %s order by created_at, operation",
+            "select operation, predecessor, gpu_bound, gpu_seconds, state, kind, stage, note from key_run_members where root = %s order by created_at, operation",
             (root,),
         ).fetchall()
     return [
@@ -820,9 +820,74 @@ def run_members(root: str) -> list[dict]:
             "gpu_bound": float(r[2]),
             "gpu_seconds": float(r[3]) if r[3] is not None else None,
             "state": r[4],
+            "kind": r[5],
+            "stage": r[6],
+            "note": r[7],
         }
         for r in rows
     ]
+
+
+# ---- stage graphs (docs/JOBS.md "Stage composition") ----------------------------------------------------------
+def declare_graph(root: str, tenant: str, owner: str, stages: dict, deadline_at=None) -> None:
+    """Seal the stages of a root at its submission (idempotent for a replay of the same root)."""
+    with _connection() as c, c.transaction():
+        c.execute(
+            "insert into run_graphs (root, tenant, owner, stages, deadline_at) values (%s, %s, %s, %s, %s) on conflict (root) do nothing",
+            (root, tenant, owner, json.dumps(stages), deadline_at),
+        )
+
+
+_GRAPH_COLUMNS = "root, stages, deadline_at, cancelled_at, closed_at, reason, tenant, owner, sealed_at"
+
+
+def _graph(r) -> dict:
+    return {
+        "root": r[0],
+        "stages": r[1],
+        "deadline_at": r[2],
+        "cancelled_at": r[3],
+        "closed_at": r[4],
+        "reason": r[5],
+        "tenant": r[6],
+        "owner": r[7],
+        "sealed_at": r[8],
+    }
+
+
+def graph_of(root: str) -> dict | None:
+    with _connection() as c:
+        r = c.execute(f"select {_GRAPH_COLUMNS} from run_graphs where root = %s", (root,)).fetchone()
+    return _graph(r) if r else None
+
+
+def open_graphs() -> list[dict]:
+    """The graphs still waiting for a stage (neither cancelled nor closed), oldest first."""
+    with _connection() as c:
+        rows = c.execute(
+            f"select {_GRAPH_COLUMNS} from run_graphs where cancelled_at is null and closed_at is null order by sealed_at"
+        ).fetchall()
+    return [_graph(r) for r in rows]
+
+
+def cancel_graph(root: str, reason: str) -> bool:
+    """The root was cancelled, or its graph can never complete (deadline, root failed): no stage attaches or is
+    admitted any more; the run closes once nothing is active. Idempotent (the first reason stands)."""
+    with _connection() as c, c.transaction():
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        r = c.execute(
+            "update run_graphs set cancelled_at = coalesce(cancelled_at, now()), reason = coalesce(reason, %s) where root = %s returning root",
+            (reason, root),
+        ).fetchone()
+        if r is not None:
+            _close_run_if_idle(c, root)
+        return r is not None
+
+
+def note_member(operation: str, note: str) -> None:
+    """Why a member ended the way it did (a stage cancelled for a failed dependency), for the root's graph view."""
+    with _connection() as c, c.transaction():
+        c.execute("update key_run_members set note = %s where operation = %s", (note, operation))
 
 
 def run_head(root: str) -> str | None:
@@ -837,7 +902,14 @@ def run_head(root: str) -> str | None:
 
 
 def prepare_run_member(
-    root: str, operation: str, predecessor: str | None, gpus: int, timeout_s: int | None, transfer_only: bool = False
+    root: str,
+    operation: str,
+    predecessor: str | None,
+    gpus: int,
+    timeout_s: int | None,
+    transfer_only: bool = False,
+    kind: str = "continuation",
+    stage: str | None = None,
 ) -> dict:
     """Admit a continuation of the run `root` (resume, export retry, finalizer, fallback, recovery) as member
     `operation` on the root's original key, before its Job exists: the key must still be valid (not blocked, not
@@ -867,12 +939,32 @@ def prepare_run_member(
             raise KeyLimit(403, "the run's key is blocked")
         if expires is not None and expires < datetime.now(timezone.utc):
             raise KeyLimit(401, "the run's key has expired")
-        head = c.execute(
-            "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
-            (root,),
-        ).fetchone()[0]
-        if predecessor != head:
-            raise KeyLimit(409, f"only the current run head may be continued ({head}, not {predecessor})")
+        if kind == "stage":
+            # a declared stage of the root's graph (docs/JOBS.md "Stage composition"): siblings coexist, the head rule
+            # of continuations does not apply; the graph must exist, name the stage and not be cancelled
+            g = c.execute(
+                "select stages, cancelled_at, closed_at from run_graphs where root = %s for update", (root,)
+            ).fetchone()
+            if g is None:
+                raise KeyLimit(409, f"run {root} declared no stage graph")
+            if stage not in (g[0] or {}):
+                raise KeyLimit(400, f"stage {stage!r} is not declared by {root} ({sorted(g[0] or {})})")
+            if g[1] is not None or g[2] is not None:
+                raise KeyLimit(
+                    409, f"the graph of {root} is {'cancelled' if g[1] else 'closed'}; no stage attaches to it"
+                )
+            if c.execute(
+                "select 1 from key_run_members where root = %s and stage = %s and operation <> %s",
+                (root, stage, operation),
+            ).fetchone():
+                raise KeyLimit(409, f"stage {stage!r} of {root} already has an operation")
+        else:
+            head = c.execute(
+                "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
+                (root,),
+            ).fetchone()[0]
+            if predecessor != head:
+                raise KeyLimit(409, f"only the current run head may be continued ({head}, not {predecessor})")
         bound = 0.0
         if b_gpu is not None and gpus > 0 and not transfer_only:
             if not timeout_s:
@@ -895,16 +987,30 @@ def prepare_run_member(
         else:
             c.execute("update key_reservations set gpu_seconds = gpu_seconds + %s where operation = %s", (bound, root))
         c.execute(
-            "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound) values (%s, %s, %s, %s, %s, %s)",
-            (operation, root, predecessor, h, tenant, bound),
+            "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound, kind, stage) values (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (operation, root, predecessor, h, tenant, bound, kind, stage),
         )
         return {"operation": operation, "replay": False, "gpu_bound": bound, "key_hash": h}
 
 
 def _close_run_if_idle(c, root: str) -> bool:
-    """No active member left: the run's slot goes and its request count is spent. Returns whether it closed now."""
+    """No active member left, and every stage the root declared has a settled member (a graph keeps its slot and
+    request until all declared stages settled or the graph was cancelled, docs/JOBS.md "Stage composition"): the
+    run's slot goes and its request count is spent. Returns whether it closed now."""
     if c.execute("select 1 from key_run_members where root = %s and state = 'active' limit 1", (root,)).fetchone():
         return False
+    g = c.execute("select stages, cancelled_at from run_graphs where root = %s", (root,)).fetchone()
+    if g and g[1] is None:
+        settled = {
+            r[0]
+            for r in c.execute(
+                "select stage from key_run_members where root = %s and kind = 'stage' and state <> 'active'", (root,)
+            ).fetchall()
+        }
+        if not set(g[0] or {}) <= settled:
+            return False
+    if g:
+        c.execute("update run_graphs set closed_at = coalesce(closed_at, now()) where root = %s", (root,))
     r = c.execute("delete from key_reservations where operation = %s returning key_hash, requests", (root,)).fetchone()
     if r is None:
         return False

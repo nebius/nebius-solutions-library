@@ -894,15 +894,18 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     ann = job["metadata"]["annotations"]
     ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
     root = ann.get(f"{LABEL}/resumed-from") or name
-    execution.deliver(
-        ex,
-        name,
-        root,
-        ns,
-        job["metadata"]["labels"][f"{LABEL}/tenant"],
-        placement_regions(job) or [region],
-        owner=operation_owner(ann, root),
-    )
+    if job["metadata"].get("labels", {}).get(f"{LABEL}/stage-waiting") != "true":
+        # a waiting stage (docs/JOBS.md "Stage composition") gets its binding from the gate when its dependencies
+        # delivered: its request-scoped credentials are not consumed while it waits
+        execution.deliver(
+            ex,
+            name,
+            root,
+            ns,
+            job["metadata"]["labels"][f"{LABEL}/tenant"],
+            placement_regions(job) or [region],
+            owner=operation_owner(ann, root),
+        )
     was_created = True
     try:
         if is_jobset(job):

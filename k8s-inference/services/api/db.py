@@ -197,6 +197,24 @@ create table if not exists operation_marks (
     alter table attempts add column if not exists model text;
     alter table attempts add column if not exists io_mode text;
     """,
+    # 13: stage graphs (docs/JOBS.md "Stage composition"): the stages a root declared at submission (sealed: nothing
+    # attaches later), and members of kind `stage` (a declared stage's operation, outside the continuation head rule)
+    """
+    create table if not exists run_graphs (
+        root         text primary key,
+        tenant       text not null,
+        owner        text not null,
+        stages       jsonb not null,
+        deadline_at  timestamptz,
+        sealed_at    timestamptz not null default now(),
+        cancelled_at timestamptz,
+        closed_at    timestamptz,
+        reason       text
+    );
+    alter table key_run_members add column if not exists kind text not null default 'continuation';
+    alter table key_run_members add column if not exists stage text;
+    alter table key_run_members add column if not exists note text;
+    """,
 ]
 
 _pool = None

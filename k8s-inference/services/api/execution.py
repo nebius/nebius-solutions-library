@@ -187,6 +187,14 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
             pl["fallback_wait_s"] = spec.placement.fallback_wait_s
         if pl:
             ex["placement"] = pl
+    if spec.graph and spec.stage:
+        raise HTTPException(400, "execution.graph declares a root's stages; execution.stage submits one: not both")
+    if spec.graph:
+        ex["graph"] = validate_graph(spec.graph.stages, spec.graph.deadline_s)
+    if spec.stage:
+        if not (STAGE_ID.match(spec.stage.id) and _ref(spec.stage.root, "stage.root")):
+            raise HTTPException(400, "execution.stage: id (letters, digits, -) and root are required")
+        ex["stage"] = {"root": spec.stage.root, "id": spec.stage.id}
     if spec.recovery:
         ex["recovery"] = {"on_infrastructure_loss": spec.recovery.on_infrastructure_loss}
         if spec.recovery.checkpoint_ref:
@@ -201,6 +209,48 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         elif bounds:
             raise HTTPException(400, f"recovery.{'/'.join(bounds)}: only with on_infrastructure_loss: recover")
     return ex
+
+
+STAGE_ID = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
+MAX_STAGES = 64
+ROOT_STAGE = "root"
+
+
+def validate_graph(stages: dict, deadline_s: int | None) -> dict:
+    """A declared stage graph: 1..MAX_STAGES stage ids, dependencies among them (or `root`), no cycle, no stage named
+    `root`, no self-dependency, no duplicate dependency. Returns the resolved block."""
+    if not stages or len(stages) > MAX_STAGES:
+        raise HTTPException(400, f"execution.graph.stages: 1 to {MAX_STAGES} stages")
+    for sid, deps in stages.items():
+        if sid == ROOT_STAGE or not STAGE_ID.match(sid):
+            raise HTTPException(400, f"execution.graph.stages: stage id {sid!r} (letters, digits, -; not 'root')")
+        if not isinstance(deps, list) or len(deps) != len(set(deps)):
+            raise HTTPException(400, f"stage {sid!r}: dependencies must be a list without duplicates")
+        for d in deps:
+            if d == sid:
+                raise HTTPException(400, f"stage {sid!r} depends on itself")
+            if d != ROOT_STAGE and d not in stages:
+                raise HTTPException(400, f"stage {sid!r} depends on {d!r}, which is not declared")
+    # cycles: depth-first over the declared edges
+    state: dict[str, int] = {}
+
+    def visit(n: str, path: list[str]) -> None:
+        if state.get(n) == 2:
+            return
+        if state.get(n) == 1:
+            raise HTTPException(400, f"execution.graph.stages: cycle through {' -> '.join(path + [n])}")
+        state[n] = 1
+        for d in stages.get(n) or []:
+            if d != ROOT_STAGE:
+                visit(d, path + [n])
+        state[n] = 2
+
+    for sid in stages:
+        visit(sid, [])
+    out = {"stages": {sid: list(deps) for sid, deps in stages.items()}}
+    if deadline_s:
+        out["deadline_s"] = int(deadline_s)
+    return out
 
 
 def narrow_placement(placement: dict | None, ex: dict | None) -> dict | None:

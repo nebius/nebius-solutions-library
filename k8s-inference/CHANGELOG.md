@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.46
+
+- Stage composition (docs/JOBS.md "Stage composition"): a root declares its stages at submission (`execution.graph`:
+  ids → dependencies, acyclic, at most 64, sealed), each stage is submitted as its own run (`execution.stage`:
+  deterministic id `<root>-s-<id>`, same owner, admitted on the root's key as a member of the root's run without the
+  head rule); a stage waits as a suspended Job without a Kueue queue (no node, no binding claimed, no credential
+  consumed) until the control API's gate finds every dependency `SUCCEEDED` with a `result_ref` on durable records,
+  then delivers its binding, binds the dependencies' results into the pod (`DEPENDENCY_RESULTS`) and hands it to
+  Kueue; a failed or cancelled dependency, or a success without a result, cancels the stage; the root's `:cancel`
+  fans out; the graph's deadline cancels what waits and closes the graph; the root's slot and request are released
+  only when every declared stage settled; the root's handle reports `graph` and is terminal only with its stages; a
+  stage that settled is never run again (ledger migration 13: `run_graphs`, member `kind`/`stage`/`note`).
+
 ## platform chart 0.1.4
 
 - The gateways' access logs use an explicit format: the path without its query string, no credential headers

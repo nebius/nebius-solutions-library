@@ -295,6 +295,44 @@ identity or profile does not exist for a caller.
 Every run pod, with or without the block, mounts the runner's Kubernetes token into the uploader only
 (`automountServiceAccountToken: false`, a projected 1-hour token): the model's container holds no Kubernetes credential.
 
+## Stage composition
+
+A root run can declare, at its submission, the stages that will follow it and what each depends on
+(`services/api/stages.py`; the control API's ledger is required). Each stage is submitted later as its own run
+and waits until every dependency delivered; the stages share the root's key slot and request, and the root is
+terminal only when every stage is. The shape it is built for: one CPU preparation → two concurrent GPU stages →
+one CPU collection.
+
+```json
+POST /v1/models/prep-class:invoke
+{"input": {...}, "execution": {"graph": {"stages": {"gpu-0": [], "gpu-1": [], "collect": ["gpu-0", "gpu-1"]},
+                                         "deadline_s": 86400}}}
+→ 202 {"id": "op-prep-1a2b…", ...}
+
+POST /v1/models/md-class:invoke
+{"input": {...}, "execution": {"stage": {"root": "op-prep-1a2b…", "id": "gpu-0"}, "private_input_ref": "grant-0"}}
+→ 202 {"id": "op-prep-1a2b…-s-gpu-0", "status": "QUEUED", "phase": "waiting_for_dependencies", ...}
+```
+
+| Rule | What it means |
+|---|---|
+| sealed graph | `execution.graph.stages` maps stage ids (letters, digits, `-`; never `root`) to the stages they depend on; a stage with no dependencies depends on the root. At most 64 stages, no cycle, no undeclared or duplicate dependency (400). The graph is written with the root's admission and never extended: a stage id that was not declared, a second graph, or a stage on a root without a graph is refused; nothing attaches to a cancelled or closed graph (409) |
+| one operation per stage | a stage's operation id is `<root>-s-<id>`; it needs no `Idempotency-Key` (one is refused). A resubmission of a waiting stage is the Job's replay; a resubmission of a stage that settled (ran, was cancelled) answers with its durable state and never runs it again |
+| same owner, same key | a stage is submitted by the root's owner (403 otherwise) in the root's tenant, and admitted on the root's key as a member of the root's run (docs/API.md "Keys": the key still valid, the stage's GPU bound within the budget next to its siblings, no head rule among stages); the root's slot and request are released only when every declared stage settled or the graph was cancelled |
+| waiting | a submitted stage is a suspended Job without a Kueue queue label: Kueue does not see it, no node is held, no binding is claimed, no credential consumed. Its handle shows `QUEUED` with `phase: waiting_for_dependencies` and the gate's last finding as `reason` |
+| the gate | the control API's reconcile loop (every 15 s, idempotent, any replica) admits a waiting stage when every dependency is `SUCCEEDED` on durable records with a `result_ref`: it claims and delivers the stage's own binding now, writes the dependencies' results into the pod (`DEPENDENCY_RESULTS`: `{"<dep>": {"operation", "result_ref", "attempt_id"}}`, `root` for the root), and adds the queue label; from then on the stage is a run like any other (Kueue, placement, attempts, billing). A binding that is not there yet keeps the stage waiting (reason `not admitted: …`) |
+| failure | a dependency that is `FAILED` or `CANCELLED`, or `SUCCEEDED` without a `result_ref` (success without the required output is not runnable), cancels the stage (never started: deleted, settled at zero, the reason on the root's handle); siblings that do not depend on it continue. A dependency whose export failed keeps its dependents waiting until `:export` delivers or the deadline passes |
+| root | the root's handle carries `graph`: every declared stage with `depends_on`, `operation`, `status` (`NOT_SUBMITTED` until submitted), `attempt_id`, `result_ref`, `reason`; `graph.status` is `PENDING`, `SUCCEEDED`, `FAILED` or `CANCELLED`. A root whose own run succeeded reports `RUNNING` with `phase: stages` while the graph is pending (its `/result` is 409 until then), then the graph's outcome: the final outputs are late-bound from the stages' validated results, never from a declaration. A stage's handle carries `stage` (`root`, `id`, `depends_on`, `reason`) |
+| cancel | `:cancel` on the root cancels every stage (waiting ones deleted and settled at zero, running ones stopped as any run) and closes the graph; `:cancel` on a stage cancels that stage, its dependents follow through the gate. A root that failed on its own cancels what waits and closes the graph |
+| deadline | `deadline_s` (default 7 days, 60 s to 7 days) bounds how long the graph stays open: when it passes, waiting stages are cancelled, never-submitted stages are recorded in the graph's reason, the graph closes and the root's run releases its slot (running stages settle through billing as usual) |
+| limits | a stage is a single-node run (no JobSet); stages are not endpoint calls; a stage's continuations (`:resume`, `:export`, recovery) are the stage operation's own and follow its head; the gate reads durable attempt records, so a dependency that delivered through a retry or finalizer counts once that is on record |
+
+What the gate changes on a waiting Job is limited to what Kubernetes allows on a never-started suspended Job
+(KEP-2926): the queue and waiting labels and the pod template's `serverless2.nebius/dependency-results`
+annotation, which the main container reads through the downward API. The results are the operations' `result_ref`s
+(bucket prefixes for managed I/O, the application's references for application I/O); the stage's own access to
+them is its own (its bucket credentials, its identity or its binding), as for any run.
+
 ## Attempts and finalization
 
 Every attempt (a pod of an operation) is on record twice: the uploader writes `attempts/<pod>.json` into the tenant

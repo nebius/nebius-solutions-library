@@ -393,10 +393,21 @@ async def _reconcile_loop():
             await asyncio.to_thread(recovery_switch)
             await asyncio.to_thread(reconcile_models)
             await asyncio.to_thread(release_stale_reservations)
+            await asyncio.to_thread(gate_stages)
             await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
             log.exception("model reconciliation unavailable")
         await asyncio.sleep(15)
+
+
+def gate_stages() -> list[str]:
+    """Stage composition (docs/JOBS.md): admit waiting stages whose dependencies delivered, cancel what cannot run,
+    close graphs that are over (stages.gate). Needs the ledger (the database)."""
+    if not db.enabled():
+        return []
+    import stages
+
+    return stages.gate()
 
 
 def release_stale_reservations() -> list[str]:
