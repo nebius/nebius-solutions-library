@@ -113,11 +113,11 @@
  },
  "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/external": {
   "component": "gateway",
-  "sha256": "5d520264996d6d6266ddf514749ace3294c559156283aa313983185fd484acb3"
+  "sha256": "dd1cd542ae6396c79c4e528c37263267eb350c6bb864826bc829dd739eac6b5d"
  },
  "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/internal": {
   "component": "gateway",
-  "sha256": "e21ed94e2bbff8ee5db419c90c3a022ff0df89b9d1f96257e24c8b41531abd09"
+  "sha256": "01ed0cac46f1dac49a46975224a08354d9b7a38aadca7e1ac73f96fae9d54175"
  },
  "gateway.networking.k8s.io/BackendTLSPolicy/api/api": {
   "component": "edge",

@@ -4,6 +4,11 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## platform chart 0.1.4
+
+- The gateways' access logs use an explicit format: the path without its query string, no credential headers
+  (docs/EDGE.md "Access logs"); the gate refuses a proxy that logs the raw path, Authorization, Cookie or an `api_key`.
+
 ## api 0.11.45, jobs 0.1.19
 
 - An endpoint call's pod carries the runner's file-system group (fsGroup 10001, as a run's pod): the retained work
@@ -65,7 +70,7 @@ The Kubernetes inference fleet solution: a control cluster and one cluster per G
 endpoints that scale to zero, queued and multi-node runs with checkpoint resume and automatic recovery,
 per-tenant Kueue queues, a per-region image cache, tenants with API keys and budgets, observability and cost
 reporting. Versions at the initial release: api 0.11.39, dispatcher 0.2.12, jobs 0.1.15, ops 0.1.12; charts fleet
-0.1.7, platform 0.1.3, tenant 0.3.2.
+0.1.7, platform 0.1.4, tenant 0.3.2.
 
 The pre-merge correctness review is covered by regressions: operation artifact ownership and scopes,
 binding revocation permission, key rotation/revocation with durable LiteLLM deletion retries, removed endpoint

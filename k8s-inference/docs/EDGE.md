@@ -49,3 +49,12 @@ platform stage re-issues every region's leaf certificates (`terraform_data.reiss
 restarts on the changed bundle, and the API rebuilds its trust file before each cross-cluster call. Apply the
 control cluster first, then the regions. One rule for operators: every `./stack.sh apply` of one fleet must run
 from the same checkout at the same commit; an older copy of the stack silently drops resources it does not know.
+
+## Access logs
+
+Both gateways (`EnvoyProxy` external and internal, every cluster) log requests with an explicit text format: Envoy
+Gateway's default line with the path logged **without its query string** (`%REQ_WITHOUT_QUERY(...)%`) and no request
+header that can carry a credential (no Authorization, Cookie, `api_key` or WebSocket subprotocol). A signed download
+URL or a token passed as a query parameter never reaches Loki; method, status, flags, bytes, duration, forwarded-for,
+user agent, request id, authority, upstream and route name stay. `tools/check.sh` refuses a rendered proxy whose
+format logs the raw path or one of those headers.

@@ -212,6 +212,18 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
         assert "api-redirect" in routes and any(f.get("type") == "RequestRedirect" and f["requestRedirect"].get("scheme") == "https"
                                                 for r in routes["api-redirect"]["spec"]["rules"] for f in r.get("filters", [])), f"{cid}: no HTTPS redirect route for the API hostname"
         print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect")
+    # the gateways' access logs carry no query string (signed URLs, api_key parameters) and no credential header
+    proxies = [o for o in objs if o["kind"] == "EnvoyProxy"]
+    assert proxies, f"{cid}: no EnvoyProxy rendered"
+    for o in proxies:
+        settings = ((o["spec"].get("telemetry") or {}).get("accessLog") or {}).get("settings") or []
+        assert settings, f"{cid}: EnvoyProxy {o['metadata']['name']} has no explicit access log format (the default logs the query string)"
+        for st in settings:
+            text = (st.get("format") or {}).get("text") or ""
+            assert "REQ_WITHOUT_QUERY" in text, f"{cid}: EnvoyProxy {o['metadata']['name']} logs the path with its query"
+            for bad in ("%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%", "%REQ(:PATH)%", "AUTHORIZATION", "COOKIE", "API_KEY", "SEC-WEBSOCKET-PROTOCOL"):
+                assert bad.lower() not in text.lower(), f"{cid}: EnvoyProxy {o['metadata']['name']} access log carries {bad}"
+    print(f"   ok access logs {cid}: query-free paths, no credential headers")
 EOF4
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF3'
 import re, sys, yaml
