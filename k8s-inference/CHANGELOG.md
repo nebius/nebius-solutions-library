@@ -4,6 +4,11 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.49
+
+- A stage of a closed graph (every stage settled) replays as its durable lineage head (200) instead of 409; a stage never
+  submitted before the graph closed, or any stage of a cancelled graph, stays 409 and no Job is created.
+
 ## api 0.11.48
 
 - Stage lineages, two seams found on 0.11.47 (never deployed): a stage's successor carries the stage root as an

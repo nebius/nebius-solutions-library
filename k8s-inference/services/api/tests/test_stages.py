@@ -461,3 +461,22 @@ def test_resume_or_export_of_an_older_member_is_refused_with_the_head_named(worl
     rows.append({**_record(x1, f"{x1}-a", export="failed"), "tenant": "demo", "root": g1})
     again = c.post(f"/v1/operations/{r1}:resume", headers=H, json={})  # the head is r1's own export retry: r1 continues
     assert again.status_code in (202, 409) and (again.status_code == 202 or "x1" not in again.json()["detail"])
+
+
+def test_completed_graph_stage_replays_its_head_and_nothing_new_attaches(world):
+    """After the graph closed (every stage settled) a resubmission of a stage that ran answers 200 with its lineage
+    head; a declared stage that never was submitted gets 409 and no Job; a cancelled graph refuses every stage."""
+    c, cl, fk, rows, _cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _succeed(cl, rows, g0, "s3://b/g0")
+    fk.settle_run_member(g0, 10.0)
+    fk.graphs[root]["closed_at"] = "now"  # the ledger closed the run (database rule in test_database.py)
+    again = _submit(c, root, "gpu-0")
+    assert again.status_code == 200 and again.json()["id"] == g0 and again.json()["status"] == "SUCCEEDED"
+    late = _submit(c, root, "gpu-1")
+    assert late.status_code == 409 and "closed" in late.json()["detail"]
+    assert (NS, f"{root}-s-gpu-1") not in cl.jobs and len([x for x in fk.calls if x[0] == "prepare"]) == 1
+    fk.graphs[root]["cancelled_at"] = "now"
+    assert _submit(c, root, "gpu-0").status_code == 409 and _submit(c, root, "gpu-1").status_code == 409

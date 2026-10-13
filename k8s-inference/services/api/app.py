@@ -111,7 +111,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.48", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.49", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -711,6 +711,8 @@ def _invoke_job(
         done = _settled_stage(p, graph, stage)
         if done is not None:
             return JSONResponse(done, status_code=200)  # a stage that ran is never run again: its durable state
+        if graph.get("closed_at"):
+            raise HTTPException(409, f"the graph of {stage['root']} is closed: no new stage attaches")
     else:
         name = render.op_name(p.owner, model, idempotency_key)
     if mode == "async" and ex:
@@ -823,11 +825,10 @@ def _stage_request(
         raise HTTPException(403, f"operation {stage['root']}: the stages of a graph belong to its root's owner")
     if stage["id"] not in (g["stages"] or {}):
         raise HTTPException(400, f"stage {stage['id']!r} is not declared by {stage['root']} ({sorted(g['stages'])})")
-    if g.get("cancelled_at") or g.get("closed_at"):
-        raise HTTPException(
-            409,
-            f"the graph of {stage['root']} is {'cancelled' if g.get('cancelled_at') else 'closed'}: no stage attaches",
-        )
+    if g.get("cancelled_at"):
+        raise HTTPException(409, f"the graph of {stage['root']} is cancelled: no stage attaches")
+    # a closed graph (every stage settled): a stage that ran answers with its durable head (_settled_stage); one that
+    # never was submitted cannot attach any more (409 below, after the lookup)
     return stage, g
 
 
