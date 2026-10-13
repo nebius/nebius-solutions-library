@@ -1,4 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
+
 import asyncio, base64, hashlib, hmac, json, time, urllib.parse, uuid
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
@@ -9,23 +10,40 @@ from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 import logging
 import artifacts, attempts, billing, catalog, config as cfg, db, execution, jobs, keys, kube, models, monitoring, placement as placing
+
 log = logging.getLogger("api")
 import endpoints as ep
 from execution import BindingRequest, ExecutionSpec
-from auth import Principal, _principal, allows_model, check_budget, check_model, check_scope, forget, forget_hash, principal
+from auth import (
+    Principal,
+    _principal,
+    allows_model,
+    check_budget,
+    check_model,
+    check_scope,
+    forget,
+    forget_hash,
+    principal,
+)
 import render
 import status
 from config import FLEET_MANAGER, GRAFANA_URLS, LITELLM_URL, PUBLIC_API_URL, REGION, SYNC_TIMEOUT_S
+
 
 def check_placeholders() -> None:
     """Refuse to start with a manifest placeholder (charts/platform/templates/api/api.yaml carries
     `example.invalid` hostnames that the platform stage or the cluster overlay must replace): a placeholder
     would end up in every invoke link and Grafana link this API hands out."""
-    bad = [name for name, value in (("PUBLIC_API_URL", cfg.PUBLIC_API_URL), ("GRAFANA_URLS", ",".join(cfg.GRAFANA_URLS.values())))
-           if "example.invalid" in value]
+    bad = [
+        name
+        for name, value in (
+            ("PUBLIC_API_URL", cfg.PUBLIC_API_URL),
+            ("GRAFANA_URLS", ",".join(cfg.GRAFANA_URLS.values())),
+        )
+        if "example.invalid" in value
+    ]
     if bad:
         raise RuntimeError(f"placeholder hostnames in {', '.join(bad)}: set them per cluster (stack/platform/stage.tf)")
-
 
 
 @asynccontextmanager
@@ -55,8 +73,10 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.38", lifespan=_lifespan)
 
 
-INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
-INPUT_MAX_BYTES = 60000               # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
+INVOKE_TIMEOUT_MAX_S = (
+    7 * 86400
+)  # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
+INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
 
 
 class InvokeRequest(BaseModel):
@@ -66,11 +86,11 @@ class InvokeRequest(BaseModel):
     region: str | None = None
     priority: str | None = None
     timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
-    execution: ExecutionSpec | None = None     # docs/JOBS.md "Execution options" (runs only)
+    execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs only)
 
 
-ADMITTED_HEADER = "x-serverless2-admitted"     # the API's own proxied call to a gateway: the hook must not count it again
-RESERVATION_STALE_S = 3600                        # a reservation whose Job is gone this long after creation is released
+ADMITTED_HEADER = "x-serverless2-admitted"  # the API's own proxied call to a gateway: the hook must not count it again
+RESERVATION_STALE_S = 3600  # a reservation whose Job is gone this long after creation is released
 
 
 def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
@@ -94,15 +114,26 @@ def _release(operation: str, gpu_seconds: float | None = None) -> None:
 
 def _job_gpus(job: dict) -> int:
     """GPUs a rendered Job (or JobSet) holds while it runs: nvidia.com/gpu over its containers times its parallelism."""
+
     def pods(spec: dict) -> int:
         tmpl = (spec.get("template") or {}).get("spec") or {}
         n = 0
         for c in (tmpl.get("containers") or []) + (tmpl.get("initContainers") or []):
-            res = (c.get("resources") or {})
-            n += int(str((res.get("limits") or {}).get("nvidia.com/gpu") or (res.get("requests") or {}).get("nvidia.com/gpu") or 0))
+            res = c.get("resources") or {}
+            n += int(
+                str(
+                    (res.get("limits") or {}).get("nvidia.com/gpu")
+                    or (res.get("requests") or {}).get("nvidia.com/gpu")
+                    or 0
+                )
+            )
         return n * int(spec.get("parallelism") or 1)
+
     if job.get("kind") == "JobSet":
-        return sum(pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1) for rj in (job.get("spec") or {}).get("replicatedJobs") or [])
+        return sum(
+            pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1)
+            for rj in (job.get("spec") or {}).get("replicatedJobs") or []
+        )
     return pods(job.get("spec") or {})
 
 
@@ -132,23 +163,40 @@ def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
         return
     if p.info.get("budget_gpu_seconds") is not None:
         raise HTTPException(501, "finite GPU-second budgets are unsupported for shared endpoints; use a metered run")
-    if p.info.get("max_budget") is not None and ((p.info.get("metadata") or {}).get("legacy") or {}).get("principal_id"):
-        raise HTTPException(501, "finite USD budgets on imported keys require endpoint accounting; hash-only imports are not mirrored into the router")
+    if p.info.get("max_budget") is not None and ((p.info.get("metadata") or {}).get("legacy") or {}).get(
+        "principal_id"
+    ):
+        raise HTTPException(
+            501,
+            "finite USD budgets on imported keys require endpoint accounting; hash-only imports are not mirrored into the router",
+        )
     if mode == "gateway" and not admitted and p.info.get("max_concurrent") is not None:
-        raise HTTPException(501, "direct endpoints cannot hold per-key concurrency reservations; use the synchronous API invoke path")
+        raise HTTPException(
+            501, "direct endpoints cannot hold per-key concurrency reservations; use the synchronous API invoke path"
+        )
     if mode == "async" and any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "rate_limit")):
-        raise HTTPException(501, "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke")
+        raise HTTPException(
+            501,
+            "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke",
+        )
 
 
 def _continuation_limits(p: Principal) -> None:
     # Resume/export/recovery currently create a new Job outside _create_admitted.
     # Do not let that re-entry path bypass a migrated key's reserved units.
-    if any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "budget_gpu_seconds", "rate_limit")):
-        raise HTTPException(501, "bounded key continuations require reservation transfer; resume/export/fallback/recovery are not yet supported")
+    if any(
+        p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "budget_gpu_seconds", "rate_limit")
+    ):
+        raise HTTPException(
+            501,
+            "bounded key continuations require reservation transfer; resume/export/fallback/recovery are not yet supported",
+        )
 
 
 class ResumeRequest(BaseModel):
-    checkpoint_ref: str | None = Field(default=None, max_length=1024)   # a portable checkpoint: no volume, any permitted cluster/class
+    checkpoint_ref: str | None = Field(
+        default=None, max_length=1024
+    )  # a portable checkpoint: no volume, any permitted cluster/class
     gpu_class: str | None = None
 
 
@@ -178,10 +226,10 @@ class KeyRequest(BaseModel):
 class KeyUpdate(BaseModel):
     """What an admin may change on an existing key: the spending limit, the model allow-list, the expiry (days from
     now; 0 = never). Fields left out stay as they are; spend and the key value never change here."""
+
     budget: float | None = Field(default=None, ge=0)
     models: list[str] | None = None
     expires_days: int | None = Field(default=None, ge=0)
-
 
 
 def with_served_model(m: dict, inp):
@@ -189,6 +237,7 @@ def with_served_model(m: dict, inp):
     if isinstance(inp, dict) and m.get("protocol") == "openai" and m.get("served_model") and not inp.get("model"):
         return {**inp, "model": m["served_model"]}
     return inp
+
 
 def _model(name: str) -> dict:
     m = catalog.get(name)
@@ -225,7 +274,7 @@ def _public(m: dict, p: Principal | None = None) -> dict:
     if m["mode"] == "run":
         return catalog.to_public(m)
     statuses = []
-    for region in m["regions"]:          # the endpoints' live state, read in their clusters (REGION_KUBECONFIGS)
+    for region in m["regions"]:  # the endpoints' live state, read in their clusters (REGION_KUBECONFIGS)
         try:
             st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
         except (HTTPException, ApiException):
@@ -243,8 +292,14 @@ def livez():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "models": len(catalog.all_models()), "region": REGION, "regions": kube.regions(), "fleet_manager": FLEET_MANAGER,
-            "gpu_classes": sorted({p["gpu_class"] for p in kube.fleet()["pools"].values() if p.get("gpu_class")})}
+    return {
+        "ok": True,
+        "models": len(catalog.all_models()),
+        "region": REGION,
+        "regions": kube.regions(),
+        "fleet_manager": FLEET_MANAGER,
+        "gpu_classes": sorted({p["gpu_class"] for p in kube.fleet()["pools"].values() if p.get("gpu_class")}),
+    }
 
 
 @app.get("/v1/fleet")
@@ -252,23 +307,49 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
     """The fleet as Terraform shaped it (pools per region, GPU class, preset, capacity type, price) and, with
     `live=true`, what is up right now: ready nodes per pool and the GPUs their pods hold (the console's Fleet page)."""
     pools = list(kube.fleet().get("pools", {}).values())
-    regions = sorted({kube.cluster_region(pool["region"]) for pool in pools if pool.get("region")}
-                     | {r for m in catalog.all_models().values() for r in m.get("regions", [])})
-    out = {"regions": regions, "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
-           "fleet_manager": FLEET_MANAGER, "region": REGION,
-           "execution": execution.capabilities(p.namespace),      # what this tenant may ask for (services/api/execution.py)
-           "pools": [{"region": kube.cluster_region(pool.get("region") or REGION), "cluster": pool.get("region"), "pool": pool.get("pool"),
-                      "gpu_class": pool.get("gpu_class"), "platform": pool.get("platform"), "preset": pool.get("preset"),
-                      "gpus_per_node": int(pool.get("gpus_per_node") or 1), "capacity": pool.get("capacity"),
-                      "usd_per_gpu_hour": pool.get("usd_per_gpu_hour"), "max_nodes": pool.get("max_nodes"),
-                      "interconnect": pool.get("interconnect"), "local_nvme": bool(pool.get("local_nvme"))} for pool in pools]}
+    regions = sorted(
+        {kube.cluster_region(pool["region"]) for pool in pools if pool.get("region")}
+        | {r for m in catalog.all_models().values() for r in m.get("regions", [])}
+    )
+    out = {
+        "regions": regions,
+        "gpu_classes": sorted({pool["gpu_class"] for pool in pools if pool.get("gpu_class")}),
+        "fleet_manager": FLEET_MANAGER,
+        "region": REGION,
+        "execution": execution.capabilities(p.namespace),  # what this tenant may ask for (services/api/execution.py)
+        "pools": [
+            {
+                "region": kube.cluster_region(pool.get("region") or REGION),
+                "cluster": pool.get("region"),
+                "pool": pool.get("pool"),
+                "gpu_class": pool.get("gpu_class"),
+                "platform": pool.get("platform"),
+                "preset": pool.get("preset"),
+                "gpus_per_node": int(pool.get("gpus_per_node") or 1),
+                "capacity": pool.get("capacity"),
+                "usd_per_gpu_hour": pool.get("usd_per_gpu_hour"),
+                "max_nodes": pool.get("max_nodes"),
+                "interconnect": pool.get("interconnect"),
+                "local_nvme": bool(pool.get("local_nvme")),
+            }
+            for pool in pools
+        ],
+    }
     # the caller's tenant: its quotas as terraform.tfvars shaped them (charts/fleet tenants.yaml) and, live, what its
     # queues hold per region (docs/FLEET.md "Tenants")
     t = (kube.fleet().get("tenants") or {}).get(p.tenant) or {}
-    out["tenant"] = {"name": p.tenant, "gpu_quota": t.get("gpu_quota"), "fair_share_weight": t.get("fair_share_weight", 1),
-                     "dedicated_pools": list(t.get("dedicated_pools") or [])}
+    out["tenant"] = {
+        "name": p.tenant,
+        "gpu_quota": t.get("gpu_quota"),
+        "fair_share_weight": t.get("fair_share_weight", 1),
+        "dedicated_pools": list(t.get("dedicated_pools") or []),
+    }
     if live:
-        out["tenant"]["usage"] = {region: kube.tenant_usage(p.tenant, region) for region in kube.regions() if not (FLEET_MANAGER and region == REGION)}
+        out["tenant"]["usage"] = {
+            region: kube.tenant_usage(p.tenant, region)
+            for region in kube.regions()
+            if not (FLEET_MANAGER and region == REGION)
+        }
         for entry in out["pools"]:
             entry.update(kube.pool_usage(entry["cluster"], entry["pool"]))
         # the clusters: this one (the control plane when it is the fleet manager) and every region it reaches
@@ -278,11 +359,17 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
             cid = next((cid for cid, pool in by_cluster.items() if kube.cluster_region(cid) == region), region)
             pool = by_cluster.get(cid) or {}
             control = region == REGION and FLEET_MANAGER
-            clusters.append({"id": "control" if control else cid, "region": "control" if control and region == "control" else region,
-                             "project": pool.get("project"), "roles": ["control", "manager"] if control else ["worker"],
-                             "api_url": PUBLIC_API_URL if region == REGION else None,     # the fleet's one API
-                             "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
-                             **kube.cluster_summary(region)})
+            clusters.append(
+                {
+                    "id": "control" if control else cid,
+                    "region": "control" if control and region == "control" else region,
+                    "project": pool.get("project"),
+                    "roles": ["control", "manager"] if control else ["worker"],
+                    "api_url": PUBLIC_API_URL if region == REGION else None,  # the fleet's one API
+                    "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
+                    **kube.cluster_summary(region),
+                }
+            )
         out["clusters"] = clusters
     return out
 
@@ -294,7 +381,7 @@ def list_models(p: Principal = Depends(principal)):
 
 
 class ModelSpec(BaseModel):
-    model_config = {"extra": "allow"}   # the spec of services/api/models.py; reserved fields pass through
+    model_config = {"extra": "allow"}  # the spec of services/api/models.py; reserved fields pass through
     id: str
     kind: str = "endpoint"
     image: str | None = None
@@ -303,7 +390,10 @@ class ModelSpec(BaseModel):
 def _runtime_or_409(mid: str) -> dict:
     m = catalog.get(mid)
     if m and m.get("managed_by") != "api":
-        raise HTTPException(409, f"model {mid} is a built-in class of the solution ({m.get('managed_by')}); it cannot be changed through the API")
+        raise HTTPException(
+            409,
+            f"model {mid} is a built-in class of the solution ({m.get('managed_by')}); it cannot be changed through the API",
+        )
     return m
 
 
@@ -324,7 +414,7 @@ def _deploy(entry: dict, after: dict, result: dict):
             raise HTTPException(400, f"regions: no connection to {region} from this API (REGION_KUBECONFIGS)")
         result["applied"][cid] = models.apply(entry, cid, region)
         models.sync_certificate(region, after)
-        if (w := models.litellm_group_upsert(entry, cid, region)):
+        if w := models.litellm_group_upsert(entry, cid, region):
             result.setdefault("warnings", []).append(w)
             raise RuntimeError(w)
 
@@ -336,7 +426,9 @@ def _undeploy(entry: dict, clusters: list[str], after: dict):
         region = kube.cluster_region(cid)
         models.delete_rendered(entry, cid, region)
         models.sync_certificate(region, after)
-        if (warning := models.litellm_group_delete(entry["id"], cid, [v["name"] for v in models.variants(entry, cid)[1:]])):
+        if warning := models.litellm_group_delete(
+            entry["id"], cid, [v["name"] for v in models.variants(entry, cid)[1:]]
+        ):
             raise RuntimeError(warning)
 
 
@@ -349,7 +441,7 @@ def _prune_variants(before: dict, entry: dict, clusters: list[str]):
         if not objects:
             continue
         models.delete_variants(before, cid, objects, kube.cluster_region(cid))
-        if (warning := models.litellm_deployments_delete(ids)):
+        if warning := models.litellm_deployments_delete(ids):
             raise RuntimeError(warning)
 
 
@@ -393,7 +485,12 @@ def idle_shutdown() -> list[str]:
     for m in list(catalog.all_models().values()):
         spec = m.get("spec") or {}
         sc = spec.get("scaling") or {}
-        if m.get("managed_by") != "api" or int(m.get("nodes") or 1) <= 1 or int(sc.get("min") or 0) < 1 or not sc.get("idle_s"):
+        if (
+            m.get("managed_by") != "api"
+            or int(m.get("nodes") or 1) <= 1
+            or int(sc.get("min") or 0) < 1
+            or not sc.get("idle_s")
+        ):
             continue
         try:
             busy = False
@@ -402,7 +499,7 @@ def idle_shutdown() -> list[str]:
                 st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
                 marks = [st.get(k) for k in ("ready_at", "last_request_at") if st.get(k)]
                 if st["status"] != "ready" or not marks:
-                    busy = True                      # starting, or no Ready pod yet: nothing to measure
+                    busy = True  # starting, or no Ready pod yet: nothing to measure
                     continue
                 last = max(datetime.fromisoformat(x.replace("Z", "+00:00")) for x in marks)
                 if (now - last).total_seconds() < int(sc["idle_s"]):
@@ -412,8 +509,10 @@ def idle_shutdown() -> list[str]:
             new_spec = {**spec, "scaling": {**sc, "min": 0}}
             entry = models.to_entry(new_spec, managed_by="api")
             row = db.get_model(m["name"])
-            try:    # an admin's write in between wins: this round skips, the next one re-reads
-                db.upsert_model(entry, new_spec, by="idle-shutdown", expected=row.get("version") if row else None, create_only=False)
+            try:  # an admin's write in between wins: this round skips, the next one re-reads
+                db.upsert_model(
+                    entry, new_spec, by="idle-shutdown", expected=row.get("version") if row else None, create_only=False
+                )
             except HTTPException as e:
                 if e.status_code != 409:
                     raise
@@ -440,14 +539,22 @@ def fallback_switch() -> list[str]:
     for ns in namespaces:
         try:
             b = kube.batch()
-            items = [b.api_client.sanitize_for_serialization(j) for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items]
+            items = [
+                b.api_client.sanitize_for_serialization(j)
+                for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items
+            ]
         except Exception:  # noqa: BLE001
             continue
         clusters = None
         for job in items:
             ann = job["metadata"].get("annotations") or {}
             wait = ann.get(f"{cfg.LABEL}/fallback-wait-s")
-            if wait is None or not jobs.is_manager_job(job) or status.finished(job) or ann.get(f"{cfg.LABEL}/successor"):
+            if (
+                wait is None
+                or not jobs.is_manager_job(job)
+                or status.finished(job)
+                or ann.get(f"{cfg.LABEL}/successor")
+            ):
                 continue
             created = datetime.fromisoformat(str(job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
             if (now - created).total_seconds() < int(wait):
@@ -455,18 +562,22 @@ def fallback_switch() -> list[str]:
             if clusters is None:
                 clusters = kube.workload_clusters(ns)
             if clusters.get(job["metadata"].get("uid", "")):
-                continue                      # placed: the wait is over
+                continue  # placed: the wait is over
             try:
                 ex = jobs.normalise(job).get("execution") or {}
                 pref = (ex.get("placement") or {}).get("gpu_preference") or []
                 current = job["metadata"].get("labels", {}).get(f"{cfg.LABEL}/gpu-class") or (pref[0] if pref else None)
-                remaining = pref[pref.index(current) + 1:] if current in pref else []
+                remaining = pref[pref.index(current) + 1 :] if current in pref else []
                 if not remaining:
-                    continue                  # the last class of the preference: keep waiting
+                    continue  # the last class of the preference: keep waiting
                 m = _model(job["metadata"]["labels"].get(f"{cfg.LABEL}/model", ""))
-                new, _ = jobs.switch_class(ns, job["metadata"]["name"], REGION, m, catalog.fleet_params(m), remaining[0], remaining)
+                new, _ = jobs.switch_class(
+                    ns, job["metadata"]["name"], REGION, m, catalog.fleet_params(m), remaining[0], remaining
+                )
                 moved.append(new["metadata"]["name"])
-                log.info("fallback: %s/%s -> %s on %s", ns, job["metadata"]["name"], new["metadata"]["name"], remaining[0])
+                log.info(
+                    "fallback: %s/%s -> %s on %s", ns, job["metadata"]["name"], new["metadata"]["name"], remaining[0]
+                )
             except Exception:  # noqa: BLE001
                 log.exception("fallback of %s/%s failed", ns, job["metadata"]["name"])
     return moved
@@ -504,7 +615,10 @@ def recovery_switch() -> list[str]:
     for ns in namespaces:
         try:
             b = kube.batch()
-            items = [b.api_client.sanitize_for_serialization(j) for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items]
+            items = [
+                b.api_client.sanitize_for_serialization(j)
+                for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items
+            ]
         except Exception:  # noqa: BLE001
             continue
         for item in items:
@@ -516,8 +630,13 @@ def recovery_switch() -> list[str]:
             except ValueError:
                 ex = {}
             rec = ex.get("recovery") or {}
-            if rec.get("on_infrastructure_loss") != "recover" or not jobs.is_manager_job(item) or status.finished(item) \
-                    or ann.get(f"{cfg.LABEL}/successor") or ann.get(f"{cfg.LABEL}/cancelled"):
+            if (
+                rec.get("on_infrastructure_loss") != "recover"
+                or not jobs.is_manager_job(item)
+                or status.finished(item)
+                or ann.get(f"{cfg.LABEL}/successor")
+                or ann.get(f"{cfg.LABEL}/cancelled")
+            ):
                 continue
             try:
                 job = jobs.get(ns, name, REGION)
@@ -525,19 +644,21 @@ def recovery_switch() -> list[str]:
                 op = jobs.normalise(job, records=attempts.for_operation(root))
                 lost, why = _lost(op, job)
                 if lost is None:
-                    if ann.get(f"{cfg.LABEL}/lost-at"):          # back on its own class: the loss is over
+                    if ann.get(f"{cfg.LABEL}/lost-at"):  # back on its own class: the loss is over
                         _annotate(ns, name, {f"{cfg.LABEL}/lost-at": None})
                     continue
                 lost_at = ann.get(f"{cfg.LABEL}/lost-at")
                 if not lost_at:
                     _annotate(ns, name, {f"{cfg.LABEL}/lost-at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
                     lost_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if (now - datetime.fromisoformat(lost_at.replace("Z", "+00:00"))).total_seconds() < int(rec.get("wait_s") or 0):
+                if (now - datetime.fromisoformat(lost_at.replace("Z", "+00:00"))).total_seconds() < int(
+                    rec.get("wait_s") or 0
+                ):
                     continue
                 tenant = md["labels"][f"{cfg.LABEL}/tenant"]
                 marks = attempts._marks(name)
                 if marks and marks[1]:
-                    continue                                       # cancelled: never resurrected
+                    continue  # cancelled: never resurrected
                 stop = None
                 pointer = (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
                 if not pointer:
@@ -554,8 +675,12 @@ def recovery_switch() -> list[str]:
                         stop = f"recovery deadline passed: {rec['deadline_s']} s after the root operation was created"
                 m = _model(md["labels"].get(f"{cfg.LABEL}/model", ""))
                 pref = (ex.get("placement") or {}).get("gpu_preference") or jobs.gpu_classes(m)
-                current = lost.get("gpu_class") or md.get("labels", {}).get(f"{cfg.LABEL}/gpu-class") or (pref[0] if pref else None)
-                remaining = pref[pref.index(current) + 1:] if current in pref else list(pref)
+                current = (
+                    lost.get("gpu_class")
+                    or md.get("labels", {}).get(f"{cfg.LABEL}/gpu-class")
+                    or (pref[0] if pref else None)
+                )
+                remaining = pref[pref.index(current) + 1 :] if current in pref else list(pref)
                 next_class = remaining[0] if remaining else current
                 if not stop and not next_class:
                     stop = "no GPU class to continue on"
@@ -563,15 +688,38 @@ def recovery_switch() -> list[str]:
                     if ann.get(f"{cfg.LABEL}/recovery") != stop:
                         _annotate(ns, name, {f"{cfg.LABEL}/recovery": stop})
                     continue
-                placement = execution.narrow_placement({"profile": jobs.profile_of(m), "classes": [next_class], "regions": m["regions"]}, ex) or {}
+                placement = (
+                    execution.narrow_placement(
+                        {"profile": jobs.profile_of(m), "classes": [next_class], "regions": m["regions"]}, ex
+                    )
+                    or {}
+                )
                 placement["classes"] = [next_class]
-                new, created = jobs.recover(ns, name, REGION, m, placement, pointer, int(lost.get("epoch") or 0), next_class,
-                                            remaining or [next_class], why, timeout_s=remaining_s)
+                new, created = jobs.recover(
+                    ns,
+                    name,
+                    REGION,
+                    m,
+                    placement,
+                    pointer,
+                    int(lost.get("epoch") or 0),
+                    next_class,
+                    remaining or [next_class],
+                    why,
+                    timeout_s=remaining_s,
+                )
                 marks = attempts._marks(name)
-                if marks and marks[1]:                                 # cancelled while we were moving it: cancel the successor, too
+                if marks and marks[1]:  # cancelled while we were moving it: cancel the successor, too
                     attempts.mark_cancelled(new["metadata"]["name"])
-                    jobs.cancel(ns, new["metadata"]["name"], REGION)   # never started: deleted
-                    _annotate(ns, name, {f"{cfg.LABEL}/cancelled": "true", f"{cfg.LABEL}/recovery": "cancelled while recovering: the successor was withdrawn"})
+                    jobs.cancel(ns, new["metadata"]["name"], REGION)  # never started: deleted
+                    _annotate(
+                        ns,
+                        name,
+                        {
+                            f"{cfg.LABEL}/cancelled": "true",
+                            f"{cfg.LABEL}/recovery": "cancelled while recovering: the successor was withdrawn",
+                        },
+                    )
                     continue
                 if created:
                     moved.append(new["metadata"]["name"])
@@ -621,7 +769,10 @@ def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None =
     _writes_here()
     entry = models.to_entry(spec, managed_by="api")
     if "scaling" in entry["spec"]:
-        spec = {**spec, "scaling": entry["spec"]["scaling"]}   # store the complete policy that was rendered (models.validate)
+        spec = {
+            **spec,
+            "scaling": entry["spec"]["scaling"],
+        }  # store the complete policy that was rendered (models.validate)
     mid = entry["id"]
     existing = catalog.get(mid)
     if existing and not replace:
@@ -629,7 +780,9 @@ def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None =
     if existing:
         _runtime_or_409(mid)
     result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(entry["deployments"]), "applied": {}}
-    row = db.upsert_model(entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace)
+    row = db.upsert_model(
+        entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace
+    )
     catalog.invalidate()
     result.update(reconcile_models().get(mid, {"pending": True}))
     result.update({"version": row.get("version"), "model": catalog.to_public(catalog.normalise(entry))})
@@ -645,7 +798,9 @@ def create_model(req: ModelSpec, p: Principal = Depends(principal)):
 
 
 @app.put("/v1/models/{model}")
-def replace_model(model: str, req: ModelSpec, p: Principal = Depends(principal), if_match: int | None = Header(default=None)):
+def replace_model(
+    model: str, req: ModelSpec, p: Principal = Depends(principal), if_match: int | None = Header(default=None)
+):
     admin(p)
     spec = req.model_dump()
     if spec.get("id") != model:
@@ -682,8 +837,16 @@ def get_model(model: str, p: Principal = Depends(principal)):
     return _public(_model(model), p)
 
 
-@app.api_route("/internal/authorize/{model}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"], include_in_schema=False)
-@app.api_route("/internal/authorize/{model}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"], include_in_schema=False)
+@app.api_route(
+    "/internal/authorize/{model}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+@app.api_route(
+    "/internal/authorize/{model}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
 async def authorize_endpoint(model: str, request: Request, path: str = ""):
     """Envoy prefixes the original URI with a model identity fixed by the endpoint's SecurityPolicy."""
     key = request.headers.get("authorization", "")
@@ -694,11 +857,17 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
             if not token and (protocol.startswith("bearer.") or protocol.startswith("sk-")):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
-    p = await _principal(key, allow_router=True)       # LiteLLM's deployments call here with the fleet's router key
+    p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
-    admitted = bool(cfg.ROUTER_KEY) and bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
-    await asyncio.to_thread(_authorize_model, p, model, admitted)      # catalog (database) and Kubernetes calls: off the event loop
-    return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
+    admitted = (
+        bool(cfg.ROUTER_KEY) and bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
+    )
+    await asyncio.to_thread(
+        _authorize_model, p, model, admitted
+    )  # catalog (database) and Kubernetes calls: off the event loop
+    return JSONResponse(
+        {}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")}
+    )
 
 
 def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
@@ -716,8 +885,10 @@ def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
         _admit(p, gid)
         _release(gid, 0.0)
     if int(m.get("nodes") or 1) > 1:
-        for region in m["regions"]:                                    # the gateway's call names no region: stamp every
-            kube.stamp_last_request(m["k8s_name"], m["namespace"], region)   # deployment (idle shutdown reads it, throttled)
+        for region in m["regions"]:  # the gateway's call names no region: stamp every
+            kube.stamp_last_request(
+                m["k8s_name"], m["namespace"], region
+            )  # deployment (idle shutdown reads it, throttled)
 
 
 @app.get("/v1/keys/me")
@@ -727,8 +898,12 @@ def key_me(p: Principal = Depends(principal)):
 
 
 @app.post("/v1/models/{model}:invoke")
-async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principal),
-                 idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+async def invoke(
+    model: str,
+    req: InvokeRequest,
+    p: Principal = Depends(principal),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
     m = _model(model)
     check_model(p, model)
     check_budget(p)
@@ -745,26 +920,33 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         _endpoint_limits(p, mode)
     if mode == "sync":
         sid = f"sync-{uuid.uuid4().hex[:12]}"
-        await asyncio.to_thread(_admit, p, sid)                      # a slot and a request for the duration of the call
+        await asyncio.to_thread(_admit, p, sid)  # a slot and a request for the duration of the call
         try:
             return await _sync(m, req, p, region)
         finally:
             await asyncio.to_thread(_release, sid, None)  # no per-request GPU measurement exists for shared endpoints
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
-        raise HTTPException(413, f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)")
+        raise HTTPException(
+            413,
+            f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)",
+        )
     # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
     return await asyncio.to_thread(_invoke_job, m, model, req, p, region, mode, idempotency_key)
 
 
-def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None):
+def _invoke_job(
+    m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None
+):
     # Imported principal keys share an idempotency namespace only with the same
     # principal; a tenant's shared bucket never shares private operation state.
     name = render.op_name(p.owner, model, idempotency_key)
-    timeout = req.timeout_s          # no deadline unless asked for: queued work waits for as long as it takes (days)
+    timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
-    if ex and ((ex.get("placement") or {}).get("fallback_wait_s") is not None
-               or (ex.get("recovery") or {}).get("on_infrastructure_loss") == "recover"):
+    if ex and (
+        (ex.get("placement") or {}).get("fallback_wait_s") is not None
+        or (ex.get("recovery") or {}).get("on_infrastructure_loss") == "recover"
+    ):
         _continuation_limits(p)
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
     if allowed and req.region and req.region not in allowed:
@@ -773,22 +955,39 @@ def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: s
         raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
     if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
         raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
-    if mode == "async":                  # the caller Job runs in the endpoint's region, through that region's gateway
+    if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
         output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
-        job, secret = jobs.build_async(name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region)
+        job, secret = jobs.build_async(
+            name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region
+        )
     elif FLEET_MANAGER:
         _guard_run_input(m, req, p, REGION, ex)
         job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
-        region = REGION                      # created on the manager; the dispatcher picks the worker
+        region = REGION  # created on the manager; the dispatcher picks the worker
     else:
         _guard_run_input(m, req, p, region, ex)
         defaults = catalog.region_params(m, region)
         if not (ex and ex.get("io_mode") == "application"):
-            defaults.setdefault("output_prefix", f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}")
+            defaults.setdefault(
+                "output_prefix", f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
+            )
         else:
             defaults.setdefault("output_prefix", "")
-        job = jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults, billing.key_hash(p.key),
-                             gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
+        job = jobs.build_run(
+            name,
+            m,
+            req.input,
+            p.tenant,
+            req.name,
+            idempotency_key,
+            timeout,
+            req.priority,
+            region,
+            defaults,
+            billing.key_hash(p.key),
+            gpu_class=_class_for(m, req, region, p.tenant, ex),
+            ex=ex,
+        )
     # admission on the caller's key, from the rendered Job (its real GPU count): a slot, a request and, for a key with a
     # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
     ann = job["metadata"].setdefault("annotations", {})
@@ -802,7 +1001,9 @@ def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: s
         created_job, created = _create_admitted(p, name, job, region, secret, req, mode)
     if created:
         return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202)
-    return JSONResponse(_operation(p, created_job, created_job["metadata"]["name"], region), status_code=200)     # a replay: its current state
+    return JSONResponse(
+        _operation(p, created_job, created_job["metadata"]["name"], region), status_code=200
+    )  # a replay: its current state
 
 
 def _create_admitted(p, name, job, region, secret, req, mode):
@@ -844,7 +1045,9 @@ def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex:
     out = req.input.get("output_prefix")
     if ex and ex.get("io_mode") == "application":
         if out or req.input.get("input_prefix"):
-            raise HTTPException(400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data")
+            raise HTTPException(
+                400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data"
+            )
         out = None
     if out:
         bucket = artifacts.storage(p.namespace, region)["bucket"]
@@ -854,8 +1057,15 @@ def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex:
         jobs.check_image_allowed(p.namespace, str(req.input["image"]), region)
 
 
-def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: int | None, idempotency_key: str | None,
-               ex: dict | None = None) -> dict:
+def _fleet_run(
+    m: dict,
+    req: InvokeRequest,
+    p: Principal,
+    name: str,
+    timeout: int | None,
+    idempotency_key: str | None,
+    ex: dict | None = None,
+) -> dict:
     """Fleet placement (control cluster, docs/JOBS.md): the Job is created on the manager and MultiKueue +
     the dispatcher pick the worker among the model's regions and GPU classes. Inputs and outputs live in the
     tenant's hub-region bucket (the one this cluster's tenant-storage names). Per-region parameter defaults
@@ -866,17 +1076,42 @@ def _fleet_run(m: dict, req: InvokeRequest, p: Principal, name: str, timeout: in
     bucket = None if application else artifacts.storage(p.namespace, REGION)["bucket"]
     inp = req.input.get("input_prefix")
     if inp and not str(inp).startswith(f"s3://{bucket}/"):
-        raise HTTPException(400, f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)")
-    placement = execution.narrow_placement({"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}, ex)
+        raise HTTPException(
+            400,
+            f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)",
+        )
+    placement = execution.narrow_placement(
+        {"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}, ex
+    )
     region = req.region
     defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
     defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
-    return jobs.build_run(name, m, req.input, p.tenant, req.name, idempotency_key, timeout, req.priority, region, defaults,
-                          billing.key_hash(p.key), placement=placement, gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")), ex=ex)
+    return jobs.build_run(
+        name,
+        m,
+        req.input,
+        p.tenant,
+        req.name,
+        idempotency_key,
+        timeout,
+        req.priority,
+        region,
+        defaults,
+        billing.key_hash(p.key),
+        placement=placement,
+        gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")),
+        ex=ex,
+    )
 
 
-def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | None = None, ex: dict | None = None,
-               regions: list[str] | None = None) -> str | None:
+def _class_for(
+    m: dict,
+    req: InvokeRequest,
+    region: str | None,
+    tenant: str | None = None,
+    ex: dict | None = None,
+    regions: list[str] | None = None,
+) -> str | None:
     """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
     runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
     given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
@@ -885,10 +1120,18 @@ def _class_for(m: dict, req: InvokeRequest, region: str | None, tenant: str | No
     gpus = (m.get("job") or {}).get("gpu", 1)
     try:
         gpus = int(gpus)
-    except (TypeError, ValueError):           # a parameter placeholder: one GPU for the ranking
-        gpus = int(req.input.get("gpus", 1) or 1) if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit() else 1
-    available = (ex.get("placement") or {}).get("gpu_preference") if ex else None   # the caller's order narrows the model's
-    cls, how = placing.choose_class(m, region, gpus, available, tenant, regions)      # `regions`: the run's allowed clusters
+    except (TypeError, ValueError):  # a parameter placeholder: one GPU for the ranking
+        gpus = (
+            int(req.input.get("gpus", 1) or 1)
+            if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit()
+            else 1
+        )
+    available = (
+        (ex.get("placement") or {}).get("gpu_preference") if ex else None
+    )  # the caller's order narrows the model's
+    cls, how = placing.choose_class(
+        m, region, gpus, available, tenant, regions
+    )  # `regions`: the run's allowed clusters
     log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
     return cls
 
@@ -900,23 +1143,35 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
     key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API."""
     if int(m.get("nodes") or 1) > 1:
         st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
-        kube.stamp_last_request(m["k8s_name"], m["namespace"], region)     # a direct proxy call bypasses the gateway's authorize hook
+        kube.stamp_last_request(
+            m["k8s_name"], m["namespace"], region
+        )  # a direct proxy call bypasses the gateway's authorize hook
         if st["status"] != "ready":
-            raise HTTPException(503, f"endpoint {m['name']} is {st['status']} ({m['nodes']} nodes): a multi-node endpoint is started with "
-                                     f"PATCH /v1/endpoints/{m['k8s_name']} {{\"scaling\": {{\"min\": 1}}}} (or the console's Start button) and takes "
-                                     f"minutes to load; it stops again after scaling.idle_s without a request")
+            raise HTTPException(
+                503,
+                f"endpoint {m['name']} is {st['status']} ({m['nodes']} nodes): a multi-node endpoint is started with "
+                f"PATCH /v1/endpoints/{m['k8s_name']} {{\"scaling\": {{\"min\": 1}}}} (or the console's Start button) and takes "
+                f"minutes to load; it stops again after scaling.idle_s without a request",
+            )
     if m.get("litellm_route"):
         url, headers = LITELLM_URL + m["litellm_route"], {"Authorization": f"Bearer {p.key}"}
     elif region == REGION:
         v = _variant_for(m, req.input, models.cluster_id())
-        host = m["endpoint_host"] if v["object"] == m["k8s_name"] else f"http://{v['object']}-predictor.{m['namespace']}.svc.cluster.local"
+        host = (
+            m["endpoint_host"]
+            if v["object"] == m["k8s_name"]
+            else f"http://{v['object']}-predictor.{m['namespace']}.svc.cluster.local"
+        )
         url, headers = host + m["endpoint_path"], {}
     else:
         if not models.endpoint_domain(region):
             raise HTTPException(503, f"sync calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
         cfg.refresh_trust()
         v = _variant_for(m, req.input, region)
-        url, headers = f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}", {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key))}
+        url, headers = (
+            f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}",
+            {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key))},
+        )
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
@@ -936,14 +1191,38 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
             body = r.text
         else:
             # ZIP, audio and image bytes must never pass through lossy UTF-8 decoding.
-            body = {"encoding": "base64", "media_type": media_type, "size_bytes": len(r.content),
-                    "sha256": hashlib.sha256(r.content).hexdigest(), "data": base64.b64encode(r.content).decode("ascii")}
-    op = {"id": f"sync-{uuid.uuid4().hex[:12]}", "name": req.name, "model": m["name"], "mode": "sync", "region": region,
-          "status": "SUCCEEDED" if ok else "FAILED", "tenant": p.tenant, "created_at": started, "started_at": started,
-          "ended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "duration_s": round(time.time() - t0, 3),
-          "attempts": [{"index": 1, "status": "SUCCEEDED" if ok else "FAILED", "reason": None if ok else f"HTTP {r.status_code}"}],
-          "input": req.input, "cost": m.get("price_per_call") if ok else None, "error": None if ok else str(body)[:500]}
-    return JSONResponse({"result": body, "operation": op}, status_code=200 if ok else (r.status_code if r.status_code in (400, 401, 402, 403, 404, 409, 413, 415, 422, 429) else 502))
+            body = {
+                "encoding": "base64",
+                "media_type": media_type,
+                "size_bytes": len(r.content),
+                "sha256": hashlib.sha256(r.content).hexdigest(),
+                "data": base64.b64encode(r.content).decode("ascii"),
+            }
+    op = {
+        "id": f"sync-{uuid.uuid4().hex[:12]}",
+        "name": req.name,
+        "model": m["name"],
+        "mode": "sync",
+        "region": region,
+        "status": "SUCCEEDED" if ok else "FAILED",
+        "tenant": p.tenant,
+        "created_at": started,
+        "started_at": started,
+        "ended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_s": round(time.time() - t0, 3),
+        "attempts": [
+            {"index": 1, "status": "SUCCEEDED" if ok else "FAILED", "reason": None if ok else f"HTTP {r.status_code}"}
+        ],
+        "input": req.input,
+        "cost": m.get("price_per_call") if ok else None,
+        "error": None if ok else str(body)[:500],
+    }
+    return JSONResponse(
+        {"result": body, "operation": op},
+        status_code=200
+        if ok
+        else (r.status_code if r.status_code in (400, 401, 402, 403, 404, 409, 413, 415, 422, 429) else 502),
+    )
 
 
 def _price(job: dict) -> float | None:
@@ -1021,8 +1300,13 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
             rows = [r for r in attempts.for_operation(current) if r["operation"] == current and r["tenant"] == p.tenant]
             if not rows and previous is not None:
                 return previous  # a verified owner's successor is not created yet
-            synthetic_job = {"metadata": {"name": current, "labels": {f"{cfg.LABEL}/tenant": p.tenant, f"{cfg.LABEL}/mode": "run"},
-                                          "annotations": {f"{cfg.LABEL}/resumed-from": rows[-1]["root"] if rows else current}}}
+            synthetic_job = {
+                "metadata": {
+                    "name": current,
+                    "labels": {f"{cfg.LABEL}/tenant": p.tenant, f"{cfg.LABEL}/mode": "run"},
+                    "annotations": {f"{cfg.LABEL}/resumed-from": rows[-1]["root"] if rows else current},
+                }
+            }
             _check_operation_owner(p, synthetic_job)
             nxt = attempts.successor_of(current)
             if follow and nxt and nxt != current:
@@ -1030,7 +1314,7 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
                 continue
             synthetic = attempts.synthesize(current, p.tenant)
             if synthetic is None:
-                if previous is not None:          # a successor that is marked but not created yet: the original stands
+                if previous is not None:  # a successor that is marked but not created yet: the original stands
                     return previous
                 raise
             return {**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")
@@ -1060,21 +1344,33 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     seconds), and when the newest successor was created. The effective id, status and current attempt are the
     member's own and unchanged."""
     import status as st
+
     rows = attempts.for_operation(root) if attempts.enabled() else []
-    by_pod = {r["pod"]: r for r in rows}                               # one row per pod (the newest wins)
+    by_pod = {r["pod"]: r for r in rows}  # one row per pod (the newest wins)
     rows = list(by_pod.values())
-    members = sorted([j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-                      if _may_read_operation(p, j) and (j["metadata"]["name"] == root or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root)],
-                     key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))
+    members = sorted(
+        [
+            j
+            for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
+            if _may_read_operation(p, j)
+            and (
+                j["metadata"]["name"] == root
+                or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root
+            )
+        ],
+        key=lambda j: str(j["metadata"].get("creationTimestamp") or ""),
+    )
     name = job["metadata"]["name"]
-    all_attempts = st._attempts(job.get("_pods", []), rows)          # every member's records; the live pods are this member's
+    all_attempts = st._attempts(job.get("_pods", []), rows)  # every member's records; the live pods are this member's
     for a in all_attempts:
         r = by_pod.get(a.get("attempt_id")) or {}
         a["operation"] = r.get("operation") or name
         a["attempt_role"] = r.get("role") or a.get("attempt_role") or "run"
         a["image"] = r.get("image")
         d = st._secs(a.get("started_at"), a.get("ended_at"))
-        a["gpu_seconds"] = round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None   # unknown stays unknown
+        a["gpu_seconds"] = (
+            round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None
+        )  # unknown stays unknown
     chain, total, complete = [], 0.0, True
     for m in members:
         mid = m["metadata"]["name"]
@@ -1082,41 +1378,85 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         measured = [a["gpu_seconds"] for a in mine if a["gpu_seconds"] is not None]
         unknown = any(a["gpu_seconds"] is None and a["status"] != "QUEUED" for a in mine)
         ann = m["metadata"].get("annotations") or {}
-        chain.append({"id": mid, "created_at": m["metadata"].get("creationTimestamp"),
-                      "status": op["status"] if mid == name else jobs.normalise(m, None, [r for r in rows if r["operation"] == mid])["status"],
-                      "gpu_class": (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/gpu-class"),
-                      "cluster": next(((by_pod[a["attempt_id"]].get("cluster") or kube.cluster_id_or_none(by_pod[a["attempt_id"]].get("region"))) for a in reversed(mine) if a.get("attempt_id") in by_pod), op.get("cluster") if mid == name else None),
-                      "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
-                      "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0), "gpu_seconds_complete": not unknown,
-                      "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None})
-        total += sum(measured); complete = complete and not unknown
+        chain.append(
+            {
+                "id": mid,
+                "created_at": m["metadata"].get("creationTimestamp"),
+                "status": op["status"]
+                if mid == name
+                else jobs.normalise(m, None, [r for r in rows if r["operation"] == mid])["status"],
+                "gpu_class": (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/gpu-class"),
+                "cluster": next(
+                    (
+                        (
+                            by_pod[a["attempt_id"]].get("cluster")
+                            or kube.cluster_id_or_none(by_pod[a["attempt_id"]].get("region"))
+                        )
+                        for a in reversed(mine)
+                        if a.get("attempt_id") in by_pod
+                    ),
+                    op.get("cluster") if mid == name else None,
+                ),
+                "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
+                "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0),
+                "gpu_seconds_complete": not unknown,
+                "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None,
+            }
+        )
+        total += sum(measured)
+        complete = complete and not unknown
     root_member = next((c for c in chain if c["id"] == root), None)
     successors = [c for c in chain if c["id"] != root]
     billed = [c["cost"] for c in chain if c["cost"] is not None]
-    return {"created_at": (root_member or {}).get("created_at") or min((a["started_at"] for a in all_attempts if a.get("started_at")), default=op.get("created_at")),
-            "started_at": min((a["started_at"] for a in all_attempts if a.get("started_at")), default=None),
-            "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
-            "chain": chain, "successor_created_at": successors[-1]["created_at"] if successors else None,
-            "gpu_seconds": round(total, 1), "gpu_seconds_complete": complete, "cost": round(sum(billed), 6) if billed else None}
+    return {
+        "created_at": (root_member or {}).get("created_at")
+        or min((a["started_at"] for a in all_attempts if a.get("started_at")), default=op.get("created_at")),
+        "started_at": min((a["started_at"] for a in all_attempts if a.get("started_at")), default=None),
+        "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
+        "chain": chain,
+        "successor_created_at": successors[-1]["created_at"] if successors else None,
+        "gpu_seconds": round(total, 1),
+        "gpu_seconds_complete": complete,
+        "cost": round(sum(billed), 6) if billed else None,
+    }
 
 
 def _finalizers(p: Principal, name: str, root: str) -> dict:
     """The application finalizers of an operation (docs/JOBS.md "Finalization by the application"): how many ran
     (`finalize_attempts`) and, while one is QUEUED or RUNNING, the handle shows it: `status FINALIZING`,
     `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
-    xs = [j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-          if _may_read_operation(p, j) and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
-          and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"]
+    xs = [
+        j
+        for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
+        if _may_read_operation(p, j)
+        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
+        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
+    ]
     out: dict = {"finalize_attempts": len(xs)}
-    active = [j for j in xs if jobs.normalise(j)["status"] in ("QUEUED", "RUNNING") and not (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")]
+    active = [
+        j
+        for j in xs
+        if jobs.normalise(j)["status"] in ("QUEUED", "RUNNING")
+        and not (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")
+    ]
     if active:
         a = sorted(active, key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))[-1]
         aname = a["metadata"]["name"]
         rows = [r for r in attempts.for_operation(root) if r["operation"] == aname]
         latest = rows[-1] if rows else None
-        out.update({"status": "FINALIZING", "finalizing_by": aname, "error": None,
-                    "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,
-                    "attempt_role": "finalize", "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else out.get("cluster")})
+        out.update(
+            {
+                "status": "FINALIZING",
+                "finalizing_by": aname,
+                "error": None,
+                "attempt_id": latest.get("pod") if latest else None,
+                "epoch": latest.get("epoch") if latest else None,
+                "attempt_role": "finalize",
+                "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region")))
+                if latest
+                else out.get("cluster"),
+            }
+        )
     return out
 
 
@@ -1128,21 +1468,47 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     op = jobs.normalise(job, _price(job), records)
     op.update(attempts.lifecycle(name, root, records))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
-        op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(job["_region"])   # admitted, no record yet: the admitting cluster's id
+        op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(
+            job["_region"]
+        )  # admitted, no record yet: the admitting cluster's id
     if name != id:
-        op["requested_id"] = id             # the caller's handle was superseded; this is its current successor
-    if root != name or name != id or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root))):
-        op.update(_chain(p, op, job, root))       # a chain member, a followed handle, or a root with retries/successors on record
-    if op["status"] in ("FAILED", "EXPORT_FAILED") and attempts.enabled() and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "run":
+        op["requested_id"] = id  # the caller's handle was superseded; this is its current successor
+    if (
+        root != name
+        or name != id
+        or (attempts.enabled() and any(r["operation"] != name for r in attempts.for_operation(root)))
+    ):
+        op.update(
+            _chain(p, op, job, root)
+        )  # a chain member, a followed handle, or a root with retries/successors on record
+    if (
+        op["status"] in ("FAILED", "EXPORT_FAILED")
+        and attempts.enabled()
+        and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "run"
+    ):
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
         # a transfer-only retry or an application finalizer (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md
         # "Attempts and finalization", "Finalization by the application"); a FAILED run only ever has finalizers
-        done = [r for r in attempts.for_operation(root) if r["operation"].startswith(f"{name}-x")
-                and ((r.get("export_state") or r.get("export")) == "succeeded" or (r.get("result_ref") and r["status"] == "succeeded"))]
+        done = [
+            r
+            for r in attempts.for_operation(root)
+            if r["operation"].startswith(f"{name}-x")
+            and (
+                (r.get("export_state") or r.get("export")) == "succeeded"
+                or (r.get("result_ref") and r["status"] == "succeeded")
+            )
+        ]
         if done:
-            op.update({"status": "SUCCEEDED", "export_state": done[-1].get("export_state") or "succeeded", "exported_by": done[-1]["operation"],
-                       "result_ref": done[-1].get("result_ref") or op.get("result_ref"), "error": None})   # the delivering attempt's result
+            op.update(
+                {
+                    "status": "SUCCEEDED",
+                    "export_state": done[-1].get("export_state") or "succeeded",
+                    "exported_by": done[-1]["operation"],
+                    "result_ref": done[-1].get("result_ref") or op.get("result_ref"),
+                    "error": None,
+                }
+            )  # the delivering attempt's result
     return op
 
 
@@ -1153,7 +1519,12 @@ def get_operation(id: str, since: int | None = None, p: Principal = Depends(prin
     check_scope(p, "read:operations")
     job, region = _owned(p, id)
     op = _operation(p, job, id, region)
-    if since is not None and op.get("revision") and op["revision"] <= since and op["status"] not in ("QUEUED", "RUNNING"):
+    if (
+        since is not None
+        and op.get("revision")
+        and op["revision"] <= since
+        and op["status"] not in ("QUEUED", "RUNNING")
+    ):
         return JSONResponse(None, status_code=304)
     return op
 
@@ -1163,15 +1534,28 @@ def get_result(id: str, p: Principal = Depends(principal)):
     check_scope(p, "read:results")
     job, region = _owned(p, id)
     op = _operation(p, job, id, region)
-    res = {"operation_id": id, "status": op["status"], "region": region, "error": op.get("error"),
-           "export_state": op.get("export_state"), "result_ref": op.get("result_ref"), "checkpoint_ref": op.get("checkpoint_ref")}
+    res = {
+        "operation_id": id,
+        "status": op["status"],
+        "region": region,
+        "error": op.get("error"),
+        "export_state": op.get("export_state"),
+        "result_ref": op.get("result_ref"),
+        "checkpoint_ref": op.get("checkpoint_ref"),
+    }
     if op["status"] in ("QUEUED", "RUNNING"):
         return JSONResponse(res, status_code=409)
     prefix = jobs.output_prefix(job)
     application = (op.get("execution") or {}).get("io_mode") == "application"
     if op["mode"] == "async":
-        res["result"] = artifacts.read_json(p.namespace, f"operations/{id}/out/response.json", region or REGION, prefix=prefix)
-    res["artifacts"] = artifacts.list_outputs(p.namespace, id, region or REGION, prefix) if op["mode"] == "run" and not application else []
+        res["result"] = artifacts.read_json(
+            p.namespace, f"operations/{id}/out/response.json", region or REGION, prefix=prefix
+        )
+    res["artifacts"] = (
+        artifacts.list_outputs(p.namespace, id, region or REGION, prefix)
+        if op["mode"] == "run" and not application
+        else []
+    )
     return res
 
 
@@ -1179,11 +1563,12 @@ def get_result(id: str, p: Principal = Depends(principal)):
 def export_again(id: str, p: Principal = Depends(principal)):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
-    check_scope(p, "read:results"); check_scope(p, "run:control")
+    check_scope(p, "read:results")
+    check_scope(p, "run:control")
     orig, region = _owned(p, id)
     _continuation_limits(p)
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
-    if exported:                          # a previous retry's handle: the retry is of the compute attempt, never of a retry
+    if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
     op = _operation(p, orig, orig["metadata"]["name"], region)
     if op.get("finalizing_by"):
@@ -1198,15 +1583,36 @@ def export_again(id: str, p: Principal = Depends(principal)):
         # one of the model's "delivery pending" exit codes; a failed computation is never finalized into a success
         name = orig["metadata"]["name"]
         root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or name
-        rows = [r for r in attempts.for_operation(root) if r["operation"] == name and r["status"] == "failed"] if attempts.enabled() else []
+        rows = (
+            [r for r in attempts.for_operation(root) if r["operation"] == name and r["status"] == "failed"]
+            if attempts.enabled()
+            else []
+        )
         last = rows[-1] if rows else None
         if last is None or last.get("exit_code") not in fz["onExitCodes"]:
-            raise HTTPException(409, f"operation {id} is FAILED with exit code {(last or {}).get('exit_code')}; the model finalizes only after exit codes {fz['onExitCodes']} (compute done, delivery pending)")
+            raise HTTPException(
+                409,
+                f"operation {id} is FAILED with exit code {(last or {}).get('exit_code')}; the model finalizes only after exit codes {fz['onExitCodes']} (compute done, delivery pending)",
+            )
         finalize = {"spec": fz, "attempt": last}
     elif op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
-        raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
-                                 + (" (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)" if op["status"] == "FAILED" else ""))
-    job, created = jobs.export_again(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region else {}, finalize=finalize)
+        raise HTTPException(
+            409,
+            f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
+            + (
+                " (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)"
+                if op["status"] == "FAILED"
+                else ""
+            ),
+        )
+    job, created = jobs.export_again(
+        p.namespace,
+        orig["metadata"]["name"],
+        _home(orig),
+        m,
+        catalog.region_params(m, region) if region else {},
+        finalize=finalize,
+    )
     return _continued(p, job, created, region)
 
 
@@ -1225,13 +1631,17 @@ async def record_attempt(request: Request, authorization: str = Header(default="
     region, ns, pod = await asyncio.to_thread(attempts.verify_runner_token, authorization[7:].strip())
     operation = str(body.get("operation") or "")
     try:
-        job, _ = await asyncio.to_thread(jobs.find, ns, operation)      # the manager's Job for a fleet run (the worker holds a mirror)
+        job, _ = await asyncio.to_thread(
+            jobs.find, ns, operation
+        )  # the manager's Job for a fleet run (the worker holds a mirror)
         body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
-        body["role"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") or "run"    # the platform's statement, never the pod's
+        body["role"] = (job["metadata"].get("annotations") or {}).get(
+            f"{cfg.LABEL}/attempt-role"
+        ) or "run"  # the platform's statement, never the pod's
         # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
         body["cluster"] = job.get("_cluster") or _cluster_of(region)
     except HTTPException:
-        body["root"] = operation                 # the Job is already gone (TTL, cancel): the record still counts
+        body["root"] = operation  # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"
         body["cluster"] = _cluster_of(region)
     return await asyncio.to_thread(attempts.record, region, ns, pod, body)
@@ -1259,25 +1669,30 @@ def cancel(id: str, p: Principal = Depends(principal)):
         raise HTTPException(409, f"operation {id} is over; nothing to cancel")
     current = job["metadata"]["name"]
     op = _operation(p, job, id, region)
-    if op.get("finalizing_by"):           # the root's handle: a cancel stops its active finalizer, the root stays as it is
+    if op.get("finalizing_by"):  # the root's handle: a cancel stops its active finalizer, the root stays as it is
         job, _ = _owned(p, op["finalizing_by"], follow=False)
         current = job["metadata"]["name"]
-    attempts.mark_cancelled(current)       # a late "succeeded" from the cancelled attempt is refused from now on
+    attempts.mark_cancelled(current)  # a late "succeeded" from the cancelled attempt is refused from now on
     op = jobs.normalise(jobs.cancel(p.namespace, current, _home(job)))
     if op["status"] in ("QUEUED", "RUNNING"):
-        op["status"] = "CANCELLED"   # the Job controller converges within seconds (pods get SIGTERM)
+        op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
     return op
 
 
 @app.post("/v1/operations/{id}:resume")
-def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(principal),
-           idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+def resume(
+    id: str,
+    req: ResumeRequest | None = None,
+    p: Principal = Depends(principal),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
     """A new operation `<id>-r<n>` in the same region on the same work volume (checkpoints); for a
     FAILED or CANCELLED run whose volume still exists (docs/JOBS.md). Preemptions resume on their own.
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
-    check_scope(p, "run:submit"); check_scope(p, "run:control")
+    check_scope(p, "run:submit")
+    check_scope(p, "run:control")
     orig, region = _owned(p, id)
     _continuation_limits(p)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
@@ -1285,14 +1700,35 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
         raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
     root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
-    pointer = (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref") if attempts.enabled() and not req.checkpoint_ref else None
+    pointer = (
+        (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
+        if attempts.enabled() and not req.checkpoint_ref
+        else None
+    )
     if req.gpu_class and not req.checkpoint_ref and not pointer:
-        raise HTTPException(400, "another gpu_class needs a checkpoint_ref (none was acknowledged for this run): the work volume's checkpoints belong to the original class")
-    placement = {"profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]} if jobs.is_manager_job(orig) else None
+        raise HTTPException(
+            400,
+            "another gpu_class needs a checkpoint_ref (none was acknowledged for this run): the work volume's checkpoints belong to the original class",
+        )
+    placement = (
+        {"profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}
+        if jobs.is_manager_job(orig)
+        else None
+    )
     if req.gpu_class and placement:
         placement["classes"] = [req.gpu_class]
-    job, created = jobs.resume(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {}, placement,
-                               checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class, idem=idempotency_key, pointer=pointer)
+    job, created = jobs.resume(
+        p.namespace,
+        orig["metadata"]["name"],
+        _home(orig),
+        m,
+        catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
+        placement,
+        checkpoint_ref=req.checkpoint_ref,
+        gpu_class=req.gpu_class,
+        idem=idempotency_key,
+        pointer=pointer,
+    )
     return _continued(p, job, created, region)
 
 
@@ -1327,7 +1763,9 @@ def delete_binding(ref: str, p: Principal = Depends(principal)):
 @app.post("/v1/artifacts/uploads", status_code=201)
 def upload(req: UploadRequest, p: Principal = Depends(principal)):
     check_scope(p, "artifacts:write")
-    return artifacts.presign_upload(p.namespace, req.filename, req.content_type, min(req.expires_s, 7 * 86400), req.region)
+    return artifacts.presign_upload(
+        p.namespace, req.filename, req.content_type, min(req.expires_s, 7 * 86400), req.region
+    )
 
 
 @app.get("/v1/artifacts/{uri:path}")
@@ -1339,7 +1777,7 @@ def download(uri: str, p: Principal = Depends(principal)):
     check_scope(p, "read:results")
     uri = urllib.parse.unquote(uri)
     if (oid := artifacts.operation_of(uri)) is not None:
-        _owned(p, oid, follow=False)             # 404 for another principal's operation or a model outside the allow-list
+        _owned(p, oid, follow=False)  # 404 for another principal's operation or a model outside the allow-list
     return artifacts.presign_download(p.namespace, uri)
 
 
@@ -1369,7 +1807,9 @@ def _endpoint_model(eid: str) -> dict:
     for m in catalog.all_models().values():
         if m["mode"] == "run":
             continue
-        if m["k8s_name"] == eid or any(v["object"] == eid for c in (m.get("deployments") or {}) for v in models.variants(m, c)):
+        if m["k8s_name"] == eid or any(
+            v["object"] == eid for c in (m.get("deployments") or {}) for v in models.variants(m, c)
+        ):
             return m
     raise HTTPException(404, f"endpoint {eid} not found")
 
@@ -1388,8 +1828,18 @@ def _variants_public(m: dict, region: str) -> list[dict]:
             st = kube.endpoint_status(v["object"], m["namespace"], region)
         except (HTTPException, ApiException):
             st = {"status": "unavailable", "replicas_ready": None}
-        out.append({"name": v["name"], "id": v["object"], "pool": v.get("pool"), "min": v.get("min"), "max": v.get("max"), "image": v.get("image"),
-                    "status": st.get("status"), "replicas_ready": st.get("replicas_ready")})
+        out.append(
+            {
+                "name": v["name"],
+                "id": v["object"],
+                "pool": v.get("pool"),
+                "min": v.get("min"),
+                "max": v.get("max"),
+                "image": v.get("image"),
+                "status": st.get("status"),
+                "replicas_ready": st.get("replicas_ready"),
+            }
+        )
     return out
 
 
@@ -1406,17 +1856,36 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(principal))
             continue
         if m["mode"] == "run":
             continue
-        for region in ([selected_region] if selected_region else served_regions):
+        for region in [selected_region] if selected_region else served_regions:
             if region not in m["regions"]:
                 continue
             try:
                 i = _deployed(m, region)
                 if i:
-                    out.append({**ep.to_public(m, i, region), **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {})})
+                    out.append(
+                        {
+                            **ep.to_public(m, i, region),
+                            **(
+                                {"variants": vs, "routing": m.get("routing")}
+                                if (vs := _variants_public(m, region))
+                                else {}
+                            ),
+                        }
+                    )
             except (HTTPException, ApiException):
-                out.append({"id": m["k8s_name"], "name": m["display_name"], "model": m["name"], "region": region,
-                            "status": "unavailable", "replicas_ready": None, "gpu": m.get("gpu"),
-                            "managed_by": m.get("managed_by"), "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke"})
+                out.append(
+                    {
+                        "id": m["k8s_name"],
+                        "name": m["display_name"],
+                        "model": m["name"],
+                        "region": region,
+                        "status": "unavailable",
+                        "replicas_ready": None,
+                        "gpu": m.get("gpu"),
+                        "managed_by": m.get("managed_by"),
+                        "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke",
+                    }
+                )
     return out
 
 
@@ -1429,7 +1898,10 @@ def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(prin
     i = _deployed(m, region) or {}
     if not i:
         raise HTTPException(404, f"endpoint {id} not deployed in {region}")
-    return {**ep.to_public(m, i, region), **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {})}
+    return {
+        **ep.to_public(m, i, region),
+        **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {}),
+    }
 
 
 @app.patch("/v1/endpoints/{id}")
@@ -1447,8 +1919,12 @@ def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: 
     # target_concurrency is the per-replica scale target the endpoint reports (Knative's scaleTarget): the replica
     # concurrency limit under concurrency_utilization, the requests/s target under requests_per_second
     rate = spec["scaling"].get("metric") == "requests_per_second"
-    for key, target in (("min_replicas", "min"), ("max_replicas", "max"), ("scale_to_zero_after_s", "idle_s"),
-                        ("target_concurrency", "target" if rate else "container_concurrency")):
+    for key, target in (
+        ("min_replicas", "min"),
+        ("max_replicas", "max"),
+        ("scale_to_zero_after_s", "idle_s"),
+        ("target_concurrency", "target" if rate else "container_concurrency"),
+    ):
         if (value := getattr(req, key)) is not None:
             spec["scaling"][target] = value
     if spec["scaling"].get("min", 0) > spec["scaling"].get("max", 1):
@@ -1467,8 +1943,9 @@ def _endpoint_region(m: dict, region: str | None) -> str:
 
 
 @app.get("/v1/endpoints/{id}/metrics")
-async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h", end: float | None = None,
-                           p: Principal = Depends(principal)):
+async def endpoint_metrics(
+    id: str, region: str | None = None, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)
+):
     check_scope(p, "read:metrics")
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
@@ -1477,8 +1954,15 @@ async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h"
 
 
 @app.get("/v1/endpoints/{id}/logs")
-async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", search: str = Query("", max_length=200),
-                        limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+async def endpoint_logs(
+    id: str,
+    region: str | None = None,
+    range: str = "1h",
+    search: str = Query("", max_length=200),
+    limit: int = Query(300, ge=1, le=1000),
+    end: float | None = None,
+    p: Principal = Depends(principal),
+):
     check_scope(p, "read:logs")
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
@@ -1501,8 +1985,14 @@ async def operation_metrics(id: str, range: str = "1h", end: float | None = None
 
 
 @app.get("/v1/operations/{id}/logs")
-async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
-                         limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
+async def operation_logs(
+    id: str,
+    range: str = "1h",
+    search: str = Query("", max_length=200),
+    limit: int = Query(300, ge=1, le=1000),
+    end: float | None = None,
+    p: Principal = Depends(principal),
+):
     check_scope(p, "read:logs")
     region, kind = await asyncio.to_thread(_monitored, p, id)
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
@@ -1510,9 +2000,19 @@ async def operation_logs(id: str, range: str = "1h", search: str = Query("", max
 
 def _key_public(i: dict, tenant: str) -> dict:
     exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
-    return {"id": i.get("key_alias"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"), "tenant": tenant, "budget": i.get("max_budget"),
-            "spend": i.get("spend", 0), "models": i.get("models", []), "created_at": i.get("created_at"), "expires_at": i.get("expires"),
-            "status": "exhausted" if exhausted else "active", "role": (i.get("metadata") or {}).get("role", "user")}
+    return {
+        "id": i.get("key_alias"),
+        "key_preview": i.get("key_name"),
+        "alias": i.get("key_alias"),
+        "tenant": tenant,
+        "budget": i.get("max_budget"),
+        "spend": i.get("spend", 0),
+        "models": i.get("models", []),
+        "created_at": i.get("created_at"),
+        "expires_at": i.get("expires"),
+        "status": "exhausted" if exhausted else "active",
+        "role": (i.get("metadata") or {}).get("role", "user"),
+    }
 
 
 def _fleet_only() -> None:
@@ -1532,7 +2032,15 @@ def create_key(req: KeyRequest, p: Principal = Depends(admin)):
     value is returned once and mirrored into LiteLLM (services/api/keys.py)."""
     _fleet_only()
     meta = {"allowed_passthrough_routes": (p.info.get("metadata") or {}).get("allowed_passthrough_routes", [])}
-    value, i = keys.create(p.tenant, f"{p.tenant}-{req.alias}", req.budget, req.models, req.expires_days, metadata=meta, by=p.info.get("key_alias"))
+    value, i = keys.create(
+        p.tenant,
+        f"{p.tenant}-{req.alias}",
+        req.budget,
+        req.models,
+        req.expires_days,
+        metadata=meta,
+        by=p.info.get("key_alias"),
+    )
     return {**_key_public(i, p.tenant), "key": value}
 
 
@@ -1558,7 +2066,7 @@ def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
     i = keys.update(p.tenant, alias, req.budget, req.models, req.expires_days)
     if i is None:
         raise HTTPException(404, f"key {alias} not found")
-    forget_hash(i["token"])                  # a cached principal would keep the old budget for AUTH_CACHE_S
+    forget_hash(i["token"])  # a cached principal would keep the old budget for AUTH_CACHE_S
     return _key_public(i, p.tenant)
 
 

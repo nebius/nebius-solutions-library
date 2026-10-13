@@ -16,6 +16,7 @@ calls it once per variant. `api_backend`: the gateway's ext-auth target is the E
 (the fleet's API over its public hostname, charts/platform/templates/edge) on a GPU region, the Service api/api
 on the API's own cluster (the chart's `apiBackend` value).
 """
+
 import copy
 
 from fastapi import HTTPException
@@ -28,33 +29,98 @@ MODELS_NAMESPACE_DEFAULT = "models"
 # Every setting with its default. The entry's top level, then `runtime`, then
 # `deployments.<cluster>` override these (see `values`).
 DEFAULTS: dict = {
-    "name": "", "namespace": MODELS_NAMESPACE_DEFAULT, "labels": {}, "annotations": {}, "podMetadata": {},
+    "name": "",
+    "namespace": MODELS_NAMESPACE_DEFAULT,
+    "labels": {},
+    "annotations": {},
+    "podMetadata": {},
     "automountServiceAccountToken": None,
-    "image": "", "imagePullSecrets": [], "command": [], "args": [], "env": [], "envFrom": [],
-    "port": 8080, "protocol": "http", "workingDir": "",
-    "resources": {"gpu": 1, "cpu": "4", "memory": "16Gi", "cpuRequest": "", "memoryRequest": "", "ephemeralStorage": ""},
-    "pool": "", "nodeSelector": {},
+    "image": "",
+    "imagePullSecrets": [],
+    "command": [],
+    "args": [],
+    "env": [],
+    "envFrom": [],
+    "port": 8080,
+    "protocol": "http",
+    "workingDir": "",
+    "resources": {
+        "gpu": 1,
+        "cpu": "4",
+        "memory": "16Gi",
+        "cpuRequest": "",
+        "memoryRequest": "",
+        "ephemeralStorage": "",
+    },
+    "pool": "",
+    "nodeSelector": {},
     "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
-    "scaling": {"minReplicas": 0, "maxReplicas": 1, "metric": "concurrency", "target": 1, "containerConcurrency": 0,
-                "scaleToZeroRetention": "2m"},
-    "timeout": 600, "priorityClassName": "",
+    "scaling": {
+        "minReplicas": 0,
+        "maxReplicas": 1,
+        "metric": "concurrency",
+        "target": 1,
+        "containerConcurrency": 0,
+        "scaleToZeroRetention": "2m",
+    },
+    "timeout": 600,
+    "priorityClassName": "",
     "queue": {"priorityClass": "customer-batch", "name": ""},
     "images": {},
     "shm": {"enabled": True, "size": "1Gi"},
-    "volumes": [], "persistentVolumes": [],
-    "readinessProbe": {}, "livenessProbe": {},
-    "securityContext": {}, "containerSecurityContext": {},
+    "volumes": [],
+    "persistentVolumes": [],
+    "readinessProbe": {},
+    "livenessProbe": {},
+    "securityContext": {},
+    "containerSecurityContext": {},
     "localModelCache": {"enabled": False, "storageUri": "", "nodeGroups": [], "size": "50Gi"},
-    "weights": {"sharedFilesystem": {"enabled": False, "claimName": "weights-shared", "path": "", "mountPath": "/weights",
-                                     "readOnly": False, "prepare": True,
-                                     "prepareImage": f"{IMAGES_HOST}/docker/library/busybox:1.36" if IMAGES_HOST else "docker.io/library/busybox:1.36"},
-                "env": {}},
-    "nodes": 1, "workerCommand": [], "interconnect": "none", "ibDevices": 0, "ibClaimTemplate": "ib", "idleSeconds": 0,
-    "domain": "", "gatewayName": "serverless2-external", "gatewayNamespace": "envoy-gateway-system",
+    "weights": {
+        "sharedFilesystem": {
+            "enabled": False,
+            "claimName": "weights-shared",
+            "path": "",
+            "mountPath": "/weights",
+            "readOnly": False,
+            "prepare": True,
+            "prepareImage": f"{IMAGES_HOST}/docker/library/busybox:1.36"
+            if IMAGES_HOST
+            else "docker.io/library/busybox:1.36",
+        },
+        "env": {},
+    },
+    "nodes": 1,
+    "workerCommand": [],
+    "interconnect": "none",
+    "ibDevices": 0,
+    "ibClaimTemplate": "ib",
+    "idleSeconds": 0,
+    "domain": "",
+    "gatewayName": "serverless2-external",
+    "gatewayNamespace": "envoy-gateway-system",
 }
 # entry fields that are not settings (the chart's `endpoint.values` omits them before merging `runtime`)
-OMIT = ("runtime", "deployments", "cluster", "id", "task", "mode", "displayName", "description", "source", "protocol",
-        "port", "endpoints", "gpu", "concurrency", "coldStartClass", "price", "scaleToZero", "parameters", "workflow_template")
+OMIT = (
+    "runtime",
+    "deployments",
+    "cluster",
+    "id",
+    "task",
+    "mode",
+    "displayName",
+    "description",
+    "source",
+    "protocol",
+    "port",
+    "endpoints",
+    "gpu",
+    "concurrency",
+    "coldStartClass",
+    "price",
+    "scaleToZero",
+    "parameters",
+    "workflow_template",
+)
 # entry fields of `deployments.<cluster>` that are not settings either
 NOT_SETTINGS = ("paused", "price_per_gpu_hour", "parameters")
 # the order `helm template` printed the objects in (its install order: claims, then Services, then the custom
@@ -150,18 +216,25 @@ def values(entry: dict, cluster: str, domain: str, ib_claim_template: str, varia
     vals["variant"] = v.get("name") if obj != mid else ""
     vals["namespace"] = top.get("namespace") or MODELS_NAMESPACE_DEFAULT
     labels = dict(vals.get("labels") or {})
-    labels.update({f"{LABEL}/task": top.get("task") or "", f"{LABEL}/mode": top.get("mode") or "", f"{LABEL}/cluster": cluster})
+    labels.update(
+        {f"{LABEL}/task": top.get("task") or "", f"{LABEL}/mode": top.get("mode") or "", f"{LABEL}/cluster": cluster}
+    )
     vals["labels"] = labels
     return vals
 
 
 # ---- pieces shared by the InferenceService and the LeaderWorkerSet ---------------------------------------
 
+
 def _labels(v: dict) -> dict:
     """Metadata labels of every object: the standard Helm set plus the serverless2 labels the API and the
     dispatcher select on, the Kueue priority class, and the entry's own labels (which win)."""
-    out = {"app.kubernetes.io/name": v["name"], "app.kubernetes.io/instance": v["name"],
-           "app.kubernetes.io/part-of": "serverless2", f"{LABEL}/model": v.get("modelId") or v["name"]}
+    out = {
+        "app.kubernetes.io/name": v["name"],
+        "app.kubernetes.io/instance": v["name"],
+        "app.kubernetes.io/part-of": "serverless2",
+        f"{LABEL}/model": v.get("modelId") or v["name"],
+    }
     if v.get("variant"):
         out[f"{LABEL}/variant"] = v["variant"]
     out[f"{LABEL}/protocol"] = v.get("protocol")
@@ -178,8 +251,11 @@ def _shared_fs(v: dict) -> dict:
 def _resources(v: dict) -> dict:
     r = v.get("resources") or {}
     limits = {"nvidia.com/gpu": _text(r.get("gpu")), "cpu": _text(r.get("cpu")), "memory": r.get("memory")}
-    requests = {"nvidia.com/gpu": _text(r.get("gpu")), "cpu": _text(r.get("cpuRequest") or r.get("cpu")),
-                "memory": r.get("memoryRequest") or r.get("memory")}
+    requests = {
+        "nvidia.com/gpu": _text(r.get("gpu")),
+        "cpu": _text(r.get("cpuRequest") or r.get("cpu")),
+        "memory": r.get("memoryRequest") or r.get("memory"),
+    }
     if r.get("ephemeralStorage"):
         limits["ephemeral-storage"] = requests["ephemeral-storage"] = r["ephemeralStorage"]
     return {"limits": limits, "requests": requests}
@@ -187,15 +263,18 @@ def _resources(v: dict) -> dict:
 
 def _probes(v: dict) -> dict:
     out = {}
-    if (p := v.get("readinessProbe")):
+    if p := v.get("readinessProbe"):
         probe = {"httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")}}
         for key in ("periodSeconds", "failureThreshold"):
             if p.get(key):
                 probe[key] = p[key]
         out["readinessProbe"] = probe
-    if (p := v.get("livenessProbe")):
-        probe = {"httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")},
-                 "periodSeconds": p.get("periodSeconds") or 15, "failureThreshold": p.get("failureThreshold") or 4}
+    if p := v.get("livenessProbe"):
+        probe = {
+            "httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")},
+            "periodSeconds": p.get("periodSeconds") or 15,
+            "failureThreshold": p.get("failureThreshold") or 4,
+        }
         if p.get("initialDelaySeconds"):
             probe["initialDelaySeconds"] = p["initialDelaySeconds"]
         out["livenessProbe"] = probe
@@ -208,8 +287,14 @@ def _volume_mounts(v: dict) -> list[dict]:
     if (v.get("shm") or {}).get("enabled"):
         out.append({"name": "shm", "mountPath": "/dev/shm"})
     if w.get("enabled"):
-        out.append({"name": "weights", "mountPath": w.get("mountPath") or "/weights", "subPath": _text(w.get("path") or v["name"]),
-                    "readOnly": bool(w.get("readOnly"))})
+        out.append(
+            {
+                "name": "weights",
+                "mountPath": w.get("mountPath") or "/weights",
+                "subPath": _text(w.get("path") or v["name"]),
+                "readOnly": bool(w.get("readOnly")),
+            }
+        )
     for x in (v.get("volumes") or []) + (v.get("persistentVolumes") or []):
         out.append({"name": x.get("name"), "mountPath": x.get("mountPath")})
     return out
@@ -222,7 +307,9 @@ def _volumes(v: dict) -> list[dict]:
         out.append({"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": v["shm"].get("size")}})
     if w.get("enabled"):
         # the region's shared filesystem (Terraform weights_filesystem) through the cluster's RWX claim; subPath <path>
-        out.append({"name": "weights", "persistentVolumeClaim": {"claimName": _text(w.get("claimName") or "weights-shared")}})
+        out.append(
+            {"name": "weights", "persistentVolumeClaim": {"claimName": _text(w.get("claimName") or "weights-shared")}}
+        )
     for x in v.get("volumes") or []:
         empty = {"sizeLimit": x.get("sizeLimit")}
         if x.get("medium"):
@@ -240,11 +327,16 @@ def _weights_prepare(v: dict) -> list[dict]:
     if not (w.get("enabled") and w.get("prepare")):
         return []
     path = w.get("path") or v["name"]
-    return [{"name": "weights-prepare", "image": w.get("prepareImage"),
-             "command": ["sh", "-c", f"mkdir -p /weights-root/{path} && chmod 1777 /weights-root/{path}"],
-             "securityContext": {"runAsUser": 0},
-             "volumeMounts": [{"name": "weights", "mountPath": "/weights-root"}],
-             "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}}}]
+    return [
+        {
+            "name": "weights-prepare",
+            "image": w.get("prepareImage"),
+            "command": ["sh", "-c", f"mkdir -p /weights-root/{path} && chmod 1777 /weights-root/{path}"],
+            "securityContext": {"runAsUser": 0},
+            "volumeMounts": [{"name": "weights", "mountPath": "/weights-root"}],
+            "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
+        }
+    ]
 
 
 def _weights_env(v: dict) -> list[dict]:
@@ -262,12 +354,17 @@ def _pod_labels_annotations(v: dict, extra: dict | None = None) -> tuple[dict, d
 
 # ---- the objects -------------------------------------------------------------------------------------------
 
+
 def _inferenceservice(v: dict) -> dict:
     sc = v.get("scaling") or {}
     queue = v.get("queue") or {}
     pm = v.get("podMetadata") or {}
-    pred: dict = {"minReplicas": sc.get("minReplicas"), "maxReplicas": sc.get("maxReplicas"), "scaleMetric": sc.get("metric"),
-                  "scaleTarget": sc.get("target")}
+    pred: dict = {
+        "minReplicas": sc.get("minReplicas"),
+        "maxReplicas": sc.get("maxReplicas"),
+        "scaleMetric": sc.get("metric"),
+        "scaleTarget": sc.get("target"),
+    }
     if sc.get("containerConcurrency"):
         pred["containerConcurrency"] = sc["containerConcurrency"]
     pred["timeout"] = v.get("timeout")
@@ -292,14 +389,16 @@ def _inferenceservice(v: dict) -> dict:
     if not queue.get("name") or v.get("nodeSelector"):
         selector = {}
         if not queue.get("name"):
-            selector[POOL_LABEL] = _required(v.get("pool"), "pool is required (or queue.name for Kueue placement)", v["name"])
+            selector[POOL_LABEL] = _required(
+                v.get("pool"), "pool is required (or queue.name for Kueue placement)", v["name"]
+            )
         selector.update(v.get("nodeSelector") or {})
         pred["nodeSelector"] = selector
     if v.get("tolerations"):
         pred["tolerations"] = list(v["tolerations"])
     if v.get("securityContext"):
         pred["securityContext"] = dict(v["securityContext"])
-    if (init := _weights_prepare(v)):
+    if init := _weights_prepare(v):
         pred["initContainers"] = init
     # per-pool image: when the endpoint is pinned to a pool, `images.<pool>` overrides `image` (docs/SCHEDULING.md)
     images = v.get("images") or {}
@@ -324,18 +423,26 @@ def _inferenceservice(v: dict) -> dict:
     c.update(_probes(v))
     if v.get("containerSecurityContext"):
         c["securityContext"] = dict(v["containerSecurityContext"])
-    if (mounts := _volume_mounts(v)):
+    if mounts := _volume_mounts(v):
         c["volumeMounts"] = mounts
     pred["containers"] = [c]
-    if (vols := _volumes(v)):
+    if vols := _volumes(v):
         pred["volumes"] = vols
-    return {"apiVersion": "serving.kserve.io/v1beta1", "kind": "InferenceService",
-            "metadata": {"name": _required(v.get("name"), "name is required", v.get("name") or "?"), "namespace": v["namespace"],
-                         "labels": _labels(v),
-                         "annotations": {"serving.kserve.io/deploymentMode": "Knative",
-                                         "autoscaling.knative.dev/scale-to-zero-pod-retention-period": _text(sc.get("scaleToZeroRetention")),
-                                         **(v.get("annotations") or {})}},
-            "spec": {"predictor": pred}}
+    return {
+        "apiVersion": "serving.kserve.io/v1beta1",
+        "kind": "InferenceService",
+        "metadata": {
+            "name": _required(v.get("name"), "name is required", v.get("name") or "?"),
+            "namespace": v["namespace"],
+            "labels": _labels(v),
+            "annotations": {
+                "serving.kserve.io/deploymentMode": "Knative",
+                "autoscaling.knative.dev/scale-to-zero-pod-retention-period": _text(sc.get("scaleToZeroRetention")),
+                **(v.get("annotations") or {}),
+            },
+        },
+        "spec": {"predictor": pred},
+    }
 
 
 def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
@@ -347,13 +454,24 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
         c["args"] = list(v["args"])
     if v.get("workingDir"):
         c["workingDir"] = v["workingDir"]
-    env = [{"name": "NODE_RANK", "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']"}}},
-           {"name": "NNODES", "value": str(nodes)}, {"name": "GPUS_PER_NODE", "value": _text(r.get("gpu"))},
-           {"name": "WORLD_SIZE", "value": str(nodes * int(r.get("gpu") or 0))},
-           # the leader pod through the LeaderWorkerSet's headless Service
-           {"name": "MASTER_ADDR", "value": f"{v['name']}-0.{v['name']}"}, {"name": "MASTER_PORT", "value": "29500"}]
+    env = [
+        {
+            "name": "NODE_RANK",
+            "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['leaderworkerset.sigs.k8s.io/worker-index']"}},
+        },
+        {"name": "NNODES", "value": str(nodes)},
+        {"name": "GPUS_PER_NODE", "value": _text(r.get("gpu"))},
+        {"name": "WORLD_SIZE", "value": str(nodes * int(r.get("gpu") or 0))},
+        # the leader pod through the LeaderWorkerSet's headless Service
+        {"name": "MASTER_ADDR", "value": f"{v['name']}-0.{v['name']}"},
+        {"name": "MASTER_PORT", "value": "29500"},
+    ]
     if ib > 0:
-        env += [{"name": "NCCL_IB_HCA", "value": "mlx5"}, {"name": "NCCL_SOCKET_IFNAME", "value": "eth0"}, {"name": "UCX_NET_DEVICES", "value": "eth0"}]
+        env += [
+            {"name": "NCCL_IB_HCA", "value": "mlx5"},
+            {"name": "NCCL_SOCKET_IFNAME", "value": "eth0"},
+            {"name": "UCX_NET_DEVICES", "value": "eth0"},
+        ]
     else:
         # Ethernet between the nodes: NCCL must not try the InfiniBand transport (the nodes carry Mellanox NICs, the
         # pod holds none: "unhandled system error" at communicator setup on B300)
@@ -369,10 +487,10 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
     if ib > 0:
         c["resources"]["claims"] = [{"name": "ib"}]
     if leader:
-        c.update(_probes(v))             # a hung leader is restarted; RecreateGroupOnPodRestart recreates the group
+        c.update(_probes(v))  # a hung leader is restarted; RecreateGroupOnPodRestart recreates the group
     if v.get("containerSecurityContext"):
         c["securityContext"] = dict(v["containerSecurityContext"])
-    if (mounts := _volume_mounts(v)):
+    if mounts := _volume_mounts(v):
         c["volumeMounts"] = mounts
     return c
 
@@ -385,18 +503,23 @@ def _lws_podspec(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
         spec["priorityClassName"] = v["priorityClassName"]
     if v.get("imagePullSecrets"):
         spec["imagePullSecrets"] = [{"name": s} for s in v["imagePullSecrets"]]
-    spec["nodeSelector"] = {POOL_LABEL: _required(v.get("pool"), "pool is required", v["name"]), **(v.get("nodeSelector") or {})}
+    spec["nodeSelector"] = {
+        POOL_LABEL: _required(v.get("pool"), "pool is required", v["name"]),
+        **(v.get("nodeSelector") or {}),
+    }
     if v.get("tolerations"):
         spec["tolerations"] = list(v["tolerations"])
     if v.get("securityContext"):
         spec["securityContext"] = dict(v["securityContext"])
     if ib > 0:
         # DRA claim of every fabric NIC of the node (ResourceClaimTemplate <prefix>-<n>, docs/JOBS.md)
-        spec["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{v.get('ibClaimTemplate') or 'ib'}-{ib}"}]
-    if (init := _weights_prepare(v)):
+        spec["resourceClaims"] = [
+            {"name": "ib", "resourceClaimTemplateName": f"{v.get('ibClaimTemplate') or 'ib'}-{ib}"}
+        ]
+    if init := _weights_prepare(v):
         spec["initContainers"] = init
     spec["containers"] = [_lws_container(v, nodes, ib, leader, command)]
-    if (vols := _volumes(v)):
+    if vols := _volumes(v):
         spec["volumes"] = vols
     return spec
 
@@ -408,8 +531,15 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
     sc = v.get("scaling") or {}
     name, ns = _required(v.get("name"), "name is required", v.get("name") or "?"), v["namespace"]
     labels = _labels(v)
-    pod_labels, pod_annotations = _pod_labels_annotations(v, {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": "serverless2",
-                                                              f"{LABEL}/model": name, f"{LABEL}/protocol": v.get("protocol") or "http"})
+    pod_labels, pod_annotations = _pod_labels_annotations(
+        v,
+        {
+            "app.kubernetes.io/name": name,
+            "app.kubernetes.io/part-of": "serverless2",
+            f"{LABEL}/model": name,
+            f"{LABEL}/protocol": v.get("protocol") or "http",
+        },
+    )
 
     def template(role: str, leader: bool, command) -> dict:
         md = {"labels": {**pod_labels, f"{LABEL}/role": role}}
@@ -417,54 +547,125 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
             md["annotations"] = pod_annotations
         return {"metadata": md, "spec": _lws_podspec(v, nodes, ib, leader, command)}
 
-    lws = {"apiVersion": "leaderworkerset.x-k8s.io/v1", "kind": "LeaderWorkerSet",
-           "metadata": {"name": name, "namespace": ns, "labels": labels,
-                        "annotations": {f"{LABEL}/nodes": str(nodes), f"{LABEL}/interconnect": _text(v.get("interconnect") or "none"),
-                                        f"{LABEL}/idle-s": _text(v.get("idleSeconds") or 0), **(v.get("annotations") or {})}},
-           "spec": {"replicas": sc.get("minReplicas"), "startupPolicy": "LeaderCreated",
-                    "leaderWorkerTemplate": {"size": nodes, "restartPolicy": "RecreateGroupOnPodRestart",
-                                             "leaderTemplate": template("leader", True, v.get("command")),
-                                             "workerTemplate": template("worker", False, v.get("workerCommand") or v.get("command"))}}}
-    service = {"apiVersion": "v1", "kind": "Service",
-               "metadata": {"name": f"{name}-predictor", "namespace": ns, "labels": labels},
-               "spec": {"type": "ClusterIP",
-                        "selector": {"leaderworkerset.sigs.k8s.io/name": name, "leaderworkerset.sigs.k8s.io/worker-index": "0"},
-                        "ports": [{"name": "http", "port": 80, "targetPort": v.get("port"), "protocol": "TCP"}]}}
+    lws = {
+        "apiVersion": "leaderworkerset.x-k8s.io/v1",
+        "kind": "LeaderWorkerSet",
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+            "labels": labels,
+            "annotations": {
+                f"{LABEL}/nodes": str(nodes),
+                f"{LABEL}/interconnect": _text(v.get("interconnect") or "none"),
+                f"{LABEL}/idle-s": _text(v.get("idleSeconds") or 0),
+                **(v.get("annotations") or {}),
+            },
+        },
+        "spec": {
+            "replicas": sc.get("minReplicas"),
+            "startupPolicy": "LeaderCreated",
+            "leaderWorkerTemplate": {
+                "size": nodes,
+                "restartPolicy": "RecreateGroupOnPodRestart",
+                "leaderTemplate": template("leader", True, v.get("command")),
+                "workerTemplate": template("worker", False, v.get("workerCommand") or v.get("command")),
+            },
+        },
+    }
+    service = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": f"{name}-predictor", "namespace": ns, "labels": labels},
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {"leaderworkerset.sigs.k8s.io/name": name, "leaderworkerset.sigs.k8s.io/worker-index": "0"},
+            "ports": [{"name": "http", "port": 80, "targetPort": v.get("port"), "protocol": "TCP"}],
+        },
+    }
     domain = _required(v.get("domain"), "domain is required for a multi-node endpoint", name)
-    route = {"apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
-             "metadata": {"name": f"{name}-predictor", "namespace": ns, "labels": {**labels, "serving.knative.dev/route": f"{name}-predictor"}},
-             "spec": {"parentRefs": [{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": v.get("gatewayName"), "namespace": v.get("gatewayNamespace")}],
-                      "hostnames": [f"{name}-predictor.{ns}.{domain}"],
-                      "rules": [{"matches": [{"path": {"type": "PathPrefix", "value": "/"}}],
-                                 "backendRefs": [{"group": "", "kind": "Service", "name": f"{name}-predictor", "port": 80}],
-                                 "timeouts": {"request": "0s"}}]}}
+    route = {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "metadata": {
+            "name": f"{name}-predictor",
+            "namespace": ns,
+            "labels": {**labels, "serving.knative.dev/route": f"{name}-predictor"},
+        },
+        "spec": {
+            "parentRefs": [
+                {
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "Gateway",
+                    "name": v.get("gatewayName"),
+                    "namespace": v.get("gatewayNamespace"),
+                }
+            ],
+            "hostnames": [f"{name}-predictor.{ns}.{domain}"],
+            "rules": [
+                {
+                    "matches": [{"path": {"type": "PathPrefix", "value": "/"}}],
+                    "backendRefs": [{"group": "", "kind": "Service", "name": f"{name}-predictor", "port": 80}],
+                    "timeouts": {"request": "0s"},
+                }
+            ],
+        },
+    }
     return [lws, service, route]
 
 
 def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
     """The gateway's authorization of the endpoint's external routes through the API's authorizer."""
     name = v["name"]
-    api = ({"group": "gateway.envoyproxy.io", "kind": "Backend", "name": "api", "namespace": "api", "port": 443} if api_backend
-           else {"group": "", "kind": "Service", "name": "api", "namespace": "api", "port": 80})
-    return {"apiVersion": "gateway.envoyproxy.io/v1alpha1", "kind": "SecurityPolicy",
-            "metadata": {"name": f"{name}-authorization", "namespace": v["namespace"], "labels": _labels(v)},
-            "spec": {"targetSelectors": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute",
-                                          "matchLabels": {"serving.knative.dev/route": f"{name}-predictor"},
-                                          "matchExpressions": [{"key": "networking.knative.dev/visibility", "operator": "NotIn", "values": ["cluster-local"]}]}],
-                     "extAuth": {"failOpen": False, "timeout": "10s", "headersToExtAuth": ["authorization", "sec-websocket-protocol", "x-serverless2-admitted"],
-                                 "http": {"path": f"/internal/authorize/{v.get('modelId') or name}",
-                                          "backendRefs": [api],
-                                          "headersToBackend": ["x-serverless2-tenant", "x-serverless2-key-alias"]}}}}
+    api = (
+        {"group": "gateway.envoyproxy.io", "kind": "Backend", "name": "api", "namespace": "api", "port": 443}
+        if api_backend
+        else {"group": "", "kind": "Service", "name": "api", "namespace": "api", "port": 80}
+    )
+    return {
+        "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+        "kind": "SecurityPolicy",
+        "metadata": {"name": f"{name}-authorization", "namespace": v["namespace"], "labels": _labels(v)},
+        "spec": {
+            "targetSelectors": [
+                {
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "HTTPRoute",
+                    "matchLabels": {"serving.knative.dev/route": f"{name}-predictor"},
+                    "matchExpressions": [
+                        {"key": "networking.knative.dev/visibility", "operator": "NotIn", "values": ["cluster-local"]}
+                    ],
+                }
+            ],
+            "extAuth": {
+                "failOpen": False,
+                "timeout": "10s",
+                "headersToExtAuth": ["authorization", "sec-websocket-protocol", "x-serverless2-admitted"],
+                "http": {
+                    "path": f"/internal/authorize/{v.get('modelId') or name}",
+                    "backendRefs": [api],
+                    "headersToBackend": ["x-serverless2-tenant", "x-serverless2-key-alias"],
+                },
+            },
+        },
+    }
 
 
 def _localmodelcache(v: dict) -> list[dict]:
     lmc = v.get("localModelCache") or {}
     if not lmc.get("enabled"):
         return []
-    return [{"apiVersion": "serving.kserve.io/v1alpha1", "kind": "LocalModelCache",
-             "metadata": {"name": v["name"], "labels": _labels(v)},      # cluster-scoped: no namespace
-             "spec": {"sourceModelUri": _required(lmc.get("storageUri"), "localModelCache.storageUri", v["name"]),
-                      "modelSize": lmc.get("size"), "nodeGroups": lmc.get("nodeGroups")}}]
+    return [
+        {
+            "apiVersion": "serving.kserve.io/v1alpha1",
+            "kind": "LocalModelCache",
+            "metadata": {"name": v["name"], "labels": _labels(v)},  # cluster-scoped: no namespace
+            "spec": {
+                "sourceModelUri": _required(lmc.get("storageUri"), "localModelCache.storageUri", v["name"]),
+                "modelSize": lmc.get("size"),
+                "nodeGroups": lmc.get("nodeGroups"),
+            },
+        }
+    ]
 
 
 def _pvcs(v: dict) -> list[dict]:
@@ -474,13 +675,25 @@ def _pvcs(v: dict) -> list[dict]:
         if p.get("storageClass"):
             spec["storageClassName"] = p["storageClass"]
         spec["resources"] = {"requests": {"storage": p.get("size")}}
-        out.append({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-                    "metadata": {"name": f"{v['name']}-{p.get('name')}", "namespace": v["namespace"], "labels": _labels(v)}, "spec": spec})
+        out.append(
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {"name": f"{v['name']}-{p.get('name')}", "namespace": v["namespace"], "labels": _labels(v)},
+                "spec": spec,
+            }
+        )
     return out
 
 
-def render(entry: dict, cluster: str, domain: str, ib_claim_template: str, variant: dict | None = None,
-           api_backend: bool = False) -> list[dict]:
+def render(
+    entry: dict,
+    cluster: str,
+    domain: str,
+    ib_claim_template: str,
+    variant: dict | None = None,
+    api_backend: bool = False,
+) -> list[dict]:
     """The objects of one variant of an endpoint on a cluster (`variant`: an element of models.variants, the first
     variant keeps the model's id as the object name; `api_backend`: the cluster is a GPU region, not the API's own)."""
     v = values(entry, cluster, domain, ib_claim_template, variant)
@@ -488,4 +701,7 @@ def render(entry: dict, cluster: str, domain: str, ib_claim_template: str, varia
     docs = [_securitypolicy(v, api_backend)]
     docs += [_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes)
     docs += _localmodelcache(v) + _pvcs(v)
-    return sorted(docs, key=lambda d: (KIND_ORDER.get(d["kind"], len(KIND_ORDER)), d["kind"] if d["kind"] not in KIND_ORDER else ""))
+    return sorted(
+        docs,
+        key=lambda d: (KIND_ORDER.get(d["kind"], len(KIND_ORDER)), d["kind"] if d["kind"] not in KIND_ORDER else ""),
+    )

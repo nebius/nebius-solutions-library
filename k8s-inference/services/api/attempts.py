@@ -10,6 +10,7 @@ id (the pod), a monotonic epoch, a revision cursor for polling, the selected clu
 export and finalization state that decides whether "exit 0" became a delivered result.
 
 """
+
 import logging
 from datetime import datetime, timezone
 from fastapi import HTTPException
@@ -34,10 +35,13 @@ def verify_runner_token(token: str) -> tuple[str, str, str]:
     "unauthenticated" at once): (region, namespace, pod). 401 when no cluster issued it or it is not a bound pod
     token of a tenant namespace. The record itself names no cluster: the uploader only knows its pod."""
     from kubernetes import client
+
     for region in sorted(kube.regions(), key=lambda r: r == REGION):
         try:
-            review = retry(client.AuthenticationV1Api(kube._client(region)).create_token_review,
-                           client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)))
+            review = retry(
+                client.AuthenticationV1Api(kube._client(region)).create_token_review,
+                client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)),
+            )
         except (ApiException, OSError) as e:
             log.warning("token review in %s: %s", region, str(e)[:120])
             continue
@@ -46,7 +50,12 @@ def verify_runner_token(token: str) -> tuple[str, str, str]:
             continue
         user = st.user.username or ""
         parts = user.split(":")
-        if len(parts) != 4 or parts[0] != "system" or parts[1] != "serviceaccount" or not parts[2].startswith(TENANT_NS_PREFIX):
+        if (
+            len(parts) != 4
+            or parts[0] != "system"
+            or parts[1] != "serviceaccount"
+            or not parts[2].startswith(TENANT_NS_PREFIX)
+        ):
             raise HTTPException(401, "not a tenant run identity")
         pod = ((st.user.extra or {}).get("authentication.kubernetes.io/pod-name") or [""])[0]
         if not pod:
@@ -75,15 +84,19 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
     if status not in VALID:
         raise HTTPException(400, f"status must be one of {VALID}")
     root = str(body.get("root") or operation)
-    tenant = ns[len(TENANT_NS_PREFIX):]
+    tenant = ns[len(TENANT_NS_PREFIX) :]
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (root,))
-        cur = c.execute("select epoch, status from attempts where operation = %s and pod = %s", (operation, pod)).fetchone()
+        cur = c.execute(
+            "select epoch, status from attempts where operation = %s and pod = %s", (operation, pod)
+        ).fetchone()
         top = c.execute("select coalesce(max(epoch), 0) from attempts where root = %s", (root,)).fetchone()[0]
-        marks = c.execute("select cancelled_at, successor from operation_marks where operation = %s", (operation,)).fetchone()
+        marks = c.execute(
+            "select cancelled_at, successor from operation_marks where operation = %s", (operation,)
+        ).fetchone()
         cancelled = (marks[0],) if marks else None
         epoch = cur[0] if cur else top + 1
-        if epoch < top:                              # any record from a replaced attempt, pointers included
+        if epoch < top:  # any record from a replaced attempt, pointers included
             raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
         if marks and marks[1]:
             # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
@@ -94,11 +107,14 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                 raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
             body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
         if cur and cur[1] in TERMINAL and status == "started":
-            return _row(c, operation, pod)           # a late duplicate of the current attempt's start record
+            return _row(c, operation, pod)  # a late duplicate of the current attempt's start record
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
-        export = body.get("export") or ("n/a" if body.get("io_mode") == "application" and status != "succeeded" else None)
-        c.execute("""insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
+        export = body.get("export") or (
+            "n/a" if body.get("io_mode") == "application" and status != "succeeded" else None
+        )
+        c.execute(
+            """insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
                         image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster)
                      values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s)
                      on conflict (operation, pod) do update set
@@ -112,17 +128,39 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                         checkpoint_ref = coalesce(excluded.checkpoint_ref, attempts.checkpoint_ref),
                         checkpoint_generation = coalesce(excluded.checkpoint_generation, attempts.checkpoint_generation),
                         revision = nextval('attempts_revision_seq'), updated_at = now()""",
-                  (operation, pod, root, tenant, ns, epoch, region, body.get("node") or None, body.get("pool") or None,
-                   body.get("gpu_class") or None, int(body.get("gpus") or 0), body.get("image") or None, body.get("image_digest") or None,
-                   status, body.get("exit_code"), _ts(body.get("started_at")), _ts(body.get("ended_at")), export,
-                   body.get("result_ref") or None, body.get("checkpoint_ref") or None,
-                   int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
-                   str(body.get("role") or "run"), body.get("cluster") or None))
+            (
+                operation,
+                pod,
+                root,
+                tenant,
+                ns,
+                epoch,
+                region,
+                body.get("node") or None,
+                body.get("pool") or None,
+                body.get("gpu_class") or None,
+                int(body.get("gpus") or 0),
+                body.get("image") or None,
+                body.get("image_digest") or None,
+                status,
+                body.get("exit_code"),
+                _ts(body.get("started_at")),
+                _ts(body.get("ended_at")),
+                export,
+                body.get("result_ref") or None,
+                body.get("checkpoint_ref") or None,
+                int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
+                str(body.get("role") or "run"),
+                body.get("cluster") or None,
+            ),
+        )
         return _row(c, operation, pod)
 
 
-COLS = ("operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
-        "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster")
+COLS = (
+    "operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
+    "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster"
+)
 
 
 def _dict(r) -> dict:
@@ -134,7 +172,9 @@ def _dict(r) -> dict:
 
 
 def _row(c, operation: str, pod: str) -> dict:
-    return _dict(c.execute(f"select {COLS} from attempts where operation = %s and pod = %s", (operation, pod)).fetchone())
+    return _dict(
+        c.execute(f"select {COLS} from attempts where operation = %s and pod = %s", (operation, pod)).fetchone()
+    )
 
 
 def for_operation(root: str) -> list[dict]:
@@ -143,7 +183,9 @@ def for_operation(root: str) -> list[dict]:
     if not enabled():
         return []
     with db.pool().connection() as c:
-        rows = c.execute(f"select {COLS} from attempts where root = %s or operation = %s order by epoch, started_at", (root, root)).fetchall()
+        rows = c.execute(
+            f"select {COLS} from attempts where root = %s or operation = %s order by epoch, started_at", (root, root)
+        ).fetchall()
     return [_dict(r) for r in rows]
 
 
@@ -152,8 +194,10 @@ def for_operations(roots: set[str]) -> dict[str, list[dict]]:
     if not enabled() or not roots:
         return {}
     with db.pool().connection() as c:
-        rows = c.execute(f"select {COLS} from attempts where root = any(%s) or operation = any(%s) order by epoch, started_at",
-                         (list(roots), list(roots))).fetchall()
+        rows = c.execute(
+            f"select {COLS} from attempts where root = any(%s) or operation = any(%s) order by epoch, started_at",
+            (list(roots), list(roots)),
+        ).fetchall()
     out: dict[str, list[dict]] = {}
     for r in rows:
         d = _dict(r)
@@ -168,7 +212,12 @@ def latest_checkpoint(root: str) -> dict | None:
     if not rows:
         return None
     best = max(rows, key=lambda r: (r.get("epoch") or 0, r.get("checkpoint_generation") or 0, r.get("revision") or 0))
-    return {"checkpoint_ref": best["checkpoint_ref"], "generation": best.get("checkpoint_generation"), "epoch": best.get("epoch"), "attempt_id": best["pod"]}
+    return {
+        "checkpoint_ref": best["checkpoint_ref"],
+        "generation": best.get("checkpoint_generation"),
+        "epoch": best.get("epoch"),
+        "attempt_id": best["pod"],
+    }
 
 
 def mark_successor(operation: str, successor: str) -> None:
@@ -176,7 +225,10 @@ def mark_successor(operation: str, successor: str) -> None:
     if not enabled():
         return
     with db.pool().connection() as c:
-        c.execute("insert into operation_marks (operation, successor) values (%s, %s) on conflict (operation) do update set successor = excluded.successor, revision = nextval('operation_marks_revision_seq')", (operation, successor))
+        c.execute(
+            "insert into operation_marks (operation, successor) values (%s, %s) on conflict (operation) do update set successor = excluded.successor, revision = nextval('operation_marks_revision_seq')",
+            (operation, successor),
+        )
 
 
 def successor_of(operation: str) -> str | None:
@@ -191,36 +243,84 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     if not rows:
         return None
     last = rows[-1]
-    status = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}.get(last["status"], "FAILED")
+    status = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}.get(
+        last["status"], "FAILED"
+    )
     export = last.get("export_state")
-    if status == "SUCCEEDED" and (export == "failed" or export is None or (export == "n/a" and not last.get("result_ref"))):
+    if status == "SUCCEEDED" and (
+        export == "failed" or export is None or (export == "n/a" and not last.get("result_ref"))
+    ):
         status = "EXPORT_FAILED"
     m = _marks(operation)
     if m and m[1]:
         status = "CANCELLED"
-    attempts = [{"index": i + 1, "attempt_id": r["pod"], "status": {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}.get(r["status"], "FAILED"),
-                 "started_at": r.get("started_at"), "ended_at": r.get("ended_at"), "node": r.get("node"), "gpu_class": r.get("gpu_class"), "epoch": r.get("epoch"),
-                 "export_state": r.get("export_state"), "result_ref": r.get("result_ref"), "checkpoint_ref": r.get("checkpoint_ref"), "image_digest": r.get("image_digest")} for i, r in enumerate(rows)]
-    return {"id": operation, "name": None, "model": None, "mode": "run", "status": status, "region": last.get("region"), "tenant": tenant,
-            "phase": None,
-            "created_at": rows[0].get("started_at"), "started_at": rows[0].get("started_at"), "ended_at": last.get("ended_at"), "attempts": attempts,
-            "error": None, "input": {}, "resumed_from": last["root"] if last["root"] != operation else None, "gpu_class": last.get("gpu_class"),
-            "image": last.get("image"), "resumable": False, "nodes": 1, "execution": None, "reason": "the Job object expired; this is the durable record",
-            "cost": None, "gpu_seconds": None, **lifecycle(operation, last["root"], rows)}
+    attempts = [
+        {
+            "index": i + 1,
+            "attempt_id": r["pod"],
+            "status": {
+                "succeeded": "SUCCEEDED",
+                "failed": "FAILED",
+                "interrupted": "PREEMPTED",
+                "started": "PREEMPTED",
+            }.get(r["status"], "FAILED"),
+            "started_at": r.get("started_at"),
+            "ended_at": r.get("ended_at"),
+            "node": r.get("node"),
+            "gpu_class": r.get("gpu_class"),
+            "epoch": r.get("epoch"),
+            "export_state": r.get("export_state"),
+            "result_ref": r.get("result_ref"),
+            "checkpoint_ref": r.get("checkpoint_ref"),
+            "image_digest": r.get("image_digest"),
+        }
+        for i, r in enumerate(rows)
+    ]
+    return {
+        "id": operation,
+        "name": None,
+        "model": None,
+        "mode": "run",
+        "status": status,
+        "region": last.get("region"),
+        "tenant": tenant,
+        "phase": None,
+        "created_at": rows[0].get("started_at"),
+        "started_at": rows[0].get("started_at"),
+        "ended_at": last.get("ended_at"),
+        "attempts": attempts,
+        "error": None,
+        "input": {},
+        "resumed_from": last["root"] if last["root"] != operation else None,
+        "gpu_class": last.get("gpu_class"),
+        "image": last.get("image"),
+        "resumable": False,
+        "nodes": 1,
+        "execution": None,
+        "reason": "the Job object expired; this is the durable record",
+        "cost": None,
+        "gpu_seconds": None,
+        **lifecycle(operation, last["root"], rows),
+    }
 
 
 def mark_cancelled(operation: str) -> None:
     if not enabled():
         return
     with db.pool().connection() as c:
-        c.execute("insert into operation_marks (operation, cancelled_at) values (%s, now()) on conflict (operation) do update set cancelled_at = now(), revision = nextval('operation_marks_revision_seq')", (operation,))
+        c.execute(
+            "insert into operation_marks (operation, cancelled_at) values (%s, now()) on conflict (operation) do update set cancelled_at = now(), revision = nextval('operation_marks_revision_seq')",
+            (operation,),
+        )
 
 
 def _marks(operation: str):
     if not enabled():
         return None
     with db.pool().connection() as c:
-        return c.execute("select revision, cancelled_at, successor from operation_marks where operation = %s", (operation,)).fetchone()
+        return c.execute(
+            "select revision, cancelled_at, successor from operation_marks where operation = %s", (operation,)
+        ).fetchone()
 
 
 def marks_for(operations: set[str]) -> dict[str, tuple]:
@@ -228,7 +328,10 @@ def marks_for(operations: set[str]) -> dict[str, tuple]:
     if not enabled() or not operations:
         return {}
     with db.pool().connection() as c:
-        rows = c.execute("select operation, revision, cancelled_at, successor from operation_marks where operation = any(%s)", (list(operations),)).fetchall()
+        rows = c.execute(
+            "select operation, revision, cancelled_at, successor from operation_marks where operation = any(%s)",
+            (list(operations),),
+        ).fetchall()
     return {r[0]: tuple(r[1:]) for r in rows}
 
 
@@ -241,11 +344,17 @@ def lifecycle(operation: str, root: str, rows: list[dict], marks: tuple | None |
     m = _marks(operation) if marks is False else marks
     if m:
         revision = max(revision, m[0] or 0)
-    return {"root_operation_id": root, "attempt_id": latest.get("pod") if latest else None, "epoch": latest.get("epoch") if latest else None,
-            "revision": revision, "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
-            "result_ref": latest.get("result_ref") if latest else None, "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
-            "image_digest": latest.get("image_digest") if latest else None,
-            # the canonical cluster id (configured name); the Nebius region is the operation's `region`
-            "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
-            "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
-            "attempt_role": (latest.get("role") or "run") if latest else None}
+    return {
+        "root_operation_id": root,
+        "attempt_id": latest.get("pod") if latest else None,
+        "epoch": latest.get("epoch") if latest else None,
+        "revision": revision,
+        "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
+        "result_ref": latest.get("result_ref") if latest else None,
+        "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
+        "image_digest": latest.get("image_digest") if latest else None,
+        # the canonical cluster id (configured name); the Nebius region is the operation's `region`
+        "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
+        "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
+        "attempt_role": (latest.get("role") or "run") if latest else None,
+    }

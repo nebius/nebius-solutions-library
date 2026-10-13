@@ -22,6 +22,7 @@ The dispatcher's elected replica does it instead, every reconcile cycle, per wor
 Pools without `interconnect: infiniband` or without a node group id (the cloud stage has not created it yet) are
 never touched; a failed CLI call is logged and retried on the next cycle (the patch is idempotent).
 """
+
 import json
 import logging
 import os
@@ -40,23 +41,34 @@ POOL_KEY, IB_KEY = f"{LABEL}/pool", f"{LABEL}/interconnect"
 NS = os.environ.get("PRICES_NAMESPACE", "kueue-system")
 STATE_CM = os.environ.get("INFINIBAND_CONFIGMAP", "infiniband-pools")
 RESTORE_AFTER_S = int(os.environ.get("RESTORE_AFTER_S", "600"))
-CAP_RANK = {"reserved": 0, "on_demand": 1, "ondemand": 1, "spot": 2}   # fleet.yaml capacity_order, as Kueue's flavor order
-_warned: set = set()   # (cluster, workload) already reported as too large for its pool
+CAP_RANK = {
+    "reserved": 0,
+    "on_demand": 1,
+    "ondemand": 1,
+    "spot": 2,
+}  # fleet.yaml capacity_order, as Kueue's flavor order
+_warned: set = set()  # (cluster, workload) already reported as too large for its pool
 
 
 # ---------- pure functions (unit-tested) ----------
 def ib_pools(cluster: dict) -> dict:
     """{pool: pool} of a cluster's pools (dispatcher.clusters_from_pools) whose nodes form an InfiniBand GPU cluster
     and whose node group the fleet document names (charts/fleet pools.yaml `node_group_id`)."""
-    return {n: p for n, p in (cluster.get("pools") or {}).items()
-            if (p.get("interconnect") or "none") == "infiniband" and p.get("node_group_id")}
+    return {
+        n: p
+        for n, p in (cluster.get("pools") or {}).items()
+        if (p.get("interconnect") or "none") == "infiniband" and p.get("node_group_id")
+    }
 
 
 def _required(template: dict) -> dict:
     """Node label -> values a pod template requires (required nodeAffinity `In` terms plus nodeSelector)."""
     spec = template.get("spec") or {}
     out: dict = {}
-    for t in (((spec.get("affinity") or {}).get("nodeAffinity") or {}).get("requiredDuringSchedulingIgnoredDuringExecution") or {}).get("nodeSelectorTerms") or []:
+    for t in (
+        ((spec.get("affinity") or {}).get("nodeAffinity") or {}).get("requiredDuringSchedulingIgnoredDuringExecution")
+        or {}
+    ).get("nodeSelectorTerms") or []:
         for e in t.get("matchExpressions") or []:
             if e.get("operator") == "In":
                 out.setdefault(e.get("key"), set()).update(e.get("values") or [])
@@ -67,13 +79,19 @@ def _required(template: dict) -> dict:
 
 def _first(candidates: set, pools: dict) -> str:
     """The pool Kueue takes first among candidates: reserved, on-demand, spot (capacity_order), then price, then name."""
-    return min(candidates, key=lambda n: (CAP_RANK.get(pools[n].get("capacity", "spot"), 3), float(pools[n].get("price", 1e9)), n))
+    return min(
+        candidates,
+        key=lambda n: (CAP_RANK.get(pools[n].get("capacity", "spot"), 3), float(pools[n].get("price", 1e9)), n),
+    )
 
 
 def finished(wl: dict) -> bool:
-    if (wl.get("spec") or {}).get("active") is False:        # deactivated (a superseded run): never admitted again
+    if (wl.get("spec") or {}).get("active") is False:  # deactivated (a superseded run): never admitted again
         return True
-    return any(c.get("type") == "Finished" and c.get("status") == "True" for c in (wl.get("status") or {}).get("conditions") or [])
+    return any(
+        c.get("type") == "Finished" and c.get("status") == "True"
+        for c in (wl.get("status") or {}).get("conditions") or []
+    )
 
 
 def workload_demand(wl: dict, pools: dict) -> dict:
@@ -82,8 +100,10 @@ def workload_demand(wl: dict, pools: dict) -> dict:
     first of its affinity's candidates); {} for anything else (single-node runs, Ethernet multi-node runs)."""
     if finished(wl):
         return {}
-    assigned = {a.get("name"): (a.get("flavors") or {}).get("nvidia.com/gpu")
-                for a in ((wl.get("status") or {}).get("admission") or {}).get("podSetAssignments") or []}
+    assigned = {
+        a.get("name"): (a.get("flavors") or {}).get("nvidia.com/gpu")
+        for a in ((wl.get("status") or {}).get("admission") or {}).get("podSetAssignments") or []
+    }
     out: dict = {}
     for ps in (wl.get("spec") or {}).get("podSets") or []:
         req = _required(ps.get("template") or {})
@@ -108,7 +128,9 @@ def lws_demand(obj: dict, pools: dict) -> dict:
     size = int(lwt.get("size") or ((obj.get("metadata") or {}).get("annotations") or {}).get(f"{LABEL}/nodes") or 1)
     if replicas < 1:
         return {}
-    cands = (_required(lwt.get("leaderTemplate") or lwt.get("workerTemplate") or {}).get(POOL_KEY) or set()) & set(pools)
+    cands = (_required(lwt.get("leaderTemplate") or lwt.get("workerTemplate") or {}).get(POOL_KEY) or set()) & set(
+        pools
+    )
     return {_first(cands, pools): size * replicas} if cands else {}
 
 
@@ -125,8 +147,16 @@ def demand(workloads: list, lwss: list, pools: dict, cluster: str = "") -> dict:
                     key = (cluster, md.get("namespace"), md.get("name"))
                     if key not in _warned:
                         _warned.add(key)
-                        log.warning("%s: %s %s/%s needs %d nodes on %s, more than its max_nodes %s: it cannot run there",
-                                    cluster, kind, md.get("namespace"), md.get("name"), n, pool, pools[pool].get("max_nodes"))
+                        log.warning(
+                            "%s: %s %s/%s needs %d nodes on %s, more than its max_nodes %s: it cannot run there",
+                            cluster,
+                            kind,
+                            md.get("namespace"),
+                            md.get("name"),
+                            n,
+                            pool,
+                            pools[pool].get("max_nodes"),
+                        )
                     continue
                 out[pool] = max(out.get(pool, 0), n)
     return out
@@ -150,7 +180,13 @@ def plan(pools: dict, needed: dict, state: dict, now: float) -> list:
             if since is None:
                 s["low_since"] = now
             elif now - float(since) >= RESTORE_AFTER_S:
-                changes.append((name, target, "idle, back to the fleet's min_nodes" if target == base else f"demand down to {need} nodes"))
+                changes.append(
+                    (
+                        name,
+                        target,
+                        "idle, back to the fleet's min_nodes" if target == base else f"demand down to {need} nodes",
+                    )
+                )
         else:
             s.pop("low_since", None)
     return changes
@@ -167,8 +203,13 @@ def load_state(core: client.CoreV1Api) -> dict:
 
 
 def save_state(core: client.CoreV1Api, state: dict) -> None:
-    body = {"metadata": {"name": STATE_CM, "labels": {"app.kubernetes.io/part-of": "serverless2", "app.kubernetes.io/name": "dispatcher"}},
-            "data": {"state.json": json.dumps(state, sort_keys=True)}}
+    body = {
+        "metadata": {
+            "name": STATE_CM,
+            "labels": {"app.kubernetes.io/part-of": "serverless2", "app.kubernetes.io/name": "dispatcher"},
+        },
+        "data": {"state.json": json.dumps(state, sort_keys=True)},
+    }
     try:
         core.patch_namespaced_config_map(STATE_CM, NS, body)
     except client.exceptions.ApiException as e:
@@ -188,8 +229,22 @@ def list_lws(w: dict) -> list:
 
 
 def set_min_nodes(node_group_id: str, n: int, region: str) -> None:
-    nebius_cli.run(["mk8s", "node-group", "update", "--id", node_group_id, "--patch", "--autoscaling-min-node-count", str(n), "--format", "json"],
-                   region=region, timeout=180)
+    nebius_cli.run(
+        [
+            "mk8s",
+            "node-group",
+            "update",
+            "--id",
+            node_group_id,
+            "--patch",
+            "--autoscaling-min-node-count",
+            str(n),
+            "--format",
+            "json",
+        ],
+        region=region,
+        timeout=180,
+    )
 
 
 def reconcile(core: client.CoreV1Api, workers: dict, clusters: dict, aliases: dict) -> None:
@@ -213,21 +268,46 @@ def reconcile(core: client.CoreV1Api, workers: dict, clusters: dict, aliases: di
             seen[cid] = state.get(cid) or {}
             continue
         needed = demand(workloads, lwss, pools, cid)
-        cstate = {n: s for n, s in (state.get(cid) or {}).items() if n in pools}   # pools gone from the fleet: forgotten
+        cstate = {n: s for n, s in (state.get(cid) or {}).items() if n in pools}  # pools gone from the fleet: forgotten
         for pool, target, reason in plan(pools, needed, cstate, now):
             p, region = pools[pool], names.get(cid)
             if not region or not nebius_cli.profile(region):
-                log.warning("%s/%s: min_nodes -> %d: no credentials for region %s mounted (/etc/nebius/<region>.json)", cid, pool, target, region)
+                log.warning(
+                    "%s/%s: min_nodes -> %d: no credentials for region %s mounted (/etc/nebius/<region>.json)",
+                    cid,
+                    pool,
+                    target,
+                    region,
+                )
                 continue
             try:
                 set_min_nodes(p["node_group_id"], target, region)
             except Exception as e:  # noqa: BLE001 - logged, retried next cycle
-                log.warning("%s/%s: min_nodes -> %d failed: %s", cid, pool, target, (getattr(e, "stderr", None) or str(e)).strip())
+                log.warning(
+                    "%s/%s: min_nodes -> %d failed: %s",
+                    cid,
+                    pool,
+                    target,
+                    (getattr(e, "stderr", None) or str(e)).strip(),
+                )
                 continue
-            log.info("%s/%s: min_nodes %s -> %d (%s; fleet min %s, max %s, node group %s)", cid, pool,
-                     cstate[pool].get("set", p.get("min_nodes")), target, reason, p.get("min_nodes"), p.get("max_nodes"), p["node_group_id"])
+            log.info(
+                "%s/%s: min_nodes %s -> %d (%s; fleet min %s, max %s, node group %s)",
+                cid,
+                pool,
+                cstate[pool].get("set", p.get("min_nodes")),
+                target,
+                reason,
+                p.get("min_nodes"),
+                p.get("max_nodes"),
+                p["node_group_id"],
+            )
             # at the fleet's own value nothing is remembered: the state is empty while every pool is idle
-            cstate[pool] = {"set": target, "at": datetime.now(timezone.utc).isoformat()} if target != int(p.get("min_nodes") or 0) else {}
+            cstate[pool] = (
+                {"set": target, "at": datetime.now(timezone.utc).isoformat()}
+                if target != int(p.get("min_nodes") or 0)
+                else {}
+            )
         seen[cid] = {n: s for n, s in cstate.items() if s.get("set") is not None or s.get("low_since") is not None}
     state = {cid: s for cid, s in seen.items() if s}
     if json.dumps(state, sort_keys=True) != before:

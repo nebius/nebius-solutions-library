@@ -1,5 +1,6 @@
 """Bearer key -> Principal: the fleet database answers (hash lookup, cached AUTH_CACHE_S); nothing else authenticates a
 caller. LiteLLM holds a best-effort mirror of the keys for its own OpenAI route (keys.py) and is never consulted here."""
+
 import asyncio, time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,29 +30,51 @@ class Principal:
     def owner(self) -> str:
         """Opaque stable operation owner; multiple imported keys of one principal agree."""
         principal_id = ((self.info.get("metadata") or {}).get("legacy") or {}).get("principal_id")
-        identity = [self.tenant, "principal", principal_id] if principal_id else [self.tenant, "key", keys.key_hash(self.key)]
+        identity = (
+            [self.tenant, "principal", principal_id] if principal_id else [self.tenant, "key", keys.key_hash(self.key)]
+        )
         import json
+
         return keys.key_hash(json.dumps(identity, separators=(",", ":")))
 
     def public(self) -> dict:
         i = self.info
-        exhausted = (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]) \
-            or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"]) \
-            or (i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"])
+        exhausted = (
+            (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"])
+            or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"])
+            or (
+                i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]
+            )
+        )
         legacy = (i.get("metadata") or {}).get("legacy") or {}
-        return {"id": i.get("token") or i.get("key_name"), "key_preview": i.get("key_name"), "alias": i.get("key_alias"),
-                "tenant": self.tenant, "budget": i.get("max_budget"), "spend": i.get("spend", 0), "models": i.get("models", []),
-                "created_at": i.get("created_at"), "expires_at": i.get("expires"),
-                "status": "exhausted" if exhausted else "active", "role": self.role,
-                "scopes": i.get("scopes") or [], "max_concurrent": i.get("max_concurrent"),
-                "budget_requests": i.get("budget_requests"), "spent_requests": i.get("spent_requests") or 0,
-                "budget_gpu_seconds": i.get("budget_gpu_seconds"), "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
-                "rate_limit": i.get("rate_limit"), "principal_id": legacy.get("principal_id"), "legacy": legacy or None}
+        return {
+            "id": i.get("token") or i.get("key_name"),
+            "key_preview": i.get("key_name"),
+            "alias": i.get("key_alias"),
+            "tenant": self.tenant,
+            "budget": i.get("max_budget"),
+            "spend": i.get("spend", 0),
+            "models": i.get("models", []),
+            "created_at": i.get("created_at"),
+            "expires_at": i.get("expires"),
+            "status": "exhausted" if exhausted else "active",
+            "role": self.role,
+            "scopes": i.get("scopes") or [],
+            "max_concurrent": i.get("max_concurrent"),
+            "budget_requests": i.get("budget_requests"),
+            "spent_requests": i.get("spent_requests") or 0,
+            "budget_gpu_seconds": i.get("budget_gpu_seconds"),
+            "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
+            "rate_limit": i.get("rate_limit"),
+            "principal_id": legacy.get("principal_id"),
+            "legacy": legacy or None,
+        }
 
 
 async def _fetch(url: str, headers: dict, params: dict | None = None) -> dict | None:
     """GET a key service: its JSON, None for a key it does not know, 503 when it is down (fail closed)."""
     from resilience import retry_http
+
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await retry_http(lambda: c.get(url, params=params, headers=headers))

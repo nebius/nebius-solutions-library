@@ -1,4 +1,5 @@
 """Migration regressions: direct S2 access, not only the Scientific gateway."""
+
 import copy
 
 import pytest
@@ -21,13 +22,17 @@ def principal_info(owner, **limits):
 def auth_as(monkeypatch, values):
     async def info(key):
         return copy.deepcopy(values[key])
+
     monkeypatch.setattr(auth, "key_info", info)
     monkeypatch.setattr(attempts, "enabled", lambda: False)
 
 
 def test_same_principal_multiple_keys_and_other_principal_direct_paths(client, admin_keys, fake_keys, monkeypatch):
     c, cluster = client
-    auth_as(monkeypatch, {"sk-good": principal_info("p1"), "sk-same": principal_info("p1"), "sk-other": principal_info("p2")})
+    auth_as(
+        monkeypatch,
+        {"sk-good": principal_info("p1"), "sk-same": principal_info("p1"), "sk-other": principal_info("p2")},
+    )
     own, other = {"Authorization": "Bearer sk-same"}, {"Authorization": "Bearer sk-other"}
     body = {"mode": "run", "input": {"message": "synthetic"}}
     first = c.post("/v1/models/hello-run:invoke", headers={**H, "Idempotency-Key": "same-intent"}, json=body)
@@ -54,8 +59,19 @@ def test_same_principal_multiple_keys_and_other_principal_direct_paths(client, a
     del cluster.jobs[("tenant-demo", oid)]
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda _: None)
-    rows = [{"operation": oid, "root": oid, "tenant": "demo", "pod": oid + "-a", "epoch": 1,
-             "status": "succeeded", "export_state": "succeeded", "revision": 1, "region": "eu-north1"}]
+    rows = [
+        {
+            "operation": oid,
+            "root": oid,
+            "tenant": "demo",
+            "pod": oid + "-a",
+            "epoch": 1,
+            "status": "succeeded",
+            "export_state": "succeeded",
+            "revision": 1,
+            "region": "eu-north1",
+        }
+    ]
     monkeypatch.setattr(attempts, "for_operation", lambda _: rows)
     assert c.get(f"/v1/operations/{oid}", headers=own).status_code == 200
     assert c.get(f"/v1/operations/{oid}", headers=other).status_code == 404
@@ -65,7 +81,9 @@ def test_missing_historical_provenance_is_not_tenant_ownership(client, admin_key
     c, _ = client
     auth_as(monkeypatch, {"sk-good": principal_info("p1")})
     monkeypatch.setattr(attempts, "enabled", lambda: True)
-    monkeypatch.setattr(attempts, "for_operation", lambda _: [{"operation": "op-old", "root": "op-old", "tenant": "demo"}])
+    monkeypatch.setattr(
+        attempts, "for_operation", lambda _: [{"operation": "op-old", "root": "op-old", "tenant": "demo"}]
+    )
     assert c.get("/v1/operations/op-old", headers=H).status_code == 404
 
 
@@ -90,9 +108,12 @@ def test_bounded_continuation_does_not_bypass_admission(client, admin_keys, fake
     assert result.status_code == 501 and "reservation transfer" in result.json()["detail"]
 
 
-@pytest.mark.parametrize("execution", [{"placement": {"fallback_wait_s": 0}}, {"recovery": {"on_infrastructure_loss": "recover"}}])
+@pytest.mark.parametrize(
+    "execution", [{"placement": {"fallback_wait_s": 0}}, {"recovery": {"on_infrastructure_loss": "recover"}}]
+)
 def test_bounded_auto_continuation_is_not_admitted(client, admin_keys, fake_keys, monkeypatch, execution):
     import execution as ex
+
     c, _ = client
     auth_as(monkeypatch, {"sk-good": principal_info("p1", budget_requests=10)})
     monkeypatch.setattr(ex, "tenant_config", lambda *a, **k: {"identities": {}, "execution_profiles": {}})
@@ -133,9 +154,11 @@ def test_direct_gateway_cannot_bypass_concurrency_and_unconfigured_hmac(client, 
 def test_sync_unlimited_gpu_key_holds_slot_and_releases_on_failure(client, admin_keys, fake_keys, monkeypatch):
     c, _ = client
     auth_as(monkeypatch, {"sk-good": principal_info("p1", max_concurrent=1)})
+
     async def fail(*args):
         assert [x[0] for x in fake_keys.calls] == ["admit"]
         raise HTTPException(502, "synthetic upstream failure")
+
     monkeypatch.setattr(api, "_sync", fail)
     assert c.post("/v1/models/llm-example:invoke", headers=H, json={"mode": "sync"}).status_code == 502
     assert [x[0] for x in fake_keys.calls] == ["admit", "release"]
@@ -146,10 +169,12 @@ def test_sync_unlimited_gpu_key_holds_slot_and_releases_on_failure(client, admin
 def test_create_failure_refunds_only_confirmed_missing_new_job(client, admin_keys, fake_keys, monkeypatch, exists):
     c, cluster = client
     monkeypatch.setattr(attempts, "enabled", lambda: False)
+
     def fail(ns, job, region, secret):
         if exists:
             cluster.create_namespaced_job(ns, job)
         raise HTTPException(502, "synthetic create response lost")
+
     monkeypatch.setattr(jobs, "create", fail)
     r = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}})
     assert r.status_code == 502
@@ -184,10 +209,12 @@ def test_admission_cannot_replay_another_keys_reservation(database):
 def test_create_lock_reuses_pool_connection_for_admission_and_owner(database):
     from concurrent.futures import ThreadPoolExecutor
     import threading
+
     db.migrate()
     value, _ = keys.create("demo", "lock-proof")
     keys.own_operation("op-lock", "demo", "owner", "hello-run")
     barrier = threading.Barrier(8)
+
     def operation(index):
         name = "op-lock-" + str(index)
         with keys.operation_lock(name):
@@ -195,6 +222,7 @@ def test_create_lock_reuses_pool_connection_for_admission_and_owner(database):
             keys.admit(keys.key_hash(value), name, "demo")
             assert keys.operation_owner("op-lock") == ("demo", "owner", "hello-run")
             return keys.abandon(name, keys.key_hash(value))
+
     with ThreadPoolExecutor(max_workers=8) as executor:
         assert all(executor.map(operation, range(8)))
 

@@ -5,6 +5,7 @@ endpoints {name: path}, gpu {count, classes}, price {unit, usd}, coldStartClass,
 runtime {image, port, ...} (endpoints), job {image, command, gpu, cpu, memory, pvcSizeGi, ...} and
 parameters [] (run, rendered into a Kubernetes Job by jobs.py, docs/JOBS.md), namespace, litellm_route, endpoint_host, deployments {<cluster>: {pool, image,
 priorityClassName, parameters, price_per_gpu_hour, paused}} ("hub" = this API's region)."""
+
 import glob, os, yaml
 from config import CATALOG_DIRS, HUB_REGION, LABEL, MODELS_NAMESPACE
 
@@ -29,7 +30,9 @@ def normalise(doc: dict) -> dict:
     eps = {k: v for k, v in (m.get("endpoints") or {}).items() if k not in ("ready", "live", "metrics")}
     m["name"] = m["id"]
     m["display_name"] = m.get("displayName", m["id"])
-    m.setdefault("managed_by", "catalog")      # catalog (bundled file, read-only) | api (services/api/models.py, the fleet database)
+    m.setdefault(
+        "managed_by", "catalog"
+    )  # catalog (bundled file, read-only) | api (services/api/models.py, the fleet database)
     m.setdefault("k8s_name", m["id"].replace(".", "-"))
     m.setdefault("mode", "sync")
     m.setdefault("modes", ["run"] if m["mode"] == "run" else ["sync", "async"])
@@ -43,27 +46,45 @@ def normalise(doc: dict) -> dict:
     # API injects it when the caller omits `model` (sync and async), so tenants only know the catalog id.
     if not m.get("served_model"):
         m["served_model"] = m.get("servedModel") or next(
-            (a.split("=", 1)[1] for a in (rt.get("args") or []) if a.startswith("--model_name=")), None)
+            (a.split("=", 1)[1] for a in (rt.get("args") or []) if a.startswith("--model_name=")), None
+        )
     if isinstance(price, dict) and price:
         m["price"] = f"${price['usd']} / {price['unit']}"
         m["price_per_call"] = price.get("usd") if price.get("unit") == "call" else None
-    m["gpu"] = f"{gpu.get('count', 1)}x {'/'.join(gpu.get('classes', []))}" if isinstance(gpu, dict) and gpu else (gpu or "none")
-    m["gpu_classes"] = list(gpu.get("classes") or []) if isinstance(gpu, dict) else []    # preferred first (scheduling profile)
-    m["nodes"] = int(m.get("nodes") or rt.get("nodes") or 1)       # > 1: a multi-node endpoint (LeaderWorkerSet, services/api/models.py)
+    m["gpu"] = (
+        f"{gpu.get('count', 1)}x {'/'.join(gpu.get('classes', []))}"
+        if isinstance(gpu, dict) and gpu
+        else (gpu or "none")
+    )
+    m["gpu_classes"] = (
+        list(gpu.get("classes") or []) if isinstance(gpu, dict) else []
+    )  # preferred first (scheduling profile)
+    m["nodes"] = int(
+        m.get("nodes") or rt.get("nodes") or 1
+    )  # > 1: a multi-node endpoint (LeaderWorkerSet, services/api/models.py)
     m["cold_start_class"] = m.get("coldStartClass")
     if not m.get("deployments") and m["mode"] == "run":
-        import kube                                   # lazy: catalog must not import kube at load
+        import kube  # lazy: catalog must not import kube at load
+
         # a run class without deployments runs in every region of the fleet (the fleet document's pools), else here
-        regions = sorted({kube.cluster_region(p["region"]) for p in (kube.fleet().get("pools") or {}).values() if p.get("region")})
+        regions = sorted(
+            {kube.cluster_region(p["region"]) for p in (kube.fleet().get("pools") or {}).values() if p.get("region")}
+        )
         m["deployments"] = {r: {} for r in (regions or kube.regions())}
-    dep = {(k if k != "hub" else HUB_REGION): (v or {}) for k, v in (m.get("deployments") or {"hub": {}}).items() if not (v or {}).get("paused")}
+    dep = {
+        (k if k != "hub" else HUB_REGION): (v or {})
+        for k, v in (m.get("deployments") or {"hub": {}}).items()
+        if not (v or {}).get("paused")
+    }
     m["deployments"] = dep
     m["regions"] = list(dep)
     if m["mode"] != "run" and not m.get("endpoint_host"):
-        m["endpoint_host"] = f"http://{m['k8s_name']}-predictor.{m['namespace']}.svc.cluster.local"   # on this cluster only
+        m["endpoint_host"] = (
+            f"http://{m['k8s_name']}-predictor.{m['namespace']}.svc.cluster.local"  # on this cluster only
+        )
     if m["mode"] == "run":
-        m["job"] = dict(m.get("job") or {})          # image, command, gpu, cpu, memory, ... (docs/JOBS.md)
-        images = m["job"].get("images")              # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs")
+        m["job"] = dict(m.get("job") or {})  # image, command, gpu, cpu, memory, ... (docs/JOBS.md)
+        images = m["job"].get("images")  # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs")
         if isinstance(images, dict) and images.get("default") and not m["job"].get("image"):
             m["job"]["image"] = images["default"]
         m["protocol"] = m.get("protocol") or "kubernetes-job"
@@ -78,8 +99,10 @@ def runtime_models(force: bool = False) -> dict:
     """Entries defined through the API (services/api/models.py: the fleet database on the control API, ConfigMap copies
     in the regions), re-read every few seconds or after a write."""
     import time
+
     if force or _runtime["until"] < time.time():
         import models as runtime_store
+
         _runtime["models"] = {mid: normalise(e) for mid, e in runtime_store.list_runtime().items()}
         _runtime["until"] = time.time() + RUNTIME_TTL_S
     return _runtime["models"]
@@ -108,6 +131,7 @@ def pinned(model: dict, ann: dict) -> dict:
     if not want or str(model.get("version")) == str(want) or model.get("managed_by") != "api":
         return model
     import db, models as runtime_store
+
     if not db.enabled():
         return model
     for h in db.history(model["name"], 500):
@@ -136,11 +160,23 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
     """Shape of docs/API.md Model."""
     price = m.get("price") or (f"${m['price_per_call']} / call" if m.get("price_per_call") is not None else "metered")
     return {
-        "id": m["name"], "name": m["display_name"], "description": m.get("description", ""),
-        "modes": m["modes"], "default_mode": m["mode"], "gpu": m.get("gpu", "none"), "price": price,
-        "price_per_call": m.get("price_per_call"), "image": m.get("image"), "protocol": m.get("protocol"),
-        "cold_start_s": m.get("cold_start_s"), "cold_start_class": m.get("cold_start_class"), "parameters": m.get("parameters", []),
-        "endpoints": m.get("endpoints"), "task": m.get("task"), "managed_by": m.get("managed_by", "catalog"), "spec": m.get("spec"),
-        "example": m.get("example"),      # a valid request body (the console's "Test request" tab)
+        "id": m["name"],
+        "name": m["display_name"],
+        "description": m.get("description", ""),
+        "modes": m["modes"],
+        "default_mode": m["mode"],
+        "gpu": m.get("gpu", "none"),
+        "price": price,
+        "price_per_call": m.get("price_per_call"),
+        "image": m.get("image"),
+        "protocol": m.get("protocol"),
+        "cold_start_s": m.get("cold_start_s"),
+        "cold_start_class": m.get("cold_start_class"),
+        "parameters": m.get("parameters", []),
+        "endpoints": m.get("endpoints"),
+        "task": m.get("task"),
+        "managed_by": m.get("managed_by", "catalog"),
+        "spec": m.get("spec"),
+        "example": m.get("example"),  # a valid request body (the console's "Test request" tab)
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
     }

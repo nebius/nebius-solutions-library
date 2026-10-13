@@ -6,6 +6,7 @@ kueue-system/price-feed-nebius-sa, stack/platform/secrets.tf: the `ops_credentia
 (the key file is re-read on every call, tokens are minted per call, nothing expires), so a caller names the
 region whose project it acts in and never handles tokens. HOME must be writable (the manifests set /tmp).
 """
+
 import glob
 import logging
 import os
@@ -14,7 +15,7 @@ import subprocess
 log = logging.getLogger("nebius-cli")
 KEYS_DIR = os.environ.get("NEBIUS_KEYS_DIR", "/etc/nebius")
 ENDPOINT = os.environ.get("NEBIUS_ENDPOINT", "api.nebius.cloud")
-_profiles: dict[str, str] = {}   # region name -> profile name, filled by login()
+_profiles: dict[str, str] = {}  # region name -> profile name, filled by login()
 
 
 def login(keys_dir: str = KEYS_DIR) -> dict[str, str]:
@@ -22,11 +23,16 @@ def login(keys_dir: str = KEYS_DIR) -> dict[str, str]:
     profile cannot be created is logged and skipped: the callers then act without that region's credentials."""
     _profiles.clear()
     for f in sorted(glob.glob(os.path.join(keys_dir, "*.json"))):
-        region = os.path.basename(f)[:-len(".json")]
+        region = os.path.basename(f)[: -len(".json")]
         profile = f"sa-{region}"
         try:
-            subprocess.run(["nebius", "profile", "create", profile, "--endpoint", ENDPOINT, "--service-account-file-path", f],
-                           capture_output=True, text=True, timeout=60, check=True)
+            subprocess.run(
+                ["nebius", "profile", "create", profile, "--endpoint", ENDPOINT, "--service-account-file-path", f],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
             _profiles[region] = profile
         except Exception as e:  # noqa: BLE001 - a bad key must not stop the dispatcher
             log.warning("profile %s from %s failed: %s", profile, f, getattr(e, "stderr", None) or e)

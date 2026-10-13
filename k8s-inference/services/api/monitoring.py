@@ -5,6 +5,7 @@ another region through that cluster's API server proxy with the api-agent kubeco
 no monitoring service of any region is exposed outside its cluster. Missing series stay missing (idle and
 unavailable are different from a measured zero).
 """
+
 import asyncio, json, math, re, time, urllib.parse
 import httpx
 from fastapi import HTTPException
@@ -31,27 +32,37 @@ def target(service_url: str, region: str) -> tuple[str, dict, str | bool]:
     if region == REGION:
         return service_url, {}, True
     if region not in kube.regions():
-        raise HTTPException(410, f"Region {region} is no longer part of this fleet: the metrics and logs of this operation lived "
-                                 f"on its cluster and are gone. Its attempt records and outputs in the bucket are still there (result).")
+        raise HTTPException(
+            410,
+            f"Region {region} is no longer part of this fleet: the metrics and logs of this operation lived "
+            f"on its cluster and are gone. Its attempt records and outputs in the bucket are still there (result).",
+        )
     u = urllib.parse.urlsplit(service_url)
-    name, ns = u.hostname.split(".")[:2]              # <name>.<namespace>.svc[.cluster.local]
+    name, ns = u.hostname.split(".")[:2]  # <name>.<namespace>.svc[.cluster.local]
     api = kube._client(region)
     headers: dict = {}
-    api.update_params_for_auth(headers, [], ["BearerToken"])     # kubernetes 36: (headers, queries, auth_settings)
+    api.update_params_for_auth(headers, [], ["BearerToken"])  # kubernetes 36: (headers, queries, auth_settings)
     conf = api.configuration
-    return (f"{conf.host.rstrip('/')}/api/v1/namespaces/{ns}/services/{name}:{u.port}/proxy", headers,
-            conf.ssl_ca_cert or conf.verify_ssl)
+    return (
+        f"{conf.host.rstrip('/')}/api/v1/namespaces/{ns}/services/{name}:{u.port}/proxy",
+        headers,
+        conf.ssl_ca_cert or conf.verify_ssl,
+    )
 
 
 def selectors(labels: dict[str, str], regex: set[str] | None = None) -> str:
-    return "{" + ",".join(f"{k}{'=~' if k in (regex or set()) else '='}{json.dumps(v)}" for k, v in labels.items()) + "}"
+    return (
+        "{" + ",".join(f"{k}{'=~' if k in (regex or set()) else '='}{json.dumps(v)}" for k, v in labels.items()) + "}"
+    )
 
 
 def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[str, str, str, str]]:
     # RE2-escaped identity, not a user-provided regex. Kubernetes prefixes cover all revisions/attempts.
-    pods = selectors({"namespace": namespace, "pod": re.escape(name) + ("-predictor.*" if kind == "endpoint" else "-.*")}, {"pod"})
+    pods = selectors(
+        {"namespace": namespace, "pod": re.escape(name) + ("-predictor.*" if kind == "endpoint" else "-.*")}, {"pod"}
+    )
     containers = pods[:-1] + ',container!="",container!="POD"}'
-    w = f"{max(120, 2 * step)}s"   # the rate window follows the step: a coarse window still catches a short-lived pod
+    w = f"{max(120, 2 * step)}s"  # the rate window follows the step: a coarse window still catches a short-lived pod
     q = [
         ("cpu", "CPU usage", "cores", f"sum(rate(container_cpu_usage_seconds_total{containers}[{w}]))"),
         ("memory", "Memory usage", "bytes", f"sum(container_memory_working_set_bytes{containers})"),
@@ -62,9 +73,24 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
         service = selectors({"namespace": namespace, "inferenceservice": name})
         knative = selectors({"k8s_namespace_name": namespace, "kn_service_name": name + "-predictor"})
         q = [
-            ("requests", "Request rate", "req/s", f"sum(rate(http_server_request_duration_seconds_count{service}[{w}]))"),
-            ("latency", "Response latency · p95", "ms", f"histogram_quantile(0.95, sum by(le) (rate(http_server_request_duration_seconds_bucket{service}[{w}]))) * 1000"),
-            ("errors", "Server errors", "req/s", f"sum(rate(http_server_request_duration_seconds_count{service[:-1]},http_response_status_code=~\"5..\"}}[{w}]))"),
+            (
+                "requests",
+                "Request rate",
+                "req/s",
+                f"sum(rate(http_server_request_duration_seconds_count{service}[{w}]))",
+            ),
+            (
+                "latency",
+                "Response latency · p95",
+                "ms",
+                f"histogram_quantile(0.95, sum by(le) (rate(http_server_request_duration_seconds_bucket{service}[{w}]))) * 1000",
+            ),
+            (
+                "errors",
+                "Server errors",
+                "req/s",
+                f'sum(rate(http_server_request_duration_seconds_count{service[:-1]},http_response_status_code=~"5.."}}[{w}]))',
+            ),
             ("replicas", "Ready replicas", "replicas", f"sum(kn_revision_pods_count{knative})"),
             ("concurrency", "Concurrent requests", "requests", f"sum(kn_revision_concurrency_stable{knative})"),
         ] + q
@@ -89,9 +115,18 @@ async def metrics(kind: str, namespace: str, name: str, region: str, period: str
     definitions = queries(kind, namespace, name, step)
     base, headers, verify = target(PROMETHEUS_URL, region)
     async with httpx.AsyncClient(timeout=8, verify=verify) as client:
-        results = await asyncio.gather(*[_query(client, base + "/api/v1/query_range",
-                                               {"query": q, "start": start, "end": stop, "step": step}, headers)
-                                         for _, _, _, q in definitions], return_exceptions=True)
+        results = await asyncio.gather(
+            *[
+                _query(
+                    client,
+                    base + "/api/v1/query_range",
+                    {"query": q, "start": start, "end": stop, "step": step},
+                    headers,
+                )
+                for _, _, _, q in definitions
+            ],
+            return_exceptions=True,
+        )
     panels, unavailable = [], []
     for (mid, title, unit, _), result in zip(definitions, results):
         series = []
@@ -113,8 +148,16 @@ async def metrics(kind: str, namespace: str, name: str, region: str, period: str
     return {"region": region, "start": start, "end": stop, "step": step, "panels": panels}
 
 
-async def logs(kind: str, namespace: str, name: str, region: str, period: str,
-               search: str = "", limit: int = 300, end: float | None = None) -> dict:
+async def logs(
+    kind: str,
+    namespace: str,
+    name: str,
+    region: str,
+    period: str,
+    search: str = "",
+    limit: int = 300,
+    end: float | None = None,
+) -> dict:
     start, stop, _ = window(period, end)
     labels = {"namespace": namespace, "inferenceservice" if kind == "endpoint" else "job": name}
     if kind == "jobset":
@@ -125,15 +168,30 @@ async def logs(kind: str, namespace: str, name: str, region: str, period: str,
         query += " |= " + json.dumps(search)  # LogQL string literal, never executable query syntax
     base, headers, verify = target(LOKI_URL, region)
     async with httpx.AsyncClient(timeout=8, verify=verify) as client:
-        data = await _query(client, base + "/loki/api/v1/query_range",
-                            {"query": query, "start": str(int(start * 1e9)), "end": str(int(stop * 1e9)),
-                             "limit": limit, "direction": "backward"}, headers)
+        data = await _query(
+            client,
+            base + "/loki/api/v1/query_range",
+            {
+                "query": query,
+                "start": str(int(start * 1e9)),
+                "end": str(int(stop * 1e9)),
+                "limit": limit,
+                "direction": "backward",
+            },
+            headers,
+        )
     lines = []
     for stream in data.get("result", []):
         labels = stream.get("stream") or {}
         for timestamp, line in stream.get("values", []):
-            lines.append({"timestamp": str(timestamp), "line": line, "pod": labels.get("pod", ""),
-                          "container": labels.get("container", "")})
+            lines.append(
+                {
+                    "timestamp": str(timestamp),
+                    "line": line,
+                    "pod": labels.get("pod", ""),
+                    "container": labels.get("container", ""),
+                }
+            )
     lines.sort(key=lambda line: int(line["timestamp"]), reverse=True)
     lines = lines[:limit]
     return {"region": region, "start": start, "end": stop, "lines": lines, "truncated": len(lines) == limit}

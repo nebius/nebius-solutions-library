@@ -1,5 +1,6 @@
 """Kubernetes clients per region (in-cluster for this region, rotated kubeconfigs for the others)
 and the KServe read helpers the catalog uses."""
+
 import os, time
 from fastapi import HTTPException
 from kubernetes import client, config as kconfig
@@ -8,7 +9,7 @@ from config import FLEET_CONFIGMAP, HUB_REGION, KUEUE_JOB_UID_LABEL, KUEUE_NAMES
 from resilience import retry
 
 _clients: dict[str, client.ApiClient] = {}
-_kubeconfig_mtime: dict[str, float] = {}      # region -> mtime of the kubeconfig the client was built from
+_kubeconfig_mtime: dict[str, float] = {}  # region -> mtime of the kubeconfig the client was built from
 
 
 def regions() -> list[str]:
@@ -67,6 +68,7 @@ def fleet() -> dict:
         return _fleet_cache
     try:
         import yaml
+
         data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
         _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
         _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
@@ -119,13 +121,19 @@ def cluster_id(region: str | None) -> str | None:
     key them. An id equal to the region wins; without the map the legacy `hub` alias, else the region itself."""
     if not region:
         return None
-    known = {cid: c for cid, c in (fleet().get("clusters") or {}).items() if (c or {}).get("region") == region and not (c or {}).get("control")}
+    known = {
+        cid: c
+        for cid, c in (fleet().get("clusters") or {}).items()
+        if (c or {}).get("region") == region and not (c or {}).get("control")
+    }
     if region in known:
         return region
     if len(known) == 1:
         return next(iter(known))
-    if known:                      # two worker clusters in one region: never guess an identity, the caller must know the cluster
-        raise LookupError(f"ambiguous worker cluster for region {region}: {sorted(known)}; the Workload's admitting cluster is required")
+    if known:  # two worker clusters in one region: never guess an identity, the caller must know the cluster
+        raise LookupError(
+            f"ambiguous worker cluster for region {region}: {sorted(known)}; the Workload's admitting cluster is required"
+        )
     return "hub" if region == HUB_REGION and region != REGION else region
 
 
@@ -146,13 +154,26 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     to a region (its Kueue admits the JobSet directly and would undo a suspend the same way).
     Returns the number of Workloads patched (0: none found, the run never reached the queue)."""
     try:
-        items = retry(api(region).list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads",
-                      label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}").get("items", [])
+        items = retry(
+            api(region).list_namespaced_custom_object,
+            "kueue.x-k8s.io",
+            "v1beta2",
+            ns,
+            "workloads",
+            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+        ).get("items", [])
     except ApiException:
         return 0
     for w in items:
-        retry(api(region).patch_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads", w["metadata"]["name"],
-              {"spec": {"active": False}})
+        retry(
+            api(region).patch_namespaced_custom_object,
+            "kueue.x-k8s.io",
+            "v1beta2",
+            ns,
+            "workloads",
+            w["metadata"]["name"],
+            {"spec": {"active": False}},
+        )
     return len(items)
 
 
@@ -160,7 +181,9 @@ def workload_reasons(ns: str) -> dict[str, str]:
     """Job uid -> why its Workload is not admitted (the condition messages Kueue writes): what a QUEUED operation
     reports as `reason`."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get("items", [])
+        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
+            "items", []
+        )
     except ApiException:
         return {}
     out = {}
@@ -182,14 +205,18 @@ def workload_clusters(ns: str) -> dict[str, str]:
     status.clusterName while the worker's copy exists, afterwards the record the dispatcher wrote on the Workload
     (`serverless2.nebius/admitted-cluster`); absent while the run is only nominated (it may still move)."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get("items", [])
+        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
+            "items", []
+        )
     except ApiException:
         return {}
     out = {}
     for w in items:
         uid = (w.get("metadata", {}).get("labels") or {}).get(KUEUE_JOB_UID_LABEL)
         st = w.get("status") or {}
-        placed = st.get("clusterName") or (w.get("metadata", {}).get("annotations") or {}).get(f"{LABEL}/admitted-cluster")
+        placed = st.get("clusterName") or (w.get("metadata", {}).get("annotations") or {}).get(
+            f"{LABEL}/admitted-cluster"
+        )
         if uid and placed:
             out[uid] = placed
     return out
@@ -200,7 +227,9 @@ _isvc_cache: dict[str, tuple[float, dict]] = {}
 
 def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
     try:
-        return retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
+        return retry(
+            api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
+        )
     except ApiException as e:
         if e.status == 404:
             return None
@@ -252,25 +281,54 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
     try:
         if nodes > 1:
             i = _lws_get(region, ns, name)
-            pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}").items
+            pods = retry(
+                core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}"
+            ).items
             leaders = [p for p in pods if p.metadata.labels.get("leaderworkerset.sigs.k8s.io/worker-index") == "0"]
-            n = sum(1 for p in leaders if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
+            n = sum(
+                1
+                for p in leaders
+                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
+            )
             stopped = int(i.get("spec", {}).get("replicas", 0)) == 0
-            out = {"status": "ready" if n else ("scaled-to-zero" if stopped and not pods else "deploying"), "replicas_ready": n,
-                   "nodes": nodes, "pods_ready": sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))),
-                   **_startup(leaders)}
-            if (last := (i.get("metadata", {}).get("annotations") or {}).get(LAST_REQUEST_ANNOTATION)):
+            out = {
+                "status": "ready" if n else ("scaled-to-zero" if stopped and not pods else "deploying"),
+                "replicas_ready": n,
+                "nodes": nodes,
+                "pods_ready": sum(
+                    1
+                    for p in pods
+                    if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
+                ),
+                **_startup(leaders),
+            }
+            if last := (i.get("metadata", {}).get("annotations") or {}).get(LAST_REQUEST_ANNOTATION):
                 out["last_request_at"] = last
         else:
-            i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
+            i = retry(
+                api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
+            )
             conds = i.get("status", {}).get("conditions", [])
             ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds)
-            pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
-            n = sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
+            pods = retry(
+                core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}"
+            ).items
+            n = sum(
+                1
+                for p in pods
+                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
+            )
             # Knative gave up on the newest revision (ProgressDeadlineExceeded -> RevisionFailed): nothing is starting any
             # more, so this is an error with Knative's message, not "deploying" (a Boltz-2 NIM whose Secret was gone sat in
             # "deploying" for two days with no pod, no logs and no metrics)
-            failed = next((c for c in conds if c.get("type") == "Ready" and c.get("status") == "False" and "Failed" in (c.get("reason") or "")), None)
+            failed = next(
+                (
+                    c
+                    for c in conds
+                    if c.get("type") == "Ready" and c.get("status") == "False" and "Failed" in (c.get("reason") or "")
+                ),
+                None,
+            )
             if n:
                 status = "ready"
             elif failed and not pods:
@@ -296,7 +354,9 @@ def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_
     if _last_stamp.get(f"{region}/{name}", 0) + min_interval_s > now:
         return
     _last_stamp[f"{region}/{name}"] = now
-    body = {"metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}}
+    body = {
+        "metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}
+    }
     try:
         api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
     except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
@@ -319,7 +379,11 @@ def pool_usage(cluster: str, pool: str) -> dict:
     try:
         for pod in retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items:
             if pod.spec.node_name in names:
-                used += sum(int((c.resources.requests or {}).get("nvidia.com/gpu", 0)) for c in pod.spec.containers if c.resources)
+                used += sum(
+                    int((c.resources.requests or {}).get("nvidia.com/gpu", 0))
+                    for c in pod.spec.containers
+                    if c.resources
+                )
     except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
         used = None
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
@@ -330,7 +394,9 @@ def tenant_usage(tenant: str, region: str = REGION) -> dict:
     pool (flavor), admitted and pending workloads. Unreachable: empty."""
     out = {"gpus_by_pool": {}, "admitted": 0, "pending": 0}
     try:
-        items = retry(api(region).list_cluster_custom_object, "kueue.x-k8s.io", "v1beta2", "clusterqueues").get("items", [])
+        items = retry(api(region).list_cluster_custom_object, "kueue.x-k8s.io", "v1beta2", "clusterqueues").get(
+            "items", []
+        )
     except Exception:  # noqa: BLE001 - a region that cannot be reached shows as empty
         return out
     for q in items:
@@ -342,7 +408,9 @@ def tenant_usage(tenant: str, region: str = REGION) -> dict:
         for fu in st.get("flavorsUsage") or []:
             for r in fu.get("resources") or []:
                 if r.get("name") == "nvidia.com/gpu":
-                    out["gpus_by_pool"][fu["name"]] = out["gpus_by_pool"].get(fu["name"], 0) + int(float(str(r.get("total") or 0)))
+                    out["gpus_by_pool"][fu["name"]] = out["gpus_by_pool"].get(fu["name"], 0) + int(
+                        float(str(r.get("total") or 0))
+                    )
     return out
 
 
@@ -353,6 +421,10 @@ def cluster_summary(region: str) -> dict:
     except Exception:  # noqa: BLE001 - an unreachable cluster shows as such
         return {"reachable": False, "nodes_ready": None, "gpu_nodes_ready": None, "kubernetes_version": None}
     ready = [n for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))]
-    gpu = [n for n in ready if (n.metadata.labels or {}).get(f"{LABEL}/pool") and (n.metadata.labels or {}).get(f"{LABEL}/pool") != "system"]
+    gpu = [
+        n
+        for n in ready
+        if (n.metadata.labels or {}).get(f"{LABEL}/pool") and (n.metadata.labels or {}).get(f"{LABEL}/pool") != "system"
+    ]
     version = next((n.status.node_info.kubelet_version for n in nodes if n.status and n.status.node_info), None)
     return {"reachable": True, "nodes_ready": len(ready), "gpu_nodes_ready": len(gpu), "kubernetes_version": version}

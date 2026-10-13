@@ -9,13 +9,29 @@
 - `_job_shell`: the Job envelope (failure policy, deadline, MultiKueue `managedBy`)
 
 Nothing here talks to Kubernetes; jobs.py does."""
+
 import hashlib, json, re, uuid
 from fastapi import HTTPException
-from config import PUBLIC_API_URL, JOB_BACKOFF_LIMIT, JOB_TTL_S, KUEUE_PRIORITY, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, RUNNER_IMAGE, S3_ENV_SECRET
+from config import (
+    PUBLIC_API_URL,
+    JOB_BACKOFF_LIMIT,
+    JOB_TTL_S,
+    KUEUE_PRIORITY,
+    KUEUE_QUEUE,
+    LABEL,
+    MULTIKUEUE_MANAGED_BY,
+    RUNNER_IMAGE,
+    S3_ENV_SECRET,
+)
 from pod_metadata import normalise as normalise_pod_metadata
 
 TOKEN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
-PRIORITY_CLASS = {"high": "serverless2-batch-priority", "low": "serverless2-batch", None: "serverless2-batch", "normal": "serverless2-batch"}
+PRIORITY_CLASS = {
+    "high": "serverless2-batch-priority",
+    "low": "serverless2-batch",
+    None: "serverless2-batch",
+    "normal": "serverless2-batch",
+}
 
 
 def op_name(tenant: str, model: str, idem: str | None) -> str:
@@ -49,7 +65,10 @@ def class_images(model: dict) -> dict | None:
         raise HTTPException(500, f"model {model.get('name')}: job.images must map GPU classes to image references")
     bad = sorted(set(images) - {"default"} - set(gpu_classes(model)))
     if bad:
-        raise HTTPException(500, f"model {model.get('name')}: job.images names classes {bad} that are not in gpu.classes {gpu_classes(model)}")
+        raise HTTPException(
+            500,
+            f"model {model.get('name')}: job.images names classes {bad} that are not in gpu.classes {gpu_classes(model)}",
+        )
     out = dict(images)
     out.setdefault("default", job.get("image"))
     if not out["default"]:
@@ -68,12 +87,14 @@ def image_for_class(model: dict, gpu_class: str | None) -> str | None:
 def _render(value, params: dict):
     """Substitute {{name}} in strings, recursively; a token without a value is a 400."""
     if isinstance(value, str):
+
         def sub(m):
             k = m.group(1)
             if k not in params or params[k] is None:
                 raise HTTPException(400, f"missing parameter {k}")
             v = params[k]
             return v if isinstance(v, str) else json.dumps(v)
+
         return TOKEN.sub(sub, value)
     if isinstance(value, list):
         return [_render(v, params) for v in value]
@@ -82,27 +103,48 @@ def _render(value, params: dict):
     return value
 
 
-def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, label: str | None, inp: dict, idem: str | None,
-          priority: str | None, key_hash: str | None, profile: str = KUEUE_QUEUE, gpu_class: str | None = None,
-          execution: dict | None = None) -> dict:
-    labels = {f"{LABEL}/tenant": tenant, f"{LABEL}/model": model, f"{LABEL}/mode": mode, f"{LABEL}/profile": profile,
-              "kueue.x-k8s.io/queue-name": profile,
-              "kueue.x-k8s.io/priority-class": "bulk-backfill" if priority == "low" else KUEUE_PRIORITY}
-    if region:                        # pinned: the regional path always, the fleet path for explicit regions and resumes
+def _meta(
+    name: str,
+    tenant: str,
+    model: str,
+    mode: str,
+    region: str | None,
+    label: str | None,
+    inp: dict,
+    idem: str | None,
+    priority: str | None,
+    key_hash: str | None,
+    profile: str = KUEUE_QUEUE,
+    gpu_class: str | None = None,
+    execution: dict | None = None,
+) -> dict:
+    labels = {
+        f"{LABEL}/tenant": tenant,
+        f"{LABEL}/model": model,
+        f"{LABEL}/mode": mode,
+        f"{LABEL}/profile": profile,
+        "kueue.x-k8s.io/queue-name": profile,
+        "kueue.x-k8s.io/priority-class": "bulk-backfill" if priority == "low" else KUEUE_PRIORITY,
+    }
+    if region:  # pinned: the regional path always, the fleet path for explicit regions and resumes
         labels[f"{LABEL}/region"] = region
-    if gpu_class:                     # the class chosen at submission (per-class images): the pods carry it, a resume keeps it
+    if gpu_class:  # the class chosen at submission (per-class images): the pods carry it, a resume keeps it
         labels[f"{LABEL}/gpu-class"] = gpu_class
     if priority:
         labels[f"{LABEL}/priority"] = priority
-    if execution and execution.get("profile"):     # the pod label the profile's network policy selects (charts/tenant)
+    if execution and execution.get("profile"):  # the pod label the profile's network policy selects (charts/tenant)
         labels[f"{LABEL}/execution-profile"] = execution["profile"]["name"]
-    ann = {f"{LABEL}/input": json.dumps(inp)}     # bounded by the API (INPUT_MAX_BYTES): a truncated input would corrupt every resume
+    ann = {
+        f"{LABEL}/input": json.dumps(inp)
+    }  # bounded by the API (INPUT_MAX_BYTES): a truncated input would corrupt every resume
     if execution:
-        ann[f"{LABEL}/execution"] = json.dumps(execution, sort_keys=True)     # names only, never data (services/api/execution.py)
+        ann[f"{LABEL}/execution"] = json.dumps(
+            execution, sort_keys=True
+        )  # names only, never data (services/api/execution.py)
         if (execution.get("placement") or {}).get("fallback_wait_s") is not None:
             ann[f"{LABEL}/fallback-wait-s"] = str(execution["placement"]["fallback_wait_s"])
     if key_hash:
-        ann[f"{LABEL}/key"] = key_hash          # sha256 of the submitting key: billing target, never the key itself
+        ann[f"{LABEL}/key"] = key_hash  # sha256 of the submitting key: billing target, never the key itself
     if label:
         ann[f"{LABEL}/name"] = label
     if idem:
@@ -110,22 +152,43 @@ def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, lab
     return {"name": name, "labels": labels, "annotations": ann}
 
 
-def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None, excludes: str = "", gpus: int = 0,
-              placement: dict | None = None, gpu_class: str | None = None) -> dict:
-    env = [{"name": "OPERATION", "value": name}, {"name": "OUTPUT_PREFIX", "value": output_prefix}, {"name": "MAIN_CONTAINER", "value": "main"},
-           {"name": "GPUS", "value": str(gpus)}, {"name": "GPU_CLASS", "value": gpu_class or ""},
-           {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-           {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}}]
+def _uploader(
+    name: str,
+    region: str | None,
+    output_prefix: str,
+    pvc: str | None,
+    excludes: str = "",
+    gpus: int = 0,
+    placement: dict | None = None,
+    gpu_class: str | None = None,
+) -> dict:
+    env = [
+        {"name": "OPERATION", "value": name},
+        {"name": "OUTPUT_PREFIX", "value": output_prefix},
+        {"name": "MAIN_CONTAINER", "value": "main"},
+        {"name": "GPUS", "value": str(gpus)},
+        {"name": "GPU_CLASS", "value": gpu_class or ""},
+        {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+        {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+    ]
     if pvc:
         env.append({"name": "PVC_NAME", "value": pvc})
     if PUBLIC_API_URL:
-        env.append({"name": "API_URL", "value": PUBLIC_API_URL})        # POST /internal/attempts with the pod's projected token
+        env.append(
+            {"name": "API_URL", "value": PUBLIC_API_URL}
+        )  # POST /internal/attempts with the pod's projected token
     if excludes:
         env.append({"name": "UPLOAD_EXCLUDES", "value": excludes})
-    return {"name": "uploader", "image": RUNNER_IMAGE, "command": ["/usr/local/bin/upload.sh"], "env": env,
-            "envFrom": [{"secretRef": {"name": S3_ENV_SECRET}}],
-            "resources": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "1", "memory": "1Gi"}},
-            "volumeMounts": [{"name": "work", "mountPath": "/work"}], "securityContext": RUNNER_SECURITY_CONTEXT}
+    return {
+        "name": "uploader",
+        "image": RUNNER_IMAGE,
+        "command": ["/usr/local/bin/upload.sh"],
+        "env": env,
+        "envFrom": [{"secretRef": {"name": S3_ENV_SECRET}}],
+        "resources": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "1", "memory": "1Gi"}},
+        "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+        "securityContext": RUNNER_SECURITY_CONTEXT,
+    }
 
 
 # Hardening of every rendered pod (tenant containers share the GPU nodes, README "Security notes"): no privilege
@@ -134,28 +197,48 @@ def _uploader(name: str, region: str | None, output_prefix: str, pvc: str | None
 # the model container keeps the image's user unless the job class sets `runAsNonRoot` (many model images run as root).
 # Together with Pod Security Admission `baseline` on the tenant namespaces (charts/tenant) this is what the API
 # can promise: it never renders a privileged pod.
-CONTAINER_HARDENING = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
-                       "seccompProfile": {"type": "RuntimeDefault"}}
+CONTAINER_HARDENING = {
+    "allowPrivilegeEscalation": False,
+    "capabilities": {"drop": ["ALL"]},
+    "seccompProfile": {"type": "RuntimeDefault"},
+}
 RUNNER_SECURITY_CONTEXT = {**CONTAINER_HARDENING, "runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001}
 POD_SECURITY_CONTEXT = {"seccompProfile": {"type": "RuntimeDefault"}}
 
 
 def _pod_failure_policy() -> dict:
-    return {"rules": [
-        {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},   # node drain / preemption
-        {"action": "Ignore", "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]}},   # SIGKILL / SIGTERM
-    ]}
+    return {
+        "rules": [
+            {
+                "action": "Ignore",
+                "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}],
+            },  # node drain / preemption
+            {
+                "action": "Ignore",
+                "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]},
+            },  # SIGKILL / SIGTERM
+        ]
+    }
 
 
-def _job_shell(name: str, meta: dict, pod_spec: dict, timeout_s: int | None, placement: dict | None = None,
-               pod_metadata: dict | None = None) -> dict:
+def _job_shell(
+    name: str,
+    meta: dict,
+    pod_spec: dict,
+    timeout_s: int | None,
+    placement: dict | None = None,
+    pod_metadata: dict | None = None,
+) -> dict:
     """placement (fleet path): {manager: bool, classes: [...], regions: [...]}; the pod template carries what
     the dispatcher needs (it sees the Workload's pod template, not the Job): allowed GPU classes and regions,
     work volume size."""
     extra = normalise_pod_metadata(pod_metadata)
     from execution import scope_runner_token
+
     scope_runner_token(pod_spec)
-    tmpl_meta = {"labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}}
+    tmpl_meta = {
+        "labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}
+    }
     ann = dict(extra.get("annotations", {}))
     if meta["annotations"].get(f"{LABEL}/pvc-size-gi"):
         ann[f"{LABEL}/pvc-size-gi"] = meta["annotations"][f"{LABEL}/pvc-size-gi"]
@@ -165,12 +248,16 @@ def _job_shell(name: str, meta: dict, pod_spec: dict, timeout_s: int | None, pla
         ann[f"{LABEL}/regions"] = ",".join(placement["regions"])
     if ann:
         tmpl_meta["annotations"] = ann
-    spec = {"parallelism": 1, "completions": 1, "backoffLimit": JOB_BACKOFF_LIMIT, "ttlSecondsAfterFinished": JOB_TTL_S,
-            "podFailurePolicy": _pod_failure_policy(), "template": {"metadata": tmpl_meta, "spec": pod_spec}}
+    spec = {
+        "parallelism": 1,
+        "completions": 1,
+        "backoffLimit": JOB_BACKOFF_LIMIT,
+        "ttlSecondsAfterFinished": JOB_TTL_S,
+        "podFailurePolicy": _pod_failure_policy(),
+        "template": {"metadata": tmpl_meta, "spec": pod_spec},
+    }
     if timeout_s:
         spec["activeDeadlineSeconds"] = timeout_s
     if placement and placement.get("manager"):
-        spec["managedBy"] = MULTIKUEUE_MANAGED_BY     # the manager's Job controller leaves it to Kueue MultiKueue
+        spec["managedBy"] = MULTIKUEUE_MANAGED_BY  # the manager's Job controller leaves it to Kueue MultiKueue
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": spec}
-
-

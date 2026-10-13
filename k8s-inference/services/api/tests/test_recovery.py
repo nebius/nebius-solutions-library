@@ -1,4 +1,5 @@
 """Regression coverage for authorization and interrupted desired-state/job writes."""
+
 import copy
 import json
 import pytest
@@ -21,14 +22,22 @@ def test_catalogue_and_endpoint_auth_enforce_model_permissions(client, admin_key
     spec = {**SPEC, "env": {"PRIVATE_VALUE": "must-not-leak"}}
     assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 201
     assert "must-not-leak" not in c.get("/v1/models", headers=H).text
+
     async def limited(key):
         return {**KEY_INFO, "models": ["http-example"]}
+
     monkeypatch.setattr(auth, "key_info", limited)
     assert "recovery-test" not in {m["id"] for m in c.get("/v1/models", headers=H).json()}
     assert c.get("/v1/models/recovery-test", headers=H).status_code == 403
     assert c.get("/v1/endpoints/recovery-test", headers=H).status_code == 403
     # Host headers cannot change the chart-bound identity.
-    assert c.get("/internal/authorize/recovery-test/v1/chat", headers={**H, "X-Forwarded-Host": "http-example-predictor.models.example"}).status_code == 403
+    assert (
+        c.get(
+            "/internal/authorize/recovery-test/v1/chat",
+            headers={**H, "X-Forwarded-Host": "http-example-predictor.models.example"},
+        ).status_code
+        == 403
+    )
     assert c.get("/internal/authorize/http-example/v1/echo", headers=H).status_code == 200
 
 
@@ -36,8 +45,10 @@ def test_endpoint_auth_websocket_and_exhausted_budget(client, monkeypatch):
     c, _ = client
     r = c.get("/internal/authorize/ws-example/ws", headers={"Sec-WebSocket-Protocol": "bearer.sk-good"})
     assert r.status_code == 200 and r.headers["x-serverless2-tenant"] == "demo"
+
     async def exhausted(key):
         return {**KEY_INFO, "spend": 10}
+
     monkeypatch.setattr(auth, "key_info", exhausted)
     assert c.get("/internal/authorize/ws-example/ws", headers=H).status_code == 402
 
@@ -58,11 +69,13 @@ def test_deploy_failure_is_retried_without_another_history_version(client, admin
     c, _ = client
     apply = models.apply
     calls = []
+
     def fail_once(*args):
         calls.append(args)
         if len(calls) == 1:
             raise RuntimeError("cluster unavailable")
         return apply(*args)
+
     monkeypatch.setattr(models, "apply", fail_once)
     assert c.post("/v1/models", json=SPEC, headers=ADMIN).json()["pending"]
     api.reconcile_models()
@@ -81,7 +94,9 @@ def test_delete_keeps_authorization_until_routes_disappear(client, admin_keys):
     c, cluster = client
     assert c.post("/v1/models", json=SPEC, headers=ADMIN).status_code == 201
     route = ("models", "httproutes", "old-route")
-    cluster.custom[route] = {"metadata": {"name": "old-route", "labels": {"serving.knative.dev/route": SPEC["id"] + "-predictor"}}}
+    cluster.custom[route] = {
+        "metadata": {"name": "old-route", "labels": {"serving.knative.dev/route": SPEC["id"] + "-predictor"}}
+    }
     assert c.delete("/v1/models/" + SPEC["id"], headers=ADMIN).status_code == 204
     policy = ("models", "securitypolicies", SPEC["id"] + "-authorization")
     assert policy in cluster.custom and admin_keys.changes
@@ -93,15 +108,27 @@ def test_delete_keeps_authorization_until_routes_disappear(client, admin_keys):
 
 def test_litellm_model_retry_updates_existing_deployment_without_deleting(monkeypatch):
     import httpx
+
     calls = []
+
     class Proxy:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
         def patch(self, url, **kw):
-            calls.append(("patch", url)); return httpx.Response(200, json={})
+            calls.append(("patch", url))
+            return httpx.Response(200, json={})
+
         def post(self, url, **kw):
-            calls.append(("post", url)); raise AssertionError("existing models must update in place")
+            calls.append(("post", url))
+            raise AssertionError("existing models must update in place")
+
     monkeypatch.setattr(httpx, "Client", Proxy)
     monkeypatch.setattr(models, "LITELLM_MASTER_KEY", "sk-test")
     monkeypatch.setattr(models, "ROUTER_KEY", "sk-router")
@@ -112,11 +139,28 @@ def test_litellm_model_retry_updates_existing_deployment_without_deleting(monkey
 
 
 def test_job_replay_repairs_missing_dependencies_and_rejects_changed_input(cluster):
-    job = jobs.build_run("retry-test", catalog.get("hello-run"), {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://test/out"})
-    secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "retry-secret"}, "stringData": {"key": "secret"}}
+    job = jobs.build_run(
+        "retry-test",
+        catalog.get("hello-run"),
+        {},
+        "demo",
+        None,
+        None,
+        None,
+        None,
+        "eu-north1",
+        {"output_prefix": "s3://test/out"},
+    )
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "retry-secret"},
+        "stringData": {"key": "secret"},
+    }
     job["metadata"]["annotations"][f"{L}/pvc"] = "retry-work"
     created, _ = jobs.create("tenant-demo", copy.deepcopy(job), secret=copy.deepcopy(secret))
-    cluster.pvcs.clear(); cluster.secrets.clear()
+    cluster.pvcs.clear()
+    cluster.secrets.clear()
     replay, was_created = jobs.create("tenant-demo", copy.deepcopy(job), secret=copy.deepcopy(secret))
     assert not was_created and replay["metadata"]["uid"] == created["metadata"]["uid"]
     assert ("tenant-demo", "retry-work") in cluster.pvcs and ("tenant-demo", "retry-secret") in cluster.secrets
@@ -128,11 +172,27 @@ def test_job_replay_repairs_missing_dependencies_and_rejects_changed_input(clust
 
 def test_native_job_prices_are_snapshotted_and_survive_model_deletion(client, admin_keys, monkeypatch):
     import kube
+
     c, _ = client
-    monkeypatch.setattr(kube, "fleet", lambda: {"pools": {"h100": {"region": "hub", "pool": "h100", "gpu_class": "h100", "usd_per_gpu_hour": 2}}})
+    monkeypatch.setattr(
+        kube,
+        "fleet",
+        lambda: {"pools": {"h100": {"region": "hub", "pool": "h100", "gpu_class": "h100", "usd_per_gpu_hour": 2}}},
+    )
     spec = {**SPEC, "kind": "job", "command": "echo ok"}
     assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 201
-    job = jobs.build_run("priced-test", catalog.get(SPEC["id"]), {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://test/out"})
+    job = jobs.build_run(
+        "priced-test",
+        catalog.get(SPEC["id"]),
+        {},
+        "demo",
+        None,
+        None,
+        None,
+        None,
+        "eu-north1",
+        {"output_prefix": "s3://test/out"},
+    )
     p = pod("priced-test", "Succeeded", finished="2026-10-05T21:01:00Z")
     p["spec"]["nodeSelector"] = {f"{L}/pool": "h100"}
     job["_pods"] = [p]

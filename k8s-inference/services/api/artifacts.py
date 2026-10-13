@@ -2,6 +2,7 @@
 tenant namespace of each cluster: access_key, secret_key, bucket, endpoint, region). On the control
 cluster that Secret names the tenant's hub-region bucket: the bucket every fleet-placed run reads
 its inputs from and writes its outputs to (the worker is unknown when the run is submitted)."""
+
 import base64, json, re, time, uuid
 from datetime import datetime, timedelta, timezone
 import boto3
@@ -25,9 +26,19 @@ def storage(ns: str, region: str = REGION) -> dict:
     except ApiException as e:
         raise HTTPException(503 if e.status != 404 else 404, f"tenant storage not configured in {region} ({e.reason})")
     d = {k: base64.b64decode(v).decode() for k, v in data.items()}
-    d["client"] = boto3.client("s3", endpoint_url=d["endpoint"], region_name=d["region"], aws_access_key_id=d["access_key"],
-                               aws_secret_access_key=d["secret_key"],
-                               config=Config(signature_version="s3v4", connect_timeout=5, read_timeout=15, retries={"max_attempts": 3, "mode": "standard"}))
+    d["client"] = boto3.client(
+        "s3",
+        endpoint_url=d["endpoint"],
+        region_name=d["region"],
+        aws_access_key_id=d["access_key"],
+        aws_secret_access_key=d["secret_key"],
+        config=Config(
+            signature_version="s3v4",
+            connect_timeout=5,
+            read_timeout=15,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
     _cache[f"{region}/{ns}"] = (time.time() + 300, d)
     return d
 
@@ -55,9 +66,16 @@ def storage_for(ns: str, uri: str | None, region: str = REGION) -> dict:
 def presign_upload(ns: str, filename: str, content_type: str, expires_s: int, region: str = REGION) -> dict:
     s = storage(ns, region)
     key = f"uploads/{uuid.uuid4().hex[:12]}/{filename.strip('/').replace('..', '')}"
-    url = s["client"].generate_presigned_url("put_object", Params={"Bucket": s["bucket"], "Key": key, "ContentType": content_type}, ExpiresIn=expires_s)
-    return {"uri": f"s3://{s['bucket']}/{key}", "url": url, "method": "PUT", "headers": {"Content-Type": content_type},
-            "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=expires_s)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    url = s["client"].generate_presigned_url(
+        "put_object", Params={"Bucket": s["bucket"], "Key": key, "ContentType": content_type}, ExpiresIn=expires_s
+    )
+    return {
+        "uri": f"s3://{s['bucket']}/{key}",
+        "url": url,
+        "method": "PUT",
+        "headers": {"Content-Type": content_type},
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=expires_s)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def operation_of(uri: str) -> str | None:
@@ -68,11 +86,20 @@ def operation_of(uri: str) -> str | None:
 
 
 def presign_download(ns: str, uri: str, expires_s: int = 3600, region: str | None = None) -> dict:
-    s = next((st for r in ([region] if region else kube.regions()) if uri.startswith(f"s3://{(st := storage(ns, r))['bucket']}/")), None)
+    s = next(
+        (
+            st
+            for r in ([region] if region else kube.regions())
+            if uri.startswith(f"s3://{(st := storage(ns, r))['bucket']}/")
+        ),
+        None,
+    )
     if not s:
         raise HTTPException(403, "artifact is not in one of the tenant's buckets")
-    key = uri[len(f"s3://{s['bucket']}/"):]
-    url = s["client"].generate_presigned_url("get_object", Params={"Bucket": s["bucket"], "Key": key}, ExpiresIn=expires_s)
+    key = uri[len(f"s3://{s['bucket']}/") :]
+    url = s["client"].generate_presigned_url(
+        "get_object", Params={"Bucket": s["bucket"], "Key": key}, ExpiresIn=expires_s
+    )
     return {"name": key.rsplit("/", 1)[-1], "uri": uri, "url": url}
 
 

@@ -6,6 +6,7 @@ project, platform, preset, capacity) and, for each spot or on-demand pool, asks 
 Writes `spot.json` = {"<region id>/<pool>": usd_per_gpu_hour} into the spot-prices ConfigMap (created on
 first run; runtime-owned, outside Terraform). Reserved pools are not priced (marginal cost in fleet.yaml).
 """
+
 import json
 import logging
 import os
@@ -22,15 +23,28 @@ SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")
 
 
 def estimate(project: str, platform: str, preset: str, spot: bool):
-    cmd = ["billing", "v1alpha1", "calculator", "estimate", "--format", "json",
-           "--resource-spec-compute-instance-spec-parent-id", project,
-           "--resource-spec-compute-instance-spec-resources-platform", platform,
-           "--resource-spec-compute-instance-spec-resources-preset", preset]
+    cmd = [
+        "billing",
+        "v1alpha1",
+        "calculator",
+        "estimate",
+        "--format",
+        "json",
+        "--resource-spec-compute-instance-spec-parent-id",
+        project,
+        "--resource-spec-compute-instance-spec-resources-platform",
+        platform,
+        "--resource-spec-compute-instance-spec-resources-preset",
+        preset,
+    ]
     if spot:
         # the current spot quote: a preemptible VM following the spot price (the old `priority` field has no
         # effect any more; quotes move every 15 min, so this feed runs on a short schedule)
-        cmd += ["--resource-spec-compute-instance-spec-preemptible-on-preemption", "STOP",
-                "--resource-spec-compute-instance-spec-follows-spot-price"]
+        cmd += [
+            "--resource-spec-compute-instance-spec-preemptible-on-preemption",
+            "STOP",
+            "--resource-spec-compute-instance-spec-follows-spot-price",
+        ]
     try:
         # the calculator is tenant-wide: any mounted region key's profile may ask (nebius_cli.login in main)
         out = nebius_cli.run(cmd, timeout=60).stdout

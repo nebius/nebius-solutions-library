@@ -34,6 +34,7 @@ Patches use the `kueue-admission` field manager (Kueue MultiKueue docs, external
 The API reproduces the order of `rank()` from the fleet document alone (services/api/placement.py) when it has to
 pick a run's GPU class at submission (docs/SCHEDULING.md "Per-GPU images for runs"); keep the two in step.
 """
+
 import base64
 import json
 import logging
@@ -51,23 +52,25 @@ from kubernetes import client, config
 log = logging.getLogger("dispatcher")
 GROUP, VERSION = "kueue.x-k8s.io", "v1beta2"
 NS = os.environ.get("PRICES_NAMESPACE", "kueue-system")
-FLEET_CM = os.environ.get("FLEET_CONFIGMAP", "fleet-prices")   # charts/fleet: pools.yaml
-SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: spot.json
+FLEET_CM = os.environ.get("FLEET_CONFIGMAP", "fleet-prices")  # charts/fleet: pools.yaml
+SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")  # price_feed.py: spot.json
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
-INFINIBAND = os.environ.get("INFINIBAND", "1") == "1"   # InfiniBand pool floors for multi-node runs (infiniband.py)
+INFINIBAND = os.environ.get("INFINIBAND", "1") == "1"  # InfiniBand pool floors for multi-node runs (infiniband.py)
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
 ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))
-REQUEST_TIMEOUT_S = int(os.environ.get("REQUEST_TIMEOUT_S", "30"))   # every Kubernetes API call (a hung worker API server never stalls the loop)   # grace before a volume whose manager Jobs are gone is deleted
+REQUEST_TIMEOUT_S = int(
+    os.environ.get("REQUEST_TIMEOUT_S", "30")
+)  # every Kubernetes API call (a hung worker API server never stalls the loop)   # grace before a volume whose manager Jobs are gone is deleted
 LABEL = "serverless2.nebius"
 REGION_LABEL = f"{LABEL}/region"
 CLASSES_ANN = f"{LABEL}/gpu-classes"
 REGIONS_ANN = f"{LABEL}/regions"
 PVC_SIZE_ANN = f"{LABEL}/pvc-size-gi"
 NOMINATED_AT = f"{LABEL}/nominated-at"
-ADMITTED_ANN = f"{LABEL}/admitted-cluster"   # on the manager Workload: the worker that admitted it (status.clusterName is cleared when the worker's copy is gone)
+ADMITTED_ANN = f"{LABEL}/admitted-cluster"  # on the manager Workload: the worker that admitted it (status.clusterName is cleared when the worker's copy is gone)
 
 
-KEPT_STATUS = ("admission", "admissionChecks")   # status fields Kueue writes as `kueue-admission` too (see nominate)
+KEPT_STATUS = ("admission", "admissionChecks")  # status fields Kueue writes as `kueue-admission` too (see nominate)
 
 
 def nominate(custom, ns, name, want, status=None):
@@ -87,15 +90,29 @@ def nominate(custom, ns, name, want, status=None):
     """
     keep = {k: status[k] for k in KEPT_STATUS if status and status.get(k)}
     custom.patch_namespaced_custom_object_status(
-        GROUP, VERSION, ns, "workloads", name,
-        {"apiVersion": f"{GROUP}/{VERSION}", "kind": "Workload",
-         "metadata": {"name": name, "namespace": ns},
-         "status": {"nominatedClusterNames": want, **keep}},
-        field_manager="kueue-admission", force=True, _content_type="application/apply-patch+yaml")
-PVC_JOBS_ANN = f"{LABEL}/jobs"          # on a worker PVC: Jobs that use it (owners once they exist)
+        GROUP,
+        VERSION,
+        ns,
+        "workloads",
+        name,
+        {
+            "apiVersion": f"{GROUP}/{VERSION}",
+            "kind": "Workload",
+            "metadata": {"name": name, "namespace": ns},
+            "status": {"nominatedClusterNames": want, **keep},
+        },
+        field_manager="kueue-admission",
+        force=True,
+        _content_type="application/apply-patch+yaml",
+    )
+
+
+PVC_JOBS_ANN = f"{LABEL}/jobs"  # on a worker PVC: Jobs that use it (owners once they exist)
 MANAGED_LABEL = f"{LABEL}/managed-by"
-SUCCESSOR_ANN = f"{LABEL}/successor"         # on a manager Job the platform superseded (services/api/jobs.py switch_class, recover)
-CAP_RANK = {"reserved": 0, "on_demand": 1, "ondemand": 1, "spot": 2}   # fleet.yaml capacity_order
+SUCCESSOR_ANN = (
+    f"{LABEL}/successor"  # on a manager Job the platform superseded (services/api/jobs.py switch_class, recover)
+)
+CAP_RANK = {"reserved": 0, "on_demand": 1, "ondemand": 1, "spot": 2}  # fleet.yaml capacity_order
 
 
 # ---------- pure functions (unit-tested) ----------
@@ -116,7 +133,10 @@ def clusters_from_pools(pools: dict) -> dict:
     out = {}
     for _, p in (pools or {}).items():
         out.setdefault(p["region"], {"pools": {}})["pools"][p["pool"]] = {
-            **p, "class": p.get("gpu_class"), "price": float(p.get("usd_per_gpu_hour", 1e9))}
+            **p,
+            "class": p.get("gpu_class"),
+            "price": float(p.get("usd_per_gpu_hour", 1e9)),
+        }
     return out
 
 
@@ -133,7 +153,7 @@ def profile_from_name(name: str | None, clusters: dict, spot_prices: dict, tenan
     <tenant>-<profile> (charts/fleet); with the tenant known the prefix is stripped, then prefer-<class> means that
     class first and the others by their cheapest pool; anything else: cheapest of all."""
     if name and tenant and name.startswith(f"{tenant}-"):
-        name = name[len(tenant) + 1:]
+        name = name[len(tenant) + 1 :]
     cheapest = {}
     for cname, cl in clusters.items():
         for fname, pool in (cl.get("pools") or {}).items():
@@ -148,8 +168,17 @@ def profile_from_name(name: str | None, clusters: dict, spot_prices: dict, tenan
     return {"classes": by_price, "strategy": "cheapest"}
 
 
-def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict, pin: str | None = None,
-         allowed_classes: list | None = None, allowed_clusters: list | None = None, tenant: str | None = None) -> list:
+def rank(
+    profile: dict,
+    clusters: dict,
+    free: dict,
+    gpus: int,
+    spot_prices: dict,
+    pin: str | None = None,
+    allowed_classes: list | None = None,
+    allowed_clusters: list | None = None,
+    tenant: str | None = None,
+) -> list:
     """Candidates best-first as (cluster, flavor, price, is_free).
 
     profile:  {"classes": [preferred, ...], "strategy": "preferred" | "cheapest"}
@@ -183,7 +212,9 @@ def rank(profile: dict, clusters: dict, free: dict, gpus: int, spot_prices: dict
         # would boot (a 1-GPU run on an 8-GPU pool pays eight GPUs: it boots a full node)
         node = int(pool.get("gpus_per_node") or 1)
         eff = price * (max(gpus, 1) if is_free else max(max(gpus, 1), node))
-        if strategy == "preferred":   # class preference, then reserved -> on-demand -> spot, then cost (mirrored in services/api/placement.py)
+        if (
+            strategy == "preferred"
+        ):  # class preference, then reserved -> on-demand -> spot, then cost (mirrored in services/api/placement.py)
             return (0 if is_free else 1, classes.index(pool["class"]), cap, eff, cname, fname)
         return (0 if is_free else 1, eff, cap, cname, fname)
 
@@ -230,7 +261,7 @@ def allowed_of(wl: dict) -> tuple[list | None, list | None]:
     return classes, regions
 
 
-WORK_VOLUME = "work"                      # the run's own scratch volume (services/api/jobs.py); the only claim the dispatcher owns
+WORK_VOLUME = "work"  # the run's own scratch volume (services/api/jobs.py); the only claim the dispatcher owns
 
 
 def pvc_of(template: dict) -> str | None:
@@ -334,7 +365,7 @@ def is_superseded(job) -> bool:
 def job_claim(job) -> str | None:
     """The work claim a manager Job's pod template names (a resume or finalizer shares the original's)."""
     tmpl = getattr(getattr(job, "spec", None), "template", None)
-    for v in (getattr(getattr(tmpl, "spec", None), "volumes", None) or []):
+    for v in getattr(getattr(tmpl, "spec", None), "volumes", None) or []:
         pvc = getattr(v, "persistent_volume_claim", None)
         if getattr(v, "name", None) == WORK_VOLUME and pvc is not None and getattr(pvc, "claim_name", None):
             return pvc.claim_name
@@ -395,7 +426,11 @@ def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
         with open(path, "wb") as f:
             f.write(base64.b64decode(sec.data.get("kubeconfig")))
         api = config.new_client_from_config(path)
-        out[name] = {"custom": Timed(client.CustomObjectsApi(api)), "core": Timed(client.CoreV1Api(api)), "batch": Timed(client.BatchV1Api(api))}
+        out[name] = {
+            "custom": Timed(client.CustomObjectsApi(api)),
+            "core": Timed(client.CoreV1Api(api)),
+            "batch": Timed(client.BatchV1Api(api)),
+        }
     return out, aliases
 
 
@@ -451,16 +486,30 @@ def ensure_pvc(w: dict, ns: str, claim: str, size_gi: str, job_name: str) -> Non
         cur = core.read_namespaced_persistent_volume_claim(claim, ns)
         jobs = [j for j in ((cur.metadata.annotations or {}).get(PVC_JOBS_ANN) or "").split(",") if j]
         if job_name not in jobs:
-            core.patch_namespaced_persistent_volume_claim(claim, ns, {"metadata": {"annotations": {PVC_JOBS_ANN: ",".join(jobs + [job_name])},
-                                                                                   "labels": {MANAGED_LABEL: "dispatcher"}}})
+            core.patch_namespaced_persistent_volume_claim(
+                claim,
+                ns,
+                {
+                    "metadata": {
+                        "annotations": {PVC_JOBS_ANN: ",".join(jobs + [job_name])},
+                        "labels": {MANAGED_LABEL: "dispatcher"},
+                    }
+                },
+            )
         return
     except client.exceptions.ApiException as e:
         if e.status != 404:
             raise
-    body = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-            "metadata": {"name": claim, "labels": {MANAGED_LABEL: "dispatcher", f"{LABEL}/operation": job_name},
-                         "annotations": {PVC_JOBS_ANN: job_name}},
-            "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": f"{size_gi}Gi"}}}}
+    body = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": claim,
+            "labels": {MANAGED_LABEL: "dispatcher", f"{LABEL}/operation": job_name},
+            "annotations": {PVC_JOBS_ANN: job_name},
+        },
+        "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": f"{size_gi}Gi"}}},
+    }
     try:
         core.create_namespaced_persistent_volume_claim(ns, body)
         log.info("created %s/%s (%s Gi) for %s", ns, claim, size_gi, job_name)
@@ -479,25 +528,38 @@ def sweep_volumes(workers: dict, batch: client.BatchV1Api, admitted: dict, jobs_
     jobs_cache = {} if jobs_cache is None else jobs_cache
     for cname, w in workers.items():
         try:
-            pvcs = w["core"].list_persistent_volume_claim_for_all_namespaces(label_selector=f"{MANAGED_LABEL}=dispatcher").items
+            pvcs = (
+                w["core"]
+                .list_persistent_volume_claim_for_all_namespaces(label_selector=f"{MANAGED_LABEL}=dispatcher")
+                .items
+            )
         except Exception as e:
             log.warning("worker %s: list volumes: %s", cname, e)
             continue
         for pvc in pvcs:
             ns, name = pvc.metadata.namespace, pvc.metadata.name
             if not name.endswith(f"-{WORK_VOLUME}"):
-                continue                  # not a work volume the dispatcher created: never swept, whatever its labels say
+                continue  # not a work volume the dispatcher created: never swept, whatever its labels say
             idx = manager_jobs(batch, ns, jobs_cache)
             if idx is None:
-                continue                  # unknown: keep
+                continue  # unknown: keep
             age = (datetime.now(timezone.utc) - pvc.metadata.creation_timestamp).total_seconds()
             wanted = [j for j in ((pvc.metadata.annotations or {}).get(PVC_JOBS_ANN) or "").split(",") if j]
             users, superseded = claim_references(wanted, idx, name)
             action = volume_action(cname, users, superseded, admitted, ns, age)
             if action:
                 w["core"].delete_namespaced_persistent_volume_claim(name, ns)
-                log.info("worker %s: deleted volume %s/%s (%s; recorded %s, users %s, superseded %s, admitted %s)", cname, ns, name, action,
-                         wanted, sorted(users), sorted(superseded), {j: admitted.get((ns, j)) for j in sorted(users | superseded)})
+                log.info(
+                    "worker %s: deleted volume %s/%s (%s; recorded %s, users %s, superseded %s, admitted %s)",
+                    cname,
+                    ns,
+                    name,
+                    action,
+                    wanted,
+                    sorted(users),
+                    sorted(superseded),
+                    {j: admitted.get((ns, j)) for j in sorted(users | superseded)},
+                )
 
 
 def reconcile(core, custom, batch):
@@ -505,7 +567,7 @@ def reconcile(core, custom, batch):
     workers, aliases = worker_clients(core, custom)
     free = free_quota(workers)
     if INFINIBAND:
-        try:   # its own failures (a worker down, the CLI) must not stop the dispatch below
+        try:  # its own failures (a worker down, the CLI) must not stop the dispatch below
             infiniband.reconcile(core, workers, clusters, aliases)
         except Exception as e:  # noqa: BLE001
             log.exception("infiniband pools: %s", e)
@@ -515,7 +577,7 @@ def reconcile(core, custom, batch):
             continue
         meta, st = wl["metadata"], wl.get("status", {})
         ns, job_name = meta["namespace"], owner_job(wl)
-        tenant = ns[len("tenant-"):] if ns.startswith("tenant-") else None
+        tenant = ns[len("tenant-") :] if ns.startswith("tenant-") else None
         prof = profile_from_name(profile_of(custom, wl), clusters, spot, tenant)
         pin = (meta.get("labels") or {}).get(REGION_LABEL)
         pin = aliases.get(pin, pin)
@@ -527,15 +589,38 @@ def reconcile(core, custom, batch):
         gpus = gpu_request(wl)
         ranked = rank(prof, clusters, free, gpus, spot, pin, classes, allowed_clusters, tenant)
         if not ranked:
-            log.warning("%s/%s: no candidate cluster (profile=%s pin=%s classes=%s regions=%s)", ns, meta["name"], prof, pin, classes, regions)
+            log.warning(
+                "%s/%s: no candidate cluster (profile=%s pin=%s classes=%s regions=%s)",
+                ns,
+                meta["name"],
+                prof,
+                pin,
+                classes,
+                regions,
+            )
             continue
         want = nominations(ranked, already, age)
         if want and want != already:
-            log.info("%s/%s profile=%s pin=%s classes=%s gpus=%d -> %s best=%s", ns, meta["name"], prof, pin, classes, gpus, want, ranked[:1])
+            log.info(
+                "%s/%s profile=%s pin=%s classes=%s gpus=%d -> %s best=%s",
+                ns,
+                meta["name"],
+                prof,
+                pin,
+                classes,
+                gpus,
+                want,
+                ranked[:1],
+            )
             nominate(custom, ns, meta["name"], want, st)
             custom.patch_namespaced_custom_object(
-                GROUP, VERSION, ns, "workloads", meta["name"],
-                {"metadata": {"annotations": {NOMINATED_AT: datetime.now(timezone.utc).isoformat()}}})
+                GROUP,
+                VERSION,
+                ns,
+                "workloads",
+                meta["name"],
+                {"metadata": {"annotations": {NOMINATED_AT: datetime.now(timezone.utc).isoformat()}}},
+            )
         if ranked and ranked[0][3]:  # account for the capacity this workload will take
             cname, fname = ranked[0][0], ranked[0][1]
             free[(cname, fname)] = free.get((cname, fname), 0) - max(gpus, 1)
@@ -550,8 +635,14 @@ def reconcile(core, custom, batch):
         if cname and job_name:
             admitted[(meta["namespace"], job_name)] = cname
         if cname and recorded != cname:
-            custom.patch_namespaced_custom_object(GROUP, VERSION, meta["namespace"], "workloads", meta["name"],
-                                                  {"metadata": {"annotations": {ADMITTED_ANN: cname}}})
+            custom.patch_namespaced_custom_object(
+                GROUP,
+                VERSION,
+                meta["namespace"],
+                "workloads",
+                meta["name"],
+                {"metadata": {"annotations": {ADMITTED_ANN: cname}}},
+            )
             log.info("%s/%s admitted in %s", meta["namespace"], meta["name"], cname)
         vol = admitted_volume(wl, cname)
         if vol and vol[0] in workers:
@@ -564,7 +655,6 @@ def reconcile(core, custom, batch):
     sweep_volumes(workers, batch, admitted, jobs_cache)
 
 
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -573,21 +663,23 @@ def main():
         config.load_kube_config()
     core, custom, batch = Timed(client.CoreV1Api()), Timed(client.CustomObjectsApi()), Timed(client.BatchV1Api())
     if INFINIBAND:
-        nebius_cli.login()      # one CLI profile per mounted region key (the node-group updates of infiniband.py)
+        nebius_cli.login()  # one CLI profile per mounted region key (the node-group updates of infiniband.py)
     # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs (the other one
     # waits as a standby). A replica losing renewal exits immediately, fencing its reconcile loop before another
     # leader starts.
     leading = threading.Event()
     from kubernetes.leaderelection import electionconfig, leaderelection
     from kubernetes.leaderelection.resourcelock.configmaplock import ConfigMapLock
+
     lock = ConfigMapLock("dispatcher-leader", NS, os.environ.get("HOSTNAME", "dispatcher"))
-    election = leaderelection.LeaderElection(electionconfig.Config(
-        lock, 60, 30, 5, leading.set, lambda: os._exit(1)))
+    election = leaderelection.LeaderElection(electionconfig.Config(lock, 60, 30, 5, leading.set, lambda: os._exit(1)))
+
     def elect():
         try:
             election.run()
         finally:
             os._exit(1)
+
     threading.Thread(target=elect, daemon=True).start()
     while True:
         if leading.is_set():
