@@ -152,7 +152,7 @@ variable "fleet" {
         # one per pool) on `infiniband_fabric`, so multi-node jobs run over InfiniBand; needs a full-node preset
         # the platform allows clustering for (8gpu-* on H100/H200/B200/B300, 4gpu-* on GB300; preflight checks
         # the platform's `allow_gpu_clustering`). The fabric names per region are in docs.nebius.com/compute/clusters/gpu;
-        # preflight checks the one given against the region's list. Nodes get the
+        # the provider refuses an unknown one. Nodes get the
         # label serverless2.nebius/interconnect=infiniband and the pool's Kueue flavor carries it, so a job
         # class can require it. A reservation (capacity block) must be on the same fabric.
         interconnect      = optional(string, "none")
