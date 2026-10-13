@@ -470,7 +470,7 @@
           "value": "s3-fleet"
          }
         ],
-        "image": "registry.serverless2.local/nebius/serverless2/api:0.11.34",
+        "image": "registry.serverless2.local/nebius/serverless2/api:0.11.35",
         "livenessProbe": {
          "httpGet": {
           "path": "/livez",

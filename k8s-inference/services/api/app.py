@@ -52,7 +52,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.34", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.35", lifespan=_lifespan)
 
 
 INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
