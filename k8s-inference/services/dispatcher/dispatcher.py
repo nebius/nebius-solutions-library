@@ -57,7 +57,8 @@ SPOT_CM = os.environ.get("SPOT_CONFIGMAP", "spot-prices")      # price_feed.py: 
 INTERVAL = int(os.environ.get("INTERVAL_S", "15"))
 INFINIBAND = os.environ.get("INFINIBAND", "1") == "1"   # InfiniBand pool floors for multi-node runs (infiniband.py)
 RENOMINATE_AFTER_S = int(os.environ.get("RENOMINATE_AFTER_S", "300"))
-ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))   # grace before a volume whose manager Jobs are gone is deleted
+ORPHAN_AFTER_S = int(os.environ.get("ORPHAN_AFTER_S", "900"))
+REQUEST_TIMEOUT_S = int(os.environ.get("REQUEST_TIMEOUT_S", "30"))   # every Kubernetes API call (a hung worker API server never stalls the loop)   # grace before a volume whose manager Jobs are gone is deleted
 LABEL = "serverless2.nebius"
 REGION_LABEL = f"{LABEL}/region"
 CLASSES_ANN = f"{LABEL}/gpu-classes"
@@ -364,6 +365,20 @@ def load_fleet(core: client.CoreV1Api):
     return clusters_from_pools(pools), spot
 
 
+class Timed:
+    """A Kubernetes API client whose every call carries `_request_timeout` (the dispatcher runs one thread: one
+    worker API server that stops answering would otherwise stall every cluster's dispatch)."""
+
+    def __init__(self, api, timeout_s: int = REQUEST_TIMEOUT_S):
+        self._api, self._timeout = api, timeout_s
+
+    def __getattr__(self, name: str):
+        fn = getattr(self._api, name)
+        if not callable(fn):
+            return fn
+        return lambda *a, **kw: fn(*a, **{"_request_timeout": self._timeout, **kw})
+
+
 def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
     """Per MultiKueueCluster (from its kubeconfig Secret): {"custom", "core", "batch"} API clients,
     plus {region name: cluster id}."""
@@ -381,7 +396,7 @@ def worker_clients(core: client.CoreV1Api, custom: client.CustomObjectsApi):
         with open(path, "wb") as f:
             f.write(base64.b64decode(sec.data.get("kubeconfig")))
         api = config.new_client_from_config(path)
-        out[name] = {"custom": client.CustomObjectsApi(api), "core": client.CoreV1Api(api), "batch": client.BatchV1Api(api)}
+        out[name] = {"custom": Timed(client.CustomObjectsApi(api)), "core": Timed(client.CoreV1Api(api)), "batch": Timed(client.BatchV1Api(api))}
     return out, aliases
 
 
@@ -557,7 +572,7 @@ def main():
         config.load_incluster_config()
     except config.ConfigException:
         config.load_kube_config()
-    core, custom, batch = client.CoreV1Api(), client.CustomObjectsApi(), client.BatchV1Api()
+    core, custom, batch = Timed(client.CoreV1Api()), Timed(client.CustomObjectsApi()), Timed(client.BatchV1Api())
     if INFINIBAND:
         nebius_cli.login()      # one CLI profile per mounted region key (the node-group updates of infiniband.py)
     # Reuse the Kubernetes client's resource lock; only the elected replica mutates workloads/PVCs (the other one

@@ -137,6 +137,7 @@ def fleet(monkeypatch, tmp_path):
     """One worker `hub` behind the MultiKueueCluster's kubeconfig Secret; the worker's clients are the fakes."""
     wcore, wcustom = WorkerCore([pvc("op-1-work", "op-1"), pvc("op-3-work", "op-3", age_s=10 ** 7)]), WorkerCustom()
     monkeypatch.setattr(d, "INFINIBAND", False)
+    monkeypatch.setattr(d, "Timed", lambda api, timeout_s=0: api)       # the fakes take no _request_timeout; Timed has its own test
     monkeypatch.setattr(d.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(d.config, "new_client_from_config", lambda path: "hub-api")
     monkeypatch.setattr(d.client, "CoreV1Api", lambda api=None: wcore)
@@ -187,3 +188,18 @@ def test_reconcile_preserves_everything_when_the_manager_cannot_be_listed(fleet)
     d.reconcile(ControlCore(), custom, ControlBatch(None))
     assert fleet.deleted == [] and fleet.created == [] and set(fleet.pvcs) == {"op-1-work", "op-3-work"}
     assert custom.nominated == []
+
+
+def test_timed_client_adds_a_request_timeout_to_every_call():
+    """Every Kubernetes call of the dispatcher carries _request_timeout (one hung worker API server must not stall
+    the single reconcile thread); an explicit timeout wins; attributes pass through."""
+    calls = []
+    class Api:
+        version = "v1"
+        def list_namespaced_job(self, ns, **kw):
+            calls.append((ns, kw)); return NS(items=[])
+    t = d.Timed(Api(), timeout_s=7)
+    t.list_namespaced_job("t")
+    t.list_namespaced_job("u", _request_timeout=3, label_selector="x")
+    assert calls == [("t", {"_request_timeout": 7}), ("u", {"_request_timeout": 3, "label_selector": "x"})]
+    assert t.version == "v1" and d.REQUEST_TIMEOUT_S > 0

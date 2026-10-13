@@ -133,7 +133,7 @@ spec:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: "1", memory: 512Mi }
           readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 5 }
-          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 20 }
+          livenessProbe: { httpGet: { path: /livez, port: 8080 }, periodSeconds: 20 }     # process-only: a database outage never restarts the API
       volumes:
         - name: kubeconfigs          # one key per GPU region (stack/platform/secrets.tf)
           secret: { secretName: region-kubeconfigs, optional: true }

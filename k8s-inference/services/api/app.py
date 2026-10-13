@@ -65,7 +65,11 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.32", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.33", lifespan=_lifespan)
+
+
+INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
+INPUT_MAX_BYTES = 60000               # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
 
 
 class InvokeRequest(BaseModel):
@@ -74,7 +78,7 @@ class InvokeRequest(BaseModel):
     input: dict = Field(default_factory=dict)
     region: str | None = None
     priority: str | None = None
-    timeout_s: int | None = None
+    timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
     execution: ExecutionSpec | None = None     # docs/JOBS.md "Execution options" (runs only)
 
 
@@ -163,6 +167,13 @@ def _public(m: dict, p: Principal | None = None) -> dict:
             st = {"status": "unavailable", "replicas_ready": None}
         statuses.append({"region": region, **st})
     return catalog.to_public(m, statuses)
+
+
+@app.get("/livez", include_in_schema=False)
+def livez():
+    """Liveness: the process answers. Nothing here depends on the database or the clusters (the readiness probe
+    does, through /healthz): a database outage must not restart every API replica and take ext-auth with it."""
+    return {"ok": True}
 
 
 @app.get("/healthz")
@@ -583,6 +594,11 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
     p = await _principal(key, allow_router=True)       # LiteLLM's deployments call here with the fleet's router key
+    await asyncio.to_thread(_authorize_model, p, model)      # catalog (database) and Kubernetes calls: off the event loop
+    return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
+
+
+def _authorize_model(p: Principal, model: str) -> None:
     m = catalog.get(model) or _endpoint_model(model)
     check_model(p, m["name"])
     check_budget(p)
@@ -591,7 +607,6 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     if int(m.get("nodes") or 1) > 1:
         for region in m["regions"]:                                    # the gateway's call names no region: stamp every
             kube.stamp_last_request(m["k8s_name"], m["namespace"], region)   # deployment (idle shutdown reads it, throttled)
-    return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
 
 
 @app.get("/v1/keys/me")
@@ -616,6 +631,13 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         raise HTTPException(400, "execution options apply to runs only")
     if mode == "sync":
         return await _sync(m, req, p, region)
+    if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
+        raise HTTPException(413, f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)")
+    # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
+    return await asyncio.to_thread(_invoke_job, m, model, req, p, region, mode, idempotency_key)
+
+
+def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None):
     # admission: Kueue (profile queues) bounds concurrent runs; LiteLLM rpm/budget bound async calls;
     # the gateway BackendTrafficPolicy caps request rates. Nothing is counted here.
     name = jobs.op_name(p.tenant, model, idempotency_key)
@@ -1190,7 +1212,7 @@ def _endpoint_region(m: dict, region: str | None) -> str:
 @app.get("/v1/endpoints/{id}/metrics")
 async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h", end: float | None = None,
                            p: Principal = Depends(principal)):
-    m = _endpoint_model(id)
+    m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
     return await monitoring.metrics("endpoint", m["namespace"], m["k8s_name"], region, range, end)
@@ -1199,7 +1221,7 @@ async def endpoint_metrics(id: str, region: str | None = None, range: str = "1h"
 @app.get("/v1/endpoints/{id}/logs")
 async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", search: str = Query("", max_length=200),
                         limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
-    m = _endpoint_model(id)
+    m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
     region = _endpoint_region(m, region)
     return await monitoring.logs("endpoint", m["namespace"], m["k8s_name"], region, range, search, limit, end)
@@ -1216,14 +1238,14 @@ def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
 
 @app.get("/v1/operations/{id}/metrics")
 async def operation_metrics(id: str, range: str = "1h", end: float | None = None, p: Principal = Depends(principal)):
-    region, _ = _monitored(p, id)
+    region, _ = await asyncio.to_thread(_monitored, p, id)
     return await monitoring.metrics("job", p.namespace, id, region or REGION, range, end)
 
 
 @app.get("/v1/operations/{id}/logs")
 async def operation_logs(id: str, range: str = "1h", search: str = Query("", max_length=200),
                          limit: int = Query(300, ge=1, le=1000), end: float | None = None, p: Principal = Depends(principal)):
-    region, kind = _monitored(p, id)
+    region, kind = await asyncio.to_thread(_monitored, p, id)
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 

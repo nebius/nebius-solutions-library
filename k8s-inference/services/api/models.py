@@ -622,9 +622,15 @@ def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
 # one more entry of the same group, added by configuration (LiteLLM routes and fails over inside a group).
 
 def endpoint_domain(region: str) -> str:
-    """The gateway domain of a region's endpoints: ENDPOINT_DOMAINS (every GPU region), ENDPOINT_DOMAIN for
-    the API's own cluster (single-cluster mode)."""
-    return ENDPOINT_DOMAINS.get(region) or (ENDPOINT_DOMAIN if region == REGION else "")
+    """The gateway domain of a region's endpoints: ENDPOINT_DOMAINS (every GPU region, keyed by Nebius region),
+    ENDPOINT_DOMAIN for the API's own cluster (single-cluster mode). A cluster id (`north`, the fleet's own names for
+    its workers, as runtime definitions and placement use them) is mapped to its region first: a fleet with custom
+    ids answered 503 on every real endpoint call before."""
+    if region in ENDPOINT_DOMAINS:
+        return ENDPOINT_DOMAINS[region]
+    import kube
+    mapped = kube.cluster_region(region) if region else region
+    return ENDPOINT_DOMAINS.get(mapped) or (ENDPOINT_DOMAIN if REGION in (region, mapped) else "")
 
 
 def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str | None:

@@ -96,7 +96,7 @@ def _meta(name: str, tenant: str, model: str, mode: str, region: str | None, lab
         labels[f"{LABEL}/priority"] = priority
     if execution and execution.get("profile"):     # the pod label the profile's network policy selects (charts/tenant)
         labels[f"{LABEL}/execution-profile"] = execution["profile"]["name"]
-    ann = {f"{LABEL}/input": json.dumps(inp)[:60000]}
+    ann = {f"{LABEL}/input": json.dumps(inp)}     # bounded by the API (INPUT_MAX_BYTES): a truncated input would corrupt every resume
     if execution:
         ann[f"{LABEL}/execution"] = json.dumps(execution, sort_keys=True)     # names only, never data (services/api/execution.py)
         if (execution.get("placement") or {}).get("fallback_wait_s") is not None:
