@@ -5,7 +5,7 @@ and a queued operation says why it waits."""
 import json
 import pytest
 
-from test_api import FLEET, H, client, cluster, pod  # noqa: F401
+from test_api import FLEET, H, KEY_INFO, client, cluster, admin_keys, fake_keys, pod  # noqa: F401
 import app as appmod
 import attempts
 import catalog
@@ -377,8 +377,11 @@ def test_resume_uses_the_acknowledged_checkpoint_pointer(client, monkeypatch):
     assert r.json()["execution"]["recovery"]["checkpoint_ref"] == "app://ckpt/gen-3"
 
 
-def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow(client, monkeypatch):
+def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow(client, admin_keys, fake_keys, monkeypatch):
     c, fake = client
+    from auth import Principal
+    fake_keys.own_operation("op-gone", "demo", Principal("sk-good", "demo", KEY_INFO).owner, "hello-run")
+    fake_keys.own_operation("op-old", "demo", Principal("sk-good", "demo", KEY_INFO).owner, "hello-run")
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     rows = [{"operation": "op-gone", "pod": "op-gone-a", "root": "op-gone", "tenant": "demo", "status": "succeeded", "epoch": 1, "revision": 9,
              "export_state": "succeeded", "started_at": "2026-10-11T10:00:00Z", "ended_at": "2026-10-11T11:00:00Z", "gpus": 1, "region": "eu-north1"}]

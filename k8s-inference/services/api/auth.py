@@ -25,6 +25,14 @@ class Principal:
     def role(self) -> str:
         return (self.info.get("metadata") or {}).get("role") or "user"
 
+    @property
+    def owner(self) -> str:
+        """Opaque stable operation owner; multiple imported keys of one principal agree."""
+        principal_id = ((self.info.get("metadata") or {}).get("legacy") or {}).get("principal_id")
+        identity = [self.tenant, "principal", principal_id] if principal_id else [self.tenant, "key", keys.key_hash(self.key)]
+        import json
+        return keys.key_hash(json.dumps(identity, separators=(",", ":")))
+
     def public(self) -> dict:
         i = self.info
         exhausted = (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]) \

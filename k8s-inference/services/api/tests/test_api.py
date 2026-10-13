@@ -456,7 +456,7 @@ def test_render_and_build_run(cluster):
     assert render.op_name("demo", "batch-example", "k") == render.op_name("demo", "batch-example", "k") != render.op_name("demo", "batch-example", "k2")
 
 
-def test_normalise_status_and_attempts():
+def test_normalise_status_and_attempts(cluster):
     job = {"metadata": {"name": "op-1", "namespace": "tenant-demo", "labels": {f"{L}/model": "batch-example", f"{L}/mode": "run", f"{L}/tenant": "demo", f"{L}/region": "eu-north1"},
                         "annotations": {f"{L}/input": '{"nsteps": "5"}', f"{L}/pvc": "op-1-work"}, "creationTimestamp": "2026-10-05T18:49:23Z"},
            "spec": {}, "status": {"startTime": "2026-10-05T18:49:23Z", "completionTime": "2026-10-05T19:10:47Z", "conditions": [{"type": "Complete", "status": "True"}]},
@@ -669,7 +669,7 @@ def test_endpoints_read_and_scale_only(client, monkeypatch):
 class FakeKeys:
     """services/api/keys.py in memory (the routes' view: tenant-scoped aliases, info dicts in the Principal shape)."""
     def __init__(self):
-        self.rows, self.calls = {}, []
+        self.rows, self.calls, self.owners = {}, [], {}
 
     def _info(self, h):
         r = self.rows[h]
@@ -682,6 +682,12 @@ class FakeKeys:
     def admit(self, h, operation, tenant, gpu_seconds=0.0, counts_request=True):
         self.calls.append(("admit", operation, gpu_seconds, counts_request)); return {"operation": operation, "replay": False}
     def release(self, operation, gpu_seconds=None): self.calls.append(("release", operation, gpu_seconds)); return True
+    def abandon(self, operation, h): self.calls.append(("abandon", operation)); return True
+    def own_operation(self, operation, tenant, owner, model): self.owners[operation] = (tenant, owner, model)
+    def operation_owner(self, operation): return self.owners.get(operation)
+    def operation_lock(self, operation):
+        from contextlib import nullcontext
+        return nullcontext()
     def stale_reservations(self, older_than_s): return list(getattr(self, "stale", []))
     def import_records(self, records, tenant, by, dry_run=False):
         self.calls.append(("import", tenant, by, dry_run, len(records))); return {"dry_run": dry_run, "inserted": [r.get("alias") for r in records], "unchanged": [], "conflicts": []}
@@ -717,7 +723,7 @@ class FakeKeys:
 def fake_keys(monkeypatch):
     import keys, db
     fk = FakeKeys()
-    for name in ("info", "list_tenant", "create", "update", "revoke", "admit", "release", "stale_reservations", "import_records"):
+    for name in ("info", "list_tenant", "create", "update", "revoke", "admit", "release", "abandon", "own_operation", "operation_owner", "operation_lock", "stale_reservations", "import_records"):
         monkeypatch.setattr(keys, name, getattr(fk, name))
     monkeypatch.setattr(db, "enabled", lambda: True)          # the fleet API: it has the database
     return fk
@@ -1204,6 +1210,12 @@ def admin_keys(monkeypatch):
     import keys as keys_mod                       # admission reservations live in the database too: recorded, never refused here
     monkeypatch.setattr(keys_mod, "admit", lambda h, op, tenant, gpu_seconds=0.0, counts_request=True: {"operation": op, "replay": False})
     monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: True)
+    operation_owners = {}
+    monkeypatch.setattr(keys_mod, "own_operation", lambda op, tenant, owner, model: operation_owners.__setitem__(op, (tenant, owner, model)))
+    monkeypatch.setattr(keys_mod, "operation_owner", lambda op: operation_owners.get(op))
+    monkeypatch.setattr(keys_mod, "abandon", lambda op, h: True)
+    from contextlib import nullcontext
+    monkeypatch.setattr(keys_mod, "operation_lock", lambda op: nullcontext())
     monkeypatch.setattr(keys_mod, "stale_reservations", lambda older_than_s: [])
     monkeypatch.setattr(m, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io", "eu-south1": "203.0.113.20.sslip.io"})
     auth.forget("sk-admin"); auth.forget("sk-good")

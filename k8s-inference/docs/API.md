@@ -151,6 +151,16 @@ endpoint hostname directly counts once at the hook; a replay with the same `Idem
 Exhausted budgets answer 402, a full concurrency slot or rate window 429. `GET /v1/keys/me` shows the limits,
 what was spent against them, and for imported keys the legacy `principal_id` and metadata.
 
+**Ownership and the paths a bounded key cannot take yet.** Every operation records its owner (the key's principal,
+migration 9), so a key never reads, cancels, resumes or exports another principal's operations even inside the same
+tenant namespace; an idempotency key is scoped to its owner; a reservation is refunded when the Job's creation fails
+after admission. A key with any finite limit (`max_concurrent`, `budget_requests`, `budget_gpu_seconds`,
+`rate_limit`) is admitted on the synchronous and run paths only: a shared endpoint cannot measure a key's GPU time, so a
+finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint call cannot hold a concurrency slot
+(501 unless the call is the API's own admitted proxy); bounded asynchronous calls and continuations (resume, export,
+fallback, recovery) answer 501 until the reservation transfers to the successor. Unbounded keys and keys created
+through `POST /v1/keys` are not affected.
+
 **Importing keys.** `POST /v1/keys:import` (an admin key; the keys of its own tenant only) and
 `python -m keys import <file.json>` (an operator with database access) take pre-hashed records
 (`{"keys": [{"hash", "alias", "tenant", "principal_id", "models", "scopes", "budget_usd", "budget_requests",

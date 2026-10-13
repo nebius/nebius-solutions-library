@@ -23,6 +23,8 @@ terraform.tfvars, before any admin key exists that could mint through the API. `
 imports pre-hashed keys ({"tenant": ..., "dry_run": bool, "keys": [...]}) for an operator with database access.
 """
 import hashlib, json, logging, os, re, secrets, string, sys, time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import db
 from config import LITELLM_MASTER_KEY, LITELLM_URL
@@ -38,6 +40,19 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 METADATA_MAX_BYTES = 8192
 _ALNUM = string.ascii_letters + string.digits
+_creation_connection = ContextVar("key_creation_connection", default=None)
+
+
+@contextmanager
+def _connection():
+    # A create lock already holds a pool connection. Reuse it for its short key
+    # transactions instead of exhausting the pool with nested borrows.
+    current = _creation_connection.get()
+    if current is not None:
+        yield current
+    else:
+        with db.pool().connection() as connection:
+            yield connection
 
 
 def key_hash(value: str) -> str:
@@ -378,11 +393,14 @@ def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_
     one request against the request budget and the rate window, plus `gpu_seconds` against the GPU-second budget.
     The key row is locked, so two API replicas never admit past a limit together; a reservation that already exists
     (a replay with the same idempotency key) counts once. Raises KeyLimit(402 | 429)."""
-    with db.pool().connection() as c, c.transaction():
+    with _connection() as c, c.transaction():
         k = c.execute("select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit from keys where hash = %s for update", (h,)).fetchone()
         if k is None:
             raise KeyLimit(401, "invalid API key")
-        if c.execute("select 1 from key_reservations where operation = %s", (operation,)).fetchone():
+        existing = c.execute("select key_hash, tenant from key_reservations where operation = %s", (operation,)).fetchone()
+        if existing and existing != (h, tenant):
+            raise KeyLimit(409, "operation is reserved by another key")
+        if existing:
             return {"operation": operation, "replay": True}
         max_c, b_req, b_gpu, s_req, s_gpu, rate = k
         active, r_req, r_gpu = c.execute("select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)).fetchone()
@@ -402,6 +420,46 @@ def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_
         c.execute("insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, %s)",
                   (operation, h, tenant, gpu_seconds, req))
         return {"operation": operation, "replay": False, "active": int(active) + 1}
+
+
+def abandon(operation: str, h: str) -> bool:
+    """Refund a new reservation only after the caller proves no Job was created.
+
+    Admission attempts still count against the rate window; no executed request/GPU
+    spend is invented. The matching key prevents a failed replay releasing another key.
+    """
+    with _connection() as c, c.transaction():
+        return c.execute("delete from key_reservations where operation = %s and key_hash = %s returning operation", (operation, h)).fetchone() is not None
+
+
+@contextmanager
+def operation_lock(operation: str):
+    """Serialize create/replay/refund across API replicas; no second scheduler."""
+    with db.pool().connection() as c:
+        c.execute("select pg_advisory_lock(hashtextextended(%s, 1))", (operation,))
+        token = _creation_connection.set(c)
+        try:
+            yield
+        finally:
+            try:
+                c.execute("select pg_advisory_unlock(hashtextextended(%s, 1))", (operation,))
+            finally:
+                _creation_connection.reset(token)
+
+
+def own_operation(operation: str, tenant: str, owner: str, model: str) -> None:
+    """Record immutable ownership before creating the Job; safe under concurrent replay."""
+    with db.pool().connection() as c, c.transaction():
+        c.execute("insert into operation_owners (operation, tenant, owner, model) values (%s, %s, %s, %s) on conflict do nothing",
+                  (operation, tenant, owner, model))
+        row = c.execute("select tenant, owner, model from operation_owners where operation = %s", (operation,)).fetchone()
+        if row != (tenant, owner, model):
+            raise KeyLimit(409, "operation belongs to another owner or model")
+
+
+def operation_owner(operation: str) -> tuple[str, str, str] | None:
+    with _connection() as c:
+        return c.execute("select tenant, owner, model from operation_owners where operation = %s", (operation,)).fetchone()
 
 
 def release(operation: str, gpu_seconds: float | None = None) -> bool:

@@ -1,6 +1,6 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
 import asyncio, base64, hashlib, hmac, json, time, urllib.parse, uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -73,13 +73,13 @@ ADMITTED_HEADER = "x-serverless2-admitted"     # the API's own proxied call to a
 RESERVATION_STALE_S = 3600                        # a reservation whose Job is gone this long after creation is released
 
 
-def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> None:
+def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
     """Reserve the slot, the request and the GPU seconds of `operation` on the caller's key (keys.admit); nothing
     without the database, nothing for the router key (it carries no budget)."""
     if not db.enabled() or p.role == keys.ROUTER["role"]:
-        return
+        return {"replay": False}
     try:
-        keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request)
+        return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request)
     except keys.KeyLimit as e:
         raise HTTPException(e.status, e.detail)
 
@@ -120,6 +120,31 @@ def _admitted_token(key_hash: str) -> str:
     """HMAC the gateway hook verifies on the API's own proxied calls (one API call + its gateway authorization is one
     logical request); the router key is the shared secret of this fleet."""
     return hmac.new((cfg.ROUTER_KEY or "").encode(), key_hash.encode(), hashlib.sha256).hexdigest()
+
+
+def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
+    """An authorization hook cannot measure GPU time or hold a concurrency slot.
+
+    Shared endpoint GPU time is not request wall time. Until instrumentation exists,
+    finite GPU budgets are unsupported, never silently charged zero.
+    """
+    if p.role == keys.ROUTER["role"]:
+        return
+    if p.info.get("budget_gpu_seconds") is not None:
+        raise HTTPException(501, "finite GPU-second budgets are unsupported for shared endpoints; use a metered run")
+    if p.info.get("max_budget") is not None and ((p.info.get("metadata") or {}).get("legacy") or {}).get("principal_id"):
+        raise HTTPException(501, "finite USD budgets on imported keys require endpoint accounting; hash-only imports are not mirrored into the router")
+    if mode == "gateway" and not admitted and p.info.get("max_concurrent") is not None:
+        raise HTTPException(501, "direct endpoints cannot hold per-key concurrency reservations; use the synchronous API invoke path")
+    if mode == "async" and any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "rate_limit")):
+        raise HTTPException(501, "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke")
+
+
+def _continuation_limits(p: Principal) -> None:
+    # Resume/export/recovery currently create a new Job outside _create_admitted.
+    # Do not let that re-entry path bypass a migrated key's reserved units.
+    if any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "budget_gpu_seconds", "rate_limit")):
+        raise HTTPException(501, "bounded key continuations require reservation transfer; resume/export/fallback/recovery are not yet supported")
 
 
 class ResumeRequest(BaseModel):
@@ -655,7 +680,7 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
         key = f"Bearer {token}" if token else ""
     p = await _principal(key, allow_router=True)       # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
-    admitted = bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
+    admitted = bool(cfg.ROUTER_KEY) and bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
     await asyncio.to_thread(_authorize_model, p, model, admitted)      # catalog (database) and Kubernetes calls: off the event loop
     return JSONResponse({}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")})
 
@@ -665,14 +690,15 @@ def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
     check_model(p, m["name"])
     check_budget(p)
     check_scope(p, "invoke:sync")
+    _endpoint_limits(p, "gateway", admitted)
+    if m["mode"] == "run":
+        raise HTTPException(404, "not an endpoint")
     if not admitted and p.role != keys.ROUTER["role"]:
         # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is
         # not held: the hook cannot see the call end); the API's own proxied call was admitted already
         gid = f"gw-{uuid.uuid4().hex[:12]}"
         _admit(p, gid)
         _release(gid, 0.0)
-    if m["mode"] == "run":
-        raise HTTPException(404, "not an endpoint")
     if int(m.get("nodes") or 1) > 1:
         for region in m["regions"]:                                    # the gateway's call names no region: stamp every
             kube.stamp_last_request(m["k8s_name"], m["namespace"], region)   # deployment (idle shutdown reads it, throttled)
@@ -699,13 +725,15 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
         raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
     if req.execution and mode != "run":
         raise HTTPException(400, "execution options apply to runs only")
+    if mode != "run":
+        _endpoint_limits(p, mode)
     if mode == "sync":
         sid = f"sync-{uuid.uuid4().hex[:12]}"
         await asyncio.to_thread(_admit, p, sid)                      # a slot and a request for the duration of the call
         try:
             return await _sync(m, req, p, region)
         finally:
-            await asyncio.to_thread(_release, sid, 0.0)
+            await asyncio.to_thread(_release, sid, None)  # no per-request GPU measurement exists for shared endpoints
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
         raise HTTPException(413, f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)")
     # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
@@ -713,12 +741,15 @@ async def invoke(model: str, req: InvokeRequest, p: Principal = Depends(principa
 
 
 def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None):
-    # admission: Kueue (profile queues) bounds concurrent runs; LiteLLM rpm/budget bound async calls;
-    # the gateway BackendTrafficPolicy caps request rates. Nothing is counted here.
-    name = render.op_name(p.tenant, model, idempotency_key)
+    # Imported principal keys share an idempotency namespace only with the same
+    # principal; a tenant's shared bucket never shares private operation state.
+    name = render.op_name(p.owner, model, idempotency_key)
     timeout = req.timeout_s          # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret = None
     ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
+    if ex and ((ex.get("placement") or {}).get("fallback_wait_s") is not None
+               or (ex.get("recovery") or {}).get("on_infrastructure_loss") == "recover"):
+        _continuation_limits(p)
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
     if allowed and req.region and req.region not in allowed:
         # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
@@ -744,9 +775,48 @@ def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: s
                              gpu_class=_class_for(m, req, region, p.tenant, ex), ex=ex)
     # admission on the caller's key, from the rendered Job (its real GPU count): a slot, a request and, for a key with a
     # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
-    _admit(p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0)
-    created_job, created = jobs.create(p.namespace, job, region, secret)
+    ann = job["metadata"].setdefault("annotations", {})
+    ann[f"{cfg.LABEL}/owner"] = p.owner
+    if db.enabled():
+        try:
+            keys.own_operation(name, p.tenant, p.owner, model)
+        except keys.KeyLimit as e:
+            raise HTTPException(e.status, e.detail)
+    with keys.operation_lock(name) if db.enabled() else nullcontext():
+        created_job, created = _create_admitted(p, name, job, region, secret, req, mode)
     return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
+
+
+def _create_admitted(p, name, job, region, secret, req, mode):
+    """Called under the per-operation database lock; a refund cannot race a replay."""
+    # Existing Jobs already own their admission, including terminal replays.
+    try:
+        existing = jobs.get(p.namespace, name, region)
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        existing = None
+    if existing:
+        _check_operation_owner(p, existing)
+        reservation = {"replay": True}
+    else:
+        reservation = _admit(p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0)
+    try:
+        created_job, created = jobs.create(p.namespace, job, region, secret)
+    except Exception:
+        if db.enabled() and not reservation.get("replay"):
+            # A timeout can mean the create succeeded. Only a confirmed absence
+            # permits a refund; ambiguous failures retain the reservation.
+            try:
+                jobs.get(p.namespace, name, region)
+            except HTTPException as missing:
+                if missing.status_code == 404:
+                    keys.abandon(name, keys.key_hash(p.key))
+            except Exception:
+                pass
+        raise
+    _check_operation_owner(p, created_job)
+    return created_job, created
 
 
 def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex: dict | None = None) -> None:
@@ -866,7 +936,42 @@ def _price(job: dict) -> float | None:
 @app.get("/v1/operations")
 def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le=500), model: str | None = None):
     check_scope(p, "read:operations")
-    return [jobs.normalise(j, _price(j)) for j in jobs.list_ops(p.namespace, p.tenant, model, limit)]
+    return [jobs.normalise(j, _price(j)) for j in jobs.list_ops(p.namespace, p.tenant, model, 500) if _may_read_operation(p, j)][:limit]
+
+
+def _check_operation_owner(p: Principal, job: dict) -> None:
+    md = job["metadata"]
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
+    missing = HTTPException(404, "operation not found")
+    if labels.get(f"{cfg.LABEL}/tenant") != p.tenant:
+        raise missing
+    model = labels.get(f"{cfg.LABEL}/model")
+    root = ann.get(f"{cfg.LABEL}/resumed-from") or md["name"]
+    record = keys.operation_owner(root) if db.enabled() else None
+    if record:
+        tenant, owner, model = record
+        if tenant != p.tenant or (p.role != "admin" and owner != p.owner):
+            raise missing
+    elif ann.get(f"{cfg.LABEL}/owner"):
+        if p.role != "admin" and ann[f"{cfg.LABEL}/owner"] != p.owner:
+            raise missing
+    elif p.role != "admin":
+        # Pre-migration rows have no durable provenance. A matching original
+        # key is evidence; sharing its tenant/bucket is not.
+        if ann.get(f"{cfg.LABEL}/key") != keys.key_hash(p.key):
+            raise missing
+    if model and not allows_model(p, model):
+        raise missing
+
+
+def _may_read_operation(p: Principal, job: dict) -> bool:
+    try:
+        _check_operation_owner(p, job)
+        return True
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        return False
 
 
 def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
@@ -879,6 +984,12 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
         except HTTPException as e:
             if e.status_code != 404 or not attempts.enabled():
                 raise
+            rows = [r for r in attempts.for_operation(current) if r["operation"] == current and r["tenant"] == p.tenant]
+            if not rows and previous is not None:
+                return previous  # a verified owner's successor is not created yet
+            synthetic_job = {"metadata": {"name": current, "labels": {f"{cfg.LABEL}/tenant": p.tenant, f"{cfg.LABEL}/mode": "run"},
+                                          "annotations": {f"{cfg.LABEL}/resumed-from": rows[-1]["root"] if rows else current}}}
+            _check_operation_owner(p, synthetic_job)
             nxt = attempts.successor_of(current)
             if follow and nxt and nxt != current:
                 current = nxt
@@ -888,9 +999,8 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
                 if previous is not None:          # a successor that is marked but not created yet: the original stands
                     return previous
                 raise
-            return {"_synthetic": synthetic, "metadata": {"name": current, "labels": {"serverless2.nebius/tenant": p.tenant, "serverless2.nebius/mode": "run"}, "annotations": {}}}, synthetic.get("region")
-        if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
-            raise HTTPException(404, f"operation {id}: not found")
+            return {**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")
+        _check_operation_owner(p, job)
         nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor")
         if follow and nxt and nxt != current:
             current, previous = nxt, (job, region)
@@ -920,7 +1030,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     by_pod = {r["pod"]: r for r in rows}                               # one row per pod (the newest wins)
     rows = list(by_pod.values())
     members = sorted([j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-                      if j["metadata"]["name"] == root or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root],
+                      if _may_read_operation(p, j) and (j["metadata"]["name"] == root or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root)],
                      key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))
     name = job["metadata"]["name"]
     all_attempts = st._attempts(job.get("_pods", []), rows)          # every member's records; the live pods are this member's
@@ -961,7 +1071,7 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
     (`finalize_attempts`) and, while one is QUEUED or RUNNING, the handle shows it: `status FINALIZING`,
     `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
     xs = [j for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-          if (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
+          if _may_read_operation(p, j) and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
           and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"]
     out: dict = {"finalize_attempts": len(xs)}
     active = [j for j in xs if jobs.normalise(j)["status"] in ("QUEUED", "RUNNING") and not (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")]
@@ -1037,6 +1147,7 @@ def export_again(id: str, p: Principal = Depends(principal)):
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
     check_scope(p, "read:results"); check_scope(p, "run:control")
     orig, region = _owned(p, id)
+    _continuation_limits(p)
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:                          # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
@@ -1134,6 +1245,7 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
     check_scope(p, "run:submit"); check_scope(p, "run:control")
     orig, region = _owned(p, id)
+    _continuation_limits(p)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
@@ -1326,9 +1438,7 @@ async def endpoint_logs(id: str, region: str | None = None, range: str = "1h", s
 def _monitored(p: Principal, id: str) -> tuple[str | None, str]:
     """(region, kind) of an operation for its metrics and logs: the Job's region (a fleet-placed run: the worker that
     admitted it, None while it waits). Every query is scoped to the caller's own namespace."""
-    job, region = jobs.find(p.namespace, id)
-    if job["metadata"].get("labels", {}).get("serverless2.nebius/tenant") != p.tenant:
-        raise HTTPException(404, f"operation {id}: not found")    # someone else's run is never served
+    job, region = _owned(p, id, follow=False)
     return region, "jobset" if jobs.is_jobset(job) else "job"
 
 

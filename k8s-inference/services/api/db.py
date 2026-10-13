@@ -147,6 +147,18 @@ create table if not exists operation_marks (
     );
     create index if not exists key_calls_key_at on key_calls (key_hash, at);
     """,
+    # 9: private operation ownership outlives Jobs, reservations, and key revocation.
+    # Namespace/storage sharing does not grant access to another principal's operations.
+    """
+    create table if not exists operation_owners (
+        operation text primary key,
+        tenant text not null,
+        owner text not null,
+        model text not null,
+        created_at timestamptz not null default now()
+    );
+    create index if not exists operation_owners_tenant_owner on operation_owners (tenant, owner);
+    """,
 ]
 
 _pool = None

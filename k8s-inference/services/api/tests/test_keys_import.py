@@ -88,6 +88,7 @@ def test_run_admission_reserves_and_the_gateway_counts_one_logical_call(client, 
     assert admits[-1][2] == 600.0 * 2 and admits[-1][3] is True                                            # GPUs x timeout
     assert appmod._job_gpus({"spec": {"parallelism": 2, "template": {"spec": {"containers": [{"resources": {"limits": {"nvidia.com/gpu": "4"}}}]}}}}) == 8
     # the gateway hook counts a direct call once, and not at all when the API's proxied call carries the token
+    budgeted["budget_gpu_seconds"] = None  # shared endpoint GPU time is not per-request measured
     fake_keys.calls.clear()
     assert c.get("/internal/authorize/llm-example", headers=H).status_code == 200
     assert [x[0] for x in fake_keys.calls] == ["admit", "release"] and fake_keys.calls[0][1].startswith("gw-")

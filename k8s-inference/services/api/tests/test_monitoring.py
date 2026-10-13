@@ -100,7 +100,8 @@ def test_another_regions_monitoring_goes_through_its_api_server_proxy(client,mon
     """Loki of another region is reached through that cluster's API server proxy with the api-agent credentials
     (the caller's key never leaves this API); the query stays scoped to the resource."""
     c,_=client;requests=[]
-    monkeypatch.setattr(jobs,"find",lambda ns,id:({"metadata":{"labels":{"serverless2.nebius/tenant":"demo"}}},"eu-south1"))
+    import keys
+    monkeypatch.setattr(jobs,"find",lambda ns,id:({"metadata":{"name": id, "labels":{"serverless2.nebius/tenant":"demo"}, "annotations": {"serverless2.nebius/key": keys.key_hash("sk-good")}}},"eu-south1"))
     monkeypatch.setattr(kube,"regions",lambda:["eu-north1","eu-south1"])
     monkeypatch.setattr(kube,"_client",lambda region:FakeAgentClient())
     transport(monkeypatch,lambda req:requests.append(req) or httpx.Response(200,json={"status":"success","data":{"result":[]}}))

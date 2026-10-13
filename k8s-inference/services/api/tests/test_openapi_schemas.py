@@ -208,7 +208,7 @@ def test_every_status_literal_in_the_code_is_in_the_enum():
     assert "CANCELLED" in enum("AttemptStatus")
 
 
-def test_lifecycle_chain_and_finalizer_views_are_declared(client, monkeypatch):
+def test_lifecycle_chain_and_finalizer_views_are_declared(client, admin_keys, fake_keys, monkeypatch):
     """GET /v1/operations/{id} with the attempt records of a chain: the lifecycle fields (attempts.lifecycle), the
     chain view (app._chain), the finalizer view (app._finalizers) and the delivery closure (`exported_by`)."""
     c, fake = client
