@@ -4,6 +4,20 @@ locals {
     "mem-perf",
   ])
 
+  testing_disabled_gpu_active_checks = toset([
+    "all-reduce-perf-nccl-in-docker",
+    "all-reduce-perf-nccl-with-ib",
+    "all-reduce-perf-nccl-without-ib",
+    "cuda-samples",
+    "dcgmi-diag-r2",
+    "dcgmi-diag-r3",
+    "extensive-check",
+    "gpu-fryer",
+    "ib-gpu-perf",
+    "mem-perf",
+    "prepull-container-image",
+  ])
+
   gb300_active_checks_overrides = merge(
     {
       for check_name in local.gb300_disabled_active_checks :
@@ -42,22 +56,27 @@ locals {
     }
 
     # Run what is relevant in E2E
-    testing = {
-      ssh-check = {
-        k8sJobSpec = {
-          jobContainer = {
-            env = [{
-              name : "NUM_OF_LOGIN_NODES",
-              value : tostring(var.node_count.login)
-            }]
+    testing = merge(
+      {
+        for check_name in local.testing_disabled_gpu_active_checks :
+        check_name => {
+          runAfterCreation = false
+          suspend          = true
+        }
+      },
+      {
+        ssh-check = {
+          k8sJobSpec = {
+            jobContainer = {
+              env = [{
+                name : "NUM_OF_LOGIN_NODES",
+                value : tostring(var.node_count.login)
+              }]
+            }
           }
         }
       }
-      ib-gpu-perf = {
-        drainReasonPrefix = "[node_problem]"
-        commentPrefix     = null
-      }
-    }
+    )
     # Check the provisioned cluster, but don't run health-checks that take long
     prod_quick = {
       all-reduce-perf-nccl-in-docker = {
