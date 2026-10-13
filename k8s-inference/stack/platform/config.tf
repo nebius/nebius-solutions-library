@@ -64,7 +64,7 @@ locals {
   platform_values             = module.config.platform_values[var.target]
 }
 
-# The Nebius IAM access token (12 h) for the Kubernetes and Helm providers of this cluster; stack.sh sets
+# The Nebius IAM access token for the Kubernetes and Helm providers of this cluster; stack.sh sets
 # TF_VAR_iam_token from NEBIUS_IAM_TOKEN (`nebius iam get-access-token`), exactly as k8s-training does.
 variable "iam_token" {
   type      = string

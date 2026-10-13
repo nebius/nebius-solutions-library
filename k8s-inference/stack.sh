@@ -22,11 +22,15 @@ cmd="${1:-}"; shift || true
 export TF_IN_AUTOMATION=1
 [ "$cmd" = check ] && exec "$ROOT/tools/check.sh" "$@"
 # Authentication, the same way as the library's other solutions: an IAM access token of the Nebius CLI's active
-# profile (`nebius profile activate <name>` to switch), valid 12 hours, read by the Nebius provider from
-# NEBIUS_IAM_TOKEN and passed to the Kubernetes/Helm providers as TF_VAR_iam_token. Set NEBIUS_IAM_TOKEN
-# yourself (CI: a service-account token) to skip the CLI call.
-export NEBIUS_IAM_TOKEN="${NEBIUS_IAM_TOKEN:-$(nebius iam get-access-token)}"
-export TF_VAR_iam_token="$NEBIUS_IAM_TOKEN"
+# profile (`nebius profile activate <name>` to switch), read by the Nebius provider from NEBIUS_IAM_TOKEN and
+# passed to the Kubernetes/Helm providers as TF_VAR_iam_token. The CLI hands out its cached token, whose remaining
+# lifetime is unknown here, so the token is fetched again before every stage run (a token that expires inside one
+# stage fails that stage with "Unauthorized"; re-run it). Set NEBIUS_IAM_TOKEN yourself (CI: a service-account
+# token) to skip the CLI calls.
+TOKEN_FROM_CLI=0
+[ -n "${NEBIUS_IAM_TOKEN:-}" ] || TOKEN_FROM_CLI=1
+token() { [ "$TOKEN_FROM_CLI" = 1 ] && NEBIUS_IAM_TOKEN="$(nebius iam get-access-token)"; export NEBIUS_IAM_TOKEN TF_VAR_iam_token="$NEBIUS_IAM_TOKEN"; }
+token
 
 # The plan stack.sh follows (cluster ids, roles, order, state bucket) is derived from the tfvars by the
 # config root (stack/config/locals.tf `plan`), so this script never parses HCL itself.
@@ -84,6 +88,7 @@ tf_init() { # <stage> [<cluster-id>]
 run() { # <tf command> <stage> [<cluster-id>] [extra args...]
   local tfcmd="$1" stage="$2" id="" ; shift 2
   case "$stage" in platform) id="${1:?cluster id}"; shift ;; esac
+  token
   tf_init "$stage" "$id"
   local dir="$ROOT/stack/$stage" args=(-input=false -var-file="$TFVARS")
   [ -z "$id" ] || args+=(-var "target=$id")
