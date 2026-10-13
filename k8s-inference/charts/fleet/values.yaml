@@ -1,0 +1,19 @@
+# charts/fleet values. Terraform passes the fleet definition (the `fleet:` key) plus
+# the platform stage (stack/platform), and `cluster` = the cluster id (control, or a region's cluster id).
+cluster: ""
+fleet:               # the whole `fleet:` document of fleet.yaml, merged over these defaults
+  # CPU-only admission: the `system` flavor budgets the region's system nodes (`regions.<r>.system_pool`) minus this
+  # reserve per node for the platform's own add-ons (gateway, Kueue, cache, monitoring); GPU-free runs (finalizers,
+  # export retries, CPU classes) land there instead of on a GPU pool. No node is added: it is the capacity the
+  # system nodes already have.
+  system_reserve: { cpu: 4, memory_gib: 16 }
+cohort: serverless2  # root cohort shared with the tenant queues (charts/tenant)
+namespaces:
+  kueue: kueue-system
+  models: models
+prepull:
+  enabled: true
+  imagePullSecrets: []   # images come through the regional cache (fleet.images), no pull secret needed
+  images: []         # per cluster (terraform.tfvars `images.prepull`): [{name: <model>, image: <ref>}]
+multikueue:
+  secretPrefix: multikueue-   # kubeconfig Secrets `kueue-system/multikueue-<region id>` on the control cluster

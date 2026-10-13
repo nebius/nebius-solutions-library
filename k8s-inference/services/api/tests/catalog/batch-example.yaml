@@ -1,0 +1,43 @@
+# Test fixture: a GPU run class with one image for every GPU class (the generic shape of a batch job that
+# resumes from checkpoints on the per-run volume after a preemption or a :resume).
+id: batch-example
+displayName: Batch example (run class)
+description: A long GPU job with checkpoints; inputs and outputs in the tenant bucket of the run's region, resumes after preemption on the same volume.
+task: batch
+mode: run
+protocol: kubernetes-job
+gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # preferred first
+price: { unit: gpu-hour, usd: 1.60 }       # display; billing uses deployments.<cluster>.price_per_gpu_hour
+job:
+  # one image for every region (sm_90 + sm_120 fatbin), pulled through the regional cache (docs/IMAGES.md)
+  image: registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120
+  gpu: 1
+  cpu: "12"
+  memory: 32Gi
+  pvcSizeGi: 50
+  graceSeconds: 300               # checkpoints are written every 5 min anyway; a resume loses at most that
+  command:
+    - bash
+    - -c
+    - |
+      set -euo pipefail
+      cd /work
+      echo "ATTEMPT START $(date -u +%FT%TZ) pod=$HOSTNAME"
+      [ -n "{{threads}}" ] && export EXAMPLE_THREADS="{{threads}}"
+      sed -E 's/^(steps[[:space:]]*=).*/\1 {{nsteps}}/' in/{{config}} > run.cfg
+      example-run --config run.cfg --batch-size {{batch_size}} --resume-from run.ckpt --checkpoint-every 5m {{extra_args}}
+      echo "ATTEMPT END $(date -u +%FT%TZ)"
+deployments:          # where the run class may land (fleet placement picks among these by preference and price); per-cluster
+                      # parameter defaults; no pool pin: the profile queue and the class affinity place it
+  hub:
+    price_per_gpu_hour: 2.15      # H100 spot cap (pricing policy of the pool); billed on GPU-seconds of the run
+    parameters: { threads: "16" }
+  eu-south1:
+    price_per_gpu_hour: 1.60      # RTX PRO 6000 spot
+    parameters: { threads: "16" }
+parameters:
+  - { name: input_prefix, type: string, label: Input prefix (s3://<tenant bucket>/...), required: true }
+  - { name: nsteps, type: number, label: Steps, default: 1000 }
+  - { name: config, type: string, label: Config file, default: run.cfg }
+  - { name: batch_size, type: number, label: Batch size, default: 200 }
+  - { name: extra_args, type: string, label: Extra arguments, default: "" }

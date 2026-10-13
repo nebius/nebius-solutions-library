@@ -1,0 +1,262 @@
+{
+ "_/ConfigMap/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "4dce1b6a345c28d899a04297ac20265f1221bd829c5806b9bb66ba329ffb62cb"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-cost": {
+  "component": "observability",
+  "sha256": "57e08bcd0c68a49719e43cdef2bb8500dfeb917e4ac270d2c4e4154b99c40c1a"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-endpoints": {
+  "component": "observability",
+  "sha256": "1ddc4f528dd6128696dd35c4b689e4a8734fd02803d1ff887de396d0e553eca5"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-jobs": {
+  "component": "observability",
+  "sha256": "4c608a8e8eb720e61d86e4fe9d059335f223cb5a21dcddea0072b8f3885e765f"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-logs": {
+  "component": "observability",
+  "sha256": "3cfd36d414501ac592dbb5f6102077fda9f6f2be58dafe02fc30c67bb9188375"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-platform": {
+  "component": "observability",
+  "sha256": "5cc750308ef96f1da4fafc03c5ba3e0ad32925f0bcc24f15aca0e495e157825b"
+ },
+ "_/ConfigMap/monitoring/serverless2-datasource-loki": {
+  "component": "observability",
+  "sha256": "ab461582bf667273cbb5515d54fd6de7336ed990f763d6e5285a79a51c51f2e2"
+ },
+ "_/Namespace/_/api": {
+  "component": "api-agent",
+  "sha256": "66aafe34be9dfff45a10b3af6744147d370e83af43fe742bfc0fedd837f0c4f0"
+ },
+ "_/Namespace/_/models": {
+  "component": "scheduling",
+  "sha256": "7865f2564bb0b837b3eccac81d77bf464698cada20f9730d10fa8d5763d3439e"
+ },
+ "_/Namespace/_/ops": {
+  "component": "ops",
+  "sha256": "32375c24b59f152b14001377a0e46d8d070fb96ad292aff485b9c03aaee8f9c4"
+ },
+ "_/PersistentVolumeClaim/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "44b4f1b5474b90832efaf5732b7436665b2fb1080310de1facbad334525073d6"
+ },
+ "_/Service/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "e19d2dd366b1e7879b331fb4493e82804dc59055f89ca2b59418c11382a15852"
+ },
+ "_/Service/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "576c411cb314ffc37dc5fd0f6aab783cabcdad62d7b17a1d7c417219588b3843"
+ },
+ "_/ServiceAccount/api/api-agent": {
+  "component": "api-agent",
+  "sha256": "a10b38ab593796d805df13950cfe468e02fd1eaa6f2c6af3a8e42650f121e330"
+ },
+ "_/ServiceAccount/kueue-system/multikueue": {
+  "component": "fleet-access",
+  "sha256": "349b4b983429d182884024a912b3d4b0e0931f3629db3893329ac0f27e6739fe"
+ },
+ "apps/DaemonSet/spegel/containerd-registry-config": {
+  "component": "node-config",
+  "sha256": "2becbada53207f175db8b8f0227e1b1f148dde959540133ee836cc3e96481623"
+ },
+ "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "d516577d9208c5263d90a85853d5db21f3ec3a5db5cc9c68c44e96452513e1ee"
+ },
+ "apps/Deployment/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "2246f80c558b2bfdc0715bd6cc67fe35432b5c641707d6a9865c8c6b177a9e91"
+ },
+ "batch/CronJob/monitoring/cost-export": {
+  "component": "observability",
+  "sha256": "58d3665cd4409af8da8921839ccd21376db4e7742dcfb51bd0b67ced6d616db7"
+ },
+ "batch/CronJob/ops/recover-stopped-nodes": {
+  "component": "ops",
+  "sha256": "5248c888d64fef4217790a4b68d46ce7e5fcd3e6d5756863f855700e98d448de"
+ },
+ "cert-manager.io/Certificate/envoy-gateway-system/models": {
+  "component": "gateway",
+  "sha256": "8fa2699c4c923eeec30df03f415af22bd32e69645b28d3da9d1aa8fabafd4f78"
+ },
+ "cert-manager.io/ClusterIssuer/_/letsencrypt": {
+  "component": "gateway",
+  "sha256": "d365f8ad0c3bb10dd4f77b3a5abb82e3b61af1129f28a4d7a4ca5118e06a6993"
+ },
+ "cert-manager.io/ClusterIssuer/_/letsencrypt-staging": {
+  "component": "gateway",
+  "sha256": "2fd83997a065ee2dd5ca6c888868f4e556b6201b655ef1dd46a396d68719db02"
+ },
+ "cert-manager.io/ClusterIssuer/_/selfsigned": {
+  "component": "gateway",
+  "sha256": "290f4c8ce8617c5a88541f8cd9e23efad1248f1fc54d9bfeabf558316240545f"
+ },
+ "cilium.io/CiliumClusterwideNetworkPolicy/_/tenant-egress-world": {
+  "component": "ops",
+  "sha256": "1e21c3753109d663ce754ec9746546268e50ffc802d87a59ff191b2da34a6176"
+ },
+ "cilium.io/CiliumClusterwideNetworkPolicy/_/tenant-isolation": {
+  "component": "ops",
+  "sha256": "e99262d714d9351ca321afcdf6625bce0f793cb8557ada56dd2ab8e351d5bb33"
+ },
+ "gateway.envoyproxy.io/Backend/api/api": {
+  "component": "edge",
+  "sha256": "dab7a5361c2eae04c0d6d77d673201e2910834d0b11bde1344a4c0ccb75e96af"
+ },
+ "gateway.envoyproxy.io/BackendTrafficPolicy/envoy-gateway-system/per-key-rate-limit": {
+  "component": "gateway",
+  "sha256": "27971608c4ffb479f6146146b1bfe42493935832f3b1f45d4c071e94ff3b6fc6"
+ },
+ "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/external": {
+  "component": "gateway",
+  "sha256": "5d520264996d6d6266ddf514749ace3294c559156283aa313983185fd484acb3"
+ },
+ "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/internal": {
+  "component": "gateway",
+  "sha256": "e21ed94e2bbff8ee5db419c90c3a022ff0df89b9d1f96257e24c8b41531abd09"
+ },
+ "gateway.networking.k8s.io/BackendTLSPolicy/api/api": {
+  "component": "edge",
+  "sha256": "44d3340921052aa166e26ff11b1d99f53ec532ca3700936afa96ac101c848b69"
+ },
+ "gateway.networking.k8s.io/Gateway/envoy-gateway-system/serverless2-external": {
+  "component": "gateway",
+  "sha256": "2587af47f1c2b047512faea7e56b49122c0d10a575a5cee202c4cf1e405263f0"
+ },
+ "gateway.networking.k8s.io/Gateway/envoy-gateway-system/serverless2-internal": {
+  "component": "gateway",
+  "sha256": "6f7e9eb71d71999755fefd7552631d6db00e5ec8d7a4c8bf96ad4e3af59205f7"
+ },
+ "gateway.networking.k8s.io/GatewayClass/_/eg": {
+  "component": "gateway",
+  "sha256": "30c042ba895d1087dc39f086a0088ab4fb6fb4e63f98a3252ac68f641a6cb076"
+ },
+ "gateway.networking.k8s.io/HTTPRoute/monitoring/grafana": {
+  "component": "grafana-route",
+  "sha256": "b7dcda1579176a710fcff2c0a05fc43df7ad4914738fdadea8ce24e8402ff38e"
+ },
+ "gateway.networking.k8s.io/ReferenceGrant/api/endpoint-authorization": {
+  "component": "edge",
+  "sha256": "b80d3bfdcaf99c347adbe2ba34e25888aeaaa881110a533096d2ab7c83f36721"
+ },
+ "kueue.x-k8s.io/LocalQueue/models/endpoints": {
+  "component": "scheduling",
+  "sha256": "16bef4bfe0bf3434add7bd76aae2cdc57e72f61f3cfff854b90c3c73e666c1c2"
+ },
+ "kueue.x-k8s.io/WorkloadPriorityClass/_/bulk-backfill": {
+  "component": "scheduling",
+  "sha256": "c36b13ffcef722660fa67fdfc4d063fc5439d507ca782afd2c2602ee109f328d"
+ },
+ "kueue.x-k8s.io/WorkloadPriorityClass/_/customer-batch": {
+  "component": "scheduling",
+  "sha256": "205dfca77458e05dfd24eb008a74f08a4a5f1fdc85f19cea98b2e9d99396cc4f"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/cert-manager": {
+  "component": "observability",
+  "sha256": "5ad52d3172415836d3095df058d7cd442b10e9b413e655ab928b723ad59d1831"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/envoy-gateway-proxies": {
+  "component": "observability",
+  "sha256": "a7a648b460addbbf2f8c7a58735f221c2905266a7bf0faa4b8dfa780eb2ef8eb"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/knative-control-plane": {
+  "component": "observability",
+  "sha256": "618bf2b7a3f39529b74f4ba53c9a6ba19eca655313dc8923a9af599c01dab261"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/knative-queue-proxy": {
+  "component": "observability",
+  "sha256": "6e7e3b3c881dcf71fedfc9b2be2832be7b33670ddff59323316b89f1e67b578b"
+ },
+ "monitoring.coreos.com/PrometheusRule/monitoring/serverless2-capacity": {
+  "component": "observability",
+  "sha256": "e77281df4c35d4d289693a2a3467da96057a46866775ecf7185abab00b46033f"
+ },
+ "monitoring.coreos.com/PrometheusRule/monitoring/serverless2-platform": {
+  "component": "observability",
+  "sha256": "b1e624e5cae87370b414bd22097fe436ea50289f0b3801c5e2a50fca029e061e"
+ },
+ "monitoring.coreos.com/ServiceMonitor/monitoring/kserve-controller": {
+  "component": "observability",
+  "sha256": "8eaac31dafa70bcccfdaba9c1df37f72756c0204a88d945e1294db079550fbef"
+ },
+ "monitoring.coreos.com/ServiceMonitor/monitoring/kueue": {
+  "component": "observability",
+  "sha256": "fc2f91f9e7586ddfcfbe9a8fb8a946d4b5fd0aba55f7b6e8f5adf5a2037b5c24"
+ },
+ "networking.k8s.io/NetworkPolicy/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "e6d7134a849bd0e913ed06e7b28cb0e2e5dc5e9e0953cda43a1719b1461ca6d2"
+ },
+ "operator.knative.dev/KnativeServing/knative-serving/knative-serving": {
+  "component": "knative-serving",
+  "sha256": "231901a4d06dc424463b45eb900cff2470a462777274b4a330542766dcabbe78"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/multikueue-manager": {
+  "component": "fleet-access",
+  "sha256": "7ae5a24d3374a94e5dbf8c8c29d0ec9ea704a258e7d1b1bb78aac608a002355a"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-agent-read": {
+  "component": "api-agent",
+  "sha256": "487605bacd4491ddda28c5aafc5c50f916414c9de62b2ac6f525eecfbca1c00a"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-agent-tokenreview": {
+  "component": "api-agent",
+  "sha256": "9a33cac505edb2f6a8c96b7631b224ef212dd0420ddcc0630d16403b353be5f9"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
+  "component": "tenant-clusterrole",
+  "sha256": "a9ad5ab84800b533cde7e84c334d3633c405b71658e62b3cf691e27c3985f80e"
+ },
+ "rbac.authorization.k8s.io/ClusterRoleBinding/_/multikueue-manager": {
+  "component": "fleet-access",
+  "sha256": "bda7df2587919f0d6bc2e43060cc15a93d2de46f3efc812abfcea2b5f5b9be55"
+ },
+ "rbac.authorization.k8s.io/ClusterRoleBinding/_/serverless2-api-agent-read": {
+  "component": "api-agent",
+  "sha256": "2e5b35b416b2b06c2917d867eb70d28d8053b4f65f43867dbcc7a551fc678831"
+ },
+ "rbac.authorization.k8s.io/ClusterRoleBinding/_/serverless2-api-agent-tokenreview": {
+  "component": "api-agent",
+  "sha256": "9fd3937aedd5b9e61d0f1bc4bb1c4a88aee5e96c5fa5226a5bae2ab6d64bf60d"
+ },
+ "rbac.authorization.k8s.io/Role/envoy-gateway-system/serverless2-api-agent-models-certificate": {
+  "component": "api-agent",
+  "sha256": "b5782e952da60a4360905e99a103d5ab0ab1cc982babae352b1ec1dbf6844946"
+ },
+ "rbac.authorization.k8s.io/Role/models/serverless2-api-agent-models": {
+  "component": "api-agent",
+  "sha256": "cd5711afcdb3269200146555afd0236205a7d6b0acbaf3f720e90d2ebe3e5277"
+ },
+ "rbac.authorization.k8s.io/Role/monitoring/serverless2-api-agent-monitoring": {
+  "component": "api-agent",
+  "sha256": "0ba7e63a670fd145aeacbb1eb68b4070539d6680dc8cc3f47cb4d5a760106a32"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/envoy-gateway-system/serverless2-api-agent-models-certificate": {
+  "component": "api-agent",
+  "sha256": "f95dd3ad820362a72d75569f7a62f77756da47e79411ab68c51c47ed19931798"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/models/serverless2-api-agent-models": {
+  "component": "api-agent",
+  "sha256": "b00f4299a133c9e83f0eadafbdfe83e67a50031c02a7918d981777ebd9775635"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/monitoring/serverless2-api-agent-monitoring": {
+  "component": "api-agent",
+  "sha256": "98b9a20d0c0426f881ec5de1fc2fb61d0a505b3e59bebc4fded94d7c78b398c6"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-batch": {
+  "component": "scheduling",
+  "sha256": "76e9fbaa5d629d63dfd45ca054d8f162879a9400c198970585c76e2dba107588"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-batch-priority": {
+  "component": "scheduling",
+  "sha256": "3a71950acf06001bcf692ec88acb22db4c6ec61cbad87899ed1c0089c1c98a52"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-interactive": {
+  "component": "scheduling",
+  "sha256": "814a8f6fb955f741c0bc46f929998998cf4d253ab9f4d8b6420e8e1216cbdac2"
+ }
+}

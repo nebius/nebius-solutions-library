@@ -1,0 +1,36 @@
+# Test fixture: an HTTP endpoint from a private registry image (NIM-like: pull through the cache, a
+# model cache on the shared filesystem, a per-call price, one GPU class).
+id: http-example
+displayName: HTTP example (private registry image)
+task: inference
+mode: sync                       # also suitable for async (10 s to minutes per call)
+protocol: http
+port: 8000
+endpoints: { generate: /v1/generate, ready: /v1/health/ready, live: /v1/health/live }
+gpu: { count: 1, memoryGiB: 16, classes: [h100] }
+concurrency: 1
+coldStartClass: slow             # 15 GiB image; model cache on the shared filesystem after the first start
+price: { unit: call, usd: 0.05 }
+scaleToZero: true
+
+runtime:
+  image: registry.serverless2.local/nvcr/example/http-example:1.0.0   # a private registry through the regional cache (docs/IMAGES.md); no pull secret on the pod
+  command: [/usr/bin/python3, /usr/local/bin/start_server]
+  port: 8000
+  protocol: http
+  env:
+    - name: EXAMPLE_API_KEY
+      valueFrom: { secretKeyRef: { name: example-api-key, key: EXAMPLE_API_KEY } }
+    - { name: EXAMPLE_CACHE_PATH, value: /opt/example/.cache }
+  resources: { gpu: 1, cpu: "8", memory: 32Gi, cpuRequest: "4", memoryRequest: 16Gi }
+  scaling: { minReplicas: 0, maxReplicas: 1, metric: concurrency, target: 1, containerConcurrency: 1, scaleToZeroRetention: 2m }
+  timeout: 600                      # also the pod's termination grace period in Knative
+  shm: { enabled: true, size: 4Gi }
+  weights:
+    sharedFilesystem: { enabled: true, path: http-example, mountPath: /opt/example/.cache }
+  readinessProbe: { path: /v1/health/ready }
+
+deployments:
+  hub:
+    pool: h100-spot-1x
+    priorityClassName: serverless2-interactive

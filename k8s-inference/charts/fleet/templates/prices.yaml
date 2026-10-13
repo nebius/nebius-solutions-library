@@ -1,0 +1,57 @@
+{{- /* fleet-prices: USD per GPU-hour per pool (every region on the control cluster, this region's pools on a
+       worker) for the cost-aware dispatcher and the price feed. OpenCost itself keeps one GPU/spot price per
+       cluster (platform stage), set from the same numbers. */ -}}
+{{- $f := .Values.fleet }}
+{{- $all := include "fleet.allPools" $f | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fleet-prices
+  namespace: {{ .Values.namespaces.kueue }}
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+data:
+  pools.yaml: |
+    {{- range $name, $p := $all }}
+    {{- if or (include "fleet.isControl" $) (eq $p.region $.Values.cluster) }}
+    {{ $name }}:
+      region: {{ $p.region }}
+      pool: {{ $p.pool }}
+      gpu_class: {{ $p.gpu_class }}
+      platform: {{ $p.platform }}
+      preset: {{ $p.preset }}
+      project: {{ $p.project }}
+      capacity: {{ (default (dict "type" "on_demand") $p.capacity).type }}
+      usd_per_gpu_hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) }}
+      gpus_per_node: {{ (include "fleet.preset" $p.preset | fromYaml).gpus }}
+      min_nodes: {{ default 0 $p.min_nodes }}
+      max_nodes: {{ $p.max_nodes }}
+      {{- /* the pool's node group (platform stage, from the cloud state): the dispatcher moves an InfiniBand pool's floor with it */}}
+      {{- with $p.node_group_id }}
+      node_group_id: {{ . }}
+      {{- end }}
+      interconnect: {{ default "none" $p.interconnect }}
+      ib_devices_per_node: {{ include "fleet.ibDevices" $p }}
+      local_nvme: {{ if $p.local_nvme }}true{{ else }}false{{ end }}
+      tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
+    {{- end }}
+    {{- end }}
+  clusters.yaml: |
+    {{- /* cluster id (MultiKueueCluster name, pools' `region`, catalog deployments) -> the Nebius region and project:
+           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region) */}}
+    {{- range $rn, $r := $f.regions }}
+    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }} }
+    {{- end }}
+    {{- if ne $f.control.id "none" }}
+    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true }
+    {{- end }}
+  tenants.yaml: |
+    {{- range $tn, $t := (default dict $f.tenants) }}
+    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }} }
+    {{- end }}
+  list.yaml: |
+    {{- range $platform, $pr := $f.prices }}
+    {{- if kindIs "map" $pr }}
+    {{ $platform }}: { on_demand: {{ $pr.on_demand }}, spot: {{ $pr.spot }} }
+    {{- end }}
+    {{- end }}
