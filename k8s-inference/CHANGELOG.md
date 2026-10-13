@@ -4,6 +4,12 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.52
+
+- A public run class (`POST /v1/models`, kind job) takes separate limits and node-local scratch: `cpu_limit`,
+  `memory_limit` (the request stays what the scheduler guarantees), `ephemeral_storage`, `ephemeral_storage_limit`
+  (docs/JOBS.md "Run class"); absent, nothing changes (memory limit = request, no CPU quota, no ephemeral request).
+
 ## api 0.11.51
 
 - An endpoint call's caller carries the fleet's CA bundle (the system roots plus the CAs the API itself trusts, the

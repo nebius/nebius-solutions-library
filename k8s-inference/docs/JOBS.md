@@ -23,7 +23,8 @@ job:
   env: { CHECKPOINT_DIR: /work/checkpoint, OPERATION: "{{operation}}" }
   gpu: "{{gpus}}"                 # nvidia.com/gpu request = limit (0 = CPU job)
   cpu: "8"                        # request; cpuLimit optional (many solvers run without one: a CFS quota throttles them)
-  memory: 64Gi                    # request = limit (memoryLimit overrides the limit)
+  memory: 64Gi                    # request = limit (memoryLimit overrides the limit: what the container may grow to, not guaranteed memory)
+  ephemeralStorage: 200Gi         # optional: the kubelet's node-local scratch (the writable layer, emptyDirs, /work on local-nvme); ephemeralStorageLimit optional (= the request)
   pvcSizeGi: 100                  # the work volume (/work), ReadWriteOnce, regional
   shm: 16Gi                       # /dev/shm emptyDir
   pool: "{{pool}}"                # nodeSelector serverless2.nebius/pool (omit: Kueue's flavor decides)

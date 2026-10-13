@@ -124,3 +124,72 @@ def test_weights_mount_read_only_and_images_through_the_cache():
         }
     )
     assert e["job"]["weights"] == "llm-example" and e["job"]["weightsMountPath"] == "/w"
+
+
+def test_run_class_limits_and_ephemeral_storage_are_separate_from_requests(monkeypatch):
+    """A public run class (`POST /v1/models`, kind job) carries separate limits and node-local scratch (docs/JOBS.md "Run
+    class"): the request is what the scheduler guarantees (96Gi fits a 185Gi node), the limit what the container may
+    grow to (256Gi); ephemeral storage request/limit for the kubelet's local scratch; nothing without them (the limit
+    equals the request, no CPU quota)."""
+    import kube
+    from test_api import FLEET
+
+    monkeypatch.setattr(kube, "fleet", lambda: FLEET)  # the fleet the classes are validated against
+    spec = {
+        "id": "fold",
+        "kind": "job",
+        "image": "img",
+        "command": "fold",
+        "gpu": {"count": 8, "classes": ["h100"]},
+        "cpu": "32",
+        "memory": "96Gi",
+        "memory_limit": "256Gi",
+        "cpu_limit": "64",
+        "ephemeral_storage": "200Gi",
+        "ephemeral_storage_limit": "400Gi",
+    }
+    job_block = models.to_entry(spec)["job"]
+    assert (job_block["cpu"], job_block["memory"], job_block["cpuLimit"], job_block["memoryLimit"]) == (
+        "32",
+        "96Gi",
+        "64",
+        "256Gi",
+    )
+    assert (job_block["ephemeralStorage"], job_block["ephemeralStorageLimit"]) == ("200Gi", "400Gi")
+    m = catalog.normalise(models.to_entry(spec))
+    job = jobs.build_run("op-fold-1", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"})
+    res = next(c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "main")["resources"]
+    assert res["requests"] == {"cpu": "32", "memory": "96Gi", "ephemeral-storage": "200Gi", "nvidia.com/gpu": "8"}
+    assert res["limits"] == {"cpu": "64", "memory": "256Gi", "ephemeral-storage": "400Gi", "nvidia.com/gpu": "8"}
+    plain = models.to_entry(
+        {**spec, "memory": "16Gi"}
+        | {k: None for k in ("memory_limit", "cpu_limit", "ephemeral_storage", "ephemeral_storage_limit")}
+    )
+    assert not {"cpuLimit", "memoryLimit", "ephemeralStorage", "ephemeralStorageLimit"} & set(plain["job"])
+    m = catalog.normalise(plain)
+    res = next(
+        c
+        for c in jobs.build_run(
+            "op-fold-2", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"}
+        )["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "main"
+    )["resources"]
+    assert res["limits"] == {"memory": "16Gi", "nvidia.com/gpu": "8"} and "ephemeral-storage" not in res["requests"]
+    one = models.to_entry({**spec} | {"ephemeral_storage_limit": None})
+    res = next(
+        c
+        for c in jobs.build_run(
+            "op-fold-3",
+            catalog.normalise(one),
+            {},
+            "demo",
+            None,
+            None,
+            None,
+            None,
+            "eu-north1",
+            {"output_prefix": "s3://b/o"},
+        )["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "main"
+    )["resources"]
+    assert res["requests"]["ephemeral-storage"] == res["limits"]["ephemeral-storage"] == "200Gi"

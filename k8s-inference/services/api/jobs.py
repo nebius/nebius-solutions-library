@@ -215,6 +215,12 @@ def build_run(
     }
     if r.get("cpuLimit"):
         res["limits"]["cpu"] = str(r["cpuLimit"])
+    if r.get("ephemeralStorage") or r.get("ephemeralStorageLimit"):
+        # the kubelet's ephemeral storage (/work on local-nvme scratch, the container's writable layer, emptyDirs):
+        # request = limit unless both are given
+        req = r.get("ephemeralStorage") or r.get("ephemeralStorageLimit")
+        res["requests"]["ephemeral-storage"] = str(req)
+        res["limits"]["ephemeral-storage"] = str(r.get("ephemeralStorageLimit") or req)
     if gpus:
         res["requests"]["nvidia.com/gpu"] = res["limits"]["nvidia.com/gpu"] = str(gpus)
     pvc = pvc or f"{name}-work"

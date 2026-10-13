@@ -354,8 +354,12 @@ class ModelSpec(BaseModel):
     display_name: SkipValidation[str | None] = None
     description: SkipValidation[str | None] = None
     task: SkipValidation[str | None] = None
-    cpu: SkipValidation[str | None] = None
-    memory: SkipValidation[str | None] = None
+    cpu: SkipValidation[str | None] = None  # request
+    memory: SkipValidation[str | None] = None  # request (= limit unless memory_limit)
+    cpu_limit: SkipValidation[str | None] = None  # optional: no CFS quota without it
+    memory_limit: SkipValidation[str | None] = None  # a limit above the request is not guaranteed memory
+    ephemeral_storage: SkipValidation[str | None] = None  # node-local scratch request (the kubelet's ephemeral storage)
+    ephemeral_storage_limit: SkipValidation[str | None] = None  # = the request unless given
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
     scratch: SkipValidation[Literal["network", "local-nvme"] | None] = None

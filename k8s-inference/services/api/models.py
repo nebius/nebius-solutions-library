@@ -602,6 +602,15 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "gpu": count,
             "cpu": str(s.get("cpu", "4")),
             "memory": str(s.get("memory", "16Gi")),
+            # separate limits and node-local scratch (docs/JOBS.md "Run class"): a request is what the scheduler
+            # guarantees, a limit what the container may grow to; absent limits keep the chart's rules (memory limit =
+            # request, no CPU quota)
+            **({"cpuLimit": str(s["cpu_limit"])} if s.get("cpu_limit") else {}),
+            **({"memoryLimit": str(s["memory_limit"])} if s.get("memory_limit") else {}),
+            **({"ephemeralStorage": str(s["ephemeral_storage"])} if s.get("ephemeral_storage") else {}),
+            **(
+                {"ephemeralStorageLimit": str(s["ephemeral_storage_limit"])} if s.get("ephemeral_storage_limit") else {}
+            ),
             "pvcSizeGi": int(s.get("disk_gi", 50)),
             "graceSeconds": int(s.get("grace_seconds", 300)),
             "scratch": s.get("scratch", "network"),
