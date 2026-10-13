@@ -111,7 +111,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.47", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.48", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -169,6 +169,32 @@ def continuation_admission(root: str, predecessor: str | None, transfer_only: bo
             raise HTTPException(e.status, e.detail)
 
     return admit
+
+
+def _require_current(p: Principal, source: str, root: str) -> None:
+    """A public continuation renders from `source` (the Job the caller named), while the ledger admits it after the
+    lineage's current head. The two must be the same operation, or the head an export retry / finalizer of the source
+    (`export-of` = source: the compute attempt stays where it was): a resume or export of an older member after a
+    newer compute successor exists is refused with the head named, never a silent reopening of old state."""
+    if not db.enabled():
+        return
+    member = keys.member_of(root)
+    if member is None:
+        return
+    head = keys.stage_head(member["root"], member["stage"]) if member["kind"] == "stage" else keys.run_head(root)
+    if head in (None, source):
+        return
+    try:
+        head_job, _ = jobs.find(p.namespace, head)
+        if (head_job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == source:
+            return
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+    raise HTTPException(
+        409,
+        f"operation {source} was continued by {head}; continue {head} (the current member of its lineage), not {source}",
+    )
 
 
 def continue_run(root: str, build, transfer_only: bool = False):
@@ -1428,6 +1454,11 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
     if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
     op = _operation(p, orig, orig["metadata"]["name"], region)
+    _require_current(
+        p,
+        orig["metadata"]["name"],
+        (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or orig["metadata"]["name"],
+    )
     if op.get("finalizing_by"):
         # one active finalizer per root: the call is idempotent while it runs
         active, _ = _owned(p, op["finalizing_by"], follow=False)
@@ -1594,6 +1625,7 @@ def resume(
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
         raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
     root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    _require_current(p, orig["metadata"]["name"], root)
     pointer = (
         (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
         if attempts.enabled() and not req.checkpoint_ref

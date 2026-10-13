@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.48
+
+- Stage lineages, two seams found on 0.11.47 (never deployed): a stage's successor carries the stage root as an
+  annotation too, so the second and every later continuation (resume of a resume, export of a resume) keeps the stage
+  identity and the bound dependency results; a public `:resume` or `:export` names the current member of its lineage:
+  an older member that a newer compute successor continued is refused (409, the head named), never reopened silently
+  (an export retry or finalizer of the named member is still followed on the member itself).
+
 ## api 0.11.47
 
 - Stage lineages (docs/JOBS.md "Stage composition"; 0.11.46 was never deployed): a stage's `:resume`, `:export`,

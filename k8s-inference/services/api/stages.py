@@ -81,6 +81,7 @@ def inherit(job: dict, ann: dict) -> None:
     md = job["metadata"]
     md.setdefault("labels", {})[STAGE_ROOT] = ann[STAGE_ROOT]
     md.setdefault("annotations", {})[STAGE_ID] = ann[STAGE_ID]
+    md["annotations"][STAGE_ROOT] = ann[STAGE_ROOT]  # the next continuation inherits from this one's annotations
     if ann.get(DEPENDS_ON):
         md["annotations"][DEPENDS_ON] = ann[DEPENDS_ON]
     if ann.get(RESULTS) and job.get("kind") == "Job":

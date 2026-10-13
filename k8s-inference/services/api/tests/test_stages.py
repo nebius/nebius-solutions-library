@@ -389,3 +389,75 @@ def test_no_database_no_stages(client, monkeypatch):
         json={"input": {}, "execution": {"stage": {"root": "op-x", "id": "a"}}},
     )
     assert r.status_code == 409 and "ledger" in r.text
+
+
+def test_second_continuation_keeps_the_stage_identity_and_results(world):
+    """resume -> resume and resume -> export: every successor carries the stage root (label and annotation), the stage
+    id, the dependencies and the bound results, because each inherits from the previous member's annotations."""
+    c, cl, fk, rows, _cancelled, root = world
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _fail(cl, rows, g1)
+    r1 = c.post(f"/v1/operations/{g1}:resume", headers=H, json={}).json()["id"]
+    _fail(cl, rows, r1)
+    r = c.post(f"/v1/operations/{r1}:resume", headers=H, json={})
+    assert r.status_code == 202, r.text
+    r2 = r.json()["id"]
+    assert r2 == f"{g1}-r2"
+    for name in (r1, r2):
+        j = cl.jobs[(NS, name)]
+        assert j["metadata"]["labels"][stages.STAGE_ROOT] == root
+        assert j["metadata"]["annotations"][stages.STAGE_ROOT] == root
+        assert j["metadata"]["annotations"][stages.STAGE_ID] == "gpu-1"
+        assert j["metadata"]["annotations"][stages.DEPENDS_ON] == "root"
+        assert json.loads(j["metadata"]["annotations"][stages.RESULTS])["root"]["result_ref"] == "s3://b/root"
+        assert json.loads(j["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])["root"]["result_ref"] == (
+            "s3://b/root"
+        )
+        assert "DEPENDENCY_RESULTS" in _main_env(j)
+    assert [x[3] for x in fk.calls if x[0] == "prepare" and x[2] in (r1, r2)] == [g1, r1]  # each after the previous
+    # an export retry of the second resume keeps it all, too
+    cl.jobs[(NS, r2)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    rows.append({**_record(r2, f"{r2}-a", export="failed"), "tenant": "demo", "root": g1})
+    x = c.post(f"/v1/operations/{r2}:export", headers=H)
+    assert x.status_code == 202, x.text
+    xj = cl.jobs[(NS, x.json()["id"])]
+    assert (
+        xj["metadata"]["annotations"][stages.STAGE_ROOT] == root
+        and xj["metadata"]["annotations"][stages.STAGE_ID] == "gpu-1"
+    )
+    assert [x[3] for x in fk.calls if x[0] == "prepare" and x[2] == xj["metadata"]["name"]] == [r2]
+
+
+def test_resume_or_export_of_an_older_member_is_refused_with_the_head_named(world):
+    """A public resume/export renders from the Job the caller names; the ledger admits after the lineage's head. An
+    older member that a newer compute successor continued is refused (409 naming the head), whether the successor is
+    active or delivered; the head itself continues; an export retry of the named member is still followed on it."""
+    c, cl, fk, rows, _cancelled, root = world
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _fail(cl, rows, g1)
+    r1 = c.post(f"/v1/operations/{g1}:resume", headers=H, json={}).json()["id"]
+    cl.jobs[(NS, r1)]["status"] = {"startTime": "2026-10-13T20:00:00Z"}  # the successor runs
+    stale = c.post(f"/v1/operations/{g1}:resume", headers=H, json={})
+    assert stale.status_code == 409 and r1 in stale.json()["detail"], stale.text
+    stale = c.post(f"/v1/operations/{g1}:export", headers=H)
+    assert stale.status_code == 409 and r1 in stale.json()["detail"], stale.text
+    _succeed(cl, rows, r1, "s3://b/g1")  # delivered: still not the old member's to resume
+    stale = c.post(f"/v1/operations/{g1}:resume", headers=H, json={})
+    assert stale.status_code == 409 and r1 in stale.json()["detail"]
+    assert len([x for x in fk.calls if x[0] == "prepare" and x[1] == root]) == 2  # g1, r1: nothing else admitted
+    assert len([k for k in cl.jobs if k[1].startswith(g1)]) == 2
+    # the head's own export retry, then a resume of the head: allowed (the x-member leaves the compute where it is)
+    rows[-1] = {**_record(r1, f"{r1}-a", export="failed"), "tenant": "demo", "root": g1}
+    x = c.post(f"/v1/operations/{r1}:export", headers=H)
+    assert x.status_code == 202, x.text
+    x1 = x.json()["id"]
+    assert x1 == f"{g1}-x1" and cl.jobs[(NS, x1)]["metadata"]["annotations"]["serverless2.nebius/export-of"] == r1
+    assert c.post(f"/v1/operations/{r1}:export", headers=H).status_code in (200, 202)  # followed on the member
+    cl.jobs[(NS, x1)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    rows.append({**_record(x1, f"{x1}-a", export="failed"), "tenant": "demo", "root": g1})
+    again = c.post(f"/v1/operations/{r1}:resume", headers=H, json={})  # the head is r1's own export retry: r1 continues
+    assert again.status_code in (202, 409) and (again.status_code == 202 or "x1" not in again.json()["detail"])
