@@ -111,7 +111,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.46", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.47", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -148,7 +148,7 @@ def _job_deadline(job: dict) -> int | None:
     return int(d) if d else None
 
 
-def continuation_admission(root: str, predecessor: str | None, transfer_only: bool = False):
+def continuation_admission(root: str, predecessor: str | None, transfer_only: bool = False, stage: str | None = None):
     """The admission a continuation builder calls with its rendered Job, right before creating it: the member joins
     the run's reservation on the root's original key (keys.prepare_run_member: key still valid, current head, budget
     for its GPU bound, the slot reused or re-acquired). The returned callable raises HTTPException with the ledger's
@@ -157,7 +157,13 @@ def continuation_admission(root: str, predecessor: str | None, transfer_only: bo
     def admit(job: dict) -> None:
         try:
             keys.prepare_run_member(
-                root, job["metadata"]["name"], predecessor, _job_gpus(job), _job_deadline(job), transfer_only
+                root,
+                job["metadata"]["name"],
+                predecessor,
+                _job_gpus(job),
+                _job_deadline(job),
+                transfer_only,
+                **({"kind": "stage", "stage": stage} if stage else {}),
             )
         except keys.KeyLimit as e:
             raise HTTPException(e.status, e.detail)
@@ -172,13 +178,21 @@ def continue_run(root: str, build, transfer_only: bool = False):
     before the ledger existed) the builder runs unadmitted, as for an unbounded key."""
     if not db.enabled():
         return build(None)
-    head = keys.run_head(root)
+    member = keys.member_of(root)
+    if member and member["kind"] == "stage":
+        # a stage of a graph (docs/JOBS.md "Stage composition"): its continuations follow the stage's own head inside
+        # the graph root's run (the root's key, slot and budget), never the root's lineage or a sibling's
+        root, stage = member["root"], member["stage"]
+        head = keys.stage_head(root, stage)
+    else:
+        stage = None
+        head = keys.run_head(root)
     if head is None:
         return build(None)
     pending: dict = {}
 
     def admit(job: dict) -> None:
-        continuation_admission(root, head, transfer_only)(job)
+        continuation_admission(root, head, transfer_only, stage=stage)(job)
         pending["name"] = job["metadata"]["name"]
 
     try:
@@ -794,21 +808,18 @@ def _stage_request(
 def _settled_stage(p: Principal, g: dict, stage: dict) -> dict | None:
     """A stage whose member already settled (ran, was cancelled) is not run again: its current state, or None when
     the stage has no settled member (a replay of an active stage is the Job's replay)."""
-    name = stages.stage_name(stage["root"], stage["id"])
-    m = next(
-        (m for m in keys.run_members(stage["root"]) if m.get("kind") == "stage" and m.get("stage") == stage["id"]), None
-    )
-    if m is None or m["state"] == "active":
-        return None
+    head = keys.stage_head(stage["root"], stage["id"])
+    if head is None:
+        return None  # a declared stage is submitted once: its lineage (the stage, its continuations) answers afterwards
     try:
-        job, region = _owned(p, name)
+        job, region = _owned(p, head)
     except HTTPException as e:
         if e.status_code != 404:
             raise
         raise HTTPException(
-            409, f"stage {stage['id']!r} of {stage['root']} already ran ({m['state']}); nothing durable remains"
+            409, f"stage {stage['id']!r} of {stage['root']} already ran ({head}); nothing durable remains"
         )
-    return _operation(p, job, name, region)
+    return _operation(p, job, job["metadata"]["name"], region)
 
 
 def _create_admitted(p, name, job, region, secret, req, mode, stage: dict | None = None):

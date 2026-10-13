@@ -63,7 +63,7 @@ class RecoverySpec(BaseModel):
     )  # `recover` only: no recovery past root.created_at + deadline_s
 
 
-MAX_STAGES = 64
+MAX_STAGES = 256
 
 
 class GraphSpec(BaseModel):
@@ -72,7 +72,9 @@ class GraphSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     stages: dict[str, list[str]]
-    deadline_s: int | None = Field(default=None, ge=60, le=7 * 86400)  # stages still waiting after it are cancelled
+    deadline_s: int | None = Field(
+        default=None, ge=60, le=30 * 86400
+    )  # stages still waiting after it are cancelled (default 14 days)
 
 
 class StageSpec(BaseModel):

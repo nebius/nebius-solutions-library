@@ -212,7 +212,7 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
 
 
 STAGE_ID = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
-MAX_STAGES = 64
+MAX_STAGES = 256  # ESMFold-class fan-outs: up to 128 shards plus their collector, with room
 ROOT_STAGE = "root"
 
 

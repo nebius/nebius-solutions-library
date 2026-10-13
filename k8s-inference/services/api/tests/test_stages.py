@@ -85,13 +85,15 @@ def _main_env(job):
 def test_graph_validation():
     ok = execution.validate_graph({"a": [], "b": ["a", "root"]}, 3600)
     assert ok == {"stages": {"a": [], "b": ["a", "root"]}, "deadline_s": 3600}
+    wide = {f"shard-{i}": [] for i in range(128)} | {"collect": [f"shard-{i}" for i in range(128)]}
+    assert len(execution.validate_graph(wide, 14 * 86400)["stages"]) == 129  # ESMFold-class: 128 shards + collector
     for stages_, why in (
         ({"a": ["b"], "b": ["a"]}, "cycle"),
         ({"a": ["x"]}, "not declared"),
         ({"a": ["a"]}, "itself"),
         ({"root": []}, "root"),
         ({"a": ["b", "b"], "b": []}, "duplicates"),
-        ({f"s{i}": [] for i in range(65)}, "64"),
+        ({f"s{i}": [] for i in range(257)}, "256"),
         ({}, "1 to"),
     ):
         with pytest.raises(Exception) as e:
@@ -201,29 +203,86 @@ def test_a_settled_stage_is_never_run_again(world, monkeypatch):
     assert (NS, name) not in cl.jobs and len([x for x in fk.calls if x[0] == "prepare"]) == 1
 
 
-def test_failed_dependency_cancels_the_dependent_and_the_root_fails_with_it(world):
+def test_failed_dependency_holds_its_dependents_until_resumed_or_cancelled(world):
+    """A FAILED dependency is resumable, so its dependents wait (reason on the handle) instead of dying; its resume
+    is a member of the same stage lineage on the root's key, the successor carries the stage identity and the bound
+    results, and once it delivers the dependents run with the successor's result. A CANCELLED dependency cancels
+    them once."""
     c, cl, fk, rows, cancelled, root = world
     g0 = _submit(c, root, "gpu-0").json()["id"]
     g1 = _submit(c, root, "gpu-1").json()["id"]
     col = _submit(c, root, "collect").json()["id"]
-    _succeed(cl, rows, root)
+    _succeed(cl, rows, root, "s3://b/root")
     reconciliation.gate_stages()
     _succeed(cl, rows, g0, "s3://b/g0")
     _fail(cl, rows, g1)
-    assert reconciliation.gate_stages() == [f"{col}:cancelled"]
-    assert (NS, col) not in cl.jobs and col in cancelled
-    assert ("settle", col, 0.0) in fk.calls  # never started: settled at zero, once
-    member = next(m for m in fk.members if m["operation"] == col)
-    assert "gpu-1" in member["note"] and "FAILED" in member["note"]
-    assert reconciliation.gate_stages() == []  # a second pass finds nothing to do
+    assert reconciliation.gate_stages() == []  # collect waits: gpu-1 may be resumed
+    reason = cl.jobs[(NS, col)]["metadata"]["annotations"][stages.WAIT_REASON]
+    assert "gpu-1 FAILED" in reason and ":resume" in reason
     op = c.get(f"/v1/operations/{root}", headers=H).json()
-    assert op["status"] == "FAILED" and op["graph"]["status"] == "FAILED"
+    assert op["status"] == "RUNNING" and op["graph"]["status"] == "PENDING"
     assert {s["id"]: s["status"] for s in op["graph"]["stages"]} == {
         "gpu-0": "SUCCEEDED",
         "gpu-1": "FAILED",
-        "collect": "CANCELLED",
+        "collect": "QUEUED",
     }
-    assert "gpu-1" in op["error"]
+    # the resume: admitted on the graph root as the next member of stage gpu-1's lineage (sibling gpu-0 untouched)
+    r = c.post(f"/v1/operations/{g1}:resume", headers=H, json={})
+    assert r.status_code == 202, r.text
+    succ = r.json()["id"]
+    assert succ == f"{g1}-r1"
+    prepared = [x for x in fk.calls if x[0] == "prepare" and x[2] == succ]
+    assert [(x[1], x[3], x[7], x[8]) for x in prepared] == [(root, g1, "stage", "gpu-1")]
+    sj = cl.jobs[(NS, succ)]
+    assert sj["metadata"]["labels"][stages.STAGE_ROOT] == root and stages.WAITING not in sj["metadata"]["labels"]
+    assert sj["metadata"]["labels"]["kueue.x-k8s.io/queue-name"]  # not gated again: its dependencies delivered already
+    assert sj["metadata"]["annotations"][stages.STAGE_ID] == "gpu-1"
+    assert (
+        json.loads(sj["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])["root"]["result_ref"]
+        == "s3://b/root"
+    )
+    assert "DEPENDENCY_RESULTS" in _main_env(sj)
+    # a resubmission of the stage answers with its lineage head, never a new Job
+    again = _submit(c, root, "gpu-1")
+    assert again.status_code == 200 and again.json()["id"] == succ
+    _succeed(cl, rows, succ, "s3://b/g1-again")
+    assert reconciliation.gate_stages() == [f"{col}:admitted"]
+    bound = json.loads(cl.jobs[(NS, col)]["spec"]["template"]["metadata"]["annotations"][stages.RESULTS])
+    assert bound["gpu-1"] == {"operation": succ, "result_ref": "s3://b/g1-again", "attempt_id": f"{succ}-a"}
+    op = c.get(f"/v1/operations/{root}", headers=H).json()
+    g1_view = next(s for s in op["graph"]["stages"] if s["id"] == "gpu-1")
+    assert g1_view["status"] == "SUCCEEDED" and g1_view["operation"] == succ and g1_view["continuations"] == 1
+    # a cancelled dependency cancels what depends on it, once
+    other = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}, "execution": {"graph": GRAPH}})
+    root2 = other.json()["id"]
+    a = _submit(c, root2, "gpu-0").json()["id"]
+    b = _submit(c, root2, "collect").json()["id"]
+    assert c.post(f"/v1/operations/{a}:cancel", headers=H).status_code == 200
+    _succeed(cl, rows, root2)
+    assert reconciliation.gate_stages() == [f"{b}:cancelled"]
+    assert (NS, b) not in cl.jobs and b in cancelled and ("settle", b, 0.0) in fk.calls
+    assert "gpu-0" in next(m for m in fk.members if m["operation"] == b)["note"]
+    assert reconciliation.gate_stages() == []
+
+
+def test_stage_export_retry_follows_the_stage_lineage(world):
+    """An export retry of a stage is a transfer-only member of that stage's lineage on the root's key (predecessor =
+    the stage), while a sibling is active."""
+    c, cl, fk, rows, _cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    _succeed(cl, rows, root)
+    reconciliation.gate_stages()
+    cl.jobs[(NS, g1)]["status"] = {"startTime": "2026-10-13T20:00:00Z"}  # the sibling runs
+    cl.jobs[(NS, g0)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    rows.append({**_record(g0, f"{g0}-a", export="failed"), "tenant": "demo", "root": g0})
+    r = c.post(f"/v1/operations/{g0}:export", headers=H)
+    assert r.status_code == 202, r.text
+    x1 = r.json()["id"]
+    prepared = [x for x in fk.calls if x[0] == "prepare" and x[2] == x1]
+    assert [(x[1], x[3], x[6], x[7], x[8]) for x in prepared] == [(root, g0, True, "stage", "gpu-0")]
+    assert cl.jobs[(NS, x1)]["metadata"]["labels"][stages.STAGE_ROOT] == root
+    assert len([m for m in fk.members if m["root"] == root and m.get("stage") == "gpu-1"]) == 1  # untouched
 
 
 def test_success_without_a_result_is_not_runnable(world):

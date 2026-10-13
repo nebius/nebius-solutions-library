@@ -428,3 +428,24 @@ def test_private_call_pod_owns_its_volume_and_binding_and_a_dead_main_is_failed(
         )["status"]
         == "RUNNING"
     )
+
+
+def test_private_call_pod_shares_its_process_namespace(client, monkeypatch):
+    """The caller pod shares one PID namespace between main and the uploader, as a run's pod does: the uploader
+    records `started` only when it sees the caller's process and `finished` when it is gone (upload.sh main_alive);
+    without the shared namespace no attempt is ever opened and an application broker that grants nothing before the
+    authoritative start record keeps the caller waiting for good (the 21:54 UTC deadlock on API45/jobs19)."""
+    c, cluster = client
+    _tenant(monkeypatch)
+    _bind(c)
+    monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
+    body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-1"}}
+    r = c.post("/v1/models/llm-example:invoke", json=body, headers=H)
+    assert r.status_code == 202, r.text
+    spec = cluster.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["spec"]
+    assert spec["shareProcessNamespace"] is True
+    assert [x["name"] for x in spec["containers"]] == ["main", "uploader"]
+    # the managed path (no execution block) renders the same pod shape
+    r = c.post("/v1/models/llm-example:invoke", json={"mode": "async", "input": {"messages": []}}, headers=H)
+    assert r.status_code == 202, r.text
+    assert cluster.jobs[("tenant-demo", r.json()["id"])]["spec"]["template"]["spec"]["shareProcessNamespace"] is True

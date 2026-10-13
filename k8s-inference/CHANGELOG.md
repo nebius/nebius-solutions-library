@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.47
+
+- Stage lineages (docs/JOBS.md "Stage composition"; 0.11.46 was never deployed): a stage's `:resume`, `:export`,
+  finalizer, fallback and recovery members are admitted on the graph root's key and budget as the next member of that
+  stage's own lineage (`keys.stage_head`, `keys.member_of`; the root's own continuations keep their head, stage
+  members never become it), siblings continue meanwhile, the successor carries the stage identity and the bound
+  dependency results, the gate judges a dependency by the head of its lineage, a FAILED dependency holds its
+  dependents (resumable) while a CANCELLED one cancels them once, and a declared stage is submitted once (a
+  resubmission answers with its lineage head). Up to 256 stages; graph deadline default 14 days, up to 30.
+- An endpoint call's caller pod shares its process namespace between main and the uploader, as a run's pod: the
+  attempt's `started` and `finished` records are written from what the uploader sees (upload.sh main_alive); in
+  separate namespaces no attempt was ever opened and a broker that grants nothing before the authoritative start
+  record held the caller for good.
+
 ## api 0.11.46
 
 - Stage composition (docs/JOBS.md "Stage composition"): a root declares its stages at submission (`execution.graph`:

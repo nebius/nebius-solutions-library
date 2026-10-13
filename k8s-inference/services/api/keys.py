@@ -890,15 +890,38 @@ def note_member(operation: str, note: str) -> None:
         c.execute("update key_run_members set note = %s where operation = %s", (note, operation))
 
 
+def _lineage_head(c, root: str, kind: str, stage: str | None) -> str | None:
+    r = c.execute(
+        "select operation from key_run_members where root = %s and kind = %s and stage is not distinct from %s "
+        "order by created_at desc, operation desc limit 1",
+        (root, kind, stage),
+    ).fetchone()
+    return r[0] if r else None
+
+
 def run_head(root: str) -> str | None:
-    """The member a continuation may follow: the newest member of the run (active, settled or unknown); None when the
-    run has no ledger (an unbounded key admitted before the ledger existed, or no database)."""
+    """The member a continuation of the root may follow: the newest member of the root's own lineage (the root and
+    its resumes/exports/recoveries; a graph's stages are their own lineages, stage_head); None when the run has no
+    ledger (an unbounded key admitted before the ledger existed, or no database)."""
+    with _connection() as c:
+        return _lineage_head(c, root, "continuation", None)
+
+
+def stage_head(root: str, stage: str) -> str | None:
+    """The newest member of one stage's lineage (the stage's operation and its continuations); None before the stage
+    was submitted."""
+    with _connection() as c:
+        return _lineage_head(c, root, "stage", stage)
+
+
+def member_of(operation: str) -> dict | None:
+    """The ledger row of an operation: its root, kind (`continuation` | `stage`), stage and state; None when it is no
+    member (no ledger)."""
     with _connection() as c:
         r = c.execute(
-            "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
-            (root,),
+            "select root, kind, stage, state, predecessor from key_run_members where operation = %s", (operation,)
         ).fetchone()
-    return r[0] if r else None
+    return {"root": r[0], "kind": r[1], "stage": r[2], "state": r[3], "predecessor": r[4]} if r else None
 
 
 def prepare_run_member(
@@ -940,8 +963,10 @@ def prepare_run_member(
         if expires is not None and expires < datetime.now(timezone.utc):
             raise KeyLimit(401, "the run's key has expired")
         if kind == "stage":
-            # a declared stage of the root's graph (docs/JOBS.md "Stage composition"): siblings coexist, the head rule
-            # of continuations does not apply; the graph must exist, name the stage and not be cancelled
+            # a declared stage of the root's graph (docs/JOBS.md "Stage composition"), or a continuation of one: each
+            # stage is its own lineage inside the root's run (one head per stage; siblings coexist; the stage's
+            # resume/export/recovery members follow that stage's head); the graph must exist and name the stage; a
+            # cancelled graph admits nothing, a closed one no new stage (continuations of its stages still run)
             g = c.execute(
                 "select stages, cancelled_at, closed_at from run_graphs where root = %s for update", (root,)
             ).fetchone()
@@ -949,20 +974,20 @@ def prepare_run_member(
                 raise KeyLimit(409, f"run {root} declared no stage graph")
             if stage not in (g[0] or {}):
                 raise KeyLimit(400, f"stage {stage!r} is not declared by {root} ({sorted(g[0] or {})})")
-            if g[1] is not None or g[2] is not None:
+            if g[1] is not None:
+                raise KeyLimit(409, f"the graph of {root} is cancelled; no stage attaches to it")
+            head = _lineage_head(c, root, "stage", stage)
+            if predecessor is None:
+                if head is not None:
+                    raise KeyLimit(409, f"stage {stage!r} of {root} already has an operation ({head})")
+                if g[2] is not None:
+                    raise KeyLimit(409, f"the graph of {root} is closed; no stage attaches to it")
+            elif predecessor != head:
                 raise KeyLimit(
-                    409, f"the graph of {root} is {'cancelled' if g[1] else 'closed'}; no stage attaches to it"
+                    409, f"only the current head of stage {stage!r} may be continued ({head}, not {predecessor})"
                 )
-            if c.execute(
-                "select 1 from key_run_members where root = %s and stage = %s and operation <> %s",
-                (root, stage, operation),
-            ).fetchone():
-                raise KeyLimit(409, f"stage {stage!r} of {root} already has an operation")
         else:
-            head = c.execute(
-                "select operation from key_run_members where root = %s order by created_at desc, operation desc limit 1",
-                (root,),
-            ).fetchone()[0]
+            head = _lineage_head(c, root, "continuation", None)
             if predecessor != head:
                 raise KeyLimit(409, f"only the current run head may be continued ({head}, not {predecessor})")
         bound = 0.0

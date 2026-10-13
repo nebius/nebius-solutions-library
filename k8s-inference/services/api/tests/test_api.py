@@ -1189,9 +1189,34 @@ class FakeKeys:
         return True
 
     # the run ledger (keys.py migration 11): members recorded in order, the head rule and budgets live in the database tests
+    def _lineage(self, root, kind, stage):
+        return [
+            m
+            for m in getattr(self, "members", [])
+            if m["root"] == root and m.get("kind", "continuation") == kind and m.get("stage") == stage
+        ]
+
     def run_head(self, root):
-        chain = [m for m in getattr(self, "members", []) if m["root"] == root]
+        chain = self._lineage(root, "continuation", None)
         return chain[-1]["operation"] if chain else None
+
+    def stage_head(self, root, stage):
+        chain = self._lineage(root, "stage", stage)
+        return chain[-1]["operation"] if chain else None
+
+    def member_of(self, operation):
+        m = next((m for m in getattr(self, "members", []) if m["operation"] == operation), None)
+        return (
+            {
+                "root": m["root"],
+                "kind": m.get("kind", "continuation"),
+                "stage": m.get("stage"),
+                "state": m["state"],
+                "predecessor": m["predecessor"],
+            }
+            if m
+            else None
+        )
 
     def prepare_run_member(
         self, root, operation, predecessor, gpus, timeout_s, transfer_only=False, kind="continuation", stage=None
@@ -1203,16 +1228,24 @@ class FakeKeys:
         self.members = getattr(self, "members", [])
         if any(m["operation"] == operation for m in self.members):
             return {"operation": operation, "replay": True}
-        if kind == "stage":  # the database rules (test_database.py), in short: declared, open, one operation per stage
+        if kind == "stage":  # the database rules (test_database.py), in short: declared, open, one lineage per stage
             g = self.graphs.get(root)
             if g is None:
                 raise keys.KeyLimit(409, f"run {root} declared no stage graph")
             if stage not in g["stages"]:
                 raise keys.KeyLimit(400, f"stage {stage!r} is not declared by {root}")
-            if g["cancelled_at"] or g["closed_at"]:
-                raise keys.KeyLimit(409, f"the graph of {root} is closed")
-            if any(m["root"] == root and m.get("stage") == stage for m in self.members):
-                raise keys.KeyLimit(409, f"stage {stage!r} of {root} already has an operation")
+            if g["cancelled_at"]:
+                raise keys.KeyLimit(409, f"the graph of {root} is cancelled")
+            head = self.stage_head(root, stage)
+            if predecessor is None:
+                if head is not None:
+                    raise keys.KeyLimit(409, f"stage {stage!r} of {root} already has an operation ({head})")
+                if g["closed_at"]:
+                    raise keys.KeyLimit(409, f"the graph of {root} is closed")
+            elif predecessor != head:
+                raise keys.KeyLimit(409, f"only the current head of stage {stage!r} may be continued ({head})")
+        elif predecessor != self.run_head(root):
+            raise keys.KeyLimit(409, f"only the current run head may be continued ({self.run_head(root)})")
         self.members.append(
             {
                 "operation": operation,
@@ -1385,6 +1418,8 @@ def fake_keys(monkeypatch):
         "rollback_run_member",
         "run_usage",
         "run_members",
+        "stage_head",
+        "member_of",
         "declare_graph",
         "graph_of",
         "open_graphs",
@@ -2313,10 +2348,13 @@ def admin_keys(monkeypatch):
     monkeypatch.setattr(
         keys_mod, "run_head", lambda root: next((m["operation"] for m in reversed(ledger) if m["root"] == root), None)
     )
+    monkeypatch.setattr(keys_mod, "stage_head", lambda root, stage: None)
+    monkeypatch.setattr(keys_mod, "member_of", lambda op: None)
+    monkeypatch.setattr(keys_mod, "graph_of", lambda root: None)
     monkeypatch.setattr(
         keys_mod,
         "prepare_run_member",
-        lambda root, op, pred, gpus, timeout_s, transfer_only=False: (
+        lambda root, op, pred, gpus, timeout_s, transfer_only=False, kind="continuation", stage=None: (
             ledger.append({"operation": op, "root": root, "predecessor": pred}) or {"operation": op, "replay": False}
         ),
     )

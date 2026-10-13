@@ -41,7 +41,7 @@ RESULTS = f"{LABEL}/dependency-results"  # pod template annotation: the dependen
 RESULTS_ENV = "DEPENDENCY_RESULTS"
 ROOT = execution.ROOT_STAGE
 TERMINAL_FAILED = ("FAILED", "CANCELLED")
-DEFAULT_DEADLINE_S = 7 * 86400
+DEFAULT_DEADLINE_S = 14 * 86400  # the long-run contract; `deadline_s` up to 30 days
 
 
 def stage_name(root: str, stage: str) -> str:
@@ -66,11 +66,32 @@ def mark_waiting(job: dict, root: str, stage: str, deps: list[str]) -> None:
     md["labels"][WAITING] = "true"
     md["labels"][STAGE_ROOT] = root
     md.setdefault("annotations", {})[STAGE_ID] = stage
+    md["annotations"][STAGE_ROOT] = root
     md["annotations"][DEPENDS_ON] = ",".join(deps)
-    spec = job["spec"]
-    spec["suspend"] = True
-    tmpl = spec["template"]
-    tmpl.setdefault("metadata", {}).setdefault("annotations", {})[RESULTS] = "{}"
+    job["spec"]["suspend"] = True
+    bind_results(job, "{}")
+
+
+def inherit(job: dict, ann: dict) -> None:
+    """A continuation (resume, export retry, finalizer, fallback, recovery) of a stage stays that stage: the stage
+    label and annotations follow it (never the waiting label: a continuation exists only after the stage was
+    admitted), and the dependency results bound into the original are bound into the successor's pod again."""
+    if not ann.get(STAGE_ID) or not ann.get(STAGE_ROOT):
+        return
+    md = job["metadata"]
+    md.setdefault("labels", {})[STAGE_ROOT] = ann[STAGE_ROOT]
+    md.setdefault("annotations", {})[STAGE_ID] = ann[STAGE_ID]
+    if ann.get(DEPENDS_ON):
+        md["annotations"][DEPENDS_ON] = ann[DEPENDS_ON]
+    if ann.get(RESULTS) and job.get("kind") == "Job":
+        md["annotations"][RESULTS] = ann[RESULTS]
+        bind_results(job, ann[RESULTS])
+
+
+def bind_results(job: dict, results_json: str) -> None:
+    """The dependencies' results into the pod: the template annotation the main container reads (downward API)."""
+    tmpl = job["spec"]["template"]
+    tmpl.setdefault("metadata", {}).setdefault("annotations", {})[RESULTS] = results_json
     for c in tmpl["spec"].get("containers") or []:
         if c.get("name") == "main":
             env = [e for e in (c.get("env") or []) if e.get("name") != RESULTS_ENV]
@@ -124,6 +145,12 @@ def state_of(ns: str, operation: str) -> dict:
                 continue
             syn = attempts.synthesize(current, tenant)
             if syn is None:
+                # no Job, no attempt row: either never submitted, or cancelled before it started (its Job deleted; the
+                # cancel mark and the settled ledger member are what remains)
+                marks = attempts._marks(current)
+                member = keys.member_of(current)
+                if (marks and marks[1]) or (member and member["state"] != "active"):
+                    return {"operation": current, "status": "CANCELLED"}
                 return {"operation": current, "status": None}
             op = dict(syn)
             if op.get("status") in ("EXPORT_FAILED", "FINALIZING", "FAILED"):
@@ -155,19 +182,24 @@ def state_of(ns: str, operation: str) -> dict:
     return {"operation": current, "status": None}
 
 
-def dependency_name(root: str, dep: str) -> str:
-    return root if dep == ROOT else stage_name(root, dep)
+def dependency_head(root: str, dep: str) -> str | None:
+    """The operation a dependency currently is: the newest member of its lineage (the root and its continuations for
+    `root`; the stage and its continuations otherwise), so a resumed or recovered dependency is judged by what it
+    became. None before the stage was submitted."""
+    return keys.run_head(root) if dep == ROOT else keys.stage_head(root, dep)
 
 
 def evaluate(ns: str, graph: dict, deps: list[str]) -> tuple[str, dict | str]:
     """What a stage's dependencies allow: ("ready", {dep: result}) when every dependency SUCCEEDED with a result_ref;
-    ("failed", why) when one FAILED, was CANCELLED, or succeeded without a result (not runnable); ("waiting", why)
-    otherwise (not submitted, queued, running, or an export still retried)."""
+    ("failed", why) when one was CANCELLED or succeeded without a result (not runnable); ("waiting", why) otherwise
+    (not submitted, queued, running, an export still retried, or FAILED: a failed dependency may be resumed, so its
+    dependents wait for its lineage until the root is cancelled or the graph's deadline passes)."""
     results, waiting = {}, []
     for dep in deps:
-        st = state_of(ns, dependency_name(graph["root"], dep))
-        if st["status"] in TERMINAL_FAILED:
-            return "failed", f"dependency {dep} ({st['operation']}) {st['status']}"
+        head = dependency_head(graph["root"], dep)
+        st = state_of(ns, head) if head else {"operation": None, "status": None}
+        if st["status"] == "CANCELLED":
+            return "failed", f"dependency {dep} ({st['operation']}) CANCELLED"
         if st["status"] == "SUCCEEDED":
             if not st.get("result_ref"):
                 return "failed", f"dependency {dep} ({st['operation']}) succeeded without a result_ref: not runnable"
@@ -178,6 +210,8 @@ def evaluate(ns: str, graph: dict, deps: list[str]) -> tuple[str, dict | str]:
             }
         elif st["status"] is None:
             waiting.append(f"{dep} not submitted")
+        elif st["status"] == "FAILED":
+            waiting.append(f"{dep} FAILED ({st['operation']}: :resume it, or :cancel the root)")
         else:
             waiting.append(f"{dep} {st['status']}")
     if waiting:
@@ -239,6 +273,7 @@ def _admit_stage(ns: str, job: dict, results: dict) -> None:
         },
         "spec": {"template": {"metadata": {"annotations": {RESULTS: json.dumps(results, sort_keys=True)}}}},
     }
+    body["metadata"]["annotations"][RESULTS] = json.dumps(results, sort_keys=True)  # continuations inherit it
     retry(kube.batch().patch_namespaced_job, name, ns, body)
     log.info("stage %s/%s admitted: %s", ns, name, sorted(results))
 
@@ -266,19 +301,28 @@ def _stage_jobs(ns: str, root: str) -> list[dict]:
 
 
 def cancel_members(ns: str, root: str, why: str) -> list[str]:
-    """Every stage of a root that is not over yet is cancelled (the root's cancel fans out; the gate's deadline and
-    root-failure paths do the same): waiting ones are deleted and settled at zero, running ones stopped as any run.
+    """Every active stage member of a root (the stages and their continuations, from the ledger) is cancelled: the
+    root's cancel fans out, the gate's deadline path does the same. Waiting ones are deleted and settled at zero,
+    running ones stopped as any run; a member whose Job is already gone is settled by the reconciler's sweep.
     Returns the names it cancelled."""
+    from app import settle_deleted
+
     out = []
-    for job in _stage_jobs(ns, root):
+    for m in keys.run_members(root):
+        if m.get("kind") != "stage" or m["state"] != "active":
+            continue
+        name = m["operation"]
+        try:
+            job, _region = jobs.find(ns, name)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            continue
         if status.finished(job) or (job["metadata"].get("annotations") or {}).get(f"{LABEL}/cancelled"):
             continue
-        name = job["metadata"]["name"]
         if is_waiting(job):
             _cancel_stage(ns, job, why)
         else:
-            from app import settle_deleted
-
             attempts.mark_cancelled(name)
             settle_deleted(jobs.cancel(ns, name, REGION))
             keys.note_member(name, why)
@@ -309,18 +353,17 @@ def gate() -> list[str]:
 
 def _gate_graph(ns: str, g: dict, now: datetime) -> list[str]:
     root, out = g["root"], []
-    root_state = state_of(ns, root)
-    if root_state["status"] in TERMINAL_FAILED:
-        why = f"root {root_state['status']}"
+    root_state = state_of(ns, keys.run_head(root) or root)
+    if root_state["status"] == "CANCELLED":
+        why = "root CANCELLED"
         out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
         keys.cancel_graph(root, why)
         return out + [f"{root}:closed"]
     if g.get("deadline_at") and g["deadline_at"] <= now:
-        members = {m["stage"]: m for m in keys.run_members(root) if m.get("kind") == "stage"}
+        members = {m["stage"] for m in keys.run_members(root) if m.get("kind") == "stage"}
         missing = sorted(s for s in g["stages"] if s not in members)
         why = "graph deadline passed" + (f"; never submitted: {', '.join(missing)}" if missing else "")
-        out += [f"{n}:cancelled" for n in cancel_members(ns, root, why) if True]
-        # only what waited was cancelled above; running stages settle through billing, then the run closes
+        out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
         keys.cancel_graph(root, why)
         return out + [f"{root}:closed"]
     for job in _stage_jobs(ns, root):
@@ -352,12 +395,16 @@ def graph_view(ns: str, g: dict) -> dict:
     status, attempt and reason; the graph's own status: PENDING while a stage is not settled, SUCCEEDED when every
     stage succeeded, FAILED when one failed or was cancelled or the graph was closed before every stage ran,
     CANCELLED when the root was cancelled."""
-    members = {m["stage"]: m for m in keys.run_members(g["root"]) if m.get("kind") == "stage"}
+    lineages: dict[str, list[dict]] = {}
+    for m in keys.run_members(g["root"]):
+        if m.get("kind") == "stage":
+            lineages.setdefault(m["stage"], []).append(m)  # oldest first: the last one is the lineage head
     stages, statuses = [], []
     for sid, deps in (g.get("stages") or {}).items():
-        m = members.get(sid)
+        lineage = lineages.get(sid) or []
         entry = {"id": sid, "depends_on": list(deps) or [ROOT], "operation": None, "status": None}
-        if m:
+        if lineage:
+            m = lineage[-1]
             st = state_of(ns, m["operation"])
             entry.update(
                 {
@@ -365,23 +412,22 @@ def graph_view(ns: str, g: dict) -> dict:
                     "status": st.get("status") or ("CANCELLED" if m["state"] != "active" else "QUEUED"),
                     "attempt_id": st.get("attempt_id"),
                     "result_ref": st.get("result_ref"),
-                    "reason": m.get("note"),
+                    "reason": m.get("note") or lineage[0].get("note"),
+                    **({"continuations": len(lineage) - 1} if len(lineage) > 1 else {}),
                 }
             )
         else:
             entry["status"] = "NOT_SUBMITTED"
         stages.append(entry)
         statuses.append(entry["status"])
-    if g.get("cancelled_at") and (g.get("reason") or "").startswith("cancelled by"):
-        overall = "CANCELLED"
-    elif any(s in TERMINAL_FAILED for s in statuses) or (
-        (g.get("cancelled_at") or g.get("closed_at")) and any(s == "NOT_SUBMITTED" for s in statuses)
-    ):
-        overall = "FAILED"
-    elif all(s == "SUCCEEDED" for s in statuses):
+    if statuses and all(s == "SUCCEEDED" for s in statuses):
         overall = "SUCCEEDED"
+    elif g.get("cancelled_at") and (g.get("reason") or "").startswith("cancelled by"):
+        overall = "CANCELLED"
+    elif g.get("cancelled_at") or g.get("closed_at"):
+        overall = "FAILED"  # over, and not every stage delivered (a resumed stage that delivers later turns it)
     else:
-        overall = "PENDING"
+        overall = "PENDING"  # open: a FAILED stage may be resumed, a cancelled one cancels its dependents
     return {
         "status": overall,
         "stages": stages,
