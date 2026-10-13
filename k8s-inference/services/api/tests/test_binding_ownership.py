@@ -152,3 +152,55 @@ def test_claim_is_a_compare_and_swap_and_in_flight_ownerless_bindings_continue(
         headers={**P1, "Idempotency-Key": "race"},
     )
     assert r.status_code == 409 and "claimed concurrently" in r.json()["detail"]
+
+
+def test_copies_follow_their_binding_identity_through_delete_and_recreate(client, admin_keys, fake_keys, monkeypatch):
+    """A binding deleted and re-created under the same ref (by another principal) is a different binding: the old one's
+    late refresh or revocation never reaches the new one's copies, a revocation of a binding that changed meanwhile is
+    refused, and copies carry the identity they came from."""
+    c, cluster = client
+    _two(monkeypatch)
+    monkeypatch.setattr(ex, "tenant_config", lambda *a, **k: {"identities": {}, "execution_profiles": {}})
+    c.put("/v1/bindings/shared", json={"data": {"input.json": "p1"}}, headers=P1)
+    body = {"mode": "run", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "shared"}}
+    op1 = c.post("/v1/models/hello-run:invoke", json=body, headers=P1).json()["id"]
+    old = dict(cluster.secrets[("tenant-demo", "binding-shared")])
+    old_uid = old["metadata"]["uid"]
+    assert (
+        cluster.secrets[("tenant-demo", f"{op1}-private")]["metadata"]["annotations"][ex.BINDING_UID_ANNOTATION]
+        == old_uid
+    )
+    assert c.delete("/v1/bindings/shared", headers=P1).status_code == 204
+    assert ("tenant-demo", f"{op1}-private") not in cluster.secrets
+    # p2 re-creates the ref and consumes it
+    c.put("/v1/bindings/shared", json={"data": {"input.json": "p2"}}, headers=P2)
+    op2 = c.post("/v1/models/hello-run:invoke", json=body, headers={**P2, "Idempotency-Key": "p2"}).json()["id"]
+    copy2 = cluster.secrets[("tenant-demo", f"{op2}-private")]
+    new_uid = cluster.secrets[("tenant-demo", "binding-shared")]["metadata"]["uid"]
+    assert copy2["metadata"]["annotations"][ex.BINDING_UID_ANNOTATION] == new_uid != old_uid
+    # a late refresh and a late revocation from p1's old binding: p2's copy is untouched
+    ex._refresh_copies("tenant-demo", "shared", {"input.json": "late"}, old)
+    assert cluster.secrets[("tenant-demo", f"{op2}-private")]["data"] == {"input.json": "p2"}
+    ex._refresh_copies("tenant-demo", "shared", {"revoked": ""}, old, delete=True)
+    assert cluster.secrets[("tenant-demo", f"{op2}-private")]["data"] == {"input.json": "p2"}
+    assert c.delete("/v1/bindings/shared", headers=P1).status_code == 404  # p2's now
+    # p2's own refresh reaches its copy, keeps the copy's identity and bumps the revision
+    rv = copy2["metadata"]["resourceVersion"]
+    assert c.put("/v1/bindings/shared", json={"data": {"input.json": "p2-rotated"}}, headers=P2).status_code == 200
+    copy2 = cluster.secrets[("tenant-demo", f"{op2}-private")]
+    assert copy2["data"] == {"input.json": "p2-rotated"} and copy2["metadata"]["resourceVersion"] != rv
+    assert (
+        copy2["metadata"]["annotations"][ex.BINDING_UID_ANNOTATION] == new_uid
+        and copy2["metadata"]["labels"]["serverless2.nebius/operation"] == op2
+    )
+    # a revocation of a binding that changed between the read and the delete is refused (uid/resourceVersion preconditions)
+    real_delete = cluster.delete_namespaced_secret
+
+    def bump_then_delete(name, ns, body=None):
+        if name == "binding-shared":
+            cluster.secrets[(ns, name)]["metadata"]["resourceVersion"] = "999"
+        return real_delete(name, ns, body)
+
+    monkeypatch.setattr(cluster, "delete_namespaced_secret", bump_then_delete)
+    r = c.delete("/v1/bindings/shared", headers=P2)
+    assert r.status_code == 409 and ("tenant-demo", "binding-shared") in cluster.secrets

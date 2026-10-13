@@ -492,9 +492,12 @@ for the uploader's attempt record: the operation is `SUCCEEDED` only with that r
 `EXPORT_FAILED` with the capture kept, and `POST /v1/operations/{id}:export` renders the caller again on the same volume
 with `TRANSFER_ONLY=1`: it delivers the complete capture and never calls the endpoint again (no complete capture: the
 retry fails with "nothing to export"); while it runs the root reports `FINALIZING`, `finalizing_by` and the retry's
-`attempt_id` (`attempt_role: export`). A 4xx from the endpoint is captured and delivered as well: the operation is
-`FAILED` (the caller's error) and `GET /v1/operations/{id}/result` reports `export_state: succeeded` with the
-`result_ref` of that delivered error response. The endpoint's pods receive an HTTP request and nothing else: no URL,
+`attempt_id` (`attempt_role: export`). Any other status from the endpoint is captured and delivered as well: the operation is
+`FAILED` (exit 2 for a 4xx, the caller's error; exit 5 for another status, the endpoint's error) and
+`GET /v1/operations/{id}/result` reports `export_state: succeeded` with the `result_ref` of that delivered error
+response; a re-delivery through `:export` ends with the same captured outcome, so a delivered error never becomes a
+success, live or after the Job is gone. A FAILED call whose delivery failed (`export_state: failed`, a complete capture)
+is delivered again by `:export` like an EXPORT_FAILED one; an unknown outcome has nothing to deliver. The endpoint's pods receive an HTTP request and nothing else: no URL,
 token or credential of the binding reaches them. The call's reservation on the key (slot and request, docs/API.md
 "Keys") is released by the billing pass when the Job ends; a continuation joins it as a member.
 

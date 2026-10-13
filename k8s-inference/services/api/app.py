@@ -110,7 +110,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.42", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.43", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1132,9 +1132,48 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
     return out
 
 
+def _delivered(op: dict, name: str, root: str) -> dict:
+    """What a transfer-only retry or an application finalizer (`<name>-x<n>`) that delivered means for `name`
+    (docs/JOBS.md "Attempts and finalization", "Finalization by the application"): a run or an endpoint call whose
+    inference succeeded is SUCCEEDED with the delivering attempt's result; a delivered capture of an endpoint error
+    (the retry's exit code 2 or 5, the captured status class) stays FAILED and reports the delivery next to it, so
+    delivery never turns a failed inference into a success."""
+    done = [
+        r
+        for r in attempts.for_operation(root)
+        if r["operation"].startswith(f"{name}-x")
+        and (
+            (r.get("export_state") or r.get("export")) == "succeeded"
+            or (r.get("result_ref") and r["status"] == "succeeded")
+        )
+    ]
+    if not done:
+        return {}
+    last = done[-1]
+    out = {
+        "export_state": last.get("export_state") or "succeeded",
+        "exported_by": last["operation"],
+        "result_ref": last.get("result_ref") or op.get("result_ref"),
+    }
+    if last.get("exit_code") in (2, 5) or (last["status"] != "succeeded" and last.get("exit_code")):
+        out.update(
+            {
+                "status": "FAILED",
+                "error": "the endpoint answered an error; its response was delivered (see result_ref), inference did not succeed",
+            }
+        )
+    else:
+        out.update({"status": "SUCCEEDED", "error": None})
+    return out
+
+
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
-        return job["_synthetic"]
+        op = dict(job["_synthetic"])
+        if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
+            root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or op["id"]
+            op.update(_delivered(op, op["id"], root))  # a retry that delivered after the Job was gone
+        return op
     name = job["metadata"]["name"]
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
@@ -1158,27 +1197,7 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         # shows FINALIZING and the active attempt (the identity a refresh broker verifies against the pod's token)
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
-        # a transfer-only retry or an application finalizer (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md
-        # "Attempts and finalization", "Finalization by the application"); a FAILED run only ever has finalizers
-        done = [
-            r
-            for r in attempts.for_operation(root)
-            if r["operation"].startswith(f"{name}-x")
-            and (
-                (r.get("export_state") or r.get("export")) == "succeeded"
-                or (r.get("result_ref") and r["status"] == "succeeded")
-            )
-        ]
-        if done:
-            op.update(
-                {
-                    "status": "SUCCEEDED",
-                    "export_state": done[-1].get("export_state") or "succeeded",
-                    "exported_by": done[-1]["operation"],
-                    "result_ref": done[-1].get("result_ref") or op.get("result_ref"),
-                    "error": None,
-                }
-            )  # the delivering attempt's result
+        op.update(_delivered(op, name, root))  # a retry or finalizer that delivered closes the original
     return op
 
 
@@ -1254,9 +1273,19 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
         return JSONResponse(jobs.normalise(active, _price(active)), status_code=200)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     if op["mode"] == "async":
-        if op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
+        # an endpoint call is delivered again when its capture is complete and its delivery failed: EXPORT_FAILED (a 2xx
+        # capture), or FAILED with export_state failed when the capture is an endpoint error (exit 2 or 5); an unknown
+        # outcome (exit 4) or a retry that found nothing (exit 3) has no capture to deliver
+        last_exit = next(
+            (r.get("exit_code") for r in reversed(op.get("attempts") or []) if r.get("exit_code") is not None), None
+        )
+        failed_capture = op["status"] == "FAILED" and op.get("export_state") == "failed" and last_exit in (0, 2, 5)
+        if op["status"] not in ("EXPORT_FAILED", "FINALIZING") and not failed_capture:
             raise HTTPException(
-                409, f"operation {id} is {op['status']}; only an EXPORT_FAILED endpoint call is delivered again"
+                409,
+                f"operation {id} is {op['status']}"
+                + (" with no complete capture (inference outcome unknown)" if last_exit == 4 else "")
+                + "; only an endpoint call whose capture is complete and undelivered is delivered again",
             )
         root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or orig["metadata"]["name"]
         job, created = continue_run(

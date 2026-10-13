@@ -175,13 +175,22 @@ class FakeCluster:
             raise ApiException(status=404, reason="NotFound")
         del self.pvcs[(ns, name)]
 
+    _rv = 0
+
+    def _stamp(self, body, uid=None):
+        FakeCluster._rv += 1
+        body["metadata"]["uid"] = uid or f"uid-{FakeCluster._rv}"
+        body["metadata"]["resourceVersion"] = str(FakeCluster._rv)
+
     def create_namespaced_secret(self, ns, body):
         if (ns, body["metadata"]["name"]) in self.secrets:
             raise ApiException(status=409, reason="AlreadyExists")
         body = copy.deepcopy(body)
         if "stringData" in body:
             body["data"] = dict(body["stringData"])  # the API server would base64-encode; tests read either
+        self._stamp(body)
         self.secrets[(ns, body["metadata"]["name"])] = body
+        return body
 
     def read_namespaced_secret(self, name, ns):
         if (ns, name) not in self.secrets:
@@ -191,15 +200,22 @@ class FakeCluster:
     def replace_namespaced_secret(self, name, ns, body):
         if (ns, name) not in self.secrets:
             raise ApiException(status=404, reason="NotFound")
+        current = self.secrets[(ns, name)]
+        rv = (body.get("metadata") or {}).get("resourceVersion")
+        if rv is not None and str(rv) != str(current["metadata"].get("resourceVersion")):
+            raise ApiException(status=409, reason="Conflict")  # the API server's optimistic concurrency
         body = copy.deepcopy(body)
         if "stringData" in body:
             body["data"] = dict(body["stringData"])
+        self._stamp(body, uid=current["metadata"].get("uid"))
         self.secrets[(ns, name)] = body
         return body
 
     def patch_namespaced_secret(self, name, ns, body):
         s = self.secrets[(ns, name)]
         s["metadata"].setdefault("annotations", {}).update((body.get("metadata") or {}).get("annotations") or {})
+        FakeCluster._rv += 1
+        s["metadata"]["resourceVersion"] = str(FakeCluster._rv)
         return s
 
     def list_namespaced_secret(self, ns, label_selector=""):
@@ -217,9 +233,16 @@ class FakeCluster:
 
         return Items([s for (n, _), s in self.secrets.items() if n == ns and ok(s)])
 
-    def delete_namespaced_secret(self, name, ns):
+    def delete_namespaced_secret(self, name, ns, body=None):
         if (ns, name) not in self.secrets:
             raise ApiException(status=404, reason="NotFound")
+        pre = getattr(body, "preconditions", None)
+        if pre is not None:  # V1Preconditions: the deletion is conditional on uid and resourceVersion
+            md = self.secrets[(ns, name)]["metadata"]
+            if (pre.uid and pre.uid != md.get("uid")) or (
+                pre.resource_version and str(pre.resource_version) != str(md.get("resourceVersion"))
+            ):
+                raise ApiException(status=409, reason="Conflict")
         del self.secrets[(ns, name)]
 
     def delete_collection_namespaced_secret(self, ns, label_selector=""):

@@ -4,7 +4,7 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.42, jobs 0.1.17
+## api 0.11.43, jobs 0.1.18
 
 - Endpoint calls with private input and application-owned output (docs/JOBS.md "Endpoint calls with private input and
   application-owned output"): the `execution` block on `mode: async`; the request and the destination from a binding
@@ -18,11 +18,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   with `export_state: succeeded`; an endpoint call's export retry is followed on the root (`finalizing_by`); the result
   of an application-I/O call is its `result_ref`, not the platform bucket; a binding's claim is a compare-and-swap, and
   a binding from before owners existed continues under the owner of the operation it is bound to.
+- Delivery never turns a failed inference into a success: the caller ends with the captured outcome (0 for 2xx, 2 for
+  4xx, 5 for another status) on the first delivery and every re-delivery, and a root closed by a delivering retry stays
+  FAILED with the delivery reported next to it (`export_state`, `exported_by`, `result_ref`), live and after the Job is
+  gone. Per-operation binding copies carry the binding's uid: a refresh or revocation reaches only the copies of that
+  binding (compare-and-swap, annotations kept, deletions with uid and resourceVersion preconditions), a late revoker
+  never deletes a binding re-created under the same ref, and the pre-owner continuity checks the record's tenant.
 - Attempt rows keep the operation's mode, model and I/O mode (migration 12): an operation whose Job is gone keeps its
   result path and the key's model allow-list.
 - Bindings belong to the principal that created them: another principal of the tenant cannot list, replace, revoke
   or consume them (404), continuations inherit the owner, replacement is a compare-and-swap (`If-Match: <revision>`),
-  an admin may act on any binding. jobs 0.1.17: `call.sh` with application I/O and transfer-only retries, `upload.sh`
+  an admin may act on any binding. jobs 0.1.18: `call.sh` with application I/O and transfer-only retries, `upload.sh`
   reports the application's export state.
 
 ## api 0.11.40

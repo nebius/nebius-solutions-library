@@ -306,3 +306,70 @@ def test_a_gone_private_call_keeps_its_provenance_on_the_durable_path(client, ad
     assert c.get(f"/v1/operations/{oid}/result", headers={"Authorization": "Bearer sk-other"}).status_code == 404
     fake_keys.owners.pop(oid, None)  # no durable owner record: the model allow-list alone still fences the key
     assert c.get(f"/v1/operations/{oid}/result", headers={"Authorization": "Bearer sk-restricted"}).status_code == 404
+
+
+def test_a_delivered_error_capture_stays_failed_on_the_root_live_and_after_gc(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """An export retry that delivers a captured endpoint error closes the root as FAILED with the delivery next to it
+    (export_state succeeded, exported_by, result_ref), never as SUCCEEDED; the same after the Job is gone."""
+    c, cluster = client
+    _tenant(monkeypatch)
+    _bind(c, "call-6")
+    body = {"mode": "async", "input": {}, "execution": {"io_mode": "application", "private_input_ref": "call-6"}}
+    oid = c.post("/v1/models/llm-example:invoke", json=body, headers=H).json()["id"]
+    cluster.jobs[("tenant-demo", oid)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
+    rows = [
+        {
+            **_record(oid, f"{oid}-a", st="failed", export="failed", exit_code=2),
+            "operation": oid,
+            "io_mode": "application",
+        }
+    ]
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
+    x1 = c.post(f"/v1/operations/{oid}:export", headers=H).json()["id"]
+    rows.append(
+        {
+            **_record(x1, f"{x1}-b", st="failed", export="succeeded", result_ref="app://results/err", exit_code=2),
+            "operation": x1,
+            "root": oid,
+        }
+    )
+    cluster.jobs[("tenant-demo", x1)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    got = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert got["status"] == "FAILED" and got["export_state"] == "succeeded" and got["exported_by"] == x1
+    assert got["result_ref"] == "app://results/err" and "did not succeed" in got["error"]
+    res = c.get(f"/v1/operations/{oid}/result", headers=H).json()
+    assert res["status"] == "FAILED" and res["export_state"] == "succeeded" and res["result_ref"] == "app://results/err"
+    # after the Job is gone: served from the rows, same answer
+    del cluster.jobs[("tenant-demo", oid)]
+    monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    synth = {
+        "id": oid,
+        "mode": "async",
+        "model": "llm-example",
+        "status": "FAILED",
+        "execution": {"io_mode": "application"},
+        "result_ref": None,
+        "export_state": "failed",
+        "attempts": [],
+        "region": "eu-north1",
+    }
+    monkeypatch.setattr(attempts, "synthesize", lambda operation, tenant: dict(synth) if operation == oid else None)
+    for r in rows:
+        r.setdefault("tenant", "demo")
+        r.setdefault("root", oid)
+    got = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert (
+        got["status"] == "FAILED"
+        and got["export_state"] == "succeeded"
+        and got["exported_by"] == x1
+        and got["result_ref"] == "app://results/err"
+    )
+    # a delivered 2xx capture through a retry: SUCCEEDED
+    rows[-1].update({"status": "succeeded", "exit_code": 0})
+    got = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert got["status"] == "SUCCEEDED" and got["exported_by"] == x1

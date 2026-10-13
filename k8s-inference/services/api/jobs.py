@@ -745,12 +745,13 @@ def build_async(
     job = _job_shell(name, meta, pod, timeout_s)
     job["spec"]["backoffLimit"] = 6
     # a 4xx from the endpoint is the caller's error (call.sh exit 2): fail the Job, no pod retries; with application
-    # I/O also an unknown inference outcome (exit 4) and nothing to export (exit 3): never a second inference POST
+    # I/O also the endpoint's own error (exit 5), an unknown inference outcome (exit 4) and nothing to export (exit 3):
+    # never a second inference POST
     job["spec"]["podFailurePolicy"]["rules"].insert(
         0,
         {
             "action": "FailJob",
-            "onExitCodes": {"containerName": "main", "operator": "In", "values": [2, 3, 4] if ex else [2]},
+            "onExitCodes": {"containerName": "main", "operator": "In", "values": [2, 3, 4, 5] if ex else [2]},
         },
     )
     secret = {

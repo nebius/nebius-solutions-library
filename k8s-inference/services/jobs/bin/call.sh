@@ -15,7 +15,9 @@
 # (TRANSFER_ONLY=1: no inference, upload what is captured; nothing complete -> exit 3). Readiness is probed first
 # with an idempotent GET (READY_URL) so the one inference POST meets an endpoint that answers; the POST is made
 # exactly once per operation (posted.json is the marker): no response means an unknown outcome (exit 4, FAILED),
-# never a second POST; a response with any status is a capture and is delivered.
+# never a second POST; a response with any status is a capture and is delivered. The exit code is the inference
+# outcome (0 = 2xx, 2 = 4xx, 5 = another status), on the first delivery and on every re-delivery; the delivery
+# itself is reported through RESULT.json (export succeeded | failed).
 #
 # The URL is the endpoint's gateway hostname (TLS verified, key in AUTH_HEADER, ADMITTED = the API's admission token
 # so the gateway hook counts the call once); CONNECT_TO (host:443:svc:443) routes the connection to the gateway's
@@ -113,11 +115,23 @@ fi
 # ---- application I/O ------------------------------------------------------------------------------------------
 if [ -z "$PRIV" ] || [ ! -d "$PRIV" ]; then echo "application I/O needs the private binding (PRIVATE_INPUT_DIR)"; exit 2; fi
 
+outcome_exit() {   # the inference outcome of a capture, independent of its delivery: 0 = 2xx, 2 = 4xx (the caller's
+  local st=$1       # error), 5 = anything else the endpoint answered (its error); delivery is tracked by RESULT.json
+  case "$st" in 2*) return 0;; 4*) return 2;; *) return 5;; esac
+}
+
+done_with() {   # $1 = HTTP status of the capture: exit with its outcome after a successful delivery
+  local st=$1 rc; outcome_exit "$st"; rc=$?
+  [ "$rc" = 0 ] || echo "endpoint answered HTTP $st (delivered)" > /dev/termination-log 2>/dev/null
+  exit "$rc"
+}
+
 if [ "${TRANSFER_ONLY:-0}" = 1 ]; then
-  # export retry: the capture of a previous attempt on this volume, complete only with its marker
+  # export retry: the capture of a previous attempt on this volume, complete only with its marker; the retry ends with
+  # the captured outcome, so a delivered error never becomes a successful inference
   if [ -f call.json ] && [ -f response.bin ] && [ "$(jq -r '.capture_complete // false' call.json)" = true ]; then
     CAPTURE_ATTEMPT=$(jq -r '.attempt_id // empty' call.json)
-    if deliver; then finish succeeded; exit 0; fi
+    if deliver; then finish succeeded; done_with "$(jq -r '.http_status // 0' call.json)"; fi
     finish failed "upload of the retained capture failed again"; exit 0
   fi
   echo "no complete capture on the work volume: nothing to export (inference is not repeated)"
@@ -127,7 +141,7 @@ fi
 if [ -f call.json ] && [ "$(jq -r '.capture_complete // false' call.json)" = true ]; then
   echo "a complete capture exists already (a previous attempt of this operation): delivering it, not calling again"
   CAPTURE_ATTEMPT=$(jq -r '.attempt_id // empty' call.json)
-  if deliver; then finish succeeded; exit 0; fi
+  if deliver; then finish succeeded; done_with "$(jq -r '.http_status // 0' call.json)"; fi
   finish failed "upload failed"; exit 0
 fi
 
@@ -203,12 +217,8 @@ CAPTURE_ATTEMPT="${POD_NAME:-$(hostname)}"
 case "$http" in
   2*) ;;
   4*) echo "the endpoint answered $http (the caller's error): the response is captured and delivered as is";;
-  *) echo "the endpoint answered $http: captured and delivered as is";;
+  *) echo "the endpoint answered $http (the endpoint's error): captured and delivered as is";;
 esac
-if deliver; then
-  finish succeeded
-  if [ "${http:0:1}" = 4 ]; then echo "endpoint answered HTTP $http (delivered)" > /dev/termination-log 2>/dev/null; exit 2; fi
-  exit 0
-fi
+if deliver; then finish succeeded; done_with "$http"; fi
 finish failed "upload of the capture failed; the capture is kept on the work volume for POST /v1/operations/<id>:export"
 exit 0

@@ -210,3 +210,35 @@ def test_refresh_supplies_the_urls_with_the_identity_header(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     refreshes = [c for c in calls if "app.example/refresh" in c]
     assert len(refreshes) == 2 and '"phase":"input"' in refreshes[0] and '"phase":"output"' in refreshes[1]
+
+
+def test_a_captured_endpoint_error_is_delivered_but_never_a_success(tmp_path):
+    """Delivery is independent of the inference outcome: a 5xx capture ends with exit 5 (the endpoint's error), a
+    retained 4xx re-delivered with TRANSFER_ONLY ends with exit 2, a retained 2xx with 0."""
+    script = [
+        "GET https://ep.example/health 200 ok",
+        'POST https://ep.example/v1/chat 500 {"error":"cuda"}',
+        "PUT https://objects.example/put/response 200",
+        "PUT https://objects.example/put/call 200",
+    ]
+    r, work, calls = _run(tmp_path, BINDING, script)
+    assert r.returncode == 5 and json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
+    assert json.loads((work / "call.json").read_text())["http_status"] == 500
+    for status, code in ((422, 2), (200, 0), (503, 5)):
+        capture = {
+            "operation_id": "op-1",
+            "attempt_id": "op-1-old",
+            "http_status": status,
+            "content_type": "application/json",
+            "capture_complete": True,
+        }
+        script = ["PUT https://objects.example/put/response 200", "PUT https://objects.example/put/call 200"]
+        r, work, calls = _run(
+            tmp_path / f"retry-{status}",
+            BINDING,
+            script,
+            env={"TRANSFER_ONLY": "1"},
+            work_files={"call.json": json.dumps(capture), "response.bin": "{}"},
+        )
+        assert r.returncode == code, (status, r.stdout)
+        assert json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
