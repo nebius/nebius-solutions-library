@@ -672,7 +672,9 @@ def litellm_group_delete(mid: str, cluster: str, names: list[str] | None = None)
         with httpx.Client(timeout=20) as c:
             for did in ids:
                 r = c.post(f"{LITELLM_URL}/model/delete", json={"id": did}, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
-                if r.status_code >= 300 and r.status_code != 404:
+                if r.status_code >= 300 and r.status_code != 404 and not (r.status_code == 400 and "not found" in r.text):
+                    # LiteLLM answers 400 "Model with id=... not found in db" for an entry it no longer has: that is the
+                    # state we want (a deleted model whose entry was already gone retried its reconciliation forever)
                     return f"litellm /model/delete {r.status_code}: {r.text[:160]}"
     except Exception as e:  # noqa: BLE001
         return f"litellm unreachable: {e}"

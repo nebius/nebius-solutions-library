@@ -16,7 +16,7 @@ export interface ScalingSpec {
 
 export interface ModelRegionStatus {
   region: Region;
-  status: "ready" | "scaled-to-zero" | "deploying" | "unavailable";
+  status: "ready" | "scaled-to-zero" | "deploying" | "error" | "unavailable";
   replicas_ready?: number | null;
 }
 

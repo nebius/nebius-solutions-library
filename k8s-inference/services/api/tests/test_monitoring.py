@@ -184,6 +184,36 @@ def test_unreachable_endpoint_state_does_not_invent_zero_replicas(monkeypatch):
     assert kube.endpoint_status("example", "example-ns") == {"status": "unavailable", "replicas_ready": None}
 
 
+def test_failed_revision_is_an_error_not_deploying(monkeypatch):
+    """Knative marked the newest revision failed (ProgressDeadlineExceeded) and no pod exists: the endpoint reports
+    `error` with Knative's message; while a pod exists it is still deploying; a Ready InferenceService without pods
+    is scaled-to-zero."""
+    from types import SimpleNamespace as NS
+    state = {"conds": [], "pods": []}
+    class Api:
+        def get_namespaced_custom_object(self, *a, **k):
+            return {"status": {"conditions": state["conds"]}}
+    class Core:
+        def list_namespaced_pod(self, ns, label_selector=None, **k):
+            return NS(items=state["pods"])
+    monkeypatch.setattr(kube, "api", lambda region: Api())
+    monkeypatch.setattr(kube, "core", lambda region: Core())
+    monkeypatch.setattr(kube, "_isvc_cache", {})
+    failed = [{"type": "Ready", "status": "False", "reason": "RevisionFailed", "message": 'Revision "x-00002" failed with message: Initial scale was never achieved.'}]
+    state["conds"] = failed
+    st = kube.endpoint_status("x", "models")
+    assert st["status"] == "error" and st["replicas_ready"] == 0 and st["reason"].startswith("RevisionFailed: Revision \"x-00002\" failed")
+    kube._isvc_cache.clear()
+    state["pods"] = [NS(status=NS(phase="Pending", container_statuses=[]), metadata=NS(creation_timestamp=None))]
+    assert kube.endpoint_status("x", "models")["status"] == "deploying"            # a pod is starting: not given up yet
+    kube._isvc_cache.clear()
+    state["pods"], state["conds"] = [], [{"type": "Ready", "status": "True"}]
+    assert kube.endpoint_status("x", "models")["status"] == "scaled-to-zero"
+    kube._isvc_cache.clear()
+    state["conds"] = [{"type": "Ready", "status": "False", "reason": "PredictorConfigurationReady not ready"}]
+    assert kube.endpoint_status("x", "models")["status"] == "deploying"            # not a terminal failure
+
+
 def test_monitoring_of_a_retired_region_says_so(monkeypatch):
     """An operation that ran in a region that left the fleet: 410 with the explanation, not a connection error."""
     import asyncio

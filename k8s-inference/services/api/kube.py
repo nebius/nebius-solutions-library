@@ -263,10 +263,23 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 out["last_request_at"] = last
         else:
             i = retry(api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name)
-            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in i.get("status", {}).get("conditions", []))
+            conds = i.get("status", {}).get("conditions", [])
+            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds)
             pods = retry(core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}").items
             n = sum(1 for p in pods if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or [])))
-            out = {"status": "ready" if n else ("scaled-to-zero" if ready and not pods else "deploying"), "replicas_ready": n, **_startup(pods)}
+            # Knative gave up on the newest revision (ProgressDeadlineExceeded -> RevisionFailed): nothing is starting any
+            # more, so this is an error with Knative's message, not "deploying" (a Boltz-2 NIM whose Secret was gone sat in
+            # "deploying" for two days with no pod, no logs and no metrics, test fleet 2026-10-11..13)
+            failed = next((c for c in conds if c.get("type") == "Ready" and c.get("status") == "False" and "Failed" in (c.get("reason") or "")), None)
+            if n:
+                status = "ready"
+            elif failed and not pods:
+                status = "error"
+            else:
+                status = "scaled-to-zero" if ready and not pods else "deploying"
+            out = {"status": status, "replicas_ready": n, **_startup(pods)}
+            if status == "error":
+                out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:
         pass
     _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)

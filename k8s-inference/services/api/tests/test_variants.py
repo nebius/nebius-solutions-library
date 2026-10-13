@@ -102,6 +102,14 @@ def test_hostnames_and_litellm_deployments_follow_the_variants(monkeypatch):
     calls.clear()
     assert models.litellm_group_delete("chat", "hub", ["spot", "cheap"]) is None
     assert [c[2]["id"] for c in calls] == ["chat--hub", "chat--hub--spot", "chat--hub--cheap"]
+    # an entry LiteLLM no longer has is deleted (its 400 "not found in db"); any other 400 is still a failure
+    def answer(code, text):
+        r = R(code); r.text = text
+        return r
+    C.post = lambda self, url, json=None, headers=None: answer(400, "{'error': 'Model with id=chat--hub not found in db'}")
+    assert models.litellm_group_delete("chat", "hub", []) is None
+    C.post = lambda self, url, json=None, headers=None: answer(400, "{'error': 'bad request'}")
+    assert models.litellm_group_delete("chat", "hub", []).startswith("litellm /model/delete 400")
 
 
 def test_sync_requests_pick_a_variant_by_field_then_by_readiness(client, monkeypatch):
