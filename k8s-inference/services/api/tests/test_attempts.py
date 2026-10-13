@@ -3,16 +3,15 @@ uploader, epoch fencing, export gating of SUCCEEDED, lifecycle fields on the ope
 rows are faked here; test_database.py exercises the real transactions when TEST_DATABASE_URL is set."""
 
 import os
+
 import pytest
 from fastapi import HTTPException
 
-from test_api import FLEET, H, client, cluster, pod  # noqa: F401
-from test_database import database  # noqa: F401
 import attempts
-import jobs
-import kube
 import status
 from config import LABEL
+from test_api import FLEET, H, client, cluster, pod  # noqa: F401
+from test_database import database  # noqa: F401
 
 
 def _job(name="op-container-run-1", execution=None, complete=True):
@@ -77,7 +76,6 @@ def test_multinode_delivery_is_rank_zeros_record():
     job["spec"] = {"replicatedJobs": [{"name": "workers", "template": {"spec": {"template": {"spec": {}}}}}]}
     job["status"] = {"conditions": [{"type": "Completed", "status": "True"}]}
     import status as st
-    import jobs as jobs_mod
 
     records = [_record(name, f"{name}-workers-0-0", export="succeeded"), _record(name, f"{name}-workers-0-1")]
     op = st.normalise({**job, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}, None, records)

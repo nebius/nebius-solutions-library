@@ -7,7 +7,8 @@
 # key in AUTH_HEADER); CONNECT_TO (host:443:svc:443) routes the connection to the gateway's in-cluster Service
 # instead of the public IP, while the TLS name and Host stay the public hostname (either path works on mk8s).
 set -uo pipefail
-cd /work; mkdir -p out
+cd /work || exit 1
+mkdir -p out
 n=0
 while true; do
   code=$(curl -sS -o out/response.json -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' \

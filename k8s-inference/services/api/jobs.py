@@ -18,38 +18,37 @@ back; pods, logs and billing come from the worker. Image references are fleet-wi
 host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the region it lands in."""
 
 import json
-from fastapi import HTTPException
 import logging
+
 import urllib3
+from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 
-log = logging.getLogger("api.jobs")
+import execution
 import kube
 from config import (
+    ENDPOINT_CONNECT_TO,
     EXECUTOR_SA,
+    INFINIBAND_CLAIM_TEMPLATE,
+    INFINIBAND_ENV,
     JOB_BACKOFF_LIMIT,
     JOB_PVC_SIZE_GI,
     JOB_TTL_S,
-    LABEL,
-    ENDPOINT_CONNECT_TO,
-    LITELLM_URL,
-    MULTIKUEUE_MANAGED_BY,
-    REGION,
-    RUNNER_IMAGE,
-    S3_ENV_SECRET,
-    INFINIBAND_CLAIM_TEMPLATE,
-    INFINIBAND_ENV,
     JOBSET_GROUP,
     JOBSET_NAME_LABEL,
     JOBSET_PLURAL,
     JOBSET_VERSION,
+    LABEL,
+    LITELLM_URL,
+    MULTIKUEUE_MANAGED_BY,
     MULTINODE_MAX_NODES,
+    REGION,
+    RUNNER_IMAGE,
+    S3_ENV_SECRET,
     SHARED_SCRATCH_PVC,
     WEIGHTS_SHARED_PVC,
 )
-from resilience import retry
 from pod_metadata import normalise as normalise_pod_metadata
-import execution
 from render import (
     CONTAINER_HARDENING,
     POD_SECURITY_CONTEXT,
@@ -64,7 +63,10 @@ from render import (
     image_for_class,
     profile_of,
 )
+from resilience import retry
 from status import is_jobset, is_manager_job, is_mirror, normalise
+
+log = logging.getLogger("api.jobs")
 
 
 def _mount_data(r: dict, pod: dict, containers: list) -> None:
@@ -1305,7 +1307,9 @@ def recover(
     `<root>-r-<sha8>` is created from the acknowledged checkpoint pointer on `next_class` with that class's image and a
     fresh volume. The name is a function of (original, lost epoch): competing API replicas and repeated ticks
     converge on one Job (create is ignore-exists). Returns (successor, created)."""
-    import attempts, hashlib
+    import hashlib
+
+    import attempts
 
     orig = get(ns, name, region)
     md = orig["metadata"]

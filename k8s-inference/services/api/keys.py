@@ -23,10 +23,19 @@ terraform.tfvars, before any admin key exists that could mint through the API. `
 imports pre-hashed keys ({"tenant": ..., "dry_run": bool, "keys": [...]}) for an operator with database access.
 """
 
-import hashlib, json, logging, os, re, secrets, string, sys, time
+import hashlib
+import json
+import logging
+import os
+import re
+import secrets
+import string
+import sys
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+
 import db
 from config import LITELLM_MASTER_KEY, LITELLM_URL
 
@@ -280,10 +289,18 @@ def retire_mirrors() -> list[str]:
         pending = [r[0] for r in c.execute("select hash from retired_mirrors order by retired_at").fetchall()]
     gone = []
     for h in pending:
-        if mirror_delete(h):
-            with db.pool().connection() as c:
+        # Serialize deletion with a bootstrap that restores this value. A captured pending list may
+        # already be stale; hold its row through the router call so restoration mirrors the value last.
+        with db.pool().connection() as c, c.transaction():
+            retired = c.execute("select hash from retired_mirrors where hash = %s for update", (h,)).fetchone()
+            if retired is None:
+                continue
+            if c.execute("select 1 from keys where hash = %s", (h,)).fetchone():
                 c.execute("delete from retired_mirrors where hash = %s", (h,))
-            gone.append(h)
+                continue
+            if mirror_delete(h):
+                c.execute("delete from retired_mirrors where hash = %s", (h,))
+                gone.append(h)
     return gone
 
 
@@ -358,6 +375,7 @@ def bootstrap(
             _retire(
                 c, old[0]
             )  # the replaced value's LiteLLM record is an entry point of its own: revoked with the value
+        c.execute("delete from retired_mirrors where hash = %s", (h,))  # a rollback may restore a retired value
     i = _info(r)
     mirror_create(value, i)
     retire_mirrors()

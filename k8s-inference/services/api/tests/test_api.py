@@ -1,19 +1,24 @@
 """Unit tests: no cluster, no LiteLLM (both are monkeypatched)."""
 
-import copy, json, os, sys
+import copy
+import json
+import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-os.environ["CATALOG_DIRS"] = (
-    os.path.join(ROOT, "catalog", "models") + ":" + os.path.join(os.path.dirname(__file__), "catalog")
-)  # platform classes + generic endpoint/run-class fixtures
-os.environ["PUBLIC_API_URL"] = "https://api.example"
-os.environ["REGION"] = "eu-north1"  # the region this API serves in the tests (no default in config.py)
-os.environ["ENDPOINT_DOMAIN"] = "203.0.113.10.sslip.io"  # async endpoint calls go through the gateway (docs/JOBS.md)
-import pytest, yaml
+import pytest
+import yaml
 from fastapi.testclient import TestClient
 from kubernetes.client.rest import ApiException
-import app as appmod, auth, catalog, config, jobs, keys, kube, models, render, status
+
+import app as appmod
+import auth
+import catalog
+import config
+import jobs
+import keys
+import kube
+import models
+import render
+import status
 from config import RUNNER_IMAGE
 
 KEY_INFO = {
@@ -1012,7 +1017,10 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
 
 
 def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
-    import base64, hashlib, httpx
+    import base64
+    import hashlib
+
+    import httpx
 
     c, _ = client
     raw = b"PK\x03\x04\x00\xff\xfe\x80binary-model-output"
@@ -1215,7 +1223,8 @@ class FakeKeys:
 
 @pytest.fixture
 def fake_keys(monkeypatch):
-    import keys, db
+    import db
+    import keys
 
     fk = FakeKeys()
     for name in (
@@ -1324,7 +1333,9 @@ def test_router_key_is_accepted_at_the_gateway_only(client, monkeypatch):
 
 def test_billing_once(cluster, monkeypatch):
     """The CronJob entry point bills finished, unbilled runs exactly once (annotation guard), no claim protocol."""
-    import asyncio, billing
+    import asyncio
+
+    import billing
 
     done = {
         "metadata": {
@@ -1405,18 +1416,18 @@ def test_billing_once(cluster, monkeypatch):
     assert op["cost"] == 1.6 and op["gpu_seconds"] == 3600.0
 
 
-def test_openapi_paths_match_served_routes():
-    spec = yaml.safe_load(
-        open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "openapi.yaml"))
-    )
-    documented = {(p, m) for p, ops in spec["paths"].items() for m in ops if m in ("get", "post", "patch", "delete")}
-    served = {
-        (p, m)
-        for p, ops in appmod.app.openapi()["paths"].items()
-        for m in ops
-        if m in ("get", "post", "patch", "delete")
-    }
-    assert documented == served, documented ^ served
+def test_openapi_documents_bearer_authentication_and_response_types():
+    spec = appmod.app.openapi()
+    assert spec["components"]["securitySchemes"]["bearer"] == {"type": "http", "scheme": "bearer"}
+    for path, methods in spec["paths"].items():
+        if path == "/healthz":
+            continue
+        for method, operation in methods.items():
+            assert operation["security"] == [{"bearer": []}], (path, method)
+            assert all(p["name"] != "authorization" for p in operation.get("parameters", []))
+            for code, response in operation["responses"].items():
+                if code.startswith("2") and code != "204":
+                    assert response["content"]["application/json"]["schema"], (path, method, code)
 
 
 def test_retry_helper(monkeypatch):
@@ -1752,6 +1763,7 @@ def test_run_pods_are_hardened_and_scratch_local_nvme_uses_host_nvme(client, mon
 def test_tenant_image_allow_list_and_output_prefix_guard(client, monkeypatch):
     c, fake = client
     from fastapi import HTTPException
+
     import jobs as jobs_mod
 
     def check(ns, image, region="eu-north1"):
@@ -2109,7 +2121,8 @@ def admin_keys(monkeypatch):
         return dict(ADMIN_INFO) if key == "sk-admin" else dict(KEY_INFO)
 
     monkeypatch.setattr(auth, "key_info", fake_info)
-    import db, models as m
+    import db
+    import models as m
 
     fdb = FakeDB()
     for name in (
@@ -2345,7 +2358,8 @@ def test_model_group_needs_the_router_key(client, admin_keys, monkeypatch, caplo
 def test_without_the_fleet_database_only_the_bundled_classes_exist(client, admin_keys, monkeypatch):
     """No DATABASE_URL: the runtime catalog is empty (the bundled classes stay) and every write answers 409."""
     c, fake = client
-    import db, models as m
+    import db
+    import models as m
 
     monkeypatch.setattr(db, "enabled", lambda: False)
     catalog.invalidate()
@@ -2734,6 +2748,7 @@ def test_monitoring_of_an_unknown_operation_is_404(client, monkeypatch):
     """The operation's Job is the record (the manager's Job of a fleet run outlives the worker's copy): no Job in any
     region, no metrics or logs."""
     from fastapi import HTTPException
+
     from auth import Principal
 
     p = Principal(key="k", tenant="demo", info={})

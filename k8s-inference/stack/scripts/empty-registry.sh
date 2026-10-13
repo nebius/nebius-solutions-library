@@ -9,9 +9,9 @@ set -euo pipefail
 reg="${1:?registry id, e.g. registry-e00xxxxxxxxxxxxxxxxx}"
 command -v nebius > /dev/null || { echo "!! empty-registry: the Nebius CLI is needed to empty $reg before Terraform deletes it" >&2; exit 1; }
 n=0
-for i in 1 2 3; do   # a few passes: index manifests reference their platform manifests
+for _ in 1 2 3; do   # a few passes: index manifests reference their platform manifests
   ids=$(nebius registry image list --parent-id "$reg" --page-size 1000 --format json 2> /dev/null \
-        | python3 -c 'import json,sys; print(" ".join(i["id"] for i in json.load(sys.stdin).get("items", [])))' 2> /dev/null || true)
+        | python3 -c 'import json,sys; print(" ".join(i["id"] for _ in json.load(sys.stdin).get("items", [])))' 2> /dev/null || true)
   [ -n "$ids" ] || break
   for id in $ids; do nebius registry image delete --id "$id" > /dev/null 2>&1 && n=$((n + 1)) || true; done
 done

@@ -69,7 +69,7 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "85ea528595833c85bf54d3fc69b267116c548dd4c4b4d6d640d00e1224f152af"
+  "sha256": "da3514d2100f1055df98c0448f4b72ee896bc2ab14ee5ae74ddc757ba0019ddd"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -93,7 +93,7 @@
  },
  "batch/CronJob/ops/recover-stopped-nodes": {
   "component": "ops",
-  "sha256": "9ed1982f5388a8879071d0f14226ecfef96fb25d63be46afba8cc9dccc51016b"
+  "sha256": "f402c254e9d228443884f71c67bd14908cc9c5984850d3bf753e771f01c1b271"
  },
  "cert-manager.io/Certificate/envoy-gateway-system/models": {
   "component": "gateway",

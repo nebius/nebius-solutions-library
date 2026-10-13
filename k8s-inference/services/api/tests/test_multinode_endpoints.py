@@ -210,8 +210,8 @@ def test_leaderworkerset_reads_use_the_namespace_before_the_plural(monkeypatch):
 
 
 def test_example_request_travels_with_the_definition():
-    import endpoints as ep
     import catalog
+    import endpoints as ep
 
     spec = {
         **SPEC,
@@ -296,10 +296,11 @@ def test_lws_public_shape_and_stopped_invoke(monkeypatch):
 
 
 def test_idle_shutdown_stops_an_idle_group_and_skips_a_busy_one(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
     import app as appmod
     import catalog
     import db
-    from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
     old = (now - timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%SZ")

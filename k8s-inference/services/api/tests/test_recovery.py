@@ -2,17 +2,17 @@
 
 import copy
 import json
+
 import pytest
 from fastapi import HTTPException
 
-from test_api import client, cluster, admin_keys, ADMIN, H, KEY_INFO, L, pod
 import app as api
 import auth
 import billing
 import catalog
 import jobs
 import models
-
+from test_api import ADMIN, KEY_INFO, H, L, admin_keys, client, cluster, pod  # noqa: F401 - pytest fixture registration
 
 SPEC = {"id": "recovery-test", "kind": "endpoint", "image": "busybox:1.36", "gpu": {"count": 1, "classes": ["h100"]}}
 

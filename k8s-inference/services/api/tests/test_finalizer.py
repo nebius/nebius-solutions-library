@@ -7,15 +7,14 @@ import json
 
 import pytest
 
-from test_api import FLEET, H, client, cluster, pod  # noqa: F401
 import app as appmod
 import attempts
 import catalog
 import execution
-import jobs
 import kube
 import models as models_mod
 from config import LABEL
+from test_api import FLEET, H, client, cluster, pod  # noqa: F401
 
 NS = "tenant-demo"
 SPEC = {
@@ -389,8 +388,9 @@ def test_delivery_pending_fails_the_compute_job_at_once(failed_run):
         75
     ]  # the finalizer too: no restarts, :export bounds it
     plain = _model({k: v for k, v in SPEC.items() if k != "finalize"})
-    import catalog as cat
     import pytest as pt
+
+    import catalog as cat
 
     with pt.MonkeyPatch.context() as mp:
         mp.setattr(cat, "get", lambda name: plain if name == "md" else None)

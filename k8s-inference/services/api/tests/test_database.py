@@ -5,19 +5,16 @@ Set TEST_DATABASE_URL to run these tests. CI provides PostgreSQL; each test uses
 
 import os
 import uuid
-import sys
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import psycopg
-from psycopg.conninfo import make_conninfo
-from psycopg_pool import ConnectionPool
 import pytest
 from fastapi import HTTPException
+from psycopg.conninfo import make_conninfo
+from psycopg_pool import ConnectionPool
 
-import db
 import billing
+import db
 import keys
 
 
@@ -379,3 +376,25 @@ def test_bootstrap_rotation_revokes_the_previous_mirror_and_retries_it(database,
     assert keys.revoke("demo", "demo-admin")
     answer["code"] = 200
     assert keys.retire_mirrors() == [keys.key_hash(new)]
+
+
+def test_rotation_back_to_a_previous_value_does_not_revoke_the_active_mirror(database, monkeypatch):
+    """A rollback during a router outage must cancel the old pending deletion before restoring that value."""
+    db.migrate()
+    calls, answer = [], {"code": 200}
+    monkeypatch.setattr(keys, "LITELLM_MASTER_KEY", "m")
+    monkeypatch.setattr(
+        keys, "_litellm_call", lambda method, path, body: calls.append((path, body)) or (answer["code"], "")
+    )
+    old, new = "sk-" + "a" * 40, "sk-" + "b" * 40
+    keys.bootstrap(old, "demo-admin", "demo", "admin")
+    answer["code"] = 0
+    keys.bootstrap(new, "demo-admin", "demo", "admin")
+    answer["code"] = 200
+    calls.clear()
+    keys.bootstrap(old, "demo-admin", "demo", "admin")
+    assert keys.info(keys.key_hash(old)) is not None
+    assert calls[0][0] == "/key/generate"
+    assert calls[1:] == [("/key/delete", {"keys": [keys.key_hash(new)]})]
+    with db.pool().connection() as c:
+        assert c.execute("select count(*) from retired_mirrors").fetchone()[0] == 0

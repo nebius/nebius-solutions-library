@@ -60,7 +60,7 @@ S3_ENV_SECRET = os.environ.get("S3_ENV_SECRET", "s3")  # AWS_* env for the runne
 EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")  # job ServiceAccount in the tenant namespace (charts/tenant)
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
-RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.14")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.15")
 # External domain of this cluster's own endpoints (single-cluster mode; the GPU regions are in ENDPOINT_DOMAINS): async
 # endpoint calls from tenant Jobs and sync calls for another region go through the region's gateway (TLS, key check,
 # rate limit) as https://<model>-predictor.<ns>.<domain>, never to the predictor Service (no call may skip the key check).

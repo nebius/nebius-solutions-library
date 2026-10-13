@@ -5,7 +5,9 @@ and Kubernetes version are accepted by Managed Kubernetes (get-compatibility-mat
 on the platform in the pool's project, and that the state bucket is reachable. Exit 1 on the first set of
 findings; a wrong preset otherwise costs a ten-minute failed apply."""
 
-import json, subprocess, sys
+import json
+import subprocess
+import sys
 
 plan = json.load(sys.stdin)
 tfvars = sys.argv[1]

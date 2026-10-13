@@ -9,8 +9,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 
-from test_api import FLEET, H, client, cluster, pod  # noqa: F401
-from test_fallback import CFG, PER_CLASS, TWO_CLASS_FLEET, _fold_model, _env  # noqa: F401
 import app as appmod
 import attempts
 import catalog
@@ -18,6 +16,8 @@ import execution
 import jobs
 import kube
 from config import LABEL
+from test_api import FLEET, H, client, cluster, pod  # noqa: F401
+from test_fallback import CFG, PER_CLASS, TWO_CLASS_FLEET, _env, _fold_model  # noqa: F401
 
 NS = "tenant-demo"
 

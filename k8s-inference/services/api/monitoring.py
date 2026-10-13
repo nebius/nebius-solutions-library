@@ -6,11 +6,18 @@ no monitoring service of any region is exposed outside its cluster. Missing seri
 unavailable are different from a measured zero).
 """
 
-import asyncio, json, math, re, time, urllib.parse
+import asyncio
+import json
+import math
+import re
+import time
+import urllib.parse
+
 import httpx
 from fastapi import HTTPException
+
 import kube
-from config import PROMETHEUS_URL, LOKI_URL, REGION
+from config import LOKI_URL, PROMETHEUS_URL, REGION
 
 RANGES = {"15m": 900, "1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800}
 

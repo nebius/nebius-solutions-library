@@ -1,8 +1,11 @@
 """The standalone console needs account roles and region-specific endpoint state."""
 
 from types import SimpleNamespace
-from test_api import client, cluster, FakeCluster, ADMIN_INFO, H
-import auth, catalog, kube
+
+import auth
+import catalog
+import kube
+from test_api import ADMIN_INFO, FakeCluster, H, client, cluster  # noqa: F401 - pytest fixture registration
 
 read_status = kube.endpoint_status
 

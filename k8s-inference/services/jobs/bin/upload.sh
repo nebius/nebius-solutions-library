@@ -1,4 +1,6 @@
 #!/bin/bash
+# jq expressions intentionally use single quotes: jq, rather than the shell, expands their variables.
+# shellcheck disable=SC2016
 # Uploader container: waits until the main container of this pod has ended, then syncs /work (minus
 # the inputs) to OUTPUT_PREFIX with a STATUS.json and an attempt record (attempts/<pod>.json: the
 # operation's history and GPU-seconds survive the pod, which preemption deletes), and on success
@@ -12,6 +14,7 @@
 # (preemption, cancel) it uploads what exists at once, then waits for main to finish its own
 # SIGTERM handling (checkpoint) and uploads again.
 set -uo pipefail
+: "${POD_NAME:?POD_NAME must be set}"
 # UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
 # attempt record is kept under /work/attempts (the run moves its own data).
 MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"; ACK=""; CKPT_SEEN=""
@@ -25,11 +28,12 @@ field() { jq -r --arg m "$MAIN" "$1" <<<"$POD"; }
 
 main_alive() {   # any process whose ancestry ends neither at this shell nor at pid 1 (pause) belongs to another container
   local d p root rest pp
+  local -a stat_fields
   for d in /proc/[0-9]*; do
     p=${d#/proc/}; root=$p
     while :; do
       rest=$(cat "/proc/$root/stat" 2>/dev/null) || break
-      rest=${rest##*) }; set -- $rest; pp=$2
+      rest=${rest##*) }; read -r -a stat_fields <<< "$rest"; pp=${stat_fields[1]}
       [ -z "${pp:-}" ] || [ "$pp" = 0 ] && break
       root=$pp
     done
@@ -127,6 +131,7 @@ upload() {   # $1 = status
   aws s3 cp STATUS.json "${OUTPUT_PREFIX%/}/STATUS.json" --no-progress 2>&1 | tail -n 1
   echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
+# shellcheck disable=SC2329 # invoked by the TERM trap
 on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; EXIT=""; upload interrupted; }
 trap on_term TERM
 

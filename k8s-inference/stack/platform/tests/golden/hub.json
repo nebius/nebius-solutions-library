@@ -77,7 +77,7 @@
  },
  "batch/CronJob/ops/recover-stopped-nodes": {
   "component": "ops",
-  "sha256": "0f3712f5711d6d61ee54c273fbd0a4728c307eef260ea0b355a03fac50c5829b"
+  "sha256": "5248c888d64fef4217790a4b68d46ce7e5fcd3e6d5756863f855700e98d448de"
  },
  "cert-manager.io/Certificate/envoy-gateway-system/models": {
   "component": "gateway",

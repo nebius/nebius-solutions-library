@@ -3,11 +3,10 @@ on a Job (never truncated), a liveness probe without the database, the endpoint 
 
 import json
 
-from test_api import client, cluster, H  # noqa: F401 - fixtures
-
 import app as appmod
-import models
 import kube
+import models
+from test_api import H, client, cluster  # noqa: F401 - fixtures
 
 
 def test_timeout_bounds_and_input_cap(client):

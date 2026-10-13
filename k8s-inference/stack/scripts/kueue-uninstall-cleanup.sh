@@ -10,7 +10,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 k() { "$here/kube.sh" "$@"; }
-for i in $(seq 1 40); do
+for _ in $(seq 1 40); do
   left=$(k get clusterrole -l 'rbac.kueue.x-k8s.io/batch-admin=true' -o name 2> /dev/null | wc -l)
   left=$((left + $(k get clusterrole -l 'rbac.kueue.x-k8s.io/batch-user=true' -o name 2> /dev/null | wc -l)))
   [ "$left" = 0 ] && break

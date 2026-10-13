@@ -10,16 +10,21 @@
 
 Nothing here talks to Kubernetes; jobs.py does."""
 
-import hashlib, json, re, uuid
+import hashlib
+import json
+import re
+import uuid
+
 from fastapi import HTTPException
+
 from config import (
-    PUBLIC_API_URL,
     JOB_BACKOFF_LIMIT,
     JOB_TTL_S,
     KUEUE_PRIORITY,
     KUEUE_QUEUE,
     LABEL,
     MULTIKUEUE_MANAGED_BY,
+    PUBLIC_API_URL,
     RUNNER_IMAGE,
     S3_ENV_SECRET,
 )

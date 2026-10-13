@@ -43,32 +43,40 @@ model group lists every variant of every cluster as a deployment with its priori
 database (`models` table, services/api/db.py). Entries that come from files (the bundled classes) are read-only here.
 """
 
-import json, logging, re, sys
+import json
+import logging
+import re
+import sys
+
 import yaml
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from typing import Literal
 from kubernetes.client.rest import ApiException
-import db, kube, render_endpoint
-from pod_metadata import normalise as normalise_pod_metadata
+from pydantic import ValidationError
+
+import db
+import kube
+import render_endpoint
 from config import (
-    MODELS_ISSUER,
     ENDPOINT_DOMAIN,
     ENDPOINT_DOMAINS,
     GATEWAY_NAMESPACE,
     IMAGES_HOST,
-    INFINIBAND_CLAIM_TEMPLATE,
-    MODELS_CERTIFICATE,
     IMAGES_SOURCE,
+    INFINIBAND_CLAIM_TEMPLATE,
     LABEL,
     LITELLM_MASTER_KEY,
     LITELLM_URL,
+    MODELS_CERTIFICATE,
+    MODELS_ISSUER,
     MODELS_NAMESPACE,
     MULTINODE_MAX_NODES,
     REGION,
     ROUTER_KEY,
 )
+from pod_metadata import normalise as normalise_pod_metadata
 from resilience import retry
+from schemas import EphemeralVolumeSpec
+from schemas import ScalingSpec as ScalingSpec
 
 log = logging.getLogger("api")
 
@@ -85,32 +93,6 @@ MAX_VARIANTS = 8
 DATA_PATH_RE = re.compile(
     r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$"
 )  # a relative directory, no parent references
-
-
-class ScalingSpec(BaseModel):
-    """The scaling vocabulary of an endpoint (docs/API.md "Scaling"), rendered onto Knative's KPA by `to_entry`:
-    `concurrency_utilization` scales on `target` percent of `container_concurrency` (the per-replica request limit),
-    `requests_per_second` on `target` requests/s per replica with no concurrency limit."""
-
-    model_config = ConfigDict(extra="forbid")
-    min: int | None = Field(default=None, ge=0)
-    max: int | None = Field(default=None, ge=1)
-    metric: Literal["concurrency_utilization", "requests_per_second"] | None = None
-    target: int | None = Field(default=None, ge=1)
-    container_concurrency: int | None = Field(default=None, ge=0, le=1000)
-    cooldown_s: int | None = Field(default=None, ge=0, le=3600)
-    window_s: int | None = Field(default=None, ge=6, le=300)
-    idle_s: int | None = Field(default=None, ge=0, le=3600)
-
-
-class EphemeralVolumeSpec(BaseModel):
-    """Endpoint scratch space, not a host path, customer bucket or shared cache."""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
-    mount_path: str = Field(pattern=r"^/[A-Za-z0-9_/-]+$")
-    size_limit: str = Field(pattern=r"^[1-9][0-9]*(Mi|Gi)$")
-    memory: bool = False
 
 
 def _endpoint_bindings(s: dict) -> None:

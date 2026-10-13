@@ -1,12 +1,17 @@
 """Bearer key -> Principal: the fleet database answers (hash lookup, cached AUTH_CACHE_S); nothing else authenticates a
 caller. LiteLLM holds a best-effort mirror of the keys for its own OpenAI route (keys.py) and is never consulted here."""
 
-import asyncio, time
+import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import httpx
-from fastapi import Header, HTTPException
-import db, keys
+
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+import config as cfg
+import db
+import keys
 from config import AUTH_CACHE_S, TENANT_NS_PREFIX
 
 _cache: dict[str, tuple[float, dict]] = {}
@@ -71,22 +76,6 @@ class Principal:
         }
 
 
-async def _fetch(url: str, headers: dict, params: dict | None = None) -> dict | None:
-    """GET a key service: its JSON, None for a key it does not know, 503 when it is down (fail closed)."""
-    from resilience import retry_http
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await retry_http(lambda: c.get(url, params=params, headers=headers))
-    except httpx.HTTPError as e:
-        raise HTTPException(503, f"key service unavailable: {type(e).__name__}")
-    if r.status_code >= 500:
-        raise HTTPException(503, "key service unavailable")
-    if r.status_code != 200:
-        return None
-    return r.json()
-
-
 async def key_info(key: str) -> dict:
     h = keys.key_hash(key)
     now = time.time()
@@ -128,8 +117,11 @@ async def _principal(authorization: str, allow_router: bool = False) -> Principa
     return Principal(key=key, tenant=meta["tenant"], info=info)
 
 
-async def principal(authorization: str = Header(default="")) -> Principal:
-    return await _principal(authorization)
+bearer = HTTPBearer(auto_error=False, scheme_name="bearer")
+
+
+async def principal(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Principal:
+    return await _principal(f"{credentials.scheme} {credentials.credentials}" if credentials else "")
 
 
 def check_budget(p: Principal) -> None:
@@ -158,3 +150,63 @@ def check_model(p: Principal, model: str) -> None:
 def allows_model(p: Principal, model: str) -> bool:
     allowed = p.info.get("models") or []
     return not allowed or model in allowed or "all-proxy-models" in allowed
+
+
+def scoped(*scopes: str):
+    """A route dependency: authenticate once and require every named permission before calling the handler."""
+
+    def dependency(p: Principal = Depends(principal)) -> Principal:
+        for scope in scopes:
+            check_scope(p, scope)
+        return p
+
+    return dependency
+
+
+def authorize(p: Principal, model: str, scope: str, *, budget: bool = False) -> None:
+    """Shared model policy for API invokes and the model gateway's authorization hook."""
+    check_model(p, model)
+    if budget:
+        check_budget(p)
+    check_scope(p, scope)
+
+
+def check_operation_owner(p: Principal, job: dict) -> None:
+    md = job["metadata"]
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
+    missing = HTTPException(404, "operation not found")
+    if labels.get(f"{cfg.LABEL}/tenant") != p.tenant:
+        raise missing
+    model = labels.get(f"{cfg.LABEL}/model")
+    root = ann.get(f"{cfg.LABEL}/resumed-from") or md["name"]
+    record = keys.operation_owner(root) if db.enabled() else None
+    if record:
+        tenant, owner, model = record
+        if tenant != p.tenant or (p.role != "admin" and owner != p.owner):
+            raise missing
+    elif ann.get(f"{cfg.LABEL}/owner"):
+        if p.role != "admin" and ann[f"{cfg.LABEL}/owner"] != p.owner:
+            raise missing
+    elif p.role != "admin":
+        # Pre-migration rows have no durable provenance. A matching original
+        # key is evidence; sharing its tenant/bucket is not.
+        if ann.get(f"{cfg.LABEL}/key") != keys.key_hash(p.key):
+            raise missing
+    if model and not allows_model(p, model):
+        raise missing
+
+
+def may_read_operation(p: Principal, job: dict) -> bool:
+    try:
+        check_operation_owner(p, job)
+        return True
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        return False
+
+
+def admin(p: Principal = Depends(principal)) -> Principal:
+    if (p.info.get("metadata") or {}).get("role") != "admin":
+        raise HTTPException(403, "endpoint scaling and key management need a key with metadata.role=admin")
+    return p

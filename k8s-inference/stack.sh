@@ -61,7 +61,11 @@ creds() {
   if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     local f="${STATE_CREDS:-$HOME/.config/$NAME/tfstate.env}"
     [ -r "$f" ] || { echo "!! no AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for the state bucket and no $f (run stack/bootstrap/state-bucket.sh)" >&2; exit 4; }
-    set -a; . "$f"; set +a
+    # The operator's state-bucket credentials are loaded at runtime.
+    set -a
+    # shellcheck source=/dev/null
+    . "$f"
+    set +a
   fi
 }
 

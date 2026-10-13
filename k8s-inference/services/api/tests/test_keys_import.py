@@ -2,12 +2,22 @@
 classification, the scope checks on every direct path, the one-logical-call rule between the API and the gateway
 hook, and the reservation plumbing. The database rules themselves are in test_database.py."""
 
-import hashlib, hmac
+import hashlib
+import hmac
 
-import pytest
-from test_api import client, cluster, fake_keys, admin_keys, H, ADMIN, KEY_INFO, ADMIN_INFO  # noqa: F401 - fixtures and constants
-
-import app as appmod, auth, keys
+import app as appmod
+import auth
+import keys
+from test_api import (  # noqa: F401 - fixtures and constants
+    ADMIN,
+    ADMIN_INFO,
+    KEY_INFO,
+    H,
+    admin_keys,
+    client,
+    cluster,
+    fake_keys,
+)
 
 HASH = "a" * 64
 REC = {
@@ -167,8 +177,9 @@ def test_stale_reservations_are_released_when_the_job_is_gone(client, fake_keys,
 
     monkeypatch.setattr(db, "enabled", lambda: True)
     fake_keys.stale = [("op-gone", "demo"), ("op-live", "demo")]
-    import jobs
     from fastapi import HTTPException
+
+    import jobs
 
     def find(ns, name):
         if name == "op-gone":

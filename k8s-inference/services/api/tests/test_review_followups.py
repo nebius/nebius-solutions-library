@@ -3,18 +3,16 @@ of binding revocation, variants dropped within a retained region, and record-awa
 
 import copy
 
-import pytest
-from fastapi import HTTPException
-
-from test_api import ADMIN, FLEET, H, KEY_INFO, admin_keys, client, cluster, fake_keys  # noqa: F401
-from test_attempts import _record
-from test_variants import SPEC as VARIANT_SPEC, VARIANT_FLEET
 import app as api
 import artifacts
 import attempts
 import auth
 import kube
 import models
+from test_api import ADMIN, FLEET, KEY_INFO, H, admin_keys, client, cluster, fake_keys  # noqa: F401
+from test_attempts import _record
+from test_variants import SPEC as VARIANT_SPEC
+from test_variants import VARIANT_FLEET
 
 
 def _auth(monkeypatch, values):

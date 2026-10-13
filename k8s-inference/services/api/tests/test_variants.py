@@ -5,11 +5,11 @@ picks a variant, LiteLLM deployments with priorities, and the objects every vari
 import pytest
 from fastapi import HTTPException
 
-from test_api import FLEET, H, client, cluster  # noqa: F401
 import app as appmod
 import catalog
 import kube
 import models
+from test_api import FLEET, H, client, cluster  # noqa: F401
 
 VARIANT_FLEET = {
     "pools": {

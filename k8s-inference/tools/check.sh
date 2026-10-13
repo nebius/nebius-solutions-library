@@ -5,7 +5,7 @@
 # golden set), and the tests of the API and the dispatcher must pass.
 #
 #   tools/check.sh            everything
-#   tools/check.sh terraform | render | tests      one part
+#   tools/check.sh lint | terraform | render | tests      one part
 #   UPDATE_GOLDEN=1 tools/check.sh render          after a deliberate manifest change: rewrite stack/platform/tests/golden
 #
 # PYTHON (default python3) runs the tests.
@@ -28,9 +28,16 @@ render() { # a Terraform expression over terraform.tfvars.example (or TFVARS_EXA
   echo "$1" | tf stack/config console -var-file="${TFVARS_EXAMPLE:-$EXAMPLE}" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read()))))'
 }
 
-check_terraform() {
+check_lint() {
+  step "Python lint and format (Ruff)"
+  (cd "$ROOT" && "$PYTHON" -m ruff check services stack && "$PYTHON" -m ruff format --check services stack)
+  step "ShellCheck: fleet scripts and container entry points"
+  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh
   step "terraform fmt"
   terraform fmt -check -recursive "$ROOT/stack"
+}
+
+check_terraform() {
   step "terraform validate: every stage and module"
   for d in stack/config stack/cloud stack/platform stack/modules/cluster stack/modules/tenant-region; do
     tf "$d" init -backend=false -input=false > /dev/null
@@ -239,7 +246,8 @@ check_tests() {
 }
 
 case "$part" in
-  all) check_terraform; check_render; check_tests ;;
+  all) check_lint; check_terraform; check_render; check_tests ;;
+  lint) check_lint ;;
   terraform) check_terraform ;;
   render) check_render ;;
   tests) check_tests ;;

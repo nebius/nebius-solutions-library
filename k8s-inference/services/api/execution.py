@@ -26,14 +26,21 @@ charts/tenant), never against raw Kubernetes names: a reference another tenant o
 confidential enters the Job: the resolved block (names only) is an annotation, the data lives in Secrets.
 """
 
-import json, re, time
-from typing import Literal
+import json
+import re
+import time
+
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel, ConfigDict, Field
+
 import kube
 from config import LABEL, REGION
 from resilience import retry
+from schemas import RECOVERY_MAX as RECOVERY_MAX
+from schemas import BindingRequest as BindingRequest
+from schemas import ExecutionSpec as ExecutionSpec
+from schemas import PlacementSpec as PlacementSpec
+from schemas import RecoverySpec as RecoverySpec
 
 REF = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
 IO_MODES = ("managed", "application")
@@ -47,45 +54,7 @@ MAX_BINDING_BYTES = 64 * 1024
 KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")  # a binding key is a file name under the private directory
 
 
-RECOVERY_MAX = 3
-
-
-class PlacementSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    gpu_preference: list[str] | None = None
-    allowed_clusters: list[str] | None = None
-    fallback_wait_s: int | None = Field(default=None, ge=0, le=7 * 86400)
-
-
-class RecoverySpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    on_infrastructure_loss: Literal["retry", "fail", "recover"] = "retry"
-    checkpoint_ref: str | None = Field(default=None, max_length=1024)
-    max_recoveries: int | None = Field(
-        default=None, ge=1, le=RECOVERY_MAX
-    )  # `recover` only: automatic continuations per root
-    wait_s: int | None = Field(default=None, ge=0, le=86400)  # `recover` only: time to come back on its own class first
-    deadline_s: int | None = Field(
-        default=None, ge=60, le=7 * 86400
-    )  # `recover` only: no recovery past root.created_at + deadline_s
-
-
 RECOVERY_DEFAULTS = {"max_recoveries": 1, "wait_s": 300}
-
-
-class ExecutionSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")  # an unknown execution field is an error, never silently ignored
-    io_mode: Literal["managed", "application"] = "managed"
-    profile_ref: str | None = None
-    workload_identity_ref: str | None = None
-    private_input_ref: str | None = None
-    placement: PlacementSpec | None = None
-    recovery: RecoverySpec | None = None
-
-
-class BindingRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    data: dict[str, str]
 
 
 _cache: dict[str, tuple[float, dict]] = {}

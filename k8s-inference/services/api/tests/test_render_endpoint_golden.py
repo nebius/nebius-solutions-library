@@ -16,10 +16,13 @@ import pytest
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config  # noqa: E402
+import kube
+import models
+import render_endpoint
 import test_api  # noqa: E402  (sets the test environment: REGION, CATALOG_DIRS, ...)
 import test_multinode_endpoints as multinode  # noqa: E402
 import test_variants as variants  # noqa: E402
-import config, kube, models, render_endpoint  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -228,7 +231,8 @@ def native(entry: dict, cluster: str) -> list[dict]:
 
 def digests(objects: list[dict]) -> list[dict]:
     """One hash per rendered object (kind, name, sha256 of the canonical JSON): what the record holds."""
-    import hashlib, json
+    import hashlib
+    import json
 
     return [
         {

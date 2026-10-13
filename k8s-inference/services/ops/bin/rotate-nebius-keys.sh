@@ -41,7 +41,7 @@ for secret in $SECRETS; do
     fi
     newid=$(jq -r '.["subject-credentials"].kid // empty' "$out")
     if patch_secret "$OPS_NS" "$secret" "$region.json" "$out"; then
-      echo "rotate: $OPS_NS/$secret[$region.json] -> new auth key ${newid:-?} for $said"
+      echo "rotate: $OPS_NS/${secret}[${region}.json] -> new auth key ${newid:-?} for $said"
     else rc=1; fi
     [ -z "$first_sa" ] && { first_sa=$said; first_profile=$profile; }
     # retire old auth keys (never the one just created; keep anything younger than $AGE days)

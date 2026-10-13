@@ -380,7 +380,7 @@ cache fetches them from the source registry on first use.
 
 ```
 ./stack.sh plan                                                   # no changes on any stage and cluster
-make check                                                        # every stage validates, every chart and manifest renders, the tests pass
+make check                                                        # format/lint, every stage validates, every chart renders, tests pass
 kubectl -n ops get cronjob; kubectl -n ops logs -l app=recover-stopped-nodes --tail=3      # on each worker
 kubectl -n api get job | tail -3                                  # billing CronJob runs (control cluster)
 nebius msp postgresql v1alpha1 backup list --parent-id <control project id> | head          # the managed database's backups

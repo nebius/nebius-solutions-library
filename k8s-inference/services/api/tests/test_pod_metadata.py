@@ -4,11 +4,10 @@ import copy
 
 import pytest
 
-from test_api import client, cluster, admin_keys, ADMIN, H, MULTINODE_FLEET
 import catalog
 import jobs
 import kube
-
+from test_api import ADMIN, MULTINODE_FLEET, H, admin_keys, client, cluster  # noqa: F401 - pytest fixture registration
 
 EXTRA = {
     "labels": {"example.org/startup-profile": "qualified-science"},

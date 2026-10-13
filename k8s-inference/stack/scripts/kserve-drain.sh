@@ -13,7 +13,7 @@ kinds="inferenceservices.serving.kserve.io localmodelcaches.serving.kserve.io se
 for kind in $kinds; do
   k delete "$kind" --all --all-namespaces --wait=false --ignore-not-found > /dev/null 2>&1 || true
 done
-for i in $(seq 1 24); do
+for _ in $(seq 1 24); do
   left=0
   for kind in $kinds; do left=$((left + $( (k get "$kind" --all-namespaces -o name 2> /dev/null || true) | wc -l))); done
   [ "$left" = 0 ] && break

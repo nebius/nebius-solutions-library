@@ -1,10 +1,14 @@
 """Kubernetes clients per region (in-cluster for this region, rotated kubeconfigs for the others)
 and the KServe read helpers the catalog uses."""
 
-import os, time
+import os
+import time
+
 from fastapi import HTTPException
-from kubernetes import client, config as kconfig
+from kubernetes import client
+from kubernetes import config as kconfig
 from kubernetes.client.rest import ApiException
+
 from config import FLEET_CONFIGMAP, HUB_REGION, KUEUE_JOB_UID_LABEL, KUEUE_NAMESPACE, LABEL, REGION, REGION_KUBECONFIGS
 from resilience import retry
 

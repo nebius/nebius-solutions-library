@@ -5,7 +5,6 @@ the class's profile queue; a resume keeps the class; a run class with one image 
 tests/catalog/batch-example-tuned.yaml; the fleet of test_api.py has an RTX PRO 6000 spot pool (1.6) and an H100 one."""
 
 import copy
-import json
 
 import pytest
 from fastapi import HTTPException
@@ -15,7 +14,7 @@ import catalog
 import jobs
 import kube
 import placement
-from test_api import FLEET, H, L, FakeCluster, _main, client, cluster, pod  # noqa: F401 (pytest fixtures)
+from test_api import FLEET, FakeCluster, H, L, _main, client, cluster, pod  # noqa: F401 (pytest fixtures)
 
 IMG_RTX = "registry.serverless2.local/nebius/batch-example:1.0-rtx-pro-6000"
 IMG_H100 = "registry.serverless2.local/nebius/batch-example:1.0-h100"
@@ -213,7 +212,6 @@ def test_run_with_per_class_images_is_rendered_for_the_chosen_class(client, monk
         ][0]["matchExpressions"][0]["values"]
     ) == ["h100-spot-1x", "rtx6000-spot-1x"]
     # a live pod's attempt and a bucket record both report the class
-    jp = fake.jobs[("tenant-demo", op["id"])]
     p = pod(op["id"], "Running")
     p["metadata"]["labels"][f"{L}/gpu-class"] = "rtx-pro-6000"
     fake.pods.append(p)

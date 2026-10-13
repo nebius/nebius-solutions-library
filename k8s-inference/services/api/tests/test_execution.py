@@ -3,15 +3,16 @@ workload identities, private inputs through bindings, execution profiles, placem
 runner token that never reaches the model's container."""
 
 import json
+
 import pytest
 from fastapi import HTTPException
 
-from test_api import FLEET, H, client, cluster  # noqa: F401  (sets the catalog path before the API modules load)
 import catalog
 import execution
 import jobs
 import kube
 from config import LABEL, S3_ENV_SECRET
+from test_api import FLEET, H, client, cluster  # noqa: F401  (sets the catalog path before the API modules load)
 
 TENANT_CFG = {
     "identities": {"sci": {"audience": "sts.amazonaws.com", "env": {"AWS_ROLE_ARN": "arn:aws:iam::1:role/sci"}}},

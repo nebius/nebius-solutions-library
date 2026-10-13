@@ -10,7 +10,12 @@ state address) and the hash of the object's canonical JSON. A changed template t
 it changed; the objects themselves are rendered on demand (`helm template`), never tracked.
 """
 
-import hashlib, json, re, sys, yaml
+import hashlib
+import json
+import re
+import sys
+
+import yaml
 
 update = sys.argv[1] == "--update"
 path = sys.argv[2] if update else sys.argv[1]

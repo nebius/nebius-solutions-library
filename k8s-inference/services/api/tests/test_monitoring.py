@@ -1,11 +1,19 @@
 """Monitoring authorization, bounded queries, the other regions' API server proxy, and real response normalization."""
 
-import asyncio, time
-import httpx, pytest
+import time
+
+import httpx
+import pytest
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
-from test_api import client, cluster, H, KEY_INFO
-import app as appmod, auth, catalog, jobs, kube, monitoring
+
+import app as appmod
+import auth
+import catalog
+import jobs
+import kube
+import monitoring
+from test_api import KEY_INFO, H, client, cluster  # noqa: F401 - pytest fixture registration
 
 
 def transport(monkeypatch, responder):
@@ -110,7 +118,7 @@ def test_log_search_is_literal_and_streams_are_sorted(client, monkeypatch):
     q = requests[0].url.params["query"]
     assert q.startswith('{namespace="models",inferenceservice="llm-example"}')
     assert q.endswith(' |= "\\"} | json"')
-    assert [l["line"] for l in r.json()["lines"]] == ["second", "first"]
+    assert [line["line"] for line in r.json()["lines"]] == ["second", "first"]
 
 
 def test_operation_ownership_checked_before_monitoring(client, monkeypatch):
@@ -335,8 +343,7 @@ def test_failed_revision_is_an_error_not_deploying(monkeypatch):
 
 def test_monitoring_of_a_retired_region_says_so(monkeypatch):
     """An operation that ran in a region that left the fleet: 410 with the explanation, not a connection error."""
-    import asyncio
-    import app as appmod
+
     import kube
 
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-north2"])

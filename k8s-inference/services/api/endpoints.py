@@ -2,8 +2,9 @@
 fleet-managed objects are read-only through the customer API."""
 
 import re
-from config import PUBLIC_API_URL, REGION
+
 import kube
+from config import PUBLIC_API_URL, REGION
 
 
 def _secs(d: str) -> int:

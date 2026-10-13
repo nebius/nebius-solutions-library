@@ -1,30 +1,18 @@
-"""openapi.yaml against the code. The file is hand-maintained; test_api holds its paths equal to the served routes,
-this file holds its component schemas equal to what the code accepts and returns.
+"""The generated API contract against actual handler output.
 
-Requests: every Pydantic body model FastAPI serves (app.openapi() components) has a component of the same name in
-openapi.yaml with the same property names, the same required set and the same extra-field rule. ModelSpec is the
-exception the code makes itself (extra fields pass through to services/api/models.py): its component must name every
-key models.py reads from the spec.
-
-Responses: objects built through the code (status.normalise on fixture Jobs carrying every annotation the API writes,
-the lifecycle, chain and finalizer views through the route with faked attempt rows, the durable record, both endpoint
-kinds through endpoints.to_public with kube.endpoint_status run against fakes, the fleet, keys, bindings and results
-through the routes) may only carry keys the component declares, and their status values must be in the enums.
-A key the code returns and the component lacks fails here: declare it in openapi.yaml, never exclude it in this file."""
+The shared Pydantic types own requests and responses. These tests exercise fixture Jobs, durable attempt
+records, endpoints, fleet status, keys and bindings; undeclared output fields still fail the contract gate.
+"""
 
 import ast
 import copy
 import inspect
-import os
 import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import pytest
-import yaml
 from kubernetes.client.rest import ApiException
 
-from test_api import ADMIN_INFO, FLEET, H, L, admin_keys, client, cluster, fake_keys, pod  # noqa: F401
 import app as appmod
 import attempts
 import auth
@@ -33,15 +21,34 @@ import db
 import endpoints as ep
 import kube
 import models as models_mod
+import schemas
 import status
+from test_api import ADMIN_INFO, FLEET, H, L, admin_keys, client, cluster, fake_keys, pod  # noqa: F401
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SPEC = yaml.safe_load(open(os.path.join(os.path.dirname(HERE), "openapi.yaml")))
-SCHEMAS = SPEC["components"]["schemas"]
-SERVED = appmod.app.openapi()["components"]["schemas"]
+SPEC = appmod.app.openapi()
+
+
+def resolved(node):
+    if isinstance(node, list):
+        return [resolved(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    if "$ref" in node:
+        return resolved(SPEC["components"]["schemas"][node["$ref"].rsplit("/", 1)[1]])
+    node = {k: resolved(v) for k, v in node.items()}
+    choices = node.get("anyOf", [])
+    nonnull = [v for v in choices if v.get("type") != "null"]
+    if len(nonnull) == 1:
+        node = {**node, **nonnull[0]}
+        if "enum" in node and len(nonnull) < len(choices):
+            node["enum"] = [*node["enum"], None]
+    return node
+
+
+SCHEMAS = resolved(SPEC["components"]["schemas"])
+SCHEMAS["ExportState"] = SCHEMAS["ExportStateValue"]
 REAL_ENDPOINT_STATUS = kube.endpoint_status  # the client fixture replaces it; _live_statuses runs the real one
 REAL_DB_HISTORY = db.history  # the admin_keys fixture replaces it with the fake's
-REQUEST_MODELS = sorted(n for n in SERVED if n not in ("HTTPValidationError", "ValidationError"))
 
 
 def props(name: str) -> set:
@@ -53,29 +60,14 @@ def enum(name: str) -> set:
 
 
 def covered(obj: dict, component: str, where: str = "") -> None:
+    getattr(schemas, component).model_validate(obj)
     extra = set(obj) - props(component)
     assert (
         not extra
-    ), f"{where or component}: the code returns {sorted(extra)}, openapi.yaml {component} does not declare them"
+    ), f"{where or component}: the code returns {sorted(extra)}, generated contract {component} does not declare them"
 
 
 # ---- requests ----------------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("name", REQUEST_MODELS)
-def test_request_model_matches_its_component(name):
-    """Property names, required set and the extra-field rule of every served body model equal its component."""
-    served = SERVED[name]
-    assert name in SCHEMAS, f"openapi.yaml has no component {name} for the served request model"
-    component = SCHEMAS[name]
-    if served.get("additionalProperties") is True:  # ModelSpec: the component is the superset models.py validates
-        assert set(served["properties"]) <= set(component["properties"])
-        assert component.get("additionalProperties") is True
-    else:
-        assert set(served["properties"]) == set(component["properties"]), name
-        if served.get("additionalProperties") is False:
-            assert component.get("additionalProperties") is False, f"{name} forbids extra fields in the code"
-    assert set(served.get("required") or []) == set(component.get("required") or []), f"{name}: required"
 
 
 def _spec_keys_read_by_models_py() -> set:
@@ -121,33 +113,10 @@ def test_model_spec_component_names_every_key_models_py_reads():
     missing = read - props("ModelSpec")
     assert (
         not missing
-    ), f"models.py reads {sorted(missing)} from a model spec; openapi.yaml ModelSpec does not declare them"
+    ), f"models.py reads {sorted(missing)} from a model spec; generated contract ModelSpec does not declare them"
     stale = props("ModelSpec") - read
-    assert not stale, f"openapi.yaml ModelSpec declares {sorted(stale)}, which models.py never reads"
+    assert not stale, f"generated contract ModelSpec declares {sorted(stale)}, which models.py never reads"
     assert set(SCHEMAS["ScalingSpec"]["properties"]) == set(models_mod.ScalingSpec.model_json_schema()["properties"])
-
-
-def test_declared_query_and_header_parameters_exist_in_the_code():
-    """The parameters openapi.yaml declares on a route are the ones the handler reads (FastAPI's own schema)."""
-    served = appmod.app.openapi()["paths"]
-    for path, ops in SPEC["paths"].items():
-        for method, op in ops.items():
-            if method not in ("get", "post", "patch", "put", "delete"):
-                continue
-            declared = set()
-            for prm in op.get("parameters") or []:
-                if "$ref" in prm:
-                    prm = SPEC["components"]["parameters"][prm["$ref"].rsplit("/", 1)[1]]
-                declared.add((prm["in"], prm["name"].lower()))
-            served_params = {
-                (prm["in"], prm["name"].lower()) for prm in served[path][method].get("parameters") or []
-            } - {("header", "authorization")}  # the bearer security scheme
-            assert (
-                declared == served_params
-            ), f"{method.upper()} {path}: declared {sorted(declared)} vs served {sorted(served_params)}"
-            assert ("requestBody" in op) == (
-                "requestBody" in served[path][method]
-            ), f"{method.upper()} {path}: request body"
 
 
 # ---- the operation --------------------------------------------------------------------------------------------------
@@ -622,11 +591,7 @@ def test_model_shapes_are_declared(client, admin_keys, monkeypatch):
                 assert not extra, f"Model.regions: {sorted(extra)} undeclared"
     # the history rows as the real db.history builds them (the test fake adds an `id` of its own)
     built = set(re.findall(r'"(\w+)":', inspect.getsource(REAL_DB_HISTORY)))
-    declared = set(
-        SPEC["paths"]["/v1/models/{model}/history"]["get"]["responses"]["200"]["content"]["application/json"]["schema"][
-            "items"
-        ]["properties"]
-    )
+    declared = set(SCHEMAS["ModelHistory"]["properties"])
     assert built and built == declared, (built, declared)
 
 

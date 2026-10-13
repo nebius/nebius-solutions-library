@@ -4,9 +4,9 @@ checkpoint reference needs no volume and may change class (and image), a resume 
 and a queued operation says why it waits."""
 
 import json
+
 import pytest
 
-from test_api import FLEET, H, KEY_INFO, client, cluster, admin_keys, fake_keys, pod  # noqa: F401
 import app as appmod
 import attempts
 import catalog
@@ -15,9 +15,10 @@ import execution
 import jobs
 import kube
 import models as models_mod
-from config import LABEL
-
 import placement as _placement
+import reconciliation
+from config import LABEL
+from test_api import FLEET, KEY_INFO, H, admin_keys, client, cluster, fake_keys, pod  # noqa: F401
 
 _real_choose_class = _placement.choose_class  # captured before the autouse stub replaces it
 _real_cluster_region = kube.cluster_region  # same for the cluster id map
@@ -52,6 +53,7 @@ def _env(monkeypatch):
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "us-central1"])
     monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
     monkeypatch.setattr(appmod, "FLEET_MANAGER", True)
+    monkeypatch.setattr(reconciliation, "FLEET_MANAGER", True)
     monkeypatch.setattr(
         jobs.placing if hasattr(jobs, "placing") else appmod.placing,
         "choose_class",
@@ -412,6 +414,7 @@ def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, m
         )  # no class pin for a single-image class (Kueue may still move within the list)
     # single-cluster mode (no fleet manager): runs happen here, so a list that excludes this region is an error
     monkeypatch.setattr(appmod, "FLEET_MANAGER", False)
+    monkeypatch.setattr(reconciliation, "FLEET_MANAGER", False)
     r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": ex}, headers=H)
     assert r.status_code == 400 and "runs jobs in eu-north1 only" in r.text
     r = c.post(

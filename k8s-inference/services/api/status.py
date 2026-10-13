@@ -4,9 +4,11 @@
 attempt records from the bucket standing in for pods that preemption deleted; `gpu_seconds` is what the
 billing CronJob prices. The predicates (`is_jobset`, `is_manager_job`, `is_mirror`) tell the kinds apart."""
 
-import json, urllib.parse
-import kube
+import json
+import urllib.parse
 from datetime import datetime, timezone
+
+import kube
 from config import GRAFANA_URLS, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION
 
 

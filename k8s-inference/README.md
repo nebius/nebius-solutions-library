@@ -125,8 +125,9 @@ curl -X POST -H "Authorization: Bearer $KEY" -H 'content-type: application/json'
 
 `./stack.sh apply` runs the stages in dependency order. Each stage can also run alone (`./stack.sh plan
 platform hub`), every state lives in the bucket, and `./stack.sh tf <stage> [<id>] -- <args>` runs any
-Terraform command against a stage. `make check` renders everything and runs the tests without touching
-the cloud (run `make venv` once first: it creates the Python virtualenv the tests use); CI runs the same gate.
+Terraform command against a stage. `make check` checks formatting and lint, renders everything and runs the
+tests without touching the cloud. Run `make venv` once first and install ShellCheck (`brew install shellcheck`
+on macOS, `apt-get install shellcheck` on Ubuntu); CI runs the same gate.
 
 ## What is the platform and what is not
 
@@ -309,7 +310,7 @@ then the topic docs in `docs/`.
 
 ## Everyday commands
 
-`make help` lists them: `make venv` (once, the test virtualenv), `make check` (render everything and run the
+`make help` lists them: `make venv` (once, the test virtualenv), `make check` (lint, render everything and run the
 tests, no cloud access), `make preflight`, `make plan`, `make apply`, `make destroy`, `make images`. Every
 target is a script you can also call directly (`./stack.sh`, `tools/check.sh`, `tools/images.sh`).
 
@@ -321,10 +322,10 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.38 |
+| `services/api` image | 0.11.39 |
 | `services/dispatcher` image | 0.2.12 |
-| `services/jobs` image | 0.1.14 |
-| `services/ops` image | 0.1.11 |
+| `services/jobs` image | 0.1.15 |
+| `services/ops` image | 0.1.12 |
 | `charts/fleet` | 0.1.7 |
 | `charts/platform` | 0.1.3 |
 | `charts/tenant` | 0.3.2 |

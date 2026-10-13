@@ -1,66 +1,51 @@
 # services/api: the customer API
 
-FastAPI service implementing `docs/API.md` (contract: `openapi.yaml`, also served at `/openapi.json`;
-`test_openapi_paths_match_served_routes` keeps them equal). About 1000 lines: `app.py` (routes),
-`auth.py` (key -> tenant), `keys.py` (keys and the GPU ledger in the fleet database), `catalog.py` (model catalog), `jobs.py` (operations as Kubernetes
-Jobs: render, submit, status, cancel, resume; `docs/JOBS.md`), `kube.py` (per-region clients, KServe
-reads), `artifacts.py` (presigned URLs and small reads in the tenant bucket), `endpoints.py` (read/scale
-InferenceServices), `billing.py` (run-class spend, run as a CronJob), `resilience.py` (retries).
-The runner image the Jobs use (fetch, upload, endpoint call) is `services/jobs`.
+FastAPI implements [docs/API.md](../../docs/API.md). Its `/openapi.json` contract is generated from
+`schemas.py` and the route declarations; `make openapi` exports it without a cluster or database.
+The schema tests validate actual handler output against the shared response types and detect undeclared fields.
 
-| Request | What happens |
+| Module | Responsibility |
 |---|---|
-| `Authorization: Bearer <key>` | the `keys` table of the fleet database by sha256 (cached 30 s; LiteLLM `/key/info` only for a key not imported yet); the row names the tenant, namespace `tenant-<name>`. Blocked, expired, budget-exhausted keys and model allow-lists are enforced; the fleet's router key passes the gateway's authorize hook only |
-| `POST /v1/models/{m}:invoke` mode `sync` | proxied to LiteLLM's pass-through route (`litellm_route`, spend + budget + `cost_per_request` recorded on the caller's key) or straight to the KServe predictor host; returns `{result, operation}` |
-| mode `async` | a one-pod Job in the tenant namespace whose main container (runner image, `call.sh`) POSTs `input` to the same route with the caller's key from a per-operation Secret owned by the Job, retrying until the endpoint answers; the uploader puts the response in the bucket and `GET .../result` returns it inline |
-| `region` (sync/async) | the endpoint's region (default: the API's own region when the model is deployed there, else the model's first). sync on the API's own cluster: the predictor Service; sync in another region: proxied to the endpoint's gateway hostname (`ENDPOINT_DOMAINS`, the fleet CA) with the caller's key, which that gateway's ext-auth checks once more; async: the caller Job is created in that region. `HUB_REGION` maps `deployments.hub` to the hub's region name |
-| `region` (run mode) | optional on the fleet (`FLEET_MANAGER=true`, the dedicated control cluster): the Job is created on the MultiKueue manager and placed by Kueue + the dispatcher among the model's regions and GPU classes; `region` pins it. Single-cluster mode: the API's own region (the Job is created in its cluster) |
-| mode `run` | the catalog entry's `job` block is rendered (`{{param}}`) into a Job in the tenant namespace: fetch init container, `main`, uploader, a per-run PVC for `/work`; run-pod SA (`job-runner`), Kueue labels (`queue-name: <profile>` = `prefer-<first gpu class>` or `default`, priority `customer-batch`, `bulk-backfill` for `priority: low`), a nodeAffinity over the fleet pools of the entry's GPU classes and the region's registry prefix on every image (both from `kueue-system/fleet-prices`), parameters from `input` (unknown or missing required names -> 400), `activeDeadlineSeconds` from `timeout_s`, `podFailurePolicy` so preemptions do not consume `backoffLimit` (`docs/JOBS.md`) |
-| `Idempotency-Key` | operation id = `op-<sha256(tenant, model, key)[:16]>`; `AlreadyExists` -> 200 with the existing operation |
-| `GET /v1/operations[/{id}]` | Job conditions + pods -> QUEUED / RUNNING / SUCCEEDED / FAILED / CANCELLED; one attempt per pod (`DisruptionTarget` or exit 137/143 -> PREEMPTED); `logs_url` into Grafana Explore/Loki (`GRAFANA_URLS`); `resumed_from`, `resumable` |
-| `GET /v1/operations/{id}/result` | 409 while running; async: `out/response.json` from the bucket; run: presigned links to `operations/<id>/...` in the tenant bucket |
-| `POST /v1/operations/{id}:cancel` | queued: Job deleted (PVC and Secret follow by owner reference); running: `activeDeadlineSeconds: 1` + `cancelled` annotation, reported CANCELLED |
-| `POST /v1/operations/{id}:resume` | FAILED/CANCELLED run with its PVC still present: Job `<id>-r<n>` with the original spec on the same volume in the same region; 409 otherwise |
-| `GET /v1/endpoints[/{id}]`, `PATCH /v1/endpoints/{id}` | InferenceServices of catalog models in `models`; PATCH (admin keys) sets min/max replicas, target concurrency, scale-to-zero retention and persists API-managed definitions. Create/delete: `/v1/models`; bundled classes remain read-only |
-| `GET/POST /v1/keys`, `PATCH/DELETE /v1/keys/{alias}` | keys of the caller's tenant in the fleet database (alias prefixed `<tenant>-`, pass-through routes copied from the admin key), mirrored into LiteLLM best effort. Admin keys, fleet API only (`keys.py`) |
-| `POST /v1/artifacts/uploads`, `GET /v1/artifacts/{uri}` | presigned PUT to `s3://serverless2-<tenant>-<region>/uploads/<id>/<file>` / GET of a tenant object (credentials: secret `tenant-storage` in the tenant namespace) |
+| `app.py` | HTTP routes, invoke admission and operation views |
+| `schemas.py` | Request and response types, shared scaling and execution options |
+| `auth.py` | Database bearer authentication, admin/scope dependencies, model grants and operation ownership |
+| `reconciliation.py` | Desired model generations, apply/remove/variant pruning, idle shutdown, fallback, recovery and reservation/mirror sweeps |
+| `models.py`, `render_endpoint.py` | Fleet-dependent definition validation and native endpoint rendering |
+| `catalog.py` | Bundled read-only classes and saved model definitions |
+| `jobs.py`, `render.py`, `status.py` | Run rendering, submission, continuation and status projection |
+| `attempts.py`, `db.py` | Durable, fenced attempt records and model history |
+| `execution.py` | Tenant execution profiles, workload identities and confidential input bindings |
+| `keys.py`, `billing.py` | Keys, transactional admission, consumption ledger and LiteLLM mirror |
+| `kube.py`, `endpoints.py`, `monitoring.py` | Regional Kubernetes clients, endpoint scaling, scoped logs and metrics |
+| `artifacts.py`, `resilience.py` | Tenant-bucket I/O and bounded retries |
 
-Catalog: `catalog/models/*.yaml`, one schema for endpoints and run classes (`catalog/README.md`):
-`id, displayName, mode, protocol, port, endpoints{...}, gpu{count,classes}, price{unit,usd},
-runtime{...}` for endpoints, `job{image,command,gpu,...}` + `parameters[]` for run classes,
-`deployments{<cluster>: {pool, image, priorityClassName, parameters, price_per_gpu_hour}}` (`hub`
-= this API's region). Loaded from `CATALOG_DIRS` (default `/app/catalog/models`, copied into the image).
+Authentication consults the fleet database only. LiteLLM holds a best-effort mirror for its OpenAI route.
+Scopes are declared on route dependencies; invokes and the gateway hook share model authorization.
+Operation reads, results, logs, metrics and operation-object downloads enforce the same tenant, owner and
+model grants. Binding writes and revocation require `artifacts:write`; downloads require `read:results`.
+The router key is accepted only at the model gateway.
 
-Admission and limits are not in the API: Kueue bounds concurrent runs (profile ClusterQueues of the
-fleet, `charts/fleet`; tenants share them through their LocalQueues), LiteLLM `rpm_limit`/`max_budget` bound sync and async calls per key, the Envoy
-Gateway `BackendTrafficPolicy api/api-rate-limit` caps the route (local rate limit, 600 req/min per
-gateway replica). Every Kubernetes call is retried (3 attempts, 0.2/0.6 s) with a 15 s timeout;
-LiteLLM and S3 calls likewise (`resilience.py`).
+Model definitions commit desired state and history before reconciliation. The controller holds the database
+reconciler lock and completes only the matching generation. Partial apply/delete failures remain pending.
+Removed variants are pruned in retained regions, including their LiteLLM deployments; gateway authorization
+is retained until the corresponding predictor routes disappear. Key revocations and rotations also persist
+pending mirror deletion, with retries while LiteLLM is unavailable.
 
-Billing (`billing.py`): the CronJob `api/billing` (every 2 min, `python -m billing`, same image and
-identity as the API, on the control cluster) bills every finished unbilled run once (a fleet-placed
-run: its copy on the worker, with that region's price; the manager's Job is annotated too): GPU-seconds (main container running time
-x GPUs, summed over the Job's pods, preempted attempts included) x `deployments.<region>.price_per_gpu_hour`,
-added to the submitting key's spend in the fleet database (`keys.add_spend`: the `charges` receipt and the
-increment commit together; the key's sha256 is on the Job, never the key); the `billed` annotation is the
-display receipt, `charges` the deduplication.
+Model options retain their raw input until `models.validate` checks them: Pydantic must not coerce an invalid
+ServiceAccount-token flag or drop an unknown pod-metadata field before that check. Shared scaling, ephemeral
+volume and execution types are used by their validators as well as the generated contract. Response schemas
+document and test the wire format without adding defaults or filtering the handler's output.
 
-RBAC: no cluster-wide API ClusterRole; per tenant namespace a RoleBinding to `serverless2-api-tenant`
-(rendered by `charts/tenant`: Jobs, pods, PVCs, Secret creation, Kueue Workloads read), a scale-only Role
-in `models`, a read of `kueue-system/fleet-prices`, one ClusterRole to list tenant namespaces (billing).
+The fleet manager creates runs on MultiKueue; Kueue and the dispatcher place them in eligible GPU regions.
+A single-cluster API creates local Jobs. The runner image (`services/jobs`) fetches inputs and records/delivers
+outputs. Durable attempt records preserve terminal delivery status after worker pods disappear and keep
+operation lists and idempotent replays consistent with single-operation reads.
 
-Deploy: image `<fleet.yaml images.source>/serverless2/api:<tag>` built from the repo root
-(`docker buildx build --push -f services/api/Dockerfile .`), referenced as
-`registry.serverless2.local/nebius/serverless2/api:<tag>` (docs/IMAGES.md); runner image
-`serverless2/jobs:<tag>` from `services/jobs` the same way (`RUNNER_IMAGE`). Manifests in
-`charts/platform/templates/api` + per-cluster overlays (Deployment, CronJob,
-HTTPRoute, rate limit, RBAC), host from `PUBLIC_API_URL`. Secret `api/litellm-master` comes from
-`python -m onboarding bootstrap`.
+Build the API with `docker build -f services/api/Dockerfile .` from `k8s-inference`.
+Terraform supplies the image tags, tenant Secrets and `python -m keys bootstrap`; the API applies database
+migrations at startup. The billing CronJob uses the same image. See [docs/OPERATIONS.md](../../docs/OPERATIONS.md)
+for deployment and acceptance checks.
 
-Tests: `pip install -r services/api/requirements-dev.txt && pytest services/api/tests` (cluster and
-LiteLLM faked). Tenants: the cloud stage (`stack/cloud/tenants.tf`: identity + bucket per region) and the platform
-stage (`stack/platform/tenants.tf`: `charts/tenant` for the Kubernetes objects, Secrets, the keys through `python -m keys bootstrap`
-of this image); `charts/platform/templates/api-agent` (installed by Terraform per worker) installs the fleet API's identity in each region.
-
-Not done: operation history beyond the Jobs' 90-day TTL (finished Jobs are the history; a longer
-record would be a Loki/bucket export); authz is key -> tenant only.
+Development: `make venv`, install ShellCheck, then `make check`. `make format` applies Python/import and
+Terraform formatting; `make lint` checks Ruff, ShellCheck and Terraform formatting. Unit tests fake Kubernetes
+and LiteLLM; `TEST_DATABASE_URL` enables isolated real-PostgreSQL transaction tests (CI provides PostgreSQL).

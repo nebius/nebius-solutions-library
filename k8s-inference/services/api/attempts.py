@@ -13,9 +13,12 @@ export and finalization state that decides whether "exit 0" became a delivered r
 
 import logging
 from datetime import datetime, timezone
+
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
-import db, kube
+
+import db
+import kube
 from config import REGION, TENANT_NS_PREFIX
 from resilience import retry
 

@@ -5,14 +5,14 @@ import copy
 import pytest
 from fastapi import HTTPException
 
-from test_api import client, cluster, admin_keys, fake_keys, H, KEY_INFO  # noqa: F401
-from test_database import database  # noqa: F401
 import app as api
 import attempts
 import auth
 import db
 import jobs
 import keys
+from test_api import KEY_INFO, H, admin_keys, client, cluster, fake_keys  # noqa: F401
+from test_database import database  # noqa: F401
 
 
 def principal_info(owner, **limits):
@@ -207,8 +207,8 @@ def test_admission_cannot_replay_another_keys_reservation(database):
 
 
 def test_create_lock_reuses_pool_connection_for_admission_and_owner(database):
-    from concurrent.futures import ThreadPoolExecutor
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     db.migrate()
     value, _ = keys.create("demo", "lock-proof")

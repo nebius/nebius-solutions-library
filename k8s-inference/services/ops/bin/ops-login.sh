@@ -19,7 +19,7 @@ done
 [ -n "$first" ] && nebius profile activate "$first" >/dev/null
 # crane/docker: fresh IAM token per registry request through the credential helper, one entry per region
 helpers=""
-for r in $(printf '%s\n' $regions | sort -u); do
+for r in $(printf '%s\n' "$regions" | tr ' ' '\n' | sort -u); do
   helpers="$helpers${helpers:+, }\"cr.$r.nebius.cloud\": \"nebius-sa\""
 done
 mkdir -p "$HOME/.docker"

@@ -6,7 +6,11 @@ runtime {image, port, ...} (endpoints), job {image, command, gpu, cpu, memory, p
 parameters [] (run, rendered into a Kubernetes Job by jobs.py, docs/JOBS.md), namespace, litellm_route, endpoint_host, deployments {<cluster>: {pool, image,
 priorityClassName, parameters, price_per_gpu_hour, paused}} ("hub" = this API's region)."""
 
-import glob, os, yaml
+import glob
+import os
+
+import yaml
+
 from config import CATALOG_DIRS, HUB_REGION, LABEL, MODELS_NAMESPACE
 
 _cache: dict = {"mtime": None, "models": {}}
@@ -130,7 +134,8 @@ def pinned(model: dict, ann: dict) -> dict:
     want = ann.get(f"{LABEL}/model-version")
     if not want or str(model.get("version")) == str(want) or model.get("managed_by") != "api":
         return model
-    import db, models as runtime_store
+    import db
+    import models as runtime_store
 
     if not db.enabled():
         return model
@@ -180,3 +185,13 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "example": m.get("example"),  # a valid request body (the console's "Test request" tab)
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
     }
+
+
+def require(name: str) -> dict:
+    """Resolve a model consistently for routes and the controller."""
+    from fastapi import HTTPException
+
+    model = get(name)
+    if model is None:
+        raise HTTPException(404, f"model {name} not found")
+    return model

@@ -45,9 +45,10 @@ import time
 from datetime import datetime, timezone
 
 import yaml
+from kubernetes import client, config
+
 import infiniband
 import nebius_cli
-from kubernetes import client, config
 
 log = logging.getLogger("dispatcher")
 GROUP, VERSION = "kueue.x-k8s.io", "v1beta2"
