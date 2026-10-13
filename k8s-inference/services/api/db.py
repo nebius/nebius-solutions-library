@@ -159,6 +159,13 @@ create table if not exists operation_marks (
     );
     create index if not exists operation_owners_tenant_owner on operation_owners (tenant, owner);
     """,
+    # 10: LiteLLM records of revoked or replaced key values whose deletion is still owed (keys.retire_mirrors)
+    """
+    create table if not exists retired_mirrors (
+        hash       text primary key,
+        retired_at timestamptz not null default now()
+    );
+    """,
 ]
 
 _pool = None

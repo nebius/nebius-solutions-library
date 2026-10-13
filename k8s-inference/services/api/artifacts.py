@@ -2,7 +2,7 @@
 tenant namespace of each cluster: access_key, secret_key, bucket, endpoint, region). On the control
 cluster that Secret names the tenant's hub-region bucket: the bucket every fleet-placed run reads
 its inputs from and writes its outputs to (the worker is unknown when the run is submitted)."""
-import base64, json, time, uuid
+import base64, json, re, time, uuid
 from datetime import datetime, timedelta, timezone
 import boto3
 from botocore.config import Config
@@ -58,6 +58,13 @@ def presign_upload(ns: str, filename: str, content_type: str, expires_s: int, re
     url = s["client"].generate_presigned_url("put_object", Params={"Bucket": s["bucket"], "Key": key, "ContentType": content_type}, ExpiresIn=expires_s)
     return {"uri": f"s3://{s['bucket']}/{key}", "url": url, "method": "PUT", "headers": {"Content-Type": content_type},
             "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=expires_s)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def operation_of(uri: str) -> str | None:
+    """The operation whose uploader owns an object: `s3://<bucket>/operations/<id>/...` (the output prefix of every
+    run and endpoint-call Job, `jobs.output_prefix`); None for other objects (uploads)."""
+    m = re.match(r"s3://[^/]+/operations/([^/]+)/", uri)
+    return m.group(1) if m else None
 
 
 def presign_download(ns: str, uri: str, expires_s: int = 3600, region: str | None = None) -> dict:

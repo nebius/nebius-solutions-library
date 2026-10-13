@@ -201,7 +201,9 @@ The password is `random_password.database` of the cloud stage (output `secrets.d
 the platform stage (one Job `api/key-<tenant>-<name>` running `python -m keys bootstrap` of the API image), the
 rest through the API. Each is mirrored into LiteLLM (same value) for the OpenAI route; a mirror that drifted
 (LiteLLM restored from an older backup) is repaired by the next `PATCH` of the key or by re-running the
-bootstrap Job (`-replace` it). **The router key** (`api/router-key`, docs/API.md "Model groups") is the key
+bootstrap Job (`-replace` it). A revoked or replaced value's mirror is deleted with it; while LiteLLM is
+unreachable the deletion stays owed in `retired_mirrors`, which the control API's reconcile loop retries until
+the record is gone (a rotation never leaves the old value usable on the OpenAI route). **The router key** (`api/router-key`, docs/API.md "Model groups") is the key
 the model groups of OpenAI endpoints call the gateway with; the API upserts its hash at every start (role
 `router`), so rotation is the `-replace` of the table above. A compromised router key only lets its holder
 call the endpoints through the edge; rotate it.

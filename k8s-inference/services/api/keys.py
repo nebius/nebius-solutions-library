@@ -167,10 +167,35 @@ def block(tenant: str, alias: str, blocked: bool = True) -> dict | None:
 def revoke(tenant: str, alias: str) -> bool:
     with db.pool().connection() as c, c.transaction():
         r = c.execute("delete from keys where tenant = %s and alias = %s returning hash", (tenant, alias)).fetchone()
+        if r is not None:
+            _retire(c, r[0])
     if r is None:
         return False
-    mirror_delete(r[0])
+    retire_mirrors()
     return True
+
+
+def _retire(c, h: str) -> None:
+    """Remember, in the revoking transaction, that a hash's LiteLLM mirror must go: the mirror call happens after
+    the commit and may fail (LiteLLM down); the row keeps the revocation retryable until the mirror is gone."""
+    c.execute("insert into retired_mirrors (hash) values (%s) on conflict do nothing", (h,))
+
+
+def retire_mirrors() -> list[str]:
+    """Delete the LiteLLM records of every revoked or replaced key value still on the retired list; a record that
+    stays (LiteLLM unreachable or failing) is retried by the next call (the control API's reconcile loop, the next
+    bootstrap). Returns the hashes whose mirrors are gone now."""
+    if not db.enabled():
+        return []
+    with db.pool().connection() as c:
+        pending = [r[0] for r in c.execute("select hash from retired_mirrors order by retired_at").fetchall()]
+    gone = []
+    for h in pending:
+        if mirror_delete(h):
+            with db.pool().connection() as c:
+                c.execute("delete from retired_mirrors where hash = %s", (h,))
+            gone.append(h)
+    return gone
 
 
 def add_spend(h: str, usd: float, operation: str, gpu_s: float) -> float | None:
@@ -212,14 +237,18 @@ def bootstrap(value: str, alias: str, tenant: str, role: str = "user", budget: f
     is replaced in place, its spend carried over. Idempotent; mirrored into LiteLLM."""
     h, meta = key_hash(value), json.dumps({"allowed_passthrough_routes": list(routes or [])})
     with db.pool().connection() as c, c.transaction():
+        old = c.execute("select hash from keys where tenant = %s and alias = %s for update", (tenant, alias)).fetchone()
         r = c.execute(f"""update keys set hash = %s, preview = %s, role = %s, budget = %s, models = %s, metadata = %s, blocked = false, updated_at = now()
                           where tenant = %s and alias = %s returning {COLS}""",
                       (h, preview(value), role, budget, json.dumps(list(models or [])), meta, tenant, alias)).fetchone()
         if r is None:
             r = c.execute(f"""insert into keys (hash, alias, tenant, role, models, budget, preview, metadata, created_by) values (%s, %s, %s, %s, %s, %s, %s, %s, 'terraform')
                               returning {COLS}""", (h, alias, tenant, role, json.dumps(list(models or [])), budget, preview(value), meta)).fetchone()
+        if old and old[0] != h:
+            _retire(c, old[0])      # the replaced value's LiteLLM record is an entry point of its own: revoked with the value
     i = _info(r)
     mirror_create(value, i)
+    retire_mirrors()
     return i
 
 
@@ -483,18 +512,22 @@ def stale_reservations(older_than_s: int) -> list[tuple[str, str]]:
 # ---- the LiteLLM mirror (best effort; the fleet database is the source of truth) ----------------------
 def _litellm(method: str, path: str, body: dict) -> int:
     """Status code of a LiteLLM admin call, 0 when LiteLLM is unreachable; never raises."""
+    return _litellm_call(method, path, body)[0]
+
+
+def _litellm_call(method: str, path: str, body: dict) -> tuple[int, str]:
     if not LITELLM_MASTER_KEY:
-        return 0
+        return 0, ""
     import httpx
     try:
         with httpx.Client(timeout=10) as c:
             r = c.request(method, LITELLM_URL + path, json=body, headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"})
     except Exception as e:  # noqa: BLE001
         log.warning("litellm mirror %s: %s", path, e)
-        return 0
+        return 0, ""
     if r.status_code >= 300:
         log.warning("litellm mirror %s: %s %s", path, r.status_code, r.text[:160])
-    return r.status_code
+    return r.status_code, r.text
 
 
 def _mirror_body(i: dict) -> dict:
@@ -519,8 +552,13 @@ def mirror_update(i: dict) -> None:
     _litellm("POST", "/key/update", {"key": i["token"], **body})
 
 
-def mirror_delete(h: str) -> None:
-    _litellm("POST", "/key/delete", {"keys": [h]})
+def mirror_delete(h: str) -> bool:
+    """True when LiteLLM no longer has the key (deleted now, or not there); False when the call failed and the
+    deletion must be retried. Without a mirror (no LITELLM_MASTER_KEY) there is nothing to delete."""
+    if not LITELLM_MASTER_KEY:
+        return True
+    code, text = _litellm_call("POST", "/key/delete", {"keys": [h]})
+    return code == 200 or code == 404 or (code == 400 and "not found" in text.lower())
 
 
 if __name__ == "__main__":

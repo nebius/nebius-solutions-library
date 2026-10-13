@@ -16,7 +16,7 @@ GET    /v1/operations/{id}/result    result (async) or presigned artifact links 
 POST   /v1/operations/{id}:cancel
 POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on the same checkpoint volume, same region
 POST   /v1/artifacts/uploads         presigned upload URL scoped to the tenant prefix
-GET    /v1/artifacts/{uri}           presigned download of a tenant object
+GET    /v1/artifacts/{uri}           presigned download of a tenant object (an operation's: authorized like its result)
 GET    /v1/endpoints[/{id}]          the endpoints of the catalog models per region (`region=`); PATCH scaling (admin key)
 GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry)
 Idempotency-Key header on every mutating call
@@ -227,13 +227,15 @@ replica, else to the first one. Through LiteLLM the model group lists every vari
 with its priority (`order`), so the OpenAI route tries the warm floor before the overflow. `GET /v1/endpoints` reports
 `variants` (name, object id, pool, bounds, image, live state) and `routing`. `images` alone (no variants) gives a
 plain deployment the image of its pool's GPU class. Regions named under `deployments` define where the endpoint
-runs; a region without variants keeps the automatic pool choice.
+runs; a region without variants keeps the automatic pool choice. A redefinition that drops a variant (or a region)
+removes its service, its LiteLLM deployment and, once Knative has torn its routes down, its authorizer; a dropped
+warm variant holds no GPUs beyond that.
 
 ## Bindings and execution options (runs)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the
 tenant; `GET /v1/bindings` lists them (reference, bound operation, keys; never the data); `DELETE /v1/bindings/{ref}`
-revokes one. A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
+revokes one (both need `artifacts:write`). A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
 (`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
 profiles, the regions' OIDC issuers, the `recovery` policies and bounds the fleet supports, the application `finalize`

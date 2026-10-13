@@ -252,3 +252,37 @@ def test_two_replicas_cannot_both_take_the_last_slot(database):
     ts = [threading.Thread(target=take, args=(n,)) for n in range(6)]
     [t.start() for t in ts]; [t.join() for t in ts]
     assert sorted(results) == ["full"] * 5 + ["ok"]
+
+
+def test_bootstrap_rotation_revokes_the_previous_mirror_and_retries_it(database, monkeypatch):
+    """[P1] A Terraform key alias with a new value: the previous value's LiteLLM record is deleted; while LiteLLM is
+    unavailable the deletion stays owed (retired_mirrors) and the next sweep completes it."""
+    db.migrate()
+    calls, answer = [], {"code": 200, "text": ""}
+    monkeypatch.setattr(keys, "LITELLM_MASTER_KEY", "m")
+    monkeypatch.setattr(keys, "_litellm_call", lambda method, path, body: calls.append((path, body)) or (answer["code"], answer["text"]))
+    old, new = "sk-" + "o" * 40, "sk-" + "n" * 40
+    i = keys.bootstrap(old, "demo-admin", "demo", "admin")
+    assert i["token"] == keys.key_hash(old) and [p for p, _ in calls] == ["/key/generate"]
+    calls.clear()
+    answer["code"] = 0                                   # LiteLLM unreachable during the rotation
+    assert keys.bootstrap(new, "demo-admin", "demo", "admin")["token"] == keys.key_hash(new)
+    assert keys.info(keys.key_hash(old)) is None and keys.info(keys.key_hash(new))["key_alias"] == "demo-admin"
+    assert ("/key/delete", {"keys": [keys.key_hash(old)]}) in calls
+    with db.pool().connection() as c:
+        assert [r[0] for r in c.execute("select hash from retired_mirrors").fetchall()] == [keys.key_hash(old)]
+    calls.clear()
+    answer["code"] = 400; answer["text"] = '{"error": "key not found"}'          # LiteLLM back; the record is already gone
+    assert keys.retire_mirrors() == [keys.key_hash(old)] and calls == [("/key/delete", {"keys": [keys.key_hash(old)]})]
+    with db.pool().connection() as c:
+        assert c.execute("select count(*) from retired_mirrors").fetchone()[0] == 0
+    assert keys.retire_mirrors() == []
+    # the same value again is not a rotation: nothing retired
+    calls.clear(); answer["code"] = 200
+    keys.bootstrap(new, "demo-admin", "demo", "admin")
+    assert [p for p, _ in calls] == ["/key/generate"]
+    # a revocation is owed the same way
+    answer["code"] = 0
+    assert keys.revoke("demo", "demo-admin")
+    answer["code"] = 200
+    assert keys.retire_mirrors() == [keys.key_hash(new)]

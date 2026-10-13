@@ -147,6 +147,20 @@ def for_operation(root: str) -> list[dict]:
     return [_dict(r) for r in rows]
 
 
+def for_operations(roots: set[str]) -> dict[str, list[dict]]:
+    """`for_operation` for many roots in one query: {root: its rows, oldest first}."""
+    if not enabled() or not roots:
+        return {}
+    with db.pool().connection() as c:
+        rows = c.execute(f"select {COLS} from attempts where root = any(%s) or operation = any(%s) order by epoch, started_at",
+                         (list(roots), list(roots))).fetchall()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        d = _dict(r)
+        out.setdefault(d["root"] if d["root"] in roots else d["operation"], []).append(d)
+    return out
+
+
 def latest_checkpoint(root: str) -> dict | None:
     """The newest acknowledged checkpoint pointer of the operation chain (the highest epoch, then generation):
     what a resume uses when the caller names none."""

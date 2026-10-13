@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Nebius Serverless 2.0 customer API
-  version: 0.11.36
+  version: 0.11.37
   description: |
     Invoke a model, receive an operation, poll, fetch the result, cancel.
     Auth: `Authorization: Bearer <API key>` on every request (keys in the fleet
@@ -162,9 +162,9 @@ paths:
       responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Upload" } } } } }
   /v1/artifacts/{uri}:
     get:
-      summary: Presigned GET URL for an artifact URI the tenant owns
+      summary: Presigned GET URL for an artifact URI the tenant owns (scope read:results); an operation's object (operations/<id>/...) is authorized like GET /v1/operations/{id}/result (owner or admin, model allow-list)
       parameters: [{ name: uri, in: path, required: true, schema: { type: string }, description: "URL-encoded s3://bucket/key" }]
-      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Artifact" } } } }, "403": { $ref: "#/components/responses/Error" } }
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Artifact" } } } }, "403": { $ref: "#/components/responses/Error" }, "404": { $ref: "#/components/responses/Error" } }
   /v1/endpoints:
     get:
       parameters: [{ $ref: "#/components/parameters/region" }]

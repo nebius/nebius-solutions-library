@@ -52,7 +52,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.36", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.37", lifespan=_lifespan)
 
 
 INVOKE_TIMEOUT_MAX_S = 7 * 86400     # a sync call or a run may wait at most a week; nothing holds a connection or a Job beyond it
@@ -340,6 +340,19 @@ def _undeploy(entry: dict, clusters: list[str], after: dict):
             raise RuntimeError(warning)
 
 
+def _prune_variants(before: dict, entry: dict, clusters: list[str]):
+    """A redefinition that drops a variant while its region stays deployed: `apply` renders only the new variants, so
+    the dropped one's InferenceService (its warm replicas hold GPUs), authorization and LiteLLM deployment are
+    removed here, with the same route-teardown retention as a region's removal (models.delete_variants)."""
+    for cid in clusters:
+        objects, ids = models.removed_variants(before, entry, cid)
+        if not objects:
+            continue
+        models.delete_variants(before, cid, objects, kube.cluster_region(cid))
+        if (warning := models.litellm_deployments_delete(ids)):
+            raise RuntimeError(warning)
+
+
 def reconcile_models() -> dict:
     results = {}
     with db.reconciler() as acquired:
@@ -357,6 +370,8 @@ def reconcile_models() -> dict:
                     removed = [c for c in removed if c not in entry.get("deployments", {})]
                 if before:
                     _undeploy(before, removed, after)
+                    if entry and entry.get("mode") != "run" and before.get("mode") != "run":
+                        _prune_variants(before, entry, [c for c in before.get("deployments", {}) if c not in removed])
                 db.finish_change(mid, change["version"])
             except Exception:
                 log.exception("model reconciliation failed for %s generation %s", mid, change["version"])
@@ -578,6 +593,7 @@ async def _reconcile_loop():
             await asyncio.to_thread(recovery_switch)
             await asyncio.to_thread(reconcile_models)
             await asyncio.to_thread(release_stale_reservations)
+            await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
             log.exception("model reconciliation unavailable")
         await asyncio.sleep(15)
@@ -784,7 +800,9 @@ def _invoke_job(m: dict, model: str, req: InvokeRequest, p: Principal, region: s
             raise HTTPException(e.status, e.detail)
     with keys.operation_lock(name) if db.enabled() else nullcontext():
         created_job, created = _create_admitted(p, name, job, region, secret, req, mode)
-    return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202 if created else 200)
+    if created:
+        return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202)
+    return JSONResponse(_operation(p, created_job, created_job["metadata"]["name"], region), status_code=200)     # a replay: its current state
 
 
 def _create_admitted(p, name, job, region, secret, req, mode):
@@ -936,7 +954,15 @@ def _price(job: dict) -> float | None:
 @app.get("/v1/operations")
 def list_operations(p: Principal = Depends(principal), limit: int = Query(50, le=500), model: str | None = None):
     check_scope(p, "read:operations")
-    return [jobs.normalise(j, _price(j)) for j in jobs.list_ops(p.namespace, p.tenant, model, 500) if _may_read_operation(p, j)][:limit]
+    mine = [j for j in jobs.list_ops(p.namespace, p.tenant, model, 500) if _may_read_operation(p, j)][:limit]
+    # the durable attempt records of every listed operation in one query (a pod the worker cluster removed after
+    # delivery leaves no live evidence of it; the records are what GET /v1/operations/{id} reports from)
+    rows = attempts.for_operations({_root(j) for j in mine}) if attempts.enabled() else {}
+    return [jobs.normalise(j, _price(j), [r for r in rows.get(_root(j), []) if r["operation"] == j["metadata"]["name"]]) for j in mine]
+
+
+def _root(job: dict) -> str:
+    return (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or job["metadata"]["name"]
 
 
 def _check_operation_owner(p: Principal, job: dict) -> None:
@@ -1173,7 +1199,7 @@ def export_again(id: str, p: Principal = Depends(principal)):
         raise HTTPException(409, f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
                                  + (" (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)" if op["status"] == "FAILED" else ""))
     job, created = jobs.export_again(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region else {}, finalize=finalize)
-    return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
+    return _continued(p, job, created, region)
 
 
 @app.post("/internal/attempts", include_in_schema=False)
@@ -1259,7 +1285,15 @@ def resume(id: str, req: ResumeRequest | None = None, p: Principal = Depends(pri
         placement["classes"] = [req.gpu_class]
     job, created = jobs.resume(p.namespace, orig["metadata"]["name"], _home(orig), m, catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {}, placement,
                                checkpoint_ref=req.checkpoint_ref, gpu_class=req.gpu_class, idem=idempotency_key, pointer=pointer)
-    return JSONResponse(jobs.normalise(job, _price(job)), status_code=202 if created else 200)
+    return _continued(p, job, created, region)
+
+
+def _continued(p: Principal, job: dict, created: bool, region: str | None) -> JSONResponse:
+    """The response of a continuation: 202 with the new Job, or 200 with the existing one's current state (the
+    replay of an idempotent call reports what GET /v1/operations/{id} reports, records included)."""
+    if created:
+        return JSONResponse(jobs.normalise(job, _price(job)), status_code=202)
+    return JSONResponse(_operation(p, job, job["metadata"]["name"], region), status_code=200)
 
 
 # ---- bindings: confidential inputs for runs (docs/JOBS.md "Execution options") ----
@@ -1276,6 +1310,7 @@ def list_bindings(p: Principal = Depends(principal)):
 
 @app.delete("/v1/bindings/{ref}", status_code=204)
 def delete_binding(ref: str, p: Principal = Depends(principal)):
+    check_scope(p, "artifacts:write")
     if not execution.delete_binding(p.namespace, ref):
         raise HTTPException(404, f"binding {ref}: not found")
     return None
@@ -1289,7 +1324,15 @@ def upload(req: UploadRequest, p: Principal = Depends(principal)):
 
 @app.get("/v1/artifacts/{uri:path}")
 def download(uri: str, p: Principal = Depends(principal)):
-    return artifacts.presign_download(p.namespace, urllib.parse.unquote(uri))
+    """A presigned download of one object in the tenant's buckets. An object of an operation (`operations/<id>/...`,
+    where the uploaders write) is authorized exactly like `GET /v1/operations/{id}/result`: the results scope, the
+    operation's owner (admins read every operation of the tenant) and the key's model allow-list; the tenant bucket
+    boundary alone is not the documented per-principal isolation."""
+    check_scope(p, "read:results")
+    uri = urllib.parse.unquote(uri)
+    if (oid := artifacts.operation_of(uri)) is not None:
+        _owned(p, oid, follow=False)             # 404 for another principal's operation or a model outside the allow-list
+    return artifacts.presign_download(p.namespace, uri)
 
 
 @app.middleware("http")

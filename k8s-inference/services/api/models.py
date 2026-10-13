@@ -563,10 +563,30 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
 
 
 def delete_rendered(entry: dict, cluster: str, region: str = REGION) -> list[str]:
+    return _delete(render(entry, cluster), region)
+
+
+def delete_variants(entry: dict, cluster: str, objects: set[str], region: str = REGION) -> list[str]:
+    """Delete the objects of the variants of `entry` (as it was) whose object names are in `objects`: a variant that
+    a new definition dropped while its region stayed deployed (`apply` prunes nothing)."""
+    docs = [doc for doc in render(entry, cluster) if doc["metadata"].get("labels", {}).get("app.kubernetes.io/name") in objects]
+    return _delete(docs, region)
+
+
+def removed_variants(before: dict, after: dict, cluster: str) -> tuple[set[str], list[str]]:
+    """What a redefinition dropped on a cluster that stays deployed: the object names of the variants `after` no
+    longer renders, and the LiteLLM deployment ids of theirs (docs/API.md "Variants"; `litellm_group_upsert`)."""
+    kept = {v["object"] for v in variants(after, cluster)}
+    gone = [v for v in variants(before, cluster) if v["object"] not in kept]
+    ids = [f"{before['id']}--{cluster}" if v["object"] == before["id"] else f"{before['id']}--{cluster}--{v['name']}" for v in gone]
+    return {v["object"] for v in gone}, ids
+
+
+def _delete(docs: list[dict], region: str) -> list[str]:
     gone = []
     # Retain authorization while Knative tears routes down asynchronously. Deleted models deny
     # immediately; reconciliation removes their policy only after the last route disappears.
-    for doc in sorted(render(entry, cluster), key=lambda d: d["kind"] == "SecurityPolicy"):
+    for doc in sorted(docs, key=lambda d: d["kind"] == "SecurityPolicy"):
         kind, md = doc["kind"], doc["metadata"]
         ns, name = md.get("namespace", "models"), md["name"]
         if kind == "SecurityPolicy":
@@ -679,10 +699,14 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
 
 def litellm_group_delete(mid: str, cluster: str, names: list[str] | None = None) -> str | None:
     """Remove the cluster's deployments of a model from LiteLLM: the first variant's id and one per further variant."""
+    return litellm_deployments_delete([f"{mid}--{cluster}"] + [f"{mid}--{cluster}--{n}" for n in (names or [])])      # names: the further variants
+
+
+def litellm_deployments_delete(ids: list[str]) -> str | None:
+    """Remove LiteLLM deployments by id; returns a warning or None."""
     if not LITELLM_MASTER_KEY:
         return None
     import httpx
-    ids = [f"{mid}--{cluster}"] + [f"{mid}--{cluster}--{n}" for n in (names or [])]      # names: the further variants
     try:
         with httpx.Client(timeout=20) as c:
             for did in ids:
