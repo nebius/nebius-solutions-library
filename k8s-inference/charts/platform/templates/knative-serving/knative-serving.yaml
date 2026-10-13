@@ -57,6 +57,8 @@ spec:
       kubernetes.podspec-persistent-volume-write: enabled
       kubernetes.podspec-init-containers: enabled
       kubernetes.podspec-volumes-emptydir: enabled
+      # Native model runtime identity uses only metadata uid/name/namespace.
+      kubernetes.podspec-fieldref: enabled
       kubernetes.podspec-securitycontext: enabled
       kubernetes.podspec-priorityclassname: enabled
       # Model weights on the shared filesystem go through a PVC (persistent-volume-claim + -write above):

@@ -625,7 +625,7 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
     spec = {"id": "native-model", "image": "image:1", "gpu": {"count": 1, "classes": ["h100"]},
             "regions": ["eu-north1"], "shm_gib": 16,
             "env_field_refs": {"POD_UID": "metadata.uid"},
-            "empty_dirs": [{"name": "runtime-cache", "mount_path": "/runtime-cache", "size_gib": 4}]}
+            "empty_dirs": [{"name": "runtime-cache", "mount_path": "/runtime-cache", "size_limit": "4Gi"}]}
     result = c.post("/v1/models", json=spec, headers=ADMIN)
     assert result.status_code == 201, result.text
     predictor = fake.custom[("models", "inferenceservices", "native-model")]["spec"]["predictor"]
@@ -637,11 +637,11 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
     for change in (
         {"env_field_refs": {"POD_UID": "spec.nodeName"}},
         {"env": {"POD_UID": "fake"}},
-        {"empty_dirs": [{"name": "weights", "mount_path": "/tmp", "size_gib": 1}]},
-        {"empty_dirs": [{"name": "scratch", "mount_path": "/", "size_gib": 1}]},
-        {"empty_dirs": [{"name": "scratch", "mount_path": "/dev", "size_gib": 1}]},
-        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_gib": "4"}]},
-        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_gib": 4, "hostPath": "/"}]},
+        {"empty_dirs": [{"name": "weights", "mount_path": "/tmp", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/dev", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4Gi", "hostPath": "/"}]},
         {"kind": "job"},
     ):
         assert c.post("/v1/models", json={**spec, "id": "invalid-model", **change}, headers=ADMIN).status_code == 400

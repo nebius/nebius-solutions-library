@@ -391,12 +391,12 @@ components:
           description: "endpoints only: bounded scratch volumes (emptyDir), never a host path, bucket or shared cache"
           items:
             type: object
-            required: [name, mount_path, size_gib]
+            required: [name, mount_path, size_limit]
             additionalProperties: false
             properties:
               name: { type: string, pattern: "^[a-z][a-z0-9-]{0,62}$" }
               mount_path: { type: string, pattern: "^/[A-Za-z0-9_/-]+$" }
-              size_gib: { type: integer, minimum: 1, maximum: 1024 }
+              size_limit: { type: string, pattern: "^[1-9][0-9]*(Mi|Gi)$", description: "exact Kubernetes quantity, Mi or Gi, never rounded" }
               memory: { type: boolean, default: false }
         env_field_refs:
           type: object

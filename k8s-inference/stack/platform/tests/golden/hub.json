@@ -193,7 +193,7 @@
  },
  "operator.knative.dev/KnativeServing/knative-serving/knative-serving": {
   "component": "knative-serving",
-  "sha256": "f65f6674aac62997111cc27b5a81686af5e6a8be85dd48ca5d98058a2349c86c"
+  "sha256": "231901a4d06dc424463b45eb900cff2470a462777274b4a330542766dcabbe78"
  },
  "rbac.authorization.k8s.io/ClusterRole/_/multikueue-manager": {
   "component": "fleet-access",

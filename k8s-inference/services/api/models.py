@@ -88,7 +88,7 @@ class EphemeralVolumeSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
     mount_path: str = Field(pattern=r"^/[A-Za-z0-9_/-]+$")
-    size_gib: int = Field(strict=True, ge=1, le=1024)
+    size_limit: str = Field(pattern=r"^[1-9][0-9]*(Mi|Gi)$")
     memory: bool = False
 
 
@@ -110,7 +110,7 @@ def _endpoint_bindings(s: dict) -> None:
     try:
         volumes = [EphemeralVolumeSpec.model_validate(v).model_dump() for v in volumes]
     except ValidationError:
-        raise HTTPException(400, "empty_dirs: each entry needs name, mount_path and integer size_gib") from None
+        raise HTTPException(400, "empty_dirs: each entry needs name, mount_path and size_limit in Mi/Gi") from None
     names, paths = {"weights", "shm"}, {"/dev/shm"}
     if s.get("weights"):
         paths.add(s["weights"].get("mount_path", "/weights"))
@@ -395,7 +395,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                                                   for name, field in s["env_field_refs"].items())
         if s.get("empty_dirs"):
             runtime["volumes"] = [{"name": v["name"], "mountPath": v["mount_path"],
-                                   "sizeLimit": f"{v['size_gib']}Gi", **({"medium": "Memory"} if v["memory"] else {})}
+                                   "sizeLimit": v["size_limit"], **({"medium": "Memory"} if v["memory"] else {})}
                                   for v in s["empty_dirs"]]
         if s.get("env_secrets"):
             runtime["envFrom"] = [{"secretRef": {"name": name}} for name in s["env_secrets"]]
