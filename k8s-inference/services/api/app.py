@@ -1,5 +1,5 @@
 """Nebius Serverless 2.0 customer API (docs/API.md). Run: uvicorn app:app"""
-import asyncio, hashlib, hmac, json, time, urllib.parse, uuid
+import asyncio, base64, hashlib, hmac, json, time, urllib.parse, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import httpx
@@ -843,13 +843,19 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
     try:
         body = r.json()
     except ValueError:
-        body = r.text
+        media_type = r.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+        if media_type.startswith("text/"):
+            body = r.text
+        else:
+            # ZIP, audio and image bytes must never pass through lossy UTF-8 decoding.
+            body = {"encoding": "base64", "media_type": media_type, "size_bytes": len(r.content),
+                    "sha256": hashlib.sha256(r.content).hexdigest(), "data": base64.b64encode(r.content).decode("ascii")}
     op = {"id": f"sync-{uuid.uuid4().hex[:12]}", "name": req.name, "model": m["name"], "mode": "sync", "region": region,
           "status": "SUCCEEDED" if ok else "FAILED", "tenant": p.tenant, "created_at": started, "started_at": started,
           "ended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "duration_s": round(time.time() - t0, 3),
           "attempts": [{"index": 1, "status": "SUCCEEDED" if ok else "FAILED", "reason": None if ok else f"HTTP {r.status_code}"}],
           "input": req.input, "cost": m.get("price_per_call") if ok else None, "error": None if ok else str(body)[:500]}
-    return JSONResponse({"result": body, "operation": op}, status_code=200 if ok else (r.status_code if r.status_code in (400, 401, 402, 403, 404, 413, 429) else 502))
+    return JSONResponse({"result": body, "operation": op}, status_code=200 if ok else (r.status_code if r.status_code in (400, 401, 402, 403, 404, 409, 413, 415, 422, 429) else 502))
 
 
 def _price(job: dict) -> float | None:

@@ -596,6 +596,57 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
     assert headers == {"Authorization": "Bearer sk-good", appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"))}   # the hook counts this call once
 
 
+def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
+    import base64, hashlib, httpx
+    c, _ = client
+    raw = b"PK\x03\x04\x00\xff\xfe\x80binary-model-output"
+    response = httpx.Response(200, content=raw, headers={"content-type": "application/zip"})
+    class FakeClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, *a, **kw): return response
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", FakeClient)
+    r = c.post("/v1/models/llm-example:invoke", json={"input": {}}, headers=H)
+    assert r.status_code == 200
+    body = r.json()["result"]
+    assert base64.b64decode(body["data"], validate=True) == raw
+    assert body["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert body["size_bytes"] == len(raw) and body["media_type"] == "application/zip"
+    response = httpx.Response(422, json={"detail": "invalid native input"})
+    r = c.post("/v1/models/llm-example:invoke", json={"input": {}}, headers=H)
+    assert r.status_code == 422 and r.json()["operation"]["status"] == "FAILED"
+    response = httpx.Response(200, content=b"plain text", headers={"content-type": "text/plain"})
+    assert c.post("/v1/models/llm-example:invoke", json={"input": {}}, headers=H).json()["result"] == "plain text"
+
+
+def test_endpoint_scratch_and_downward_identity(client, admin_keys):
+    c, fake = client
+    spec = {"id": "native-model", "image": "image:1", "gpu": {"count": 1, "classes": ["h100"]},
+            "regions": ["eu-north1"], "shm_gib": 16,
+            "env_field_refs": {"POD_UID": "metadata.uid"},
+            "empty_dirs": [{"name": "runtime-cache", "mount_path": "/runtime-cache", "size_gib": 4}]}
+    result = c.post("/v1/models", json=spec, headers=ADMIN)
+    assert result.status_code == 201, result.text
+    predictor = fake.custom[("models", "inferenceservices", "native-model")]["spec"]["predictor"]
+    container = predictor["containers"][0]
+    assert {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}} in container["env"]
+    assert {"name": "runtime-cache", "mountPath": "/runtime-cache"} in container["volumeMounts"]
+    assert {"name": "runtime-cache", "emptyDir": {"sizeLimit": "4Gi"}} in predictor["volumes"]
+    assert {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "16Gi"}} in predictor["volumes"]
+    for change in (
+        {"env_field_refs": {"POD_UID": "spec.nodeName"}},
+        {"env": {"POD_UID": "fake"}},
+        {"empty_dirs": [{"name": "weights", "mount_path": "/tmp", "size_gib": 1}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/", "size_gib": 1}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/dev", "size_gib": 1}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_gib": "4"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_gib": 4, "hostPath": "/"}]},
+        {"kind": "job"},
+    ):
+        assert c.post("/v1/models", json={**spec, "id": "invalid-model", **change}, headers=ADMIN).status_code == 400
+
+
 ADMIN_INFO = {**KEY_INFO, "metadata": {**KEY_INFO["metadata"], "role": "admin"}}
 
 

@@ -356,7 +356,7 @@ components:
         window_s: { type: integer, minimum: 6, maximum: 300, default: 30, description: "Evaluation interval: the metrics averaging window in seconds. The internal autoscaler tick is separate." }
         idle_s: { type: integer, minimum: 0, maximum: 3600, default: 120, description: "Retention of the last pod after the decision to scale to zero; multi-node endpoints: the idle shutdown delay" }
     ModelSpec:
-      description: "A model as the console form defines it (services/api/models.py `validate` and `to_entry`); kept in the fleet database with its history. The API accepts any field and models.py validates the ones it knows; the test suite holds this list equal to what models.py reads."
+      description: "A model as a client defines it (services/api/models.py `validate` and `to_entry`); kept in the fleet database with its history. The API accepts any field and models.py validates the ones it knows; the test suite holds this list equal to what models.py reads."
       type: object
       required: [id]
       additionalProperties: true
@@ -385,6 +385,23 @@ components:
         scaling: { $ref: "#/components/schemas/ScalingSpec" }
         timeout_s: { type: integer, default: 600 }
         shm_gib: { type: integer, default: 1 }
+        empty_dirs:
+          type: array
+          maxItems: 16
+          description: "endpoints only: bounded scratch volumes (emptyDir), never a host path, bucket or shared cache"
+          items:
+            type: object
+            required: [name, mount_path, size_gib]
+            additionalProperties: false
+            properties:
+              name: { type: string, pattern: "^[a-z][a-z0-9-]{0,62}$" }
+              mount_path: { type: string, pattern: "^/[A-Za-z0-9_/-]+$" }
+              size_gib: { type: integer, minimum: 1, maximum: 1024 }
+              memory: { type: boolean, default: false }
+        env_field_refs:
+          type: object
+          description: "endpoints only: env names mapped to the pod's own metadata.uid, metadata.name or metadata.namespace (a pod identity for the application)"
+          additionalProperties: { type: string, enum: [metadata.uid, metadata.name, metadata.namespace] }
         pull_secret: { type: string, description: "name of an image pull Secret in the models namespace (private registries)" }
         weights: { type: object, description: "a directory on the region's shared weights filesystem, mounted into the container (endpoints and run classes)", properties: { path: { type: string }, mount_path: { type: string, default: /weights }, env: { type: object, additionalProperties: { type: string } } } }
         data: { type: object, description: "jobs: a directory of the tenant's shared data mounted into the run (docs/JOBS.md \"Shared data\")", properties: { path: { type: string }, mount_path: { type: string, default: /data }, readonly: { type: boolean, default: true } } }

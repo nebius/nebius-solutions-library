@@ -81,6 +81,47 @@ class ScalingSpec(BaseModel):
     cooldown_s: int | None = Field(default=None, ge=0, le=3600)
     window_s: int | None = Field(default=None, ge=6, le=300)
     idle_s: int | None = Field(default=None, ge=0, le=3600)
+
+
+class EphemeralVolumeSpec(BaseModel):
+    """Endpoint scratch space, not a host path, customer bucket or shared cache."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
+    mount_path: str = Field(pattern=r"^/[A-Za-z0-9_/-]+$")
+    size_gib: int = Field(strict=True, ge=1, le=1024)
+    memory: bool = False
+
+
+def _endpoint_bindings(s: dict) -> None:
+    if "empty_dirs" not in s and "env_field_refs" not in s:
+        return
+    if s.get("kind", "endpoint") != "endpoint":
+        raise HTTPException(400, "empty_dirs and env_field_refs: endpoints only")
+    fields = s.get("env_field_refs", {})
+    if not isinstance(fields, dict) or any(
+        not isinstance(k, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
+        or v not in ("metadata.uid", "metadata.name", "metadata.namespace")
+        or k in (s.get("env") or {}) for k, v in fields.items()
+    ):
+        raise HTTPException(400, "env_field_refs: distinct env names mapped to pod metadata uid/name/namespace")
+    volumes = s.get("empty_dirs", [])
+    if not isinstance(volumes, list) or len(volumes) > 16:
+        raise HTTPException(400, "empty_dirs: a list of at most 16 bounded scratch volumes")
+    try:
+        volumes = [EphemeralVolumeSpec.model_validate(v).model_dump() for v in volumes]
+    except ValidationError:
+        raise HTTPException(400, "empty_dirs: each entry needs name, mount_path and integer size_gib") from None
+    names, paths = {"weights", "shm"}, {"/dev/shm"}
+    if s.get("weights"):
+        paths.add(s["weights"].get("mount_path", "/weights"))
+    for v in volumes:
+        path = v["mount_path"].rstrip("/") or "/"
+        if (v["name"] in names or path == "/" or "//" in path
+            or any(path == p or path.startswith(p + "/") or p.startswith(path + "/") for p in paths)):
+            raise HTTPException(400, "empty_dirs: names/mounts must be distinct and cannot shadow weights or shm")
+        names.add(v["name"]); paths.add(path)
+        v["mount_path"] = path
+    s["empty_dirs"] = volumes
 # public registries -> the alias the image cache serves them under (terraform.tfvars `images.upstreams`)
 UPSTREAM_ALIAS = {"docker.io": "docker", "registry-1.docker.io": "docker", "index.docker.io": "docker",
                   "nvcr.io": "nvcr", "ghcr.io": "ghcr", "quay.io": "quay", "registry.k8s.io": "k8s"}
@@ -170,6 +211,7 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
 
 def validate(spec: dict) -> dict:
     s = dict(spec or {})
+    _endpoint_bindings(s)
     if "pod_metadata" in s:
         s["pod_metadata"] = normalise_pod_metadata(s["pod_metadata"])
     secrets = s.get("env_secrets", [])
@@ -348,6 +390,13 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             runtime["command"] = cmd
         if s.get("env"):
             runtime["env"] = _env_list(s["env"])
+        if s.get("env_field_refs"):
+            runtime.setdefault("env", []).extend({"name": name, "valueFrom": {"fieldRef": {"fieldPath": field}}}
+                                                  for name, field in s["env_field_refs"].items())
+        if s.get("empty_dirs"):
+            runtime["volumes"] = [{"name": v["name"], "mountPath": v["mount_path"],
+                                   "sizeLimit": f"{v['size_gib']}Gi", **({"medium": "Memory"} if v["memory"] else {})}
+                                  for v in s["empty_dirs"]]
         if s.get("env_secrets"):
             runtime["envFrom"] = [{"secretRef": {"name": name}} for name in s["env_secrets"]]
         if s.get("health_path"):
