@@ -4,11 +4,8 @@ terraform {
       source = "hashicorp/external"
     }
     nebius = {
-      source = "terraform-provider.storage.eu-north1.nebius.cloud/nebius/nebius"
+      source  = "nebius/nebius"
+      version = ">= 0.6.31"
     }
   }
-}
-
-provider "nebius" {
-  domain = "api.eu.nebius.cloud:443"
 }
