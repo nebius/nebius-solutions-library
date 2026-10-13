@@ -8,12 +8,8 @@ tests, and entries that exercise the remaining settings (claims, caches, probes,
 Regenerate after a deliberate change of the chart:  .venv-api/bin/python services/api/tests/test_render_endpoint_golden.py --write
 """
 import contextlib
-import glob
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 import pytest
 import yaml
@@ -26,8 +22,7 @@ import config, kube, models, render_endpoint      # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-CHART = os.path.join(ROOT, "charts", "endpoint")
-GOLDEN = os.path.join(HERE, "golden", "endpoint")
+GOLDEN = os.path.join(HERE, "golden", "endpoint.json")   # {case: [{kind, name, sha256}]}
 DOMAIN = "203.0.113.1.sslip.io"
 IB_CLAIM_TEMPLATE = "ib"
 REGIONS = {"hub": "eu-north1"}                    # cluster id -> region (every other id is its own region)
@@ -136,28 +131,34 @@ def native(entry: dict, cluster: str) -> list[dict]:
     return [d for v in models.variants(entry, cluster) for d in render_endpoint.render(entry, cluster, DOMAIN, IB_CLAIM_TEMPLATE, v, remote(cluster))]
 
 
-def helm(entry: dict, cluster: str) -> list[dict]:
-    """`helm template charts/endpoint` the way models.render called it before 0.11.14: once per variant."""
-    out: list[dict] = []
-    for v in models.variants(entry, cluster):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            yaml.safe_dump(render_endpoint.variant_entry(entry, cluster, v), f, sort_keys=False)
-        try:
-            cmd = ["helm", "template", v["object"], CHART, "-f", f.name, "--set", f"cluster={cluster}", "--set", f"domain={DOMAIN}",
-                   "--set", f"ibClaimTemplate={IB_CLAIM_TEMPLATE}", "--set", f"apiBackend={str(remote(cluster)).lower()}"]
-            if v["object"] != entry["id"]:
-                cmd += ["--set", f"variantName={v['object']}", "--set", f"variant={v['name']}"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        finally:
-            os.unlink(f.name)
-        assert r.returncode == 0, r.stderr
-        out += [d for d in yaml.safe_load_all(r.stdout) if d]
-    return out
+
+
+def digests(objects: list[dict]) -> list[dict]:
+    """One hash per rendered object (kind, name, sha256 of the canonical JSON): what the record holds."""
+    import hashlib, json
+    return [{"kind": d["kind"], "name": d["metadata"]["name"],
+             "sha256": hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()} for d in objects]
 
 
 def golden(name: str) -> list[dict]:
-    with open(os.path.join(GOLDEN, f"{name}.yaml")) as f:
-        return [d for d in yaml.safe_load_all(f) if d]
+    import json
+    with open(GOLDEN) as f:
+        return json.load(f)[name]
+
+
+@pytest.mark.parametrize("name", sorted(cases()))
+def test_native_rendering_matches_the_record(name):
+    """Every object the renderer produces for the case equals the recorded one (a hash per object; a deliberate change
+    is recorded with `python test_render_endpoint_golden.py --write`, and the diff of the record names the objects)."""
+    entry, cluster = cases()[name]
+    got, want = digests(native(entry, cluster)), golden(name)
+    changed = [g["kind"] + "/" + g["name"] for g, w in zip(got, want) if g != w] + [g["kind"] + "/" + g["name"] for g in got[len(want):]]
+    assert got == want, f"{name}: changed objects {changed or [w['kind'] + '/' + w['name'] for w in want[len(got):]]}"
+
+
+def test_every_recorded_case_exists():
+    import json
+    assert set(json.load(open(GOLDEN))) == set(cases())
 
 
 @pytest.fixture(autouse=True)
@@ -190,9 +191,8 @@ def test_rendering_errors_name_the_object():
 
 
 if __name__ == "__main__" and "--write" in sys.argv:
-    os.makedirs(GOLDEN, exist_ok=True)
+    import json
     kube.cluster_region = lambda c: REGIONS.get(c, c)
-    for name, (entry, cluster) in cases().items():
-        with open(os.path.join(GOLDEN, f"{name}.yaml"), "w") as f:
-            yaml.safe_dump_all(helm(entry, cluster), f, sort_keys=False)
-        print(f"wrote {name}.yaml")
+    json.dump({name: digests(native(entry, cluster)) for name, (entry, cluster) in sorted(cases().items())}, open(GOLDEN, "w"), indent=1)
+    open(GOLDEN, "a").write("\n")
+    print(f"wrote {GOLDEN}")

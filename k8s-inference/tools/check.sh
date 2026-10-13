@@ -166,12 +166,10 @@ for cid, v in d["values"].items():
         assert not img["image"].startswith(d["fleet"]["images"]["host"] + "/"), f"{cid}: pre-pull image {img['image']} names the logical host without the cache"
     print(f"   ok cache off {cid}: no zot, no containerd DaemonSet, api from {image.rsplit('/', 2)[0]}")
 EOF2
-  # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: the objects
-  # (names, namespaces, labels, every field) and their components (the wave, hence the state address) must be
-  # equal, so that an apply changes nothing on a live cluster. The golden set was first written from the kustomize
-  # bases plus the stage's JSON patches that the chart replaced; UPDATE_GOLDEN=1 rewrites it from the
-  # chart after a deliberate change, and the diff of the golden files in the review shows exactly what changes.
-  step "charts/platform: the render of every cluster equals its golden set (stack/platform/tests/golden)"
+  # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: one hash per
+  # object (every field) plus its component (the wave, hence the state address), so a template change shows as the
+  # list of objects it changed and an unintended change fails the gate. UPDATE_GOLDEN=1 records a deliberate change.
+  step "charts/platform: the render of every cluster equals its record (stack/platform/tests/golden)"
   for cid in $clusters; do
     helm template platform "$ROOT/charts/platform" -f "$TMP/platform-$cid.yaml" > "$TMP/platform-$cid.rendered.yaml"
     if [ "${UPDATE_GOLDEN:-0}" = 1 ]; then

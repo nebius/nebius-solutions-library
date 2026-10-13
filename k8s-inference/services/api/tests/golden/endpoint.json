@@ -1,0 +1,201 @@
+{
+ "chat-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "chat",
+   "sha256": "bc55bdf43e6c2cdf3cdedccd0e3c4ab9b93928677f6f3e4620143e3bbcd78bb4"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "chat-authorization",
+   "sha256": "503e49870f65909a8edd79ca9c8b666bf922e1629d0e0543f8c0f65f396ca670"
+  },
+  {
+   "kind": "InferenceService",
+   "name": "chat-spot",
+   "sha256": "926b34f5d41f9682e56520bea9c95a87523bb77a8192b99927f9950ec2d83307"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "chat-spot-authorization",
+   "sha256": "fa5cd720563942f5bb9103563fdd80a9f42e7a08777cc4d0d8b953ce879ea7f0"
+  },
+  {
+   "kind": "InferenceService",
+   "name": "chat-cheap",
+   "sha256": "ce0d6283a311a4abfec0e73b74ea63b391717e02285b6b95df7f850f6f354646"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "chat-cheap-authorization",
+   "sha256": "ca4f0898f9a26b1916d22e1a7aa4ec4e2e91f4f8ad48bae163872c5518303d63"
+  }
+ ],
+ "http-example-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "http-example",
+   "sha256": "0d55526e2bd1a79cfce655cf5c00d0e7351aec9b622901ec6ea6c9ea632e8eef"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "http-example-authorization",
+   "sha256": "ca3431eab763c665d7f369fe7f72cf868c328b34bc1a1acc0b789e6e17b1ed78"
+  }
+ ],
+ "ib-hub": [
+  {
+   "kind": "Service",
+   "name": "ib-predictor",
+   "sha256": "0bac30dc2fa17313621f8bef62954a3fbc56de4e4925db05d4ab1929f9744149"
+  },
+  {
+   "kind": "HTTPRoute",
+   "name": "ib-predictor",
+   "sha256": "9cb154fb3766ee7305e5a771d9333739d6e754da89555167ef266be42a88f2bc"
+  },
+  {
+   "kind": "LeaderWorkerSet",
+   "name": "ib",
+   "sha256": "8ab7422107bda277ee334dcb96ff5b7869e35c73455b4c60e355d1230b6db9a0"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "ib-authorization",
+   "sha256": "d041ae2ed633ac9b74c635691d90bab254c1e812f61708df0c760ba184b42018"
+  }
+ ],
+ "kimi-k3-us-central1": [
+  {
+   "kind": "Service",
+   "name": "kimi-k3-predictor",
+   "sha256": "23ca993e9418337373fb1f5240b65d2703db95b366f66c56b8f077fac40ea881"
+  },
+  {
+   "kind": "HTTPRoute",
+   "name": "kimi-k3-predictor",
+   "sha256": "f05adfc48b008ae79cfec35afc91de08d45dbca1c5bff93f0375ecf4306a86c6"
+  },
+  {
+   "kind": "LeaderWorkerSet",
+   "name": "kimi-k3",
+   "sha256": "b8c5c8e4274e011f8dc0903d9a4f5b0abc1c1df2e19a3581cf06837e93725f81"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "kimi-k3-authorization",
+   "sha256": "e9b8a29ce2d5f76b742f39f2f8f895fd9b1c8d6f1f2df0aadad1cad54191937b"
+  }
+ ],
+ "kueue-example-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "kueue-example",
+   "sha256": "f9ef050c06d70c1b842a5f2d3f54f428c62ba49020657254a709bb7db3a431d3"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "kueue-example-authorization",
+   "sha256": "43c62f3857d6ae2fb1ef73321d9ff6910fb64570ff5a9703d454498a6cc0446a"
+  }
+ ],
+ "llm-example-eu-south1": [
+  {
+   "kind": "InferenceService",
+   "name": "llm-example",
+   "sha256": "db6a544d24aaa6175ae2949c92912935124a523b8f4e6cdffd923bebd104c747"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "llm-example-authorization",
+   "sha256": "d34d40071fdf6e0d5e9bcf1e533e73c15b30f185aaaa190f5167870d5919b6aa"
+  }
+ ],
+ "llm-example-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "llm-example",
+   "sha256": "eb3ee098ce5a20747c0691b2d4cfcbd94f9d4fab9dc01f8fc37550502a45895c"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "llm-example-authorization",
+   "sha256": "2c78ce8954a8e435b30c488dedb59fac1191192963f59c96df11aa57dfe2e030"
+  }
+ ],
+ "metadata-endpoint-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "metadata-endpoint",
+   "sha256": "50571e7e75ddc87221e1d209c752c76870415695cd532ea4baa8133fde04294f"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "metadata-endpoint-authorization",
+   "sha256": "d35cc4a3c103c3fbff6e8b734543df565146ae7463de75423daf8d79ee9cad67"
+  }
+ ],
+ "my-llm-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "my-llm",
+   "sha256": "701cf7ac75992d0f6d3630114954f5d96211878b34de47d0c5c0307baad1dd60"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "my-llm-authorization",
+   "sha256": "c5c7f4fd5a1765e0a13ec8c9938964a45038b22233fbfc91a6f71b8be9916765"
+  }
+ ],
+ "scaling-demo-hub": [
+  {
+   "kind": "InferenceService",
+   "name": "scaling-demo",
+   "sha256": "657d007726d5df0ad2c4c475123073f54aa51cb9a38170f54d867a7be78cc7bc"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "scaling-demo-authorization",
+   "sha256": "61890db84cc0c68db3504417fca216cfef30f297173a8fdfd4c036cd582e8914"
+  }
+ ],
+ "storage-example-hub": [
+  {
+   "kind": "PersistentVolumeClaim",
+   "name": "storage-example-index",
+   "sha256": "7f25fa60dcc7dae8b2644592664106d5dde92994ebd0bf95340b3c882bf63887"
+  },
+  {
+   "kind": "PersistentVolumeClaim",
+   "name": "storage-example-state",
+   "sha256": "8ccdcfa4883bf4dbf0f2c901c249d312a38b9c6381250bc24f13bce75565dcd0"
+  },
+  {
+   "kind": "InferenceService",
+   "name": "storage-example",
+   "sha256": "7e99db6d3843126875f7c1681096e91881f71d2c1d8fed31bbfaf60972c42db5"
+  },
+  {
+   "kind": "LocalModelCache",
+   "name": "storage-example",
+   "sha256": "8809f852442a9fcaeade5ca435c7b6469e17b961d77ab838027e6d5946adcf9f"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "storage-example-authorization",
+   "sha256": "5e345acd4f200de1e6938734b87aa75f21c687bf9298bf7ff84c40dc2f8d336a"
+  }
+ ],
+ "ws-example-eu-south1": [
+  {
+   "kind": "InferenceService",
+   "name": "ws-example",
+   "sha256": "fe0012378f683e3b7d01f1483aaf94e03a3f8ee4dc4cb295199e19368a3f7e58"
+  },
+  {
+   "kind": "SecurityPolicy",
+   "name": "ws-example-authorization",
+   "sha256": "b077ed064fdae10d1faad16a3c0993714e9a9830afd73a42b057bf112934f00f"
+  }
+ ]
+}
