@@ -660,7 +660,10 @@ copy on the worker carries the pods. What differs from the regional path:
   the region its Workload was admitted in (`cost` and `gpu_seconds` on the operation; `usage` says what they
   mean: `measured`, `unknown` (settled without a trustworthy measurement, e.g. a native call whose worker released
   with no metering: `gpu_seconds` and `cost` are `null`, the key's reservation is kept as unknown GPU time, never
-  zero), `pending` (not settled yet)).
+  zero), `pending` (not settled yet)). The owner's read of a finished operation settles it at once (the pass's body
+  for that operation, under a per-operation lock; the same answer carries the result), so `pending` is seen only by
+  a reader that arrives while another settler holds the operation; the CronJob (every 2 minutes) remains the settler
+  of record for operations nobody reads.
 
 The control cluster's tenant namespaces are rendered by the same chart (`clusters.control`,
 `manager: true`): namespace, the profile LocalQueues pointing at the manager ClusterQueues and the
@@ -765,6 +768,12 @@ request** is `{model, input | input_ref.sha256, timeout_s, region}` and is immut
 transfer URLs are renewable and never part of it: a replay of the same bound request with a new `transport.input_url`
 renews what the broker serves, nothing else. The child model's image is recorded at admission (`model_image`); an
 intent is never completed against another image.
+
+**The grant.** The caller's credential is the admission token of the root's key for exactly this child and model; at
+the gateway hook it is accepted while the child holds a live reservation and names a live attempt, under the key's
+scope and budget but **not** the key's model allow-list: the child model was allowed by the run class's frozen
+`child_endpoints`, so a key granted the parent class alone drives its children without being granted the child
+endpoints (a direct call of the key to the child endpoint stays refused).
 
 **The capture (the native one-POST protocol, docs/API.md "Endpoint calls").** The child is rendered as an
 application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written on the API's own

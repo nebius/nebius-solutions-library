@@ -4,6 +4,35 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.105
+
+(0.11.105 = 0.11.104 plus settlement on the owner's read, delegated child readiness and the JobSet rule name; jobs 0.1.27
+and platform chart 0.1.12 unchanged; no migration.)
+
+- Billing (docs/JOBS.md "Billing"): a finished operation its owner reads (`GET /v1/operations/{id}`) before the billing
+  CronJob reached it is settled by that read: the pass's own body for one operation (`billing.settle_job`, lifted out
+  of `bill_once`, which keeps calling it) under a per-operation Postgres advisory lock, so the same answer already
+  carries `usage: measured`, `gpu_seconds`, `cost`, and the key's slot is free, instead of `pending` and a held slot
+  until the next pass (every 2 minutes: the first real MPI run was qualified against `pending` 74 s before its pass).
+  Same ledger, same semantics, once: the `charges` receipt is unique per operation, the release conditional, the
+  annotation re-read under the lock; concurrent readers and the CronJob settle exactly once; a reader meeting the lock
+  held by another settler answers the view before the settlement once. Unchanged: an unfinished operation, a foreign
+  reader (404), an unmeasured attempt (`unknown`, the reservation kept, never zero), a native call whose worker is
+  still attached (deferred), and the CronJob as the settler of record for operations nobody reads.
+- Endpoint children (docs/JOBS.md "Endpoint children"): the child's caller, with its operation-scoped credential,
+  passes the gateway hook on a parent-only grant (a key allowed the run class but not the child endpoint): the hook's
+  proof already binds the credential to exactly that child, its model and a live attempt, and the child model was
+  allowed by the run class's frozen `child_endpoints` at admission, so the key's own model allow-list is not applied
+  to a live child (`keys.member_of` kind `child`, active); scope (`invoke:sync` or `invoke:async`) and budget checks
+  stay, the key itself still cannot call the child endpoint directly, and the credential is still refused for another
+  model, unit or attempt, a cancelled child and a settled one. Before, readiness answered 403 "key is not allowed to
+  use model <child>" and the parent failed ChildUnresolved (the first LeRobot child on a QA grant, 2026-10-14).
+- Multi-node runs (docs/JOBS.md "Delivery pending never restarts the gang"): the JobSet failure-policy rule is named
+  `delivery_pending`; the JobSet validating webhook accepts rule names of `[A-Za-z0-9_:]+` only, so 0.11.104's
+  `delivery-pending` had every gang with a finalizer refused 422 at creation (ADMISSION_PENDING, no JobSet: the first
+  MPI 2x1 run, 2026-10-14). The protection itself (FailJob on the delivery exit, FailJobSet on that reason) is
+  unchanged; the regression checks every emitted rule name against the webhook's rule.
+
 ## api 0.11.104
 
 (0.11.104 = 0.11.103 plus idempotent session creation and the gang finalizer's image with per-class images; jobs 0.1.27

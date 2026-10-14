@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.104", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.105", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -845,6 +845,20 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
     )
 
 
+def _delegated_child(operation: str) -> bool:
+    """Whether `operation` is a live endpoint child of a run on the ledger (keys.member_of kind `child`, active): its
+    model was granted by the parent run class's frozen `child_endpoints` (children.create), not by the key's own
+    allow-list. Nothing without the ledger."""
+    if not operation or not db.enabled():
+        return False
+    try:
+        member = keys.member_of(operation)
+    except Exception as e:  # noqa: BLE001 - no proof without the ledger
+        log.warning("delegation check of %s: %s", operation, e)
+        return False
+    return bool(member) and member.get("kind") == "child" and member.get("state") in (None, "active")
+
+
 def _authorize_model(
     p: Principal, model: str, token: str = "", operation: str = "", attempt: str = "", method: str = "GET"
 ) -> tuple[str, str]:
@@ -855,7 +869,18 @@ def _authorize_model(
     asynchronous-only key reaches its own endpoint call, nothing else."""
     m = catalog.get(model) or _endpoint_model(model)
     admitted = _is_admitted(p, token, m["name"], operation, attempt) if p.role != keys.ROUTER["role"] else False
-    authorize(p, m["name"], ("invoke:sync", "invoke:async") if admitted else "invoke:sync", budget=True)
+    # an endpoint child's caller (docs/JOBS.md "Endpoint children") acts under the PARENT's grant: the child model was
+    # allowed by the run class's frozen `child_endpoints` at the child's admission, the proof above bound the
+    # credential to exactly that child, model and live attempt, and the key's own allow-list (the parent class only,
+    # on a parent-only grant) is not widened: the model check is the admission's, the scope and budget checks stay
+    delegated = admitted and _delegated_child(operation)
+    authorize(
+        p,
+        m["name"],
+        ("invoke:sync", "invoke:async") if admitted else "invoke:sync",
+        budget=True,
+        model_check=not delegated,
+    )
     _endpoint_limits(p, "gateway", admitted)
     if admitted and method.upper() == "POST" and not operation.startswith("sync-") and db.enabled():
         # the inference POST of an endpoint call's caller: prepare its native execution (docs/API.md "Native execution
@@ -1821,11 +1846,29 @@ def _stage_fields(p: Principal, op: dict, job: dict, root: str) -> None:
         stages.apply_to_root(op, stages.graph_view(p.namespace, g))
 
 
+def _settle_on_read(p: Principal, job: dict, region: str | None) -> bool:
+    """A finished operation its owner reads before the billing pass reached it is settled now (billing.settle_job:
+    the pass's own body for one operation, under its per-operation lock; idempotent with the CronJob and the other
+    replica), so the first terminal read already carries `usage`/`gpu_seconds` and the key's slot is free instead of
+    `pending` until the next pass (every 2 minutes). Nothing changes for an unfinished operation, an unmeasured one
+    (`unknown`, the reservation kept) or a native call whose worker is still attached (deferred). Never fails the
+    read: an error is logged and the pass settles later."""
+    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job):
+        return False
+    try:
+        return asyncio.run(billing.settle_job(_home(job), p.namespace, dict(job)))
+    except Exception as e:  # noqa: BLE001 - the CronJob remains the settler of record
+        log.warning("settle on read of %s failed: %s", job["metadata"].get("name"), e)
+        return False
+
+
 @app.get("/v1/operations/{id}", responses={200: {"model": schemas.Operation}})
 def get_operation(id: str, since: int | None = None, p: Principal = Depends(scoped("read:operations"))):
     """`since=<revision>`: 304 while nothing about the operation's attempts changed (polling cursor; the live
     pod state is still re-read on every 200)."""
     job, region = _owned(p, id)
+    if _settle_on_read(p, job, region):
+        job, region = _owned(p, id)  # the same answer carries the settlement (usage, gpu_seconds, the slot free)
     op = _operation(p, job, id, region)
     if (
         since is not None

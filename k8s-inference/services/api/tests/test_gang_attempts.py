@@ -115,7 +115,7 @@ def test_a_delivery_pending_exit_fails_the_jobset_without_a_gang_restart(monkeyp
     assert fp["restartStrategy"] == "Recreate" and fp["maxRestarts"] >= 1  # every other loss: the gang restarts
     assert fp["rules"] == [
         {
-            "name": "delivery-pending",
+            "name": "delivery_pending",
             "action": "FailJobSet",
             "onJobFailureReasons": ["PodFailurePolicy"],
             "targetReplicatedJobs": ["workers"],
@@ -506,3 +506,20 @@ def test_the_finalizer_of_a_gang_with_per_class_images_runs_the_admitted_class_i
         x for x in fake.jobs[(ns, r.json()["id"])]["spec"]["template"]["spec"]["containers"] if x["name"] == "main"
     )
     assert main["image"] == "x/mpi@sha256:0123"
+
+
+def test_jobset_failure_policy_rule_names_are_valid_for_the_jobset_webhook(monkeypatch):
+    """The JobSet validating webhook accepts failure-policy rule names of `[A-Za-z0-9_:]+` only (no hyphen): api
+    0.11.104 rendered `delivery-pending` and every gang with a finalizer was refused 422 at creation (the first MPI
+    2x1 run, 2026-10-14: ADMISSION_PENDING, no JobSet). Every rule the renderer emits is checked against the webhook's
+    rule, and the delivery-pending protection (FailJobSet on the PodFailurePolicy reason) stays."""
+    import re
+
+    js = _render(monkeypatch, FINALIZE)
+    assert js["kind"] == "JobSet"
+    rules = js["spec"]["failurePolicy"]["rules"]
+    assert rules and all(re.fullmatch(r"[A-Za-z0-9_:]+", r["name"]) for r in rules), [r["name"] for r in rules]
+    assert "-" not in "".join(r["name"] for r in rules)
+    assert rules[0]["action"] == "FailJobSet" and rules[0]["onJobFailureReasons"] == ["PodFailurePolicy"]
+    pod_rules = js["spec"]["replicatedJobs"][0]["template"]["spec"]["podFailurePolicy"]["rules"]
+    assert pod_rules[0]["action"] == "FailJob" and pod_rules[0]["onExitCodes"]["values"] == [75]

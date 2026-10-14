@@ -956,7 +956,7 @@ def _multinode(
                 {
                     "rules": [
                         {
-                            "name": "delivery-pending",
+                            "name": "delivery_pending",  # JobSet rule names: [A-Za-z0-9_:]+ only (webhook)
                             "action": "FailJobSet",
                             "onJobFailureReasons": ["PodFailurePolicy"],
                             "targetReplicatedJobs": ["workers"],
