@@ -16,6 +16,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   never zero and never an error. The operation carries `usage`: `measured`, `unknown` (settled without a
   measurement), `pending` (not settled yet), so a `null` is distinguishable from "not yet". No interface removed;
   the annotations and the billing writer are unchanged.
+- Marker diagnosability at the gateway hook (docs/API.md "Native execution leases", markers row): one log line per
+  admitted inference POST naming the operation and attempt whose markers were emitted (never per readiness probe),
+  so a native execution that stays `prepared` while the worker answered is attributable: the emission is on
+  record, the loss is downstream (the policy's `headersToBackend`, the Knative data path, the worker's header
+  reading). A direct POST (no admission) to a `native_lease: required` model is refused by the hook with 403
+  `native lease required` instead of reaching a worker that refuses it without markers (same outcome, a named
+  reason, no worker request, no key count); readiness GETs and `optional` models are unchanged.
 
 ## platform stage: the image cache's registry static key is an environment input, never issued by a plan
 

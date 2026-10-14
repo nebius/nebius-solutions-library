@@ -746,6 +746,31 @@ def _authorize_model(
         )
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
+    if method.upper() == "POST":
+        if admitted:
+            # one line per admitted inference (never per readiness probe): the proof that the markers left the hook
+            # towards the gateway at this instant; a prepared-never-attached execution after this line is a loss
+            # downstream of the hook (policy, Knative data path, the worker's reading), never a missing emission
+            log.info(
+                "authorize %s: admitted POST of %s attempt %s: markers emitted (x-serverless2-operation/-attempt)",
+                m["name"],
+                operation,
+                attempt or "-",
+            )
+        elif leases.mode_of(m) == "required":
+            # a direct POST to an endpoint whose worker requires a lease: the request carries no markers, the worker
+            # would refuse it anyway (required mode fails closed); refused here with the reason, before it costs the
+            # worker a request or the key a count. Readiness probes (GET) are not affected.
+            log.warning(
+                "authorize %s: direct POST by %s refused: the model requires a native lease, a direct call has no markers",
+                m["name"],
+                p.info.get("key_alias") or p.tenant,
+            )
+            raise HTTPException(
+                403,
+                f"{m['name']}: native lease required; the endpoint serves only the platform's admitted calls "
+                "(a direct call carries no lease markers)",
+            )
     if not admitted and p.role != keys.ROUTER["role"]:
         # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is
         # not held: the hook cannot see the call end); the API's own proxied call was admitted already

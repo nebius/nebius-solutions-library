@@ -6,6 +6,7 @@ database rules are in test_database.py."""
 
 import asyncio
 import copy
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -194,6 +195,36 @@ def test_hook_prepares_once_forwards_verified_markers_and_fences_a_retry_attempt
     assert (
         r.status_code == 200 and r.headers["x-serverless2-operation"] == "" and r.headers["x-serverless2-attempt"] == ""
     )
+
+
+def test_hook_names_the_markers_it_emits_and_refuses_a_direct_post_to_a_required_lease_model(live, monkeypatch, caplog):
+    """Cosmos first case on 0.11.78: the worker answered 403 `native_lease_refused` without ever calling :attach while
+    the hook had prepared the execution (so it had emitted the markers). The hook now says so in its log, and a direct
+    POST to a required-lease model is refused at the gate with the reason instead of at the worker."""
+    import catalog
+
+    c, cl, fl, oid, attempt, hdr, A = live
+    model = catalog.get("llm-example")
+    monkeypatch.setattr(
+        catalog, "get", lambda mid: {**model, "native_lease": "required"} if mid == "llm-example" else None
+    )
+    with caplog.at_level(logging.INFO, logger="api"):
+        r = c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=hdr)
+    assert r.status_code == 200 and r.headers["x-serverless2-operation"] == oid
+    assert r.headers["x-serverless2-attempt"] == attempt and fl.rows[oid]["state"] == "prepared"
+    assert [m for m in caplog.messages if f"admitted POST of {oid} attempt {attempt}: markers emitted" in m]
+    # a direct readiness probe still passes (no markers are needed to probe)
+    r = c.get("/internal/authorize/llm-example/v1/health/ready", headers=H)
+    assert r.status_code == 200 and r.headers["x-serverless2-operation"] == ""
+    # a direct inference POST is refused at the hook, with the reason, before a worker refuses it opaquely
+    r = c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=H)
+    assert r.status_code == 403 and "native lease required" in r.json()["detail"]
+    # an optional-mode model: a direct POST passes with empty markers, as before
+    monkeypatch.setattr(
+        catalog, "get", lambda mid: {**model, "native_lease": "optional"} if mid == "llm-example" else None
+    )
+    r = c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=H)
+    assert r.status_code == 200 and r.headers["x-serverless2-operation"] == ""
 
 
 def test_worker_attach_release_watch_and_cancel_request(live, monkeypatch):
