@@ -448,6 +448,9 @@ def synthesize(operation: str, tenant: str) -> dict | None:
             "result_ref": r.get("result_ref"),
             "checkpoint_ref": r.get("checkpoint_ref"),
             "image_digest": r.get("image_digest"),
+            "pod_uid": r.get("pod_uid"),
+            "gang_rank": r.get("gang_rank"),
+            "gang_restart": r.get("gang_restart"),
         }
         for i, r in enumerate(rows)
     ]
@@ -571,4 +574,8 @@ def lifecycle(
         "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
         "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
         "attempt_role": (latest.get("role") or "run") if latest else None,
+        # observed on the pod by the API when it recorded (docs/JOBS.md "Gang attempts"): never the record's claim
+        "pod_uid": latest.get("pod_uid") if latest else None,
+        "gang_rank": latest.get("gang_rank") if latest else None,
+        "gang_restart": latest.get("gang_restart") if latest else None,
     }

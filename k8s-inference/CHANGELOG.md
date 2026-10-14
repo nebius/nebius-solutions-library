@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.99
+
+(0.11.99 = 0.11.98 plus the observer fields; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)
+
+- The owner-scoped operation exposes the observed durable fields of its current attempt (`pod_uid`, `gang_rank`,
+  `gang_restart`, from the authority record) and on every `attempts[]` entry (from the record; from the live pod's own
+  UID and JobSet labels while it exists; the durable view after the Job's TTL too), so an application broker can verify
+  a gang peer against the observed coordinator of the same epoch and incarnation without trusting a caller's claim.
+  No new endpoint, no ledger; owner access unchanged.
+
 ## api 0.11.98
 
 (0.11.98 = 0.11.97 plus one narrow correction; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)

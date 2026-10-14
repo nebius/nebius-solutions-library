@@ -292,7 +292,10 @@ checkpoint and success came back 409 "stale record refused"); the next incarnati
 recreated) is the next epoch, and the prior gang is fenced like any replaced attempt (its own interruption or failure
 still closes its record, promoting nothing). **Coordinator authority**: only rank 0's record carries the gang's
 `checkpoint_ref`/`checkpoint_generation` and `result_ref` (a peer's are dropped; its timings, exit code and GPUs stay:
-every rank is accounted). The operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation; the
+every rank is accounted). The operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation, and the
+owner-scoped operation exposes the observed fields on its current attempt and on every `attempts[]` entry (`pod_uid`,
+`gang_rank`, `gang_restart`: from the record, and from the live pod itself while it exists), so an application broker can
+verify a peer against the observed coordinator of the same epoch and incarnation without trusting any caller's claim; the
 gang's outcome counts every rank (the JobSet's `All` success policy): `SUCCEEDED` only when every rank succeeded,
 `FAILED` when any rank failed. A late record of a pod the API cannot read any more keeps only that pod's own earlier row
 (its epoch, its fences); a gang pod never recorded and unreadable has no proof of its incarnation and is refused (409),

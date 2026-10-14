@@ -72,9 +72,35 @@ def _pod_digest(p: dict) -> str | None:
     return None
 
 
+JOBSET_NAME_LABEL = "jobset.sigs.k8s.io/jobset-name"
+JOBSET_RESTART_LABEL = "jobset.sigs.k8s.io/restart-attempt"
+JOB_INDEX_LABEL = "batch.kubernetes.io/job-completion-index"
+
+
+def _pod_gang_fields(p: dict) -> dict:
+    """{pod_uid, gang_rank, gang_restart} as the live pod states them (metadata.uid; the completion index and the JobSet
+    restart-attempt for a JobSet pod, None for an ordinary pod)."""
+    md = p.get("metadata") or {}
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
+    out = {"pod_uid": md.get("uid"), "gang_rank": None, "gang_restart": None}
+    if labels.get(JOBSET_NAME_LABEL) or ann.get(JOBSET_NAME_LABEL):
+        rank = labels.get(JOB_INDEX_LABEL) or ann.get(JOB_INDEX_LABEL)
+        restart = labels.get(JOBSET_RESTART_LABEL) or ann.get(JOBSET_RESTART_LABEL) or "0"
+        try:
+            out["gang_rank"] = int(rank) if rank is not None else None
+            out["gang_restart"] = int(restart)
+        except ValueError:
+            pass
+    return out
+
+
 def _lifecycle_fields(r: dict) -> dict:
     """What an attempt record carries beyond the pod's state (the uploader's `export`, the database's `export_state`)."""
-    out = {k: r.get(k) for k in ("result_ref", "checkpoint_ref", "image_digest", "epoch") if r.get(k) is not None}
+    out = {
+        k: r.get(k)
+        for k in ("result_ref", "checkpoint_ref", "image_digest", "epoch", "pod_uid", "gang_rank", "gang_restart")
+        if r.get(k) is not None
+    }
     export = r.get("export_state") or r.get("export")
     if export is not None:
         out["export_state"] = export
@@ -133,6 +159,9 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
                 # the runtime digest the API observes on the pod (containerStatuses[main].imageID); the record's value,
                 # when it has one, replaces it below
                 "image_digest": _pod_digest(p),
+                # observed on the live pod: its UID and, for a JobSet pod, its rank and incarnation (the labels the
+                # Job and JobSet controllers stamp); the record's observation, when it has one, replaces them below
+                **_pod_gang_fields(p),
             }
         )
     for r in records or []:
