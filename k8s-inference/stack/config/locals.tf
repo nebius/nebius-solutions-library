@@ -302,8 +302,11 @@ locals {
     images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
     # the logical host resolves only on the nodes (containerd), not in the cluster network: Knative keeps such a
     # reference as written; nvcr.io needs credentials Knative does not have
-    knative = { skipTagResolving = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"] }
-    api     = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
+    knative = {
+      skipTagResolving          = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"]
+      maxRevisionTimeoutSeconds = local.f.knative.max_revision_timeout_s # one value for Knative AND the API's registration check
+    }
+    api = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
     # a GPU region's gateway authorizes endpoint calls against the fleet's API by its public hostname (templates/edge):
     # validated against the system roots (ACME) in public mode, the trust bundle (`trust`, key ca.crt) in internal mode
     edge  = { controlApiHost = local.api_host, caConfigMap = local.f.edge.mode == "internal" ? "trust" : "" }

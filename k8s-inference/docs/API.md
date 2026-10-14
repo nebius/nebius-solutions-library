@@ -13,7 +13,7 @@ POST   /v1/models                    define a model (admin key, fleet API only):
 PUT    /v1/models/{model}            replace a definition (new version); DELETE /v1/models/{model} removes it (built-in classes: 409)
 GET    /v1/models/{model}/history    every version of a definition: who changed what, when (admin key)
 POST   /v1/models/{model}:invoke     body {mode, input, region, priority, timeout_s} -> operation (sync returns the result inline)
-GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost
+GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost; the list: `limit` (≤ 500), `model`, `cursor` (from the `X-Next-Cursor` header), newest first, expired operations from their durable records, authorized before any cut
 GET    /v1/operations/{id}/result    result (async) or presigned artifact links (run)
 POST   /v1/operations/{id}:cancel
 POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on the same checkpoint volume, same region
@@ -63,7 +63,12 @@ shape of a model definition: a container plus a few knobs.
 preferred first; `resources` is the endpoint container's `cpu` and `memory` requests (defaults 4 / 16Gi; = the limits)
 and, optionally, `cpu_limit` / `memory_limit` above them and `ephemeral_storage` with `ephemeral_storage_limit` (the
 kubelet's node-local scratch: request = limit unless both are given; nothing is rendered without them), the same names
-a run class uses; `regions` defaults to every region with a pool of one of the classes; `kind: job`
+a run class uses; an endpoint's `timeout_s` (its Knative revision timeout) may not exceed the fleet's
+`fleet.knative.max_revision_timeout_s` (default 3600; the platform chart sets Knative's max-revision-timeout-seconds
+and the API's ceiling from that one value; 400 above it, naming the knob) and its `env`, `env_field_refs` and
+`weights.env` may not set the names Knative reserves (`PORT`, `K_SERVICE`, `K_CONFIGURATION`, `K_REVISION`: 400;
+Knative injects the serving port into `PORT`), so no definition is accepted that would never reconcile;
+`regions` defaults to every region with a pool of one of the classes; `kind: job`
 defines a run class instead (`cpu`, `memory`, `cpu_limit`, `memory_limit`, `ephemeral_storage`, `ephemeral_storage_limit`, `disk_gi`, `scratch`, `parameters`, `delegates`, `retry`; requests are what the scheduler guarantees, limits what a container may grow to; `delegates` names the run classes a graph rooted on this class may bind stages to, docs/JOBS.md "Delegated stages"). The full field list is
 the module docstring of `services/api/models.py`; the response schema is `Model` in `services/api/schemas.py`.
 

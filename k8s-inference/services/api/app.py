@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 
@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.93", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.95", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1423,21 +1423,94 @@ def _price(job: dict) -> float | None:
 
 @app.get("/v1/operations", responses={200: {"model": list[schemas.Operation]}})
 def list_operations(
-    p: Principal = Depends(scoped("read:operations")), limit: int = Query(50, le=500), model: str | None = None
+    response: Response,
+    p: Principal = Depends(scoped("read:operations")),
+    limit: int = Query(50, le=500),
+    model: str | None = None,
+    cursor: str | None = None,
 ):
-    mine = [j for j in jobs.list_ops(p.namespace, p.tenant, model, 500) if _may_read_operation(p, j)][:limit]
-    # the durable attempt records of every listed operation in one query (a pod the worker cluster removed after
+    """The caller's operations, newest first (`created_at` desc, then id asc: a stable order), as an array (unchanged
+    shape). Every live operation of the tenant over the reachable regions AND every operation the durable attempt
+    records still know (a Job that expired after its TTL: reported from its records, as GET /v1/operations/{id} does)
+    is authorized FIRST (tenant, owner or admin, the key's model allow-list: auth.check_operation_owner), and only
+    then cut to `limit` (≤ 500) from `cursor`. Headers: `X-Next-Cursor` (opaque; pass it as `cursor=` for the next
+    page; absent on the last page) and `X-Regions-Skipped` (regions that could not be read: their live operations are
+    absent from this answer). Before 0.11.94 the live Jobs were cut to 500 BEFORE the owner filter (a caller with
+    many foreign operations in the tenant saw none of its own) and expired operations were not listed."""
+    live, skipped = jobs.list_ops_all(p.namespace, p.tenant, model)
+    entries: list[tuple[str, str, dict | None, dict | None]] = []  # (created_at, id, live job, durable index entry)
+    live_names = set()
+    for j in live:
+        if _may_read_operation(p, j):
+            live_names.add(j["metadata"]["name"])
+            entries.append((j["metadata"].get("creationTimestamp") or "", j["metadata"]["name"], j, None))
+    durable: list[dict] = []
+    if attempts.enabled():
+        try:
+            durable = attempts.durable_index(p.tenant, None if p.role == "admin" else p.owner, model)
+        except Exception as e:  # noqa: BLE001 - the live list stands; the answer says the records were not read
+            log.warning("operations: durable records unreadable, expired operations absent: %s", str(e)[:160])
+            response.headers["X-Records-Skipped"] = "durable"
+    for e in durable:
+        if e["operation"] in live_names:
+            continue
+        synthetic_job = {  # the shape the owner check reads: tenant, model (the allow-list), the root
+            "metadata": {
+                "name": e["operation"],
+                "labels": {
+                    f"{cfg.LABEL}/tenant": p.tenant,
+                    f"{cfg.LABEL}/mode": e["mode"],
+                    **({f"{cfg.LABEL}/model": e["model"]} if e.get("model") else {}),
+                },
+                "annotations": {f"{cfg.LABEL}/resumed-from": e["root"]},
+            }
+        }
+        if _may_read_operation(p, synthetic_job):
+            entries.append((e["created_at"], e["operation"], None, e))
+    # the stable order: created_at desc, then id asc (a root before its continuations created in the same second)
+    entries.sort(key=lambda x: x[1])
+    entries.sort(key=lambda x: x[0], reverse=True)
+    if cursor:
+        c_at, c_id = _decode_cursor(cursor)
+        entries = [x for x in entries if x[0] < c_at or (x[0] == c_at and x[1] > c_id)]
+    page, rest = entries[:limit], entries[limit:]
+    if rest:
+        response.headers["X-Next-Cursor"] = _encode_cursor(page[-1][0], page[-1][1])
+    if skipped:
+        response.headers["X-Regions-Skipped"] = ",".join(skipped)
+    mine = [x[2] for x in page if x[2] is not None]
+    # the durable attempt records of every listed live operation in one query (a pod the worker cluster removed after
     # delivery leaves no live evidence of it; the records are what GET /v1/operations/{id} reports from)
     rows = attempts.for_operations({_root(j) for j in mine}) if attempts.enabled() else {}
     marks = attempts.marks_for({j["metadata"]["name"] for j in mine}) if attempts.enabled() else {}
     out = []
-    for j in mine:
-        name, root = j["metadata"]["name"], _root(j)
-        op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
-        if attempts.enabled():
-            op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name), pods=j.get("_pods")))
-        out.append(op)
+    for _created, name, j, e in page:
+        if j is not None:
+            root = _root(j)
+            op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
+            if attempts.enabled():
+                op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name), pods=j.get("_pods")))
+            out.append(op)
+        else:
+            op = attempts.synthesize(name, p.tenant)  # the durable record of an expired operation
+            if op is not None:
+                out.append(op)
     return out
+
+
+def _encode_cursor(created_at: str, id: str) -> str:
+    return base64.urlsafe_b64encode(f"{created_at}|{id}".encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+        created_at, id = raw.split("|", 1)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "cursor: not one this API issued (X-Next-Cursor of a previous page)")
+    if not id:
+        raise HTTPException(400, "cursor: not one this API issued (X-Next-Cursor of a previous page)")
+    return created_at, id
 
 
 def _root(job: dict) -> str:

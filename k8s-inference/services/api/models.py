@@ -55,6 +55,7 @@ from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 from pydantic import ValidationError
 
+import config
 import db
 import kube
 import render_endpoint
@@ -172,6 +173,52 @@ def _command(v):
     if v is None or v == "" or v == []:
         return None
     return ["/bin/sh", "-c", v] if isinstance(v, str) else list(v)
+
+
+KNATIVE_RESERVED_ENV = ("PORT", "K_SERVICE", "K_CONFIGURATION", "K_REVISION")
+
+
+def _endpoint_timeout(s: dict) -> None:
+    """An endpoint's `timeout_s` is its Knative revision timeout: above the fleet's max-revision-timeout-seconds the
+    definition would store and register but its InferenceService would never reconcile (ReconcileFailed on every
+    region). Refused at registration with the knob that raises the ceiling."""
+    t = s.get("timeout_s", 600)
+    if not isinstance(t, int) or isinstance(t, bool) or t < 1:
+        raise HTTPException(400, "timeout_s: a positive integer (seconds)")
+    limit = int(config.KNATIVE_MAX_REVISION_TIMEOUT_S)
+    if t > limit:
+        raise HTTPException(
+            400,
+            f"timeout_s {t} exceeds this fleet's Knative max-revision-timeout-seconds ({limit}); an endpoint above it registers "
+            f"but never reconciles. Raise fleet.knative.max_revision_timeout_s (stack tfvars: the platform chart sets Knative "
+            f"and the API from that one value) to at least {t}, or lower timeout_s",
+        )
+
+
+def _reserved_env(s: dict) -> None:
+    """Knative Serving reserves PORT (it injects the serving port) and K_SERVICE/K_CONFIGURATION/K_REVISION in a
+    revision's containers: a definition that sets them stores but its InferenceService never reconciles. Refused at
+    registration (endpoints only; run classes are plain Jobs and keep their env as declared)."""
+    places = {
+        "env": s.get("env") or {},
+        "env_field_refs": s.get("env_field_refs") or {},
+        "weights.env": ((s.get("weights") or {}).get("env") or {}) if isinstance(s.get("weights"), dict) else {},
+    }
+    for where, env in places.items():
+        if not isinstance(env, dict):
+            continue
+        bad = sorted(k for k in env if str(k).upper() in KNATIVE_RESERVED_ENV)
+        if bad:
+            hint = (
+                " (Knative injects the serving port into PORT: declare `port` and read PORT at runtime)"
+                if "PORT" in [b.upper() for b in bad]
+                else ""
+            )
+            raise HTTPException(
+                400,
+                f"{where}: {', '.join(bad)} reserved by Knative Serving ({', '.join(KNATIVE_RESERVED_ENV)}); an endpoint "
+                f"setting it registers but never reconciles{hint}",
+            )
 
 
 def _env_list(env: dict | None) -> list[dict]:
@@ -300,6 +347,8 @@ def validate(spec: dict) -> dict:
             raise HTTPException(400, f"protocol: one of {PROTOCOLS}")
         if not isinstance(s.get("port", 8080), int):
             raise HTTPException(400, "port: an integer")
+        _endpoint_timeout(s)
+        _reserved_env(s)
         try:
             scaling = ScalingSpec.model_validate(s.get("scaling") or {}).model_dump(exclude_none=True)
         except ValidationError as exc:
