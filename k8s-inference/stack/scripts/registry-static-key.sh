@@ -5,12 +5,15 @@
 #
 #   stack/scripts/registry-static-key.sh <fleet name> [--rotate] [--import <old cache file>] [--project <id> --sa <id>]
 #
+# Issue and import run under one lock per fleet (two operators, two shells: one key). Project and SA come from the
+# cloud stage's outputs (`./stack.sh output cloud`, which needs no secret input: the key is discovered before it
+# exists) unless given explicitly.
+#
 # Prints the `export REGISTRY_STATIC_KEY=...` line (the variable terraform.tfvars secrets.registry_key_env names) and
 # keeps the key with its id under ~/.config/serverless2/<fleet name>/registry-key.json (0600; never in a checkout, so a
 # second worktree does not mint a second key). Refuses to issue again while that file exists: `--rotate` issues a new
 # key and prints the old id for `nebius iam static-key delete`. `--import` adopts the file the former data source
-# cached under stack/.secrets/ (same shape: {"key": ..., "id": ...}). Project and SA come from the cloud stage's state
-# (`./stack.sh tf cloud -- output -json`): hub project id and the hub's ops_service_account_id.
+# cached under stack/.secrets/ (same shape: {"key": ..., "id": ...}).
 set -euo pipefail
 usage() { echo "usage: $0 <fleet name> [--rotate] [--import <file>] [--project <hub project id> --sa <ops SA id>]" >&2; exit 2; }
 [ $# -ge 1 ] || usage
@@ -34,6 +37,8 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 print("export REGISTRY_STATIC_KEY=" + repr(d["key"]) + "   # key id " + d.get("id", "?") + " (" + sys.argv[1] + ")")' "$file"; }
 
+exec 9>"$dir/.registry-key.lock"
+flock -w "${REGISTRY_KEY_LOCK_WAIT:-60}" 9 || { echo "!! another issue or import is running for $name" >&2; exit 1; }
 if [ -n "$import" ]; then
   [ -s "$import" ] || { echo "!! $import is empty or missing" >&2; exit 1; }
   [ -s "$file" ] && [ "$rotate" = 0 ] && { echo "!! $file exists; --rotate to replace it" >&2; exit 1; }
@@ -49,22 +54,21 @@ if [ -n "$import" ]; then
   echo "imported $import -> $file" >&2; emit; exit 0
 fi
 
-exec 9>"$dir/.registry-key.lock"; flock -w 60 9 || { echo "!! another issue is running for $name" >&2; exit 1; }
 if [ -s "$file" ] && [ "$rotate" = 0 ]; then
   echo "key already issued for $name ($file); --rotate for a new one" >&2; emit; exit 0
 fi
 old_id=""; [ -s "$file" ] && old_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("id", ""))' "$file")
 
 if [ -z "$project" ] || [ -z "$sa" ]; then
+  # the cloud stage's outputs through stack.sh (`output cloud`: no secret inputs needed, so this works before the
+  # key exists); `hub` and `clusters` only, never the sensitive `secrets` output
   here=$(cd "$(dirname "$0")/../.." && pwd)
-  cloud=$("$here/stack.sh" tf cloud -- output -json 2>/dev/null) || { echo "!! cannot read the cloud stage's outputs (run from the fleet checkout with its profile and state credentials, or pass --project and --sa)" >&2; exit 1; }
-  read -r project sa < <(printf '%s' "$cloud" | python3 -c '
+  hub=$("$here/stack.sh" output cloud -json hub) || { echo "!! cannot read the cloud stage's outputs (run from the fleet checkout with its profile and state credentials, or pass --project and --sa)" >&2; exit 1; }
+  clusters=$("$here/stack.sh" output cloud -json clusters) || exit 1
+  read -r project sa < <(python3 -c '
 import json, sys
-o = json.load(sys.stdin)
-cloud = o["cloud"]["value"] if "cloud" in o else o
-hub = cloud["hub_id"] if "hub_id" in cloud else next(cid for cid, c in cloud["clusters"].items() if c.get("roles", {}).get("hub") or c.get("hub"))
-c = cloud["clusters"][hub]
-print(c["project_id"], c["ops_service_account_id"])')
+hub, clusters = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+print(hub["project_id"], clusters[hub["id"]]["ops_service_account_id"])' "$hub" "$clusters")
 fi
 expires=$(date -u -d "+365 days" +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v+365d +%Y-%m-%dT00:00:00Z)
 suffix=$(python3 -c 'import secrets; print(secrets.token_hex(3))')

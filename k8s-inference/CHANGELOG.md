@@ -15,10 +15,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   fourth secret input, `secrets.registry_key_env` (default `REGISTRY_STATIC_KEY`), read from the environment by
   `stack.sh` like the NGC key: required on every cluster while `images.cache.enabled`, refused before any plan when
   unset, one value per fleet, and a `precondition` on the Secret stops a direct `terraform` call without it. The
-  `hashicorp/external` provider requirement is dropped.
+  `hashicorp/external` provider requirement is dropped. `stack.sh` asks for the secret inputs only where the platform
+  stage is planned, applied or destroyed (`plan|apply|destroy all|platform`, `tf platform <id> -- plan|apply|destroy`);
+  `plan cloud`, `output`, `registry`, `clusters` and read-only `tf` calls run without them, so the key's own bootstrap
+  (the script discovering the hub project and ops SA through `output cloud`) does not require the key it is about
+  to issue. `tools/registry-key-test.sh` (part of `check tests`) runs the launcher and the script against a fake
+  Nebius CLI and a fake Terraform: discovery and the cloud plan without the key, the platform plan refused without it
+  and run with it (`TF_VAR_registry_key`), the no-key bootstrap issue, refuse/rotate/id-fallback/import, and an
+  import blocked by the lock.
 - `stack/scripts/registry-static-key.sh` is an explicit operator command now (`<fleet name> [--rotate]`): it issues the
   key once (the name carries a random suffix, never the minute), under a lock, and prints the `export` line and the
-  key's id; it refuses to issue a second key for a fleet whose key file it already holds unless `--rotate` is given.
+  key's id; it refuses to issue a second key for a fleet whose key file it already holds unless `--rotate` is given;
+  issue and import share one lock per fleet.
   The id is read from the response's `operation.resource_id` (`IssueStaticKeyResponse` is `{token, operation}`; the
   former parser read `metadata.id` and recorded `""` for every key it issued) and, failing that, resolved from the
   token with `nebius iam static-key find --token` (the exact ownership proof of any key: its own token names it).

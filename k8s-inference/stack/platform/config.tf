@@ -72,7 +72,7 @@ variable "iam_token" {
 }
 
 # Secret inputs named in terraform.tfvars `secrets` (the names of environment variables): stack.sh exports each named
-# variable as TF_VAR_<input> and refuses to run when a named variable is unset. A feature is off only when its name
+# variable as TF_VAR_<input> and refuses to plan, apply or destroy this stage when a named variable is unset. A feature is off only when its name
 # is set to "" in the tfvars, never because a variable happened to be missing from the shell (an apply without the
 # NGC key used to delete the NGC Secrets and the cache's nvcr.io credentials on every worker).
 variable "ngc_api_key" {
