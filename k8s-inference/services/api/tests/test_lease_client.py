@@ -73,16 +73,53 @@ def test_transport_errors_retry_the_same_tuple_and_a_refusal_is_final(token, mon
     assert lease.attach({"x-serverless2-operation": "op-1", "x-serverless2-attempt": "a1"}, "w-1") is not None
     assert len({c[2]["worker_request_id"] for c in t.calls}) == 1 and len(t.calls) == 3
     t = Transport([(409, {"detail": "native executions of op-1 are over (the caller finished and the join decided)"})])
-    with pytest.raises(s2lease.LeaseRefused, match="are over"):
+    with pytest.raises(s2lease.LeaseRefused, match="are over") as e:
         s2lease.Lease("https://api.example", token, transport=t).attach(
             {"x-serverless2-operation": "op-1", "x-serverless2-attempt": "a1"}, "w-1"
         )
-    assert len(t.calls) == 1  # a refusal is never retried
+    assert len(t.calls) == 1  # a definite refusal is never retried
+    assert (e.value.status_code, e.value.action) == (409, "attach") and "are over" in e.value.detail
     t = Transport([OSError("down")] * 5)
-    with pytest.raises(s2lease.LeaseUnavailable):
+    with pytest.raises(s2lease.LeaseUnavailable) as e:
         s2lease.Lease("https://api.example", token, transport=t).attach(
             {"x-serverless2-operation": "op-1", "x-serverless2-attempt": "a1"}, "w-1"
         )
+    assert e.value.status_code is None and e.value.action == "attach" and "down" in e.value.detail
+
+
+def test_definite_4xx_is_refused_and_5xx_is_ambiguous(token, monkeypatch):
+    """A 4xx is about this request (LeaseRefused with the status: 401/403 identity, 409 lease state) and must not take the
+    worker out of service; a 5xx says nothing definite: the same tuple is retried (idempotent on the API) and, exhausted,
+    is LeaseUnavailable with the last status (an attach then holds rather than runs)."""
+    monkeypatch.setattr(s2lease.time, "sleep", lambda s: None)
+    hdr = {"x-serverless2-operation": "op-1", "x-serverless2-attempt": "a1"}
+    for code in (401, 403, 409):
+        t = Transport([(code, {"detail": f"no {code}"})])
+        with pytest.raises(s2lease.LeaseRefused) as e:
+            s2lease.Lease("https://api.example", token, transport=t).attach(hdr, "w-1")
+        assert e.value.status_code == code and e.value.detail == f"no {code}" and len(t.calls) == 1
+    t = Transport(
+        [(503, {"detail": "db"}), (502, {}), (200, {"state": "attached"})]
+    )  # recorded or not: the retry tells
+    exe = s2lease.Lease("https://api.example", token, transport=t).attach(hdr, "w-1")
+    assert exe is not None and len(t.calls) == 3 and len({c[2]["worker_request_id"] for c in t.calls}) == 1
+    t = Transport([(503, {"detail": "db"})] * 5)
+    with pytest.raises(s2lease.LeaseUnavailable) as e:
+        s2lease.Lease("https://api.example", token, transport=t).attach(hdr, "w-1")
+    assert e.value.status_code == 503 and e.value.action == "attach" and "db" in e.value.detail and len(t.calls) == 5
+    # release: the same split
+    t = Transport([(200, {"state": "attached"}), (409, {"detail": "stale release"})])
+    exe = s2lease.Lease("https://api.example", token, transport=t).attach(hdr, "w-1")
+    with pytest.raises(s2lease.LeaseRefused) as e:
+        exe.release("done", 1.5)
+    assert (e.value.status_code, e.value.action) == (409, "release") and len(t.calls) == 2
+    t = Transport([(200, {"state": "attached"})] + [(500, {})] * 5)
+    exe = s2lease.Lease("https://api.example", token, transport=t).attach(hdr, "w-1")
+    with pytest.raises(s2lease.LeaseUnavailable) as e:
+        exe.release("done", None)
+    assert e.value.status_code == 500 and e.value.action == "release"
+    # the exceptions still read as messages (backward compatible with str() handlers)
+    assert "attach refused (409)" in str(s2lease.LeaseRefused(409, "x", "attach"))
 
 
 def test_direct_calls_carry_no_lease(token):

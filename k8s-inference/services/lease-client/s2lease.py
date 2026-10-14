@@ -15,10 +15,14 @@ call, which carries no lease).
     ...                                           # run; poll exe.cancel_requested() between steps if cancellable
     exe.release("done", gpu_seconds=None)         # AFTER your own settlement; None = unknown, never 0 unless measured
 
-Semantics the client guarantees: attach is retried on transport errors with the same tuple (idempotent on the API),
-never with a new request id; a 409 is final for this request (LeaseRefused: the caller is over, cancelled, stale, or
-another worker holds it); release is retried the same way and is idempotent; a request without markers attaches
-nothing (optional mode) or raises LeaseRefused (required mode: the worker must not run an unleased request)."""
+Semantics the client guarantees: attach is retried on transport errors AND on 5xx answers with the same tuple (idempotent
+on the API: a recorded attach whose answer was lost comes back 200 on the retry), never with a new request id; a 4xx
+answer is definite and final for this request (LeaseRefused, with `status_code` and `detail`: 401/403 the identity, 409
+the caller is over, cancelled, stale, or another worker holds it) and says nothing about the worker, so it must not
+quarantine the worker; retries exhausted (transport or 5xx) is LeaseUnavailable, with `status_code` (the last 5xx, or
+None): ambiguous for an attach, hold rather than run; release is retried the same way and is idempotent; a request
+without markers attaches nothing (optional mode) or raises LeaseRefused (required mode: the worker must not run an
+unleased request)."""
 
 from __future__ import annotations
 
@@ -34,11 +38,23 @@ ATTEMPT_HEADER = "x-serverless2-attempt"
 
 
 class LeaseRefused(Exception):
-    """The platform refused the lease (409/403/401): fail closed, do not run the request."""
+    """The platform definitely refused this request (a 4xx: 401/403 the identity, 409 the lease state): fail closed, do
+    not run the request. `status_code` and `detail` are the API's answer. A refusal is about the request, never about
+    the worker: it must not take the worker out of service."""
+
+    def __init__(self, status_code: int | None, detail: str = "", action: str = ""):
+        self.status_code, self.detail, self.action = status_code, detail, action
+        super().__init__(f"{action or 'lease'} refused ({status_code}): {detail}")
 
 
 class LeaseUnavailable(Exception):
-    """The control API could not be reached after the retries: fail closed as well (the caller will retry)."""
+    """No definite answer after the retries (transport errors or 5xx): fail closed as well. For an attach this is
+    ambiguous (the API may or may not have recorded it): hold, do not run; a later retry with the same tuple is safe.
+    `status_code` is the last 5xx seen, or None when nothing answered."""
+
+    def __init__(self, status_code: int | None, detail: str = "", action: str = ""):
+        self.status_code, self.detail, self.action = status_code, detail, action
+        super().__init__(f"{action or 'lease'} unavailable ({status_code or 'no answer'}): {detail}")
 
 
 _SSL: ssl.SSLContext | None = None
@@ -79,7 +95,10 @@ class Execution:
         self.owner = state.get("owner")  # {tenant, owner, model}: the trusted owner group of the admitted call
 
     def cancel_requested(self) -> bool:
-        code, body = self.lease._call("GET", f"/internal/executions/{self.operation}")
+        try:  # one attempt, no backoff: a poll between steps must not stall the worker; the next step polls again
+            code, body = self.lease._call("GET", f"/internal/executions/{self.operation}", action="poll", retries=1)
+        except LeaseUnavailable:
+            return False
         if code == 200:
             self.state = body
             return bool(body.get("cancel_requested"))
@@ -97,11 +116,12 @@ class Execution:
                 "outcome": outcome,
                 "gpu_seconds": gpu_seconds,
             },
+            action="release",
         )
         if code == 200:
             self.state = body
             return body
-        raise LeaseRefused(f"release refused ({code}): {body.get('detail')}")
+        raise LeaseRefused(code, str(body.get("detail") or ""), "release")
 
 
 class Lease:
@@ -121,17 +141,28 @@ class Lease:
         with open(self.token_file) as f:
             return f.read().strip()
 
-    def _call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-        last: Exception | None = None
-        for i in range(self.retries):
+    def _call(
+        self, method: str, path: str, body: dict | None = None, action: str = "", retries: int | None = None
+    ) -> tuple[int, dict]:
+        """One request, retried with the same body on transport errors and 5xx answers (ambiguous: the API may have
+        acted; every lease route is idempotent per tuple). A 2xx or 4xx is definite and returned at once."""
+        last_code: int | None = None
+        last_detail = ""
+        retries = self.retries if retries is None else retries
+        for i in range(retries):
             try:
-                return self.transport(
+                code, payload = self.transport(
                     method, self.api_url + path, body, {"Authorization": f"Bearer {self._token()}"}, self.timeout
                 )
-            except (OSError, urllib.error.URLError, ValueError) as e:  # transport only: the same tuple is retried
-                last = e
+            except (OSError, urllib.error.URLError, ValueError) as e:  # transport: no answer
+                last_code, last_detail = None, f"{type(e).__name__}: {e}"
+            else:
+                if code < 500:
+                    return code, payload
+                last_code, last_detail = code, str((payload or {}).get("detail") or "")
+            if i + 1 < retries:
                 time.sleep(self.backoff * (2**i))
-        raise LeaseUnavailable(f"{method} {path}: {last}")
+        raise LeaseUnavailable(last_code, f"{method} {path}: {last_detail}", action)
 
     @staticmethod
     def markers(headers) -> tuple[str, str]:
@@ -147,13 +178,16 @@ class Lease:
         operation, attempt = self.markers(headers)
         if not operation or not attempt:
             if self.mode == "required":
-                raise LeaseRefused("no lease markers on the request (direct call); required mode refuses it")
+                raise LeaseRefused(
+                    None, "no lease markers on the request (direct call); required mode refuses it", "attach"
+                )
             return None
         code, body = self._call(
             "POST",
             f"/internal/executions/{operation}:attach",
             {"attempt": attempt, "worker_request_id": worker_request_id},
+            action="attach",
         )
         if code == 200:
             return Execution(self, operation, attempt, worker_request_id, body)
-        raise LeaseRefused(f"attach refused ({code}): {body.get('detail')}")
+        raise LeaseRefused(code, str(body.get("detail") or ""), "attach")
