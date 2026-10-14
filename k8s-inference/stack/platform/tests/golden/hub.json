@@ -61,7 +61,7 @@
  },
  "apps/DaemonSet/spegel/containerd-registry-config": {
   "component": "node-config",
-  "sha256": "2becbada53207f175db8b8f0227e1b1f148dde959540133ee836cc3e96481623"
+  "sha256": "afe3abb247d4f9c93edfd754a3fa2740a78a66a75ba9aa61837d4235fc6df248"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",

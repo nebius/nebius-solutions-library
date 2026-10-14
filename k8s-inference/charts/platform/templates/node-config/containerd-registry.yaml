@@ -7,7 +7,9 @@
 # by a probe pull, not the file). It also lifts the runtime's memlock limit (systemd drop-in) so RDMA works in pods
 # without CAP_IPC_LOCK (docs/JOBS.md "Multi-node runs"). The GPU node-group cloud-init writes the same drop-in at
 # boot (`stack/modules/cluster`), so on a fresh GPU node this is a no-op; CPU (system) nodes get their configuration from
-# this DaemonSet alone.
+# this DaemonSet alone (and, since 0.1.12, from the cloud-init fragment the batch pools share with the GPU pools, so this
+# is a no-op there too). A node that still lacks the mirror file for the logical host (created before that fragment) gets
+# a bootstrap one here, pointing at the cache on the node's loopback, and never over a file Spegel already wrote.
 # Running containers are unaffected (they belong to their shims); the kubelet reconnects. Spegel then writes
 # the per-registry hosts.toml files that this setting makes containerd read.
 apiVersion: apps/v1
@@ -33,53 +35,15 @@ spec:
           image: docker.io/library/busybox:1.36
           securityContext: { privileged: true }
           volumeMounts: [{ name: host-root, mountPath: /host }]
-          command:
-            - sh
-            - -c
+          env:
+            - { name: HOST_ROOT, value: /host }
+            - { name: IMAGES_HOST, value: {{ .Values.images.host | quote }} }
+            - { name: CACHE_NODE_PORT, value: {{ .Values.images.cacheNodePort | default 30500 | quote }} }
+          # the script is a chart file (charts/platform/files/node-config.sh, tested by tools/node-config-test.sh)
+          command: [sh, -c]
+          args:
             - |
-              set -e
-              CFG=/host/etc/containerd/config.toml
-              DROPIN=/host/etc/containerd/conf.d/serverless2-registry.toml
-              MARK=/host/etc/containerd/certs.d/.serverless2-containerd-restarted
-              mkdir -p /host/etc/containerd/certs.d
-              # Decide on the RUNNING containerd, never on the file: a file that already carries the setting says
-              # nothing about whether containerd was restarted since (nodes with an appended registry
-              # table and no restart pulled nothing through the cache). containerd 2.x does not expose the images
-              # plugin's registry setting through `crictl info`, so the check is functional: pull a 2 MB image
-              # through the logical host exactly as the kubelet would (served by Spegel or the Zot cache).
-              PROBE={{ .Values.images.host }}/docker/library/busybox:1.36
-              # Memlock (docs/JOBS.md "Multi-node runs"): RDMA memory registration is bounded by RLIMIT_MEMLOCK (8 MiB on
-              # the node image); an unlimited limit on the containerd unit lets every container register memory without
-              # CAP_IPC_LOCK. The GPU cloud-init writes the same drop-in at boot; here for nodes created before it.
-              MEMLOCK=/host/etc/systemd/system/containerd.service.d/serverless2-memlock.conf
-              NEED_RESTART=0
-              if [ ! -f "$MEMLOCK" ]; then
-                mkdir -p "$(dirname "$MEMLOCK")"
-                printf '# serverless2 (docs/JOBS.md): RDMA pins memory; an unlimited memlock limit on the runtime lets every container\n# register memory without CAP_IPC_LOCK (the node image ships 8 MiB).\n[Service]\nLimitMEMLOCK=infinity\n' > "$MEMLOCK"
-                nsenter -t 1 -m -u -i -n -p -- systemctl daemon-reload
-                NEED_RESTART=1
-              fi
-              cpid=$(nsenter -t 1 -m -u -i -n -p -- pidof containerd | cut -d' ' -f1)
-              if [ -n "$cpid" ] && ! grep -q 'locked memory.*unlimited' "/host/proc/$cpid/limits"; then NEED_RESTART=1; fi
-              if [ "$NEED_RESTART" = 0 ] && chroot /host crictl pull "$PROBE" > /dev/null 2>&1; then
-                [ -f "$MARK" ] || touch "$MARK"; echo "containerd serves the registry mirrors (probe pull ok) with unlimited memlock"; exit 0
-              fi
-              # Legacy repair: an earlier version appended the two tables to config.toml itself, which duplicates
-              # the cri.containerd table and makes the next containerd start fail. Drop that trailing block.
-              if [ "$(grep -c '^\[plugins."io.containerd.grpc.v1.cri".containerd\]$' "$CFG")" -gt 1 ]; then
-                cp "$CFG" "$CFG.serverless2-backup"
-                awk -v start="$(grep -n '^\[plugins."io.containerd.grpc.v1.cri".registry\]$' "$CFG" | tail -1 | cut -d: -f1)" 'NR < start' "$CFG" > "$CFG.new" && mv "$CFG.new" "$CFG"
-                echo "removed the appended registry block from config.toml (backup: config.toml.serverless2-backup)"
-              fi
-              # a drop-in, never an edit of config.toml: its tables (cri.containerd) already exist there and TOML
-              # forbids defining a table twice. The imports line must precede the first table: after `version`.
-              mkdir -p /host/etc/containerd/conf.d
-              grep -q '^imports' "$CFG" || sed -i '1a imports = ["/etc/containerd/conf.d/*.toml"]' "$CFG"
-              printf '# serverless2 image cache (docs/IMAGES.md): per-registry mirror configuration (Spegel peers, Zot cache)\nversion = 2\n[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n[plugins."io.containerd.grpc.v1.cri".containerd]\n  discard_unpacked_layers = false\n' > "$DROPIN"
-              chroot /host containerd -c /etc/containerd/config.toml config dump > /dev/null   # parse check before a restart
-              nsenter -t 1 -m -u -i -n -p -- systemctl restart containerd && touch "$MARK" && echo "containerd restarted with the registry configuration"
-              sleep 5; chroot /host crictl pull "$PROBE" > /dev/null 2>&1 && echo "verified: probe pull through the mirrors ok" || echo "configured; probe pull through $PROBE not yet possible (the cache or Spegel is not up yet: the next rollout re-checks)"
-              cpid=$(nsenter -t 1 -m -u -i -n -p -- pidof containerd | cut -d' ' -f1); grep -q 'locked memory.*unlimited' "/host/proc/$cpid/limits" && echo "verified: containerd memlock unlimited" || echo "!! containerd memlock limit still bounded (drop-in $MEMLOCK not applied?)"
+{{ .Files.Get "files/node-config.sh" | indent 14 }}
       containers:
         - name: pause
           image: registry.k8s.io/pause:3.10

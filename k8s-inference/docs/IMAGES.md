@@ -133,11 +133,25 @@ rewrites that file with its peers once it runs (it keeps a copy under
 happen before Spegel has started, fall back to DNS for the logical host and sit in
 the kubelet's pull back-off for minutes.
 
+The same fragment is written on every **CPU batch pool** (never the system pool, which
+keeps its plain cloud-init): a CPU node scaled from zero otherwise met its first
+workload pull between node Ready and Spegel's `hosts.toml` (about 46 s on the
+2026-10-14 LeRobot node) and fell back to DNS for the logical host ("server
+misbehaving"), then sat in the kubelet's back-off; and node-config restarted containerd
+post-Ready for the memlock drop-in (a sandbox creation in flight saw "EOF"). With the
+fragment both are done at boot. The fragment is one local (`registry_bootstrap_*`) that
+the GPU and the CPU batch pools share; a change of it re-creates those node groups.
+
 The `node-config` DaemonSet is the catch-all for a node that lacks the drop-in: such
 a node pulls its first workload image before the DaemonSet has restarted containerd
 (one failed pull, retried by the kubelet about 10 s later; with several pods landing
 at once the kubelet's pull back-off stretches that to minutes). It does nothing on a
-node that already has the setting (same marker file). The cloud-init fragment
+node that already has the setting (same marker file). Since platform chart 0.1.12 it
+also writes a bootstrap `hosts.toml` for the logical host when a node has none yet
+(pointing at the cache on the node's loopback) and never over a file that exists
+(cloud-init's, or Spegel's with its peers); it restarts containerd only when the
+running process does not serve the mirrors or lacks the unlimited memlock
+(`charts/platform/files/node-config.sh`, `tools/node-config-test.sh`). The cloud-init fragment
 Terraform renders:
 
 ```yaml

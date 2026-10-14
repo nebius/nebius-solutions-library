@@ -74,8 +74,8 @@ run "shared_store_survives_gpu_scale_to_zero" {
   }
   assert {
     # the CPU pool's mount is its own (shared_filesystem), independent of the system opt-in; never the snapshot directory step
-    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.cpu_pool_cloud_init && !strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "gpu-snapshot")
-    error_message = "Opt-in system mounting must not modify batch CPU nodes beyond their own shared_filesystem mount."
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.cpu_batch_cloud_init["batch"] && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "mount -t virtiofs weights /mnt/weights") && !strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "gpu-snapshot")
+    error_message = "Opt-in system mounting must not modify batch CPU nodes beyond their own shared_filesystem mount (plus the registry bootstrap every batch pool has)."
   }
 }
 
@@ -128,8 +128,9 @@ run "cpu_pool_without_shared_filesystem_keeps_the_system_cloud_init" {
     }
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
-    error_message = "shared_filesystem = false must leave a CPU pool without the attachment and with the system cloud-init."
+    # no attachment, no mount; the registry bootstrap (docs/IMAGES.md "The setting at boot") stays, as on every batch pool
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && !strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "mount -t virtiofs") && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "fs.inotify.max_user_instances = 8192") && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "hosts.toml")
+    error_message = "shared_filesystem = false must leave a CPU pool without the attachment and without the mount; the sysctl and the registry bootstrap stay."
   }
 }
 
@@ -139,8 +140,8 @@ run "cpu_pool_without_a_weights_filesystem_has_nothing_to_mount" {
     weights_filesystem = { enabled = false, size_gib = 0, type = "NETWORK_SSD" }
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
-    error_message = "Without a weights filesystem in the region a CPU pool attaches nothing."
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && !strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "mount -t virtiofs") && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "hosts.toml")
+    error_message = "Without a weights filesystem in the region a CPU pool attaches and mounts nothing; the registry bootstrap stays."
   }
 }
 

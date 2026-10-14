@@ -32,7 +32,7 @@ check_lint() {
   step "Python lint and format (Ruff)"
   (cd "$ROOT" && "$PYTHON" -m ruff check services stack && "$PYTHON" -m ruff format --check services stack)
   step "ShellCheck: fleet scripts and container entry points"
-  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh
+  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh "$ROOT"/charts/platform/files/*.sh
   step "terraform fmt"
   terraform fmt -check -recursive "$ROOT/stack"
 }
@@ -375,6 +375,7 @@ check_tests() {
   bash "$ROOT/tools/registry-key-test.sh"
   step "tests: shared-scratch leaf proof/cleanup/provision (services/jobs/bin/scratch.sh)"
   bash "$ROOT/tools/scratch-test.sh"
+  bash "$ROOT/tools/node-config-test.sh"
   step "tests: filesystem attachment and GPU scale-to-zero storage"
   tf stack/modules/cluster init -backend=false -input=false > /dev/null
   tf stack/modules/cluster test -no-color

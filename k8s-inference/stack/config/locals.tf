@@ -299,7 +299,7 @@ locals {
     components = merge({ for n, a in local.apps_by_cluster[id] : n => true if a.kind == "manifests" }, { for n in local.identity_components[id] : n => true })
     host       = local.host_of[id]
     hostnames  = local.hostnames_of[id]
-    images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
+    images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops, cacheNodePort = local.f.images.cache.node_port }
     # the logical host resolves only on the nodes (containerd), not in the cluster network: Knative keeps such a
     # reference as written; nvcr.io needs credentials Knative does not have
     knative = {
