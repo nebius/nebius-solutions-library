@@ -311,6 +311,13 @@ create table if not exists operation_marks (
         created_at    timestamptz not null default now()
     );
     """,
+    # 20: cold attachment of a live session (docs/API.md "Sessions"): the attach wait starts at the first observed Ready
+    # replica of the session's endpoint, recorded once (never reset on a readiness flap), bounded by the admitted
+    # deadline; until then the session is `starting`, no GPU was allocated and nothing is advertised as GPU time.
+    """
+    alter table sessions add column if not exists ready_seen_at timestamptz;
+    alter table sessions add column if not exists attach_deadline_at timestamptz;
+    """,
 ]
 
 _pool = None

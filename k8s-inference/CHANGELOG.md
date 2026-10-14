@@ -4,7 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.82
+## api 0.11.83
+
+(0.11.83 supersedes the unreleased 0.11.82 candidate: tags are immutable; everything of 0.11.82 is included.)
+
+- Cold attachment of a live session (docs/API.md "Sessions", migration 20): the attach wait no longer runs from the
+  hook's bind (before the endpoint has a pod) but from the first Ready replica the reconciler observes for the
+  session's endpoint in its region, recorded ONCE (`ready_seen_at`, a compare-and-swap; a later readiness flap never
+  moves it) together with `attach_deadline_at` (`attach_wait_s` after it, capped by the admitted `deadline_at`).
+  The hard bound stays the admitted deadline: a session that never sees a Ready replica ends `unattached` there,
+  no extra reservation, no extension. Endpoint status is read once per (model, region) per sweep; a status that
+  cannot be read is unknown (neither Ready nor idle: nothing changes). The public session carries `phase`
+  (`claimed`, `starting`, `waiting_for_worker`, `attached`, `ended`), `ready_seen_at` and `attach_deadline_at`, no
+  token, no pod identity; no GPU time is advertised for a session that never attached. PostgreSQL-backed tests:
+  cold start longer than the wait then ready and attach; ready but no worker expires at the attach deadline;
+  never-ready ends at the admitted deadline; a flap never extends; two regions judged separately; concurrent
+  sweeps record readiness once and end a session once.
+
+## api 0.11.82 (unreleased candidate, superseded by 0.11.83)
 
 - Sessions (docs/API.md "Sessions"), before any enablement: `POST /v1/models/<id>:session` refuses a `timeout_s`
   above the endpoint's transport deadline (a single-node endpoint's revision timeout, the model's `timeout_s`, 600 s

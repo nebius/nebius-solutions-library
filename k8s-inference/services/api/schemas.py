@@ -166,6 +166,9 @@ class Session(BaseModel):
     cluster: str | None = None
     region: str
     status: Literal["claimed", "bound", "attached", "ended"]
+    phase: Literal["claimed", "starting", "waiting_for_worker", "attached", "ended"] | None = None
+    ready_seen_at: str | None = None  # the first Ready replica observed while bound (once; never reset)
+    attach_deadline_at: str | None = None  # attach_wait_s after it, capped by deadline_at
     outcome: str | None = None
     cancel_requested: bool
     cancel_reason: str | None = None

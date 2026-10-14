@@ -131,7 +131,11 @@ def test_sweep_expires_unattached_deadlines_lost_workers_and_deferred_settlement
     _sql("update sessions set expires_at = now() - interval '1 second' where id = %s", expired["id"])
     unattached = _create()
     sessions.bind(unattached["claim_token"], "speech")
-    _sql("update sessions set bound_at = now() - interval '2 hours' where id = %s", unattached["id"])
+    # a Ready replica was observed and the attach wait has passed (api 0.11.83: the wait runs from readiness)
+    _sql(
+        "update sessions set ready_seen_at = now() - interval '2 hours', attach_deadline_at = now() - interval '1 hour' where id = %s",
+        unattached["id"],
+    )
     late = _create(timeout_s=60)
     bl = sessions.bind(late["claim_token"], "speech")
     sessions.attach(late["id"], bl["connection"], W1, None)
@@ -159,3 +163,126 @@ def test_sweep_expires_unattached_deadlines_lost_workers_and_deferred_settlement
     spent = keys.info(KEY)["spent_gpu_seconds"]
     assert sessions.sweep() == [f"{fine['id']}:settled"]
     assert sessions.get(fine["id"])["settled_at"] and keys.info(KEY)["spent_gpu_seconds"] == spent  # released once
+
+
+# ---- cold attachment (api 0.11.83, migration 20) --------------------------------------------------------------------
+MODEL = {"name": "speech", "k8s_name": "speech", "namespace": "models", "nodes": 1, "regions": ["hub", "south"]}
+
+
+@pytest.fixture
+def cold(live, monkeypatch):
+    """The endpoint's readiness per region is scripted; every status read is counted."""
+    import catalog
+
+    state = {"ready": {"eu-north1": False, "eu-south1": False}, "reads": [], "fail": set()}
+    monkeypatch.setattr(catalog, "get", lambda name: MODEL if name == "speech" else None)
+
+    def status(name, ns, region="eu-north1", nodes=1):
+        state["reads"].append(region)
+        if region in state["fail"]:
+            raise RuntimeError("status unavailable")
+        return {"status": "ready" if state["ready"].get(region) else "scaled-to-zero"}
+
+    import kube
+
+    monkeypatch.setattr(kube, "endpoint_status", status)
+    monkeypatch.setattr(sessions, "_worker_gone", lambda s: False)  # the attached pod lives (no cluster here)
+    monkeypatch.setattr(cfg, "SESSION_ATTACH_WAIT_S", 60)
+    return state
+
+
+def _bound(timeout_s=600, region="eu-north1"):
+    s = sessions.create(KEY, "demo", "p-1", "speech", "hub", region, timeout_s, 1)
+    b = sessions.bind(s["claim_token"], "speech")
+    return s["id"], b["connection"]
+
+
+def _age(sid, **cols):
+    """Move timestamps into the past (seconds ago) to play time forward."""
+    for col, ago in cols.items():
+        _sql(f"update sessions set {col} = now() - %s * interval '1 second' where id = %s", ago, sid)
+
+
+def test_cold_start_longer_than_the_wait_then_ready_and_attach(cold):
+    sid, conn = _bound()
+    _age(sid, bound_at=300)  # bound five minutes ago, the endpoint still starting: the old rule would have ended it
+    assert sessions.sweep() == []
+    s = sessions.get(sid)
+    assert s["state"] == "bound" and s["ready_seen_at"] is None and sessions.public(s)["phase"] == "starting"
+    assert sessions.public(s)["gpu_seconds"] is None and "claim_token" not in sessions.public(s)
+    cold["ready"]["eu-north1"] = True
+    assert sessions.sweep() == [f"{sid}:ready-seen"]
+    s = sessions.get(sid)
+    assert s["ready_seen_at"] and s["attach_deadline_at"] and sessions.public(s)["phase"] == "waiting_for_worker"
+    assert (s["attach_deadline_at"] - s["ready_seen_at"]).total_seconds() == pytest.approx(60, abs=1)
+    a = sessions.attach(sid, conn, W1, "ws-1")
+    assert a["state"] == "attached" and sessions.public(a)["phase"] == "attached"
+    assert sessions.sweep() == []
+
+
+def test_ready_but_no_worker_expires_at_the_attach_deadline_not_before(cold):
+    sid, _ = _bound()
+    cold["ready"]["eu-north1"] = True
+    assert sessions.sweep() == [f"{sid}:ready-seen"]
+    assert sessions.sweep() == []  # within the wait: nothing
+    _age(sid, attach_deadline_at=1)
+    assert sessions.sweep() == [f"{sid}:unattached"]
+    s = sessions.get(sid)
+    assert s["outcome"] == "unattached" and s["usage"] == "unknown" and s["gpu_seconds"] is None and s["settled_at"]
+
+
+def test_never_ready_ends_at_the_admitted_deadline_and_never_later(cold):
+    sid, _ = _bound(timeout_s=600)
+    _age(sid, bound_at=3000)  # long past any attach wait, still starting: held until the admitted deadline only
+    assert sessions.sweep() == []
+    _age(sid, deadline_at=1)
+    assert sessions.sweep() == [f"{sid}:unattached"]
+    s = sessions.get(sid)
+    assert s["ready_seen_at"] is None and s["usage"] == "unknown" and s["gpu_seconds"] is None
+    assert _reservation(sid) is None  # the admission's reservation is released as unknown; nothing extra was ever held
+    # unknown status is unknown: no readiness recorded, nothing ended
+    sid2, _ = _bound()
+    cold["fail"].add("eu-north1")
+    assert sessions.sweep() == [] and sessions.get(sid2)["ready_seen_at"] is None
+
+
+def test_a_readiness_flap_never_extends_the_attach_deadline(cold):
+    sid, _ = _bound()
+    cold["ready"]["eu-north1"] = True
+    assert sessions.sweep() == [f"{sid}:ready-seen"]
+    first = sessions.get(sid)["attach_deadline_at"]
+    cold["ready"]["eu-north1"] = False
+    assert sessions.sweep() == []
+    cold["ready"]["eu-north1"] = True
+    assert sessions.sweep() == []  # ready again: recorded once already
+    assert sessions.get(sid)["attach_deadline_at"] == first
+    # the attach deadline never exceeds the admitted deadline
+    short, _ = _bound(timeout_s=60)
+    assert sessions.sweep() == [f"{short}:ready-seen"]
+    s = sessions.get(short)
+    assert s["attach_deadline_at"] <= s["deadline_at"]
+
+
+def test_regions_are_judged_separately_and_status_is_read_once_per_region_per_sweep(cold):
+    north, _ = _bound(region="eu-north1")
+    north2, _ = _bound(region="eu-north1")
+    south, _ = _bound(region="eu-south1")
+    cold["ready"]["eu-south1"] = True
+    cold["reads"].clear()
+    out = sessions.sweep()
+    assert out == [f"{south}:ready-seen"]
+    assert sorted(cold["reads"]) == ["eu-north1", "eu-south1"]  # one read per (model, region), not per session
+    assert sessions.get(north)["ready_seen_at"] is None and sessions.get(north2)["ready_seen_at"] is None
+
+
+def test_concurrent_sweeps_record_readiness_once_and_end_once(cold):
+    sid, _ = _bound()
+    cold["ready"]["eu-north1"] = True
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        outs = list(ex.map(lambda _: sessions.sweep(), range(4)))
+    assert sum(o.count(f"{sid}:ready-seen") for o in outs) == 1
+    _age(sid, attach_deadline_at=1)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        outs = list(ex.map(lambda _: sessions.sweep(), range(4)))
+    assert sum(o.count(f"{sid}:unattached") for o in outs) == 1
+    assert sessions.get(sid)["state"] == "ended"

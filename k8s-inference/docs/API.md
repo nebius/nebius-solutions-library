@@ -300,7 +300,15 @@ worker pod, released once; `services/api/sessions.py`.
 
 **No reconnect, by design and kept so:** a dropped connection ends at the worker (`disconnected`), the token binds once,
 a new session is a new admission; a client that needs continuity re-creates a session (the App's adapter owns that).
-A bound session no worker attached within `sessions.attach_wait_s` (60 s) ends `unattached` with usage unknown.
+**Cold attachment:** the hook binds the claim before the endpoint has a pod, so a bound session is `starting`
+(`phase`) until the reconciler observes a Ready replica of the endpoint in the session's region (one status read per
+model and region per sweep; a status it cannot read is unknown, never Ready). That first observation is recorded
+once (`ready_seen_at`, never reset by a later flap) with the attach deadline (`attach_deadline_at` =
+`sessions.attach_wait_s`, 60 s, after it, capped by the admitted `deadline_at`); the session is then
+`waiting_for_worker`. A bound session no worker attached by that deadline, or that never saw a Ready replica by its
+admitted deadline (the hard bound: never longer than `timeout_s`, no extra reservation), ends `unattached` with usage
+unknown. No GPU time is advertised for a session that never attached (`gpu_seconds` null; the key's bound stays
+unknown, separately). The public view carries no token and no pod identity.
 Settlement on the key's ledger happens exactly once per session (the reconciler retries what a crash left unsettled).
 
 **Transport deadline:** a single-node (Knative) endpoint ends every request at its revision timeout (the model's
