@@ -356,11 +356,9 @@ create table if not exists operation_marks (
     drop index if exists endpoint_children_one_active;
     create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
     """,
-    # 23: the retirement mark of a run member (docs/API.md "Keys"; app._phantom_head): a member whose Job exists nowhere
-    # and that no attempt reported is first MARKED (durable, visible to every replica, to the admitting one included),
-    # and rolled back only when the absence persists past the grace after the mark; the admitting replica confirms its
-    # create against the mark (clears it, or deletes the Job it created when the member is gone). Immediate absence is
-    # never a proof of "never created".
+    # 23: reserved. Added by the unreleased 0.11.91 candidate for an automatic retirement of run members that 0.11.92
+    # withdrew (an admission whose Job exists nowhere stays pending and is resolved only by a replay of the same
+    # intent, app.continue_run); the column is unused and kept so the migration sequence stays stable.
     """
     alter table key_run_members add column if not exists retire_marked_at timestamptz;
     """,

@@ -241,20 +241,19 @@ def test_a_definite_refusal_rolls_back_and_an_ambiguous_failure_never_does(clien
     assert r.status_code == 404 and ("rollback", x1) in fake_keys.calls and fake_keys.member_of(x1) is None
 
 
-def test_a_phantom_head_is_marked_then_retired_past_the_grace_and_a_head_that_ran_is_kept(
+def test_a_pending_admission_is_never_retired_and_only_the_same_intent_replays_it(
     client, admin_keys, fake_keys, monkeypatch
 ):
-    """A lineage head whose Job exists nowhere, with no attempt record and an active member: the first sighting MARKS
-    it and refuses (409, the mark named); only an absence persisting past RETIRE_GRACE_S after the mark rolls it back,
-    and the lineage continues from the real head. A head that ran and expired (record) is kept."""
-    from datetime import datetime, timedelta, timezone
-
+    """A lineage head that was admitted but has no Job and no attempt record stays PENDING: nothing retires it (no
+    rollback, ever); a replay of the same request renders the same operation name, is admitted as a replay of that
+    member and creates its Job (one member, one Job, the member untouched); a head that ran and expired (on record)
+    is kept and the stale source is refused as before."""
     c, cluster = client
     oid, rows = _exportable(c, cluster, monkeypatch)
-    phantom = f"{oid}-x1"
+    pending = f"{oid}-x1"  # the name the export retry of `oid` renders (no -x Job exists): the same intent
     fake_keys.members.append(
         {
-            "operation": phantom,
+            "operation": pending,
             "root": oid,
             "predecessor": oid,
             "state": "active",
@@ -264,39 +263,25 @@ def test_a_phantom_head_is_marked_then_retired_past_the_grace_and_a_head_that_ra
         }
     )
     r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 409 and "retired automatically" in r.text, r.text  # phase one: marked, nothing rolled back
-    assert ("mark", phantom) in fake_keys.calls and ("rollback", phantom) not in fake_keys.calls
-    assert fake_keys.member_of(phantom)["retire_marked_at"] is not None
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)  # within the grace: still refused, still not rolled back
-    assert r.status_code == 409 and ("rollback", phantom) not in fake_keys.calls
-    fake_keys.member_of(phantom)  # the grace elapsed (the mark is old): the absence persisted
-    next(m for m in fake_keys.members if m["operation"] == phantom)["retire_marked_at"] = datetime.now(
-        timezone.utc
-    ) - timedelta(seconds=api.RETIRE_GRACE_S + 1)
+    assert r.status_code == 202 and r.json()["id"] == pending, r.text
+    assert ("tenant-demo", pending) in cluster.jobs and not [x for x in fake_keys.calls if x[0] == "rollback"]
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, pending, oid)]  # a replay of the member
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [pending]
+    # a head that ran and whose Job expired: on record, the stale source is refused with the head named, nothing touched
+    del cluster.jobs[("tenant-demo", pending)]
+    rows.append({**_record(pending, f"{pending}-b", export="failed"), "operation": pending})
     r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 202, r.text
-    assert ("rollback", phantom) in fake_keys.calls  # phase two: retired, confirmed absent past the grace
-    new = r.json()["id"]
-    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, new, oid)]  # after the real head
-    assert fake_keys.member_of(new)["retire_marked_at"] is None and ("confirm", new) in fake_keys.calls
-    # a head that ran and whose Job expired: on record, never marked, the stale source refused with the head named
-    del cluster.jobs[("tenant-demo", new)]
-    rows.append({**_record(new, f"{new}-b", export="failed"), "operation": new})
-    marks = len([x for x in fake_keys.calls if x[0] == "mark"])
-    rollbacks = len([x for x in fake_keys.calls if x[0] == "rollback"])
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 409 and "continue" in r.text
-    assert len([x for x in fake_keys.calls if x[0] == "mark"]) == marks  # on record: never marked
-    assert len([x for x in fake_keys.calls if x[0] == "rollback"]) == rollbacks  # never retired
+    assert r.status_code == 409 and "continue" in r.text and not [x for x in fake_keys.calls if x[0] == "rollback"]
 
 
 def test_barrier_a_second_replica_cannot_retire_an_admission_whose_create_is_in_flight(
     client, admin_keys, fake_keys, monkeypatch
 ):
-    """Root's race (COORDINATION 12:18Z): replica A is paused between its admission and its create; replica B asks for
-    the same continuation and sees an active member with no Job and no record. B must not retire it: it marks and
-    refuses; A's create then lands, A confirms its member (the mark goes) and returns 202; exactly one Job, one member,
-    nothing rolled back, nothing unaccounted."""
+    """Root's race (COORDINATION 12:18Z and the 91 review): replica A is paused between its admission and its create;
+    replica B asks for the same continuation and sees an active member with no Job and no record. B retires nothing:
+    its request is the same intent, so it is admitted as a replay of A's member and creates the Job; A's create then
+    meets AlreadyExists (the same Job) and answers with it. One Job, one member, no rollback, nothing unaccounted,
+    whatever the order of the two creates and whatever either replica reads in between."""
     import jobs
 
     c, cluster = client
@@ -305,54 +290,50 @@ def test_barrier_a_second_replica_cannot_retire_an_admission_whose_create_is_in_
     seen: dict = {}
 
     def paused_then_create(ns, job, region="eu-north1", secret=None):
-        # the barrier: A has admitted (its member is active) and has not created yet; B's request runs here
+        # the barrier: A has admitted (its member is active) and has not created yet; B's whole request runs here
         name = job["metadata"]["name"]
         assert fake_keys.member_of(name)["state"] == "active" and ("tenant-demo", name) not in cluster.jobs
-        monkeypatch.setattr(jobs, "create", real)  # B's own create (if it got that far) would be real
+        monkeypatch.setattr(jobs, "create", real)
         b = c.post(f"/v1/operations/{oid}:export", headers=H)
-        seen["b"] = (b.status_code, b.text)
-        assert ("rollback", name) not in fake_keys.calls, "B retired A's in-flight admission"
-        assert fake_keys.member_of(name)["retire_marked_at"] is not None  # B marked it, nothing more
-        return real(ns, job, region, secret)  # A's create is released
+        seen["b"] = (b.status_code, b.json())
+        assert not [x for x in fake_keys.calls if x[0] == "rollback"], "B retired A's in-flight admission"
+        assert ("tenant-demo", name) in cluster.jobs  # B created the same operation under A's member
+        return real(ns, job, region, secret)  # A's create is released: AlreadyExists, the same Job
 
     monkeypatch.setattr(jobs, "create", paused_then_create)
     a = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert a.status_code == 202, a.text
+    assert a.status_code in (200, 202), a.text
     x1 = a.json()["id"]
-    assert seen["b"][0] == 409 and "retired automatically" in seen["b"][1], seen["b"]
+    assert seen["b"][0] == 202 and seen["b"][1]["id"] == x1, seen["b"]
     assert [k for k in cluster.jobs if k[1].startswith(f"{oid}-x")] == [("tenant-demo", x1)]  # one Job
     assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]  # one member
-    assert fake_keys.member_of(x1)["retire_marked_at"] is None and ("confirm", x1) in fake_keys.calls
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [
+        (oid, x1, oid),
+        (oid, x1, oid),
+    ]  # A, then B's replay
     assert not [x for x in fake_keys.calls if x[0] == "rollback"]
-    # B, asking again now that A's Job exists: the mark would be cleared by the sighting, the lineage continued from x1
-    cluster.jobs[("tenant-demo", x1)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
-    rows.append({**_record(x1, f"{x1}-b", export="failed"), "operation": x1})
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 202 and [x[1:4] for x in fake_keys.calls if x[0] == "prepare"][-1] == (
-        oid,
-        r.json()["id"],
-        x1,
-    )
 
 
-def test_a_create_that_lands_after_its_member_was_retired_is_taken_back(client, admin_keys, fake_keys, monkeypatch):
-    """The other interleaving: A's create lands only after B's absence outlasted the grace and B rolled the member
-    back. A's confirmation finds no member: the Job A created is removed and A answers 409 (replay); nothing runs
-    unaccounted."""
-    import jobs
-
+def test_another_intent_is_refused_while_an_admission_is_pending(client, admin_keys, fake_keys, monkeypatch):
+    """While a lineage has a pending admission, a continuation that would render ANOTHER operation (a resume instead of
+    the pending export retry) is refused, naming the pending admission; nothing is admitted, nothing retired."""
     c, cluster = client
     oid, rows = _exportable(c, cluster, monkeypatch)
-    real = jobs.create
-
-    def create_then_retired(ns, job, region="eu-north1", secret=None):
-        out = real(ns, job, region, secret)
-        fake_keys.members = [m for m in fake_keys.members if m["operation"] != job["metadata"]["name"]]  # B's rollback
-        return out
-
-    monkeypatch.setattr(jobs, "create", create_then_retired)
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 409 and "retired during its creation" in r.text, r.text
-    x1 = f"{oid}-x1"
-    assert ("tenant-demo", x1) not in cluster.jobs and x1 in cluster.deleted  # taken back
-    assert fake_keys.member_of(x1) is None
+    pending = f"{oid}-x1"
+    fake_keys.members.append(
+        {
+            "operation": pending,
+            "root": oid,
+            "predecessor": oid,
+            "state": "active",
+            "kind": "continuation",
+            "stage": None,
+            "note": None,
+        }
+    )
+    r = c.post(f"/v1/operations/{oid}:resume", headers=H, json={})
+    assert r.status_code == 409 and "pending admission" in r.text and pending in r.text, r.text
+    assert [m["operation"] for m in fake_keys.members] == [oid, pending] and not [
+        x for x in fake_keys.calls if x[0] == "rollback"
+    ]
+    assert not [k for k in cluster.jobs if k[1].startswith(f"{oid}-r")]

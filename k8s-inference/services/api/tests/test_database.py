@@ -1015,22 +1015,3 @@ def test_admission_records_survive_and_rebuild_the_job(database):
         None,
     )
     assert admissions.get("op-adm-2") is None
-
-
-def test_member_retirement_mark_is_durable_once_and_cleared_by_the_creator(database):
-    """Migration 23: a continuation member is marked for retirement once (the first mark stands, visible to every
-    replica); the admitting replica's confirmation clears it and says whether the member still exists; a root member
-    is never markable; a member rolled back cannot be confirmed."""
-    db.migrate()
-    h = "e" * 64
-    _bounded(h)
-    keys.admit(h, "root", "demo", run_member=True)
-    keys.prepare_run_member("root", "root-x1", "root", 0, 100, transfer_only=True)
-    assert keys.member_of("root-x1")["retire_marked_at"] is None and keys.member_of("root-x1")["created_at"]
-    first = keys.mark_member_retiring("root-x1")
-    assert first is not None and keys.mark_member_retiring("root-x1") == first  # once
-    assert keys.member_of("root-x1")["retire_marked_at"] == first
-    assert keys.mark_member_retiring("root") is None  # the root itself: never
-    assert keys.confirm_member_created("root-x1") is True and keys.member_of("root-x1")["retire_marked_at"] is None
-    assert keys.rollback_run_member("root-x1") is True
-    assert keys.confirm_member_created("root-x1") is False and keys.member_of("root-x1") is None

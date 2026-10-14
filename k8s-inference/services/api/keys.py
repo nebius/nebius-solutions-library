@@ -937,7 +937,7 @@ def member_of(operation: str) -> dict | None:
     child) and state; None when it is no member (no ledger)."""
     with _connection() as c:
         r = c.execute(
-            "select root, kind, stage, state, predecessor, retire_marked_at, created_at from key_run_members where operation = %s",
+            "select root, kind, stage, state, predecessor, created_at from key_run_members where operation = %s",
             (operation,),
         ).fetchone()
     return (
@@ -947,43 +947,11 @@ def member_of(operation: str) -> dict | None:
             "stage": r[2],
             "state": r[3],
             "predecessor": r[4],
-            "retire_marked_at": r[5],
-            "created_at": r[6],
+            "created_at": r[5],
         }
         if r
         else None
     )
-
-
-def mark_member_retiring(operation: str):
-    """Phase one of retiring a member whose Job exists nowhere (app._phantom_head): the mark is written once (durable,
-    visible to every replica) and returned; a member already marked returns its existing mark, so the caller can judge
-    the grace. Only an active continuation member (a predecessor, or an endpoint child) can be marked; None otherwise."""
-    with _connection() as c, c.transaction():
-        r = c.execute(
-            "select retire_marked_at from key_run_members where operation = %s and state = 'active' and (predecessor is not null or kind = 'child') for update",
-            (operation,),
-        ).fetchone()
-        if r is None:
-            return None
-        if r[0] is not None:
-            return r[0]
-        return c.execute(
-            "update key_run_members set retire_marked_at = now() where operation = %s returning retire_marked_at",
-            (operation,),
-        ).fetchone()[0]
-
-
-def confirm_member_created(operation: str) -> bool:
-    """The admitting replica, right after its create succeeded: the member must still be there (not retired by another
-    replica that judged it absent meanwhile); any retirement mark is cleared, the Job having proven the member. False =
-    the member is gone: the caller must take its freshly created Job back (app.continue_run)."""
-    with _connection() as c, c.transaction():
-        r = c.execute(
-            "update key_run_members set retire_marked_at = null where operation = %s and state = 'active' returning 1",
-            (operation,),
-        ).fetchone()
-        return r is not None
 
 
 def prepare_run_member(

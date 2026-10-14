@@ -4,7 +4,22 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.91
+## api 0.11.92
+
+(0.11.92 = 0.11.91 with its automatic retirement WITHDRAWN after review; jobs 0.1.26 and platform chart 0.1.10
+unchanged. Neither 0.11.90 nor 0.11.91 was applied.)
+
+- Continuations: nothing is retired automatically any more (91's two-phase mark had a gap: the reaper's rollback was not
+  compared against the mark it had observed, and a post-create cancel is no proof a Job never ran). A lineage head
+  that was admitted but has no Job and no attempt record stays a PENDING admission; the lineage continues only by the
+  same intent: the builder that renders that very operation name (the deterministic `-x<n>` / `-r<n>` of a replayed
+  request) is admitted as a replay of the pending member and creates its Job (AlreadyExists is the same Job); any other
+  continuation is refused (409 naming the pending admission). Two replicas racing on one continuation converge on one
+  Job and one member whatever the interleaving (regression: the barrier with B's request inside A's paused create).
+  An ambiguous failure after admission (5xx, transport) keeps the member; only a definite 4xx rolls back (unchanged
+  from 91). `key_run_members.retire_marked_at` (migration 23) stays as a reserved, unused column.
+
+## api 0.11.91 (unreleased candidate, superseded by 0.11.92)
 
 (0.11.91 = 0.11.90 with its continuation reconciliation corrected after review; jobs 0.1.26 and platform chart 0.1.10
 unchanged. 0.11.90 was never applied.)
