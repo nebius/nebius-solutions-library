@@ -363,28 +363,23 @@ cache fetches them from the source registry on first use.
 
 A run that mounts the shared filesystem but was admitted, before filesystem-aware placement (api 0.11.72, fleet chart
 0.1.11), on the `system` flavor of a system pool without the mount sits in `FailedMount`; its pod never started, its
-volume is untouched, its lineage and graph are intact. Keep the same operation (no resume, no new root), with the
-Job's scheduling directives, which Kubernetes lets you change while the Job is suspended:
+volume is untouched, its lineage and graph are intact. Existing Jobs do not gain the new affinity from a rollout.
+Two ways keep the same operation (no resume, no new root):
 
-1. Deactivate its Kueue Workload: `kubectl -n tenant-<t> patch workload <wl> --type merge -p '{"spec":{"active":false}}'`.
-   Kueue suspends the Job (object kept, same name); the Job controller deletes the never-started pod. Wait until
-   `job.spec.suspend` is `true`: Kubernetes makes the pod template's scheduling directives (node affinity, node
-   selector, tolerations) mutable **only on a Job that is already suspended**, and only in a request that changes
-   nothing else; a single request that sets `suspend` and the affinity together is refused as immutable.
-2. Then give the suspended Job the affinity new runs get: `kubectl -n tenant-<t> patch job <op> --type json -p
-   '[{"op":"add","path":"/spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/-","value":{"key":"serverless2.nebius/shared-fs","operator":"In","values":["true"]}}]'`
-   (create the `affinity` object first when the Job has none). Kueue compares the Job's pod template with its Workload
-   on the next reconcile and recreates the Workload when they differ; if the Workload still shows the old pod set,
-   delete the Workload object itself (never the Job): Kueue recreates it from the suspended Job's current template.
-   The ledger member, the attempt epoch and the handle are the API's and stay.
-3. Reactivate: `--type merge -p '{"spec":{"active":true}}'`. Kueue re-admits against the current flavors (the system
-   flavor excluded by its label, a filesystem CPU pool or the GPU pool eligible), unsuspends the Job, a new pod of the
-   same operation runs; the dependents follow the root as before.
-Requires the fleet chart with the labels applied first (step 3 on the old flavors would admit the run on `system`
-again). Alternative without touching the Job: `weights_filesystem.mount_on_system = true` for the region equips the
-system pool (the cloud stage rolls its nodes, one at a time: the platform add-ons move; the system nodes then also
-carry the snapshot-store label) and the same pending Job proceeds on a mounted system node once a node is replaced; a
-heavier change for one run, right when the system pool should hold the filesystem anyway.
+1. **Equip the pool the Job is pinned to (the safe path):** `regions.<r>.weights_filesystem.mount_on_system = true`
+   attaches and mounts the filesystem on the region's system pool (the cloud stage changes the node group's cloud-init
+   and attachment; the provider replaces its nodes one at a time, the platform add-ons move; the system nodes then also
+   carry the snapshot-store label). The pending pod schedules on a replaced node and runs; nothing on the Job changes.
+   Review the plan before applying: a system-pool replacement is a controlled rolling of two nodes.
+2. **Patch the suspended Job's scheduling directives (only if the cluster allows it):** Kubernetes mutates a Job's
+   node affinity, node selector and tolerations only while the Job is suspended, in a request that changes nothing
+   else, and only when the cluster enables that mutation (check with a server-side dry run of the patch on a suspended
+   Job before relying on it). If allowed: deactivate the Kueue Workload (`kubectl -n tenant-<t> patch workload <wl>
+   --type merge -p '{"spec":{"active":false}}'`, wait for `job.spec.suspend: true`), add the affinity
+   `serverless2.nebius/shared-fs In [true]` to the Job's pod template, let Kueue recreate the Workload (delete the
+   Workload object, never the Job, if it keeps the old pod set), then reactivate. Kueue re-admits against the labelled
+   flavors; a new pod of the same operation runs.
+The static PVs keep no node affinity (immutable once created; the flavor label is the guard for new runs).
 
 ## Patching
 
