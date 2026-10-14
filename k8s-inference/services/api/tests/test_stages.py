@@ -1031,3 +1031,89 @@ def test_restart_refuses_a_succeeded_root_and_keeps_the_stale_and_owner_fences(w
     r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
     assert r.status_code == 409 and succ in r.json()["detail"], r.text
     assert c.get(f"/v1/operations/{root}", headers=H).json()["id"] == succ
+
+
+def _view(c, root):
+    return c.get(f"/v1/operations/{root}", headers=H).json()
+
+
+def test_action_required_signal_appears_when_nothing_is_active_and_clears_on_resume(world):
+    """Projection only (api 0.11.76): a FAILED stage with its collector parked by the gate → action_required with the
+    head, the actions and the parked dependents; a parked (gated) collector never counts as active; a resume of the
+    head clears it; the terminal outcomes are unchanged."""
+    c, cl, fk, rows, cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    col = _submit(c, root, "collect").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _succeed(cl, rows, g0, "s3://b/g0")
+    _fail(cl, rows, g1)
+    assert reconciliation.gate_stages() == []
+    op = _view(c, root)
+    g = op["graph"]
+    assert op["status"] == "RUNNING" and op["phase"] == "action_required", op
+    assert g["status"] == "PENDING" and g["action_required"] is True
+    assert g["waiting"] == ["collect"]
+    assert g["blocked_on"] == [
+        {
+            "stage": "gpu-1",
+            "operation": g1,
+            "status": "FAILED",
+            "attempt_id": f"{g1}-a",
+            "actions": [f":resume {g1}", f":cancel {root}"],
+            "dependents": ["collect"],
+        }
+    ]
+    st = {s["id"]: s for s in g["stages"]}
+    assert st["collect"]["status"] == "QUEUED" and st["collect"]["gated"] is True
+    assert (
+        "gpu-1 FAILED" in op["reason"]
+        and "resume it or cancel the root" in op["reason"]
+        and "waiting: collect" in op["reason"]
+    )
+    # the resume clears it: the successor is an admitted QUEUED member, active
+    r = c.post(f"/v1/operations/{g1}:resume", headers=H, json={})
+    assert r.status_code == 202, r.text
+    succ = r.json()["id"]
+    op = _view(c, root)
+    assert op["phase"] == "stages" and op["graph"]["action_required"] is False and op["graph"]["blocked_on"] == []
+    st = {s["id"]: s for s in op["graph"]["stages"]}
+    assert st["gpu-1"]["status"] == "QUEUED" and st["gpu-1"]["operation"] == succ and st["gpu-1"].get("gated") is False
+    # terminal outcomes unchanged: the successor delivers, the collector runs and delivers, the graph SUCCEEDED
+    _succeed(cl, rows, succ, "s3://b/g1")
+    assert reconciliation.gate_stages() == [f"{col}:admitted"]
+    _succeed(cl, rows, col, "s3://b/col")
+    op = _view(c, root)
+    assert (
+        op["status"] == "SUCCEEDED" and op["graph"]["status"] == "SUCCEEDED" and op["graph"]["action_required"] is False
+    )
+
+
+def test_an_active_sibling_suppresses_the_signal_and_multiple_failures_are_all_listed(world):
+    c, cl, fk, rows, cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    _submit(c, root, "collect")
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    cl.jobs[(NS, g0)]["status"] = {"startTime": "2026-10-13T20:00:00Z", "active": 1}  # gpu-0 RUNNING
+    _fail(cl, rows, g1)
+    assert reconciliation.gate_stages() == []
+    op = _view(c, root)
+    assert op["phase"] == "stages" and op["graph"]["action_required"] is False  # gpu-0 may still deliver
+    assert [b["stage"] for b in op["graph"]["blocked_on"]] == ["gpu-1"]  # the failure is still named, not hidden
+    # gpu-0 fails too: two failed dependencies, nothing active, the collector parked on both
+    _fail(cl, rows, g0)
+    assert reconciliation.gate_stages() == []
+    op = _view(c, root)
+    assert op["phase"] == "action_required" and op["graph"]["action_required"] is True
+    assert [(b["stage"], b["dependents"]) for b in op["graph"]["blocked_on"]] == [
+        ("gpu-0", ["collect"]),
+        ("gpu-1", ["collect"]),
+    ]
+    assert "gpu-0 FAILED" in op["reason"] and "gpu-1 FAILED" in op["reason"]
+    # the owner's cancel: the graph is CANCELLED as before, the signal is gone with it
+    assert c.post(f"/v1/operations/{root}:cancel", headers=H).status_code == 200
+    op = _view(c, root)
+    assert op["graph"]["status"] == "CANCELLED" and op["graph"]["action_required"] is False

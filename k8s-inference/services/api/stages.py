@@ -460,10 +460,11 @@ def graph_view(ns: str, g: dict) -> dict:
         if lineage:
             m = lineage[-1]
             st = state_of(ns, m["operation"])
+            status = st.get("status") or ("CANCELLED" if m["state"] != "active" else "QUEUED")
             entry.update(
                 {
                     "operation": m["operation"],
-                    "status": st.get("status") or ("CANCELLED" if m["state"] != "active" else "QUEUED"),
+                    "status": status,
                     "attempt_id": st.get("attempt_id"),
                     "epoch": st.get("epoch"),
                     "delivered_by": st["operation"] if st.get("operation") != m["operation"] else None,
@@ -472,6 +473,10 @@ def graph_view(ns: str, g: dict) -> dict:
                     **({"continuations": len(lineage) - 1} if len(lineage) > 1 else {}),
                 }
             )
+            if status == "QUEUED":
+                # a QUEUED member is either admitted and waiting for a node (active: it will run) or dependency-gated
+                # (parked by the gate until its dependencies deliver: it cannot mask a failed dependency)
+                entry["gated"] = _gated(ns, m["operation"])
         else:
             entry["status"] = "NOT_SUBMITTED"
         stages.append(entry)
@@ -484,13 +489,57 @@ def graph_view(ns: str, g: dict) -> dict:
         overall = "FAILED"  # over, and not every stage delivered (a resumed stage that delivers later turns it)
     else:
         overall = "PENDING"  # open: a FAILED stage may be resumed, a cancelled one cancels its dependents
-    return {
+    out = {
         "status": overall,
         "stages": stages,
         "deadline_at": g["deadline_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if g.get("deadline_at") else None,
         "cancelled": bool(g.get("cancelled_at")),
         **({"reason": g["reason"]} if g.get("reason") else {}),
     }
+    out.update(_action_required(g["root"], stages, overall))
+    return out
+
+
+ACTIVE = (
+    "RUNNING",
+    "FINALIZING",
+    "EXPORT_FAILED",
+)  # a member that will still change by itself (or by a delivery retry)
+
+
+def _gated(ns: str, operation: str) -> bool:
+    """A QUEUED member parked by the gate (label stage-waiting), as opposed to one admitted and waiting for a node."""
+    try:
+        job, _r = jobs.find(ns, operation)
+    except HTTPException:
+        return False
+    return is_waiting(job)
+
+
+def _action_required(root: str, stages: list[dict], overall: str) -> dict:
+    """The owner-facing signal (docs/API.md "Operations"): an open graph in which nothing is active any more and at
+    least one stage FAILED will not change without the owner (`:resume` the failed head, or `:cancel` the root).
+    Projection only: no state is touched, nothing is failed or retried, the graph's deadline still closes it. A
+    dependency-gated QUEUED member is not active (a parked collector cannot mask its failed dependency); an admitted
+    QUEUED, RUNNING, FINALIZING or delivery-retryable sibling is, and suppresses the signal while it may still deliver.
+    `blocked_on` carries bounded metadata only: the failed lineage head, its attempt, the actions and the direct
+    dependents parked on it."""
+    failed = [s for s in stages if s["status"] == "FAILED"]
+    active = [s for s in stages if s["status"] in ACTIVE or (s["status"] == "QUEUED" and not s.get("gated", False))]
+    waiting = [s["id"] for s in stages if s["status"] == "QUEUED" and s.get("gated")]
+    blocked = [
+        {
+            "stage": s["id"],
+            "operation": s["operation"],
+            "status": s["status"],
+            "attempt_id": s.get("attempt_id"),
+            "actions": [f":resume {s['operation']}", f":cancel {root}"],
+            "dependents": [d["id"] for d in stages if s["id"] in (d.get("depends_on") or [])],
+        }
+        for s in failed
+    ]
+    required = overall == "PENDING" and bool(failed) and not active
+    return {"action_required": required, "blocked_on": blocked, "waiting": waiting}
 
 
 def apply_to_root(op: dict, view: dict) -> None:
@@ -500,7 +549,13 @@ def apply_to_root(op: dict, view: dict) -> None:
     op["graph"] = view
     if op.get("status") != "SUCCEEDED":
         return
-    if view["status"] == "PENDING":
+    if view["status"] == "PENDING" and view.get("action_required"):
+        # nothing will change without the owner: say so on the handle itself, status RUNNING (resumable), no auto-fail
+        op["status"], op["phase"] = "RUNNING", "action_required"
+        heads = "; ".join(f"stage {b['stage']} FAILED ({b['operation']})" for b in view.get("blocked_on") or [])
+        waiting = ", ".join(view.get("waiting") or []) or "none"
+        op["reason"] = f"{heads}: resume it or cancel the root; waiting: {waiting}"[:300]
+    elif view["status"] == "PENDING":
         op["status"], op["phase"] = "RUNNING", "stages"
         pending = [s["id"] for s in view["stages"] if s["status"] not in ("SUCCEEDED",)]
         op["reason"] = f"waiting for stages: {', '.join(pending)}"[:300]

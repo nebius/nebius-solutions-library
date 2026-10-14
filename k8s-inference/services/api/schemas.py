@@ -589,6 +589,16 @@ class GraphStage(BaseModel):
     result_ref: str | None = None
     continuations: int | None = None
     reason: str | None = None
+    gated: bool | None = None  # a QUEUED member parked by the gate (dependencies not delivered), not admitted
+
+
+class BlockedStage(BaseModel):
+    stage: str
+    operation: str | None = None
+    status: str | None = None
+    attempt_id: str | None = None
+    actions: list[str] | None = None  # ":resume <operation>", ":cancel <root>"
+    dependents: list[str] | None = None  # the stages parked on it
 
 
 class GraphStatus(BaseModel):
@@ -598,6 +608,11 @@ class GraphStatus(BaseModel):
     stages: list[GraphStage] | None = None
     deadline_at: str | None = None
     cancelled: bool | None = None
+    action_required: bool | None = (
+        None  # open graph, nothing active, a FAILED stage: the owner resumes it or cancels the root
+    )
+    blocked_on: list[BlockedStage] | None = None
+    waiting: list[str] | None = None  # the dependency-gated stages
 
 
 class Operation(BaseModel):
@@ -606,7 +621,7 @@ class Operation(BaseModel):
     model: str | None
     mode: Mode
     status: OperationStatus
-    phase: Literal["waiting_for_admission", "waiting_for_node", "starting", None] = None
+    phase: Literal["waiting_for_admission", "waiting_for_node", "starting", "stages", "action_required", None] = None
     reason: str | None = None
     region: str | None
     cluster: str | None = None

@@ -4,6 +4,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.76
+
+- Graph "action required" (docs/API.md "Operations"): the root handle's `graph` carries `action_required`, `blocked_on`
+  (each FAILED lineage head with its attempt, the two actions `:resume <operation>` / `:cancel <root>`, and its parked
+  dependents) and `waiting` (dependency-gated stages); a QUEUED member reports `gated` when the gate parks it. The root
+  reads `phase: action_required` with the remedy in `reason` when the graph is open, nothing is active (admitted QUEUED,
+  RUNNING, FINALIZING or a delivery retry) and a stage FAILED; `status` stays RUNNING (resumable), nothing is failed or
+  retried, the gate and the ledger are untouched. An active sibling suppresses the signal; a resume clears it.
+
 ## api 0.11.75 (supersedes the unapplied 0.11.74)
 
 - Restart from inputs, placement-correct: the admission record keeps the run's MultiKueue `managedBy`, so the restart of

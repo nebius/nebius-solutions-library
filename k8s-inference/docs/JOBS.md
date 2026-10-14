@@ -415,7 +415,15 @@ POST /v1/models/md-class:invoke
 | deadline | `deadline_s` (default 14 days, 60 s to 30 days) bounds how long the graph stays open: when it passes, waiting stages are cancelled, never-submitted stages are recorded in the graph's reason, the graph closes and the root's run releases its slot (running stages settle through billing as usual) |
 | limits | a stage is a single-node run (no JobSet); stages are not endpoint calls; after the graph closed, no new stage attaches but the stages' lineages may still be continued (the slot is re-acquired as for any closed run); the gate reads durable attempt records, so a dependency that delivered through a retry or finalizer counts once that is on record |
 
-### Delegated stages
+#**Action required.** While the graph is open, a FAILED stage does not fail the graph (it may be resumed); when nothing
+is active any more (no admitted QUEUED, RUNNING, FINALIZING or delivery-retryable stage: a dependency-gated QUEUED
+member counts as parked, never as active) and a stage FAILED, the root handle reads `phase: action_required` with the
+remedy in `reason`, and `graph.action_required`, `graph.blocked_on` (the failed lineage heads, their attempts, the
+actions `:resume <operation>` or `:cancel <root>`, their parked dependents) and `graph.waiting` say exactly what is
+blocked on whom. `status` stays `RUNNING`; nothing is failed or retried by the platform; the graph's deadline still
+closes an unattended graph. A `:resume` of the failed head clears the signal (the successor is active).
+
+## Delegated stages
 
 A stage may run on a run class the caller's key is not granted, but only when four things meet, none of which the
 caller can mint alone: the root's run class lists the class among its `delegates` (operator-owned: the model spec of
