@@ -48,8 +48,11 @@ def _ssl_context() -> ssl.SSLContext:
     """The system roots, plus the fleet's CA bundle when the platform projected one (`S2_CA_PEM`)."""
     global _SSL
     if _SSL is None:
+        ctx = ssl.create_default_context()  # the system roots (S2_API_URL is publicly signed on a public fleet)
         pem = os.environ.get("S2_CA_PEM") or ""
-        _SSL = ssl.create_default_context(cadata=pem if "BEGIN CERTIFICATE" in pem else None)
+        if "BEGIN CERTIFICATE" in pem:
+            ctx.load_verify_locations(cadata=pem)  # ADDED to the roots, never replacing them
+        _SSL = ctx
     return _SSL
 
 

@@ -110,11 +110,45 @@ def test_from_env_and_cancel_poll(token, monkeypatch):
     assert t.calls[1][:2] == ("GET", "https://api.example/internal/executions/op-1")
 
 
-def test_ssl_context_takes_the_projected_bundle(monkeypatch):
+def test_ssl_context_adds_the_projected_bundle_to_the_system_roots(monkeypatch, tmp_path):
+    """A projected fleet CA is added to the system roots, never replacing them: S2_API_URL is publicly signed on a public
+    fleet while the bundle may still be present (the async caller gets the same bundle)."""
+    import subprocess
+
+    system = len(s2lease.ssl.create_default_context().get_ca_certs())
+    key, crt = tmp_path / "ca.key", tmp_path / "ca.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(crt),
+            "-days",
+            "2",
+            "-subj",
+            "/CN=serverless2 test fleet CA",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    s2lease._SSL = None
+    monkeypatch.setenv("S2_CA_PEM", crt.read_text())
+    ctx = s2lease._ssl_context()
+    assert ctx.verify_mode == s2lease.ssl.CERT_REQUIRED
+    assert len(ctx.get_ca_certs()) == system + 1  # the public roots stay, the fleet CA is one more
+    assert any("serverless2 test fleet CA" in str(c.get("subject")) for c in ctx.get_ca_certs())
     s2lease._SSL = None
     monkeypatch.setenv("S2_CA_PEM", "not a certificate")
-    assert s2lease._ssl_context() is not None  # garbage is ignored, the system roots stay
+    assert len(s2lease._ssl_context().get_ca_certs()) == system  # garbage is ignored, the system roots stay
     s2lease._SSL = None
     monkeypatch.delenv("S2_CA_PEM")
-    assert s2lease._ssl_context().verify_mode == s2lease.ssl.CERT_REQUIRED
+    assert len(s2lease._ssl_context().get_ca_certs()) == system
     s2lease._SSL = None
