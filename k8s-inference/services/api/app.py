@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.103", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.104", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -2095,12 +2095,22 @@ def _home(job: dict) -> str:
 # ---- live sessions (docs/API.md "Sessions") -----------------------------------------------------------------------
 @app.post("/v1/models/{model}:session", responses={202: {"model": schemas.Session}}, status_code=202)
 def create_session(
-    model: str, req: schemas.SessionRequest | None = None, p: Principal = Depends(scoped("invoke:sync"))
+    model: str,
+    req: schemas.SessionRequest | None = None,
+    p: Principal = Depends(scoped("invoke:sync")),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """An admitted stream to an endpoint: the key's slot and request are taken now (and, for a key with a GPU-second
     budget, the endpoint's GPUs x timeout_s); the answer carries a one-time claim token the connection presents
-    (`Sec-WebSocket-Protocol: s2-session.<token>` or `x-serverless2-session-claim`) within SESSION_CLAIM_TTL_S."""
+    (`Sec-WebSocket-Protocol: s2-session.<token>` or `x-serverless2-session-claim`) within SESSION_CLAIM_TTL_S.
+    `Idempotency-Key` (owner-scoped): the same request again answers the same session (`replay: true`), with a usable
+    claim that replaces the earlier one while nobody bound it, without one once bound, attached or ended; the key with
+    another request is 409 (sessions.replay)."""
     sessions.require()
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > sessions.IDEMPOTENCY_KEY_MAX:
+            raise HTTPException(400, f"Idempotency-Key: 1..{sessions.IDEMPOTENCY_KEY_MAX} characters")
     req = req or schemas.SessionRequest()
     m = _model(model)
     authorize(p, m["name"], "invoke:sync", budget=True)
@@ -2131,6 +2141,7 @@ def create_session(
             region,
             req.timeout_s,
             sessions.gpus_per_replica(m),
+            idempotency_key=idempotency_key,
         )
     except keys.KeyLimit as e:
         raise HTTPException(e.status, e.detail)

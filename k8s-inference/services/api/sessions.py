@@ -18,11 +18,18 @@ long connection (speech). One session = one claim, one connection, one worker po
   attached worker observes `cancel_requested` (`GET /internal/sessions/<id>`) and releases after cleanup. Only the
   worker's release, or the exact disappearance of the attached pod (UID), ends an attached session (usage unknown).
   Never a replica-wide drain. No reconnect: a dropped connection ends at the worker; the token binds once.
+- idempotent creation (`Idempotency-Key`, owner-scoped): a lost create answer is recovered by the same request under
+  the same key: the same session, one row, one admission; while the session is still `claimed` (unexpired, not
+  cancelled) the replay answers a usable claim that REPLACES the earlier one (the earlier token no longer binds: still
+  exactly one connection ever binds); once bound, attached or ended the replay is the same id without a claim.
+  Nothing is extended (`expires_at`, `deadline_at` stay); the same key with another request (model, deployment,
+  timeout_s) is 409. The semantic request hash is over the effective values, not the bytes sent.
 
 State lives in the database; every transition is a single conditional UPDATE (fencing). Settlement on the key's
 ledger happens once per session (`settled_at`), retried by the sweep if the process died in between."""
 
 import hashlib
+import json
 import logging
 import secrets
 import uuid
@@ -47,8 +54,10 @@ OUTCOMES = ("done", "cancelled", "disconnected", "busy", "error")
 COLUMNS = (
     "id, tenant, owner, key_hash, model, cluster, region, state, connection, pod, pod_namespace, pod_uid, "
     "worker_session_id, gpu_bound, created_at, expires_at, deadline_at, bound_at, attached_at, cancel_requested_at, "
-    "cancel_reason, ended_at, outcome, gpu_seconds, usage, settled_at, ready_seen_at, attach_deadline_at"
+    "cancel_reason, ended_at, outcome, gpu_seconds, usage, settled_at, ready_seen_at, attach_deadline_at, "
+    "idempotency_key, request_hash"
 )
+IDEMPOTENCY_KEY_MAX = 200
 
 
 def enabled() -> bool:
@@ -144,10 +153,68 @@ def open_on(model: str) -> int:
 
 
 # ---- transitions ------------------------------------------------------------------------------------------------
+def request_hash(model: str, cluster: str | None, region: str, timeout_s: int, gpus: int) -> str:
+    """The semantic identity of a create request: the EFFECTIVE values (defaults applied, the deployment resolved),
+    never the bytes the client sent: `{}` and `{"timeout_s": <the default>}` are one request; another deployment or
+    timeout is another request."""
+    doc = {"model": model, "cluster": cluster, "region": region, "timeout_s": int(timeout_s), "gpus": int(gpus)}
+    return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
+
+
+def find_replay(tenant: str, owner: str, idempotency_key: str) -> dict | None:
+    """The session an owner's Idempotency-Key names (owner-scoped: another owner's same key is another namespace)."""
+    with db.pool().connection() as c:
+        r = c.execute(
+            f"select {COLUMNS} from sessions where tenant = %s and owner = %s and idempotency_key = %s",
+            (tenant, owner, idempotency_key),
+        ).fetchone()
+    return _row(r) if r else None
+
+
+def replay(s: dict, h: str) -> dict:
+    """The same request under the key of an existing session: the session as it is (`replay: true`). While it is
+    still `claimed` (unexpired, before the deadline, not cancelled) the answer carries a usable claim that REPLACES
+    the earlier token (compare-and-swap on `claimed`: a bind racing with this either took the old token first, then
+    no claim is issued here, or finds the old token gone, 401); so exactly one connection ever binds. Once bound,
+    attached or ended: the same id, no claim, nothing re-issued. Nothing is extended: `expires_at` and `deadline_at`
+    stay as admitted. The key with another request is 409."""
+    if s.get("request_hash") != h:
+        raise HTTPException(
+            409, "Idempotency-Key was already used with a different session request (model, region or timeout_s)"
+        )
+    out = {**public(s), "replay": True}
+    if s["state"] == "claimed" and s["cancel_requested_at"] is None:
+        token = secrets.token_urlsafe(32)
+        with db.pool().connection() as c, c.transaction():
+            r = c.execute(
+                "update sessions set claim_hash = %s where id = %s and state = 'claimed' and expires_at > now() "
+                "and deadline_at > now() and cancel_requested_at is null returning id",
+                (_hash(token), s["id"]),
+            ).fetchone()
+        if r is not None:
+            out["claim_token"] = token  # the earlier token binds no more
+    return out
+
+
 def create(
-    key_hash: str, tenant: str, owner: str, model: str, cluster: str | None, region: str, timeout_s: int, gpus: int
+    key_hash: str,
+    tenant: str,
+    owner: str,
+    model: str,
+    cluster: str | None,
+    region: str,
+    timeout_s: int,
+    gpus: int,
+    idempotency_key: str | None = None,
 ) -> dict:
-    """Admit and record a session. Raises keys.KeyLimit as a run's admission does."""
+    """Admit and record a session (`replay: false`, a fresh claim). Raises keys.KeyLimit as a run's admission does.
+    With an `idempotency_key` (owner-scoped) the same request again answers the existing session (`replay`); a
+    concurrent duplicate loses the unique index, releases its own admission and answers the winner's session."""
+    h = request_hash(model, cluster, region, timeout_s, gpus)
+    if idempotency_key:
+        s = find_replay(tenant, owner, idempotency_key)
+        if s is not None:
+            return replay(s, h)
     sid = f"ses-{uuid.uuid4().hex[:16]}"
     token = secrets.token_urlsafe(32)
     bound = float(gpus * timeout_s)
@@ -156,8 +223,8 @@ def create(
     try:
         with db.pool().connection() as c, c.transaction():
             c.execute(
-                "insert into sessions (id, tenant, owner, key_hash, model, cluster, region, claim_hash, gpu_bound, expires_at, deadline_at) "
-                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "insert into sessions (id, tenant, owner, key_hash, model, cluster, region, claim_hash, gpu_bound, expires_at, deadline_at, idempotency_key, request_hash) "
+                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     sid,
                     tenant,
@@ -170,13 +237,21 @@ def create(
                     bound,
                     now + timedelta(seconds=cfg.SESSION_CLAIM_TTL_S),
                     now + timedelta(seconds=timeout_s),
+                    idempotency_key,
+                    h,
                 ),
             )
-    except Exception:
+    except Exception as e:
         keys.release(sid, 0.0)  # nothing was bound: the slot goes back
+        import psycopg
+
+        if idempotency_key and isinstance(e, psycopg.errors.UniqueViolation):
+            s = find_replay(tenant, owner, idempotency_key)  # the concurrent duplicate that won
+            if s is not None:
+                return replay(s, h)
         raise
     s = get(sid)
-    return {**public(s), "claim_token": token}
+    return {**public(s), "claim_token": token, "replay": False}
 
 
 def get(sid: str) -> dict | None:

@@ -578,7 +578,9 @@ render of the class: no `nodes`, no GPU, no fabric, a small `/work` claim of its
 subPath mounted where every rank had it (`/work/checkpoint`, `CHECKPOINT_DIR`), the coordinator's record as the finalized
 attempt (`FINALIZE_OF` = the rank-0 pod of the newest incarnation, `FINALIZE_EPOCH`, `FINALIZE_RANK=0`,
 `FINALIZE_GANG_RESTART`, `FINALIZE_NODES`); the delivery verdict is the coordinator's exit code, never a peer's teardown
-exit. The GPU gang is never rendered again for a delivery.
+exit. The GPU gang is never rendered again for a delivery. The finalizer's image is the finalized attempt's recorded
+digest when on record, else the image of the class the gang was admitted on (a class with per-class `job.images` keeps
+that image; the per-class map itself is dropped with the other compute-only keys).
 
 `POST /v1/operations/<id>:export` (the existing verb) is then accepted for a FAILED application run whose newest
 attempt ended with one of those exit codes and whose volume is kept: `<root>-x<n>` is rendered on the same
