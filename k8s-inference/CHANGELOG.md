@@ -15,6 +15,25 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   validator was the only bound before). Malformed numerics (strings, booleans, NaN/inf, fractions where an integer is
   declared) are refused, never coerced. Classes declaring no bounds are untouched (the bundled classes included).
 
+## platform chart 0.1.12, stack module `cluster`: the registry bootstrap at boot on CPU batch pools (cold-node first pull)
+
+- `stack/modules/cluster`: one `registry_bootstrap_*` cloud-init fragment shared by the GPU pools (unchanged content) and
+  the CPU batch pools (new): the containerd drop-in, the mirror file for the logical host on the loopback Zot NodePort,
+  the unlimited memlock on the runtime, the node-config marker, one containerd restart at boot. The system node group
+  keeps its plain cloud-init; without the image cache nothing is written anywhere. Module tests
+  (`tests/registry-bootstrap.tftest.hcl`): a CPU batch pool's first pull goes through the mirror files written at
+  boot (file, port, drop-in, memlock, marker, restart), one `write_files`/`runcmd` section, the sysctl and the
+  shared-filesystem mount preserved, the system group untouched, the GPU fragment unchanged, nothing without the cache.
+  Terraform effect: the CPU batch node groups' templates change (a node-group re-creation; scale-from-zero pools:
+  harmless; the system and control node groups: no change).
+- Platform chart 0.1.12: the node-config script moves to `charts/platform/files/node-config.sh` (env-parametrised,
+  testable) and gains the catch-all: a bootstrap `hosts.toml` for the logical host when a node has none (never over
+  cloud-init's or Spegel's file); the memlock drop-in and the containerd restart only when the running runtime lacks
+  them (decided by the probe pull and the process limits, never by a file). `images.cacheNodePort` (default 30500).
+  `tools/node-config-test.sh` (run by `make check`): a fresh node gets the bootstrap file, the memlock drop-in and
+  exactly one restart; an initialised node with Spegel's file sees no write and no restart; a served runtime without
+  the memlock drop-in is restarted once with Spegel's file untouched; a node booted with the fragment is a no-op.
+
 ## api 0.11.101
 
 (0.11.101 = 0.11.100 plus the gang resume pointer; jobs 0.1.27 and platform chart 0.1.11 unchanged; migration 26.)
