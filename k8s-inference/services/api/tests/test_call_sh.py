@@ -139,10 +139,20 @@ def test_readiness_then_one_post_then_delivery_with_the_frozen_schema(tmp_path):
     assert set(call["timings"]) == {"posted_at", "first_byte_at", "completed_at", "duration_s"}
     assert call["timings"]["first_byte_at"].endswith("Z") and "T" in call["timings"]["posted_at"]
     assert (work / "response.bin").read_text() == '{"choices":[]}' and call["sha256"]
-    assert json.loads((work / "RESULT.json").read_text()) == {
+    result = json.loads((work / "RESULT.json").read_text())
+    assert {k: result[k] for k in ("result_ref", "export", "capture_attempt_id")} == {
         "result_ref": "app://results/1",
         "export": "succeeded",
         "capture_attempt_id": "op-1-abc",
+    }
+    assert result["capture"]["sha256"] == call["sha256"] and result["capture"]["capture_attempt_id"] == "op-1-abc"
+    assert set(result["capture"]) >= {
+        "sha256",
+        "content_type",
+        "size_bytes",
+        "http_status",
+        "posted_at",
+        "completed_at",
     }
 
 

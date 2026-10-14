@@ -108,7 +108,10 @@ finish() {   # $1 = export state; RESULT.json is what the uploader's attempt rec
   local ref; ref=$(binding result_ref)
   local wrote=0
   if [ "$1" = succeeded ]; then
-    jq -cn --arg r "$ref" --arg a "${CAPTURE_ATTEMPT:-${POD_NAME:-}}" '{result_ref:$r, export:"succeeded", capture_attempt_id:$a}' > RESULT.json.tmp && wrote=1
+    # the capture manifest (call.json, already durable) travels with the result record: the platform's uploader posts
+    # it to the API (docs/JOBS.md "Endpoint children"); a re-delivery carries the ORIGINAL producer's manifest unchanged
+    cap=$(jq -c '{sha256, content_type, size_bytes, http_status, capture_attempt_id: .attempt_id, posted_at: .timings.posted_at, completed_at: .timings.completed_at}' call.json 2>/dev/null || echo null)
+    jq -cn --arg r "$ref" --arg a "${CAPTURE_ATTEMPT:-${POD_NAME:-}}" --argjson c "${cap:-null}" '{result_ref:$r, export:"succeeded", capture_attempt_id:$a} + (if $c != null and $c.sha256 != null then {capture:$c} else {} end)' > RESULT.json.tmp && wrote=1
   else
     jq -cn --arg r "$ref" --arg e "${2:-}" '{export:"failed", error:$e} + (if $r != "" then {result_ref_pending:$r} else {} end)' > RESULT.json.tmp && wrote=1
   fi

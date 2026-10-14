@@ -1015,3 +1015,320 @@ def test_admission_records_survive_and_rebuild_the_job(database):
         None,
     )
     assert admissions.get("op-adm-2") is None
+
+
+def _facts(gang):
+    """`attempts._pod_facts` as the tests shape it: a gang pod's facts carry its UID; an unreadable one carries none."""
+    uid = (gang or {}).get("uid")
+    return {"uid": uid, "digest": None, "gang": gang, "read": uid is not None}
+
+
+def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(database, monkeypatch):
+    """Migration 24 (docs/JOBS.md "Gang attempts"): the pods of one JobSet incarnation (observed restart-attempt and
+    completion index) share one epoch, so a peer's start never fences the coordinator; only rank 0 publishes a
+    checkpoint pointer or result; the next incarnation is the next epoch and the prior gang is fenced as any replaced
+    attempt (its own failure still closes it, promoting nothing); an ordinary single pod keeps an epoch of its own."""
+    import db
+
+    db.migrate()
+    op = "op-gang"
+    facts = {
+        f"{op}-workers-0-0-aaaaa": {"uid": "u0", "rank": 0, "restart": 0},
+        f"{op}-workers-0-1-bbbbb": {"uid": "u1", "rank": 1, "restart": 0},
+        f"{op}-workers-0-0-ccccc": {"uid": "u2", "rank": 0, "restart": 1},
+        f"{op}-workers-0-1-ddddd": {"uid": "u3", "rank": 1, "restart": 1},
+    }
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(facts.get(pod)))
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+    }
+    coord, peer = f"{op}-workers-0-0-aaaaa", f"{op}-workers-0-1-bbbbb"
+    a = attempts.record("north", "tenant-demo", coord, body)
+    b = attempts.record("north", "tenant-demo", peer, body)
+    assert (a["epoch"], b["epoch"]) == (1, 1) and a["gang_rank"] == 0 and b["gang_rank"] == 1 and b["pod_uid"] == "u1"
+    # the coordinator keeps publishing after its peer started (no fence between siblings)
+    live = attempts.record(
+        "north", "tenant-demo", coord, {**body, "checkpoint_ref": "c" * 64, "checkpoint_generation": 1}
+    )
+    assert live["checkpoint_ref"] == "c" * 64 and live["epoch"] == 1
+    # a peer's pointer or result is not the gang's: stripped, its own record stands
+    p2 = attempts.record("north", "tenant-demo", peer, {**body, "checkpoint_ref": "x" * 64, "checkpoint_generation": 7})
+    assert p2["checkpoint_ref"] is None and p2["status"] == "started"
+    done = attempts.record(
+        "north", "tenant-demo", coord, {**body, "status": "succeeded", "result_ref": "d" * 64, "export": "succeeded"}
+    )
+    assert done["result_ref"] == "d" * 64 and done["status"] == "succeeded"
+    peer_done = attempts.record("north", "tenant-demo", peer, {**body, "status": "succeeded", "result_ref": "e" * 64})
+    assert peer_done["result_ref"] is None
+    assert attempts.gang_status([r for r in attempts.for_operation(op)]) == "succeeded"
+    assert attempts.authority(attempts.for_operation(op))["pod"] == coord
+    # the next incarnation (every pod recreated): epoch 2; the old gang is stale: its late start refused, its own
+    # failure closes it without promoting anything
+    c2 = attempts.record("north", "tenant-demo", f"{op}-workers-0-0-ccccc", body)
+    d2 = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", body)
+    assert (c2["epoch"], d2["epoch"]) == (2, 2) and c2["gang_restart"] == 1
+    with pytest.raises(HTTPException) as e:
+        attempts.record("north", "tenant-demo", peer, {**body, "status": "started"})
+    assert e.value.status_code == 409 and "stale record refused" in e.value.detail
+    old = attempts.record(
+        "north", "tenant-demo", coord, {**body, "status": "failed", "exit_code": 137, "result_ref": "z" * 64}
+    )
+    assert old["status"] == "failed" and old["result_ref"] == "d" * 64  # the earlier result stays, nothing new promoted
+    assert attempts.authority(attempts.for_operation(op))["pod"] == f"{op}-workers-0-0-ccccc"
+    # an unreadable late record of a gang pod keeps only the pod's OWN verified row; it is never attributed to any gang
+    monkeypatch.setattr(
+        attempts, "_pod_facts", lambda region, ns, pod, operation: _facts({"uid": None, "rank": 1, "restart": None})
+    )
+    late = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", {**body, "status": "succeeded"})
+    assert late["epoch"] == 2  # its own row (cur): the epoch it had
+    with pytest.raises(HTTPException) as e:  # a gang pod never recorded and unreadable: no proof of its incarnation
+        attempts.record("north", "tenant-demo", f"{op}-workers-0-1-eeeee", {**body, "status": "started"})
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+    assert not any(r["pod"] == f"{op}-workers-0-1-eeeee" for r in attempts.for_operation(op))
+    # an ordinary single pod of another operation: one epoch per pod, as before
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(None))
+    assert (
+        attempts.record("north", "tenant-demo", "op-solo-a", {"operation": "op-solo", "status": "started", "gpus": 1})[
+            "epoch"
+        ]
+        == 1
+    )
+    assert (
+        attempts.record("north", "tenant-demo", "op-solo-b", {"operation": "op-solo", "status": "started", "gpus": 1})[
+            "epoch"
+        ]
+        == 2
+    )
+
+
+def test_a_deleted_old_coordinator_cannot_acquire_the_new_gangs_authority(database, monkeypatch):
+    """Root's case: incarnation 2's peer recorded, its coordinator not yet; incarnation 1's coordinator (its pod
+    deleted, unreadable) sends a late record: it keeps its own epoch-1 row, acquires neither epoch 2 nor publication
+    authority, and the gang's authority stays open for incarnation 2's rank 0."""
+    import db
+
+    db.migrate()
+    op = "op-gang2"
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+    }
+    old_coord, old_peer, new_peer, new_coord = (
+        f"{op}-workers-0-0-aaaaa",
+        f"{op}-workers-0-1-bbbbb",
+        f"{op}-workers-0-1-ddddd",
+        f"{op}-workers-0-0-ccccc",
+    )
+    facts = {
+        old_coord: {"uid": "u0", "rank": 0, "restart": 0},
+        old_peer: {"uid": "u1", "rank": 1, "restart": 0},
+        new_peer: {"uid": "u3", "rank": 1, "restart": 1},
+        new_coord: {"uid": "u2", "rank": 0, "restart": 1},
+    }
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(facts.get(pod)))
+    first = attempts.record(
+        "north", "tenant-demo", old_coord, {**body, "checkpoint_ref": "c" * 64, "checkpoint_generation": 1}
+    )
+    assert first["epoch"] == 1
+    assert attempts.record("north", "tenant-demo", old_peer, body)["epoch"] == 1
+    assert attempts.record("north", "tenant-demo", new_peer, body)["epoch"] == 2  # incarnation 2: the peer first
+    # the old coordinator's pod is gone: unreadable; rank 0 from its name, incarnation unknown
+    facts[old_coord] = {"uid": None, "rank": 0, "restart": None}
+    with pytest.raises(HTTPException) as e:  # a late start/publication: stale (its own row is epoch 1), never epoch 2
+        attempts.record(
+            "north", "tenant-demo", old_coord, {**body, "checkpoint_ref": "z" * 64, "checkpoint_generation": 9}
+        )
+    assert e.value.status_code == 409 and "stale record refused" in e.value.detail
+    with pytest.raises(HTTPException) as e:
+        attempts.record("north", "tenant-demo", old_coord, {**body, "status": "succeeded", "result_ref": "z" * 64})
+    assert e.value.status_code == 409
+    closed = attempts.record(
+        "north", "tenant-demo", old_coord, {**body, "status": "interrupted", "exit_code": 137, "result_ref": "z" * 64}
+    )
+    assert (
+        closed["epoch"] == 1 and closed["status"] == "interrupted" and closed["result_ref"] is None
+    )  # promotes nothing
+    assert closed["checkpoint_ref"] == "c" * 64  # its earlier pointer stays its own history
+    rows = attempts.for_operation(op)
+    assert attempts.authority(rows)["pod"] == new_peer  # no rank 0 of incarnation 2 yet: nothing of epoch 1 speaks
+    assert attempts.gang_status(rows) == "started"
+    # an unreadable, never-recorded pod claiming rank 0: refused, not attributed to incarnation 2
+    facts[f"{op}-workers-0-0-zzzzz"] = {"uid": None, "rank": 0, "restart": None}
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "north",
+            "tenant-demo",
+            f"{op}-workers-0-0-zzzzz",
+            {**body, "checkpoint_ref": "q" * 64, "checkpoint_generation": 3},
+        )
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+    # incarnation 2's coordinator arrives: it holds the authority
+    got = attempts.record(
+        "north", "tenant-demo", new_coord, {**body, "checkpoint_ref": "n" * 64, "checkpoint_generation": 2}
+    )
+    assert got["epoch"] == 2 and got["checkpoint_ref"] == "n" * 64
+    assert attempts.authority(attempts.for_operation(op))["pod"] == new_coord
+
+
+def test_every_recorded_pod_carries_its_observed_uid_and_an_unreadable_one_keeps_it(database, monkeypatch):
+    """Migration 24's `pod_uid` is the pod's UID as the API observes it on the pod it already reads for the digest:
+    a single-node run's pod, a CPU finalizer's pod and a gang rank alike (never the record's claim, never a guess
+    from the name); a later record of a pod the API cannot read any more keeps the UID (and digest) its row holds;
+    an ordinary unreadable pod is still recorded as before (uid None), only a gang pod without a row is refused."""
+    import db
+
+    db.migrate()
+    body = {"operation": "op-solo", "status": "started", "gpus": 1, "started_at": "2026-10-14T10:00:00Z"}
+    readable = {"uid": "uid-solo-a", "digest": "img@sha256:aaaa", "gang": None, "read": True}
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: readable)
+    a = attempts.record("north", "tenant-demo", "op-solo-a", body)
+    assert a["pod_uid"] == "uid-solo-a" and a["image_digest"] == "img@sha256:aaaa" and a["gang_rank"] is None
+    # the pod is gone: its terminal record keeps the observed UID and digest of its row
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": None, "digest": None, "gang": None, "read": False},
+    )
+    done = attempts.record("north", "tenant-demo", "op-solo-a", {**body, "status": "succeeded", "exit_code": 0})
+    assert (
+        done["pod_uid"] == "uid-solo-a" and done["image_digest"] == "img@sha256:aaaa" and done["status"] == "succeeded"
+    )
+    # an ordinary pod never recorded and unreadable: recorded as before, without a UID (no gang semantics apply)
+    b = attempts.record("north", "tenant-demo", "op-solo-b", body)
+    assert b["pod_uid"] is None and b["epoch"] == 2
+    # a CPU finalizer's pod (an ordinary pod of an export member): its UID observed as well
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "uid-fin", "digest": "img@sha256:ffff", "gang": None, "read": True},
+    )
+    f = attempts.record(
+        "north",
+        "tenant-demo",
+        "op-solo-x1-q",
+        {"operation": "op-solo-x1", "root": "op-solo", "status": "started", "role": "finalize", "gpus": 0},
+    )
+    assert f["pod_uid"] == "uid-fin" and f["role"] == "finalize"
+    # a gang rank: the same observed UID, through the same read
+    gang = {"uid": "uid-g0", "rank": 0, "restart": 0}
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "uid-g0", "digest": None, "gang": gang, "read": True},
+    )
+    g = attempts.record(
+        "north", "tenant-demo", "op-g-workers-0-0-aaaaa", {"operation": "op-g", "status": "started", "gpus": 8}
+    )
+    assert g["pod_uid"] == "uid-g0" and g["gang_rank"] == 0
+    # the unverified refusal stands: a gang pod unreadable and never recorded
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {
+            "uid": None,
+            "digest": None,
+            "gang": {"uid": None, "rank": 1, "restart": None},
+            "read": False,
+        },
+    )
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "north", "tenant-demo", "op-g-workers-0-1-bbbbb", {"operation": "op-g", "status": "started", "gpus": 8}
+        )
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+
+
+def test_a_gang_incarnation_restores_from_one_frozen_committed_pointer(database, monkeypatch):
+    """Migration 26 (docs/JOBS.md "Gang attempts"): the start ACK of EVERY rank of an incarnation carries the same
+    resume pointer, chosen once when the incarnation opens from the newest COMMITTED coordinator pointer of an EARLIER
+    epoch of the same root (never the current epoch, never a peer's, never "the latest" at read time); with nothing
+    committed yet, the explicit continuation reference the run was rendered with; a late rank of an older incarnation
+    keeps its own row's pointer; an ordinary single pod carries none."""
+    import db
+
+    db.migrate()
+    op = "op-mpi"
+    facts = {}
+
+    def pod_facts(region, ns, pod, operation):
+        g = facts.get(pod)
+        return {"uid": (g or {}).get("uid"), "digest": None, "gang": g, "read": bool(g and g.get("uid"))}
+
+    monkeypatch.setattr(attempts, "_pod_facts", pod_facts)
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+        "_explicit_checkpoint_ref": "app://ckpt/initial",
+    }
+    c0, p0 = f"{op}-workers-0-0-aaaaa", f"{op}-workers-0-1-bbbbb"
+    facts.update({c0: {"uid": "u0", "rank": 0, "restart": 0}, p0: {"uid": "u1", "rank": 1, "restart": 0}})
+    # incarnation 1: nothing committed by an earlier epoch: the explicit continuation reference, same for both ranks
+    a = attempts.record("north", "tenant-demo", p0, body)  # the peer starts first
+    b = attempts.record("north", "tenant-demo", c0, body)
+    assert (a["resume_checkpoint_ref"], a["resume_source"], a["resume_source_epoch"]) == (
+        "app://ckpt/initial",
+        "explicit",
+        None,
+    )
+    assert (b["resume_checkpoint_ref"], b["resume_source"]) == ("app://ckpt/initial", "explicit")
+    # the coordinator commits pointers; a peer's pointer is dropped (never a candidate)
+    attempts.record("north", "tenant-demo", c0, {**body, "checkpoint_ref": "app://ckpt/g1", "checkpoint_generation": 1})
+    attempts.record("north", "tenant-demo", c0, {**body, "checkpoint_ref": "app://ckpt/g2", "checkpoint_generation": 2})
+    attempts.record(
+        "north", "tenant-demo", p0, {**body, "checkpoint_ref": "app://ckpt/peer", "checkpoint_generation": 9}
+    )
+    # incarnation 2 (every pod recreated): the newest committed coordinator pointer of epoch 1, frozen for both ranks
+    c1, p1 = f"{op}-workers-0-0-ccccc", f"{op}-workers-0-1-ddddd"
+    facts.update({c1: {"uid": "u2", "rank": 0, "restart": 1}, p1: {"uid": "u3", "rank": 1, "restart": 1}})
+    x = attempts.record("north", "tenant-demo", p1, body)  # the peer first, again
+    assert (x["epoch"], x["resume_checkpoint_ref"], x["resume_source_epoch"], x["resume_source"]) == (
+        2,
+        "app://ckpt/g2",
+        1,
+        "committed",
+    )
+    y = attempts.record("north", "tenant-demo", c1, body)
+    assert (y["resume_checkpoint_ref"], y["resume_source_epoch"]) == ("app://ckpt/g2", 1)
+    # incarnation 2's coordinator commits a newer pointer: a sibling that records later in incarnation 2 still gets the
+    # FROZEN value (never a same-epoch pointer), and a late record of a rank keeps its own row's pointer
+    attempts.record("north", "tenant-demo", c1, {**body, "checkpoint_ref": "app://ckpt/g3", "checkpoint_generation": 3})
+    late = attempts.record("north", "tenant-demo", p1, {**body, "status": "started"})
+    assert (late["resume_checkpoint_ref"], late["resume_source_epoch"]) == ("app://ckpt/g2", 1)
+    # incarnation 3 restores from epoch 2's committed pointer
+    c2 = f"{op}-workers-0-0-eeeee"
+    facts[c2] = {"uid": "u4", "rank": 0, "restart": 2}
+    z = attempts.record("north", "tenant-demo", c2, body)
+    assert (z["epoch"], z["resume_checkpoint_ref"], z["resume_source_epoch"], z["resume_source"]) == (
+        3,
+        "app://ckpt/g3",
+        2,
+        "committed",
+    )
+    # the owner-scoped projections carry the same frozen values
+    life = attempts.lifecycle(op, op, attempts.for_operation(op))
+    assert (life["attempt_id"], life["resume_checkpoint_ref"], life["resume_source_epoch"]) == (c2, "app://ckpt/g3", 2)
+    rows = {r["pod"]: r for r in attempts.for_operation(op)}
+    assert rows[p1]["resume_checkpoint_ref"] == "app://ckpt/g2" and rows[c0]["resume_source"] == "explicit"
+    # an ordinary single pod: no gang, no resume pointer in its ACK
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "u9", "digest": None, "gang": None, "read": True},
+    )
+    solo = attempts.record(
+        "north",
+        "tenant-demo",
+        "op-solo-a",
+        {"operation": "op-solo", "status": "started", "gpus": 1, "_explicit_checkpoint_ref": "x"},
+    )
+    assert solo["resume_checkpoint_ref"] is None and solo["resume_source"] is None

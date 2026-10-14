@@ -800,7 +800,15 @@ def test_the_child_caller_posts_once_and_never_again_after_a_lost_response(rig, 
     assert call["capture_complete"] and call["sha256"] == hashlib.sha256(body.encode()).hexdigest()
     assert call["http_status"] == 200 and call["size_bytes"] == len(body.encode())
     result = json.loads((work / "RESULT.json").read_text())
-    assert result == {"result_ref": binding["result_ref"], "export": "succeeded", "capture_attempt_id": f"{child}-abc"}
+    assert {k: result[k] for k in ("result_ref", "export", "capture_attempt_id")} == {
+        "result_ref": binding["result_ref"],
+        "export": "succeeded",
+        "capture_attempt_id": f"{child}-abc",
+    }
+    # the capture manifest travels with the result record (the uploader posts it; docs/JOBS.md "Endpoint children")
+    assert result["capture"]["sha256"] == call["sha256"] and result["capture"]["capture_attempt_id"] == f"{child}-abc"
+    assert result["capture"]["http_status"] == 200 and result["capture"]["size_bytes"] == len(body.encode())
+    assert result["capture"]["content_type"] == "application/octet-stream" and result["capture"]["posted_at"]
     assert (work / "response.bin").read_bytes() == body.encode()  # bytes, never reinterpreted
     # a lost response: unknown, nothing delivered; the retried pod of the same operation never posts again
     script = [f"POST {binding['refresh_url']} 200 {{}}", f"GET {ready} 200 ok", f"POST {url} 000"]
@@ -995,3 +1003,294 @@ def test_the_owner_reads_a_unit_back_without_signed_urls_and_a_foreign_owner_get
     assert c.get(f"/v1/operations/{child}", headers=other).status_code == 404
     # no key, or a key without the scope: refused before any lookup
     assert c.get(f"/v1/operations/{op}/children/u1").status_code == 401
+
+
+def _external_rig(database, client, monkeypatch, delivery="application"):
+    """A tenant whose storage is external (no tenant-storage Secret: artifacts.storage answers 404) and a run class
+    whose children deliver through the application (or `platform`, to see the preflight refuse it)."""
+    c, fake = client
+    db.migrate()
+    keys.import_records(
+        [
+            {
+                **LEGACY,
+                "hash": keys.key_hash("sk-good"),
+                "alias": "demo-user",
+                "max_concurrent": 4,
+                "budget_requests": 10,
+                "budget_gpu_seconds": None,
+                "rate_limit": None,
+                "scopes": [
+                    "invoke:sync",
+                    "invoke:async",
+                    "run:submit",
+                    "run:control",
+                    "read:operations",
+                    "read:results",
+                ],
+            }
+        ],
+        "demo",
+        "admin",
+    )
+    spec = {**RUN_CLASS, "id": "lerobot-ext", "child_delivery": delivery}
+    entries = {e["name"]: e for e in (_entry(spec), _entry(ENDPOINT), _entry(ENDPOINT2))}
+    monkeypatch.setattr(kube, "fleet", lambda: FLEET)
+    monkeypatch.setattr(catalog, "get", lambda name: entries.get(name))
+    monkeypatch.setattr(
+        catalog,
+        "require",
+        lambda name: entries[name] if name in entries else (_ for _ in ()).throw(HTTPException(404, name)),
+    )
+    monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
+    monkeypatch.setattr(api, "FLEET_MANAGER", False)
+    monkeypatch.setattr(kube, "cluster_region", lambda cid: {"hub": "eu-north1"}.get(cid, cid))
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1"])
+    monkeypatch.setattr(kube, "stamp_last_request", lambda *a, **k: None)
+    monkeypatch.setattr(attempts, "enabled", lambda: False)
+
+    def no_storage(ns, region="eu-north1"):
+        raise HTTPException(404, f"tenant storage not configured in {region} (NotFound)")
+
+    monkeypatch.setattr(artifacts, "storage", no_storage)  # external storage: the platform owns no bucket here
+    monkeypatch.setattr(artifacts, "storage_for", lambda ns, uri, region="eu-north1": no_storage(ns, region))
+    import execution
+
+    monkeypatch.setattr(
+        execution,
+        "tenant_config",
+        lambda ns, region="eu-north1": {
+            "identities": {"lab": {"audience": "https://broker.example", "env": {"BROKER": "x"}}},
+            "execution_profiles": {"sealed": {"shared_filesystem": False}},
+        },
+    )
+    fake.entries = entries
+    return c, fake
+
+
+def _ext_parent(c, fake, monkeypatch, execution_block=None):
+    """The parent on an external-storage tenant is itself an application-I/O run (the SciAI shape): no platform bucket."""
+    ex = {"io_mode": "application", **(execution_block or {})}
+    r = c.post("/v1/models/lerobot-ext:invoke", json={"input": {}, "execution": ex}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    p = pod(op, "Running")
+    p["metadata"]["uid"] = "uid-parent-ext"
+    fake.pods.append(p)
+    identity = {"region": "eu-north1", "namespace": NS, "pod": p["metadata"]["name"], "uid": "uid-parent-ext"}
+    monkeypatch.setattr(children, "verify_parent_token", lambda token: dict(identity))
+    return op
+
+
+APP_TRANSPORT = {"refresh_url": "https://broker.example/s2/refresh", "refresh_token": "app-child-token-1"}
+
+
+def test_external_storage_parent_preflight_refuses_platform_delivery_and_admits_application(
+    database, client, monkeypatch
+):
+    """A class with children on an external-storage tenant: `child_delivery: platform` is refused at the PARENT's
+    admission (400 naming region, model and the fix, nothing admitted, no bucket probed for application mode);
+    `application` admits without any storage probe; the capability block advertises the support."""
+    c, fake = _external_rig(database, client, monkeypatch, delivery="platform")
+    r = c.post("/v1/models/lerobot-ext:invoke", json={"input": {}, "execution": {"io_mode": "application"}}, headers=H)
+    assert r.status_code == 400, r.text
+    assert "cosmos-" in r.text and "eu-north1" in r.text and "no capture backend" in r.text
+    assert "child_delivery: application" in r.text and "result_ref" in r.text
+    assert not [k for k in fake.jobs if k[0] == NS]  # nothing admitted, nothing rendered
+    c, fake = _external_rig(database, client, monkeypatch, delivery="application")
+    op = _ext_parent(c, fake, monkeypatch)
+    assert fake.jobs[(NS, op)]["metadata"]["annotations"][f"{LABEL}/child-delivery"] == "application"
+    caps = c.get("/v1/fleet", headers=H).json()["execution"]["endpoint_children"]
+    assert "application" in caps["delivery"] and caps["capture_record"] is True and "refresh" in caps["transport"]
+    assert caps["observed_attempt_fields"] == ["pod_uid", "gang_rank", "gang_restart"]
+
+
+def test_application_delivery_child_binds_the_app_broker_and_result_ref_and_inherits_the_parent_execution(
+    database, client, monkeypatch
+):
+    c, fake = _external_rig(database, client, monkeypatch)
+    op = _ext_parent(c, fake, monkeypatch, {"workload_identity_ref": "lab", "profile_ref": "sealed"})
+    # the request needs the application's delivery and an immutable result_ref
+    r = _post(c, op, "u1", {"prompt": "x"})
+    assert r.status_code == 400 and "result_ref" in r.text
+    r = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/u1")
+    assert r.status_code == 400 and "transport" in r.text
+    r = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/u1", transport=APP_TRANSPORT)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    child = body["child"]
+    assert body["delivery"] == "application" and body["result_ref"] == "app://results/u1" and body["capture"] is None
+    assert body["request"]["result_ref"] == "app://results/u1"  # bound: part of the immutable request
+    binding = fake.secrets[(NS, f"binding-{child}")]["data"]
+    assert binding["refresh_url"] == APP_TRANSPORT["refresh_url"] and binding["refresh_token"] == "app-child-token-1"
+    assert binding["result_ref"] == "app://results/u1" and json.loads(binding["request.json"]) == {"prompt": "x"}
+    assert "/internal/operations/" not in binding["refresh_url"]  # not the platform's broker
+    # the parent's FROZEN execution is inherited: the child's caller runs under the same identity and profile
+    cjob = fake.jobs[(NS, child)]
+    spec = cjob["spec"]["template"]["spec"]
+    assert spec["serviceAccountName"] == "identity-lab"
+    env, main = _env(cjob)
+    assert env["IDENTITY_TOKEN_FILE"] and env["BROKER"] == "x" and env["IO_MODE"] == "application"
+    assert cjob["spec"]["template"]["metadata"]["labels"][f"{LABEL}/execution-profile"] == "sealed"
+    assert json.loads(cjob["metadata"]["annotations"][f"{LABEL}/execution"])["identity"]["ref"] == "lab"
+    assert "OUTPUT_PREFIX" not in json.dumps(spec) or "s3://" not in json.dumps(spec)  # no platform destination
+    assert "sk-good" not in json.dumps(cjob) and "AWS_" not in json.dumps(
+        spec
+    )  # no customer key, no storage credential
+    # a replay with renewed broker credentials: the same bound request; only the URL/token keys of the binding change
+    r2 = _post(
+        c,
+        op,
+        "u1",
+        {"prompt": "x"},
+        result_ref="app://results/u1",
+        transport={**APP_TRANSPORT, "refresh_token": "app-child-token-2"},
+    )
+    assert r2.status_code == 200 and r2.json()["child"] == child
+    assert len([k for k in fake.jobs if k[1].startswith(f"{op}-c-")]) == 1  # never a second inference
+    # a different result_ref is a different request
+    r3 = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/other", transport=APP_TRANSPORT)
+    assert r3.status_code == 409 and "different request" in r3.text
+    # the platform's own broker mints nothing for an application-delivered child
+    token = api._admitted_token(keys.key_hash("sk-good"), "cosmos-nano", child)
+    rr = c.post(
+        f"/internal/operations/{child}:refresh",
+        json={"operation_id": child, "attempt_id": "x", "phase": "output"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert rr.status_code == 409 and "application" in rr.text
+    # static URLs stay supported
+    children._end(op, "u1", "test")
+    keys.release(child, 0.0)
+    r = _post(
+        c,
+        op,
+        "u2",
+        {"prompt": "y"},
+        result_ref="app://results/u2",
+        transport={"response_url": "https://objects.example/u2", "call_url": "https://objects.example/u2.json"},
+    )
+    assert r.status_code == 201, r.text
+    b2 = fake.secrets[(NS, f"binding-{r.json()['child']}")]["data"]
+    assert b2["response_url"] == "https://objects.example/u2" and "refresh_url" not in b2
+
+
+def test_application_delivery_readback_takes_the_capture_from_the_platform_record(database, client, monkeypatch):
+    """The capture the platform's uploader recorded (migration 25) is the authority: sha256, media type, size, status,
+    the ORIGINAL producing attempt; no download URL (the live parent fetches the exact object through its own broker);
+    only a delivered capture makes the outcome succeed; a contradicting re-post is refused."""
+    c, fake = _external_rig(database, client, monkeypatch)
+    op = _ext_parent(c, fake, monkeypatch)
+    child = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/u1", transport=APP_TRANSPORT).json()["child"]
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "uid-c", "digest": None, "gang": None, "read": True},
+    )
+    rec = {
+        "operation": child,
+        "root": child,
+        "role": "run",
+        "cluster": "hub",
+        "io_mode": "application",
+        "mode": "async",
+        "model": "cosmos-nano",
+    }
+    attempts.record("eu-north1", NS, f"{child}-abc", {**rec, "status": "started"})
+    rb = children.readback(NS, op, "u1")
+    assert rb["capture"] is None and rb["outcome"] == "pending" and rb["result_ref"] == "app://results/u1"
+    cap = {
+        "sha256": "ab" * 32,
+        "content_type": "video/mp4",
+        "size_bytes": 4096,
+        "http_status": 200,
+        "capture_attempt_id": f"{child}-abc",
+        "posted_at": "2026-10-14T14:00:00Z",
+        "completed_at": "2026-10-14T14:01:00Z",
+    }
+    attempts.record(
+        "eu-north1",
+        NS,
+        f"{child}-abc",
+        {
+            **rec,
+            "status": "succeeded",
+            "export": "succeeded",
+            "exit_code": 0,
+            "result_ref": "app://results/u1",
+            "capture": cap,
+        },
+    )
+    rb = children.readback(NS, op, "u1")
+    assert (
+        rb["outcome"] == "succeeded"
+        and rb["capture"]["sha256"] == "ab" * 32
+        and rb["capture"]["content_type"] == "video/mp4"
+    )
+    assert rb["capture"]["capture_attempt_id"] == f"{child}-abc" and rb["capture"]["uri"] == "app://results/u1"
+    assert "download_url" not in rb["capture"] and rb["attempt"]["export_state"] == "succeeded"
+    # the owner's readback: the same, still without a signed URL
+    o = c.get(f"/v1/operations/{op}/children/u1", headers=H).json()
+    assert o["capture"]["sha256"] == "ab" * 32 and "download_url" not in o["capture"] and o["delivery"] == "application"
+    # a transfer-only retry re-posting the SAME manifest is idempotent; a contradicting one is refused
+    same = attempts.record(
+        "eu-north1",
+        NS,
+        f"{child}-x1-def",
+        {
+            **rec,
+            "operation": f"{child}-x1",
+            "root": child,
+            "status": "succeeded",
+            "export": "succeeded",
+            "exit_code": 0,
+            "capture": cap,
+        },
+    )
+    assert same["capture"]["sha256"] == "ab" * 32
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "eu-north1",
+            NS,
+            f"{child}-x2-ghi",
+            {
+                **rec,
+                "operation": f"{child}-x2",
+                "root": child,
+                "status": "succeeded",
+                "export": "succeeded",
+                "exit_code": 0,
+                "capture": {**cap, "sha256": "cd" * 32},
+            },
+        )
+    assert e.value.status_code == 409 and "contradicts" in e.value.detail
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "eu-north1",
+            NS,
+            f"{child}-x2-ghi",
+            {
+                **rec,
+                "operation": f"{child}-x2",
+                "root": child,
+                "status": "succeeded",
+                "capture": {**cap, "capture_attempt_id": "someone-else"},
+            },
+        )
+    assert e.value.status_code == 409
+    for bad in (
+        {"sha256": "zz"},
+        {**cap, "size_bytes": -1},
+        {**cap, "http_status": 42},
+        {**cap, "capture_attempt_id": ""},
+        "not-an-object",
+    ):
+        with pytest.raises(HTTPException) as e:
+            attempts.record(
+                "eu-north1",
+                NS,
+                f"{child}-x3-jkl",
+                {**rec, "operation": f"{child}-x3", "root": child, "status": "succeeded", "capture": bad},
+            )
+        assert e.value.status_code == 400, bad

@@ -362,6 +362,33 @@ create table if not exists operation_marks (
     """
     alter table key_run_members add column if not exists retire_marked_at timestamptz;
     """,
+    # 24: gang attempts (docs/JOBS.md "Multi-node runs", "Gang attempts"): a JobSet's pods record their rank and the
+    # JobSet incarnation they belong to (observed on the pod by the API: the JobSet controller's restart-attempt and the
+    # indexed Job's completion index, never caller-declared) and the pod's UID; the pods of one incarnation share one
+    # epoch, so siblings never fence each other, while a prior incarnation stays fenced as before
+    """
+    alter table attempts add column if not exists gang_rank int;
+    alter table attempts add column if not exists gang_restart int;
+    alter table attempts add column if not exists pod_uid text;
+    create index if not exists attempts_gang on attempts (operation, gang_restart);
+    """,
+    # 25: application delivery of endpoint children (docs/JOBS.md "Endpoint children"): the row records which delivery
+    # the child was admitted with; the attempt record carries the capture manifest the platform's uploader posted
+    # (sha256, media type, size, status, the ORIGINAL producing attempt, timings) so a child's capture is durable and
+    # authoritative on a tenant whose storage the platform does not own
+    """
+    alter table endpoint_children add column if not exists delivery text not null default 'platform';
+    alter table attempts add column if not exists capture jsonb;
+    """,
+    # 26: the incarnation-frozen resume pointer of a gang (docs/JOBS.md "Gang attempts"): chosen once when an incarnation
+    # opens (the newest COMMITTED coordinator pointer of an EARLIER epoch of the same root, else the explicit continuation
+    # reference the run was rendered with), stored on its first row and copied to every sibling of that incarnation, so
+    # all ranks restore the same state and a late rank never sees a newer same-epoch pointer; returned in the start ACK
+    """
+    alter table attempts add column if not exists resume_checkpoint_ref text;
+    alter table attempts add column if not exists resume_source_epoch int;
+    alter table attempts add column if not exists resume_source text;
+    """,
 ]
 
 _pool = None

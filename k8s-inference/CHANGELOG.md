@@ -4,6 +4,89 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.101
+
+(0.11.101 = 0.11.100 plus the gang resume pointer; jobs 0.1.27 and platform chart 0.1.11 unchanged; migration 26.)
+
+- Gang attempts (docs/JOBS.md "Restoring a gang"): the start ACK of every rank carries `resume_checkpoint_ref`,
+  `resume_source_epoch` and `resume_source` (`committed` | `explicit`), chosen once when the incarnation opens from the
+  newest committed coordinator pointer of an EARLIER epoch of the same root, else the explicit continuation reference
+  the run was rendered with; frozen on the incarnation's first row and copied to every sibling, so all ranks restore the
+  same state and no rank ever reads a same-epoch or peer pointer; the owner-scoped operation exposes the same three
+  fields on the current attempt and every `attempts[]` entry. Ordinary single-pod runs carry none. No application
+  pointer or ledger; the uploader's ACK handling is unchanged (the ACK already lands in `/work/attempts/.ack.json`).
+
+## api 0.11.100, jobs 0.1.27
+
+(0.11.100 = 0.11.99 plus application delivery for endpoint children; platform chart 0.1.11 unchanged; migration 25.)
+
+- Endpoint children on a tenant with external storage (docs/JOBS.md "Endpoint children", "Application delivery"): a
+  class declares `child_delivery: application`; the PARENT's admission preflights the capture backend (platform mode on
+  an external tenant: 400 before admission, naming the region/model/fix; application mode: no storage probe at all;
+  before: the child POST answered 404 after admission); each child request carries the application's delivery
+  (`transport.refresh_url` + `refresh_token`, the existing call.sh refresh contract, or static URLs) and an immutable
+  `result_ref` bound into the request; the child's caller inherits the parent's frozen execution (identity, profile)
+  so the broker receives the child's own projected identity token; no customer key or storage credential enters the
+  child; the capture is recorded durably by the platform's uploader (`attempts.capture`: sha256, media type, size,
+  status, the ORIGINAL producing attempt, timings; allowlisted, immutable per lineage, 409 on contradiction) and the
+  readback takes it from there with no download URL; the platform broker refuses such a child (409); replay with
+  renewed transport rewrites only the binding's URL/token keys. `execution.endpoint_children` capability block.
+- jobs 0.1.27: call.sh's RESULT.json carries the capture manifest (`capture` object) it just made durable; upload.sh
+  forwards it with the attempt record. Nothing else of the one-POST protocol changed.
+
+## api 0.11.99
+
+(0.11.99 = 0.11.98 plus the observer fields; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)
+
+- The owner-scoped operation exposes the observed durable fields of its current attempt (`pod_uid`, `gang_rank`,
+  `gang_restart`, from the authority record) and on every `attempts[]` entry (from the record; from the live pod's own
+  UID and JobSet labels while it exists; the durable view after the Job's TTL too), so an application broker can verify
+  a gang peer against the observed coordinator of the same epoch and incarnation without trusting a caller's claim.
+  No new endpoint, no ledger; owner access unchanged.
+
+## api 0.11.98
+
+(0.11.98 = 0.11.97 plus one narrow correction; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)
+
+- Attempt records: `pod_uid` (migration 24) is now the observed UID of EVERY recording pod (a single-node run, an
+  endpoint caller, a CPU finalizer, a gang rank), taken from the one pod read the API already does for the runtime
+  digest (`attempts._pod_facts`), never from the record or the name; a later record of a pod that cannot be read
+  any more keeps the UID and digest its row holds. 97 persisted the UID for gang pods only. The unverified-gang
+  refusal and the old-row identity rule are unchanged; ordinary unreadable pods record as before.
+
+## api 0.11.97
+
+(0.11.97 = 0.11.96 with one fence corrected after review; jobs 0.1.26 and platform chart 0.1.11 unchanged. 0.11.96 was
+never applied.)
+
+- Gang attempts: a gang pod the API cannot read and never recorded is refused (409 "membership unverifiable"), never
+  attributed to the newest gang by its missing rank (96 joined it: an old incarnation's coordinator coming back late
+  could have acquired the current epoch's publication authority); a known pod keeps its own epoch and fences.
+  Regression: incarnation 2's peer recorded, its coordinator not yet; incarnation 1's deleted coordinator sends late
+  records: stale for a start/success, closes on its own interruption promoting nothing, never epoch 2; an unrecorded
+  unreadable rank-0 claimant refused; incarnation 2's rank 0 then holds the authority.
+
+## api 0.11.96 (unreleased candidate, superseded by 0.11.97)
+
+(0.11.96 = 0.11.95 plus gang attempts for multi-node runs; jobs 0.1.26 and platform chart 0.1.11 unchanged.)
+
+- Gang attempts (migration 24; docs/JOBS.md "Gang attempts"): the pods of one JobSet incarnation share one epoch (the
+  rank and incarnation observed on the pod by the API: `batch.kubernetes.io/job-completion-index`,
+  `jobset.sigs.k8s.io/restart-attempt`, the pod UID; never caller-declared), so siblings no longer fence each other
+  (before: every sibling took the next epoch and the coordinator's checkpoint/success answered 409 "stale record
+  refused"); a prior incarnation stays fenced; only rank 0 publishes `checkpoint_ref`/`result_ref` (peers' dropped,
+  their accounting kept); the operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation and the
+  gang's outcome counts every rank. Ordinary single-pod runs unchanged.
+- "Delivery pending" on a gang: a class with `finalize.on_exit_codes` now installs the `podFailurePolicy` on the
+  indexed Job AND a JobSet failure-policy rule (`FailJobSet` on reason `PodFailurePolicy`), so exit 75 ends the gang
+  instead of a whole-gang `Recreate` recompute (JobSet ≥ v0.6).
+- `:export` of a completed multi-node run (`checkpoints: shared`, application I/O): the model's finalizer as ONE CPU
+  pod on the shared checkpoint subPath, the coordinator's record as the finalized attempt (`FINALIZE_RANK`,
+  `FINALIZE_GANG_RESTART`, `FINALIZE_NODES`, `CHECKPOINT_DIR`), never the gang again; a gang without shared checkpoints
+  or without a finalizer is refused explicitly (409 naming why) instead of "no kept work volume".
+- RDMA memlock stated, not granted: an InfiniBand gang's main gets `S2_RDMA_MEMLOCK_POLICY=node-unlimited`,
+  `S2_RDMA_CAPABILITIES=none`, `S2_RDMA_DEVICES_PER_NODE`; `drop: [ALL]` stays, no IPC_LOCK.
+
 ## api 0.11.95, platform chart 0.1.11
 
 (0.11.95 = 0.11.94 (the operation listing) plus the two registration checks below; the chart carries the one value

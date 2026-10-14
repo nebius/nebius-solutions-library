@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.95", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.101", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -937,6 +937,12 @@ async def invoke(
         if region not in m["regions"] and kube.cluster_region(region) not in m["regions"]:
             raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
         region = region if region in m["regions"] else kube.cluster_region(region)
+        if (m.get("job") or {}).get("childEndpoints"):
+            import children
+
+            # endpoint children (docs/JOBS.md "Endpoint children"): the capture backend the children will need is
+            # checked NOW, before any admission, so a parent is never accepted whose children could not deliver
+            await asyncio.to_thread(children.preflight_parent, p.namespace, m)
     else:
         _cluster, region = _deployment_of(
             m, req.region
@@ -1921,12 +1927,12 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
         # one of the model's "delivery pending" exit codes; a failed computation is never finalized into a success
         name = orig["metadata"]["name"]
         root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or name
-        rows = (
-            [r for r in attempts.for_operation(root) if r["operation"] == name and r["status"] == "failed"]
-            if attempts.enabled()
-            else []
-        )
-        last = rows[-1] if rows else None
+        mine = [r for r in attempts.for_operation(root) if r["operation"] == name] if attempts.enabled() else []
+        # the record that speaks for the newest attempt: a gang's coordinator (rank 0 publishes; the peers' exits are
+        # the gang's teardown, never the delivery verdict), else the newest pod; it must be a failed one
+        last = attempts.authority(mine)
+        if last is not None and last.get("status") != "failed":
+            last = None
         if last is None or last.get("exit_code") not in fz["onExitCodes"]:
             raise HTTPException(
                 409,
@@ -2060,6 +2066,11 @@ async def record_attempt(request: Request, authorization: str = Header(default="
         ) or "run"  # the platform's statement, never the pod's
         # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
         body["cluster"] = job.get("_cluster") or _cluster_of(region)
+        try:  # the explicit continuation reference the run was rendered with (CHECKPOINT_REF): the platform's statement
+            jex = json.loads((job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/execution") or "null") or {}
+            body["_explicit_checkpoint_ref"] = (jex.get("recovery") or {}).get("checkpoint_ref")
+        except ValueError:
+            body["_explicit_checkpoint_ref"] = None
     except HTTPException:
         body["root"] = operation  # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"

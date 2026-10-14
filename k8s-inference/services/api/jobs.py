@@ -667,6 +667,7 @@ def build_run(
         _project_parent_identity(pod, name, r)
         meta["annotations"][f"{LABEL}/child-endpoints"] = ",".join(r["childEndpoints"])
         meta["annotations"][f"{LABEL}/child-max-units"] = str(int(r.get("childMaxUnits") or 0))
+        meta["annotations"][f"{LABEL}/child-delivery"] = str(r.get("childDelivery") or "platform")
     job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
     if (fz := r.get("finalize")) and fz.get("onExitCodes"):
         # "compute done, delivery pending" ends the Job at once: the GPU computation is never restarted by the Job's
@@ -836,9 +837,18 @@ def _multinode(
         # every InfiniBand NIC of the node through DRA (DeviceClass ib.networking.nebius.ai, DraNet on the node image).
         # No capability: RDMA pins memory, which RLIMIT_MEMLOCK bounds, and the GPU nodes' container runtime runs
         # with an unlimited memlock limit (cloud-init + node-config), so `drop: [ALL]` under PSA baseline holds
-        # (docs/JOBS.md "Multi-node runs").
+        # (docs/JOBS.md "Multi-node runs"). The contract is STATED to the run (an application validator that expects
+        # IPC_LOCK/no_new_privs reads it instead of probing for capabilities the platform never grants)
         pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
         main["resources"]["claims"] = [{"name": "ib"}]
+        main["env"] += [
+            {
+                "name": "S2_RDMA_MEMLOCK_POLICY",
+                "value": "node-unlimited",
+            },  # RLIMIT_MEMLOCK unlimited by the node runtime
+            {"name": "S2_RDMA_CAPABILITIES", "value": "none"},  # drop ALL stays; no IPC_LOCK, no privilege
+            {"name": "S2_RDMA_DEVICES_PER_NODE", "value": str(ib_count)},
+        ]
     pod["subdomain"] = name
     execution.scope_runner_token(pod)
     extra = normalise_pod_metadata(model.get("podMetadata"))
@@ -861,6 +871,20 @@ def _multinode(
     }
     if timeout_s:
         job_spec["activeDeadlineSeconds"] = timeout_s
+    delivery_pending = bool((fz := r.get("finalize")) and fz.get("onExitCodes"))
+    if delivery_pending:
+        # "compute done, delivery pending" (docs/JOBS.md "Finalization by the application") ends the gang at once and
+        # for good: the indexed Job fails on that exit of main (podFailurePolicy, reason PodFailurePolicy) and the
+        # JobSet's failure policy turns THAT reason into FailJobSet instead of its Recreate restart, so the completed
+        # science is never recomputed by a whole-gang restart; re-delivery is the model's CPU finalizer (:export)
+        job_spec["podFailurePolicy"] = {
+            "rules": [
+                {
+                    "action": "FailJob",
+                    "onExitCodes": {"containerName": "main", "operator": "In", "values": list(fz["onExitCodes"])},
+                }
+            ]
+        }
     meta["annotations"][f"{LABEL}/nodes"] = str(nodes)
     meta["annotations"][f"{LABEL}/interconnect"] = interconnect
     meta["annotations"][f"{LABEL}/checkpoints"] = checkpoints
@@ -869,7 +893,24 @@ def _multinode(
         "successPolicy": {"operator": "All", "targetReplicatedJobs": ["workers"]},
         # any pod loss (preemption, node loss, application failure) fails the indexed Job (backoffLimit 0) and the
         # JobSet recreates every pod: ranks restart together from the last checkpoint
-        "failurePolicy": {"maxRestarts": JOB_BACKOFF_LIMIT, "restartStrategy": "Recreate"},
+        "failurePolicy": {
+            "maxRestarts": JOB_BACKOFF_LIMIT,
+            "restartStrategy": "Recreate",
+            **(
+                {
+                    "rules": [
+                        {
+                            "name": "delivery-pending",
+                            "action": "FailJobSet",
+                            "onJobFailureReasons": ["PodFailurePolicy"],
+                            "targetReplicatedJobs": ["workers"],
+                        }
+                    ]
+                }
+                if delivery_pending
+                else {}
+            ),
+        },
         "ttlSecondsAfterFinished": JOB_TTL_S,
         "replicatedJobs": [
             {
@@ -1796,15 +1837,55 @@ def export_again(
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     pvc = ann.get(f"{LABEL}/pvc")
     worker = orig["_region"] if is_manager_job(orig) else region
-    if not pvc or not worker or is_jobset(orig):
+    gang = is_jobset(orig)
+    if gang:
+        # a multi-node run keeps no per-pod work volume (/work is node-local on every rank): what survives the gang is
+        # the coordinator's publication on the tenant's shared checkpoint claim (`checkpoints: shared`, subPath
+        # checkpoints/<root>); only the model's finalizer can deliver from it (application-owned bytes); a managed
+        # export has nothing retained to transfer
+        if ann.get(f"{LABEL}/checkpoints") != "shared":
+            raise HTTPException(
+                409,
+                f"operation {name}: a multi-node run retains bytes only with `checkpoints: shared` (the coordinator's "
+                "publication on the shared claim); nothing is kept to export or finalize",
+            )
+        if not finalize:
+            raise HTTPException(
+                409,
+                f"operation {name}: a multi-node run is delivered again only by its model's finalizer (job.finalize, "
+                "application I/O) from the shared checkpoint claim; the platform exports nothing of a gang's node-local /work",
+            )
+        if not worker:
+            raise HTTPException(
+                409, f"operation {name}: the admitting cluster of the gang is unknown; nothing to finalize"
+            )
+    elif not pvc or not worker:
         raise HTTPException(409, f"operation {name} has no kept work volume to export")
     import catalog
 
     model = catalog.pinned(model, ann)
-    try:
-        retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
-    except ApiException as e:
-        raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
+    if gang:
+        try:
+            retry(kube.core(worker).read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
+        except ApiException as e:
+            raise HTTPException(
+                409 if e.status == 404 else 502,
+                f"shared checkpoint claim {SHARED_SCRATCH_PVC} is gone; nothing to finalize",
+            )
+        # the finalizer is ONE CPU pod, never the gang again: a single-node render of the model (no nodes, no GPU, no
+        # fabric), its own small /work claim, the gang's shared checkpoint subPath mounted where the gang had it
+        jb = dict(model.get("job") or {})
+        for k in ("nodes", "interconnect", "ibDevicesPerNode", "checkpoints"):
+            jb.pop(k, None)
+        jb["gpu"] = 0
+        jb["pvcSizeGi"] = JOB_PVC_SIZE_GI
+        model = {**model, "job": jb, "gpu_classes": []}
+        pvc = None
+    else:
+        try:
+            retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
+        except ApiException as e:
+            raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
     root = ann.get(f"{LABEL}/resumed-from", name)
     n = 1 + sum(
         1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x")
@@ -1836,11 +1917,39 @@ def export_again(
         ann.get(f"{LABEL}/key"),
         pvc=pvc,
         placement={"manager": True} if is_manager_job(orig) else None,
-        gpu_class=labels.get(f"{LABEL}/gpu-class"),
+        gpu_class=None if gang else labels.get(f"{LABEL}/gpu-class"),
         ex=ex,
     )
     _strip_assets(job)  # main-compute-only: a transfer or finalizer container never sees a restricted asset
     spec = job["spec"]["template"]["spec"]
+    if gang:
+        # the gang's shared checkpoint subPath, exactly where every rank had it (/work/checkpoint): the finalizer reads
+        # the coordinator's publication; the JobSet's incarnation and coordinator pod are named in its environment
+        spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "checkpoints"] + [
+            {"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
+        ]
+        for c in spec["containers"]:
+            c.setdefault("volumeMounts", []).append(
+                {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
+            )
+            if c["name"] == "main":
+                done = (finalize or {}).get("attempt") or {}
+                c["env"] = [
+                    e
+                    for e in c.get("env", [])
+                    if e["name"] not in ("CHECKPOINT_DIR", "FINALIZE_RANK", "FINALIZE_GANG_RESTART", "FINALIZE_NODES")
+                ] + [
+                    {"name": "CHECKPOINT_DIR", "value": "/work/checkpoint"},
+                    {
+                        "name": "FINALIZE_RANK",
+                        "value": str(done.get("gang_rank") if done.get("gang_rank") is not None else 0),
+                    },
+                    {
+                        "name": "FINALIZE_GANG_RESTART",
+                        "value": str(done.get("gang_restart") if done.get("gang_restart") is not None else ""),
+                    },
+                    {"name": "FINALIZE_NODES", "value": str(ann.get(f"{LABEL}/nodes") or "")},
+                ]
     spec["initContainers"] = []
     role = "finalize" if finalize else "export"
     if finalize:

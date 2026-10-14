@@ -110,6 +110,18 @@ def capabilities(ns: str, region: str = REGION) -> dict:
         },
         # bounded application retries of one run (docs/JOBS.md "Retries"): the same Job, member and reservation
         "retry": {"max_attempts": [1, 10], "default_exit_codes": [137, 143]},
+        # endpoint children of a run (docs/JOBS.md "Endpoint children"): absent on an API without them; an application
+        # refuses before admission when "application" is not among the deliveries it needs
+        "endpoint_children": {
+            "api": "0.11.100",
+            "delivery": ["platform", "application"],
+            "transport": ["refresh", "static"],
+            "request": ["input", "input_ref"],
+            "capture_record": True,
+            "readback": ["capture", "attempt", "outcome"],
+            "observed_attempt_fields": ["pod_uid", "gang_rank", "gang_restart"],
+            "preflight": "parent-admission",
+        },
         # automatic continuation after a confirmed infrastructure loss (docs/SCHEDULING.md): what a caller may ask for
         # application finalizer (docs/JOBS.md "Finalization by the application"): the model-owned command that re-delivers
         "finalize": {
