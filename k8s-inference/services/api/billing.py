@@ -191,9 +191,7 @@ class _SettlementLock:
         try:
             import psycopg
 
-            from config import DATABASE_URL
-
-            self._conn = psycopg.connect(DATABASE_URL, autocommit=False, connect_timeout=5)
+            self._conn = psycopg.connect(db.DATABASE_URL, autocommit=False, connect_timeout=5)
             self.held = bool(
                 self._conn.execute(
                     "select pg_try_advisory_xact_lock(hashtextextended(%s, 5))", (self.operation,)

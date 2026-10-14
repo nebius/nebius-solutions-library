@@ -775,6 +775,13 @@ scope and budget but **not** the key's model allow-list: the child model was all
 `child_endpoints`, so a key granted the parent class alone drives its children without being granted the child
 endpoints (a direct call of the key to the child endpoint stays refused).
 
+**Unit retry.** A unit whose child ended without delivering its capture (the cascade of a parent that finished
+without a successor, a failed or refused caller) is not final: a live attempt of a later parent of the same root
+(a resume) asking for the same bound request reopens it as the next incarnation (`<root>-c-<sha>-r<n>`: a new Job,
+binding and ledger member for the same unit; the earlier child's Job and records stay as history); the readback and
+the owner route carry `incarnation` and `previous_child`. An ended unit with a capture stays final: the same request
+replays it, there is never a second inference for a delivered unit.
+
 **The capture (the native one-POST protocol, docs/API.md "Endpoint calls").** The child is rendered as an
 application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written on the API's own
 cluster like a caller's `PUT /v1/bindings/{ref}`, owned by the root's owner, delivered as the `<child>-private` copy into

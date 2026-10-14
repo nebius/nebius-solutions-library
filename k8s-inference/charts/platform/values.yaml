@@ -21,7 +21,7 @@ edge:
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
   cacheNodePort: 30500               # the Zot NodePort on every node's loopback (images.cache.node_port): the bootstrap mirror file node-config writes
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.106
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.107
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.12
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.12
 api:                           # the control cluster only (clusters/common/apps/api.yaml)

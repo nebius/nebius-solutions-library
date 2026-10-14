@@ -4,6 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.107
+
+(0.11.107 = 0.11.106 plus the unit retry of endpoint children and the settlement lock's database import; jobs 0.1.27 and
+platform chart 0.1.12 unchanged; migration 28.)
+
+- Endpoint children (docs/JOBS.md "Endpoint children", unit retry): a unit whose child ended WITHOUT a delivered
+  capture (the cascade of a parent that finished without a successor, a failed or refused caller) is reopened by a
+  live attempt of a later parent of the same root asking for the same bound request: the next incarnation
+  `<root>-c-<sha>-r<n>` (a new Job, binding and ledger member of kind `child` for the same unit; the earlier child's
+  Job and records stay as history), the row back to `pending`/`active` with the new parent, `incarnation` and
+  `previous_child` in the readback and the owner route. Before, the same request replayed the ended row (200, no
+  capture) and the unit could never run again under that root: the first LeRobot resume chain (2026-10-14) failed
+  its stage for exactly that. Unchanged: an ended unit WITH a capture is final (replay, never a second inference), a
+  different request is 409, one open child per root, `child_max_units` counts units. Migration 28:
+  `endpoint_children.incarnation`, `previous_child`.
+- Billing: the settlement lock (0.11.106) reads the database URL from `db`, not `config` (the import failed live and
+  every settlement ran on the idempotent unlocked path, correctly but without the duplicate-work guard).
+
 ## api 0.11.106
 
 (0.11.106 = 0.11.105 plus the session attach's owner context and the settlement lock on its own connection; jobs 0.1.27
