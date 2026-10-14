@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## fleet chart 0.1.8
+
+- Every ClusterQueue covers `ephemeral-storage` (the kubelet's node-local scratch a run class may request since api
+  0.11.52, `ephemeral_storage`) with a budget per flavor from the pool's boot disk: per node `boot_disk_gib x
+  node_reserve.ephemeral_fraction (0.85) - node_reserve.ephemeral_gib (4)`, times the pool's nodes, lent and borrowed
+  like CPU and memory (the system flavor from the system nodes' fixed 128 GiB disk). Under what the kubelet reports
+  allocatable (a 128 GiB disk reports ~109.6 Gi, a 512 GiB one ~444.4 Gi; the budget is 104 / 431 Gi per node): a run
+  requesting scratch was `NoMatchingFlavor: resource ephemeral-storage unavailable in ClusterQueue`. Nothing is
+  provisioned or changed in the cloud; `tools/check.sh` asserts the coverage and a budget on every flavor.
+
 ## platform chart 0.1.5
 
 - The API reads Knative Revisions in the models namespace (`serving.knative.dev` revisions get/list) on every cluster:
