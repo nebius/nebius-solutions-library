@@ -1565,6 +1565,19 @@ def test_a_unit_retry_is_refused_for_the_same_parent_and_for_an_outcome_unknown_
         monkeypatch.setattr(attempts, "for_operation", lambda root, _r=rec: [_r] if root == child else [])
         assert children.readback(NS, op, "u1")["can_retry"] is False
         assert _post(c, f"{op}-r1", "u1", retry=True).status_code == 409
+    # an earlier unknown outcome is never erased by a later pre-inference exit (an export retry refused at its input
+    # refresh ends 2 after the first attempt posted and lost the answer): the whole history decides
+    for history in (
+        [{"exit_code": 4, "capture": None}, {"exit_code": 2, "capture": None}],
+        [{"exit_code": 2, "capture": {"http_status": 422}}, {"exit_code": 2, "capture": None}],
+        [{"exit_code": 2, "capture": None}, {"exit_code": None, "capture": None, "status": "started"}],
+    ):
+        recs = [{"operation": child, "root": child, "status": "failed", **h} for h in history]
+        monkeypatch.setattr(attempts, "for_operation", lambda root, _r=recs: _r if root == child else [])
+        assert children.readback(NS, op, "u1")["can_retry"] is False, history
+        assert _post(c, f"{op}-r1", "u1", retry=True).status_code == 409
+    assert children._never_inferred([]) is True
+    assert children._never_inferred([{"exit_code": 2, "capture": None}, {"exit_code": 2, "capture": None}]) is True
     # exit 2 (refused before its inference) with no capture: can_retry, retried
     monkeypatch.setattr(
         attempts,
