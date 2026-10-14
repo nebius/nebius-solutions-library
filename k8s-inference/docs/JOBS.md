@@ -291,8 +291,10 @@ still closes its record, promoting nothing). **Coordinator authority**: only ran
 `checkpoint_ref`/`checkpoint_generation` and `result_ref` (a peer's are dropped; its timings, exit code and GPUs stay:
 every rank is accounted). The operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation; the
 gang's outcome counts every rank (the JobSet's `All` success policy): `SUCCEEDED` only when every rank succeeded,
-`FAILED` when any rank failed. A late record of a pod the API cannot read any more takes its rank from the pod name and
-joins the newest gang that lacks that rank. Ordinary single-pod runs keep one epoch per pod, unchanged.
+`FAILED` when any rank failed. A late record of a pod the API cannot read any more keeps only that pod's own earlier row
+(its epoch, its fences); a gang pod never recorded and unreadable has no proof of its incarnation and is refused (409),
+never attributed to any gang: an old coordinator coming back late cannot acquire the current incarnation's authority.
+Ordinary single-pod runs keep one epoch per pod, unchanged.
 
 **RDMA memlock, stated.** An InfiniBand gang runs with `drop: [ALL]` under PSA baseline and no IPC_LOCK: RDMA pins
 memory under RLIMIT_MEMLOCK, which the GPU nodes' container runtime sets unlimited (cloud-init + node-config). The

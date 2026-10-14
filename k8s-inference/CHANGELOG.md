@@ -4,7 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.96
+## api 0.11.97
+
+(0.11.97 = 0.11.96 with one fence corrected after review; jobs 0.1.26 and platform chart 0.1.11 unchanged. 0.11.96 was
+never applied.)
+
+- Gang attempts: a gang pod the API cannot read and never recorded is refused (409 "membership unverifiable"), never
+  attributed to the newest gang by its missing rank (96 joined it: an old incarnation's coordinator coming back late
+  could have acquired the current epoch's publication authority); a known pod keeps its own epoch and fences.
+  Regression: incarnation 2's peer recorded, its coordinator not yet; incarnation 1's deleted coordinator sends late
+  records: stale for a start/success, closes on its own interruption promoting nothing, never epoch 2; an unrecorded
+  unreadable rank-0 claimant refused; incarnation 2's rank 0 then holds the authority.
+
+## api 0.11.96 (unreleased candidate, superseded by 0.11.97)
 
 (0.11.96 = 0.11.95 plus gang attempts for multi-node runs; jobs 0.1.26 and platform chart 0.1.11 unchanged.)
 

@@ -103,12 +103,19 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         ).fetchone()
         cancelled = (marks[0],) if marks else None
         if cur:
-            epoch = cur[0]
+            epoch = cur[0]  # a known pod keeps the epoch it was recorded with, whatever can be read now
         elif gang:
             # one epoch per gang incarnation: the siblings of one JobSet restart share it (they never fence each
             # other); a new incarnation (every pod recreated) is the next epoch, and the prior one is stale as any
-            # replaced attempt. The incarnation is the observed restart-attempt; when the pod could not be read (a
-            # late record after the pod is gone) the newest gang that does not yet hold this rank is the one it joins
+            # replaced attempt. The incarnation is the restart-attempt OBSERVED on the pod; a gang pod the API cannot
+            # read and never recorded has no proof of its incarnation: it is refused, never attributed to any gang
+            # (an old coordinator coming back late must not acquire the current epoch's publication authority)
+            if gang.get("restart") is None:
+                raise HTTPException(
+                    409,
+                    f"attempt {pod}: gang membership unverifiable (the pod cannot be read and has no record); "
+                    "an unverified incarnation is never attributed to the gang",
+                )
             epoch = _gang_epoch(c, operation, gang, top)
         else:
             epoch = top + 1
@@ -209,7 +216,8 @@ def _pod_gang(region: str | None, namespace: str, pod: str, operation: str) -> d
     labels/annotations (the JobSet controller stamps the JobSet name and the restart attempt, the Job controller the
     completion index); None for an ordinary single pod. When the pod cannot be read any more (a late record), the
     rank comes from the JobSet pod name (`<op>-workers-<job>-<rank>-<suffix>`) and the incarnation stays unknown
-    (None): `_gang_epoch` then joins the newest gang that does not hold this rank yet. Nothing here trusts the record."""
+    (None): `record` then keeps only the pod's own existing row and refuses a pod without one. Nothing here trusts
+    the record, and nothing attributes an unverified pod to a gang."""
     try:
         obj = kube.core(region or kube.REGION).read_namespaced_pod(pod, namespace)
         md = obj.metadata
@@ -230,26 +238,13 @@ def _pod_gang(region: str | None, namespace: str, pod: str, operation: str) -> d
 
 
 def _gang_epoch(c, operation: str, gang: dict, top: int) -> int:
-    """The epoch of the gang this pod belongs to: the incarnation's existing epoch when a sibling recorded it already,
-    else the next epoch (a new incarnation). With the incarnation unknown (unreadable pod), the newest gang of the
-    operation that holds no record for this rank is joined; a gang that already holds the rank means a newer one."""
-    if gang.get("restart") is not None:
-        r = c.execute(
-            "select epoch from attempts where operation = %s and gang_restart = %s order by epoch limit 1",
-            (operation, gang["restart"]),
-        ).fetchone()
-        return int(r[0]) if r else top + 1
+    """The epoch of the gang this pod belongs to: the incarnation's existing epoch when a sibling recorded it already
+    (the restart-attempt was observed on the pod), else the next epoch (a new incarnation)."""
     r = c.execute(
-        "select max(epoch) from attempts where operation = %s and gang_rank is not null", (operation,)
+        "select epoch from attempts where operation = %s and gang_restart = %s order by epoch limit 1",
+        (operation, gang["restart"]),
     ).fetchone()
-    newest = int(r[0]) if r and r[0] is not None else None
-    if newest is None:
-        return top + 1
-    held = c.execute(
-        "select 1 from attempts where operation = %s and epoch = %s and gang_rank = %s",
-        (operation, newest, gang.get("rank")),
-    ).fetchone()
-    return top + 1 if held else newest
+    return int(r[0]) if r else top + 1
 
 
 def authority(rows: list[dict]) -> dict | None:

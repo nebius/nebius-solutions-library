@@ -1073,12 +1073,16 @@ def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(databas
     )
     assert old["status"] == "failed" and old["result_ref"] == "d" * 64  # the earlier result stays, nothing new promoted
     assert attempts.authority(attempts.for_operation(op))["pod"] == f"{op}-workers-0-0-ccccc"
-    # an unreadable late record of a gang pod: rank from the name, joined to the newest gang that lacks the rank
+    # an unreadable late record of a gang pod keeps only the pod's OWN verified row; it is never attributed to any gang
     monkeypatch.setattr(
         attempts, "_pod_gang", lambda region, ns, pod, operation: {"uid": None, "rank": 1, "restart": None}
     )
     late = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", {**body, "status": "succeeded"})
     assert late["epoch"] == 2  # its own row (cur): the epoch it had
+    with pytest.raises(HTTPException) as e:  # a gang pod never recorded and unreadable: no proof of its incarnation
+        attempts.record("north", "tenant-demo", f"{op}-workers-0-1-eeeee", {**body, "status": "started"})
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+    assert not any(r["pod"] == f"{op}-workers-0-1-eeeee" for r in attempts.for_operation(op))
     # an ordinary single pod of another operation: one epoch per pod, as before
     monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: None)
     assert (
@@ -1093,3 +1097,75 @@ def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(databas
         ]
         == 2
     )
+
+
+def test_a_deleted_old_coordinator_cannot_acquire_the_new_gangs_authority(database, monkeypatch):
+    """Root's case: incarnation 2's peer recorded, its coordinator not yet; incarnation 1's coordinator (its pod
+    deleted, unreadable) sends a late record: it keeps its own epoch-1 row, acquires neither epoch 2 nor publication
+    authority, and the gang's authority stays open for incarnation 2's rank 0."""
+    import db
+
+    db.migrate()
+    op = "op-gang2"
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+    }
+    old_coord, old_peer, new_peer, new_coord = (
+        f"{op}-workers-0-0-aaaaa",
+        f"{op}-workers-0-1-bbbbb",
+        f"{op}-workers-0-1-ddddd",
+        f"{op}-workers-0-0-ccccc",
+    )
+    facts = {
+        old_coord: {"uid": "u0", "rank": 0, "restart": 0},
+        old_peer: {"uid": "u1", "rank": 1, "restart": 0},
+        new_peer: {"uid": "u3", "rank": 1, "restart": 1},
+        new_coord: {"uid": "u2", "rank": 0, "restart": 1},
+    }
+    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: facts.get(pod))
+    first = attempts.record(
+        "north", "tenant-demo", old_coord, {**body, "checkpoint_ref": "c" * 64, "checkpoint_generation": 1}
+    )
+    assert first["epoch"] == 1
+    assert attempts.record("north", "tenant-demo", old_peer, body)["epoch"] == 1
+    assert attempts.record("north", "tenant-demo", new_peer, body)["epoch"] == 2  # incarnation 2: the peer first
+    # the old coordinator's pod is gone: unreadable; rank 0 from its name, incarnation unknown
+    facts[old_coord] = {"uid": None, "rank": 0, "restart": None}
+    with pytest.raises(HTTPException) as e:  # a late start/publication: stale (its own row is epoch 1), never epoch 2
+        attempts.record(
+            "north", "tenant-demo", old_coord, {**body, "checkpoint_ref": "z" * 64, "checkpoint_generation": 9}
+        )
+    assert e.value.status_code == 409 and "stale record refused" in e.value.detail
+    with pytest.raises(HTTPException) as e:
+        attempts.record("north", "tenant-demo", old_coord, {**body, "status": "succeeded", "result_ref": "z" * 64})
+    assert e.value.status_code == 409
+    closed = attempts.record(
+        "north", "tenant-demo", old_coord, {**body, "status": "interrupted", "exit_code": 137, "result_ref": "z" * 64}
+    )
+    assert (
+        closed["epoch"] == 1 and closed["status"] == "interrupted" and closed["result_ref"] is None
+    )  # promotes nothing
+    assert closed["checkpoint_ref"] == "c" * 64  # its earlier pointer stays its own history
+    rows = attempts.for_operation(op)
+    assert attempts.authority(rows)["pod"] == new_peer  # no rank 0 of incarnation 2 yet: nothing of epoch 1 speaks
+    assert attempts.gang_status(rows) == "started"
+    # an unreadable, never-recorded pod claiming rank 0: refused, not attributed to incarnation 2
+    facts[f"{op}-workers-0-0-zzzzz"] = {"uid": None, "rank": 0, "restart": None}
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "north",
+            "tenant-demo",
+            f"{op}-workers-0-0-zzzzz",
+            {**body, "checkpoint_ref": "q" * 64, "checkpoint_generation": 3},
+        )
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+    # incarnation 2's coordinator arrives: it holds the authority
+    got = attempts.record(
+        "north", "tenant-demo", new_coord, {**body, "checkpoint_ref": "n" * 64, "checkpoint_generation": 2}
+    )
+    assert got["epoch"] == 2 and got["checkpoint_ref"] == "n" * 64
+    assert attempts.authority(attempts.for_operation(op))["pod"] == new_coord
