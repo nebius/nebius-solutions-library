@@ -6,7 +6,8 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 ## api 0.11.110
 
-(0.11.110 = 0.11.109 plus the fleet operator surface; jobs 0.1.27 and platform chart 0.1.12 unchanged; no migration.)
+(0.11.110 = 0.11.109 plus the fleet operator surface, the provisioning of a gang's shared checkpoint leaf and the
+member-aware reservation fence of the worker's attach; jobs 0.1.27 and platform chart 0.1.12 unchanged; no migration.)
 
 - Fleet operators (docs/API.md "Fleet operators"): a key with `metadata.role=fleet` (tenant `platform`, minted only by
   the fleet's own bootstrap, `python -m keys bootstrap` with role `fleet`; never by a tenant admin, never by an
@@ -24,6 +25,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   first real 2x1 MPI run on a fresh root, 2026-10-14: `/work/checkpoint` not writable while `/work` was). chown
   10001:10001 and chmod 2770 of the mount point only, not recursive, CHOWN/FOWNER/DAC_OVERRIDE only, idempotent on
   a restart or a resume; a local-checkpoint gang is untouched.
+
+- Native execution leases (docs/API.md "Native execution leases"): the worker's attach checks the operation's LIVE
+  reservation through the durable run ledger (`keys.reservation_key_of`: its own reservation, or its root's for an
+  ACTIVE member: a continuation, a stage, an endpoint child); before, it looked for the operation's own reservation
+  row, which an endpoint child never has (it shares its root's slot), so the first LeRobot child's inference POST on
+  109 reached the hook, was prepared, and the worker's attach was refused "reservation is released" with the root
+  live (op-82b6134819bee769). The gateway's admission proof already resolved members this way; both now share the one
+  resolver. A settled member never borrows its root's live slot; a released root resolves to nothing for itself and
+  its members. Tests: root, child, foreign, settled child, released root, the child's attach.
 
 ## api 0.11.109
 
