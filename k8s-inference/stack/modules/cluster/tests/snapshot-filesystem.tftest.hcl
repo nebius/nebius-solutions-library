@@ -37,8 +37,9 @@ run "default_preserves_system_and_batch_nodes" {
     error_message = "The default must preserve existing system cloud-init."
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
-    error_message = "Batch CPU nodes must retain their original cloud-init."
+    # docs/FLEET.md "CPU pools": a CPU pool attaches and mounts the region's weights filesystem like a GPU pool
+    condition     = length(nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems) == 1 && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "mount -t virtiofs weights /mnt/weights") && strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "fs.inotify.max_user_instances")
+    error_message = "A CPU pool must attach the shared filesystem and mount it in its cloud-init, on top of the system cloud-init."
   }
   assert {
     condition     = !contains(keys(nebius_mk8s_v1_node_group.gpu["gpu"].template.metadata.labels), "serverless2.nebius/snapshot-store")
@@ -72,8 +73,9 @@ run "shared_store_survives_gpu_scale_to_zero" {
     error_message = "A failed mount must not create snapshots on a node's boot disk."
   }
   assert {
-    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
-    error_message = "Opt-in system mounting must not modify unrelated batch CPU nodes."
+    # the CPU pool's mount is its own (shared_filesystem), independent of the system opt-in; never the snapshot directory step
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.cpu_pool_cloud_init && !strcontains(nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data, "gpu-snapshot")
+    error_message = "Opt-in system mounting must not modify batch CPU nodes beyond their own shared_filesystem mount."
   }
 }
 
@@ -115,5 +117,29 @@ run "default_keeps_the_driver_preset" {
   assert {
     condition     = local.gpu_settings["gpu"] == { drivers_preset = "cuda13.0" }
     error_message = "Without the GPU Operator the pool's driver preset is on the node group."
+  }
+}
+
+run "cpu_pool_without_shared_filesystem_keeps_the_system_cloud_init" {
+  command = plan
+  variables {
+    cpu_pools = {
+      batch = { platform = "cpu-d3", preset = "4vcpu-16gb", min_nodes = 0, max_nodes = 1, boot_disk_gib = 128, labels = {}, shared_filesystem = false }
+    }
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
+    error_message = "shared_filesystem = false must leave a CPU pool without the attachment and with the system cloud-init."
+  }
+}
+
+run "cpu_pool_without_a_weights_filesystem_has_nothing_to_mount" {
+  command = plan
+  variables {
+    weights_filesystem = { enabled = false, size_gib = 0, type = "NETWORK_SSD" }
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.cpu["batch"].template.filesystems == null && nebius_mk8s_v1_node_group.cpu["batch"].template.cloud_init_user_data == local.system_cloud_init
+    error_message = "Without a weights filesystem in the region a CPU pool attaches nothing."
   }
 }

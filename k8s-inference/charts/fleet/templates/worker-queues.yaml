@@ -19,10 +19,12 @@ manager too (manager-queues.yaml).
 {{- $bare := dict }}{{ range $n, $_ := $pools }}{{ $_ := set $bare $n $n }}{{ end }}
 {{- $f := .Values.fleet }}
 {{- $systems := dict "system" (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $region.r.system_pool) | fromYaml) }}
-{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $pools "bare" $bare "systems" $systems) }}
+{{- $order := list "system" }}
+{{- range $cp, $p := (default dict $region.r.cpu_pools) }}{{ $_ := set $systems $cp (include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" $p) | fromYaml) }}{{ $order = append $order $cp }}{{ end }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $pools "bare" $bare "systems" $systems "order" $order) }}
 {{- range $tn, $tc := default dict $f.tenants }}
 {{- range $prefer := prepend (include "fleet.classes" (include "fleet.allPools" $f | fromYaml) | fromYamlArray) "" }}
-{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $pools "bare" $bare "admissionCheck" "" "systems" $systems) }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $pools "bare" $bare "admissionCheck" "" "systems" $systems "order" $order) }}
 {{- end }}
 {{- end }}
 {{- end }}

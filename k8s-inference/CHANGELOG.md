@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## fleet chart 0.1.10, cluster module: CPU pools scheduled and mounted
+
+- CPU pools (docs/FLEET.md "CPU pools"): `regions.<r>.cpu_pools` now reach the scheduler: one Kueue ResourceFlavor per
+  pool (node label, the pool's taint tolerated, no GPU toleration) listed in every ClusterQueue after `system` with
+  `nvidia.com/gpu: 0` and CPU/memory = max_nodes x preset minus the per-node reserve, on the workers and mirrored on
+  the manager; a GPU-free run that does not fit the system nodes is admitted there and the pool scales from zero. The
+  cluster module attaches and mounts the region's weights filesystem on the pool's nodes like a GPU pool
+  (`shared_filesystem`, default true), so `weights`/`data`, shared checkpoints and restricted assets work there.
+  tfvars validation of the preset shape; check.sh asserts the flavor order and tolerations. No API change.
+
+## api 0.11.66 (= 0.11.64 + the 0.11.67 lineage hotfix), platform chart 0.1.7, jobs 0.1.22
 ## api 0.11.68, fleet chart 0.1.9, tenant chart 0.3.4 (= 0.11.64 + the 0.11.67 lineage hotfix + restricted assets)
 
 - Restricted assets (docs/JOBS.md "Restricted assets"): an operator registry in the fleet document (`assets`: file or

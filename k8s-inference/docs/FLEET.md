@@ -302,6 +302,24 @@ an export retry, a CPU run class) fits it first and is scheduled onto the system
 it, with the pool node selector of a GPU flavor never injected. No node is added and no GPU quota changes; the
 budget is what the system nodes already have. `tools/check.sh` asserts the rendered order and quotas.
 
+## CPU pools
+
+A run that needs more CPU or memory than the system nodes budget (an AlphaFold 3 data pipeline at 16 CPUs / 64 GiB
+on 8-vCPU system nodes) gets a CPU pool: `regions.<r>.cpu_pools.<name> = { platform, preset = "<n>vcpu-<n>gb",
+min_nodes (0), max_nodes, boot_disk_gib (128), shared_filesystem (true) }`. The cloud stage creates the node group
+(label `serverless2.nebius/pool=<name>`, taint `serverless2.nebius/cpu-pool=present:NoSchedule`, autoscaled between
+min and max) and, with `shared_filesystem`, attaches and mounts the region's weights filesystem at `/mnt/weights`
+exactly like a GPU pool (a run class's `weights`/`data`, the shared checkpoints and the restricted assets need it on
+the node; the system nodes have it only with `weights_filesystem.mount_on_system`). `charts/fleet` renders one
+ResourceFlavor per CPU pool (its node label, its taint tolerated, no GPU toleration) and lists it in every ClusterQueue
+**after `system`** with `nvidia.com/gpu: 0` and CPU/memory = `max_nodes` × preset minus the per-node `system_reserve`.
+Kueue's flavor order does the routing: a GPU request skips the GPU-free flavors; a GPU-free workload that fits the
+system nodes stays there (finalizers, export retries, small CPU classes); one that does not takes the CPU pool, is
+admitted against the pool's quota, lands Pending with the pool's node selector and toleration (Kueue injects both),
+the node group scales up, the pod runs, the group scales back down. The manager mirrors the flavors and quotas, so a
+fleet-placed CPU run goes to a region whose CPU pool has room. No class setting is needed; a class may still pin
+`pool: <name>`. `tools/check.sh` asserts the order (system, CPU pools, GPU pools) and the tolerations.
+
 ## GPU drivers: the node image or the NVIDIA GPU Operator
 
 Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tfvars`:

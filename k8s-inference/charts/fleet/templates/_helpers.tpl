@@ -73,11 +73,27 @@
 {{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) "ephemeralGi" (mul $eph $n) | toYaml -}}
 {{- end -}}
 
-{{/* The `system` flavor entries of a queue, first in its flavor list: GPU-free workloads fit them (nominal 0 GPUs, so a
-     GPU request moves on to the pool flavors), CPU and memory from fleet.systemQuota. args: dict "systems" (flavor name ->
-     quota) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
+{{/* A CPU pool's quota (docs/FLEET.md "CPU pools"): max_nodes x preset `<n>vcpu-<n>gb` minus the per-node system_reserve,
+     ephemeral storage per node from its boot disk. args: dict "fleet" "pool" */}}
+{{- define "fleet.cpuPoolQuota" -}}
+{{- $f := .fleet }}{{ $p := .pool -}}
+{{- $parts := regexSplit "[^0-9]+" $p.preset -1 -}}
+{{- $nums := list }}{{ range $x := $parts }}{{ if ne $x "" }}{{ $nums = append $nums (atoi $x) }}{{ end }}{{ end -}}
+{{- if lt (len $nums) 2 }}{{ fail (printf "cpu pool preset %q is not <n>vcpu-<n>gb" $p.preset) }}{{ end -}}
+{{- $vcpu := index $nums (sub (len $nums) 2) }}{{ $memGi := last $nums -}}
+{{- $res := default (dict "cpu" 4 "memory_gib" 16) $f.system_reserve -}}
+{{- $n := int $p.max_nodes -}}
+{{- $eph := include "fleet.ephemeralPerNode" (dict "fleet" $f "boot" (default 128 $p.boot_disk_gib)) | int -}}
+{{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) "ephemeralGi" (mul $eph $n) | toYaml -}}
+{{- end -}}
+
+{{/* The GPU-free flavor entries of a queue, first in its flavor list: `system` (the cluster's system nodes), then the
+     CPU pools in name order (a workload that fits the system nodes stays there; a bigger one takes a CPU pool, which
+     scales from zero); nominal 0 GPUs, so a GPU request moves on to the pool flavors. args: dict "systems" (flavor name
+     -> quota) "order" (list of flavor names in order) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
 {{- define "fleet.systemFlavors" -}}
-{{- range $name, $q := .systems }}
+{{- $systems := .systems }}{{ $order := default (keys $systems | sortAlpha) .order }}
+{{- range $name := $order }}{{ $q := index $systems $name }}
 - name: {{ $name }}
   resources:
     {{- if $.lender }}
@@ -229,7 +245,7 @@ spec:
   resourceGroups:
     - coveredResources: [nvidia.com/gpu, cpu, memory, ephemeral-storage, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
       flavors:
-        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" false) | nindent 8 }}
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" false) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" $prefer) | fromYamlArray }}
         {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name)) }}
         {{- if or (not $owner) (eq $owner $tn) }}
@@ -260,7 +276,7 @@ spec:
   resourceGroups:
     - coveredResources: [nvidia.com/gpu, cpu, memory, ephemeral-storage, nebius.ai/infiniband]
       flavors:
-        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" true) | nindent 8 }}
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" true) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" "") | fromYamlArray }}
         {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name))) }}
         {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $.pools $name)) | fromYaml }}

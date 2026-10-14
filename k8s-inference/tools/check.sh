@@ -97,6 +97,16 @@ for n in system:
     assert not spec.get("tolerations"), f"{cid}: {n} must not tolerate the GPU taint"
     if n == "system":
         assert spec.get("nodeLabels") == {"serverless2.nebius/pool": "system"}, f"{cid}: {n} must select the system nodes"
+# CPU pools (docs/FLEET.md "CPU pools"): GPU-free flavors right after the system ones; the pool's own taint tolerated, never the GPU one
+cpu = [n for n, d in flavors.items() if d["metadata"].get("labels", {}).get("serverless2.nebius/capacity") == "cpu"]
+for n in cpu:
+    spec = flavors[n]["spec"]
+    tols = {(t["key"], t.get("value")) for t in spec.get("tolerations") or []}
+    assert ("nvidia.com/gpu", "present") not in tols, f"{cid}: CPU pool flavor {n} tolerates the GPU taint"
+    if spec.get("nodeLabels"):
+        assert ("serverless2.nebius/cpu-pool", "present") in tols, f"{cid}: CPU pool flavor {n} does not tolerate its pool taint"
+        assert spec["nodeLabels"] == {"serverless2.nebius/pool": n}, f"{cid}: CPU pool flavor {n} selects another pool"
+system = system + cpu  # the GPU-free group of every queue, in this order
 for q in queues:
     covered = q["spec"]["resourceGroups"][0]["coveredResources"]
     assert "ephemeral-storage" in covered, f"{cid}: {q['metadata']['name']} does not cover ephemeral-storage (a run requesting node-local scratch would be NoMatchingFlavor)"
@@ -110,6 +120,8 @@ for q in queues:
     first = [f for f in fl if f["name"] in system]
     rest = [f for f in fl if f["name"] not in system]
     assert fl[:len(first)] == first and first, f"{cid}: {q['metadata']['name']}: system flavors must come first"
+    names = [f["name"] for f in first]
+    assert names == [n for n in names if n not in cpu] + [n for n in names if n in cpu], f"{cid}: {q['metadata']['name']}: CPU pools must follow the system flavors, never precede them"
     for f in first:
         res = {r["name"]: r for r in f["resources"]}
         assert res["nvidia.com/gpu"].get("nominalQuota") == 0 and not res["nvidia.com/gpu"].get("borrowingLimit"), f"{cid}: {q['metadata']['name']}/{f['name']}: GPUs must be 0"
@@ -119,7 +131,7 @@ for q in queues:
         assert (res["nvidia.com/gpu"].get("nominalQuota") or res["nvidia.com/gpu"].get("borrowingLimit") or 0) > 0, f"{cid}: {q['metadata']['name']}/{f['name']}: a GPU pool flavor without GPUs"
         if f["name"] in flavors and flavors[f["name"]]["spec"].get("nodeLabels"):
             assert flavors[f["name"]]["spec"]["nodeLabels"]["serverless2.nebius/pool"] == f["name"], f"{cid}: {f['name']} selects another pool"
-print(f"   ok charts/fleet {cid}: system flavor first ({len(system)}), {sum(len(q['spec']['resourceGroups'][0]['flavors']) for q in queues)} flavor entries in {len(queues)} queues, ephemeral-storage covered and budgeted on every flavor")
+print(f"   ok charts/fleet {cid}: system flavor first ({len(system) - len(cpu)}), CPU pools next ({len(cpu)}), {sum(len(q['spec']['resourceGroups'][0]['flavors']) for q in queues)} flavor entries in {len(queues)} queues, ephemeral-storage covered and budgeted on every flavor")
 PYEOF2
     helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null; echo "   ok charts/tenant $cid"
     for f in "$TMP"/endpoint-*-"$cid".yaml; do

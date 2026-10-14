@@ -30,9 +30,9 @@ metadata:
     serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) | quote }}
 spec: {}
 {{- end }}
-{{- $systems := dict }}
+{{- $systems := dict }}{{ $order := list }}
 {{- range $rn, $r := $f.regions }}
-{{- $_ := set $systems (printf "%s-system" $r.id) (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $r.system_pool) | fromYaml) }}
+{{- $_ := set $systems (printf "%s-system" $r.id) (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $r.system_pool) | fromYaml) }}{{ $order = append $order (printf "%s-system" $r.id) }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
@@ -46,11 +46,27 @@ metadata:
     serverless2.nebius/capacity: "system"
 spec: {}
 {{- end }}
-{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare "systems" $systems) }}
+{{- range $rn, $r := $f.regions }}{{ range $cp, $p := (default dict $r.cpu_pools) }}
+{{- $_ := set $systems (printf "%s-%s" $r.id $cp) (include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" $p) | fromYaml) }}{{ $order = append $order (printf "%s-%s" $r.id $cp) }}
+---
+# a region's CPU pool on the manager (docs/FLEET.md "CPU pools"): the mirror of the worker's flavor, after the system ones
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $r.id }}-{{ $cp }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $r.id | quote }}
+    serverless2.nebius/pool: {{ $cp | quote }}
+    serverless2.nebius/gpu-class: "none"
+    serverless2.nebius/capacity: "cpu"
+spec: {}
+{{- end }}{{ end }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare "systems" $systems "order" $order) }}
 {{- range $tn, $tc := default dict $f.tenants }}
 {{- range $prefer := prepend (include "fleet.classes" $all | fromYamlArray) "" }}
 {{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
-{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "systems" $systems "admissionCheck" (printf "multikueue-%s" $profile)) }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "systems" $systems "order" $order "admissionCheck" (printf "multikueue-%s" $profile)) }}
 {{- end }}
 {{- end }}
 {{- end }}

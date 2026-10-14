@@ -168,12 +168,13 @@ variable "fleet" {
       # Optional CPU-only pools (batch pre/post-processing without a GPU): label serverless2.nebius/pool,
       # taint serverless2.nebius/cpu-pool=present:NoSchedule, Kueue flavor like a GPU pool with 0 GPUs.
       cpu_pools = optional(map(object({
-        platform      = string
-        preset        = string
-        min_nodes     = optional(number, 0)
-        max_nodes     = number
-        boot_disk_gib = optional(number, 128)
-        labels        = optional(map(string), {})
+        platform          = string
+        preset            = string # <n>vcpu-<n>gb: the Kueue quota of the pool's flavor is max_nodes x preset minus the per-node reserve
+        min_nodes         = optional(number, 0)
+        max_nodes         = number
+        boot_disk_gib     = optional(number, 128)
+        labels            = optional(map(string), {})
+        shared_filesystem = optional(bool, true) # attach and mount the region's weights filesystem (weights/data/assets on the node)
       })), {})
     }))
 
@@ -370,6 +371,8 @@ variable "fleet" {
     condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
     && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
     error_message = "assets: alias is a DNS label, kind is file or tree, host_path is absolute, sha256 is 64 hex digits; a tenant's assets name registered aliases."
+    condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.cpu_pools : can(regex("^[0-9]+vcpu-[0-9]+gb$", p.preset)) && p.max_nodes >= 1])])
+    error_message = "cpu_pools: preset is <n>vcpu-<n>gb (the pool's Kueue quota is derived from it) and max_nodes is at least 1."
   }
 
   validation {

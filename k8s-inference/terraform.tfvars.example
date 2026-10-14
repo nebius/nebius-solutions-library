@@ -80,8 +80,9 @@ fleet = {
           max_nodes = 2
         }
       }
-      # CPU-only pools for pre/post-processing run classes (gpu: 0): optional
-      # cpu_pools = { prep = { platform = "cpu-d3", preset = "16vcpu-64gb", max_nodes = 4 } }
+      # CPU-only pools for pre/post-processing run classes (gpu: 0), docs/FLEET.md "CPU pools": a Kueue flavor after
+      # `system` (quota = max_nodes x preset minus the per-node reserve), scaled from zero, the shared filesystem mounted
+      cpu_pools = { prep = { platform = "cpu-d3", preset = "16vcpu-64gb", max_nodes = 2 } }
     }
     # A second region: its own project and subnet; the fleet queues span both and the dispatcher sends
     # every run to the cheapest region that has a free pool of the model's GPU class (docs/SCHEDULING.md).

@@ -326,7 +326,7 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 | `services/dispatcher` image | 0.2.12 |
 | `services/jobs` image | 0.1.22 |
 | `services/ops` image | 0.1.12 |
-| `charts/fleet` | 0.1.9 |
+| `charts/fleet` | 0.1.10 |
 | `charts/platform` | 0.1.7 |
 | `charts/tenant` | 0.3.4 |
 
