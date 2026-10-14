@@ -758,18 +758,12 @@ def _authorize_model(
                 attempt or "-",
             )
         elif leases.mode_of(m) == "required":
-            # a direct POST to an endpoint whose worker requires a lease: the request carries no markers, the worker
-            # would refuse it anyway (required mode fails closed); refused here with the reason, before it costs the
-            # worker a request or the key a count. Readiness probes (GET) are not affected.
-            log.warning(
-                "authorize %s: direct POST by %s refused: the model requires a native lease, a direct call has no markers",
+            # a direct POST to an endpoint whose worker requires a lease carries no markers: the worker refuses it
+            # (required mode fails closed, unchanged); named here so the refusal is attributable from the API log
+            log.info(
+                "authorize %s: direct POST by %s carries no markers (the model requires a native lease: the worker refuses it)",
                 m["name"],
                 p.info.get("key_alias") or p.tenant,
-            )
-            raise HTTPException(
-                403,
-                f"{m['name']}: native lease required; the endpoint serves only the platform's admitted calls "
-                "(a direct call carries no lease markers)",
             )
     if not admitted and p.role != keys.ROUTER["role"]:
         # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is

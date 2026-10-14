@@ -216,9 +216,12 @@ def test_hook_names_the_markers_it_emits_and_refuses_a_direct_post_to_a_required
     # a direct readiness probe still passes (no markers are needed to probe)
     r = c.get("/internal/authorize/llm-example/v1/health/ready", headers=H)
     assert r.status_code == 200 and r.headers["x-serverless2-operation"] == ""
-    # a direct inference POST is refused at the hook, with the reason, before a worker refuses it opaquely
-    r = c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=H)
-    assert r.status_code == 403 and "native lease required" in r.json()["detail"]
+    # a direct inference POST passes the hook with empty markers (policy unchanged: the worker refuses it in required
+    # mode) and the API log names it
+    with caplog.at_level(logging.INFO, logger="api"):
+        r = c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=H)
+    assert r.status_code == 200 and r.headers["x-serverless2-operation"] == ""
+    assert [m for m in caplog.messages if "direct POST" in m and "carries no markers" in m]
     # an optional-mode model: a direct POST passes with empty markers, as before
     monkeypatch.setattr(
         catalog, "get", lambda mid: {**model, "native_lease": "optional"} if mid == "llm-example" else None

@@ -153,7 +153,7 @@
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api": {
   "component": "api",
-  "sha256": "165cd30a721032f5986b9e17c8c15b2a3d202014535b696ca78653829818decb"
+  "sha256": "01c0ef66e8a050d043c66f3348506f3a60d816c646e5dd87b9f1e4b85acc7b56"
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api-authorize": {
   "component": "api",
