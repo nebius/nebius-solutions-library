@@ -151,6 +151,35 @@ def cluster_id_or_none(region: str | None) -> str | None:
         return None
 
 
+def workload_inactive(ns: str, job_uid: str, region: str = REGION) -> bool:
+    """Whether nothing of a run can run any more as far as Kueue is concerned: its Workload (label job-uid) is gone,
+    deactivated (`spec.active = false`, deactivate_workload) or finished (condition Finished=True). An unreadable
+    answer is not an absence (False)."""
+    try:
+        items = retry(
+            api(region).list_namespaced_custom_object,
+            "kueue.x-k8s.io",
+            "v1beta2",
+            ns,
+            "workloads",
+            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+        ).get("items", [])
+    except ApiException:
+        return False
+    if not items:
+        return True
+    for w in items:
+        if (w.get("spec") or {}).get("active") is False:
+            continue
+        if any(
+            c.get("type") == "Finished" and c.get("status") == "True"
+            for c in ((w.get("status") or {}).get("conditions") or [])
+        ):
+            continue
+        return False
+    return True
+
+
 def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Kueue `spec.active = false` on the manager Workload of a run (label kueue.x-k8s.io/job-uid): Kueue evicts the
     run everywhere (the worker's copy goes, its pods with it) and never admits it again. A `suspend` patched onto

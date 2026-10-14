@@ -11,7 +11,9 @@ platform chart 0.1.12 unchanged; migration 28.)
 
 - Endpoint children (docs/JOBS.md "Endpoint children", unit retry): a unit whose child ended WITHOUT a delivered
   capture (the cascade of a parent that finished without a successor, a failed or refused caller) is reopened by a
-  live attempt of a later parent of the same root asking for the same bound request: the next incarnation
+  live attempt of a LATER parent of the same root (the owner's resume) asking for the same bound request with the
+  explicit `retry: true`, and only when the child definitely never inferred (no attempt, or exit 2/3 with no capture;
+  an outcome-unknown exit 4 is refused): the next incarnation
   `<root>-c-<sha>-r<n>` (a new Job, binding and ledger member of kind `child` for the same unit; the earlier child's
   Job and records stay as history), the row back to `pending`/`active` with the new parent, `incarnation` and
   `previous_child` in the readback and the owner route. Before, the same request replayed the ended row (200, no
@@ -19,6 +21,15 @@ platform chart 0.1.12 unchanged; migration 28.)
   its stage for exactly that. Unchanged: an ended unit WITH a capture is final (replay, never a second inference), a
   different request is 409, one open child per root, `child_max_units` counts units. Migration 28:
   `endpoint_children.incarnation`, `previous_child`.
+- Endpoint children: the readback (owner route and the parent's internal read) carries `can_retry`: true only for an
+  ended unit with no capture whose child definitely never inferred (no attempt, or exit 2 with no capture manifest);
+  exit 3/4 and every attempt with a capture say false. The explicit POST `retry: true` applies the same predicate
+  server-side (409 otherwise).
+- Billing: a cancelled JobSet (suspended, pods deleted, a manager's worker copy removed by MultiKueue) never reaches
+  Complete/Failed, so neither the pass nor the owner's read settled it and its key stayed reserved (the first MPI
+  cancel, 2026-10-14: `active_operations 1`, `usage pending`). It now settles once its cancel is on record, it is
+  suspended, no pod of it is left and Kueue holds nothing of it (`kube.workload_inactive`: Workload gone, deactivated
+  or finished), measured from the rank records like a finished run (unknown when a rank has no end); never before.
 - Billing: the settlement lock (0.11.106) reads the database URL from `db`, not `config` (the import failed live and
   every settlement ran on the idempotent unlocked path, correctly but without the duplicate-work guard).
 
