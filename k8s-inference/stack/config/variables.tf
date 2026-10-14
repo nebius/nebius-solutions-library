@@ -204,11 +204,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-<<<<<<< HEAD
         api        = optional(string, "0.11.66")
-=======
-        api        = optional(string, "0.11.66")
->>>>>>> 4b031c4b5 (api 0.11.67 (hotfix on 0.11.63, supersedes the unapplied 0.11.65): an expired lineage head is followed from durable evidence)
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.22")
         ops        = optional(string, "0.1.12")
@@ -372,7 +368,7 @@ variable "fleet" {
 
   validation {
     condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
-      && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
+    && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
     error_message = "assets: alias is a DNS label, kind is file or tree, host_path is absolute, sha256 is 64 hex digits; a tenant's assets name registered aliases."
   }
 
