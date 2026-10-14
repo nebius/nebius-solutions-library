@@ -194,7 +194,11 @@ def test_an_unreachable_region_is_reported_and_never_hides_the_others(database, 
     monkeypatch.setattr(kube, "batch", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
     monkeypatch.setattr(kube, "core", lambda region="eu-north1": {"eu-north1": fake, "eu-south1": south}[region])
     r = c.get("/v1/operations", headers=P1A)
-    assert _ids(r) == sorted(
-        mine
-    )  # equal (fake) timestamps: id ascending and r.headers.get("x-regions-skipped") == "eu-south1"
-    assert "x-next-cursor" not in r.headers
+    assert r.status_code == 200, r.text
+    assert _ids(r) == sorted(mine)  # equal (fake) timestamps: id ascending; both of p1's, from the readable region
+    assert r.headers.get("x-regions-skipped") == "eu-south1"  # the unreachable region is named, never fatal
+    assert "x-records-skipped" not in r.headers and "x-next-cursor" not in r.headers
+    # the region back: nothing skipped
+    south.list_namespaced_job = FakeCluster.list_namespaced_job.__get__(south, FakeCluster)
+    r = c.get("/v1/operations", headers=P1A)
+    assert _ids(r) == sorted(mine) and "x-regions-skipped" not in r.headers
