@@ -371,6 +371,9 @@ variable "fleet" {
     condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
     && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
     error_message = "assets: alias is a DNS label, kind is file or tree, host_path is absolute, sha256 is 64 hex digits; a tenant's assets name registered aliases."
+  }
+
+  validation {
     condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.cpu_pools : can(regex("^[0-9]+vcpu-[0-9]+gb$", p.preset)) && p.max_nodes >= 1])])
     error_message = "cpu_pools: preset is <n>vcpu-<n>gb (the pool's Kueue quota is derived from it) and max_nodes is at least 1."
   }
