@@ -726,7 +726,7 @@ resources:
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ if tailscale_enabled ~}
                   - name: tailscale
-                    image: cr.nebius.cloud/soperator/tailscale:latest # v1.88.4
+                    image: cr.nebius.cloud/soperator-proxy-docker-io/tailscale/tailscale:v1.104.1
                     imagePullPolicy: Always
                     restartPolicy: Always
                     securityContext:
@@ -740,8 +740,16 @@ resources:
                         valueFrom:
                           fieldRef:
                             fieldPath: metadata.uid
+                      - name: TS_AUTH_ONCE
+                        value: "true"
+                      - name: TS_BOOT_TIMEOUT
+                        value: 24h
                       - name: TS_DEBUG_FIREWALL_MODE
                         value: auto
+                      - name: TS_HOSTNAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
                       - name: TS_KUBE_SECRET
                         valueFrom:
                           fieldRef:
