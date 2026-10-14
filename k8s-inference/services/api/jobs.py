@@ -71,6 +71,15 @@ from status import is_jobset, is_manager_job, is_mirror, normalise
 log = logging.getLogger("api.jobs")
 
 
+SHARED_FS_VOLUMES = ("weights", "data", "checkpoints")  # the claims that live on the region's shared filesystem
+
+
+def _mounts_shared_fs(spec: dict) -> bool:
+    """Whether a rendered pod spec still mounts the shared filesystem through one of its claims (the asset claims are
+    not counted: an export or finalizer has them stripped)."""
+    return any(v.get("name") in SHARED_FS_VOLUMES and v.get("persistentVolumeClaim") for v in spec.get("volumes") or [])
+
+
 def needs_shared_fs(r: dict) -> bool:
     """Whether a run class mounts the region's shared filesystem (docs/FLEET.md "Filesystem-aware placement")."""
     return bool(
@@ -1632,8 +1641,21 @@ def export_again(
                 {"name": "GPU_CLASS", "value": ""},
             ]
     spec.pop("nodeSelector", None)
-    spec.pop("affinity", None)
+    spec.pop("affinity", None)  # the compute attempt's class, pool and NVMe constraints: not the transfer's
     spec.pop("tolerations", None)
+    if _mounts_shared_fs(spec):
+        # the delivery still mounts the shared filesystem (weights, data, shared checkpoints: what the export or the
+        # finalizer reads from); the one placement need that survives, recomputed from the RETAINED volumes, never from
+        # the stripped assets (docs/FLEET.md "Filesystem-aware placement")
+        spec["affinity"] = {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}]}
+                    ]
+                }
+            }
+        }
     job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
     _pin_to_worker(job, orig)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root

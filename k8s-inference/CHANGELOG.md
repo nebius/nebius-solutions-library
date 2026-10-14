@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.73
+
+- Export retries and finalizers keep the shared-filesystem placement: the transfer render drops the compute attempt's
+  class, pool and NVMe constraints and re-adds exactly the `serverless2.nebius/shared-fs` requirement when the volumes
+  it retains (weights, data, shared checkpoints) live on the shared filesystem, recomputed from those volumes, never
+  from the stripped restricted assets. Without it a delivery of a class that mounts weights/data landed on an unmounted
+  system node again (root review of 0.11.72). Nothing else changes.
+
 ## api 0.11.72, fleet chart 0.1.11, cluster module: filesystem-aware placement
 
 - A run that mounts the region's shared filesystem (`weights`, `data`, `checkpoints: shared`, `assets`) now requires a
