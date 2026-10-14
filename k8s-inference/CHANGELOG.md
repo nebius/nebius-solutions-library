@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.112
+
+- Endpoint children commit their inherited tenant/owner and actual endpoint model
+  in `operation_owners` before creating a callable Job. Previously only the Job
+  annotation was inherited: native attach returned `owner: null`, and Cosmos
+  correctly stopped before inference with `runtime_draining` (LeRobot R7,
+  2026-10-14). The write is outside the graph transaction, so an immediately
+  attaching worker sees the committed record. Replays are idempotent; conflicting
+  ownership is refused without creating or reassigning a Job. No model rebuild,
+  new database migration, access grant, or automatic inference retry.
+
 ## api 0.11.111
 
 (0.11.111 = 0.11.110 plus bounded owner reads, the failure settlement of stage graphs and the Terraform-bootstrapped

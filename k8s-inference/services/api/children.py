@@ -232,7 +232,7 @@ def preflight_parent(ns: str, m: dict) -> None:
             except HTTPException as e:
                 raise HTTPException(
                     400,
-                    f"class {m['name']}: child endpoint {cid} runs in {region}, where tenant {ns[len(TENANT_NS_PREFIX):]} has "
+                    f"class {m['name']}: child endpoint {cid} runs in {region}, where tenant {ns[len(TENANT_NS_PREFIX) :]} has "
                     f"no capture backend ({e.detail}); with external storage declare child_delivery: application and have the "
                     "parent pass each child's delivery (transport.refresh_url + refresh_token, or response_url + call_url) "
                     "and an immutable result_ref",
@@ -725,6 +725,13 @@ def complete(
     owner = parent_ann.get(f"{LABEL}/owner")
     if not owner:
         return _refuse(row, f"parent {row['parent']} carries no owner on record", 409, synchronous)
+    # Native endpoint workers obtain their owner from the durable lease response,
+    # not Job annotations. Commit it before a child can run (also on replay),
+    # outside the graph transaction so attachment never observes an uncommitted row.
+    try:
+        keys.own_operation(child, tenant, owner, cm["name"])
+    except keys.KeyLimit as e:
+        return _refuse(row, e.detail, e.status, synchronous)
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 3))", (root,))
         st = c.execute(

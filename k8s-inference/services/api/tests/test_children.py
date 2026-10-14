@@ -200,6 +200,8 @@ def test_child_is_a_native_application_io_call_with_a_bound_request(rig):
     assert ann[f"{LABEL}/child-of"] == op and ann[f"{LABEL}/child-root"] == op and ann[f"{LABEL}/child-unit"] == "u1"
     assert ann[f"{LABEL}/key"] == keys.key_hash("sk-good")
     assert ann.get(f"{LABEL}/owner") == fake.jobs[(NS, op)]["metadata"]["annotations"].get(f"{LABEL}/owner")
+    assert keys.operation_owner(child) == ("demo", ann[f"{LABEL}/owner"], "cosmos-nano")
+    assert api._owner_context(child) == {"tenant": "demo", "owner": ann[f"{LABEL}/owner"], "model": "cosmos-nano"}
     # the native application-I/O render: the request from the binding, one durable POST, a retained capture
     env, main = _env(cjob)
     assert (
@@ -243,6 +245,39 @@ def test_child_is_a_native_application_io_call_with_a_bound_request(rig):
     # one open child per root
     r4 = _post(c, op, "u2")
     assert r4.status_code == 409 and "still active" in r4.text
+
+
+def test_child_owner_is_committed_before_the_job_can_start(rig, monkeypatch):
+    c, fake, parent, _ = rig
+    owner = keys.operation_owner(parent)[1]
+    expected = {"tenant": "demo", "owner": owner, "model": "cosmos-nano"}
+    create = jobs.create
+    seen = []
+
+    def observed_create(ns, job, region, secret):
+        child = job["metadata"]["name"]
+        # A separate database connection sees it before Kubernetes creates a Pod.
+        assert api._owner_context(child) == expected
+        seen.append(child)
+        return create(ns, job, region, secret)
+
+    monkeypatch.setattr(jobs, "create", observed_create)
+    response = _post(c, parent, "owner-before-start")
+    assert response.status_code == 201, response.text
+    child = response.json()["child"]
+    assert seen == [child] and child != parent
+    assert _post(c, parent, "owner-before-start").status_code == 200
+    assert api._owner_context(child) == expected and seen == [child]
+
+
+def test_child_owner_conflict_never_creates_or_reassigns_a_job(rig):
+    c, fake, parent, _ = rig
+    child = children.child_id(parent, "owner-conflict")
+    keys.own_operation(child, "other-tenant", "other-owner", "other-model")
+    response = _post(c, parent, "owner-conflict")
+    assert response.status_code == 409 and "another owner or model" in response.text
+    assert (NS, child) not in fake.jobs
+    assert keys.operation_owner(child) == ("other-tenant", "other-owner", "other-model")
 
 
 def test_input_ref_binds_the_sha_and_the_refresh_broker_serves_renewable_urls(rig):

@@ -793,6 +793,11 @@ scope and budget but **not** the key's model allow-list: the child model was all
 `child_endpoints`, so a key granted the parent class alone drives its children without being granted the child
 endpoints (a direct call of the key to the child endpoint stays refused).
 
+Before the child Job is created, its inherited tenant/owner and actual endpoint
+model are committed to the durable ownership record. Native execution attachment
+therefore returns the same authenticated owner context as a direct endpoint call;
+the worker never relies on an uncommitted row or a client-supplied owner header.
+
 **Unit retry (explicit).** A unit whose child ended without delivering its capture is not necessarily final: a live
 attempt of a **later** parent of the same root (the owner's resume, never the parent that owned the ended child)
 may POST the same bound request with `retry: true`; the unit then reopens as the next incarnation
