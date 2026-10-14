@@ -2245,6 +2245,17 @@ def test_multinode_status_cancel_and_resume(client, monkeypatch):
     assert {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{op['id']}"} in main[
         "volumeMounts"
     ]
+    # the same leaf on EVERY container of the resumed rank pod, the checkpoint-provision init included: it must
+    # provision the root's leaf the ranks restore from, never a fresh checkpoints/<successor> (0.11.110 regression)
+    rpod = _jobset_pod(new)
+    init = next(x for x in rpod["initContainers"] if x["name"] == "checkpoint-provision")
+    assert init["volumeMounts"] == [
+        {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{op['id']}"}
+    ]
+    for x in list(rpod["containers"]) + list(rpod["initContainers"]):
+        for m in x.get("volumeMounts", []):
+            if m["name"] == "checkpoints":
+                assert m["subPath"] == f"checkpoints/{op['id']}", (x["name"], m)
     import billing
 
     job, _ = jobs.find("tenant-demo", op["id"])

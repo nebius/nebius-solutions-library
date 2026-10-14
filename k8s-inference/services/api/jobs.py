@@ -2721,7 +2721,10 @@ def resume(
     if expired:
         job["metadata"]["annotations"][f"{LABEL}/restarted-from-inputs"] = name
     if is_jobset(job):  # the shared checkpoint directory is keyed by the root operation
-        for c in job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]:
+        # every container of the rank pod, the provisioning init included (it must provision the ROOT's leaf, the one
+        # the ranks restore from, never a fresh `checkpoints/<successor>`)
+        pod_spec = job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        for c in list(pod_spec.get("containers") or []) + list(pod_spec.get("initContainers") or []):
             for m in c.get("volumeMounts", []):
                 if m["name"] == "checkpoints":
                     m["subPath"] = f"checkpoints/{root}"
