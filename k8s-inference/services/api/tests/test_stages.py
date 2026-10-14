@@ -12,6 +12,7 @@ import pytest
 import attempts
 import auth
 import execution
+import jobs
 import reconciliation
 import stages
 from test_api import KEY_INFO, H, admin_keys, client, cluster, fake_keys  # noqa: F401
@@ -822,3 +823,63 @@ def test_original_and_head_both_expired_follow_through_the_ledger_and_durable_ro
             r["role"] = "export"
     op = c.get(f"/v1/operations/{root}", headers=H).json()
     assert op.get("id") == root and op.get("epoch") == 1, op
+
+
+def test_restart_from_inputs_resumes_an_expired_failed_root_from_its_admission_record(world, monkeypatch):
+    """api 0.11.74: the root's Job and work volume are gone (TTL); its admission record remains. Without the flag the
+    resume is refused (409, says what to pass); with it the run renders again from the record on a fresh volume as a
+    continuation of the same root (lineage, owner, class, graph); a root without a record is refused (404)."""
+    import admissions
+
+    c, cl, fk, rows, cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    _fail(cl, rows, root)
+    for r in rows:
+        r.setdefault("model", "hello-run")
+    orig = cl.jobs[(NS, root)]
+    rec = {
+        "operation": root,
+        "tenant": "demo",
+        "region": "eu-north1",
+        "labels": dict(orig["metadata"]["labels"]),
+        "annotations": dict(orig["metadata"]["annotations"]),
+        "timeout_s": orig["spec"].get("activeDeadlineSeconds"),
+        "output_prefix": jobs.output_prefix(orig),
+    }
+    del cl.jobs[(NS, root)]  # TTL: the Job and its volume are gone
+    cl.pvcs.pop((NS, f"{root}-work"), None)
+    monkeypatch.setattr(
+        attempts,
+        "synthesize",
+        lambda operation, tenant: {
+            "id": operation,
+            "status": "FAILED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 1,
+        }
+        if operation == root
+        else None,
+    )
+    monkeypatch.setattr(admissions, "get", lambda operation: None)
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
+    assert r.status_code == 404 and "no admission record" in r.json()["detail"], r.text
+    monkeypatch.setattr(admissions, "get", lambda operation: rec if operation == root else None)
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={})
+    assert r.status_code == 409 and "restart_from_inputs" in r.json()["detail"], r.text
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
+    assert r.status_code == 202, r.text
+    succ = r.json()["id"]
+    assert succ == f"{root}-r1"
+    sj = cl.jobs[(NS, succ)]
+    ann, lab = sj["metadata"]["annotations"], sj["metadata"]["labels"]
+    assert ann["serverless2.nebius/resumed-from"] == root and ann["serverless2.nebius/restarted-from-inputs"] == root
+    assert ann.get("serverless2.nebius/owner") == orig["metadata"]["annotations"].get("serverless2.nebius/owner")
+    assert ann["serverless2.nebius/input"] == orig["metadata"]["annotations"]["serverless2.nebius/input"]
+    assert lab["serverless2.nebius/model"] == "hello-run" and lab["serverless2.nebius/tenant"] == "demo"
+    vol = next(v for v in sj["spec"]["template"]["spec"]["volumes"] if v["name"] == "work")
+    assert vol["persistentVolumeClaim"]["claimName"] == f"{succ}-work"  # a fresh volume, never the expired one
+    assert fk.run_head(root) == succ  # the ledger: a continuation of the same root
+    assert c.get(f"/v1/operations/{root}", headers=H).json()["id"] == succ  # the handle follows
+    assert reconciliation.gate_stages() == []
+    assert "root QUEUED" in cl.jobs[(NS, g0)]["metadata"]["annotations"][stages.WAIT_REASON]

@@ -138,7 +138,16 @@ privilege, no host path, no shared tenant mount: the alias cannot reach anything
 A resumed operation names its successor: durably (the attempt marks the handle and the stage gate follow, also once
 the original Job expired) and on its Job while it exists. `GET /v1/operations/<original>` therefore answers with the
 current head of the lineage (the original stays readable through its rows), a graph child waiting on a resumed
-dependency waits on the successor's state, and a second `:resume` of the original is refused naming the head. The run
+dependency waits on the successor's state, and a second `:resume` of the original is refused naming the head.
+
+**Restart from inputs** (api 0.11.74): every run admitted leaves an admission record in the ledger (the Job's labels
+and annotations, region, timeout, output prefix), kept past the Job's TTL. When a FAILED root's Job and work volume are
+gone (the Job's TTL garbage-collects the claim it owns) and no checkpoint pointer exists, `:resume` with
+`restart_from_inputs: true` renders the run again from that record on a fresh work volume on the same cluster, as a
+continuation of the same root (`<root>-rN`, annotation `restarted-from-inputs`): same owner, key, class binding and
+execution block, the current placement rules. Without the flag the resume is refused (409) so a checkpoint is never
+dropped unnoticed; a root admitted before 0.11.74 has no record and is refused (404 "submit a new run"): nothing is
+reconstructed from thin air. The run
 ledger's lineage head (`keys.run_head`, `stage_head`) is the authority behind the link: the handle follows it even
 without an annotation or mark, and the owner check applies to the named operation and to the head. `:cancel` by a
 graph root's id cancels the graph (its stages and the root lineage's head) also once the root's Job expired.

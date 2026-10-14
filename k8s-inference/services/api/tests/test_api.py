@@ -147,6 +147,8 @@ class FakeCluster:
         )
 
     def patch_namespaced_job(self, name, ns, body):
+        if (ns, name) not in self.jobs:
+            raise ApiException(status=404, reason="NotFound")  # as the API answers for an expired Job
         j = self.jobs[(ns, name)]
         _merge(j, body)  # a merge patch: nested maps merge, None deletes (labels, annotations, template metadata)
         return j
@@ -368,6 +370,9 @@ def cluster(monkeypatch):
 
 @pytest.fixture
 def client(monkeypatch, cluster):
+    import admissions
+
+    monkeypatch.setattr(admissions, "record", lambda job, region, prefix: None)  # no ledger in the fake world
     monkeypatch.setattr(
         appmod.artifacts, "storage", lambda ns, region="eu-north1": {"bucket": f"serverless2-demo-{region}"}
     )

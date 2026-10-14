@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.74
+
+- Restart from inputs (docs/JOBS.md "Resume"): every run admitted from this version on leaves an admission record in the
+  ledger (migration 19: the Job's labels and annotations, region, timeout, output prefix), kept past the Job's TTL.
+  `:resume` of a FAILED root whose Job and work volume expired renders it again from that record on a fresh volume on
+  the same cluster when the caller passes `restart_from_inputs: true` (or a `checkpoint_ref`), as a continuation of the
+  same root (lineage, handle and graph follow; owner, key and class binding inherited; the new render gets the current
+  placement rules). Without the flag: 409 saying what to pass; a root admitted before this version, with no record:
+  404 "submit a new run", never a reconstruction. Nothing else changes against 0.11.73.
+
 ## api 0.11.73
 
 - Export retries and finalizers keep the shared-filesystem placement: the transfer render drops the compute attempt's

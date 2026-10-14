@@ -402,7 +402,7 @@ application-owned output"). A run names a binding as `execution.private_input_re
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
 profiles, the regions' OIDC issuers, the `recovery` policies and bounds the fleet supports, the application `finalize`
 roles and retry bound, docs/JOBS.md "Finalization by the application"). `POST /v1/operations/{id}:resume` takes an optional body
-`{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution` and their lifecycle
+`{"checkpoint_ref": "...", "gpu_class": "...", "restart_from_inputs": true}` (the last: a FAILED root whose Job and work volume expired is rendered again from its admission record on a fresh volume, docs/JOBS.md "Resume"). Operations report their resolved block as `execution` and their lifecycle
 (`root_operation_id`, `attempt_id`, `epoch`, `revision`, `cluster`, `image_digest`, `export_state`, `result_ref`,
 `checkpoint_ref`; docs/JOBS.md "Attempts and finalization"); `GET /v1/operations/{id}?since=<revision>` answers 304
 while nothing changed; `POST /v1/operations/{id}:export` retries a failed export without rerunning the simulation;

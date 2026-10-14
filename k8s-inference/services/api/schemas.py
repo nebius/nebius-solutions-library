@@ -184,6 +184,9 @@ class ResumeRequest(BaseModel):
         default=None, max_length=1024
     )  # a portable checkpoint: no volume, any permitted cluster/class
     gpu_class: str | None = None
+    restart_from_inputs: bool = (
+        False  # a FAILED root whose Job and volume expired: render again from its admission record (docs/JOBS.md)
+    )
 
 
 class UploadRequest(BaseModel):

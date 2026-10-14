@@ -16,6 +16,7 @@ from psycopg_pool import ConnectionPool
 import attempts
 import billing
 import db
+import jobs
 import keys
 
 
@@ -965,3 +966,49 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     # required mode, nothing ever prepared: unknown; optional: the caller's own
     assert leases.settle_decision("op-never", required=True) == (True, None, "unattached")
     assert leases.settle_decision("op-never", required=False) == (True, 0.0, "no native execution")
+
+
+def test_admission_records_survive_and_rebuild_the_job(database):
+    import admissions
+
+    db.migrate()
+
+    job = {
+        "metadata": {
+            "name": "op-adm-1",
+            "labels": {
+                "serverless2.nebius/mode": "run",
+                "serverless2.nebius/tenant": "demo",
+                "serverless2.nebius/model": "m",
+            },
+            "annotations": {"serverless2.nebius/input": '{"x": 1}', "serverless2.nebius/owner": "p1"},
+        },
+        "spec": {
+            "activeDeadlineSeconds": 1200,
+            "template": {
+                "spec": {
+                    "containers": [
+                        {"name": "uploader", "env": [{"name": "OUTPUT_PREFIX", "value": "s3://b/operations/op-adm-1"}]}
+                    ]
+                }
+            },
+        },
+    }
+    admissions.record(job, "eu-north1", jobs.output_prefix(job))
+    admissions.record(job, "eu-north1", jobs.output_prefix(job))  # idempotent
+    rec = admissions.get("op-adm-1")
+    assert rec["tenant"] == "demo" and rec["region"] == "eu-north1" and rec["timeout_s"] == 1200
+    assert (
+        rec["output_prefix"] == "s3://b/operations/op-adm-1" and rec["annotations"]["serverless2.nebius/owner"] == "p1"
+    )
+    again = admissions.as_job(rec)
+    assert again["_expired"] and again["metadata"]["labels"]["serverless2.nebius/model"] == "m"
+    assert jobs.output_prefix(again) == "s3://b/operations/op-adm-1" and again["spec"]["activeDeadlineSeconds"] == 1200
+    assert admissions.get("op-nope") is None
+    # an endpoint call (mode async) leaves no record
+    admissions.record(
+        {**job, "metadata": {**job["metadata"], "name": "op-adm-2", "labels": {"serverless2.nebius/mode": "async"}}},
+        "eu-north1",
+        None,
+    )
+    assert admissions.get("op-adm-2") is None

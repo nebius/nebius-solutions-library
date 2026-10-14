@@ -295,6 +295,21 @@ create table if not exists operation_marks (
     alter table native_executions add column if not exists restart_count integer;
     alter table native_executions add column if not exists lost_reason text;
     """,
+    # 19: the admission record of a run (docs/JOBS.md "Resume", "restart from inputs"): what a resume needs that lived only
+    # on the Job until api 0.11.74 (its labels, annotations: input, class binding, execution block, owner, key; region,
+    # timeout, output prefix), kept past the Job's TTL. Only runs admitted from this version on have one.
+    """
+    create table if not exists run_admissions (
+        operation     text primary key,
+        tenant        text not null,
+        region        text,
+        labels        jsonb not null default '{}'::jsonb,
+        annotations   jsonb not null default '{}'::jsonb,
+        timeout_s     integer,
+        output_prefix text,
+        created_at    timestamptz not null default now()
+    );
+    """,
 ]
 
 _pool = None
