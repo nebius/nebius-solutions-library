@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.98
+
+(0.11.98 = 0.11.97 plus one narrow correction; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)
+
+- Attempt records: `pod_uid` (migration 24) is now the observed UID of EVERY recording pod (a single-node run, an
+  endpoint caller, a CPU finalizer, a gang rank), taken from the one pod read the API already does for the runtime
+  digest (`attempts._pod_facts`), never from the record or the name; a later record of a pod that cannot be read
+  any more keeps the UID and digest its row holds. 97 persisted the UID for gang pods only. The unverified-gang
+  refusal and the old-row identity rule are unchanged; ordinary unreadable pods record as before.
+
 ## api 0.11.97
 
 (0.11.97 = 0.11.96 with one fence corrected after review; jobs 0.1.26 and platform chart 0.1.11 unchanged. 0.11.96 was

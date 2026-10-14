@@ -89,9 +89,11 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         raise HTTPException(400, f"status must be one of {VALID}")
     root = str(body.get("root") or operation)
     tenant = ns[len(TENANT_NS_PREFIX) :]
-    # a gang pod (a JobSet's indexed Job): its rank and incarnation as the API OBSERVES them on the pod (the JobSet
-    # controller's restart-attempt, the indexed Job's completion index) and its UID; nothing of it comes from the record
-    gang = _pod_gang(region, ns, pod, operation)
+    # the pod as the API OBSERVES it (one read): its UID (every pod: a single-node run, an endpoint caller, a CPU
+    # finalizer, a gang rank), its runtime digest, and for a JobSet pod its rank and incarnation (the JobSet
+    # controller's restart-attempt, the indexed Job's completion index); nothing of it comes from the record
+    facts = _pod_facts(region, ns, pod, operation)
+    gang = facts["gang"]
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (root,))
         cur = c.execute(
@@ -143,7 +145,7 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         if cur and cur[1] in TERMINAL and status == "started":
             return _row(c, operation, pod)  # a late duplicate of the current attempt's start record
         if status == "started" and not body.get("image_digest"):
-            body = {**body, "image_digest": _pod_digest(region, ns, pod)}  # observed on the pod, or still None
+            body = {**body, "image_digest": facts["digest"]}  # observed on the pod, or still None
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
         export = body.get("export") or (
@@ -199,7 +201,7 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                 body.get("io_mode") or None,
                 gang.get("rank") if gang else None,
                 gang.get("restart") if gang else None,
-                gang.get("uid") if gang else None,
+                facts["uid"],  # the observed UID of every pod; an unreadable pod keeps the UID its row already has
             ),
         )
         return _row(c, operation, pod)
@@ -211,30 +213,42 @@ JOB_INDEX_LABEL = "batch.kubernetes.io/job-completion-index"
 GANG_POD = re.compile(r"^(?P<op>.+)-workers-\d+-(?P<rank>\d+)-[a-z0-9]{5}$")
 
 
-def _pod_gang(region: str | None, namespace: str, pod: str, operation: str) -> dict | None:
-    """The gang membership of a JobSet pod as the API observes it: {"uid", "rank", "restart"} from the pod's own
-    labels/annotations (the JobSet controller stamps the JobSet name and the restart attempt, the Job controller the
-    completion index); None for an ordinary single pod. When the pod cannot be read any more (a late record), the
-    rank comes from the JobSet pod name (`<op>-workers-<job>-<rank>-<suffix>`) and the incarnation stays unknown
-    (None): `record` then keeps only the pod's own existing row and refuses a pod without one. Nothing here trusts
-    the record, and nothing attributes an unverified pod to a gang."""
+def _pod_facts(region: str | None, namespace: str, pod: str, operation: str) -> dict:
+    """What the API observes on the recording pod, in ONE read: {"uid", "digest", "gang", "read"}. `uid` is the pod's
+    UID (every pod of every operation: a single-node run, an endpoint caller, a CPU finalizer, a gang rank), `digest`
+    the main container's runtime imageID when the kubelet reported it, `gang` the JobSet membership ({"uid", "rank",
+    "restart"}) or None for an ordinary pod. The TokenReview already proved the pod name; what is read here is the
+    cluster's own statement about that pod, never the record's. Unreadable (a late record after the pod is gone):
+    uid/digest None (the row keeps what it has), `gang` with the rank from a JobSet pod name and the incarnation
+    unknown (`record` then keeps only the pod's existing row and refuses a pod without one), or None for an ordinary
+    pod name (ordinary semantics unchanged)."""
+    out: dict = {"uid": None, "digest": None, "gang": None, "read": False}
     try:
         obj = kube.core(region or kube.REGION).read_namespaced_pod(pod, namespace)
-        md = obj.metadata
-        labels, ann = dict(md.labels or {}), dict(md.annotations or {})
     except Exception:  # noqa: BLE001 - unreadable: the name is all that is left
         m = GANG_POD.match(pod)
-        if not m or m.group("op") != operation:
-            return None
-        return {"uid": None, "rank": int(m.group("rank")), "restart": None}
-    if (labels.get(JOBSET_NAME_LABEL) or ann.get(JOBSET_NAME_LABEL)) != operation:
-        return None
-    rank = labels.get(JOB_INDEX_LABEL) or ann.get(JOB_INDEX_LABEL)
-    restart = labels.get(JOBSET_RESTART_LABEL) or ann.get(JOBSET_RESTART_LABEL) or "0"
-    try:
-        return {"uid": md.uid, "rank": int(rank) if rank is not None else None, "restart": int(restart)}
-    except ValueError:
-        return {"uid": md.uid, "rank": None, "restart": None}
+        if m and m.group("op") == operation:
+            out["gang"] = {"uid": None, "rank": int(m.group("rank")), "restart": None}
+        return out
+    md = obj.metadata
+    out["read"], out["uid"] = True, md.uid
+    for cs in (obj.status.container_statuses if obj.status else None) or []:
+        if cs.name == MAIN_CONTAINER and cs.image_id:
+            out["digest"] = cs.image_id
+    labels, ann = dict(md.labels or {}), dict(md.annotations or {})
+    if (labels.get(JOBSET_NAME_LABEL) or ann.get(JOBSET_NAME_LABEL)) == operation:
+        rank = labels.get(JOB_INDEX_LABEL) or ann.get(JOB_INDEX_LABEL)
+        restart = labels.get(JOBSET_RESTART_LABEL) or ann.get(JOBSET_RESTART_LABEL) or "0"
+        try:
+            out["gang"] = {"uid": md.uid, "rank": int(rank) if rank is not None else None, "restart": int(restart)}
+        except ValueError:
+            out["gang"] = {"uid": md.uid, "rank": None, "restart": None}
+    return out
+
+
+def _pod_gang(region: str | None, namespace: str, pod: str, operation: str) -> dict | None:
+    """The gang membership alone (see `_pod_facts`)."""
+    return _pod_facts(region, namespace, pod, operation)["gang"]
 
 
 def _gang_epoch(c, operation: str, gang: dict, top: int) -> int:
@@ -486,16 +500,9 @@ def _marks(operation: str):
 
 
 def _pod_digest(region: str | None, namespace: str, pod: str) -> str | None:
-    """The main container's imageID as the API reads it on the pod right now; None when not reported yet or unreadable
-    (the record then stays `pending` and the live read at GET time converges it)."""
-    try:
-        obj = kube.core(region or kube.REGION).read_namespaced_pod(pod, namespace)
-    except Exception:
-        return None
-    for cs in (obj.status.container_statuses if obj.status else None) or []:
-        if cs.name == MAIN_CONTAINER and cs.image_id:
-            return cs.image_id
-    return None
+    """The main container's imageID as the API reads it on the pod right now (see `_pod_facts`); None when not
+    reported yet or unreadable (the record then stays `pending` and the live read at GET time converges it)."""
+    return _pod_facts(region, namespace, pod, "")["digest"]
 
 
 def marks_for(operations: set[str]) -> dict[str, tuple]:

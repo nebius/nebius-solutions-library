@@ -280,8 +280,11 @@ start of a scaled-from-zero pool). Reserved pools (the usual home of a 16-node j
 
 ### Gang attempts
 
-Every pod of a JobSet records its attempt (`POST /internal/attempts`, its own projected token), and the API observes the
-pod's gang membership on the pod itself, never from the record: the JobSet controller's `jobset.sigs.k8s.io/restart-attempt`
+Every record carries the pod's UID as the API observes it on the pod it reads anyway for the runtime digest
+(`pod_uid`: a single-node run's pod, an endpoint caller, a CPU finalizer, a gang rank alike; a pod the API cannot read any
+more keeps the UID its row holds; never the record's claim). Every pod of a JobSet records its attempt
+(`POST /internal/attempts`, its own projected token), and the API observes the pod's gang membership on the pod itself,
+never from the record: the JobSet controller's `jobset.sigs.k8s.io/restart-attempt`
 (the incarnation), the indexed Job's `batch.kubernetes.io/job-completion-index` (the rank) and the pod UID (migration 24:
 `gang_rank`, `gang_restart`, `pod_uid`). **One epoch per incarnation**: the ranks of one restart share it, so a peer's
 start record never fences the coordinator (before 0.11.96 every sibling took the next epoch and the coordinator's

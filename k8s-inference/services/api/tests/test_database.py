@@ -1017,6 +1017,12 @@ def test_admission_records_survive_and_rebuild_the_job(database):
     assert admissions.get("op-adm-2") is None
 
 
+def _facts(gang):
+    """`attempts._pod_facts` as the tests shape it: a gang pod's facts carry its UID; an unreadable one carries none."""
+    uid = (gang or {}).get("uid")
+    return {"uid": uid, "digest": None, "gang": gang, "read": uid is not None}
+
+
 def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(database, monkeypatch):
     """Migration 24 (docs/JOBS.md "Gang attempts"): the pods of one JobSet incarnation (observed restart-attempt and
     completion index) share one epoch, so a peer's start never fences the coordinator; only rank 0 publishes a
@@ -1032,7 +1038,7 @@ def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(databas
         f"{op}-workers-0-0-ccccc": {"uid": "u2", "rank": 0, "restart": 1},
         f"{op}-workers-0-1-ddddd": {"uid": "u3", "rank": 1, "restart": 1},
     }
-    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: facts.get(pod))
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(facts.get(pod)))
     body = {
         "operation": op,
         "status": "started",
@@ -1075,7 +1081,7 @@ def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(databas
     assert attempts.authority(attempts.for_operation(op))["pod"] == f"{op}-workers-0-0-ccccc"
     # an unreadable late record of a gang pod keeps only the pod's OWN verified row; it is never attributed to any gang
     monkeypatch.setattr(
-        attempts, "_pod_gang", lambda region, ns, pod, operation: {"uid": None, "rank": 1, "restart": None}
+        attempts, "_pod_facts", lambda region, ns, pod, operation: _facts({"uid": None, "rank": 1, "restart": None})
     )
     late = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", {**body, "status": "succeeded"})
     assert late["epoch"] == 2  # its own row (cur): the epoch it had
@@ -1084,7 +1090,7 @@ def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(databas
     assert e.value.status_code == 409 and "unverifiable" in e.value.detail
     assert not any(r["pod"] == f"{op}-workers-0-1-eeeee" for r in attempts.for_operation(op))
     # an ordinary single pod of another operation: one epoch per pod, as before
-    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: None)
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(None))
     assert (
         attempts.record("north", "tenant-demo", "op-solo-a", {"operation": "op-solo", "status": "started", "gpus": 1})[
             "epoch"
@@ -1126,7 +1132,7 @@ def test_a_deleted_old_coordinator_cannot_acquire_the_new_gangs_authority(databa
         new_peer: {"uid": "u3", "rank": 1, "restart": 1},
         new_coord: {"uid": "u2", "rank": 0, "restart": 1},
     }
-    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: facts.get(pod))
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: _facts(facts.get(pod)))
     first = attempts.record(
         "north", "tenant-demo", old_coord, {**body, "checkpoint_ref": "c" * 64, "checkpoint_generation": 1}
     )
@@ -1169,3 +1175,71 @@ def test_a_deleted_old_coordinator_cannot_acquire_the_new_gangs_authority(databa
     )
     assert got["epoch"] == 2 and got["checkpoint_ref"] == "n" * 64
     assert attempts.authority(attempts.for_operation(op))["pod"] == new_coord
+
+
+def test_every_recorded_pod_carries_its_observed_uid_and_an_unreadable_one_keeps_it(database, monkeypatch):
+    """Migration 24's `pod_uid` is the pod's UID as the API observes it on the pod it already reads for the digest:
+    a single-node run's pod, a CPU finalizer's pod and a gang rank alike (never the record's claim, never a guess
+    from the name); a later record of a pod the API cannot read any more keeps the UID (and digest) its row holds;
+    an ordinary unreadable pod is still recorded as before (uid None), only a gang pod without a row is refused."""
+    import db
+
+    db.migrate()
+    body = {"operation": "op-solo", "status": "started", "gpus": 1, "started_at": "2026-10-14T10:00:00Z"}
+    readable = {"uid": "uid-solo-a", "digest": "img@sha256:aaaa", "gang": None, "read": True}
+    monkeypatch.setattr(attempts, "_pod_facts", lambda region, ns, pod, operation: readable)
+    a = attempts.record("north", "tenant-demo", "op-solo-a", body)
+    assert a["pod_uid"] == "uid-solo-a" and a["image_digest"] == "img@sha256:aaaa" and a["gang_rank"] is None
+    # the pod is gone: its terminal record keeps the observed UID and digest of its row
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": None, "digest": None, "gang": None, "read": False},
+    )
+    done = attempts.record("north", "tenant-demo", "op-solo-a", {**body, "status": "succeeded", "exit_code": 0})
+    assert (
+        done["pod_uid"] == "uid-solo-a" and done["image_digest"] == "img@sha256:aaaa" and done["status"] == "succeeded"
+    )
+    # an ordinary pod never recorded and unreadable: recorded as before, without a UID (no gang semantics apply)
+    b = attempts.record("north", "tenant-demo", "op-solo-b", body)
+    assert b["pod_uid"] is None and b["epoch"] == 2
+    # a CPU finalizer's pod (an ordinary pod of an export member): its UID observed as well
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "uid-fin", "digest": "img@sha256:ffff", "gang": None, "read": True},
+    )
+    f = attempts.record(
+        "north",
+        "tenant-demo",
+        "op-solo-x1-q",
+        {"operation": "op-solo-x1", "root": "op-solo", "status": "started", "role": "finalize", "gpus": 0},
+    )
+    assert f["pod_uid"] == "uid-fin" and f["role"] == "finalize"
+    # a gang rank: the same observed UID, through the same read
+    gang = {"uid": "uid-g0", "rank": 0, "restart": 0}
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "uid-g0", "digest": None, "gang": gang, "read": True},
+    )
+    g = attempts.record(
+        "north", "tenant-demo", "op-g-workers-0-0-aaaaa", {"operation": "op-g", "status": "started", "gpus": 8}
+    )
+    assert g["pod_uid"] == "uid-g0" and g["gang_rank"] == 0
+    # the unverified refusal stands: a gang pod unreadable and never recorded
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {
+            "uid": None,
+            "digest": None,
+            "gang": {"uid": None, "rank": 1, "restart": None},
+            "read": False,
+        },
+    )
+    with pytest.raises(HTTPException) as e:
+        attempts.record(
+            "north", "tenant-demo", "op-g-workers-0-1-bbbbb", {"operation": "op-g", "status": "started", "gpus": 8}
+        )
+    assert e.value.status_code == 409 and "unverifiable" in e.value.detail
