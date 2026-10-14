@@ -9,7 +9,9 @@ A model definition ("spec") is the shape of the console form:
      "port": 8000, "protocol": "openai" | "http" | "websocket" | "grpc", "path": "/v1/chat/completions",
      "health_path": "/health", "served_model": "llm",
      "gpu": {"count": 1, "classes": ["h100", "l40s"]},       # preferred class first; pools of these classes
-     "resources": {"cpu": "8", "memory": "32Gi"}, "scaling": {"min": 0, "max": 2, "target": 4},
+     "resources": {"cpu": "8", "memory": "64Gi", "cpu_limit": "24", "memory_limit": "128Gi",   # requests; limits optional
+                   "ephemeral_storage": "4Gi", "ephemeral_storage_limit": "16Gi"},              # (= requests unless given)
+     "scaling": {"min": 0, "max": 2, "target": 4},
      "timeout_s": 600, "shm_gib": 4, "pull_secret": "ngc",
      "weights": {"path": "my-llm", "mount_path": "/weights", "env": {"HF_HOME": "/weights"}},
      "regions": ["eu-north1"],                                 # default: every region with a pool of a class
@@ -497,7 +499,22 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "image": image,
             "port": port,
             "protocol": protocol,
-            "resources": {"gpu": count, "cpu": str(res.get("cpu", "4")), "memory": str(res.get("memory", "16Gi"))},
+            "resources": {
+                "gpu": count,
+                "cpu": str(res.get("cpu", "4")),
+                "memory": str(res.get("memory", "16Gi")),
+                # optional, as a run class's: limits above the requests (cpu/memory are the requests, = the limits
+                # unless these are given) and the kubelet's node-local scratch (request; limit = request unless given);
+                # kept through the projection, nothing rendered without them
+                **({"cpuLimit": str(res["cpu_limit"])} if res.get("cpu_limit") else {}),
+                **({"memoryLimit": str(res["memory_limit"])} if res.get("memory_limit") else {}),
+                **({"ephemeralStorage": str(res["ephemeral_storage"])} if res.get("ephemeral_storage") else {}),
+                **(
+                    {"ephemeralStorageLimit": str(res["ephemeral_storage_limit"])}
+                    if res.get("ephemeral_storage_limit")
+                    else {}
+                ),
+            },
             "scaling": {
                 "minReplicas": int(scaling.get("min", 0)),
                 "maxReplicas": int(scaling.get("max", 1)),

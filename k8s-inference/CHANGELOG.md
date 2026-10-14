@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.89
+
+(0.11.89 = 0.11.88 plus the endpoint resources addendum below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)
+
+- Endpoint `resources` keep optional `cpu_limit` / `memory_limit` above the `cpu` / `memory` requests and an
+  optional `ephemeral_storage` request with `ephemeral_storage_limit` (= the request unless given), the names a run
+  class uses, through the catalog projection and the native renderer (requests/limits on the endpoint container,
+  single- and multi-node); defaults unchanged (4 / 16Gi, requests = limits, no ephemeral storage), nothing rendered
+  without them (docs/API.md). The two-container shapes retained by the migration (NIM 20 CPU/160Gi + adapter 2/2Gi
+  with 8704Mi/13Gi ephemeral; NV-Segment-CT 8/64Gi requests, 24/128Gi limits, 4Gi/16Gi ephemeral) project as one
+  native container.
+
 ## api 0.11.88, jobs 0.1.26, platform chart 0.1.10
 
 (0.11.88 supersedes the unreleased 0.11.87 candidate after review; everything of it is included.)

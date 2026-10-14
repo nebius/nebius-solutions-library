@@ -311,8 +311,12 @@ class GpuSpec(BaseModel):
 
 
 class ResourcesSpec(BaseModel):
-    cpu: str | None = None
-    memory: str | None = None
+    cpu: str | None = None  # request (= limit unless cpu_limit)
+    memory: str | None = None  # request (= limit unless memory_limit)
+    cpu_limit: str | None = None
+    memory_limit: str | None = None
+    ephemeral_storage: str | None = None  # node-local scratch request of the endpoint container (optional)
+    ephemeral_storage_limit: str | None = None  # = the request unless given
 
 
 class WeightsSpec(BaseModel):
