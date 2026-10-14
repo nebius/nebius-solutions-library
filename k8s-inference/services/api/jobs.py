@@ -1618,9 +1618,18 @@ def find(ns: str, name: str) -> tuple[dict, str]:
     raise HTTPException(404, f"operation {name}: not found")
 
 
-def list_ops(ns: str, tenant: str, model: str | None, limit: int) -> list[dict]:
+def list_ops(ns: str, tenant: str, model: str | None, limit: int | None) -> list[dict]:
+    """The tenant's live operations (Jobs and JobSets over every reachable region), newest first; `limit` cuts the
+    list AFTER it is complete (None: no cut). The API's listing authorizes before it cuts (app.list_operations)."""
+    items, _skipped = list_ops_all(ns, tenant, model)
+    return items[:limit] if limit else items
+
+
+def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], list[str]]:
+    """Every live operation of the tenant, newest first, and the regions that could not be read (unreachable: their
+    operations are absent from the list, which says so instead of failing every other region's)."""
     sel = f"{LABEL}/tenant={tenant}" + (f",{LABEL}/model={model}" if model else "")
-    items, by_job, managers = [], {}, []
+    items, by_job, managers, skipped = [], {}, [], []
     for r in kube.regions():
         try:
             b = kube.batch(r)
@@ -1641,6 +1650,7 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int) -> list[dict]:
             # a region that cannot be reached (gone, or its endpoint down) must not hide every other region's
             # operations (the console showed 500 for every tenant while a region was being replaced)
             log.warning("operations: region %s unreachable, skipped: %s", r, str(e)[:160])
+            skipped.append(r)
             continue
         for p in pods:
             labels = p["metadata"].get("labels", {})
@@ -1663,8 +1673,9 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int) -> list[dict]:
                 if region
                 else _with_worker(j, ns, {})
             )
-    items.sort(key=lambda j: j["metadata"].get("creationTimestamp", ""), reverse=True)
-    return items[:limit]
+    items.sort(key=lambda j: j["metadata"]["name"])
+    items.sort(key=lambda j: j["metadata"].get("creationTimestamp", ""), reverse=True)  # newest first, then id
+    return items, skipped
 
 
 def cancel(ns: str, name: str, region: str = REGION) -> dict:

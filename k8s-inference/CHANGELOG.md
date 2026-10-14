@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.94
+
+(0.11.94 = 0.11.93 plus the operation listing below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)
+
+- `GET /v1/operations`: the tenant's live operations are no longer cut to 500 BEFORE the owner filter (a caller with
+  many foreign operations in the tenant saw none of its own), and operations whose Job expired (TTL) are listed from
+  their durable attempt records (as `GET /v1/operations/{id}` already reports them), narrowed by the owner records
+  (`operation_owners`) and the records' provenance (`model`). Authorization (tenant, owner or admin, the key's model
+  allow-list) applies to every candidate before the cut. Stable order `created_at` desc, id desc; bounded paging with
+  `cursor=` (opaque, from the `X-Next-Cursor` response header; absent on the last page); `X-Regions-Skipped` names the
+  regions that could not be read. The array response and `limit`/`model` are unchanged (client-compatible). No new
+  ledger: the records and owner rows that exist.
+
 ## api 0.11.93
 
 (0.11.93 = 0.11.92 without the last post-admission rollback; jobs 0.1.26 and platform chart 0.1.10 unchanged.

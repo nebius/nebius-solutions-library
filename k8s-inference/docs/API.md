@@ -13,7 +13,7 @@ POST   /v1/models                    define a model (admin key, fleet API only):
 PUT    /v1/models/{model}            replace a definition (new version); DELETE /v1/models/{model} removes it (built-in classes: 409)
 GET    /v1/models/{model}/history    every version of a definition: who changed what, when (admin key)
 POST   /v1/models/{model}:invoke     body {mode, input, region, priority, timeout_s} -> operation (sync returns the result inline)
-GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost
+GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost; the list: `limit` (≤ 500), `model`, `cursor` (from the `X-Next-Cursor` header), newest first, expired operations from their durable records, authorized before any cut
 GET    /v1/operations/{id}/result    result (async) or presigned artifact links (run)
 POST   /v1/operations/{id}:cancel
 POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on the same checkpoint volume, same region

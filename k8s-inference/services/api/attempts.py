@@ -255,6 +255,44 @@ def successor_of(operation: str) -> str | None:
     return m[2] if m and len(m) > 2 else None
 
 
+def durable_index(tenant: str, owner: str | None, model: str | None) -> list[dict]:
+    """Every operation the attempt records know for the tenant (the roots and their continuations; a Job that expired
+    leaves these rows), one entry each: operation, root, model, mode, region, created_at (its first attempt's start, as
+    the API renders it). `owner` narrows to the operations whose root the owner records name (migration 9
+    `operation_owners`: the owner's roots and their continuations), None for an admin's whole tenant; `model` narrows
+    by the provenance the records carry (migration 12). Nothing here is a new ledger: it reads the records that
+    GET /v1/operations/{id} already reports an expired operation from."""
+    if not enabled() or not db.enabled():
+        return []
+    where, params = ["a.tenant = %s"], [tenant]
+    if owner is not None:
+        where.append(
+            "(a.root in (select operation from operation_owners where tenant = %s and owner = %s) "
+            "or a.operation in (select operation from operation_owners where tenant = %s and owner = %s))"
+        )
+        params += [tenant, owner, tenant, owner]
+    with db.pool().connection() as c:
+        rows = c.execute(
+            "select a.operation, a.root, max(a.model), max(a.mode), max(a.region), "
+            "min(coalesce(a.started_at, a.updated_at)) from attempts a where "
+            + " and ".join(where)
+            + " group by a.operation, a.root"
+            + (" having max(a.model) = %s" if model else ""),
+            params + ([model] if model else []),
+        ).fetchall()
+    return [
+        {
+            "operation": r[0],
+            "root": r[1],
+            "model": r[2],
+            "mode": r[3] or "run",
+            "region": r[4],
+            "created_at": r[5].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if r[5] else "",
+        }
+        for r in rows
+    ]
+
+
 def synthesize(operation: str, tenant: str) -> dict | None:
     """An operation whose Job is gone (TTL, cleanup) rebuilt from its rows: status, attempts and lifecycle survive
     the Kubernetes objects (docs/JOBS.md "Attempts and finalization")."""
