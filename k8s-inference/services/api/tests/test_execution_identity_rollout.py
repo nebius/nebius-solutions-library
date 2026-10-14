@@ -174,6 +174,9 @@ def test_rollout_converges_only_on_observed_generation_revision_image_and_pods(m
     missing = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {})
     assert missing["converged"] is False and missing["revision_image"] is None
     assert _rollout_of(monkeypatch, {"status": {}}, [], {})["converged"] is False
+    # an absent latestRolledoutRevision (before the first rollout completed) is not "the other two agree"
+    absent = _rollout_of(monkeypatch, _isvc("m-5", "m-5", None), [], {"m-5": _revision()})
+    assert absent["converged"] is False and "revisions differ" in absent["reason"]
 
 
 def _rollout_of(monkeypatch, isvc, pods, revisions):

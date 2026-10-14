@@ -794,3 +794,132 @@ def test_graph_declaration_keeps_the_stage_model_bindings(database):
     assert keys.graph_of("root-m")["models"] == {"gpu": "fold-gpu"}
     keys.declare_graph("root-n", "demo", "owner-1", {"a": []})
     assert keys.graph_of("root-n")["models"] == {}
+
+
+def test_native_execution_lease_transitions_and_join(database, monkeypatch):
+    """Native execution leases (migration 16; docs/API.md "Native execution leases"), the exact request-lifetime gaps:
+    one live execution per operation (a retry attempt's POST refused while it lives; the same attempt replays; a new
+    attempt gets its own row, the old evidence kept); attach fenced atomically against a closed row (the caller over,
+    the join decided), a cancel before attach, a released reservation, a stale attempt, another pod; same-tuple
+    idempotency for dropped attach/release responses; release only by the attached pod with its request id; the
+    join never first-one-wins (attached -> deferred; released/lost -> settled, evidence summed, unknown stays
+    unknown); second-owner fairness (the key's slot stays taken while attached); API restart changes nothing (rows)."""
+    import leases
+
+    db.migrate()
+    h = "f" * 64
+    _bounded(h, budget_gpu_seconds=None, max_concurrent=1, budget_requests=100)
+    op, a1, a2 = "op-native-1", "op-native-1-abc", "op-native-1-def"
+    keys.admit(h, op, "demo", run_member=True)  # the endpoint call's reservation (its slot on the key)
+    me = {"pod": "cosmos-predictor-x", "namespace": "models", "uid": "uid-x"}
+    other = {"pod": "cosmos-predictor-y", "namespace": "models", "uid": "uid-y"}
+    with pytest.raises(HTTPException) as e:  # before the POST: nothing to attach to
+        leases.attach(op, a1, me, "req-1")
+    assert e.value.status_code == 409
+    e1 = leases.prepare(op, a1, "eu-north1", "cosmos")
+    assert e1["state"] == "prepared" and e1["attempt"] == a1
+    assert leases.prepare(op, a1, "eu-north1", "cosmos")["attempt"] == a1  # the same attempt's POST again
+    with pytest.raises(HTTPException) as e:  # a retry pod's POST while the first is prepared: refused at the hook
+        leases.prepare(op, a2, "eu-north1", "cosmos")
+    assert e.value.status_code == 409 and "waits" in e.value.detail
+    with pytest.raises(HTTPException) as e:  # a stale attempt cannot attach
+        leases.attach(op, a2, me, "req-x")
+    assert e.value.status_code == 409 and "stale" in e.value.detail
+    att = leases.attach(op, a1, me, "req-1")
+    assert att["state"] == "attached" and att["pod_uid"] == "uid-x"
+    assert leases.attach(op, a1, me, "req-1")["state"] == "attached"  # dropped attach response: same tuple
+    for who, rid in ((other, "req-1"), (me, "req-2")):  # another pod, or another request id: no second attach
+        with pytest.raises(HTTPException):
+            leases.attach(op, a1, who, rid)
+    with pytest.raises(HTTPException) as e:  # still no overlapping attempt while attached
+        leases.prepare(op, a2, "eu-north1", "cosmos")
+    assert e.value.status_code == 409
+    # second-owner fairness: the key's slot is the attached execution's until the join
+    with pytest.raises(keys.KeyLimit) as e:
+        keys.admit(h, "op-other", "demo", run_member=True)
+    assert e.value.status == 429
+    # the join while attached: the caller may be over, the member is not settled, whatever the caller did
+    assert leases.settle_decision(op, required=True) == (
+        False,
+        None,
+        "native execution attached: the worker has not settled",
+    )
+    leases.request_cancel(op, "cancelled by the owner")
+    assert leases.get(op)["cancel_requested_at"] is not None and leases.get(op)["state"] == "attached"
+    with pytest.raises(HTTPException):  # only the attached pod, with its request id, releases
+        leases.release(op, a1, other, "req-1", "done", 1.0)
+    with pytest.raises(HTTPException):
+        leases.release(op, a1, me, "req-9", "done", 1.0)
+    with pytest.raises(HTTPException):  # a stale same-pod release names another attempt: refused
+        leases.release(op, a2, me, "req-1", "done", 1.0)
+    rel = leases.release(op, a1, me, "req-1", "cancelled", None)  # cooperative abort, no measurement: unknown
+    assert rel["state"] == "released" and rel["gpu_seconds"] is None and rel["lane_seconds"] is not None
+    assert leases.release(op, a1, me, "req-1", "cancelled", None)["state"] == "released"  # dropped response
+    assert leases.settle_decision(op, required=True) == (True, None, "released, usage unknown")
+    # after the worker settled, the caller's retry attempt gets its own row; the first attempt's evidence stays
+    e2 = leases.prepare(op, a2, "eu-north1", "cosmos")
+    assert e2["state"] == "prepared" and e2["attempt"] == a2 and e2["pod_uid"] is None
+    assert [x["attempt"] for x in leases.history(op)] == [a1, a2]
+    leases.attach(op, a2, me, "req-2")
+    assert leases.release(op, a2, me, "req-2", "done", 12.5)["gpu_seconds"] == 12.5
+    assert leases.settle_decision(op, required=False) == (True, None, "released, usage unknown")  # one unknown: unknown
+    assert keys.release(op, None) is True  # the join settles the member unknown; the slot is free again
+    leases.mark_settled(op)
+    assert all(x["settled_at"] is not None for x in leases.history(op))
+    assert keys.admit(h, "op-other", "demo", run_member=True)["operation"] == "op-other"
+    keys.release("op-other", 0.0)
+    # evidence summed when every attempt measured
+    opm = "op-native-m"
+    keys.admit(h, opm, "demo", run_member=True)
+    leases.prepare(opm, f"{opm}-a", "eu-north1", "cosmos")
+    leases.attach(opm, f"{opm}-a", me, "r")
+    leases.release(opm, f"{opm}-a", me, "r", "error", 10.0)
+    leases.prepare(opm, f"{opm}-b", "eu-north1", "cosmos")
+    leases.attach(opm, f"{opm}-b", me, "r2")
+    leases.release(opm, f"{opm}-b", me, "r2", "done", 5.5)
+    assert leases.settle_decision(opm, required=True) == (True, 15.5, "released (error, done)")
+    keys.release(opm, 15.5)
+    # caller terminal + delayed attach: the join closes the prepared row atomically, the late attach is refused
+    opc = "op-native-c"
+    keys.admit(h, opc, "demo", run_member=True)
+    leases.prepare(opc, f"{opc}-a", "eu-north1", "cosmos")
+    assert leases.settle_decision(opc, required=True) == (True, None, "unattached")
+    assert leases.get(opc)["state"] == "closed"
+    with pytest.raises(HTTPException) as e:
+        leases.attach(opc, f"{opc}-a", me, "late")
+    assert e.value.status_code == 409 and "closed" in e.value.detail
+    keys.release(opc, None)
+    # cancel before attach: refused
+    opk = "op-native-k"
+    keys.admit(h, opk, "demo", run_member=True)
+    leases.prepare(opk, f"{opk}-a", "eu-north1", "cosmos")
+    leases.request_cancel(opk, "cancelled by the owner")
+    with pytest.raises(HTTPException) as e:
+        leases.attach(opk, f"{opk}-a", me, "r")
+    assert e.value.status_code == 409 and "cancelled before" in e.value.detail
+    assert leases.settle_decision(opk, required=False) == (True, 0.0, "no native execution")
+    keys.release(opk, 0.0)
+    # a released reservation (settled by other means): attach refused
+    opr = "op-native-r"
+    keys.admit(h, opr, "demo", run_member=True)
+    leases.prepare(opr, f"{opr}-a", "eu-north1", "cosmos")
+    keys.release(opr, 0.0)
+    with pytest.raises(HTTPException) as e:
+        leases.attach(opr, f"{opr}-a", me, "r")
+    assert e.value.status_code == 409 and "reservation is released" in e.value.detail
+    # lost: the sweep ends an attached execution only when the pod by exact UID is gone or finished
+    op2 = "op-native-2"
+    keys.admit(h, op2, "demo", run_member=True)
+    leases.prepare(op2, f"{op2}-a", "eu-north1", "cosmos")
+    leases.attach(op2, f"{op2}-a", me, "r")
+    monkeypatch.setattr(leases, "_worker_gone", lambda e: (_ for _ in ()).throw(RuntimeError("api unavailable")))
+    assert leases.sweep() == [] and leases.get(op2)["state"] == "attached"  # a failed lookup is not a loss
+    monkeypatch.setattr(leases, "_worker_gone", lambda e: False)
+    assert leases.sweep() == [] and leases.get(op2)["state"] == "attached"
+    monkeypatch.setattr(leases, "_worker_gone", lambda e: e["pod_uid"] == "uid-x")
+    assert leases.sweep() == [f"{op2}:lost"]
+    assert leases.settle_decision(op2, required=False) == (True, None, "worker lost")
+    keys.release(op2, None)
+    # required mode, nothing ever prepared: unknown; optional: the caller's own
+    assert leases.settle_decision("op-never", required=True) == (True, None, "unattached")
+    assert leases.settle_decision("op-never", required=False) == (True, 0.0, "no native execution")

@@ -4,6 +4,27 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.61, platform chart 0.1.6
+
+- Native execution leases (docs/API.md "Native execution leases"): an endpoint call's reservation outlives its CPU
+  caller and a cancel until the worker settled or its loss is confirmed. The hook prepares one native execution per
+  operation on the verified inference POST (a retry attempt's POST is refused while another attempt's execution is
+  prepared or attached); the worker attaches atomically before GPU enqueue (`POST /internal/executions/<op>:attach`,
+  pod-authenticated; stale attempt, other pod or no prepared execution: 409, fail closed), reads
+  `cancel_requested`, and releases after its own settlement with the wall-clock lane occupancy and the GPU seconds it
+  measured (null = unknown, never zero). The member settles at the JOIN of the caller's end and the execution's end
+  (billing), never first-one-wins; a lost worker (exact pod UID gone or terminated, nothing else) settles unknown.
+  `native_lease: optional | required` per endpoint model (`required`: a caller that ended unattached settles unknown).
+  Every attempt keeps its own row (evidence summed at the join, unknown stays unknown); attach is fenced atomically
+  against a closed row (the join closes a never-attached execution when the caller is over), a cancel before attach, a
+  released reservation, a stale attempt or another pod; release is exact to (attempt, pod, request id). The lease
+  routes answer with the operation's durable owner context (`owner: {tenant, owner, model}`): the trusted owner group
+  for a worker, never a client header.
+  The policy forwards the verified `x-serverless2-operation` / `x-serverless2-attempt` to the backend (empty on a
+  direct call; a client's values are overridden). Ledger migration 16 (`native_executions`). Handle `native`.
+- Rollout state: all three revision names must be present and equal for `converged` (an absent
+  `latestRolledoutRevision` is "not converged"), as the next revision after the frozen 0.11.60.
+
 ## platform chart 0.1.5
 
 - The API reads Knative Revisions in the models namespace (`serving.knative.dev` revisions get/list) on every cluster:

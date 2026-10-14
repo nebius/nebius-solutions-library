@@ -28,6 +28,7 @@ import execution
 import jobs
 import keys
 import kube
+import leases
 import models
 import monitoring
 import placement as placing
@@ -113,7 +114,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.60", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.61", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -291,6 +292,7 @@ def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
 OPERATION_HEADER = "x-serverless2-operation"  # the admitted operation a caller names (with its token)
 ATTEMPT_HEADER = "x-serverless2-attempt"  # the caller's pod (an endpoint call's attempt)
 _admission_cache: dict[tuple, float] = {}  # (operation, attempt, key hash) -> verified until (the readiness loop polls)
+_admission_region: dict[tuple, str] = {}  # (operation, attempt) -> the region the caller's Job runs in
 ADMISSION_CACHE_S = 30
 
 
@@ -338,6 +340,7 @@ def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: 
             job, region = jobs.find(p.namespace, operation)
         except HTTPException:
             return False
+        _admission_region[(operation, attempt)] = region or REGION
         md = job["metadata"]
         if (md.get("annotations") or {}).get(f"{cfg.LABEL}/key") != key_hash:
             return False
@@ -698,20 +701,31 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
         key = f"Bearer {token}" if token else ""
     p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
-    await asyncio.to_thread(
+    verified = await asyncio.to_thread(
         _authorize_model,
         p,
         model,
         token,
         request.headers.get(OPERATION_HEADER, ""),
         request.headers.get(ATTEMPT_HEADER, ""),
+        request.method,
     )  # catalog (database) and Kubernetes calls: off the event loop
+    # the markers the worker attaches its native execution to come only from this verified context: on an admitted
+    # call the operation and attempt the token proved, on any other call empty (Envoy overrides what a client sent)
     return JSONResponse(
-        {}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")}
+        {},
+        headers={
+            "x-serverless2-tenant": p.tenant,
+            "x-serverless2-key-alias": str(p.info.get("key_alias") or ""),
+            OPERATION_HEADER: verified[0],
+            ATTEMPT_HEADER: verified[1],
+        },
     )
 
 
-def _authorize_model(p: Principal, model: str, token: str = "", operation: str = "", attempt: str = "") -> None:
+def _authorize_model(
+    p: Principal, model: str, token: str = "", operation: str = "", attempt: str = "", method: str = "GET"
+) -> tuple[str, str]:
     """The gateway's authorization of a call to an endpoint: the key's model allow-list and budget always; a direct
     call needs `invoke:sync` and is counted here; the API's own admitted call (the admission token bound to this key
     and model: a proxied synchronous call, or an endpoint call's caller probing readiness and posting its one
@@ -721,6 +735,12 @@ def _authorize_model(p: Principal, model: str, token: str = "", operation: str =
     admitted = _is_admitted(p, token, m["name"], operation, attempt) if p.role != keys.ROUTER["role"] else False
     authorize(p, m["name"], ("invoke:sync", "invoke:async") if admitted else "invoke:sync", budget=True)
     _endpoint_limits(p, "gateway", admitted)
+    if admitted and method.upper() == "POST" and not operation.startswith("sync-") and db.enabled():
+        # the inference POST of an endpoint call's caller: prepare its native execution (docs/API.md "Native execution
+        # leases"); a retry attempt's POST while another attempt's execution is prepared or attached is refused here,
+        # so no two native executions overlap under one reservation
+        region = _admission_region.get((operation, attempt)) or REGION
+        leases.prepare(operation, attempt, region, m["name"])
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
     if not admitted and p.role != keys.ROUTER["role"]:
@@ -734,6 +754,7 @@ def _authorize_model(p: Principal, model: str, token: str = "", operation: str =
             kube.stamp_last_request(
                 m["k8s_name"], m["namespace"], region
             )  # deployment (idle shutdown reads it, throttled)
+    return (operation, attempt) if admitted else ("", "")
 
 
 @app.get("/v1/keys/me", responses={200: {"model": schemas.ApiKey}})
@@ -1550,6 +1571,8 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if ann.get(f"{cfg.LABEL}/endpoint-revision") or ann.get(f"{cfg.LABEL}/endpoint-image"):
         op["endpoint_revision"] = ann.get(f"{cfg.LABEL}/endpoint-revision")
         op["endpoint_image"] = ann.get(f"{cfg.LABEL}/endpoint-image")
+    if op.get("mode") == "async" and db.enabled():
+        op["native"] = leases.public(leases.get(name), leases.history(name))  # the worker's side (docs/API.md)
     return op
 
 
@@ -1861,6 +1884,68 @@ async def watch_session(id: str, authorization: str = Header(default="")):
     }
 
 
+# ---- native execution leases (docs/API.md "Native execution leases") ----------------------------------------------
+async def _worker_execution(operation: str, authorization: str) -> tuple[dict, dict]:
+    if not db.enabled():
+        raise HTTPException(404, "native execution leases need the control API's ledger")
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "a worker calls with its pod's ServiceAccount token")
+    e = leases.get(operation)
+    if e is None:
+        raise HTTPException(404, f"operation {operation}: no prepared native execution")
+    worker = await asyncio.to_thread(leases.verify_worker, authorization[7:].strip(), e, _endpoint_model)
+    return e, worker
+
+
+@app.post("/internal/executions/{operation}:attach", include_in_schema=False)
+async def attach_execution(operation: str, body: schemas.NativeAttach, authorization: str = Header(default="")):
+    """The worker, atomically before it enqueues GPU work for the request carrying these markers: the prepared
+    execution of this attempt becomes attached to this pod; a stale attempt, another pod or no prepared execution is
+    409 and the worker fails closed. Idempotent for the same tuple (a dropped response is retried safely)."""
+    _e, worker = await _worker_execution(operation, authorization)
+    out = leases.public(await asyncio.to_thread(leases.attach, operation, body.attempt, worker, body.worker_request_id))
+    out["owner"] = _owner_context(operation)
+    return out
+
+
+@app.post("/internal/executions/{operation}:release", include_in_schema=False)
+async def release_execution(operation: str, body: schemas.NativeRelease, authorization: str = Header(default="")):
+    """The attached worker, after its own settlement (natural completion, or the stop ACK of a drain): outcome, GPU
+    seconds as measured (null = unknown). Frees nothing by itself: the member settles at the join with the caller."""
+    _e, worker = await _worker_execution(operation, authorization)
+    return leases.public(
+        await asyncio.to_thread(
+            leases.release, operation, body.attempt, worker, body.worker_request_id, body.outcome, body.gpu_seconds
+        )
+    )
+
+
+@app.get("/internal/executions/{operation}", include_in_schema=False)
+async def watch_execution(operation: str, authorization: str = Header(default="")):
+    """The attached worker's view: `cancel_requested` (the cooperative abort signal) and the state."""
+    e, worker = await _worker_execution(operation, authorization)
+    if e["state"] != "attached" or e["pod_uid"] != worker["uid"]:
+        raise HTTPException(403, "only the attached worker watches its execution")
+    return {
+        "operation": operation,
+        "state": e["state"],
+        "cancel_requested": e["cancel_requested_at"] is not None,
+        "cancel_reason": e["cancel_reason"],
+        "owner": _owner_context(operation),
+    }
+
+
+def _owner_context(operation: str) -> dict | None:
+    """The trusted owner context of an admitted operation, for the worker that attached to it (docs/API.md "Native
+    execution leases"): the operation's durable owner record (tenant, the stable opaque owner id, model), written at
+    admission by the API and readable only through the pod-authenticated lease routes; never a client header."""
+    record = keys.operation_owner(operation) if db.enabled() else None
+    if not record:
+        return None
+    tenant, owner, model = record
+    return {"tenant": tenant, "owner": owner, "model": model}
+
+
 @app.post("/v1/operations/{id}:cancel", responses={200: {"model": schemas.Operation}})
 def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
     job, region = _owned(p, id)
@@ -1877,6 +1962,8 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
     op = jobs.normalise(cancelled)
     if op["status"] in ("QUEUED", "RUNNING"):
         op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
+    if db.enabled() and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async":
+        leases.request_cancel(current, "cancelled by the owner")  # a request to the attached worker, never a release
     root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
     if db.enabled() and (g := keys.graph_of(root)) and not g.get("cancelled_at"):
         # the root of a graph: every stage goes with it, nothing attaches any more (docs/JOBS.md "Stage composition")

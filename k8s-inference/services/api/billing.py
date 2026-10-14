@@ -20,6 +20,7 @@ import execution
 import jobs
 import keys
 import kube
+import leases
 from config import LABEL
 from resilience import retry
 from status import _attempts, _secs, finished, gpu_seconds
@@ -165,11 +166,31 @@ async def bill_once() -> int:
                     continue  # a worker's copy of a manager Job is transient; the manager's Job is billed
                 if job["metadata"].get("labels", {}).get(f"{LABEL}/mode") == "async":
                     # an endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md
-                    # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here
+                    # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here. The
+                    # release is a JOIN with the worker's native execution (docs/API.md "Native execution leases"):
+                    # while the worker is attached nothing is freed, whatever the caller did
                     try:
+                        value, how = 0.0, "no ledger"
                         if db.enabled():
-                            keys.release(name, 0.0)
-                        _annotate(region, ns, name, {BILLED: "0", f"{LABEL}/gpu-seconds": "0"}, job)
+                            m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
+                            settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
+                            if not settle_now:
+                                log.info("billing %s/%s: deferred, %s", region, name, how)
+                                continue
+                            keys.release(name, value)
+                            leases.mark_settled(name)
+                        seconds = "unknown" if value is None else f"{value}"
+                        _annotate(
+                            region,
+                            ns,
+                            name,
+                            {
+                                BILLED: "0" if value is not None else "unknown",
+                                f"{LABEL}/gpu-seconds": seconds,
+                                f"{LABEL}/native": how,
+                            },
+                            job,
+                        )
                         if f"{LABEL}/execution" in ann:
                             execution.sweep_copies(ns, name)
                         n += 1

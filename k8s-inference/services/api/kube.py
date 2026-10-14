@@ -341,8 +341,9 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -
                 ref = getattr(c, "image_id", None) or getattr(c, "image", None)
                 if ref and ref not in images:
                     images.append(ref)
-    known = [r for r in (created, ready_rev, rolled) if r]
-    revisions_one = bool(created) and len(set(known)) == 1 and ready_rev == created
+    # all three must be present and one: KServe omits latestRolledoutRevision until the first rollout completed, and
+    # "absent" is then "not converged", never "the other two agree"
+    revisions_one = bool(created) and bool(ready_rev) and bool(rolled) and created == ready_rev == rolled
     reconciled = generation is not None and observed == generation
     image_matches = bool(desired) and revision_image == desired
     pods_match = all(_same_image(i, revision_image, revision_digest) for i in images)

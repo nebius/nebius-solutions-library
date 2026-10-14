@@ -657,6 +657,8 @@ def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
                         "x-serverless2-key-alias",
                         "x-serverless2-session",  # set by the hook on a bound session (overrides anything a client sent)
                         "x-serverless2-connection",
+                        "x-serverless2-operation",  # the verified admitted operation and attempt (empty on a direct call):
+                        "x-serverless2-attempt",  # the worker attaches its native execution to them (docs/API.md)
                     ],
                 },
             },

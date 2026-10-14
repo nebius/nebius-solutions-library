@@ -1438,6 +1438,14 @@ def fake_keys(monkeypatch):
     ):
         monkeypatch.setattr(keys, name, getattr(fk, name))
     monkeypatch.setattr(db, "enabled", lambda: True)  # the fleet API: it has the database
+    import leases
+
+    monkeypatch.setattr(leases, "get", lambda op: None)  # no native execution unless a test fakes leases itself
+    monkeypatch.setattr(leases, "history", lambda op: [])
+    monkeypatch.setattr(leases, "prepare", lambda *a, **k: None)
+    monkeypatch.setattr(leases, "request_cancel", lambda *a, **k: None)
+    monkeypatch.setattr(leases, "settle_decision", lambda op, required: (True, 0.0, "no native execution"))
+    monkeypatch.setattr(leases, "mark_settled", lambda op: None)
     return fk
 
 

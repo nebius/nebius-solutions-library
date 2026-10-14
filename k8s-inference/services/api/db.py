@@ -254,6 +254,32 @@ create table if not exists operation_marks (
     """
     alter table run_graphs add column if not exists models jsonb not null default '{}'::jsonb;
     """,
+    # 16: native execution leases (docs/API.md "Native execution leases"): the worker side of one admitted endpoint
+    # call, so the operation's reservation outlives the CPU caller until the worker settled or its loss is confirmed
+    """
+    create table if not exists native_executions (
+        operation           text not null,
+        attempt             text not null,
+        state               text not null default 'prepared',
+        pod                 text,
+        pod_namespace       text,
+        pod_uid             text,
+        worker_request_id   text,
+        region              text not null,
+        model               text not null,
+        prepared_at         timestamptz not null default now(),
+        attached_at         timestamptz,
+        released_at         timestamptz,
+        outcome             text,
+        gpu_seconds         numeric,
+        lane_seconds        numeric,
+        cancel_requested_at timestamptz,
+        cancel_reason       text,
+        settled_at          timestamptz,
+        primary key (operation, attempt)
+    );
+    create index if not exists native_executions_attached on native_executions (state) where state = 'attached';
+    """,
 ]
 
 _pool = None

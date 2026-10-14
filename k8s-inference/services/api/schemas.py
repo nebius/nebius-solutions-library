@@ -387,6 +387,9 @@ class ModelSpec(BaseModel):
     delegates: SkipValidation[list[str] | None] = (
         None  # run classes a graph of this root may bind stages to (operator-owned)
     )
+    native_lease: SkipValidation[Literal["optional", "required"] | None] = (
+        None  # endpoints: whether the worker must attach to each call's native execution (docs/API.md)
+    )
     retry: SkipValidation[dict[str, Any] | None] = (
         None  # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
     )
@@ -489,6 +492,7 @@ class Model(BaseModel):
     example: dict[str, Any] | None = None
     parameters: list[ModelParameter] | None = None
     execution: ModelExecution | None = None  # run classes: the sanitized execution identity
+    native_lease: Literal["optional", "required"] | None = None  # endpoints: docs/API.md "Native execution leases"
 
 
 class SyncResponse(BaseModel):
@@ -527,6 +531,35 @@ class ChainMember(BaseModel):
     gpu_seconds: float | None = None
     gpu_seconds_complete: bool | None = None
     cost: float | None = None
+
+
+class NativeExecution(BaseModel):
+    state: Literal["prepared", "attached", "released", "lost", "closed"] | None = None
+    attempt: str | None = None
+    worker_request_id: str | None = None
+    prepared_at: str | None = None
+    attached_at: str | None = None
+    released_at: str | None = None
+    outcome: str | None = None
+    lane_seconds: float | None = None  # wall-clock occupancy of the worker's lane (attached -> released/lost)
+    gpu_seconds: float | None = None  # only what the worker measured; null = unknown, never zero
+    cancel_requested: bool | None = None
+    settled: bool | None = None
+    attempts: list[dict[str, Any]] | None = None  # every attempt's evidence, oldest first
+
+
+class NativeAttach(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt: str
+    worker_request_id: str | None = Field(default=None, max_length=200)
+
+
+class NativeRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt: str
+    worker_request_id: str | None = Field(default=None, max_length=200)  # the same tuple the worker attached with
+    outcome: Literal["done", "cancelled", "error", "disconnected"]
+    gpu_seconds: float | None = Field(default=None, ge=0)
 
 
 class GraphStage(BaseModel):
@@ -600,6 +633,7 @@ class Operation(BaseModel):
     exported_by_attempt_id: str | None = None  # the delivering attempt (an export retry or finalizer that delivered)
     endpoint_revision: str | None = None  # an endpoint call: the ready revision at admission (not per-request proof)
     endpoint_image: str | None = None
+    native: NativeExecution | None = None  # an endpoint call's native execution lease (docs/API.md)
     exported_by_epoch: int | None = None
     result_ref: str | None = None
     checkpoint_ref: str | None = None

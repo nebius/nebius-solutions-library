@@ -47,6 +47,9 @@ def normalise(doc: dict) -> dict:
     m.setdefault("modes", ["run"] if m["mode"] == "run" else ["sync", "async"])
     m.setdefault("namespace", MODELS_NAMESPACE)
     m["image"] = rt.get("image", m.get("image"))
+    m["native_lease"] = (
+        rt.get("nativeLease") or m.get("native_lease") or "optional"
+    )  # docs/API.md "Native execution leases"
     m["port"] = rt.get("port", m.get("port", 8080))
     m["endpoints"] = eps
     m.setdefault("endpoint_path", next(iter(eps.values()), "/"))
@@ -191,6 +194,7 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "example": m.get("example"),  # a valid request body (the console's "Test request" tab)
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
         "execution": execution_identity(m) if m["mode"] == "run" else None,
+        "native_lease": (m.get("native_lease") or "optional") if m["mode"] != "run" else None,
     }
 
 

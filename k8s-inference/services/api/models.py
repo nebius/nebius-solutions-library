@@ -519,6 +519,10 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             runtime["envFrom"] = [{"secretRef": {"name": name}} for name in s["env_secrets"]]
         if s.get("health_path"):
             runtime["readinessProbe"] = {"path": s["health_path"], "port": port}
+        if s.get("native_lease"):
+            if s["native_lease"] not in ("optional", "required"):
+                raise HTTPException(400, "native_lease: optional | required")
+            runtime["nativeLease"] = s["native_lease"]
         if s.get("pull_secret"):
             runtime["imagePullSecrets"] = [s["pull_secret"]]
         w = s.get("weights") or {}

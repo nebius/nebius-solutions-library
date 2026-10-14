@@ -395,6 +395,7 @@ async def _reconcile_loop():
             await asyncio.to_thread(release_stale_reservations)
             await asyncio.to_thread(gate_stages)
             await asyncio.to_thread(sweep_sessions)
+            await asyncio.to_thread(sweep_executions)
             await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -417,6 +418,16 @@ def sweep_sessions() -> list[str]:
     import sessions
 
     return sessions.sweep()
+
+
+def sweep_executions() -> list[str]:
+    """Native execution leases (docs/API.md): an attached worker whose pod (exact UID) is gone or terminated is lost;
+    nothing else moves an attached execution."""
+    if not db.enabled():
+        return []
+    import leases
+
+    return leases.sweep()
 
 
 def release_stale_reservations() -> list[str]:

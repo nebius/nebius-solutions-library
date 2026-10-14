@@ -302,6 +302,40 @@ No reconnect: a dropped connection ends at the worker (`disconnected`), the toke
 admission. A bound session no worker attached within `sessions.attach_wait_s` (60 s) ends `unattached` with usage unknown.
 Settlement on the key's ledger happens exactly once per session (the reconciler retries what a crash left unsettled).
 
+## Native execution leases (endpoint calls whose worker holds GPU state)
+
+An endpoint call's reservation (the key's slot, request and GPU bound) must not end with its CPU caller: a worker that
+received the request may still be computing after the caller exited, timed out, was deleted or the call was cancelled
+(an abort enqueue is not a settlement). A *native execution* is the worker's side of one admitted call, one per
+operation, on the existing ledger (the operation's member; nothing new is queued or scheduled):
+
+| Step | Who | What |
+|---|---|---|
+| prepare | the gateway hook, on the verified inference POST of the caller attempt | one execution per operation; another attempt's POST while one is prepared or attached is 409 (a caller's retry pod never overlaps the worker's work on the first request); the same attempt replays; after the worker settled the next attempt's POST replaces it |
+| markers | the hook → the worker | the policy forwards `x-serverless2-operation` and `x-serverless2-attempt` only from the hook's verified context (empty on a direct call; what a client sent is overridden) |
+| `POST /internal/executions/<op>:attach` `{attempt, worker_request_id}` | the worker pod (its own ServiceAccount token; TokenReview, pod UID, the endpoint's own pod, the call's model) | **atomically before it enqueues GPU work**: `prepared → attached` for the prepared attempt only; a stale attempt, another pod or no prepared execution is 409 and the worker fails closed (it does not run the request). Idempotent for the same (operation, attempt, pod UID, worker_request_id): a dropped response is retried safely |
+| `GET /internal/executions/<op>` | the attached worker only | `cancel_requested`, `cancel_reason`: the cooperative abort signal |
+| `POST /internal/executions/<op>:release` `{attempt, worker_request_id, outcome, gpu_seconds}` | the attached pod, after its own settlement (natural completion, or the stop ACK of a drain) | `attached → released` for exactly that attempt, pod and request id (a stale same-pod release naming another attempt or request id is 409); `lane_seconds` (wall-clock occupancy, attached → released, always recorded) distinct from `gpu_seconds` (only what the worker measured; null = unknown, never zero). Idempotent for the same tuple. Frees nothing by itself |
+| lost | the reconciler | an attached execution whose pod, by exact UID, no longer exists or finished: `lost`, usage unknown. Never from readiness, a timeout, or an API lookup that failed: those keep it attached and the slot held |
+| closed | the join (billing) | the caller is over and the live execution was never attached: closed in the same transaction that decides the settlement, so a delayed worker cannot attach and enqueue GPU work after the reservation went (attach → 409) |
+| owner context | the lease routes → the attached worker | `attach` and `GET` answer with `owner: {tenant, owner, model}` from the operation's durable owner record (written at admission, pod-authenticated to read): the trusted owner group a worker may key its own state on; never a client header, never the tenant/key-alias headers |
+| cancel | `:cancel` on the call, the deadline | a request (`cancel_requested`) to the attached worker; the caller Job is stopped as before; nothing is released |
+
+Settlement is a JOIN, decided atomically with the execution rows under the operation's lock: the operation's member
+settles when the caller is terminal (its Job finished, read by the billing pass) **and** no execution is attached
+(released, lost, or never attached once the caller is over, which closes it). Every attempt keeps its own row: the
+settled value sums every ended attempt's measured GPU seconds and is unknown when any ended attempt carries no
+measurement or the worker was lost. Attach is refused atomically against a closed row, a cancel requested before the
+attach, a released reservation, a stale attempt or another pod. The
+worker's release before the caller finished frees nothing; the caller's end before the worker released frees nothing
+(the pass defers, `serverless2.nebius/native` on the Job says why). The key's concurrency counts the execution until
+then: no new root of the key takes the slot, a retry of the caller cannot run a second native execution, and the
+original root keeps the billing. `native_lease` on an endpoint model: `optional` (default: a worker that never
+attaches leaves today's behaviour, the caller's end releases) or `required` (a caller that ended without an attached
+execution settles unknown and the handle says so; the worker refuses requests it cannot attach). The handle carries
+`native` (`state`, `attempt`, `worker_request_id`, timings, `outcome`, `lane_seconds`, `gpu_seconds`,
+`cancel_requested`, `settled`).
+
 ## Bindings and execution options (runs, and endpoint calls with private I/O)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the
