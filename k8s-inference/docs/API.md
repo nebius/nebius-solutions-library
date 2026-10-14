@@ -161,7 +161,7 @@ the torch.compile cache survives a restart (the first start of a trillion-parame
 ## Keys
 
 A key is `sk-` + 40 characters, shown once at creation; the fleet database (`keys` table, `services/api/keys.py`)
-holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`),
+holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`, `fleet`),
 model allow-list (empty = every model), budget in USD (null = unlimited), spend, expiry and block flag. Every
 API checks the key on every request (hash lookup, cached `AUTH_CACHE_S` = 30 s): blocked, expired and
 budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke`, the operations and the
@@ -295,6 +295,22 @@ runs; a region without variants keeps the automatic pool choice. A redefinition 
 removes its service, its LiteLLM deployment and, once Knative has torn its routes down, its authorizer; a dropped
 warm variant holds no GPUs beyond that.
 
+## Fleet operators
+
+A fleet operator is a key with `metadata.role=fleet` in the platform's own tenant (`platform`, next to the router
+key), minted only by the fleet's bootstrap (`python -m keys bootstrap` with `KEY_SPEC` role `fleet`; a tenant admin
+cannot mint one and an import refuses the role). It has the explicit cross-tenant surface and nothing else:
+
+| Route | What |
+|---|---|
+| `GET /v1/fleet/tenants`, `GET /v1/fleet/tenants/<tenant>` | every tenant of the fleet: the fleet document's (`charts/fleet` tenants.yaml: `gpu_quota`, `fair_share_weight`, `dedicated_pools`, `assets`, `in_fleet_document`) and every tenant with keys on record, with `keys`, `admins`, `blocked` counts, `spend` (USD over its keys) and `usage` (operations in flight, reserved and unknown GPU seconds over its keys). The platform's own keys are not a tenant |
+| `GET /v1/fleet/tenants/<tenant>/keys` | the tenant's keys exactly as its admin lists them (the same safe projection: never a hash or a value) |
+| `POST /v1/fleet/tenants/<tenant>/keys`, `POST …/keys:import`, `PATCH …/keys/<alias>`, `POST …/keys/<alias>:block[?blocked=false]`, `DELETE …/keys/<alias>` | the tenant's own key functions with an explicit tenant: a user key (no pass-through routes), an import under the tenant's rules, budget / model allow-list (the grant) / expiry, block or unblock (the record stays), revoke; the audit names the fleet operator (`fleet:<alias>`) |
+
+A tenant admin is refused on this surface (403): its authority is tenant-scoped and unchanged. The fleet operator
+is refused on the tenant surface (`/v1/keys`) and, with a `read:catalog`-only key, on every model and operation
+route: it manages, it does not run.
+
 ## Sessions (live streams to an endpoint)
 
 Off unless the fleet enables it (terraform.tfvars `sessions.enabled`; `GET /v1/sessions` is 404 while off). A session is
@@ -357,7 +373,7 @@ operation, on the existing ledger (the operation's member; nothing new is queued
 |---|---|---|
 | prepare | the gateway hook, on the verified inference POST of the caller attempt | one execution per operation; another attempt's POST while one is prepared or attached is 409 (a caller's retry pod never overlaps the worker's work on the first request); the same attempt replays; after the worker settled the next attempt's POST replaces it. A row an earlier caller only *prepared* (the worker never attached) whose caller pod is gone or finished (exact read by name in its namespace, nothing else) is closed (`caller replaced`) so the replacement pod of a preempted caller can post; an attached row is never freed this way |
 | markers | the hook → the worker | the policy forwards `x-serverless2-operation` and `x-serverless2-attempt` only from the hook's verified context (empty on a direct call; what a client sent is overridden). The hook emits them on the same answer that prepared the execution, and logs one line per admitted inference POST (`authorize <model>: admitted POST of <op> attempt <attempt>: markers emitted`): a `prepared` execution that is never `attached` while the worker answered the request means the markers were lost downstream of the hook (the policy's `headersToBackend`, the Knative data path, or the worker's reading of the headers), never that the hook did not emit them. A direct POST (no admission) to a `native_lease: required` model passes the hook with empty markers (logged) and is refused by the worker, as before |
-| `POST /internal/executions/<op>:attach` `{attempt, worker_request_id}` | the worker pod (its own ServiceAccount token; TokenReview, pod UID, the endpoint's own pod, the call's model) | **atomically before it enqueues GPU work**: `prepared → attached` for the prepared attempt only; a stale attempt, another pod or no prepared execution is 409 and the worker fails closed (it does not run the request). Idempotent for the same (operation, attempt, pod UID, worker_request_id): a dropped response is retried safely |
+| `POST /internal/executions/<op>:attach` `{attempt, worker_request_id}` | the worker pod (its own ServiceAccount token; TokenReview, pod UID, the endpoint's own pod, the call's model) | **atomically before it enqueues GPU work**: `prepared → attached` for the prepared attempt only, while the operation's live reservation holds (its own, or its root's for an active member such as an endpoint child: the same resolver as the gateway's admission); a stale attempt, another pod or no prepared execution is 409 and the worker fails closed (it does not run the request). Idempotent for the same (operation, attempt, pod UID, worker_request_id): a dropped response is retried safely |
 | `GET /internal/executions/<op>` | the attached worker only | `cancel_requested`, `cancel_reason`: the cooperative abort signal |
 | `POST /internal/executions/<op>:release` `{attempt, worker_request_id, outcome, gpu_seconds}` | the attached pod, after its own settlement (natural completion, or the stop ACK of a drain) | `attached → released` for exactly that attempt, pod and request id (a stale same-pod release naming another attempt or request id is 409); `lane_seconds` (wall-clock occupancy, attached → released, always recorded) distinct from `gpu_seconds` (only what the worker measured; null = unknown, never zero). Idempotent for the same tuple. Frees nothing by itself |
 | lost | the reconciler | an attached execution whose pod, by exact UID, no longer exists or finished, **or whose worker container restarted inside the same pod** (the restart count of the non-queue-proxy containers at attach is recorded and compared: same pod, same UID, but the engine's state and the request are gone and nothing will release): `lost`, usage unknown, `lost_reason` says which. Never from readiness, a timeout, or an API lookup that failed: those keep it attached and the slot held |

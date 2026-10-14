@@ -1001,6 +1001,24 @@ class RateLimit(BaseModel):
     window_s: int | None = None
 
 
+class FleetTenantRecord(BaseModel):
+    """A tenant as the fleet operator sees it (docs/API.md "Fleet operators"): the fleet document's grants, the keys on
+    record and what they hold. No key value, no hash."""
+
+    tenant: str
+    namespace: str | None = None
+    in_fleet_document: bool | None = None
+    gpu_quota: float | None = None
+    fair_share_weight: float | None = None
+    dedicated_pools: list[str] | None = None
+    assets: list[str] | None = None
+    keys: int | None = None
+    admins: int | None = None
+    blocked: int | None = None
+    spend: float | None = None
+    usage: "KeyUsage | None" = None
+
+
 class KeyUsage(BaseModel):
     """What the key holds beyond its spend (docs/API.md "Keys"): operations in flight, GPU seconds reserved by active
     work, GPU seconds of attempts that ended without a trustworthy measurement (kept against the budget)."""

@@ -808,10 +808,26 @@ def run_member(operation: str) -> dict | None:
 
 def reservation_key(operation: str) -> str | None:
     """The key hash holding a live reservation for `operation` (its slot: admitted, not released); None otherwise. The
-    gateway hook's proof that an admitted operation is active."""
+    gateway hook's proof that an admitted operation is active. A MEMBER of a run (a continuation, a stage, an endpoint
+    child) holds no row of its own: use `reservation_key_of`."""
     with _connection() as c:
         r = c.execute("select key_hash from key_reservations where operation = %s", (operation,)).fetchone()
     return r[0] if r else None
+
+
+def reservation_key_of(operation: str) -> str | None:
+    """The key (hash) an operation is admitted on, resolved through the durable run ledger: its own reservation, or,
+    for an ACTIVE member of a run (a continuation, a stage, an endpoint child: `key_run_members`), its root's live
+    reservation. None when nothing live holds it: no reservation and no member, a member that is settled, unknown or
+    rolled back (a settled child never borrows its root's live slot), or a root whose reservation is released. The
+    one proof every native-execution fence uses (the gateway's admission, the worker's attach)."""
+    h = reservation_key(operation)
+    if h:
+        return h
+    member = member_of(operation)
+    if not member or member.get("state") not in (None, "active") or not member.get("root"):
+        return None
+    return reservation_key(member["root"])
 
 
 def run_members(root: str) -> list[dict]:
@@ -1190,6 +1206,50 @@ def rollback_run_member(operation: str) -> bool:
             c.execute("update key_reservations set requests = greatest(requests - 1, 0) where operation = %s", (root,))
         _close_run_if_idle(c, root)
         return True
+
+
+def tenants_on_record() -> dict[str, dict]:
+    """Every tenant the keys table knows (docs/API.md "Fleet operators"): key counts by role and blocked state, and
+    the tenant's spend (USD) summed over its keys. The platform's own keys (the router, fleet operators) are not a
+    tenant and are left out."""
+    with _connection() as c:
+        rows = c.execute(
+            "select tenant, role, blocked, count(*), coalesce(sum(spend), 0) from keys where tenant <> %s "
+            "group by tenant, role, blocked order by tenant",
+            (ROUTER["tenant"],),
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for tenant, role, blocked, n, spend in rows:
+        t = out.setdefault(tenant, {"keys": 0, "blocked": 0, "admins": 0, "spend": 0.0})
+        t["keys"] += int(n)
+        t["spend"] += float(spend)
+        if blocked:
+            t["blocked"] += int(n)
+        if role == "admin":
+            t["admins"] += int(n)
+    return out
+
+
+def tenant_usage(tenant: str) -> dict:
+    """What a tenant's keys hold right now beyond their spend (the per-key `run_usage`, summed): operations in
+    flight, GPU seconds reserved by active work, GPU seconds of attempts that ended without a trustworthy
+    measurement (kept against the budgets)."""
+    with _connection() as c:
+        active, reserved = c.execute(
+            "select count(*), coalesce(sum(r.gpu_seconds), 0) from key_reservations r join keys k on k.hash = r.key_hash "
+            "where k.tenant = %s",
+            (tenant,),
+        ).fetchone()
+        unknown = c.execute(
+            "select coalesce(sum(m.gpu_bound), 0) from key_run_members m join keys k on k.hash = m.key_hash "
+            "where k.tenant = %s and m.state = 'unknown'",
+            (tenant,),
+        ).fetchone()[0]
+    return {
+        "active_operations": int(active),
+        "reserved_gpu_seconds": float(reserved),
+        "unknown_gpu_seconds": float(unknown),
+    }
 
 
 def run_usage(h: str) -> dict:

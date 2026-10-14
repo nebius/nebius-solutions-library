@@ -4,6 +4,37 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.110
+
+(0.11.110 = 0.11.109 plus the fleet operator surface, the provisioning of a gang's shared checkpoint leaf and the
+member-aware reservation fence of the worker's attach; jobs 0.1.27 and platform chart 0.1.12 unchanged; no migration.)
+
+- Fleet operators (docs/API.md "Fleet operators"): a key with `metadata.role=fleet` (tenant `platform`, minted only by
+  the fleet's own bootstrap, `python -m keys bootstrap` with role `fleet`; never by a tenant admin, never by an
+  import) gets the explicit cross-tenant surface `GET /v1/fleet/tenants[/{tenant}]` (the fleet document's tenants and
+  every tenant with keys on record: quota, fair share, dedicated pools, assets, key counts, spend, what the keys hold)
+  and `/v1/fleet/tenants/{tenant}/keys` (list, create, `:import`, PATCH budget/models/expiry, `:block` and unblock,
+  DELETE) through the tenant's own key functions with the same safe projection. Tenant admins stay tenant-scoped (403
+  on the fleet surface); the fleet operator is no tenant admin (403 on `/v1/keys`) and runs nothing. Same database,
+  same auth: no new identity store.
+
+- Multi-node runs (docs/JOBS.md "Multi-node runs"): with `checkpoints: shared` every rank pod (and the gang's CPU
+  finalizer) runs the trusted scratch provisioning init container on exactly the gang's checkpoint leaf
+  (`checkpoints/<root>` on the tenant's shared claim, the same mount) before main and the uploader: the kubelet
+  creates a missing subPath directory root-owned 0755 and the ranks (10001, no capability) could not write it (the
+  first real 2x1 MPI run on a fresh root, 2026-10-14: `/work/checkpoint` not writable while `/work` was). chown
+  10001:10001 and chmod 2770 of the mount point only, not recursive, CHOWN/FOWNER/DAC_OVERRIDE only, idempotent on
+  a restart or a resume; a local-checkpoint gang is untouched.
+
+- Native execution leases (docs/API.md "Native execution leases"): the worker's attach checks the operation's LIVE
+  reservation through the durable run ledger (`keys.reservation_key_of`: its own reservation, or its root's for an
+  ACTIVE member: a continuation, a stage, an endpoint child); before, it looked for the operation's own reservation
+  row, which an endpoint child never has (it shares its root's slot), so the first LeRobot child's inference POST on
+  109 reached the hook, was prepared, and the worker's attach was refused "reservation is released" with the root
+  live (op-82b6134819bee769). The gateway's admission proof already resolved members this way; both now share the one
+  resolver. A settled member never borrows its root's live slot; a released root resolves to nothing for itself and
+  its members. Tests: root, child, foreign, settled child, released root, the child's attach.
+
 ## api 0.11.109
 
 (0.11.109 = 0.11.108 plus the restore triple on every attempt entry and the Knative Service as the rollout witness; jobs
@@ -168,25 +199,6 @@ and platform chart 0.1.12 unchanged; migration 27.)
   shape admits only operator-approved shapes under one model id, whatever key calls it directly (the app's own
   validator was the only bound before). Malformed numerics (strings, booleans, NaN/inf, fractions where an integer is
   declared) are refused, never coerced. Classes declaring no bounds are untouched (the bundled classes included).
-
-## platform chart 0.1.12, stack module `cluster`: the registry bootstrap at boot on CPU batch pools (cold-node first pull)
-
-- `stack/modules/cluster`: one `registry_bootstrap_*` cloud-init fragment shared by the GPU pools (unchanged content) and
-  the CPU batch pools (new): the containerd drop-in, the mirror file for the logical host on the loopback Zot NodePort,
-  the unlimited memlock on the runtime, the node-config marker, one containerd restart at boot. The system node group
-  keeps its plain cloud-init; without the image cache nothing is written anywhere. Module tests
-  (`tests/registry-bootstrap.tftest.hcl`): a CPU batch pool's first pull goes through the mirror files written at
-  boot (file, port, drop-in, memlock, marker, restart), one `write_files`/`runcmd` section, the sysctl and the
-  shared-filesystem mount preserved, the system group untouched, the GPU fragment unchanged, nothing without the cache.
-  Terraform effect: the CPU batch node groups' templates change (a node-group re-creation; scale-from-zero pools:
-  harmless; the system and control node groups: no change).
-- Platform chart 0.1.12: the node-config script moves to `charts/platform/files/node-config.sh` (env-parametrised,
-  testable) and gains the catch-all: a bootstrap `hosts.toml` for the logical host when a node has none (never over
-  cloud-init's or Spegel's file); the memlock drop-in and the containerd restart only when the running runtime lacks
-  them (decided by the probe pull and the process limits, never by a file). `images.cacheNodePort` (default 30500).
-  `tools/node-config-test.sh` (run by `make check`): a fresh node gets the bootstrap file, the memlock drop-in and
-  exactly one restart; an initialised node with Spegel's file sees no write and no restart; a served runtime without
-  the memlock drop-in is restarted once with Spegel's file untouched; a node booted with the fragment is a no-op.
 
 ## api 0.11.101
 
@@ -425,16 +437,6 @@ unchanged. 0.11.90 was never applied.)
   Platform chart 0.1.10 routes `/internal/operations` on the control API (the invariant in tools/check.sh covers it).
   Nothing of the static stage delegation, the endpoint-stage refusal or the graph bound changed.
 
-
-## platform stage: `iam_token` is an ephemeral input (saved plans take the token at apply time)
-
-- `stack/platform/config.tf`: `variable "iam_token"` is `ephemeral = true` (Terraform ≥ 1.10; the stages require ≥ 1.12).
-  The Kubernetes, Helm and kubectl provider configurations keep referencing it; nothing else may (`tools/check.sh`
-  asserts the variable is ephemeral and sensitive and that `var.iam_token` appears in `providers.tf` only). A saved
-  plan no longer carries the token, and `terraform apply <plan>` reads `TF_VAR_iam_token` afresh from the environment
-  `stack.sh` exports at apply time. Before: the token was frozen into the plan and the fresh environment value was
-  ignored at apply ("Ignoring variable when applying a saved plan"), so three reviewed platform applies on 2026-10-14
-  failed every Helm write with an expired token. docs/OPERATIONS.md "Saved plans".
 ## api 0.11.86, jobs 0.1.25
 
 (0.11.86 / 0.1.25 supersede the unreleased 0.11.85 / 0.1.24 candidate after review; everything of it is included.)

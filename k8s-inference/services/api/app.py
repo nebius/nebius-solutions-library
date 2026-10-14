@@ -44,6 +44,7 @@ from auth import (
     allows_model,
     authorize,
     check_model,
+    fleet_operator,
     forget,
     forget_hash,
     principal,
@@ -115,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.109", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.110", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -388,13 +389,7 @@ ADMITTED_BEARER_PREFIX = "s2-admitted."
 def _reservation_key_of(operation: str) -> str | None:
     """The key (hash) an operation is admitted on: its own reservation, or, for a member of a run (a continuation, a
     stage, an endpoint child), its root's; None when nothing live holds it (released, settled, cancelled)."""
-    h = keys.reservation_key(operation)
-    if h:
-        return h
-    member = keys.member_of(operation)
-    if not member or member.get("state") not in (None, "active"):
-        return None
-    return keys.reservation_key(member["root"]) if member.get("root") else None
+    return keys.reservation_key_of(operation)
 
 
 def _admitted_principal(token: str, operation: str, model: str) -> Principal:
@@ -2780,6 +2775,129 @@ def _key_public(i: dict, tenant: str) -> dict:
 def _fleet_only() -> None:
     if not db.enabled():
         raise HTTPException(409, "keys live in the fleet database (DATABASE_URL), which this API does not have")
+
+
+# ---- fleet operators (docs/API.md "Fleet operators"): tenants, their keys and usage, with an explicit tenant --------
+def _fleet_tenant(tenant: str) -> str:
+    """A tenant name the fleet surface may address: a DNS label (the tenant namespace is `tenant-<name>`)."""
+    import re
+
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", tenant) or tenant == keys.ROUTER["tenant"]:
+        raise HTTPException(404, f"tenant {tenant} is not a tenant of this fleet")
+    return tenant
+
+
+def _fleet_tenant_view(tenant: str, doc: dict | None, record: dict | None, usage: dict | None) -> dict:
+    return {
+        "tenant": tenant,
+        "namespace": f"{cfg.TENANT_NS_PREFIX}{tenant}",
+        "in_fleet_document": doc is not None,
+        "gpu_quota": (doc or {}).get("gpu_quota"),
+        "fair_share_weight": (doc or {}).get("fair_share_weight"),
+        "dedicated_pools": list((doc or {}).get("dedicated_pools") or []) if doc is not None else None,
+        "assets": list((doc or {}).get("assets") or []) if doc is not None else None,
+        "keys": (record or {}).get("keys", 0),
+        "admins": (record or {}).get("admins", 0),
+        "blocked": (record or {}).get("blocked", 0),
+        "spend": float((record or {}).get("spend", 0.0)),
+        "usage": usage,
+    }
+
+
+@app.get("/v1/fleet/tenants", responses={200: {"model": list[schemas.FleetTenantRecord]}})
+def fleet_tenants(p: Principal = Depends(fleet_operator)):
+    """Every tenant of the fleet: the fleet document's tenants (charts/fleet tenants.yaml: quota, fair share,
+    dedicated pools, assets) and every tenant with keys on record, with key counts, spend and what the keys hold.
+    The platform's own keys (router, fleet operators) are not a tenant."""
+    _fleet_only()
+    doc = kube.fleet().get("tenants") or {}
+    record = keys.tenants_on_record()
+    out = []
+    for tenant in sorted(set(doc) | set(record)):
+        out.append(_fleet_tenant_view(tenant, doc.get(tenant), record.get(tenant), keys.tenant_usage(tenant)))
+    return out
+
+
+@app.get("/v1/fleet/tenants/{tenant}", responses={200: {"model": schemas.FleetTenantRecord}})
+def fleet_tenant(tenant: str, p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    doc = (kube.fleet().get("tenants") or {}).get(tenant)
+    record = keys.tenants_on_record().get(tenant)
+    if doc is None and record is None:
+        raise HTTPException(404, f"tenant {tenant} is not a tenant of this fleet")
+    return _fleet_tenant_view(tenant, doc, record, keys.tenant_usage(tenant))
+
+
+@app.get("/v1/fleet/tenants/{tenant}/keys", responses={200: {"model": list[schemas.ApiKey]}})
+def fleet_list_keys(tenant: str, p: Principal = Depends(fleet_operator)):
+    """The tenant's keys exactly as its own admin lists them (the same safe projection: never a hash or value)."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return [_key_public(k, tenant) for k in keys.list_tenant(tenant)]
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})
+def fleet_create_key(tenant: str, req: KeyRequest, p: Principal = Depends(fleet_operator)):
+    """A user key of that tenant, as its admin would mint it (no pass-through routes: the fleet operator carries
+    none); the value is returned once."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    value, i = keys.create(
+        tenant,
+        f"{tenant}-{req.alias}",
+        req.budget,
+        req.models,
+        req.expires_days,
+        metadata={"allowed_passthrough_routes": []},
+        by=f"fleet:{p.info.get('key_alias')}",
+    )
+    return {**_key_public(i, tenant), "key": value}
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys:import", responses={200: {"model": schemas.KeyImportReport}})
+def fleet_import_keys(tenant: str, req: KeyImportRequest, p: Principal = Depends(fleet_operator)):
+    """Pre-hashed user keys of that tenant (docs/API.md "Importing keys"), with the tenant's own rules."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return keys.import_records(
+        req.keys, tenant, f"fleet:{p.info.get('key_alias') or p.info.get('key_name')}", req.dry_run
+    )
+
+
+@app.patch("/v1/fleet/tenants/{tenant}/keys/{alias}", responses={200: {"model": schemas.ApiKey}})
+def fleet_update_key(tenant: str, alias: str, req: KeyUpdate, p: Principal = Depends(fleet_operator)):
+    """Budget, model allow-list (the grant) or expiry of a tenant's key; spend untouched."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    if req.budget is None and req.models is None and req.expires_days is None:
+        raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
+    i = keys.update(tenant, alias, req.budget, req.models, req.expires_days)
+    if i is None:
+        raise HTTPException(404, f"key {alias} not found in tenant {tenant}")
+    forget_hash(i["token"])
+    return _key_public(i, tenant)
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys/{alias}:block", responses={200: {"model": schemas.ApiKey}})
+def fleet_block_key(tenant: str, alias: str, blocked: bool = True, p: Principal = Depends(fleet_operator)):
+    """Block (default) or unblock (`?blocked=false`) a tenant's key: the record and its history stay; a blocked
+    key is refused on every request within AUTH_CACHE_S."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    i = keys.block(tenant, alias, blocked)
+    if i is None:
+        raise HTTPException(404, f"key {alias} not found in tenant {tenant}")
+    forget_hash(i["token"])
+    return _key_public(i, tenant)
+
+
+@app.delete("/v1/fleet/tenants/{tenant}/keys/{alias}", status_code=204)
+def fleet_revoke_key(tenant: str, alias: str, p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    if not keys.revoke(tenant, alias):
+        raise HTTPException(404, f"key {alias} not found in tenant {tenant}")
 
 
 @app.get("/v1/keys", responses={200: {"model": list[schemas.ApiKey]}})

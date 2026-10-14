@@ -274,6 +274,10 @@ whole node (`gpu` = the preset's GPU count, so the pod takes the node), the same
   `<id>-r<n>` again on the same shared checkpoint directory (409 with `checkpoints: local`).
   Status, attempts (one per pod per restart) and billing (pod-seconds x GPUs, summed over ranks and
   restarts) come from the pods and the attempt records exactly as for a Job.
+  The leaf `checkpoints/<root>` is a kubelet subPath: created root-owned 0755 when missing, so every rank pod (and
+  the gang's CPU finalizer) first runs the trusted provisioning init (`scratch.sh provision /work/checkpoint`, root with
+  CHOWN/FOWNER/DAC_OVERRIDE only) on exactly that mount point: 10001:10001, 2770, not recursive, idempotent; the ranks
+  themselves stay non-root without a capability.
 
 **Scale-from-zero does not work with DRA claims.** The cluster autoscaler builds the template of an
 empty node group without ResourceSlices, so a pod that claims InfiniBand NICs never triggers a

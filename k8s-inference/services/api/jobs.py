@@ -763,6 +763,25 @@ def _class_retry(r: dict) -> dict | None:
 INTERCONNECT = ("none", "preferred", "required")
 
 
+def _checkpoint_provision(root: str) -> dict:
+    """The init container that makes a gang's shared checkpoint leaf (`checkpoints/<root>` on the tenant's shared
+    claim, docs/JOBS.md "Multi-node runs") the runner's: scratch.sh `provision` on exactly that mount point."""
+    return {
+        "name": "checkpoint-provision",
+        "image": RUNNER_IMAGE,
+        "command": ["/usr/local/bin/scratch.sh", "provision", "/work/checkpoint"],
+        "resources": {"requests": dict(SCRATCH_PROVISION_REQUESTS), "limits": {"cpu": "200m", "memory": "64Mi"}},
+        "volumeMounts": [{"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}],
+        "securityContext": {
+            **CONTAINER_HARDENING,
+            "runAsNonRoot": False,
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]},
+        },
+    }
+
+
 def _multinode(
     name: str,
     model: dict,
@@ -861,6 +880,12 @@ def _multinode(
             c["volumeMounts"].append(
                 {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
             )
+        # the kubelet creates a missing subPath directory root-owned 0755: the ranks (10001, no capability) could not
+        # write their checkpoints there (the first real 2x1 MPI run on a fresh root). The same trusted init as the
+        # shared-scratch caller provisions EXACTLY that leaf (chown 10001:10001, chmod 2770 of the mount point, not
+        # recursive, nothing outside it) before any rank starts; idempotent on a restart or a resume (existing files
+        # untouched); every rank pod runs it (the leaf is shared, the second one finds it done)
+        pod["initContainers"] = list(pod.get("initContainers") or []) + [_checkpoint_provision(root)]  # after fetch
     _mount_data(r, pod, [main])
     _mount_weights(r, pod, [main])
     rank = {
@@ -2011,7 +2036,7 @@ def export_again(
                     },
                     {"name": "FINALIZE_NODES", "value": str(ann.get(f"{LABEL}/nodes") or "")},
                 ]
-    spec["initContainers"] = []
+    spec["initContainers"] = [_checkpoint_provision(root)] if gang else []
     role = "finalize" if finalize else "export"
     if finalize:
         # the retained scratch still carries the compute attempt's bridge files (its checkpoint pointer, its RESULT.json

@@ -1332,3 +1332,56 @@ def test_a_gang_incarnation_restores_from_one_frozen_committed_pointer(database,
         {"operation": "op-solo", "status": "started", "gpus": 1, "_explicit_checkpoint_ref": "x"},
     )
     assert solo["resume_checkpoint_ref"] is None and solo["resume_source"] is None
+
+
+def test_the_reservation_of_a_member_resolves_to_its_live_root_and_to_nothing_once_settled_or_foreign(database):
+    """keys.reservation_key_of (api 0.11.110): a root holds its own reservation; an ACTIVE member (an endpoint child
+    here, kind child) resolves to its root's live reservation although it has no row of its own; a foreign operation
+    resolves to nothing; a settled member never borrows its root's slot; a released root resolves to nothing for
+    itself and its members. The first LeRobot child on 109 was refused at the worker's attach with a live root."""
+    import leases
+
+    db.migrate()
+    h = "a" * 64
+    keys.import_records(
+        [
+            {
+                **LEGACY,
+                "hash": h,
+                "alias": "lab",
+                "budget_requests": 10,
+                "max_concurrent": 4,
+                "rate_limit": None,
+                "budget_gpu_seconds": None,
+            }
+        ],
+        "demo",
+        "admin",
+    )
+    keys.admit(h, "op-root-1", "demo", gpu_seconds=0.0, counts_request=True, run_member=True)
+    assert keys.reservation_key_of("op-root-1") == h
+    keys.prepare_run_member("op-root-1", "op-root-1-c-abcdef0123", None, 1, 600, kind="child", stage="u1")
+    assert keys.reservation_key("op-root-1-c-abcdef0123") is None  # no row of its own
+    assert keys.reservation_key_of("op-root-1-c-abcdef0123") == h  # the root's live slot
+    assert keys.reservation_key_of("op-foreign-9") is None
+    # the worker's attach of the child's native execution passes the reservation fence
+    leases.prepare("op-root-1-c-abcdef0123", "op-root-1-c-abcdef0123-pod1", "eu-north1", "cosmos-nano")
+    worker = {
+        "pod": "cosmos-predictor-00001-abc",
+        "namespace": "models",
+        "uid": "uid-w1",
+        "region": "eu-north1",
+        "restart_count": 0,
+    }
+    got = leases.attach("op-root-1-c-abcdef0123", "op-root-1-c-abcdef0123-pod1", worker, "req-1")
+    assert got["state"] == "attached" and got["pod_uid"] == "uid-w1"
+    # a settled child never borrows the root's slot; the released root resolves to nothing for both
+    keys.release("op-root-1-c-abcdef0123", 0.0)
+    assert keys.member_of("op-root-1-c-abcdef0123")["state"] == "settled"
+    assert keys.reservation_key_of("op-root-1-c-abcdef0123") is None and keys.reservation_key_of("op-root-1") == h
+    keys.release("op-root-1", 0.0)
+    assert keys.reservation_key_of("op-root-1") is None and keys.reservation_key_of("op-root-1-c-abcdef0123") is None
+    with pytest.raises(HTTPException) as e:
+        leases.prepare("op-root-1-c-abcdef0123", "op-root-1-c-abcdef0123-pod2", "eu-north1", "cosmos-nano")
+        leases.attach("op-root-1-c-abcdef0123", "op-root-1-c-abcdef0123-pod2", worker, "req-2")
+    assert e.value.status_code == 409
