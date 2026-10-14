@@ -311,8 +311,12 @@ class GpuSpec(BaseModel):
 
 
 class ResourcesSpec(BaseModel):
-    cpu: str | None = None
-    memory: str | None = None
+    cpu: str | None = None  # request (= limit unless cpu_limit)
+    memory: str | None = None  # request (= limit unless memory_limit)
+    cpu_limit: str | None = None
+    memory_limit: str | None = None
+    ephemeral_storage: str | None = None  # node-local scratch request of the endpoint container (optional)
+    ephemeral_storage_limit: str | None = None  # = the request unless given
 
 
 class WeightsSpec(BaseModel):
@@ -432,6 +436,10 @@ class ModelSpec(BaseModel):
     )
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
+    # endpoint children (docs/JOBS.md "Endpoint children"): the endpoint models a live attempt of this run class may
+    # ask the platform to call as bounded async children, and the explicit bound on their number per root
+    child_endpoints: SkipValidation[list[str] | None] = None
+    child_max_units: SkipValidation[int | None] = None
 
 
 class Error(BaseModel):

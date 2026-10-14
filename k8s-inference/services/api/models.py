@@ -9,7 +9,9 @@ A model definition ("spec") is the shape of the console form:
      "port": 8000, "protocol": "openai" | "http" | "websocket" | "grpc", "path": "/v1/chat/completions",
      "health_path": "/health", "served_model": "llm",
      "gpu": {"count": 1, "classes": ["h100", "l40s"]},       # preferred class first; pools of these classes
-     "resources": {"cpu": "8", "memory": "32Gi"}, "scaling": {"min": 0, "max": 2, "target": 4},
+     "resources": {"cpu": "8", "memory": "64Gi", "cpu_limit": "24", "memory_limit": "128Gi",   # requests; limits optional
+                   "ephemeral_storage": "4Gi", "ephemeral_storage_limit": "16Gi"},              # (= requests unless given)
+     "scaling": {"min": 0, "max": 2, "target": 4},
      "timeout_s": 600, "shm_gib": 4, "pull_secret": "ngc",
      "weights": {"path": "my-llm", "mount_path": "/weights", "env": {"HF_HOME": "/weights"}},
      "regions": ["eu-north1"],                                 # default: every region with a pool of a class
@@ -497,7 +499,22 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "image": image,
             "port": port,
             "protocol": protocol,
-            "resources": {"gpu": count, "cpu": str(res.get("cpu", "4")), "memory": str(res.get("memory", "16Gi"))},
+            "resources": {
+                "gpu": count,
+                "cpu": str(res.get("cpu", "4")),
+                "memory": str(res.get("memory", "16Gi")),
+                # optional, as a run class's: limits above the requests (cpu/memory are the requests, = the limits
+                # unless these are given) and the kubelet's node-local scratch (request; limit = request unless given);
+                # kept through the projection, nothing rendered without them
+                **({"cpuLimit": str(res["cpu_limit"])} if res.get("cpu_limit") else {}),
+                **({"memoryLimit": str(res["memory_limit"])} if res.get("memory_limit") else {}),
+                **({"ephemeralStorage": str(res["ephemeral_storage"])} if res.get("ephemeral_storage") else {}),
+                **(
+                    {"ephemeralStorageLimit": str(res["ephemeral_storage_limit"])}
+                    if res.get("ephemeral_storage_limit")
+                    else {}
+                ),
+            },
             "scaling": {
                 "minReplicas": int(scaling.get("min", 0)),
                 "maxReplicas": int(scaling.get("max", 1)),
@@ -713,6 +730,28 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                 "cpu": str(fz.get("cpu", "1")),
                 "memory": str(fz.get("memory", "2Gi")),
             }
+        if s.get("child_endpoints") is not None:
+            # endpoint children (docs/JOBS.md "Endpoint children"): the operator's allowlist of endpoint models a live
+            # attempt may ask for, with an explicit bound per root (never a silent default: the retained declared
+            # range of a dataset-driven workload is the operator's statement, not the platform's guess)
+            ce = s["child_endpoints"]
+            if (
+                not isinstance(ce, list)
+                or not ce
+                or not all(isinstance(x, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,62}", x) for x in ce)
+            ):
+                raise HTTPException(400, "child_endpoints: a non-empty list of endpoint model ids")
+            if s.get("child_max_units") is None:
+                raise HTTPException(
+                    400, "child_endpoints needs child_max_units (the explicit bound of children per root, 1..65536)"
+                )
+            n = int(s["child_max_units"])
+            if not 1 <= n <= 65536:
+                raise HTTPException(400, "child_max_units: 1..65536")
+            job["childEndpoints"] = sorted(set(ce))
+            job["childMaxUnits"] = n
+        elif s.get("child_max_units") is not None:
+            raise HTTPException(400, "child_max_units applies with child_endpoints")
         if s.get("pull_secret"):
             job["imagePullSecret"] = s["pull_secret"]
         if d := s.get("data"):

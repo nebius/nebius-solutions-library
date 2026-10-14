@@ -268,14 +268,24 @@ def _shared_fs(v: dict) -> dict:
 
 def _resources(v: dict) -> dict:
     r = v.get("resources") or {}
-    limits = {"nvidia.com/gpu": _text(r.get("gpu")), "cpu": _text(r.get("cpu")), "memory": r.get("memory")}
+    # two spellings, one meaning: `cpu`/`memory` with `cpuRequest`/`memoryRequest` below them (the chart's), or
+    # `cpu`/`memory` as the requests with `cpuLimit`/`memoryLimit` above them (the API's projection of an endpoint
+    # spec, docs/API.md); either way requests = limits unless both are given
+    limits = {
+        "nvidia.com/gpu": _text(r.get("gpu")),
+        "cpu": _text(r.get("cpuLimit") or r.get("cpu")),
+        "memory": r.get("memoryLimit") or r.get("memory"),
+    }
     requests = {
         "nvidia.com/gpu": _text(r.get("gpu")),
         "cpu": _text(r.get("cpuRequest") or r.get("cpu")),
         "memory": r.get("memoryRequest") or r.get("memory"),
     }
-    if r.get("ephemeralStorage"):
-        limits["ephemeral-storage"] = requests["ephemeral-storage"] = r["ephemeralStorage"]
+    if r.get("ephemeralStorage") or r.get("ephemeralStorageLimit"):
+        # the kubelet's node-local scratch: request = limit unless both are given (as a run class's, jobs.build_run)
+        req = r.get("ephemeralStorage") or r.get("ephemeralStorageLimit")
+        requests["ephemeral-storage"] = req
+        limits["ephemeral-storage"] = r.get("ephemeralStorageLimit") or req
     return {"limits": limits, "requests": requests}
 
 

@@ -4,6 +4,70 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.89
+
+(0.11.89 = 0.11.88 plus the endpoint resources addendum below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)
+
+- Endpoint `resources` keep optional `cpu_limit` / `memory_limit` above the `cpu` / `memory` requests and an
+  optional `ephemeral_storage` request with `ephemeral_storage_limit` (= the request unless given), the names a run
+  class uses, through the catalog projection and the native renderer (requests/limits on the endpoint container,
+  single- and multi-node); defaults unchanged (4 / 16Gi, requests = limits, no ephemeral storage), nothing rendered
+  without them (docs/API.md). The two-container shapes retained by the migration (NIM 20 CPU/160Gi + adapter 2/2Gi
+  with 8704Mi/13Gi ephemeral; NV-Segment-CT 8/64Gi requests, 24/128Gi limits, 4Gi/16Gi ephemeral) project as one
+  native container.
+
+## api 0.11.88, jobs 0.1.26, platform chart 0.1.10
+
+(0.11.88 supersedes the unreleased 0.11.87 candidate after review; everything of it is included.)
+
+- Endpoint children, the capture: the child is rendered as a native application-I/O endpoint call (docs/JOBS.md
+  "Endpoint children"): its request in a platform-written private binding (inline `input`, or `input_ref.sha256` +
+  a renewable `transport.input_url` the caller verifies against the bound sha256 before posting), ONE inference POST
+  per operation (the durable marker; a lost response is an unknown outcome, never a second POST), the response bytes
+  and their manifest (sha256, media type, size, status, producing attempt) durable on the retained work volume before
+  delivery to a platform-owned destination `s3://<bucket>/operations/<child>/{response.bin,call.json}` through
+  presigned PUT URLs the API mints on demand as the child's refresh broker (`POST /internal/operations/<child>:refresh`,
+  the child's own operation-scoped token, a live attempt of the child or of its transfer-only export retry required).
+  No tenant or bucket credential reaches the parent or the caller. `:export` of a child is admitted as a `child` member
+  after the child's own head (`keys.child_head`; no second request) and served by the same broker.
+- Endpoint children, the request: the bound request is `{model, input | input_ref.sha256, timeout_s, region}`
+  (not the input alone); renewable URLs are outside it; the allow-list and bound are the ones frozen on the parent's
+  Job (no fallback to the current class); the child model's image is recorded at admission and an intent is never
+  completed against another image.
+- Endpoint children, the readback: authoritative past the Job's TTL: the durable row, the capture manifest from the
+  destination (sha256, media type, size, HTTP status, attempt), a one-hour presigned download URL for the live
+  attempt of the root (attempt-scoped, one object), the latest attempt record, and `outcome` (`succeeded` | `failed`
+  | `undelivered` + `exportable` | `unknown` | `pending`): exit 4/3 are unknown and not exportable, never "undelivered".
+- Endpoint children, the lifecycle (migration 22): the row is a durable intent written before the member and the
+  Job (`pending` → `active` → `ended`, reason recorded); a crash in between or an ambiguous create (the Job may exist)
+  leaves the intent pending and the next replay or the sweep finishes it deterministically (found or created; one
+  Job, one member); rollback only on confirmed absence + definite refusal (`keys.rollback_run_member` now also for a
+  child member: its request leaves the root's reservation); a cancel is issued and recorded and the row stays open
+  until the terminal settlement (billing's release joined with the lease; a never-started child settles at its
+  deletion), so no next child starts while the old caller or worker drains; the sweep's cascade covers cancelled,
+  finished-without-successor and gone parents (a finished parent with a successor is judged by the successor).
+- jobs 0.1.26: call.sh verifies a fetched request against the binding's `input_sha256` (an endpoint child's bound
+  input reference) before its one POST; other bytes mean no POST (exit 2). Nothing else of the caller changed.
+
+## api 0.11.87, platform chart 0.1.10 (unreleased candidate, superseded by 0.11.88)
+
+- Endpoint children (docs/JOBS.md "Endpoint children"; migration 21): an operator-allowlisted, bounded primitive by
+  which a LIVE attempt of a run asks the platform for an asynchronous endpoint call as a child of its root. A run
+  class declares `child_endpoints` (endpoint models) and `child_max_units` (explicit bound, required); the render
+  projects a pod-bound ServiceAccount token and the control API's URL into `main` (no customer bearer in the worker).
+  `POST /internal/operations/<run>/children` / `GET …/children/<unit>`: TokenReview of the parent's pod (namespace,
+  name, exact UID), live-attempt and open-root fences, allowlist, deterministic child id per (root, unit), immutable
+  request hash (same request → readback; different → 409), one active child per root, the parent's remaining
+  deadline inherited, the root's owner/namespace/key inherited by hash: the child's caller carries only an
+  operation-scoped credential (`Bearer s2-admitted.<token>`, the admission HMAC), which the gateway hook accepts by
+  rebuilding the principal from the key record by hash while the child's reservation lives (generic authorize
+  support; no customer or admin key stored or forwarded). Ledger: the root's slot shared, one request per child
+  (`keys.prepare_run_member` kind `child`), the key's endpoint-call policy unchanged (a finite GPU-second budget gets
+  the same 501 as any endpoint call), settled as every endpoint call; the root closes only when nothing is active. Cancel cascade on the cancel route and in the reconciler's sweep; ended children recorded.
+  Platform chart 0.1.10 routes `/internal/operations` on the control API (the invariant in tools/check.sh covers it).
+  Nothing of the static stage delegation, the endpoint-stage refusal or the graph bound changed.
+
+
 ## platform stage: `iam_token` is an ephemeral input (saved plans take the token at apply time)
 
 - `stack/platform/config.tf`: `variable "iam_token"` is `ephemeral = true` (Terraform ≥ 1.10; the stages require ≥ 1.12).

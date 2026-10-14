@@ -182,6 +182,8 @@ spec:
       backendRefs: [{ name: api, port: 80 }]                                  # releases through S2_API_URL with its projected pod-bound token (TokenReview; nothing from headers)
     - matches: [{ path: { type: PathPrefix, value: /internal/sessions } }]   # live sessions (docs/API.md "Sessions"): the same worker pod-token routes
       backendRefs: [{ name: api, port: 80 }]
+    - matches: [{ path: { type: PathPrefix, value: /internal/operations } }] # endpoint children (docs/JOBS.md): a run's live attempt, with its
+      backendRefs: [{ name: api, port: 80 }]                                  # projected pod token, asks for a bounded child and reads it back
     - matches: [{ path: { type: PathPrefix, value: /internal } }]   # everything else under /internal is this cluster's own gateway's (the Service directly)
       filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]

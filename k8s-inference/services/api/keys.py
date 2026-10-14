@@ -919,6 +919,12 @@ def run_head(root: str) -> str | None:
         return _lineage_head(c, root, "continuation", None)
 
 
+def child_head(root: str, unit: str) -> str | None:
+    """The newest member of one endpoint child's lineage (the child and its transfer-only export retries)."""
+    with _connection() as c:
+        return _lineage_head(c, root, "child", unit)
+
+
 def stage_head(root: str, stage: str) -> str | None:
     """The newest member of one stage's lineage (the stage's operation and its continuations); None before the stage
     was submitted."""
@@ -927,8 +933,8 @@ def stage_head(root: str, stage: str) -> str | None:
 
 
 def member_of(operation: str) -> dict | None:
-    """The ledger row of an operation: its root, kind (`continuation` | `stage`), stage and state; None when it is no
-    member (no ledger)."""
+    """The ledger row of an operation: its root, kind (`continuation` | `stage` | `child`), stage (the unit for a
+    child) and state; None when it is no member (no ledger)."""
     with _connection() as c:
         r = c.execute(
             "select root, kind, stage, state, predecessor from key_run_members where operation = %s", (operation,)
@@ -998,6 +1004,38 @@ def prepare_run_member(
                 raise KeyLimit(
                     409, f"only the current head of stage {stage!r} may be continued ({head}, not {predecessor})"
                 )
+        elif kind == "child" and predecessor is not None:
+            # a continuation of an endpoint child (its transfer-only export retry, docs/JOBS.md "Endpoint children"):
+            # the child's own lineage inside the root's run (one head per unit), no second request (nothing is
+            # inferred again), the slot re-acquired like any continuation when the run had closed
+            head = _lineage_head(c, root, "child", stage)
+            if predecessor != head:
+                raise KeyLimit(
+                    409, f"only the current head of child unit {stage!r} may be continued ({head}, not {predecessor})"
+                )
+        elif kind == "child":
+            # an endpoint child of an active run (docs/JOBS.md "Endpoint children"): attaches to an OPEN root only (the
+            # root's reservation still exists: nothing settled it), never to a head; counts one request against the
+            # key's request budget and rate window (one inference each)
+            if c.execute("select 1 from key_reservations where operation = %s", (root,)).fetchone() is None:
+                raise KeyLimit(409, f"run {root} is closed (its reservation is settled); no child attaches to it")
+            _b_req, s_req, rate = k[1], k[3], _rate_of(c, h)
+            r_req = c.execute(
+                "select coalesce(sum(requests), 0) from key_reservations where key_hash = %s", (h,)
+            ).fetchone()[0]
+            if _b_req is not None and float(s_req) + float(r_req) + 1 > float(_b_req):
+                raise KeyLimit(402, "key request budget exhausted for the child")
+            if rate:
+                n = c.execute(
+                    "select count(*) from key_calls where key_hash = %s and at > now() - make_interval(secs => %s)",
+                    (h, rate["window_s"]),
+                ).fetchone()[0]
+                if n >= rate["requests"]:
+                    raise KeyLimit(
+                        429, f"key rate limit reached ({rate['requests']} requests per {rate['window_s']} s)"
+                    )
+                c.execute("insert into key_calls (key_hash) values (%s)", (h,))
+            c.execute("update key_reservations set requests = requests + 1 where operation = %s", (root,))
         else:
             head = _lineage_head(c, root, "continuation", None)
             if predecessor != head:
@@ -1028,6 +1066,11 @@ def prepare_run_member(
             (operation, root, predecessor, h, tenant, bound, kind, stage),
         )
         return {"operation": operation, "replay": False, "gpu_bound": bound, "key_hash": h}
+
+
+def _rate_of(c, h: str) -> dict | None:
+    r = c.execute("select rate_limit from keys where hash = %s", (h,)).fetchone()
+    return (r[0] if r and isinstance(r[0], dict) else None) or None
 
 
 def _close_run_if_idle(c, root: str) -> bool:
@@ -1114,22 +1157,25 @@ def settle_unknown(operation: str, gpu_seconds: float) -> bool:
 
 
 def rollback_run_member(operation: str) -> bool:
-    """The continuation's Job was never created (a confirmed absence after a failed create): the member goes and its
-    bound leaves the reservation; the run closes when nothing else is active. Never for a member whose Job may exist."""
+    """The continuation's (or endpoint child's) Job was never created (a confirmed absence after a failed create): the
+    member goes and its bound leaves the reservation (a child's request too); the run closes when nothing else is
+    active. Never for a member whose Job may exist."""
     with _connection() as c, c.transaction():
         m = c.execute(
-            "select root, gpu_bound from key_run_members where operation = %s and state = 'active' and predecessor is not null for update",
+            "select root, gpu_bound, kind from key_run_members where operation = %s and state = 'active' and (predecessor is not null or kind = 'child') for update",
             (operation,),
         ).fetchone()
         if m is None:
             return False
-        root, bound = m
+        root, bound, kind = m
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
         c.execute("delete from key_run_members where operation = %s", (operation,))
         c.execute(
             "update key_reservations set gpu_seconds = greatest(gpu_seconds - %s, 0) where operation = %s",
             (bound, root),
         )
+        if kind == "child":  # the child's one request was counted on the root's reservation at its preparation
+            c.execute("update key_reservations set requests = greatest(requests - 1, 0) where operation = %s", (root,))
         _close_run_if_idle(c, root)
         return True
 

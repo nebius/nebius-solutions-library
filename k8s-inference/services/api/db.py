@@ -318,6 +318,44 @@ create table if not exists operation_marks (
     alter table sessions add column if not exists ready_seen_at timestamptz;
     alter table sessions add column if not exists attach_deadline_at timestamptz;
     """,
+    # 21: endpoint children of a run (docs/JOBS.md "Endpoint children"): one row per (root, unit): the deterministic child
+    # operation, the parent attempt that admitted it, the immutable request hash, and whether it is still active; one
+    # active child per root (partial unique index), read back by unit by any live attempt of the root
+    """
+    create table if not exists endpoint_children (
+        root             text not null,
+        unit_id          text not null,
+        child            text not null unique,
+        parent           text not null,
+        parent_pod       text not null,
+        parent_pod_uid   text not null,
+        model            text not null,
+        request_sha256   text not null,
+        state            text not null default 'active',
+        created_at       timestamptz not null default now(),
+        ended_at         timestamptz,
+        primary key (root, unit_id)
+    );
+    create unique index if not exists endpoint_children_one_active on endpoint_children (root) where state = 'active';
+    """,
+    # 22: endpoint children as durable intents (docs/JOBS.md "Endpoint children"): the row is written BEFORE the ledger
+    # member and the caller Job and carries everything a later API process needs to finish it deterministically (the
+    # namespace, the resolved region, the effective timeout, the bound request); `pending` until the Job is proven to
+    # exist, `active` until the child's terminal settlement, `ended` with its reason; one open (pending or active) child
+    # per root; a cancel is recorded when issued and the row stays open until settlement
+    """
+    alter table endpoint_children add column if not exists namespace text;
+    alter table endpoint_children add column if not exists region text;
+    alter table endpoint_children add column if not exists timeout_s integer;
+    alter table endpoint_children add column if not exists request jsonb;
+    alter table endpoint_children add column if not exists cancel_requested_at timestamptz;
+    alter table endpoint_children add column if not exists reason text;
+    alter table endpoint_children add column if not exists transport jsonb;
+    alter table endpoint_children add column if not exists model_image text;
+    alter table endpoint_children add column if not exists binding_ref text;
+    drop index if exists endpoint_children_one_active;
+    create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
+    """,
 ]
 
 _pool = None
