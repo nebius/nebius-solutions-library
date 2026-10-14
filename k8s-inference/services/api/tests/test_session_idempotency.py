@@ -43,6 +43,7 @@ def _rig(database, client, monkeypatch):
         f"sk-{k}": {**KEY_INFO, "max_budget": None, "metadata": {"tenant": "demo", "legacy": {"principal_id": pid}}}
         for k, pid in (("good", "p-1"), ("other", "p-2"))
     }
+    c.infos = infos  # the principals as the auth layer sees them (a test may move their spend)
 
     async def info(key):
         if key not in infos:
@@ -101,3 +102,33 @@ def test_the_owner_recovers_a_lost_create_binds_once_and_a_peer_sees_nothing(dat
     bad = c.post("/v1/models/llm-example:session", headers={**H, "Idempotency-Key": "x" * 201}, json={})
     assert bad.status_code == 400
     assert c.post("/v1/models/llm-example:session", headers={**H, "Idempotency-Key": "  "}, json={}).status_code == 400
+
+
+def test_a_replay_takes_no_new_request_from_the_budget_but_keeps_scope_and_model_checks(database, client, monkeypatch):
+    """A key with `budget_requests: 1`: the first create spends it (admission); the answer is lost; after the auth
+    cache refreshed (spent 1 of 1) the same request under the same key must recover the session, not answer 402;
+    a changed request under the key is 409, still not 402; a NEW session (another key, or none) is 402 as before."""
+    c = _rig(database, client, monkeypatch)
+    c.infos["sk-good"].update({"budget_requests": 1, "spent_requests": 0})
+    hk = {**H, "Idempotency-Key": "speech-start-budget"}
+    r1 = c.post("/v1/models/llm-example:session", headers=hk, json={"timeout_s": 600})
+    assert r1.status_code == 202, r1.text
+    c.infos["sk-good"]["spent_requests"] = 1  # the request budget is spent by that admission (cache refreshed)
+    r2 = c.post("/v1/models/llm-example:session", headers=hk, json={"timeout_s": 600})
+    assert r2.status_code == 202, r2.text
+    assert r2.json()["id"] == r1.json()["id"] and r2.json()["replay"] is True and r2.json()["claim_token"]
+    r3 = c.post("/v1/models/llm-example:session", headers=hk, json={"timeout_s": 300})
+    assert r3.status_code == 409 and "Idempotency-Key" in r3.text
+    # a new session is a new request: the spent budget refuses it, with or without a key
+    assert (
+        c.post("/v1/models/llm-example:session", headers={**H, "Idempotency-Key": "k-new"}, json={}).status_code == 402
+    )
+    assert c.post("/v1/models/llm-example:session", headers=H, json={}).status_code == 402
+    # the replay still needs the scope and the model grant: a key without the scope, or on a model it is not granted
+    c.infos["sk-good"]["scopes"] = ["read:operations"]
+    r = c.post("/v1/models/llm-example:session", headers=hk, json={"timeout_s": 600})
+    assert r.status_code == 403, r.text
+    c.infos["sk-good"]["scopes"] = KEY_INFO.get("scopes") or []
+    c.infos["sk-good"]["models"] = ["http-example"]
+    r = c.post("/v1/models/llm-example:session", headers=hk, json={"timeout_s": 600})
+    assert r.status_code in (403, 404), r.text

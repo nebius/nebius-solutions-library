@@ -2113,7 +2113,11 @@ def create_session(
             raise HTTPException(400, f"Idempotency-Key: 1..{sessions.IDEMPOTENCY_KEY_MAX} characters")
     req = req or schemas.SessionRequest()
     m = _model(model)
-    authorize(p, m["name"], "invoke:sync", budget=True)
+    # a replay (the owner's key names a session already) keeps the key's model grant, scope and validity checks but
+    # takes no new request from the budget: the admission counted once, at the first create (a key whose last
+    # request this session was recovers its lost answer instead of a 402); the request itself is compared below
+    existing = sessions.find_replay(p.tenant, p.owner, idempotency_key) if idempotency_key else None
+    authorize(p, m["name"], "invoke:sync", budget=existing is None)
     if m["mode"] == "run":
         raise HTTPException(400, "sessions are streams to an endpoint; this model is a run class")
     if p.role == keys.ROUTER["role"]:
@@ -2690,8 +2694,15 @@ async def operation_logs(
 
 
 def _key_public(i: dict, tenant: str) -> dict:
-    exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
-    return {
+    """The admin's view of a tenant key (`GET /v1/keys`, the create/update answers): the same safe limit and usage
+    fields the caller's own view (`GET /v1/keys/me`) carries (auth.limits_view: scopes, concurrency, budgets and
+    spend, rate limit, principal id), `blocked` and a `status` that says `blocked` for a retained blocked key (an
+    imported record with unknown scopes, or a blocked one) instead of `active`, and the key's run usage; never the
+    hash, the raw metadata or a secret (`id` is the alias)."""
+    import auth as auth_mod
+
+    blocked = bool(i.get("blocked"))
+    out = {
         "id": i.get("key_alias"),
         "key_preview": i.get("key_name"),
         "alias": i.get("key_alias"),
@@ -2701,9 +2712,17 @@ def _key_public(i: dict, tenant: str) -> dict:
         "models": i.get("models", []),
         "created_at": i.get("created_at"),
         "expires_at": i.get("expires"),
-        "status": "exhausted" if exhausted else "active",
+        "status": "blocked" if blocked else ("exhausted" if auth_mod.exhausted(i) else "active"),
+        "blocked": blocked,
         "role": (i.get("metadata") or {}).get("role", "user"),
+        **auth_mod.limits_view(i),
     }
+    if db.enabled() and i.get("token") and callable(getattr(keys, "run_usage", None)):
+        try:
+            out["usage"] = keys.run_usage(i["token"])
+        except Exception as e:  # noqa: BLE001 - the listing never fails on the usage figures
+            log.warning("key %s: run usage unavailable: %s", i.get("key_alias"), e)
+    return out
 
 
 def _fleet_only() -> None:

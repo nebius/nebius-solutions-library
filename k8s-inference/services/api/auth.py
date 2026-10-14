@@ -49,13 +49,6 @@ class Principal:
 
     def public(self) -> dict:
         i = self.info
-        exhausted = (
-            (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"])
-            or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"])
-            or (
-                i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]
-            )
-        )
         legacy = (i.get("metadata") or {}).get("legacy") or {}
         return {
             "id": i.get("token") or i.get("key_name"),
@@ -67,18 +60,37 @@ class Principal:
             "models": i.get("models", []),
             "created_at": i.get("created_at"),
             "expires_at": i.get("expires"),
-            "status": "exhausted" if exhausted else "active",
+            "status": "exhausted" if exhausted(i) else "active",
             "role": self.role,
-            "scopes": i.get("scopes") or [],
-            "max_concurrent": i.get("max_concurrent"),
-            "budget_requests": i.get("budget_requests"),
-            "spent_requests": i.get("spent_requests") or 0,
-            "budget_gpu_seconds": i.get("budget_gpu_seconds"),
-            "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
-            "rate_limit": i.get("rate_limit"),
-            "principal_id": legacy.get("principal_id"),
+            **limits_view(i),
             "legacy": legacy or None,
         }
+
+
+def exhausted(i: dict) -> bool:
+    """Whether a key record has used up any of its budgets (money, requests, GPU seconds)."""
+    return (
+        (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"])
+        or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"])
+        or (i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"])
+    )
+
+
+def limits_view(i: dict) -> dict:
+    """The safe limit and usage fields of a key record (docs/API.md "Keys"): scopes, concurrency, the request and
+    GPU-second budgets with their spend, the rate limit and the stable principal id. Never the hash, the raw metadata
+    or a secret. Shared by the caller's own view (`GET /v1/keys/me`) and the admin listing (`GET /v1/keys`)."""
+    legacy = (i.get("metadata") or {}).get("legacy") or {}
+    return {
+        "scopes": i.get("scopes") or [],
+        "max_concurrent": i.get("max_concurrent"),
+        "budget_requests": i.get("budget_requests"),
+        "spent_requests": i.get("spent_requests") or 0,
+        "budget_gpu_seconds": i.get("budget_gpu_seconds"),
+        "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
+        "rate_limit": i.get("rate_limit"),
+        "principal_id": legacy.get("principal_id"),
+    }
 
 
 async def key_info(key: str) -> dict:
