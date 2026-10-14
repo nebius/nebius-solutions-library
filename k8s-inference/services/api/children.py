@@ -445,15 +445,14 @@ def _not_inferred(row: dict) -> bool:
 
 
 def _never_inferred(recs: list) -> bool:
-    """From a child's attempt records: no attempt at all (never started, or cancelled before its pod ran), or the
-    last attempt ended before the inference POST (call.sh exit 2 with no capture manifest: refused before/at
-    readiness; a 4xx answer to the POST itself carries a manifest and is a capture). Exit 3 (nothing captured,
-    transfer-only), exit 4 (posted, outcome unknown) and every attempt with a capture (0/2/5: the inference happened,
-    delivered or not) are never "not inferred"."""
-    if not recs:
-        return True
-    last = recs[-1]
-    return not last.get("capture") and last.get("exit_code") == 2
+    """From ALL attempt records of the child's lineage (the child and its transfer-only `-x<n>` retries): no attempt
+    at all (never started, or cancelled before its pod ran), or every attempt ended before the inference POST
+    (call.sh exit 2 with no capture manifest: refused before/at readiness; a 4xx answer to the POST itself carries a
+    manifest and is a capture). One attempt with exit 3 (nothing captured, transfer-only), exit 4 (posted, outcome
+    unknown), no exit on record, or a capture (0/2/5: the inference happened, delivered or not) makes the whole
+    history "maybe inferred": a later exit 2 (an export retry refused at its input refresh) never erases an earlier
+    uncertainty."""
+    return all(not r.get("capture") and r.get("exit_code") == 2 for r in recs)
 
 
 def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:

@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.108
+
+(0.11.108 = 0.11.107 plus the whole-history rule of the unit retry; 0.11.107 was built but never applied. jobs 0.1.27 and
+platform chart 0.1.12 unchanged; no new migration.)
+
+- Endpoint children (unit retry, `can_retry`): the "never inferred" verdict reads EVERY attempt record of the child's
+  lineage (its transfer-only `-x<n>` retries included), not the last one: one exit 3, exit 4, an attempt without an
+  exit on record, or any capture anywhere in the history makes the unit "maybe inferred" (no retry), so a later exit 2
+  (an export retry refused at its input refresh) never erases an earlier unknown outcome. Regressions for the mixed
+  histories.
+
 ## api 0.11.107
 
 (0.11.107 = 0.11.106 plus the unit retry of endpoint children and the settlement lock's database import; jobs 0.1.27 and
