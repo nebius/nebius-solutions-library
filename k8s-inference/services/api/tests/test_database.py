@@ -855,14 +855,16 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     rel = leases.release(op, a1, me, "req-1", "cancelled", None)  # cooperative abort, no measurement: unknown
     assert rel["state"] == "released" and rel["gpu_seconds"] is None and rel["lane_seconds"] is not None
     assert leases.release(op, a1, me, "req-1", "cancelled", None)["state"] == "released"  # dropped response
-    assert leases.settle_decision(op, required=True) == (True, None, "released, usage unknown")
-    # after the worker settled, the caller's retry attempt gets its own row; the first attempt's evidence stays
+    # the caller is not over yet (its retry pod posts again): the worker settled, so the retry attempt gets its own
+    # row; the first attempt's evidence stays
     e2 = leases.prepare(op, a2, "eu-north1", "cosmos")
     assert e2["state"] == "prepared" and e2["attempt"] == a2 and e2["pod_uid"] is None
     assert [x["attempt"] for x in leases.history(op)] == [a1, a2]
     leases.attach(op, a2, me, "req-2")
     assert leases.release(op, a2, me, "req-2", "done", 12.5)["gpu_seconds"] == 12.5
-    assert leases.settle_decision(op, required=False) == (True, None, "released, usage unknown")  # one unknown: unknown
+    # the caller finished: the join sums the evidence; one unknown attempt makes the whole unknown
+    assert leases.settle_decision(op, required=False) == (True, None, "released, usage unknown")
+    assert leases.settle_decision(op, required=True) == (True, None, "released, usage unknown")  # idempotent
     assert keys.release(op, None) is True  # the join settles the member unknown; the slot is free again
     leases.mark_settled(op)
     assert all(x["settled_at"] is not None for x in leases.history(op))
@@ -887,8 +889,30 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     assert leases.get(opc)["state"] == "closed"
     with pytest.raises(HTTPException) as e:
         leases.attach(opc, f"{opc}-a", me, "late")
-    assert e.value.status_code == 409 and "closed" in e.value.detail
+    assert e.value.status_code == 409 and "fenced" in e.value.detail
+    # the gap between the join's decision and the ledger release: the reservation is still live here, yet a prepare
+    # for a different (or a never-seen) attempt and its attach are refused by the durable fence, before and after the
+    # release, and after a restart (the fence is a row)
+    assert keys.reservation_key(opc) == h
+    for attempt in (f"{opc}-b", f"{opc}-zzz"):
+        with pytest.raises(HTTPException) as e:
+            leases.prepare(opc, attempt, "eu-north1", "cosmos")
+        assert e.value.status_code == 409 and "over" in e.value.detail
+        with pytest.raises(HTTPException) as e:
+            leases.attach(opc, attempt, me, "late")
+        assert e.value.status_code == 409
     keys.release(opc, None)
+    with pytest.raises(HTTPException):
+        leases.prepare(opc, f"{opc}-c", "eu-north1", "cosmos")
+    assert leases.settle_decision(opc, required=True) == (True, None, "unattached")  # the join's retry: unchanged
+    # a never-prepared operation whose caller finished: the join fences it; a later first POST cannot open anything
+    opn = "op-native-n"
+    keys.admit(h, opn, "demo", run_member=True)
+    assert leases.settle_decision(opn, required=False) == (True, 0.0, "no native execution")
+    with pytest.raises(HTTPException) as e:
+        leases.prepare(opn, f"{opn}-a", "eu-north1", "cosmos")
+    assert e.value.status_code == 409
+    keys.release(opn, 0.0)
     # cancel before attach: refused
     opk = "op-native-k"
     keys.admit(h, opk, "demo", run_member=True)

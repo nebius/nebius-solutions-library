@@ -21,7 +21,13 @@ import copy
 
 from fastapi import HTTPException
 
-from config import IMAGES_HOST, LABEL
+from config import IMAGES_HOST, LABEL, PUBLIC_API_URL, SESSION_TOKEN_AUDIENCE
+
+# Lease clients (docs/API.md "Native execution leases", "Lease clients"): what an endpoint pod that attaches to its
+# calls' native executions gets from the platform: a projected ServiceAccount token bound to the pod (audience
+# LEASE_AUDIENCE, the one the API's TokenReview expects), the control API's URL, and the files' paths as env.
+LEASE_DIR = "/var/run/secrets/serverless2"
+LEASE_AUDIENCE = SESSION_TOKEN_AUDIENCE or "serverless2"
 
 POOL_LABEL = f"{LABEL}/pool"
 MODELS_NAMESPACE_DEFAULT = "models"
@@ -70,6 +76,7 @@ DEFAULTS: dict = {
     "shm": {"enabled": True, "size": "1Gi"},
     "volumes": [],
     "persistentVolumes": [],
+    "nativeLease": "",  # optional | required: the pod gets the lease client's token and env (docs/API.md)
     "readinessProbe": {},
     "livenessProbe": {},
     "securityContext": {},
@@ -297,6 +304,8 @@ def _volume_mounts(v: dict) -> list[dict]:
         )
     for x in (v.get("volumes") or []) + (v.get("persistentVolumes") or []):
         out.append({"name": x.get("name"), "mountPath": x.get("mountPath")})
+    if v.get("nativeLease"):
+        out.append({"name": "s2-lease", "mountPath": LEASE_DIR, "readOnly": True})
     return out
 
 
@@ -317,7 +326,49 @@ def _volumes(v: dict) -> list[dict]:
         out.append({"name": x.get("name"), "emptyDir": empty})
     for x in v.get("persistentVolumes") or []:
         out.append({"name": x.get("name"), "persistentVolumeClaim": {"claimName": f"{v['name']}-{x.get('name')}"}})
+    if v.get("nativeLease"):
+        # the lease client's identity: a token bound to this pod (TokenReview reports the pod's name and UID), audience
+        # LEASE_AUDIENCE, renewed by the kubelet; readable by the container as a file, never in the environment
+        out.append(
+            {
+                "name": "s2-lease",
+                "projected": {
+                    "sources": [
+                        {
+                            "serviceAccountToken": {
+                                "path": "token",
+                                "audience": LEASE_AUDIENCE,
+                                "expirationSeconds": 3600,
+                            }
+                        }
+                    ]
+                },
+            }
+        )
     return out
+
+
+def _lease_env(v: dict) -> list[dict]:
+    """The lease client's environment (docs/API.md "Lease clients"): the control API, the token file, the mode."""
+    if not v.get("nativeLease"):
+        return []
+    out = [
+        {"name": "S2_API_URL", "value": PUBLIC_API_URL},
+        {"name": "S2_LEASE_TOKEN_FILE", "value": f"{LEASE_DIR}/token"},
+        {"name": "S2_LEASE_MODE", "value": str(v["nativeLease"])},
+        {"name": "S2_LEASE_AUDIENCE", "value": LEASE_AUDIENCE},
+    ]
+    if pem := trust_bundle():
+        # the fleet's CA bundle (public material only) when the control hostnames are not publicly signed: the same
+        # bundle the async caller gets (jobs.trust_bundle), as a value, no extra object in the apply shape
+        out.append({"name": "S2_CA_PEM", "value": pem})
+    return out
+
+
+def trust_bundle() -> str | None:
+    from jobs import trust_bundle as _bundle  # the async caller's projection (import here: jobs imports this module)
+
+    return _bundle()
 
 
 def _weights_prepare(v: dict) -> list[dict]:
@@ -413,9 +464,9 @@ def _inferenceservice(v: dict) -> dict:
         c["args"] = list(v["args"])
     if v.get("workingDir"):
         c["workingDir"] = v["workingDir"]
-    wenv = _weights_env(v)
-    if v.get("env") or wenv:
-        c["env"] = list(v.get("env") or []) + wenv
+    wenv, lenv = _weights_env(v), _lease_env(v)
+    if v.get("env") or wenv or lenv:
+        c["env"] = list(v.get("env") or []) + wenv + lenv
     if v.get("envFrom"):
         c["envFrom"] = list(v["envFrom"])
     c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]
@@ -479,7 +530,7 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
     # the model's own entries win over the platform defaults (one entry per name: server-side apply refuses duplicates)
     own = list(v.get("env") or []) + _weights_env(v)
     taken = {e.get("name") for e in own}
-    c["env"] = [e for e in env if e.get("name") not in taken] + own
+    c["env"] = [e for e in env if e.get("name") not in taken] + own + _lease_env(v)
     if v.get("envFrom"):
         c["envFrom"] = list(v["envFrom"])
     c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]

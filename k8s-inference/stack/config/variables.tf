@@ -204,7 +204,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.61")
+        api        = optional(string, "0.11.62")
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.20")
         ops        = optional(string, "0.1.12")
@@ -270,9 +270,9 @@ variable "fleet" {
     # Off by default; the workers of a model must implement the attach/release protocol before it is switched on.
     sessions = optional(object({
       enabled        = optional(bool, false)
-      claim_ttl_s    = optional(number, 120) # the connection must present its claim within this
-      attach_wait_s  = optional(number, 60)  # a bound session no worker attached within this ends with usage unknown
-      token_audience = optional(string, "")  # TokenReview audience of the workers' tokens ("" = the cluster's API server)
+      claim_ttl_s    = optional(number, 120)           # the connection must present its claim within this
+      attach_wait_s  = optional(number, 60)            # a bound session no worker attached within this ends with usage unknown
+      token_audience = optional(string, "serverless2") # TokenReview audience of the workers' projected tokens (the lease clients' projection uses it)
     }), {})
 
     observability = optional(object({

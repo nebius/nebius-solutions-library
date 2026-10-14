@@ -280,6 +280,15 @@ create table if not exists operation_marks (
     );
     create index if not exists native_executions_attached on native_executions (state) where state = 'attached';
     """,
+    # 17: the durable terminal fence of an operation's native executions: written by the join in the transaction that
+    # decides the settlement, before the ledger releases; prepare and attach refuse everything after it
+    """
+    create table if not exists native_fences (
+        operation text primary key,
+        closed_at timestamptz not null default now(),
+        reason    text
+    );
+    """,
 ]
 
 _pool = None

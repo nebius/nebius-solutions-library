@@ -176,7 +176,9 @@ SESSION_CLAIM_TTL_S = int(os.environ.get("SESSION_CLAIM_TTL_S", "120"))  # the u
 SESSION_ATTACH_WAIT_S = int(
     os.environ.get("SESSION_ATTACH_WAIT_S", "60")
 )  # a bound session unattached this long ends unknown
-SESSION_TOKEN_AUDIENCE = os.environ.get("SESSION_TOKEN_AUDIENCE", "")  # "" = the cluster's API server audience
+SESSION_TOKEN_AUDIENCE = os.environ.get(
+    "SESSION_TOKEN_AUDIENCE", "serverless2"
+)  # the lease/session workers' token audience
 
 # Endpoint calls (docs/API.md "Endpoint calls"): the admission token a caller presents at the gateway is bound to its
 # key, model, operation and attempt. ADMITTED_LEGACY accepts the key-only and key+model tokens of releases up to 0.11.53

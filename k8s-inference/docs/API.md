@@ -336,6 +336,37 @@ execution settles unknown and the handle says so; the worker refuses requests it
 `native` (`state`, `attempt`, `worker_request_id`, timings, `outcome`, `lane_seconds`, `gpu_seconds`,
 `cancel_requested`, `settled`).
 
+Once the join decided (the caller is over, every execution ended), the operation is **fenced** durably (ledger
+`native_fences`, written in the join's transaction, kept across the ledger release): a later prepare or attach for any
+attempt of that operation, seen before or never seen, is 409. Nothing can start native work on a settled operation.
+
+### Lease clients
+
+A model opts in with `native_lease: optional | required`; the render then gives every pod of the endpoint exactly this,
+and nothing else changes in the apply shape (same four objects):
+
+| What | Where | Value |
+|---|---|---|
+| identity | projected volume `s2-lease`, file `/var/run/secrets/serverless2/token`, read-only | a ServiceAccount token bound to the pod (TokenReview reports the pod's name and UID; an exfiltrated token dies with the pod), audience `serverless2` (`sessions.token_audience`, the same value the API verifies), 1 h lifetime, renewed by the kubelet |
+| `S2_API_URL` | container env | the control API's public URL (`PUBLIC_API_URL`): the lease routes are on the control API, reached through its gateway like any client; a GPU region's pod leaves the cluster for it (egress: `models` pods carry no egress policy; the hostname is public) |
+| `S2_LEASE_TOKEN_FILE` | container env | the token file above |
+| `S2_LEASE_MODE` | container env | `optional` or `required` |
+| `S2_LEASE_AUDIENCE` | container env | the token's audience, for a client that mints nothing and checks what it was given |
+| `S2_CA_PEM` | container env, only on a fleet with a CA bundle (`/etc/ssl/msp` on the API) | public CA material (the same bundle the async caller mounts): the control hostnames are ACME-signed in public mode, so the system roots suffice and this is absent; in internal mode the client adds it to its trust |
+
+The request's markers arrive as headers on the inference call (`x-serverless2-operation`, `x-serverless2-attempt`),
+forwarded by the gateway from the hook's verified context only (empty on a direct call; what a client sent is
+overridden).
+
+`services/lease-client/s2lease.py` is the shared client (standard library only; copy or vendor it; one implementation
+rather than one per model): `Lease.from_env()` (None without the projection), `lease.attach(headers,
+worker_request_id)` **before any GPU enqueue** (None for an unleased request in optional mode; `LeaseRefused` in
+required mode or on any refusal: fail closed, do not run the request; `LeaseUnavailable` after the transport retries),
+`exe.cancel_requested()` between steps, `exe.release(outcome, gpu_seconds)` after the worker's own settlement
+(`gpu_seconds` only as measured, `None` = unknown). Transport errors are retried with the same tuple (idempotent on
+the API), a 4xx/409 answer is final for the request. The worker keys its own state on `exe.owner`
+(`{tenant, owner, model}`), never on a client header.
+
 ## Bindings and execution options (runs, and endpoint calls with private I/O)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the

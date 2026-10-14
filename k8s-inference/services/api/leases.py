@@ -74,6 +74,12 @@ def _lock(c, operation: str) -> None:
     c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 3))", (operation,))
 
 
+def _fenced(c, operation: str) -> bool:
+    """The operation's native executions are over for good (the join decided; durable across the ledger release and
+    any restart): no prepare, no attach after it."""
+    return c.execute("select 1 from native_fences where operation = %s", (operation,)).fetchone() is not None
+
+
 def public(e: dict | None, history: list[dict] | None = None) -> dict | None:
     """The handle's `native` block: the current execution and every earlier attempt's evidence; no pod names."""
     if e is None:
@@ -126,6 +132,10 @@ def prepare(operation: str, attempt: str, region: str, model: str) -> dict:
     terminal row the new attempt gets its own row (the earlier evidence is kept)."""
     with db.pool().connection() as c, c.transaction():
         _lock(c, operation)
+        if _fenced(c, operation):
+            raise HTTPException(
+                409, f"operation {operation}: its native executions are over (the caller finished and the join decided)"
+            )
         live = c.execute(
             "select attempt, state from native_executions where operation = %s and state in ('prepared', 'attached')",
             (operation,),
@@ -156,6 +166,8 @@ def attach(operation: str, attempt: str, worker: dict, worker_request_id: str | 
     worker fails closed. Idempotent for the same (attempt, pod UID, request id)."""
     with db.pool().connection() as c, c.transaction():
         _lock(c, operation)
+        if _fenced(c, operation):
+            raise HTTPException(409, f"operation {operation}: its native executions are over; attach refused (fenced)")
         cur = c.execute(
             "select state, pod_uid, worker_request_id, cancel_requested_at from native_executions "
             "where operation = %s and attempt = %s for update",
@@ -266,6 +278,12 @@ def settle_decision(operation: str, required: bool) -> tuple[bool, float | None,
             return False, None, "native execution attached: the worker has not settled"
         c.execute(
             "update native_executions set state = 'closed', released_at = now() where operation = %s and state = 'prepared'",
+            (operation,),
+        )
+        # the durable fence, in this transaction: from here no prepare (a new or different attempt's POST) and no
+        # attach can open native work for the operation, whatever the ledger does next and whenever the process dies
+        c.execute(
+            "insert into native_fences (operation, reason) values (%s, 'caller finished; settlement decided') on conflict (operation) do nothing",
             (operation,),
         )
         ended = [r for r in rows if r["state"] in ("released", "lost")]

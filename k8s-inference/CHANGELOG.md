@@ -4,6 +4,21 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.62
+
+- Durable terminal fence for native executions (docs/API.md "Native execution leases"): the join writes
+  `native_fences` in the transaction that decides the settlement, and the fence outlives the ledger release; prepare and
+  attach for any attempt of a fenced operation (seen before or never) are 409. Closes the gap in which a prepare of an
+  absent or new attempt could slip in between the join closing the prepared rows and the reservation release. Ledger
+  migration 17.
+- Lease clients (docs/API.md "Lease clients"): a model with `native_lease` gets a projected pod-bound ServiceAccount
+  token (audience `serverless2`, 1 h, kubelet-renewed) at `/var/run/secrets/serverless2/token` and the environment
+  `S2_API_URL`, `S2_LEASE_TOKEN_FILE`, `S2_LEASE_MODE`, `S2_LEASE_AUDIENCE` (and `S2_CA_PEM` on a fleet whose control
+  hostnames are not publicly signed), on both the Knative and the multi-node shapes; the apply shape is unchanged.
+  `sessions.token_audience` defaults to `serverless2` (the audience the projection uses).
+  `services/lease-client/s2lease.py`: the shared standard-library worker client (attach before GPU enqueue, fail
+  closed, same-tuple retries on transport errors only, cancel poll, release after settlement, owner context).
+
 ## api 0.11.61, platform chart 0.1.6
 
 - Native execution leases (docs/API.md "Native execution leases"): an endpoint call's reservation outlives its CPU
