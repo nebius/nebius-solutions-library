@@ -4,6 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.87, platform chart 0.1.10
+
+- Endpoint children (docs/JOBS.md "Endpoint children"; migration 21): an operator-allowlisted, bounded primitive by
+  which a LIVE attempt of a run asks the platform for an asynchronous endpoint call as a child of its root. A run
+  class declares `child_endpoints` (endpoint models) and `child_max_units` (explicit bound, required); the render
+  projects a pod-bound ServiceAccount token and the control API's URL into `main` (no customer bearer in the worker).
+  `POST /internal/operations/<run>/children` / `GET …/children/<unit>`: TokenReview of the parent's pod (namespace,
+  name, exact UID), live-attempt and open-root fences, allowlist, deterministic child id per (root, unit), immutable
+  request hash (same request → readback; different → 409), one active child per root, the parent's remaining
+  deadline inherited, the root's owner/namespace/key inherited by hash: the child's caller carries only an
+  operation-scoped credential (`Bearer s2-admitted.<token>`, the admission HMAC), which the gateway hook accepts by
+  rebuilding the principal from the key record by hash while the child's reservation lives (generic authorize
+  support; no customer or admin key stored or forwarded). Ledger: the root's slot shared, one request per child
+  (`keys.prepare_run_member` kind `child`), the key's endpoint-call policy unchanged (a finite GPU-second budget gets
+  the same 501 as any endpoint call), settled as every endpoint call; the root closes only when nothing is active. Cancel cascade on the cancel route and in the reconciler's sweep; ended children recorded.
+  Platform chart 0.1.10 routes `/internal/operations` on the control API (the invariant in tools/check.sh covers it).
+  Nothing of the static stage delegation, the endpoint-stage refusal or the graph bound changed.
+
 ## api 0.11.86, jobs 0.1.25
 
 (0.11.86 / 0.1.25 supersede the unreleased 0.11.85 / 0.1.24 candidate after review; everything of it is included.)

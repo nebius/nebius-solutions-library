@@ -998,6 +998,29 @@ def prepare_run_member(
                 raise KeyLimit(
                     409, f"only the current head of stage {stage!r} may be continued ({head}, not {predecessor})"
                 )
+        elif kind == "child":
+            # an endpoint child of an active run (docs/JOBS.md "Endpoint children"): attaches to an OPEN root only (the
+            # root's reservation still exists: nothing settled it), never to a head; counts one request against the
+            # key's request budget and rate window (one inference each), reserves its GPU bound on the root's row
+            if c.execute("select 1 from key_reservations where operation = %s", (root,)).fetchone() is None:
+                raise KeyLimit(409, f"run {root} is closed (its reservation is settled); no child attaches to it")
+            _b_req, s_req, rate = k[1], k[3], _rate_of(c, h)
+            r_req = c.execute(
+                "select coalesce(sum(requests), 0) from key_reservations where key_hash = %s", (h,)
+            ).fetchone()[0]
+            if _b_req is not None and float(s_req) + float(r_req) + 1 > float(_b_req):
+                raise KeyLimit(402, "key request budget exhausted for the child")
+            if rate:
+                n = c.execute(
+                    "select count(*) from key_calls where key_hash = %s and at > now() - make_interval(secs => %s)",
+                    (h, rate["window_s"]),
+                ).fetchone()[0]
+                if n >= rate["requests"]:
+                    raise KeyLimit(
+                        429, f"key rate limit reached ({rate['requests']} requests per {rate['window_s']} s)"
+                    )
+                c.execute("insert into key_calls (key_hash) values (%s)", (h,))
+            c.execute("update key_reservations set requests = requests + 1 where operation = %s", (root,))
         else:
             head = _lineage_head(c, root, "continuation", None)
             if predecessor != head:
@@ -1028,6 +1051,11 @@ def prepare_run_member(
             (operation, root, predecessor, h, tenant, bound, kind, stage),
         )
         return {"operation": operation, "replay": False, "gpu_bound": bound, "key_hash": h}
+
+
+def _rate_of(c, h: str) -> dict | None:
+    r = c.execute("select rate_limit from keys where hash = %s", (h,)).fetchone()
+    return (r[0] if r and isinstance(r[0], dict) else None) or None
 
 
 def _close_run_if_idle(c, root: str) -> bool:

@@ -713,6 +713,28 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                 "cpu": str(fz.get("cpu", "1")),
                 "memory": str(fz.get("memory", "2Gi")),
             }
+        if s.get("child_endpoints") is not None:
+            # endpoint children (docs/JOBS.md "Endpoint children"): the operator's allowlist of endpoint models a live
+            # attempt may ask for, with an explicit bound per root (never a silent default: the retained declared
+            # range of a dataset-driven workload is the operator's statement, not the platform's guess)
+            ce = s["child_endpoints"]
+            if (
+                not isinstance(ce, list)
+                or not ce
+                or not all(isinstance(x, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,62}", x) for x in ce)
+            ):
+                raise HTTPException(400, "child_endpoints: a non-empty list of endpoint model ids")
+            if s.get("child_max_units") is None:
+                raise HTTPException(
+                    400, "child_endpoints needs child_max_units (the explicit bound of children per root, 1..65536)"
+                )
+            n = int(s["child_max_units"])
+            if not 1 <= n <= 65536:
+                raise HTTPException(400, "child_max_units: 1..65536")
+            job["childEndpoints"] = sorted(set(ce))
+            job["childMaxUnits"] = n
+        elif s.get("child_max_units") is not None:
+            raise HTTPException(400, "child_max_units applies with child_endpoints")
         if s.get("pull_secret"):
             job["imagePullSecret"] = s["pull_secret"]
         if d := s.get("data"):

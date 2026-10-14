@@ -45,6 +45,7 @@ from config import (
     LITELLM_URL,
     MULTIKUEUE_MANAGED_BY,
     MULTINODE_MAX_NODES,
+    PUBLIC_API_URL,
     REGION,
     RUNNER_IMAGE,
     S3_ENV_SECRET,
@@ -662,6 +663,10 @@ def build_run(
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
+    if r.get("childEndpoints"):  # endpoint children (docs/JOBS.md): the attempt's own identity, no credential
+        _project_parent_identity(pod, name, r)
+        meta["annotations"][f"{LABEL}/child-endpoints"] = ",".join(r["childEndpoints"])
+        meta["annotations"][f"{LABEL}/child-max-units"] = str(int(r.get("childMaxUnits") or 0))
     job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
     if (fz := r.get("finalize")) and fz.get("onExitCodes"):
         # "compute done, delivery pending" ends the Job at once: the GPU computation is never restarted by the Job's
@@ -1179,6 +1184,31 @@ def _mount_scratch_leaf(pod: dict, leaf: str, pools: list[str]) -> None:
     # quota lets Kueue take the next flavor whose nodes carry the label, a GPU pool; with the pool list the caller
     # waits for its CPU pool (QUEUED), never a GPU node
     _and_required(pod, {"key": f"{LABEL}/pool", "operator": "In", "values": sorted(pools)})
+
+
+PARENT_TOKEN_DIR = "/var/run/secrets/serverless2"
+
+
+def _project_parent_identity(pod: dict, name: str, r: dict) -> None:
+    """Endpoint children (docs/JOBS.md "Endpoint children"): main gets its own pod-bound ServiceAccount token (a
+    projected volume, 1 h, renewed by the kubelet; TokenReview reports the pod's name and UID) and the control API's
+    URL, so a live attempt can ask for a bounded child by proving exactly who it is; no bearer, no key, no
+    credential of the customer anywhere in the pod. The uploader's runner token stays its own."""
+    main = next(c for c in pod["containers"] if c["name"] == "main")
+    pod.setdefault("volumes", []).append(
+        {
+            "name": "s2-parent",
+            "projected": {"sources": [{"serviceAccountToken": {"path": "token", "expirationSeconds": 3600}}]},
+        }
+    )
+    main.setdefault("volumeMounts", []).append({"name": "s2-parent", "mountPath": PARENT_TOKEN_DIR, "readOnly": True})
+    main["env"] = list(main.get("env") or []) + [
+        {"name": "S2_API_URL", "value": PUBLIC_API_URL},
+        {"name": "S2_OPERATION", "value": name},
+        {"name": "S2_PARENT_TOKEN_FILE", "value": f"{PARENT_TOKEN_DIR}/token"},
+        {"name": "S2_CHILD_ENDPOINTS", "value": ",".join(r["childEndpoints"])},
+        {"name": "S2_CHILD_MAX_UNITS", "value": str(int(r.get("childMaxUnits") or 0))},
+    ]
 
 
 def _and_required(pod: dict, expr: dict) -> None:

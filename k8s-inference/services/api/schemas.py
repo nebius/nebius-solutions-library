@@ -432,6 +432,10 @@ class ModelSpec(BaseModel):
     )
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
+    # endpoint children (docs/JOBS.md "Endpoint children"): the endpoint models a live attempt of this run class may
+    # ask the platform to call as bounded async children, and the explicit bound on their number per root
+    child_endpoints: SkipValidation[list[str] | None] = None
+    child_max_units: SkipValidation[int | None] = None
 
 
 class Error(BaseModel):

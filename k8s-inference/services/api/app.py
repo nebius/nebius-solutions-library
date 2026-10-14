@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.86", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.87", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -306,6 +306,40 @@ def _admitted_token(key_hash: str, model: str | None = None, operation: str | No
     return hmac.new((cfg.ROUTER_KEY or "").encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
+ADMITTED_BEARER_PREFIX = "s2-admitted."
+
+
+def _reservation_key_of(operation: str) -> str | None:
+    """The key (hash) an operation is admitted on: its own reservation, or, for a member of a run (a continuation, a
+    stage, an endpoint child), its root's; None when nothing live holds it (released, settled, cancelled)."""
+    h = keys.reservation_key(operation)
+    if h:
+        return h
+    member = keys.member_of(operation)
+    if not member or member.get("state") not in (None, "active"):
+        return None
+    return keys.reservation_key(member["root"]) if member.get("root") else None
+
+
+def _admitted_principal(token: str, operation: str, model: str) -> Principal:
+    """The principal of an admitted-only call: the operation's reservation names the key (by hash); the token must be
+    that key's admission for this model and operation; the key record (fleet database) gives scopes, models, budgets
+    and the tenant. 401 for anything else. The attenuation is structural: the credential is useless for any other
+    operation or model, and dies with the reservation (cancel, settlement)."""
+    if not cfg.ROUTER_KEY or not db.enabled() or not operation or not token:
+        raise HTTPException(401, "admitted credential not accepted")
+    h = _reservation_key_of(operation)
+    if not h or not hmac.compare_digest(token, _admitted_token(h, model, operation)):
+        raise HTTPException(401, "admitted credential not accepted (no live reservation for it)")
+    info = keys.info(h)
+    if not info:
+        raise HTTPException(401, "the admitted operation's key no longer exists")
+    tenant = (info.get("metadata") or {}).get("tenant") or ""
+    if not tenant:
+        raise HTTPException(401, "the admitted operation's key carries no tenant")
+    return Principal(key=f"{ADMITTED_BEARER_PREFIX}{token}", tenant=tenant, info=info, key_hash=h)
+
+
 def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: str) -> bool:
     """An exact, bounded proof that the gateway call is the API's own admitted call (docs/API.md "Endpoint calls"): the
     token is the HMAC for this key, this model and the operation named; the operation holds a live reservation on
@@ -316,12 +350,12 @@ def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: 
     key+model tokens of releases up to 0.11.53 for the callers they rendered."""
     if not cfg.ROUTER_KEY or not token:
         return False
-    key_hash = keys.key_hash(p.key)
+    key_hash = p.hash
     if operation and hmac.compare_digest(token, _admitted_token(key_hash, model, operation)):
         # the live state, on every call (never cached): the reservation and the cancel fence
         if db.enabled():
             try:
-                if keys.reservation_key(operation) != key_hash:
+                if _reservation_key_of(operation) != key_hash:
                     return False  # not admitted on this key, or released already (terminal, cancelled, billed)
                 if not operation.startswith("sync-") and attempts.enabled():
                     marks = attempts._marks(operation)
@@ -700,7 +734,18 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
             if not token and (protocol.startswith("bearer.") or protocol.startswith("sk-")):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
-    p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
+    if key.startswith(f"Bearer {ADMITTED_BEARER_PREFIX}"):
+        # an operation-scoped credential (docs/JOBS.md "Endpoint children"): the admitted token itself, bound to the
+        # key's hash, the model and the operation, valid only while that operation holds a live reservation; the
+        # principal is rebuilt server-side from the key record by hash. No customer key travels, none is stored.
+        p = await asyncio.to_thread(
+            _admitted_principal,
+            key[len(f"Bearer {ADMITTED_BEARER_PREFIX}") :],
+            request.headers.get(OPERATION_HEADER, ""),
+            model,
+        )
+    else:
+        p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
     verified = await asyncio.to_thread(
         _authorize_model,
@@ -1765,6 +1810,40 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
     return _continued(p, job, created, region)
 
 
+@app.post("/internal/operations/{parent}/children", include_in_schema=False)
+async def create_child(parent: str, body: dict, authorization: str = Header(default="")):
+    """Endpoint children (docs/JOBS.md "Endpoint children"): a live attempt of `parent` (its own projected pod token)
+    asks for one bounded async endpoint child of its root. 201 created, 200 read back (same unit, same request)."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(404, "endpoint children need the fleet database")
+    token = authorization.split(" ", 1)[1].strip() if authorization.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(401, "the parent attempt's token is required")
+    identity = await asyncio.to_thread(children.verify_parent_token, token)
+    out, created = await asyncio.to_thread(children.create, identity, parent, body or {})
+    return JSONResponse(out, status_code=201 if created else 200)
+
+
+@app.get("/internal/operations/{parent}/children/{unit_id}", include_in_schema=False)
+async def read_child(parent: str, unit_id: str, authorization: str = Header(default="")):
+    """Authoritative readback of a unit's child by any live attempt of the root (a successor included)."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(404, "endpoint children need the fleet database")
+    token = authorization.split(" ", 1)[1].strip() if authorization.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(401, "the parent attempt's token is required")
+    identity = await asyncio.to_thread(children.verify_parent_token, token)
+    _job, _region, root, _m = await asyncio.to_thread(children._live_parent, identity, parent)
+    out = await asyncio.to_thread(children.readback, identity["namespace"], root, unit_id)
+    if out is None:
+        raise HTTPException(404, f"unit {unit_id} of {root} has no child")
+    return out
+
+
 @app.post("/internal/attempts", include_in_schema=False)
 async def record_attempt(request: Request, authorization: str = Header(default="")):
     """The uploader of a run pod reports its attempt (services/jobs/bin/upload.sh) with the pod's projected
@@ -2006,6 +2085,14 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
         current = job["metadata"]["name"]
     attempts.mark_cancelled(current)  # a late "succeeded" from the cancelled attempt is refused from now on
     cancelled = jobs.cancel(p.namespace, current, _home(job))
+    try:  # endpoint children of the root go with it (docs/JOBS.md "Endpoint children"); the sweep repeats it durably
+        import children
+
+        children.cancel_for_root(
+            p.namespace, (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+        )
+    except Exception as e:  # noqa: BLE001 - the sweep cancels what this missed
+        log.warning("child cascade of %s: %s", id, e)
     settle_deleted(cancelled)
     op = jobs.normalise(cancelled)
     if op["status"] in ("QUEUED", "RUNNING"):

@@ -673,6 +673,49 @@ is delivered again by `:export` like an EXPORT_FAILED one; an unknown outcome ha
 token or credential of the binding reaches them. The call's reservation on the key (slot and request, docs/API.md
 "Keys") is released by the billing pass when the Job ends; a continuation joins it as a member.
 
+## Endpoint children
+
+A run class may let its live attempts ask the platform for bounded asynchronous endpoint calls as **children** of
+their root, without any customer credential in the worker and without an application scheduler:
+
+```yaml
+child_endpoints: [cosmos3-nano-s2-r1]   # operator allowlist: endpoint models only
+child_max_units: 16384                  # explicit bound of children per root (1..65536); required with child_endpoints
+```
+
+The render then gives `main` its own pod-bound ServiceAccount token (`S2_PARENT_TOKEN_FILE`, projected, 1 h, renewed)
+and the control API's URL (`S2_API_URL`, `S2_OPERATION`, `S2_CHILD_ENDPOINTS`, `S2_CHILD_MAX_UNITS`). The attempt
+calls, with that token as its bearer:
+
+| Call | Answer |
+|---|---|
+| `POST /internal/operations/<run>/children` `{unit_id, model, input, timeout_s?, region?}` | 201 the child; 200 the existing child of that unit when the request is the same (a replay, a readback after a lost response, a successor attempt of the same root); 409 when the unit already has a child with a different request |
+| `GET /internal/operations/<run>/children/<unit_id>` | the child: `child` (its operation id), `status`, `output_prefix` (the child's captured response under the tenant bucket, readable with the run's own S3 credentials), `request_sha256`, `state` (`active`/`ended`), timestamps |
+
+Fail-closed rules, in order: the token must be a bound pod token of a tenant namespace (TokenReview on the parent's
+cluster: namespace, pod name, exact pod UID); the pod must be a live attempt of the named run (among its pods by UID,
+Running/Pending; the run not finished, cancelled or superseded; its root's reservation open); the model must be in
+the class's `child_endpoints` and an endpoint; the unit's request hash must match an existing child or no child may
+exist for the unit; at most `child_max_units` children per root; **one active child per root** (409 naming the
+active one until it ended); the parent's remaining deadline must leave at least 60 s, and the child's timeout is
+capped by it. Identity is deterministic: `<root>-c-<sha256(unit_id)[:10]>`; children of a root are keyed by the root,
+so an allowed successor attempt reads its predecessor's child back before any new submit; no replay ever creates a
+second execution for a unit.
+
+Accounting, on the root's ledger (`keys.prepare_run_member` kind `child`): the root's concurrency slot is shared (no
+second slot); each child counts **one request** against the key's request budget and rate window; the key's
+endpoint-call policy applies unchanged (a key with a finite GPU-second budget gets the same 501 as any endpoint call:
+shared endpoint GPU time is not metered per call, so a child reserves no GPU bound); the child settles as a run member
+(its key release joined with the worker's native execution, as every endpoint call's); the root closes only when
+nothing is active, children included. The child's caller is the platform's caller pod (as every endpoint call's), carrying ONLY
+an operation-scoped credential: `Bearer s2-admitted.<token>`, the admission token (HMAC of the root's key hash, the
+child model and the child operation), which the gateway hook accepts by rebuilding the principal from the key record
+by hash and only while the child holds a live reservation (it dies with cancel and settlement, and is useless for any
+other operation or model). No customer or admin key is stored or forwarded, and the parent worker never sees a bearer;
+the call goes through the model's gateway (never LiteLLM's pass-through). Cancelling the root cancels its
+active children (the cancel route at once, the reconciler's sweep every 15 s, durably); a child that ended is
+recorded `ended`. A run class without `child_endpoints` renders exactly as before.
+
 ## Status mapping
 
 `EXPORT_FAILED`: the run itself succeeded, its delivery did not (see "Attempts and finalization"); resumable and

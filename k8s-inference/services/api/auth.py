@@ -22,6 +22,11 @@ class Principal:
     key: str
     tenant: str
     info: dict
+    key_hash: str | None = None  # an operation-scoped principal (an admitted child's caller): the key's hash, no key
+
+    @property
+    def hash(self) -> str:
+        return self.key_hash or keys.key_hash(self.key)
 
     @property
     def namespace(self) -> str:

@@ -288,12 +288,12 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
             m = (r.get("matches") or [{}])[0].get("path") or {}
             return m.get("value") if m.get("type") == "PathPrefix" else None
         routed = {prefix_of(r) for r in rules if r.get("backendRefs")}
-        for want in ("/internal/attempts", "/internal/authorize", "/internal/executions", "/internal/sessions"):
+        for want in ("/internal/attempts", "/internal/authorize", "/internal/executions", "/internal/sessions", "/internal/operations"):
             assert want in routed, f"{cid}: HTTPRoute api does not route {want} to the API (worker pod-token route)"
         catch = [r for r in rules if prefix_of(r) == "/internal"]
         assert catch and not catch[0].get("backendRefs") and any(f.get("extensionRef", {}).get("name") == "api-not-found" for f in catch[0].get("filters", [])), f"{cid}: HTTPRoute api: /internal catch-all must be the api-not-found direct response"
         assert all(p is None or p.startswith("/internal/") or p == "/internal" for p in map(prefix_of, rules)), f"{cid}: HTTPRoute api routes an unexpected prefix"
-        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect, worker routes /internal/{{attempts,authorize,executions,sessions}} + /internal 404")
+        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect, worker routes /internal/{{attempts,authorize,executions,sessions,operations}} + /internal 404")
     # the gateways' access logs carry no query string (signed URLs, api_key parameters) and no credential header
     proxies = [o for o in objs if o["kind"] == "EnvoyProxy"]
     assert proxies, f"{cid}: no EnvoyProxy rendered"

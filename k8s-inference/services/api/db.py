@@ -318,6 +318,26 @@ create table if not exists operation_marks (
     alter table sessions add column if not exists ready_seen_at timestamptz;
     alter table sessions add column if not exists attach_deadline_at timestamptz;
     """,
+    # 21: endpoint children of a run (docs/JOBS.md "Endpoint children"): one row per (root, unit): the deterministic child
+    # operation, the parent attempt that admitted it, the immutable request hash, and whether it is still active; one
+    # active child per root (partial unique index), read back by unit by any live attempt of the root
+    """
+    create table if not exists endpoint_children (
+        root             text not null,
+        unit_id          text not null,
+        child            text not null unique,
+        parent           text not null,
+        parent_pod       text not null,
+        parent_pod_uid   text not null,
+        model            text not null,
+        request_sha256   text not null,
+        state            text not null default 'active',
+        created_at       timestamptz not null default now(),
+        ended_at         timestamptz,
+        primary key (root, unit_id)
+    );
+    create unique index if not exists endpoint_children_one_active on endpoint_children (root) where state = 'active';
+    """,
 ]
 
 _pool = None

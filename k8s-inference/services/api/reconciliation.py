@@ -529,6 +529,7 @@ async def _reconcile_loop():
             await asyncio.to_thread(release_stale_reservations)
             await asyncio.to_thread(gate_stages)
             await asyncio.to_thread(sweep_sessions)
+            await asyncio.to_thread(sweep_children)
             await asyncio.to_thread(sweep_executions)
             await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
@@ -544,6 +545,14 @@ def gate_stages() -> list[str]:
     import stages
 
     return stages.gate()
+
+
+def sweep_children() -> list[str]:
+    """Endpoint children (docs/JOBS.md "Endpoint children"): ended children recorded, the cancel cascade of a cancelled
+    or finished root repeated durably (children.sweep). Nothing without the database."""
+    import children
+
+    return children.sweep()
 
 
 def sweep_sessions() -> list[str]:
