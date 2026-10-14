@@ -641,7 +641,7 @@ def test_stage_graph_members_bypass_the_head_rule_and_hold_the_run_open(database
     assert e.value.status == 409 and "already has an operation" in e.value.detail
     # lineages: a stage's continuation follows that stage's head (never the root's, never a sibling's) and is admitted
     # on the root's key even after the graph closed (the slot is re-acquired, as for any continuation of a closed run)
-    assert keys.member_of("root-s-a") == {
+    assert {k: v for k, v in keys.member_of("root-s-a").items() if k not in ("retire_marked_at", "created_at")} == {
         "root": "root",
         "kind": "stage",
         "stage": "a",

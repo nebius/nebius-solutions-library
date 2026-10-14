@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.90", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.93", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -202,8 +202,8 @@ def _require_current(p: Principal, source: str, root: str) -> None:
     except HTTPException as e:
         if e.status_code != 404:
             raise
-        if _phantom_head(p.namespace, member["root"] if member["kind"] in ("stage", "child") else root, head):
-            return  # the head never existed: continue_run reads the real head
+        if _pending_admission(p.namespace, member["root"] if member["kind"] in ("stage", "child") else root, head):
+            return  # a pending admission: continue_run admits only the same intent (the operation named by the head)
     raise HTTPException(
         409,
         f"operation {source} was continued by {head}; continue {head} (the current member of its lineage), not {source}",
@@ -212,14 +212,15 @@ def _require_current(p: Principal, source: str, root: str) -> None:
 
 def continue_run(root: str, build, transfer_only: bool = False, ns: str | None = None):
     """Run a continuation builder (jobs.resume/export_again/switch_class/recover, given as a callable taking the
-    admission callback) under the run's ledger: the new member follows the current head; a builder that fails after
-    admission is reconciled against the cluster before anything is rolled back (`_reconcile_continuation`: a create
-    whose answer was lost keeps its member and is returned as created; only a confirmed absence after a definite
-    refusal rolls the member back). A head whose Job was never created (a member left by an earlier lost create) is
-    retired first (`_phantom_head`). Without a ledger for the root (no database, a run admitted before the ledger
-    existed) the builder runs unadmitted, as for an unbounded key. `ns` (the tenant namespace) enables both
-    reconciliations; without it the old behaviour holds for definite refusals and an ambiguous failure keeps the
-    member (never a blind rollback of a member whose Job may exist)."""
+    admission callback) under the run's ledger: the new member follows the current head. Nothing is ever retired
+    automatically: a head that was admitted but whose Job exists nowhere and that no attempt reported (an API process
+    that died between its admission and its create, a create whose answer was lost, or a replica paused between the
+    two: indistinguishable from outside) stays PENDING, and the lineage continues only by the same intent — the
+    builder that renders that very operation name (the deterministic `-x<n>` / `-r<n>` of a replayed request) is
+    admitted as a replay of the pending member and creates its Job (AlreadyExists is the same Job); any other
+    continuation is refused (409 naming the pending admission). A builder that fails after admission is never rolled
+    back on an immediate absence either (`_reconcile_continuation`): only a definite refusal (4xx) rolls the member
+    back. `ns` (the tenant namespace) enables the pending-head judgement; without it the head is taken as is."""
     if not db.enabled():
         return build(None)
     member = keys.member_of(root)
@@ -237,40 +238,37 @@ def continue_run(root: str, build, transfer_only: bool = False, ns: str | None =
     else:
         stage = None
         head = keys.run_head(root)
-    for _ in range(3):  # bounded: a phantom head is retired and the head read again
-        if head is None or ns is None or head == root or not _phantom_head(ns, root, head):
-            break
-        head = (
-            keys.stage_head(root, stage)
-            if kind == "stage" and stage
-            else keys.child_head(root, stage)
-            if kind == "child"
-            else keys.run_head(root)
-        )
     if head is None:
         return build(None)
+    pending_head = head if ns is not None and head != root and _pending_admission(ns, root, head) else None
+    predecessor = keys.member_of(head)["predecessor"] if pending_head else head
     pending: dict = {}
 
     def admit(job: dict) -> None:
-        continuation_admission(root, head, transfer_only, stage=stage, kind=kind)(job)
-        pending["name"] = job["metadata"]["name"]
+        name = job["metadata"]["name"]
+        if pending_head and name != pending_head:
+            raise HTTPException(
+                409,
+                f"operation {root}: its lineage has a pending admission {pending_head} (admitted, its Job not created or "
+                "not readable yet); only a replay of the same request continues it, nothing else is admitted meanwhile",
+            )
+        continuation_admission(root, predecessor, transfer_only, stage=stage, kind=kind)(job)
+        pending["name"] = name
 
     try:
         return build(admit)
     except Exception as e:
-        if pending.get("name"):
+        if pending.get("name") and pending["name"] != pending_head:
             found = _reconcile_continuation(pending["name"], ns, e)
             if found is not None:
                 return found, True  # created; the answer was lost: the member stays, the Job is the continuation
         raise
 
 
-def _phantom_head(ns: str, root: str, head: str) -> bool:
-    """A lineage head whose Job does not exist anywhere, that no attempt ever reported and whose member is still
-    active is the trace of a create that never happened (an API process that died between the admission and the
-    create, or a transport failure this API could not reconcile at the time): its member is rolled back (the
-    confirmed absence) so the lineage continues from the real head. Anything else (a Job that ran and expired has
-    records; an unreachable cluster is not an absence) keeps the head."""
+def _pending_admission(ns: str, root: str, head: str) -> bool:
+    """Whether the lineage head is an admission without a Job: active member, no Job anywhere (a clean 404 across the
+    regions; an unreachable cluster is not an absence), no attempt record (a Job that ran and expired has records). Such a
+    head is never retired here (another replica may be creating it right now); it is resolved by the same intent."""
     try:
         jobs.find(ns, head)
         return False
@@ -280,44 +278,37 @@ def _phantom_head(ns: str, root: str, head: str) -> bool:
     if attempts.enabled() and any(r["operation"] == head for r in attempts.for_operation(root)):
         return False
     m = keys.member_of(head)
-    if not m or m["state"] != "active" or (m["predecessor"] is None and m["kind"] != "child"):
-        return False
-    if keys.rollback_run_member(head):
-        log.warning(
-            "continuation %s of %s: no Job, no attempt record, member active: retired as never created", head, root
-        )
-        return True
-    return False
+    return bool(m) and m["state"] == "active" and (m["predecessor"] is not None or m["kind"] == "child")
 
 
 def _reconcile_continuation(name: str, ns: str | None, e: Exception):
-    """After a builder raised past the admission: a definite refusal (4xx: the API server refused the create, nothing
-    exists) rolls the member back; anything else (5xx, a transport error: the create may have been accepted) is
-    checked against the cluster when the namespace is known: the Job found is returned (the member stays), a confirmed
-    absence rolls the member back, an unreachable cluster keeps the member for `_phantom_head` to settle later.
-    Returns the Job when it exists, else None."""
-    definite = isinstance(e, HTTPException) and e.status_code < 500
-    if not definite and ns is not None:
+    """After a builder raised past the admission: the member is NEVER rolled back here. A definite refusal (4xx)
+    proves only that THIS caller's create was refused, not that no other replica created the operation (both may have
+    admitted the same intent: one member, two creates); an ambiguous failure (5xx, transport) may still be accepted by
+    the API server. So the member stays a pending admission in every case: the Job found is returned (the
+    continuation exists, whoever created it); otherwise the same request replays the intent (continue_run admits it as
+    a replay of the member and creates the Job). Returns the Job when it exists, else None."""
+    if ns is not None:
         try:
             job, _ = jobs.find(ns, name)
-            log.warning("continuation %s: created, the answer was lost (%s); member kept", name, str(e)[:120])
+            log.warning(
+                "continuation %s: its Job exists although this create failed (%s); member kept", name, str(e)[:120]
+            )
             return job
         except HTTPException as f:
             if f.status_code != 404:
                 log.warning(
-                    "continuation %s: creation unconfirmed (%s) and unreadable (%s): member kept",
+                    "continuation %s: create failed (%s), cluster unreadable (%s): member kept",
                     name,
                     str(e)[:80],
                     f.detail,
                 )
                 return None
-    elif not definite:
-        log.warning("continuation %s: creation unconfirmed (%s), namespace unknown: member kept", name, str(e)[:120])
-        return None
-    try:
-        keys.rollback_run_member(name)  # confirmed absent (or definitely refused): no Job exists
-    except Exception as x:  # noqa: BLE001
-        log.warning("rollback of continuation %s: %s", name, x)
+    log.warning(
+        "continuation %s: create failed (%s): member kept as a pending admission (the same request replays it)",
+        name,
+        str(e)[:120],
+    )
     return None
 
 

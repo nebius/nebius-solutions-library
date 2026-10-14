@@ -150,7 +150,11 @@ def test_job_deadline_reads_jobs_and_jobsets():
     assert api._job_deadline(js) == 900
 
 
-def test_a_failed_continuation_create_rolls_its_member_back(client, admin_keys, fake_keys, monkeypatch):
+def test_an_ambiguous_continuation_create_failure_keeps_its_member(client, admin_keys, fake_keys, monkeypatch):
+    """The cluster failed the create with no definite answer (a transport-class error): the API server may still be
+    accepting it, so the member is kept (never rolled back on an immediate absence); the error reaches the caller,
+    whose replay is admitted as a replay of the member, and the two-phase retirement settles a member that never
+    gets its Job (test_a_phantom_head_is_marked_then_retired…)."""
     c, cluster = client
     _auth(monkeypatch, {"sk-good": _principal("p1", max_concurrent=1)})
     oid = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}}).json()["id"]
@@ -163,8 +167,8 @@ def test_a_failed_continuation_create_rolls_its_member_back(client, admin_keys, 
     with pytest.raises(RuntimeError):  # the test client re-raises the server's error
         c.post(f"/v1/operations/{oid}:resume", headers=H, json={})
     kinds = [x[0] for x in fake_keys.calls]
-    assert "prepare" in kinds and kinds[-1] == "rollback"
-    assert [m["operation"] for m in fake_keys.members] == [oid]  # the member is gone, the root stays
+    assert "prepare" in kinds and "rollback" not in kinds
+    assert [m["operation"] for m in fake_keys.members] == [oid, f"{oid}-r1"]  # the member stays next to the root
 
 
 def _exportable(c, cluster, monkeypatch):
@@ -205,50 +209,81 @@ def test_a_continuation_created_with_a_lost_answer_keeps_its_member_and_is_retur
     assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, x1, oid)]
 
 
-def test_a_continuation_refused_or_confirmed_absent_rolls_its_member_back(client, admin_keys, fake_keys, monkeypatch):
-    """The API server answered 5xx and the Job is confirmed absent, or refused the create definitively (4xx): the member
-    goes (as before); the error reaches the caller."""
+def test_no_failure_after_admission_rolls_the_member_back(client, admin_keys, fake_keys, monkeypatch):
+    """A 5xx or a transport error after admission may still be accepted by the API server; a 4xx proves only that THIS
+    caller's create was refused. Either way the member stays a pending admission (never rolled back); the error reaches
+    the caller, whose replay of the same request is admitted as a replay of the member and creates the Job."""
     import jobs
 
     c, cluster = client
     oid, rows = _exportable(c, cluster, monkeypatch)
-    monkeypatch.setattr(
-        jobs,
-        "create",
-        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
-            api.HTTPException(502, "kubernetes (eu-north1): 503 Service Unavailable")
-        ),
-    )
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 502
+    real = jobs.create
     x1 = f"{oid}-x1"
-    assert (
-        ("rollback", x1) in fake_keys.calls
-        and fake_keys.member_of(x1) is None
-        and ("tenant-demo", x1) not in cluster.jobs
-    )
-    monkeypatch.setattr(
-        jobs,
-        "create",
-        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
-            api.HTTPException(404, "tenant namespace is not onboarded")
-        ),
-    )
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 404 and fake_keys.member_of(x1) is None
-    assert len([x for x in fake_keys.calls if x[0] == "rollback"]) == 2
+    for code in (502, 404):
+        monkeypatch.setattr(
+            jobs,
+            "create",
+            lambda ns, job, region="eu-north1", secret=None, code=code: (_ for _ in ()).throw(
+                api.HTTPException(code, "kubernetes refused" if code == 404 else "kubernetes (eu-north1): 503")
+            ),
+        )
+        r = c.post(f"/v1/operations/{oid}:export", headers=H)
+        assert r.status_code == code
+        assert not [x for x in fake_keys.calls if x[0] == "rollback"] and fake_keys.member_of(x1)["state"] == "active"
+        assert ("tenant-demo", x1) not in cluster.jobs
+    monkeypatch.setattr(jobs, "create", real)
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)  # the same intent: admitted as a replay, created now
+    assert r.status_code == 202 and r.json()["id"] == x1 and ("tenant-demo", x1) in cluster.jobs
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]
 
 
-def test_a_phantom_head_is_retired_and_a_head_that_ran_is_kept(client, admin_keys, fake_keys, monkeypatch):
-    """A lineage head whose Job exists nowhere, with no attempt record and an active member, is the trace of a create
-    that never happened: it is rolled back and the lineage continues from the real head. A head whose Job expired
-    after it ran (an attempt record exists) is kept: the continuation is refused as before (continue the head)."""
+def test_barrier_a_definite_refusal_of_one_replica_never_deletes_the_member_another_replica_backed(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """Root's final same-intent barrier: A and B both observe the prior head (no pending admission), A pauses right
+    after its admission; B's whole request runs (its admission is a replay of the shared member) and creates the valid
+    Job; A's create is then refused definitively (a 4xx of its own). A's member is the shared one and B's Job stands
+    on it: nothing is rolled back, A answers with its error, one Job, one member."""
+    import jobs
+
     c, cluster = client
     oid, rows = _exportable(c, cluster, monkeypatch)
-    phantom = f"{oid}-x1"
+    real = jobs.create
+    seen: dict = {}
+
+    def paused_then_refused(ns, job, region="eu-north1", secret=None):
+        name = job["metadata"]["name"]
+        assert fake_keys.member_of(name)["state"] == "active" and ("tenant-demo", name) not in cluster.jobs
+        monkeypatch.setattr(jobs, "create", real)
+        b = c.post(f"/v1/operations/{oid}:export", headers=H)  # B: replay of the shared member, creates the Job
+        seen["b"] = (b.status_code, b.json())
+        assert ("tenant-demo", name) in cluster.jobs
+        raise api.HTTPException(403, "forbidden: this replica's create was refused")  # A's own definite refusal
+
+    monkeypatch.setattr(jobs, "create", paused_then_refused)
+    a = c.post(f"/v1/operations/{oid}:export", headers=H)
+    x1 = f"{oid}-x1"
+    assert seen["b"][0] == 202 and seen["b"][1]["id"] == x1, seen["b"]
+    assert a.status_code in (200, 202, 403), a.text  # A: its own refusal, or B's Job found and returned
+    assert not [x for x in fake_keys.calls if x[0] == "rollback"]  # the shared member is never deleted
+    assert fake_keys.member_of(x1)["state"] == "active" and ("tenant-demo", x1) in cluster.jobs
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, x1, oid), (oid, x1, oid)]
+
+
+def test_a_pending_admission_is_never_retired_and_only_the_same_intent_replays_it(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """A lineage head that was admitted but has no Job and no attempt record stays PENDING: nothing retires it (no
+    rollback, ever); a replay of the same request renders the same operation name, is admitted as a replay of that
+    member and creates its Job (one member, one Job, the member untouched); a head that ran and expired (on record)
+    is kept and the stale source is refused as before."""
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    pending = f"{oid}-x1"  # the name the export retry of `oid` renders (no -x Job exists): the same intent
     fake_keys.members.append(
         {
-            "operation": phantom,
+            "operation": pending,
             "root": oid,
             "predecessor": oid,
             "state": "active",
@@ -257,17 +292,78 @@ def test_a_phantom_head_is_retired_and_a_head_that_ran_is_kept(client, admin_key
             "note": None,
         }
     )
-    assert fake_keys.run_head(oid) == phantom and ("tenant-demo", phantom) not in cluster.jobs
     r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 202, r.text
-    assert ("rollback", phantom) in fake_keys.calls  # retired: confirmed absent
-    new = r.json()["id"]
-    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, new, oid)]  # after the real head (the root)
-    assert fake_keys.run_head(oid) == new and ("tenant-demo", new) in cluster.jobs
-    # a head that ran and whose Job expired: on record, kept; the stale source is refused with the head named
-    del cluster.jobs[("tenant-demo", new)]
-    rows.append({**_record(new, f"{new}-b", export="failed"), "operation": new})
-    rollbacks = len([x for x in fake_keys.calls if x[0] == "rollback"])
+    assert r.status_code == 202 and r.json()["id"] == pending, r.text
+    assert ("tenant-demo", pending) in cluster.jobs and not [x for x in fake_keys.calls if x[0] == "rollback"]
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, pending, oid)]  # a replay of the member
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [pending]
+    # a head that ran and whose Job expired: on record, the stale source is refused with the head named, nothing touched
+    del cluster.jobs[("tenant-demo", pending)]
+    rows.append({**_record(pending, f"{pending}-b", export="failed"), "operation": pending})
     r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code in (409, 404) and "continue" in r.text
-    assert len([x for x in fake_keys.calls if x[0] == "rollback"]) == rollbacks  # on record: never retired
+    assert r.status_code == 409 and "continue" in r.text and not [x for x in fake_keys.calls if x[0] == "rollback"]
+
+
+def test_barrier_a_second_replica_cannot_retire_an_admission_whose_create_is_in_flight(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """Root's race (COORDINATION 12:18Z and the 91 review): replica A is paused between its admission and its create;
+    replica B asks for the same continuation and sees an active member with no Job and no record. B retires nothing:
+    its request is the same intent, so it is admitted as a replay of A's member and creates the Job; A's create then
+    meets AlreadyExists (the same Job) and answers with it. One Job, one member, no rollback, nothing unaccounted,
+    whatever the order of the two creates and whatever either replica reads in between."""
+    import jobs
+
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    real = jobs.create
+    seen: dict = {}
+
+    def paused_then_create(ns, job, region="eu-north1", secret=None):
+        # the barrier: A has admitted (its member is active) and has not created yet; B's whole request runs here
+        name = job["metadata"]["name"]
+        assert fake_keys.member_of(name)["state"] == "active" and ("tenant-demo", name) not in cluster.jobs
+        monkeypatch.setattr(jobs, "create", real)
+        b = c.post(f"/v1/operations/{oid}:export", headers=H)
+        seen["b"] = (b.status_code, b.json())
+        assert not [x for x in fake_keys.calls if x[0] == "rollback"], "B retired A's in-flight admission"
+        assert ("tenant-demo", name) in cluster.jobs  # B created the same operation under A's member
+        return real(ns, job, region, secret)  # A's create is released: AlreadyExists, the same Job
+
+    monkeypatch.setattr(jobs, "create", paused_then_create)
+    a = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert a.status_code in (200, 202), a.text
+    x1 = a.json()["id"]
+    assert seen["b"][0] == 202 and seen["b"][1]["id"] == x1, seen["b"]
+    assert [k for k in cluster.jobs if k[1].startswith(f"{oid}-x")] == [("tenant-demo", x1)]  # one Job
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]  # one member
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [
+        (oid, x1, oid),
+        (oid, x1, oid),
+    ]  # A, then B's replay
+    assert not [x for x in fake_keys.calls if x[0] == "rollback"]
+
+
+def test_another_intent_is_refused_while_an_admission_is_pending(client, admin_keys, fake_keys, monkeypatch):
+    """While a lineage has a pending admission, a continuation that would render ANOTHER operation (a resume instead of
+    the pending export retry) is refused, naming the pending admission; nothing is admitted, nothing retired."""
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    pending = f"{oid}-x1"
+    fake_keys.members.append(
+        {
+            "operation": pending,
+            "root": oid,
+            "predecessor": oid,
+            "state": "active",
+            "kind": "continuation",
+            "stage": None,
+            "note": None,
+        }
+    )
+    r = c.post(f"/v1/operations/{oid}:resume", headers=H, json={})
+    assert r.status_code == 409 and "pending admission" in r.text and pending in r.text, r.text
+    assert [m["operation"] for m in fake_keys.members] == [oid, pending] and not [
+        x for x in fake_keys.calls if x[0] == "rollback"
+    ]
+    assert not [k for k in cluster.jobs if k[1].startswith(f"{oid}-r")]

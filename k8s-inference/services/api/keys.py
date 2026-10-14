@@ -937,9 +937,21 @@ def member_of(operation: str) -> dict | None:
     child) and state; None when it is no member (no ledger)."""
     with _connection() as c:
         r = c.execute(
-            "select root, kind, stage, state, predecessor from key_run_members where operation = %s", (operation,)
+            "select root, kind, stage, state, predecessor, created_at from key_run_members where operation = %s",
+            (operation,),
         ).fetchone()
-    return {"root": r[0], "kind": r[1], "stage": r[2], "state": r[3], "predecessor": r[4]} if r else None
+    return (
+        {
+            "root": r[0],
+            "kind": r[1],
+            "stage": r[2],
+            "state": r[3],
+            "predecessor": r[4],
+            "created_at": r[5],
+        }
+        if r
+        else None
+    )
 
 
 def prepare_run_member(

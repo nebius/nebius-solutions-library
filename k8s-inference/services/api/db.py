@@ -356,6 +356,12 @@ create table if not exists operation_marks (
     drop index if exists endpoint_children_one_active;
     create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
     """,
+    # 23: reserved. Added by the unreleased 0.11.91 candidate for an automatic retirement of run members that 0.11.92
+    # withdrew (an admission whose Job exists nowhere stays pending and is resolved only by a replay of the same
+    # intent, app.continue_run); the column is unused and kept so the migration sequence stays stable.
+    """
+    alter table key_run_members add column if not exists retire_marked_at timestamptz;
+    """,
 ]
 
 _pool = None

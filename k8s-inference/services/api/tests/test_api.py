@@ -1254,6 +1254,7 @@ class FakeKeys:
                 "stage": m.get("stage"),
                 "state": m["state"],
                 "predecessor": m["predecessor"],
+                "created_at": m.get("created_at"),
             }
             if m
             else None
