@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.79
+
+- Operation status/result stay readable when usage is unknown: `billing.py` settles a run or a native endpoint call
+  that ended without a trustworthy measurement with the literal `unknown` in the `<LABEL>/gpu-seconds` and
+  `<LABEL>/billed` annotations (the key's reservation is kept as unknown GPU time, never zero), but `status.normalise`
+  and the chain view parsed both with `float()` and raised `ValueError` → `GET /v1/operations/<id>` and `:result`
+  answered 500 (seen on a Cosmos native call on 0.11.78: readiness 200, one inference POST 403, the response uploaded,
+  the owner's status unreadable). One parser (`status.measured`) now reads the accounting annotations: a finite
+  non-negative number is the measurement; absent, `unknown`, NaN/inf, negative or any malformed value is `null`,
+  never zero and never an error. The operation carries `usage`: `measured`, `unknown` (settled without a
+  measurement), `pending` (not settled yet), so a `null` is distinguishable from "not yet". No interface removed;
+  the annotations and the billing writer are unchanged.
+
 ## platform stage: the image cache's registry static key is an environment input, never issued by a plan
 
 - `stack/platform/secrets.tf` no longer runs `stack/scripts/registry-static-key.sh` as an `external` data source.

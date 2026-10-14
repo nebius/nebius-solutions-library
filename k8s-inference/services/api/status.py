@@ -190,6 +190,32 @@ def logs_url(ns: str, name: str, region: str | None) -> str | None:
     return f"{g}/explore?orgId=1&left={urllib.parse.quote(q)}"
 
 
+def measured(value) -> float | None:
+    """An accounting annotation (`<LABEL>/gpu-seconds`, `<LABEL>/billed`) as a number, or None when it holds no
+    measurement: absent, the literal `unknown` (billing.py writes it when a run ended without a trustworthy
+    measurement, or a native settlement had none: the reservation stays unknown, never free), or anything that is not
+    a finite non-negative number (a malformed value is unknown, never zero). Readers must not raise on a value the
+    platform itself wrote: an operation with unknown usage stays readable."""
+    if value is None:
+        return None
+    try:
+        x = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if x != x or x in (float("inf"), float("-inf")) or x < 0:
+        return None
+    return x
+
+
+def usage_of(ann: dict) -> str:
+    """`measured` (a number on record), `unknown` (settled without one: the key's reservation is kept as unknown GPU
+    time, docs/API.md "Keys"), `pending` (not settled yet)."""
+    key = f"{LABEL}/gpu-seconds"
+    if key not in ann:
+        return "pending"
+    return "measured" if measured(ann[key]) is not None else "unknown"
+
+
 def _json(text: str | None):
     try:
         return json.loads(text) if text else None
@@ -352,8 +378,9 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         "recovered_from": ann.get(f"{LABEL}/recovered-from"),
         "nodes": int(ann[f"{LABEL}/nodes"]) if f"{LABEL}/nodes" in ann else 1,
         "interconnect": ann.get(f"{LABEL}/interconnect"),
-        "gpu_seconds": float(ann[f"{LABEL}/gpu-seconds"]) if f"{LABEL}/gpu-seconds" in ann else None,
-        "cost": float(ann[f"{LABEL}/billed"])
+        "gpu_seconds": measured(ann.get(f"{LABEL}/gpu-seconds")),
+        "usage": usage_of(ann),
+        "cost": measured(ann[f"{LABEL}/billed"])
         if f"{LABEL}/billed" in ann
         else (price_per_call if status == "SUCCEEDED" and price_per_call is not None else None),
     }

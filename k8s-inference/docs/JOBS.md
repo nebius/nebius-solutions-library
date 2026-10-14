@@ -595,7 +595,10 @@ copy on the worker carries the pods. What differs from the regional path:
   queued one is deleted on the manager, which removes the worker's copy. Resume checks the volume
   on the worker and creates `<id>-r<n>` on the manager pinned to that region.
 - **Billing.** The CronJob bills the manager's Job from the attempt records with the price of
-  the region its Workload was admitted in (`cost` and `gpu_seconds` on the operation).
+  the region its Workload was admitted in (`cost` and `gpu_seconds` on the operation; `usage` says what they
+  mean: `measured`, `unknown` (settled without a trustworthy measurement, e.g. a native call whose worker released
+  with no metering: `gpu_seconds` and `cost` are `null`, the key's reservation is kept as unknown GPU time, never
+  zero), `pending` (not settled yet)).
 
 The control cluster's tenant namespaces are rendered by the same chart (`clusters.control`,
 `manager: true`): namespace, the profile LocalQueues pointing at the manager ClusterQueues and the

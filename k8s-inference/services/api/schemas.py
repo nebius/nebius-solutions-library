@@ -661,6 +661,7 @@ class Operation(BaseModel):
     interconnect: str | None = None
     cost: float | None = None
     gpu_seconds: float | None = None
+    usage: str | None = None  # measured | unknown (settled without a measurement; the reservation stays) | pending
     gpu_seconds_complete: bool | None = None
     successor: str | None = None
     recovered_from: str | None = None

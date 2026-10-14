@@ -114,7 +114,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.78", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.79", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1445,7 +1445,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
                 "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
                 "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0),
                 "gpu_seconds_complete": not unknown,
-                "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None,
+                "cost": st.measured(ann.get(f"{cfg.LABEL}/billed")),  # "unknown" (settled without a measurement) = null
             }
         )
         total += sum(measured)
