@@ -1104,7 +1104,14 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
         "regions": ["eu-north1"],
         "shm_gib": 16,
         "env_field_refs": {"POD_UID": "metadata.uid"},
-        "empty_dirs": [{"name": "runtime-cache", "mount_path": "/runtime-cache", "size_limit": "4Gi"}],
+        "empty_dirs": [
+            {"name": "runtime-cache", "mount_path": "/runtime-cache", "size_limit": "4Gi"},
+            {
+                "name": "engine-cache",
+                "mount_path": "/app/.cache",
+                "size_limit": "8Gi",
+            },  # a hidden directory is ordinary scratch
+        ],
     }
     result = c.post("/v1/models", json=spec, headers=ADMIN)
     assert result.status_code == 201, result.text
@@ -1113,6 +1120,8 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
     assert {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}} in container["env"]
     assert {"name": "runtime-cache", "mountPath": "/runtime-cache"} in container["volumeMounts"]
     assert {"name": "runtime-cache", "emptyDir": {"sizeLimit": "4Gi"}} in predictor["volumes"]
+    assert {"name": "engine-cache", "mountPath": "/app/.cache"} in container["volumeMounts"]
+    assert {"name": "engine-cache", "emptyDir": {"sizeLimit": "8Gi"}} in predictor["volumes"]
     assert {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "16Gi"}} in predictor["volumes"]
     for change in (
         {"env_field_refs": {"POD_UID": "spec.nodeName"}},
@@ -1122,6 +1131,23 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
         {"empty_dirs": [{"name": "scratch", "mount_path": "/dev", "size_limit": "1Gi"}]},
         {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4"}]},
         {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4Gi", "hostPath": "/"}]},
+        # canonical paths only: dot components, empty components, traversal, trailing slash, overlaps
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/./cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/../cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app//cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/.cache/", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/..", "size_limit": "1Gi"}]},
+        {
+            "weights": {"path": "p"},
+            "empty_dirs": [{"name": "scratch", "mount_path": "/weights/.cache", "size_limit": "1Gi"}],
+        },  # under the declared weights mount
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/dev/shm/.x", "size_limit": "1Gi"}]},
+        {
+            "empty_dirs": [
+                {"name": "scratch", "mount_path": "/app/.cache", "size_limit": "1Gi"},
+                {"name": "two", "mount_path": "/app/.cache/sub", "size_limit": "1Gi"},
+            ]
+        },
         {"kind": "job"},
     ):
         assert c.post("/v1/models", json={**spec, "id": "invalid-model", **change}, headers=ADMIN).status_code == 400

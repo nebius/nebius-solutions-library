@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.77
+
+- Endpoint scratch (`empty_dirs`): a mount path may contain dots in its components (`/app/.cache`, an engine's hidden
+  cache directory, is ordinary bounded scratch); the path must still be canonical and absolute: no `.` or `..`
+  component, no empty component (`//`), no trailing slash, not `/`; the reserved roots and the weights/shm overlap are
+  refused as before. Interfaces unchanged.
+
 ## api 0.11.76
 
 - Graph "action required" (docs/API.md "Operations"): the root handle's `graph` carries `action_required`, `blocked_on`

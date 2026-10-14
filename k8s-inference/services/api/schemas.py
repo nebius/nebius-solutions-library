@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator
 
 from config import REGION
 
@@ -34,13 +34,26 @@ class ScalingSpec(BaseModel):
 
 
 class EphemeralVolumeSpec(BaseModel):
-    """Endpoint scratch space, not a host path, customer bucket or shared cache."""
+    """Endpoint scratch space, not a host path, customer bucket or shared cache. The mount path is a canonical absolute
+    path: components may contain dots (an engine's `/app/.cache` is ordinary scratch), but never are `.` or `..`, no
+    empty component (`//`), no trailing slash, not `/` itself; the reserved roots and the weights/shm overlap are
+    refused by the model builder."""
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
-    mount_path: str = Field(pattern=r"^/[A-Za-z0-9_/-]+$")
+    mount_path: str = Field(pattern=r"^/[A-Za-z0-9._/-]+$", max_length=200)
     size_limit: str = Field(pattern=r"^[1-9][0-9]*(Mi|Gi)$")
     memory: bool = False
+
+    @field_validator("mount_path")
+    @classmethod
+    def _canonical(cls, v: str) -> str:
+        parts = v.split("/")
+        if v == "/" or v.endswith("/") or any(p == "" for p in parts[1:]) or any(p in (".", "..") for p in parts):
+            raise ValueError(
+                "mount_path: a canonical absolute path (no `.`/`..` components, no `//`, no trailing slash, not `/`)"
+            )
+        return v
 
 
 class PlacementSpec(BaseModel):
