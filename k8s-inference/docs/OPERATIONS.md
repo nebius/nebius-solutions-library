@@ -359,6 +359,33 @@ adds the cluster and the tenants' buckets there, the platform stage follows on i
 the worker (docs/FLEET.md "Change recipes"). The platform images need no per-region copy: the new cluster's
 cache fetches them from the source registry on first use.
 
+## Repair a run admitted on an unmounted flavor
+
+A run that mounts the shared filesystem but was admitted, before filesystem-aware placement (api 0.11.72, fleet chart
+0.1.11), on the `system` flavor of a system pool without the mount sits in `FailedMount`; its pod never started, its
+volume is untouched, its lineage and graph are intact. Keep the same operation (no resume, no new root), with the
+Job's scheduling directives, which Kubernetes lets you change while the Job is suspended:
+
+1. Deactivate its Kueue Workload: `kubectl -n tenant-<t> patch workload <wl> --type merge -p '{"spec":{"active":false}}'`.
+   Kueue suspends the Job (object kept, same name); the Job controller deletes the never-started pod. Wait until
+   `job.spec.suspend` is `true`: Kubernetes makes the pod template's scheduling directives (node affinity, node
+   selector, tolerations) mutable **only on a Job that is already suspended**, and only in a request that changes
+   nothing else; a single request that sets `suspend` and the affinity together is refused as immutable.
+2. Then give the suspended Job the affinity new runs get: `kubectl -n tenant-<t> patch job <op> --type json -p
+   '[{"op":"add","path":"/spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/-","value":{"key":"serverless2.nebius/shared-fs","operator":"In","values":["true"]}}]'`
+   (create the `affinity` object first when the Job has none). Kueue compares the Job's pod template with its Workload
+   on the next reconcile and recreates the Workload when they differ; if the Workload still shows the old pod set,
+   delete the Workload object itself (never the Job): Kueue recreates it from the suspended Job's current template.
+   The ledger member, the attempt epoch and the handle are the API's and stay.
+3. Reactivate: `--type merge -p '{"spec":{"active":true}}'`. Kueue re-admits against the current flavors (the system
+   flavor excluded by its label, a filesystem CPU pool or the GPU pool eligible), unsuspends the Job, a new pod of the
+   same operation runs; the dependents follow the root as before.
+Requires the fleet chart with the labels applied first (step 3 on the old flavors would admit the run on `system`
+again). Alternative without touching the Job: `weights_filesystem.mount_on_system = true` for the region equips the
+system pool (the cloud stage rolls its nodes, one at a time: the platform add-ons move; the system nodes then also
+carry the snapshot-store label) and the same pending Job proceeds on a mounted system node once a node is replaced; a
+heavier change for one run, right when the system pool should hold the filesystem anyway.
+
 ## Patching
 
 - CI (`.github/workflows/k8s-inference.yml` at the library's root) runs on every pull request and push

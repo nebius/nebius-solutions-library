@@ -71,6 +71,16 @@ from status import is_jobset, is_manager_job, is_mirror, normalise
 log = logging.getLogger("api.jobs")
 
 
+def needs_shared_fs(r: dict) -> bool:
+    """Whether a run class mounts the region's shared filesystem (docs/FLEET.md "Filesystem-aware placement")."""
+    return bool(
+        str(r.get("weights") or "").strip("/")
+        or str(r.get("data") or "").strip("/")
+        or r.get("assets")
+        or str(r.get("checkpoints") or "local") == "shared"
+    )
+
+
 def _assets_registry() -> dict:
     """The fleet's restricted assets (docs/JOBS.md "Restricted assets"): alias -> {kind, host_path, gid, sha256, size}."""
     return dict(kube.fleet().get("assets") or {})
@@ -525,6 +535,11 @@ def build_run(
                     f"scratch local-nvme: none of the regions {wanted} has a pool with local_nvme = true (regions with one: {nvme_regions})",
                 )
             placement = {**placement, "regions": keep}
+    if needs_shared_fs(r):
+        # the run mounts the region's shared filesystem (weights, data, shared checkpoints, a restricted asset): only a
+        # node that mounts it can run it; Kueue skips a flavor whose nodeLabels contradict this (the system flavor
+        # unless weights_filesystem.mount_on_system), docs/FLEET.md "Filesystem-aware placement"
+        terms.append({"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
     if terms:
         pod["affinity"] = {
             "nodeAffinity": {
@@ -651,7 +666,8 @@ def _multinode(
     main = next(c for c in pod["containers"] if c["name"] == "main")
     uploader = next(c for c in pod["containers"] if c["name"] == "uploader")
     # placement: whole nodes of the model's classes; InfiniBand pools only when required (preferred = soft). The
-    # local-NVMe term of `scratch: local-nvme` (build_run) is kept; the single-node class affinity is replaced.
+    # the local-NVMe term of `scratch: local-nvme` and the shared-filesystem term (build_run) are kept; the single-node
+    # class affinity is replaced.
     classes = gpu_classes(model)
     kept = [
         t
@@ -663,7 +679,8 @@ def _multinode(
         )
         .get("nodeSelectorTerms", [{}])[0]
         .get("matchExpressions", [])
-        if t.get("key") == f"{LABEL}/local-nvme"
+        if t.get("key")
+        in (f"{LABEL}/local-nvme", f"{LABEL}/shared-fs")  # the placement needs survive the class rewrite
     ]
     pools: list[str] = []
     if classes and gpus:

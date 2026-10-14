@@ -143,3 +143,23 @@ run "cpu_pool_without_a_weights_filesystem_has_nothing_to_mount" {
     error_message = "Without a weights filesystem in the region a CPU pool attaches nothing."
   }
 }
+
+run "shared_fs_label_follows_the_attachment" {
+  command = plan
+  assert {
+    # docs/FLEET.md "Filesystem-aware placement": the label says whether the node mounts /mnt/weights, by construction
+    condition     = nebius_mk8s_v1_node_group.gpu["gpu"].template.metadata.labels["serverless2.nebius/shared-fs"] == "true" && nebius_mk8s_v1_node_group.cpu["batch"].template.metadata.labels["serverless2.nebius/shared-fs"] == "true" && nebius_mk8s_v1_node_group.system.template.metadata.labels["serverless2.nebius/shared-fs"] == "false"
+    error_message = "GPU pools and filesystem CPU pools must carry shared-fs=true, the system pool false unless mount_on_system."
+  }
+}
+
+run "shared_fs_label_true_on_system_with_mount_on_system" {
+  command = plan
+  variables {
+    weights_filesystem = { enabled = true, size_gib = 1024, type = "NETWORK_SSD", mount_on_system = true }
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.system.template.metadata.labels["serverless2.nebius/shared-fs"] == "true"
+    error_message = "mount_on_system must label the system nodes shared-fs=true."
+  }
+}

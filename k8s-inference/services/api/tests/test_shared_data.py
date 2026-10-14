@@ -193,3 +193,42 @@ def test_run_class_limits_and_ephemeral_storage_are_separate_from_requests(monke
         if c["name"] == "main"
     )["resources"]
     assert res["requests"]["ephemeral-storage"] == res["limits"]["ephemeral-storage"] == "200Gi"
+
+
+def _terms(job):
+    aff = job["spec"]["template"]["spec"].get("affinity") or {}
+    terms = (
+        ((aff.get("nodeAffinity") or {}).get("requiredDuringSchedulingIgnoredDuringExecution") or {})
+        .get("nodeSelectorTerms", [{}])[0]
+        .get("matchExpressions", [])
+    )
+    return {(t["key"], tuple(t["values"])) for t in terms}
+
+
+def test_a_run_that_mounts_the_shared_filesystem_requires_a_node_that_has_it():
+    """Filesystem-aware placement (docs/FLEET.md): weights, data, shared checkpoints or an asset add the required node
+    affinity serverless2.nebius/shared-fs=true (the system flavor of an unmounted system pool is then never assigned);
+    a run that mounts none of these gets no such term."""
+    key = ("serverless2.nebius/shared-fs", ("true",))
+    assert key in _terms(_run({"data": "refdb/uniref"}))
+    assert key in _terms(_run({"weights": "public/esm"}))
+    assert key not in _terms(_run({}))
+    m = catalog.get("container-run")
+    for job_extra in ({"checkpoints": "shared"},):
+        mm = {**m, "job": {**m["job"], **job_extra}}
+        j = jobs.build_run(
+            "op-fs-1",
+            mm,
+            {"image": "img", "command": "x", "output_prefix": "s3://b/o"},
+            "demo",
+            None,
+            None,
+            None,
+            None,
+            "eu-north1",
+            {"output_prefix": "s3://b/o"},
+        )
+        assert key in _terms(j)
+    assert jobs.needs_shared_fs({"assets": [{"alias": "a", "mountPath": "/m"}]}) and not jobs.needs_shared_fs(
+        {"checkpoints": "local"}
+    )

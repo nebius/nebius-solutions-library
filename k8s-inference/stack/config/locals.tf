@@ -84,7 +84,7 @@ locals {
       system_pool          = r.system_pool # the CPU nodes the `system` Kueue flavor budgets (charts/fleet)
       image_cache_size_gib = coalesce(r.image_cache_size_gib, local.f.images.cache.size_gib)
       # charts/tenant multinode.yaml renders the shared scratch claim (`checkpoints: shared`) only where the region has it
-      weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib }
+      weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib, mount_on_system = r.weights_filesystem.mount_on_system }
       pools              = { for pn, p in r.pools : pn => merge(p, { capacity = { type = p.capacity.type, max_price = p.capacity.max_price } }) }
       # CPU-only pools (charts/fleet: one flavor each after `system`, quota from max_nodes x preset; docs/FLEET.md "CPU pools")
       cpu_pools = { for pn, p in r.cpu_pools : pn => { platform = p.platform, preset = p.preset, min_nodes = p.min_nodes, max_nodes = p.max_nodes, boot_disk_gib = p.boot_disk_gib, shared_filesystem = p.shared_filesystem } }

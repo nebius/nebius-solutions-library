@@ -320,6 +320,19 @@ the node group scales up, the pod runs, the group scales back down. The manager 
 fleet-placed CPU run goes to a region whose CPU pool has room. No class setting is needed; a class may still pin
 `pool: <name>`. `tools/check.sh` asserts the order (system, CPU pools, GPU pools) and the tolerations.
 
+## Filesystem-aware placement
+
+The shared weights filesystem is a hostPath on the nodes that mount it (every GPU pool of a region that has it, CPU
+pools with `shared_filesystem`, the system pool only with `weights_filesystem.mount_on_system`). A run that mounts it
+(`weights`, `data`, `checkpoints: shared`, `assets`) must land on such a node, else the kubelet fails the mount for
+ever. Three pieces make that structural: the cluster module labels every node group `serverless2.nebius/shared-fs`
+`true` or `false` by its attachment; every worker ResourceFlavor carries the same label in `nodeLabels`; the API
+renders a required node affinity `serverless2.nebius/shared-fs In [true]` on such runs (as it does `local-nvme` for
+`scratch: local-nvme`). Kueue never assigns a flavor whose `nodeLabels` contradict a pod's required affinity, so such a
+run skips the unmounted `system` flavor and takes a CPU pool or its GPU pool; a run that mounts nothing shared keeps
+`system`. Existing Jobs do not gain the affinity by a rollout (docs/OPERATIONS.md "Repair a run admitted on an unmounted
+flavor"); the static PVs keep no node affinity (immutable once created; the flavor label is the guard).
+
 ## GPU drivers: the node image or the NVIDIA GPU Operator
 
 Two ways to get a driver onto a GPU node, chosen once per fleet in `terraform.tfvars`:

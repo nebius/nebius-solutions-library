@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.72, fleet chart 0.1.11, cluster module: filesystem-aware placement
+
+- A run that mounts the region's shared filesystem (`weights`, `data`, `checkpoints: shared`, `assets`) now requires a
+  node that mounts it: the cluster module labels every node group `serverless2.nebius/shared-fs=true|false` by its
+  attachment (GPU pools true when the region has the filesystem, CPU pools by `shared_filesystem`, the system pool only
+  with `mount_on_system`), every worker flavor carries the same label in `nodeLabels`, and the API renders a required
+  node affinity on such runs, so Kueue never assigns them the system flavor of an unmounted system pool (the FailedMount
+  of 14 Oct). Runs that mount none of these are unchanged. docs/FLEET.md "Filesystem-aware placement" and
+  docs/OPERATIONS.md "Repair a run admitted on an unmounted flavor" (the scoped repair of an existing Job, no new
+  controller). check.sh asserts the flavor label; module tests cover the label.
+
 ## api 0.11.71
 
 - Export of a run class with work mount aliases: the transfer-only export render read the finalizer's attempt record

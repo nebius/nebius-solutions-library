@@ -82,7 +82,12 @@ def test_worker_queues_lender_tenants_and_dedicated_pool():
         and lender["system"]["nvidia.com/gpu"]["nominalQuota"] == 0
         and lender["system"]["cpu"]["nominalQuota"] > 0
     )
-    assert docs[("ResourceFlavor", "system")]["spec"] == {"nodeLabels": {"serverless2.nebius/pool": "system"}}
+    assert docs[("ResourceFlavor", "system")]["spec"] == {
+        "nodeLabels": {
+            "serverless2.nebius/pool": "system",
+            "serverless2.nebius/shared-fs": "false",
+        }  # no mount_on_system
+    }
     assert lender["h100-spot-1x"]["nvidia.com/gpu"]["nominalQuota"] == 4
     assert docs[("ClusterQueue", "default")]["spec"]["namespaceSelector"] == {
         "matchLabels": {"kubernetes.io/metadata.name": "models"}

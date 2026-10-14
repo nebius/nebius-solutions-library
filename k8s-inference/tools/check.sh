@@ -96,7 +96,8 @@ for n in system:
     spec = flavors[n]["spec"]
     assert not spec.get("tolerations"), f"{cid}: {n} must not tolerate the GPU taint"
     if n == "system":
-        assert spec.get("nodeLabels") == {"serverless2.nebius/pool": "system"}, f"{cid}: {n} must select the system nodes"
+        assert spec.get("nodeLabels", {}).get("serverless2.nebius/pool") == "system", f"{cid}: {n} must select the system nodes"
+        assert spec["nodeLabels"].get("serverless2.nebius/shared-fs") == "false", f"{cid}: {n} must say shared-fs=false (mount_on_system is off in the example)"
 # CPU pools (docs/FLEET.md "CPU pools"): GPU-free flavors right after the system ones; the pool's own taint tolerated, never the GPU one
 cpu = [n for n, d in flavors.items() if d["metadata"].get("labels", {}).get("serverless2.nebius/capacity") == "cpu"]
 for n in cpu:
@@ -105,8 +106,16 @@ for n in cpu:
     assert ("nvidia.com/gpu", "present") not in tols, f"{cid}: CPU pool flavor {n} tolerates the GPU taint"
     if spec.get("nodeLabels"):
         assert ("serverless2.nebius/cpu-pool", "present") in tols, f"{cid}: CPU pool flavor {n} does not tolerate its pool taint"
-        assert spec["nodeLabels"] == {"serverless2.nebius/pool": n}, f"{cid}: CPU pool flavor {n} selects another pool"
+        assert spec["nodeLabels"].get("serverless2.nebius/pool") == n, f"{cid}: CPU pool flavor {n} selects another pool"
 system = system + cpu  # the GPU-free group of every queue, in this order
+# filesystem-aware placement (docs/FLEET.md): every worker flavor says whether its nodes mount /mnt/weights
+for n, d in flavors.items():
+    if d["spec"].get("nodeLabels"):
+        assert d["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") in ("true", "false"), f"{cid}: flavor {n} carries no serverless2.nebius/shared-fs label"
+# the example's two CPU pools: `prep` mounts (default), `scratch-only` says shared_filesystem = false explicitly (hasKey, not `default`)
+for n, want in (("prep", "true"), ("scratch-only", "false")):
+    if n in flavors:
+        assert flavors[n]["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") == want, f"{cid}: CPU pool {n} must carry shared-fs={want}"
 for q in queues:
     covered = q["spec"]["resourceGroups"][0]["coveredResources"]
     assert "ephemeral-storage" in covered, f"{cid}: {q['metadata']['name']} does not cover ephemeral-storage (a run requesting node-local scratch would be NoMatchingFlavor)"
