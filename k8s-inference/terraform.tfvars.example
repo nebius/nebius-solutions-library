@@ -150,6 +150,7 @@ fleet = {
     ngc_api_key_env          = "NGC_API_KEY"          # NIM images through the cache, NGC-hosted weights
     hf_token_env             = "HF_TOKEN"             # gated Hugging Face weights
     registry_credentials_env = "REGISTRY_CREDENTIALS" # JSON {"<host>": {"username": "...", "password": "..."}}
+    registry_key_env         = "REGISTRY_STATIC_KEY"  # the image cache's static key of the hub ops SA: stack/scripts/registry-static-key.sh issues it once per fleet
   }
 
   # Restricted assets (docs/JOBS.md "Restricted assets"): operator-registered files or pinned trees on the weights

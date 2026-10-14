@@ -4,6 +4,30 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## platform stage: the image cache's registry static key is an environment input, never issued by a plan
+
+- `stack/platform/secrets.tf` no longer runs `stack/scripts/registry-static-key.sh` as an `external` data source.
+  That data source issued a real static Container Registry key (`nebius iam static-key issue`) during `terraform plan`
+  whenever its gitignored cache (`stack/.secrets/<name>-registry-key.json`) was absent: a fresh checkout or a second
+  worktree minted a credential on a read-only plan, two clusters planned in the same minute collided on the key's
+  name (`<name>-image-cache-YYYYmmddHHMM`), and each cluster's plan then proposed its own rotation of
+  `registry/zot-sync-credentials` (seen on the api 0.11.78 freeze: three plans, none applied). The key is now the
+  fourth secret input, `secrets.registry_key_env` (default `REGISTRY_STATIC_KEY`), read from the environment by
+  `stack.sh` like the NGC key: required on every cluster while `images.cache.enabled`, refused before any plan when
+  unset, one value per fleet, and a `precondition` on the Secret stops a direct `terraform` call without it. The
+  `hashicorp/external` provider requirement is dropped.
+- `stack/scripts/registry-static-key.sh` is an explicit operator command now (`<fleet name> [--rotate]`): it issues the
+  key once (the name carries a random suffix, never the minute), under a lock, and prints the `export` line and the
+  key's id; it refuses to issue a second key for a fleet whose key file it already holds unless `--rotate` is given.
+  The id is read from the response's `operation.resource_id` (`IssueStaticKeyResponse` is `{token, operation}`; the
+  former parser read `metadata.id` and recorded `""` for every key it issued) and, failing that, resolved from the
+  token with `nebius iam static-key find --token` (the exact ownership proof of any key: its own token names it).
+  Its file lives under `~/.config/serverless2/<name>/registry-key.json` (0600), never in a checkout.
+- Migration for a fleet with the old cache: `export REGISTRY_STATIC_KEY="$(python3 -c 'import json; print(json.load(open("stack/.secrets/<name>-registry-key.json"))["key"])')"`
+  (or run the script's `--import stack/.secrets/<name>-registry-key.json`), then `./stack.sh plan` shows no change to
+  `registry/zot-sync-credentials`. Keys the old data source issued and never applied: list them with
+  `nebius iam static-key list-by-account --account-service-account-id <ops SA>` and delete by id.
+
 ## api 0.11.78, platform chart 0.1.8
 
 - Lease clients (docs/API.md "Lease clients"): on a fleet with a CA bundle, the bundle is projected as a FILE

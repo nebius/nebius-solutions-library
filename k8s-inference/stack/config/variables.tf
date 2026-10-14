@@ -292,6 +292,7 @@ variable "fleet" {
       ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache); "" = off
       hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes); "" = off
       registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams; "" = off
+      registry_key_env              = optional(string, "REGISTRY_STATIC_KEY")  # the image cache's static Container Registry key of the hub ops SA (issued once by stack/scripts/registry-static-key.sh); required with images.cache.enabled, ignored without
       mysterybox_credentials_secret = optional(string)                         # pre-provisioned subject-credentials.json, per cluster
       workload_secrets = optional(map(object({
         namespace        = string

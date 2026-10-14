@@ -153,7 +153,7 @@ through the API only.
 | `prices` | USD per GPU-hour per platform: the scheduling order and the cost reports |
 | `edge` | public or internal gateways, optional domain, allowed source CIDRs, ACME email, API rate limit |
 | `observability` | retention, alert webhook, cost export |
-| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials (`""` = that feature off; an unset named variable stops `stack.sh`) |
+| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials, and the image cache's static key (`registry_key_env`, issued once per fleet by `stack/scripts/registry-static-key.sh`; required while the cache is on) (`""` = that feature off; an unset named variable stops `stack.sh`) |
 | `tenants.<name>` | regions, output retention, keys with budgets, optional GPU quota, fair share, dedicated pools, image allow-list |
 | `acceptance` | the probe `tools/verify.sh` runs after the apply (or, with `probe = true`, a Job at apply time): one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
 

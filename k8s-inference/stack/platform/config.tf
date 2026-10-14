@@ -92,3 +92,14 @@ variable "registry_credentials" {
   sensitive = true
   default   = null
 }
+
+# The image cache's static Container Registry key (secrets.registry_key_env, default REGISTRY_STATIC_KEY): issued
+# once per fleet by the operator with stack/scripts/registry-static-key.sh, never by Terraform. Until api 0.11.78 an
+# `external` data source issued it during `terraform plan` when its gitignored cache file was missing (a fresh
+# checkout, a second worktree): a read-only plan minted a real credential, two clusters planned in the same minute
+# collided on the key's name, and every cluster's plan proposed its own rotation of registry/zot-sync-credentials.
+variable "registry_key" {
+  type      = string
+  sensitive = true
+  default   = null
+}

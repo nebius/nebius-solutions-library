@@ -113,7 +113,14 @@ locals {
     order = concat([for id in local.cluster_ids : id if !local.roles[id].control], [for id in local.cluster_ids : id if local.roles[id].control])
     state = { bucket = local.state_bucket, region = local.state_region, endpoint = local.state_endpoint }
     # the environment variables that carry secret inputs (terraform.tfvars `secrets`), by platform-stage variable name
-    secrets = { ngc_api_key = local.f.secrets.ngc_api_key_env, hf_token = local.f.secrets.hf_token_env, registry_credentials = local.f.secrets.registry_credentials_env }
+    secrets = {
+      ngc_api_key          = local.f.secrets.ngc_api_key_env
+      hf_token             = local.f.secrets.hf_token_env
+      registry_credentials = local.f.secrets.registry_credentials_env
+      # the image cache's static key: a required input of every cluster's platform stage while the cache is on (the
+      # same key everywhere: one Secret value per fleet, never issued by a plan); nothing without the cache
+      registry_key = local.images_cache ? local.f.secrets.registry_key_env : ""
+    }
   }
 }
 
