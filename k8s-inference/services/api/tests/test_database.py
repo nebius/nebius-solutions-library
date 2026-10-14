@@ -1015,3 +1015,81 @@ def test_admission_records_survive_and_rebuild_the_job(database):
         None,
     )
     assert admissions.get("op-adm-2") is None
+
+
+def test_gang_siblings_share_an_epoch_and_only_the_coordinator_publishes(database, monkeypatch):
+    """Migration 24 (docs/JOBS.md "Gang attempts"): the pods of one JobSet incarnation (observed restart-attempt and
+    completion index) share one epoch, so a peer's start never fences the coordinator; only rank 0 publishes a
+    checkpoint pointer or result; the next incarnation is the next epoch and the prior gang is fenced as any replaced
+    attempt (its own failure still closes it, promoting nothing); an ordinary single pod keeps an epoch of its own."""
+    import db
+
+    db.migrate()
+    op = "op-gang"
+    facts = {
+        f"{op}-workers-0-0-aaaaa": {"uid": "u0", "rank": 0, "restart": 0},
+        f"{op}-workers-0-1-bbbbb": {"uid": "u1", "rank": 1, "restart": 0},
+        f"{op}-workers-0-0-ccccc": {"uid": "u2", "rank": 0, "restart": 1},
+        f"{op}-workers-0-1-ddddd": {"uid": "u3", "rank": 1, "restart": 1},
+    }
+    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: facts.get(pod))
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+    }
+    coord, peer = f"{op}-workers-0-0-aaaaa", f"{op}-workers-0-1-bbbbb"
+    a = attempts.record("north", "tenant-demo", coord, body)
+    b = attempts.record("north", "tenant-demo", peer, body)
+    assert (a["epoch"], b["epoch"]) == (1, 1) and a["gang_rank"] == 0 and b["gang_rank"] == 1 and b["pod_uid"] == "u1"
+    # the coordinator keeps publishing after its peer started (no fence between siblings)
+    live = attempts.record(
+        "north", "tenant-demo", coord, {**body, "checkpoint_ref": "c" * 64, "checkpoint_generation": 1}
+    )
+    assert live["checkpoint_ref"] == "c" * 64 and live["epoch"] == 1
+    # a peer's pointer or result is not the gang's: stripped, its own record stands
+    p2 = attempts.record("north", "tenant-demo", peer, {**body, "checkpoint_ref": "x" * 64, "checkpoint_generation": 7})
+    assert p2["checkpoint_ref"] is None and p2["status"] == "started"
+    done = attempts.record(
+        "north", "tenant-demo", coord, {**body, "status": "succeeded", "result_ref": "d" * 64, "export": "succeeded"}
+    )
+    assert done["result_ref"] == "d" * 64 and done["status"] == "succeeded"
+    peer_done = attempts.record("north", "tenant-demo", peer, {**body, "status": "succeeded", "result_ref": "e" * 64})
+    assert peer_done["result_ref"] is None
+    assert attempts.gang_status([r for r in attempts.for_operation(op)]) == "succeeded"
+    assert attempts.authority(attempts.for_operation(op))["pod"] == coord
+    # the next incarnation (every pod recreated): epoch 2; the old gang is stale: its late start refused, its own
+    # failure closes it without promoting anything
+    c2 = attempts.record("north", "tenant-demo", f"{op}-workers-0-0-ccccc", body)
+    d2 = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", body)
+    assert (c2["epoch"], d2["epoch"]) == (2, 2) and c2["gang_restart"] == 1
+    with pytest.raises(HTTPException) as e:
+        attempts.record("north", "tenant-demo", peer, {**body, "status": "started"})
+    assert e.value.status_code == 409 and "stale record refused" in e.value.detail
+    old = attempts.record(
+        "north", "tenant-demo", coord, {**body, "status": "failed", "exit_code": 137, "result_ref": "z" * 64}
+    )
+    assert old["status"] == "failed" and old["result_ref"] == "d" * 64  # the earlier result stays, nothing new promoted
+    assert attempts.authority(attempts.for_operation(op))["pod"] == f"{op}-workers-0-0-ccccc"
+    # an unreadable late record of a gang pod: rank from the name, joined to the newest gang that lacks the rank
+    monkeypatch.setattr(
+        attempts, "_pod_gang", lambda region, ns, pod, operation: {"uid": None, "rank": 1, "restart": None}
+    )
+    late = attempts.record("north", "tenant-demo", f"{op}-workers-0-1-ddddd", {**body, "status": "succeeded"})
+    assert late["epoch"] == 2  # its own row (cur): the epoch it had
+    # an ordinary single pod of another operation: one epoch per pod, as before
+    monkeypatch.setattr(attempts, "_pod_gang", lambda region, ns, pod, operation: None)
+    assert (
+        attempts.record("north", "tenant-demo", "op-solo-a", {"operation": "op-solo", "status": "started", "gpus": 1})[
+            "epoch"
+        ]
+        == 1
+    )
+    assert (
+        attempts.record("north", "tenant-demo", "op-solo-b", {"operation": "op-solo", "status": "started", "gpus": 1})[
+            "epoch"
+        ]
+        == 2
+    )

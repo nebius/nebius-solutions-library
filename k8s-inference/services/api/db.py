@@ -362,6 +362,16 @@ create table if not exists operation_marks (
     """
     alter table key_run_members add column if not exists retire_marked_at timestamptz;
     """,
+    # 24: gang attempts (docs/JOBS.md "Multi-node runs", "Gang attempts"): a JobSet's pods record their rank and the
+    # JobSet incarnation they belong to (observed on the pod by the API: the JobSet controller's restart-attempt and the
+    # indexed Job's completion index, never caller-declared) and the pod's UID; the pods of one incarnation share one
+    # epoch, so siblings never fence each other, while a prior incarnation stays fenced as before
+    """
+    alter table attempts add column if not exists gang_rank int;
+    alter table attempts add column if not exists gang_restart int;
+    alter table attempts add column if not exists pod_uid text;
+    create index if not exists attempts_gang on attempts (operation, gang_restart);
+    """,
 ]
 
 _pool = None

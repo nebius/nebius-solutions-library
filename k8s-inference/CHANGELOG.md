@@ -4,6 +4,27 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.96
+
+(0.11.96 = 0.11.95 plus gang attempts for multi-node runs; jobs 0.1.26 and platform chart 0.1.11 unchanged.)
+
+- Gang attempts (migration 24; docs/JOBS.md "Gang attempts"): the pods of one JobSet incarnation share one epoch (the
+  rank and incarnation observed on the pod by the API: `batch.kubernetes.io/job-completion-index`,
+  `jobset.sigs.k8s.io/restart-attempt`, the pod UID; never caller-declared), so siblings no longer fence each other
+  (before: every sibling took the next epoch and the coordinator's checkpoint/success answered 409 "stale record
+  refused"); a prior incarnation stays fenced; only rank 0 publishes `checkpoint_ref`/`result_ref` (peers' dropped,
+  their accounting kept); the operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation and the
+  gang's outcome counts every rank. Ordinary single-pod runs unchanged.
+- "Delivery pending" on a gang: a class with `finalize.on_exit_codes` now installs the `podFailurePolicy` on the
+  indexed Job AND a JobSet failure-policy rule (`FailJobSet` on reason `PodFailurePolicy`), so exit 75 ends the gang
+  instead of a whole-gang `Recreate` recompute (JobSet ≥ v0.6).
+- `:export` of a completed multi-node run (`checkpoints: shared`, application I/O): the model's finalizer as ONE CPU
+  pod on the shared checkpoint subPath, the coordinator's record as the finalized attempt (`FINALIZE_RANK`,
+  `FINALIZE_GANG_RESTART`, `FINALIZE_NODES`, `CHECKPOINT_DIR`), never the gang again; a gang without shared checkpoints
+  or without a finalizer is refused explicitly (409 naming why) instead of "no kept work volume".
+- RDMA memlock stated, not granted: an InfiniBand gang's main gets `S2_RDMA_MEMLOCK_POLICY=node-unlimited`,
+  `S2_RDMA_CAPABILITIES=none`, `S2_RDMA_DEVICES_PER_NODE`; `drop: [ALL]` stays, no IPC_LOCK.
+
 ## api 0.11.95, platform chart 0.1.11
 
 (0.11.95 = 0.11.94 (the operation listing) plus the two registration checks below; the chart carries the one value

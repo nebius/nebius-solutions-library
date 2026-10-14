@@ -278,6 +278,29 @@ The dispatcher therefore moves the pool's floor itself (docs/SCHEDULING.md "Infi
 demand"): submitting a run is all it takes; the nodes boot after admission (a few minutes, the usual
 start of a scaled-from-zero pool). Reserved pools (the usual home of a 16-node job) are fixed-size anyway.
 
+### Gang attempts
+
+Every pod of a JobSet records its attempt (`POST /internal/attempts`, its own projected token), and the API observes the
+pod's gang membership on the pod itself, never from the record: the JobSet controller's `jobset.sigs.k8s.io/restart-attempt`
+(the incarnation), the indexed Job's `batch.kubernetes.io/job-completion-index` (the rank) and the pod UID (migration 24:
+`gang_rank`, `gang_restart`, `pod_uid`). **One epoch per incarnation**: the ranks of one restart share it, so a peer's
+start record never fences the coordinator (before 0.11.96 every sibling took the next epoch and the coordinator's
+checkpoint and success came back 409 "stale record refused"); the next incarnation (JobSet `Recreate`: every pod
+recreated) is the next epoch, and the prior gang is fenced like any replaced attempt (its own interruption or failure
+still closes its record, promoting nothing). **Coordinator authority**: only rank 0's record carries the gang's
+`checkpoint_ref`/`checkpoint_generation` and `result_ref` (a peer's are dropped; its timings, exit code and GPUs stay:
+every rank is accounted). The operation's `attempt_id`/`epoch` name the coordinator of the newest incarnation; the
+gang's outcome counts every rank (the JobSet's `All` success policy): `SUCCEEDED` only when every rank succeeded,
+`FAILED` when any rank failed. A late record of a pod the API cannot read any more takes its rank from the pod name and
+joins the newest gang that lacks that rank. Ordinary single-pod runs keep one epoch per pod, unchanged.
+
+**RDMA memlock, stated.** An InfiniBand gang runs with `drop: [ALL]` under PSA baseline and no IPC_LOCK: RDMA pins
+memory under RLIMIT_MEMLOCK, which the GPU nodes' container runtime sets unlimited (cloud-init + node-config). The
+render states that contract to the run, `S2_RDMA_MEMLOCK_POLICY=node-unlimited`, `S2_RDMA_CAPABILITIES=none`,
+`S2_RDMA_DEVICES_PER_NODE=<n>`, so an application validator written for a capability-based host (IPC_LOCK,
+`no_new_privs=0`) can accept the native path explicitly instead of probing for capabilities the platform never grants.
+No capability is added for it.
+
 ### Limits of multi-node runs
 
 What works, and where the edges are (sources: docs.nebius.com/compute/clusters/gpu,
@@ -291,6 +314,7 @@ docs.nebius.com/kubernetes/gpu/clusters, docs.nebius.com/kubernetes/node-groups/
 | **NIC claims are ExactCount: 8 per node (4 on GB300).** | Kueue's DRA accounting (0.20) supports ExactCount claims only; the tenant's `ib-8` / `ib-4` templates hand the pod every NIC of its node (the pod has the whole node anyway). |
 | **Size of one run**: `nodes <= MULTINODE_MAX_NODES` (64 by default), a node group holds at most 100 nodes, and a fabric has limited GPU capacity. | Nebius publishes no fixed maximum per GPU cluster; "each fabric has limited GPU capacity" and a GPU cluster is bounded by the quota of its project and the free capacity of its fabric. A 16-node run needs 16 nodes in ONE pool (one node group, one GPU cluster): size `max_nodes` (and the reservation) accordingly; the Kueue quota of the pool is NICs per node x `max_nodes`. |
 | **Spot preemption = restart-all** from the last checkpoint; after `maxRestarts` (3) the run is FAILED. | A partial rank set cannot continue an NCCL job. Use `checkpoints: shared` so the restart (and a `:resume`) continues from the shared filesystem; `local` checkpoints die with the pod. Reserved or on-demand pools avoid the restarts. |
+| **"Delivery pending" never restarts the gang.** A class with `finalize.on_exit_codes` installs that exit as a `podFailurePolicy` FailJob on the indexed Job and a JobSet failure-policy rule (`FailJobSet` on reason `PodFailurePolicy`): the completed science is never recomputed; `:export` runs the model's finalizer as ONE CPU pod on the shared checkpoint claim ("Finalization by the application"). Needs `checkpoints: shared`; a gang without it retains nothing to deliver (409). A managed-I/O gang has no re-export (rank 0's `/work` is node-local). | JobSet ≥ v0.6 (`failurePolicy.rules`). |
 | **One run per node at a time.** | A pod requests the preset's GPU count, CPU and memory; nothing else fits on the node while it runs. |
 | **Which platforms and regions have fabrics** | H100 (`gpu-h100-sxm`): eu-north1 `fabric-2/3/4/6`. H200 (`gpu-h200-sxm`): eu-north1 `fabric-7`, eu-west1 `fabric-5`, eu-north2 `eu-north2-a`. B200 (`gpu-b200-sxm`, `8gpu-160vcpu-1792gb`): us-central1, me-west1. B300 (`gpu-b300-sxm`, `8gpu-192vcpu-2768gb`): uk-south1, eu-west2, us-north1. GB300 (`gpu-gb300`): 4 NICs per node. No fabric: L40S, RTX PRO 6000, every 1-GPU preset. The fabric names change as Nebius adds capacity: `infiniband_fabric` in `terraform.tfvars` is the one place to update (docs.nebius.com/compute/clusters/gpu). |
 
@@ -519,6 +543,13 @@ declare a model-owned finalizer, `job.finalize = {"command": "...", "on_exit_cod
 "cpu": "1", "memory": "2Gi"}`: a fixed command in the model's own image that re-delivers from the kept work volume
 after the scientific compute ended with one of `on_exit_codes` ("compute done, delivery pending"). Never a
 caller-supplied executable, never a GPU, never a recomputation.
+
+For a multi-node run (JobSet, `checkpoints: shared`) the same verb renders the finalizer as ONE CPU pod (a single-node
+render of the class: no `nodes`, no GPU, no fabric, a small `/work` claim of its own) with the gang's shared checkpoint
+subPath mounted where every rank had it (`/work/checkpoint`, `CHECKPOINT_DIR`), the coordinator's record as the finalized
+attempt (`FINALIZE_OF` = the rank-0 pod of the newest incarnation, `FINALIZE_EPOCH`, `FINALIZE_RANK=0`,
+`FINALIZE_GANG_RESTART`, `FINALIZE_NODES`); the delivery verdict is the coordinator's exit code, never a peer's teardown
+exit. The GPU gang is never rendered again for a delivery.
 
 `POST /v1/operations/<id>:export` (the existing verb) is then accepted for a FAILED application run whose newest
 attempt ended with one of those exit codes and whose volume is kept: `<root>-x<n>` is rendered on the same
