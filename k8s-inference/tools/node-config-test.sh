@@ -37,6 +37,15 @@ cat > "$B/containerd" <<'EOF'
 #!/bin/bash
 echo "containerd $*" >> "$CALLS"; exit 0
 EOF
+# RACE=<file>: a `mkdir` that, after the real mkdir of the mirror directory, drops Spegel's peers file there — the file
+# "appears" between the script's absence check and its publication
+cat > "$B/mkdir" <<'EOF'
+#!/bin/bash
+/bin/mkdir "$@"
+if [ -n "${RACE:-}" ] && [[ "${@: -1}" == */certs.d/registry.serverless2.local ]]; then
+  printf 'server = "http://127.0.0.1:30500"\n\n[host."http://10.0.0.9:5000"]\n  capabilities = ["pull", "resolve"]\n' > "$RACE"
+fi
+EOF
 chmod +x "$B"/*
 node() { # <dir>: a host filesystem; memlock=<0|1> hosts=<none|spegel|boot> served=<0|1>
   local d=$1 memlock=$2 hosts=$3 limit=$4
@@ -50,9 +59,9 @@ node() { # <dir>: a host filesystem; memlock=<0|1> hosts=<none|spegel|boot> serv
   esac
   return 0
 }
-run() { # <dir> <pull ok> -> stdout; CALLS reset
+run() { # <dir> <pull ok> [race file] -> stdout; CALLS reset
   CALLS="$T/calls.txt"; : > "$CALLS"
-  PATH="$B:$PATH" CALLS="$CALLS" PULL_OK="$2" HOST_ROOT="$1" IMAGES_HOST=registry.serverless2.local CACHE_NODE_PORT=30500 SETTLE_S=0 sh "$S"
+  PATH="$B:$PATH" CALLS="$CALLS" PULL_OK="$2" RACE="${3:-}" HOST_ROOT="$1" IMAGES_HOST=registry.serverless2.local CACHE_NODE_PORT=30500 SETTLE_S=0 sh "$S"
 }
 
 # 1. a fresh CPU node (nothing written yet, memlock bounded, mirrors not served): bootstrap file + memlock + ONE restart
@@ -97,4 +106,15 @@ out=$(run "$T/booted" 1) || fail "booted node: script failed: $out"
 [ "$(sha256sum "$T/booted/etc/containerd/certs.d/registry.serverless2.local/hosts.toml")" = "$before" ] || fail "booted node: the boot-time mirror file was rewritten"
 grep -q 'systemctl' "$T/calls.txt" && fail "booted node: systemd was called"
 echo "   ok booted node (cloud-init fragment): no-op"
+# 5. the race: Spegel writes its peers file between the absence check and the publication: Spegel's file wins
+# byte-for-byte, no temporary is left behind, the rest of the run (memlock, served runtime) is unaffected
+node "$T/race" 1 none unlimited
+RH="$T/race/etc/containerd/certs.d/registry.serverless2.local/hosts.toml"
+out=$(run "$T/race" 1 "$RH") || fail "race: script failed: $out"
+grep -q '10.0.0.9:5000' "$RH" || fail "race: Spegel's peers file was clobbered by the bootstrap file"
+[ "$(grep -c 'server = ' "$RH")" = 1 ] || fail "race: the mirror file is not Spegel's alone"
+for leftover in "$T"/race/etc/containerd/certs.d/registry.serverless2.local/hosts.toml.bootstrap.*; do [ -e "$leftover" ] && fail "race: a temporary was left behind: $leftover"; done
+echo "$out" | grep -q 'appeared meanwhile' || fail "race: the script did not report the lost race: $out"
+grep -q 'systemctl' "$T/calls.txt" && fail "race: systemd was called on a served node"
+echo "   ok race: Spegel's file published in between wins, no temporary left, no restart"
 echo "node-config: all checks passed"

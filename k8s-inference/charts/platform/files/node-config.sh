@@ -27,12 +27,20 @@ host_pid() { nsenter -t 1 -m -u -i -n -p -- pidof containerd | cut -d' ' -f1; }
 probe_pull() { chroot "$HOST_ROOT" crictl pull "$PROBE" > /dev/null 2>&1; }
 
 mkdir -p "$CERTS"
-# 1. the bootstrap mirror file, only when absent (never over a Spegel-written one)
+# 1. the bootstrap mirror file, only when absent, published WITHOUT clobbering: a hard link from a uniquely named
+# temporary of this run (same filesystem) into the final name creates the file atomically and FAILS when a file exists
+# there — Spegel may have written its peers file between the absence check and this publication; whatever exists wins,
+# the temporary is removed. (A rename would silently replace it.)
 if [ ! -f "$HOSTS" ]; then
   mkdir -p "$(dirname "$HOSTS")"
-  printf 'server = "http://127.0.0.1:%s"\n\n[host."http://127.0.0.1:%s"]\n  capabilities = ["pull", "resolve"]\n' "$CACHE_NODE_PORT" "$CACHE_NODE_PORT" > "$HOSTS.tmp"
-  mv "$HOSTS.tmp" "$HOSTS"
-  echo "bootstrap mirror file written for $IMAGES_HOST (the cache on 127.0.0.1:$CACHE_NODE_PORT; Spegel rewrites it with its peers)"
+  TMP="$HOSTS.bootstrap.$$"
+  printf 'server = "http://127.0.0.1:%s"\n\n[host."http://127.0.0.1:%s"]\n  capabilities = ["pull", "resolve"]\n' "$CACHE_NODE_PORT" "$CACHE_NODE_PORT" > "$TMP"
+  if ln "$TMP" "$HOSTS" 2>/dev/null; then
+    echo "bootstrap mirror file written for $IMAGES_HOST (the cache on 127.0.0.1:$CACHE_NODE_PORT; Spegel rewrites it with its peers)"
+  else
+    echo "mirror file for $IMAGES_HOST appeared meanwhile (Spegel): left as is"
+  fi
+  rm -f "$TMP"
 else
   echo "mirror file for $IMAGES_HOST present: left as is"
 fi
