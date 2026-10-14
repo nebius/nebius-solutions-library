@@ -290,7 +290,7 @@ worker pod, released once; `services/api/sessions.py`.
 
 | Step | Who | What |
 |---|---|---|
-| `POST /v1/models/<id>:session` `{timeout_s, region}` | the caller (`invoke:sync`) | admission on the key as a run's root: one concurrency slot, one request, and for a key with a GPU-second budget the endpoint's GPUs x `timeout_s` as the bound. Answers 202 with a one-time `claim_token`, `expires_at` (the claim must be presented within `sessions.claim_ttl_s`, 120 s by default) and `deadline_at` (`timeout_s` after creation) |
+| `POST /v1/models/<id>:session` `{timeout_s, region}` | the caller (`invoke:sync`) | admission on the key as a run's root: one concurrency slot, one request, and for a key with a GPU-second budget the endpoint's GPUs x `timeout_s` as the bound. `timeout_s` defaults to the endpoint's transport deadline (a single-node endpoint's `timeout_s`; 3600 for a multi-node endpoint) and may not exceed it (400 naming the bound). Answers 202 with a one-time `claim_token`, `expires_at` (the claim must be presented within `sessions.claim_ttl_s`, 120 s by default) and `deadline_at` (`timeout_s` after creation) |
 | the connection | the caller | presents the claim once: `Sec-WebSocket-Protocol: s2-session.<token>` on an upgrade, or the header `x-serverless2-session-claim: <token>` on a plain HTTP request (NDJSON streaming). The gateway's authorization hook binds it with a compare-and-swap (`claimed -> bound`, a server-generated connection id): exactly one connection ever binds a session, across API replicas; a second presentation, an expired, cancelled or foreign claim is 401. The hook injects `x-serverless2-session` and `x-serverless2-connection` towards the worker and refuses (403) any client that supplies those headers itself; the claim token is never logged |
 | `POST /internal/sessions/<id>:attach` `{connection, worker_session_id}` | the worker pod, with its own ServiceAccount token | before any decoder, reset, feed or GPU work: `bound -> attached` for the injected connection id only. The pod is verified server-side (TokenReview on the session's cluster with `sessions.token_audience` or the cluster's, the pod's namespace/name/UID from the token's claims, the pod object with the same UID, the endpoint it belongs to = the session's model); nothing is taken from headers. Idempotent for the same connection and pod UID; 409 for another connection, a second worker, or after the attach wait, a cancel or the deadline (fenced for good) |
 | `GET /internal/sessions/<id>` | the attached worker only | `status`, `cancel_requested`, `cancel_reason`, `deadline_at`: the worker polls it (or reads its own socket) to learn of a cancellation |
@@ -298,9 +298,25 @@ worker pod, released once; `services/api/sessions.py`.
 | `POST /v1/sessions/<id>:cancel`, the deadline, a client disconnect | the owner, the reconciler, the transport | cancellation *requests*: nothing is released by them. A session nobody bound ends at once (zero: no worker was reached). A bound or attached one keeps its slot until its worker releases it or its pod (exact UID) is gone or finished, which the reconciler confirms every 15 s (`worker_lost`, usage unknown). Never a replica-wide drain |
 | `GET /v1/sessions`, `GET /v1/sessions/<id>` | the owner (`read:operations`) | `status` (`claimed`, `bound`, `attached`, `ended`), `outcome`, `cancel_requested`, `attached`, `worker_session_id`, the timestamps, `gpu_seconds`, `usage` (`measured`, `unknown`, `none`) |
 
-No reconnect: a dropped connection ends at the worker (`disconnected`), the token binds once, a new session is a new
-admission. A bound session no worker attached within `sessions.attach_wait_s` (60 s) ends `unattached` with usage unknown.
+**No reconnect, by design and kept so:** a dropped connection ends at the worker (`disconnected`), the token binds once,
+a new session is a new admission; a client that needs continuity re-creates a session (the App's adapter owns that).
+**Cold attachment:** the hook binds the claim before the endpoint has a pod, so a bound session is `starting`
+(`phase`) until the reconciler observes a Ready replica of the endpoint in the session's region (one status read per
+model and region per sweep; a status it cannot read is unknown, never Ready). That first observation is recorded
+once (`ready_seen_at`, never reset by a later flap) with the attach deadline (`attach_deadline_at` =
+`sessions.attach_wait_s`, 60 s, after it, capped by the admitted `deadline_at`); the session is then
+`waiting_for_worker`. A bound session no worker attached by that deadline, or that never saw a Ready replica by its
+admitted deadline (the hard bound: never longer than `timeout_s`, no extra reservation), ends `unattached` with usage
+unknown. No GPU time is advertised for a session that never attached (`gpu_seconds` null; the key's bound stays
+unknown, separately). The public view carries no token and no pod identity.
 Settlement on the key's ledger happens exactly once per session (the reconciler retries what a crash left unsettled).
+
+**Transport deadline:** a single-node (Knative) endpoint ends every request at its revision timeout (the model's
+`timeout_s`, 600 s by default, within the fleet's Knative maximum), WebSocket or NDJSON alike, with no record on the
+session; `POST …:session` therefore refuses a `timeout_s` above it (400 naming the bound) instead of admitting a
+stream the transport would cut. A multi-node endpoint's route carries no request timeout; its sessions are bounded by
+`timeout_s` alone. **Idle shutdown:** a multi-node endpoint with `scaling.idle_s` counts its bound and attached
+sessions as activity (a stream makes no stamped call of its own).
 
 ## Native execution leases (endpoint calls whose worker holds GPU state)
 

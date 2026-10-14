@@ -511,6 +511,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         }
         if "automount_service_account_token" in s:
             runtime["automountServiceAccountToken"] = s["automount_service_account_token"]
+        if s.get("call_scratch"):
+            runtime["callScratch"] = s["call_scratch"]
         annotations = {
             f"autoscaling.knative.dev/{a}": f"{scaling[k]}s"
             for k, a in (("cooldown_s", "scale-down-delay"), ("window_s", "window"))

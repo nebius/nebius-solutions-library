@@ -119,8 +119,12 @@ def idle_shutdown() -> list[str]:
         ):
             continue
         try:
-            busy = False
+            import sessions
+
+            busy = sessions.open_on(m["name"]) > 0  # a live session stamps nothing: it is activity nonetheless
             for cid in m.get("deployments") or {}:
+                if busy:
+                    break
                 region = kube.cluster_region(cid)
                 st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
                 marks = [st.get(k) for k in ("ready_at", "last_request_at") if st.get(k)]

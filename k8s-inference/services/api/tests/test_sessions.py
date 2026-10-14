@@ -124,6 +124,24 @@ def test_sessions_are_off_unless_the_fleet_enables_them(client, admin_keys, fake
     assert r.status_code == 401
 
 
+def test_a_session_longer_than_the_transport_deadline_is_refused_with_the_bound(live, monkeypatch):
+    """A single-node endpoint ends every request at its revision timeout (the model's timeout_s, 600 by default):
+    a longer session is refused with the number to use; a multi-node endpoint (no route timeout) takes it."""
+    c, _cl, fs = live
+    r = c.post("/v1/models/llm-example:session", headers=H, json={"timeout_s": 3600})
+    assert r.status_code == 400 and "transport deadline of 600 s" in r.json()["detail"] and "timeout_s <= 600" in r.text
+    assert fs.rows == {}  # nothing admitted, nothing on the key
+    assert c.post("/v1/models/llm-example:session", headers=H, json={"timeout_s": 600}).status_code == 202
+    r = c.post("/v1/models/llm-example:session", headers=H, json={})  # left out: the transport deadline itself
+    assert r.status_code == 202 and r.json()["id"] in fs.rows
+    real = api._model
+    monkeypatch.setattr(api, "_model", lambda name: {**real(name), "nodes": 2})
+    assert c.post("/v1/models/llm-example:session", headers=H, json={"timeout_s": 3600}).status_code == 202
+    assert sessions.transport_deadline_s({"nodes": 1, "runtime": {"timeout": 1800}}) == 1800
+    assert sessions.transport_deadline_s({"nodes": 1, "runtime": {}}) == 600
+    assert sessions.transport_deadline_s({"nodes": 2, "runtime": {"timeout": 60}}) is None
+
+
 def test_create_admits_on_the_key_and_the_hook_binds_the_claim_once(live):
     c, _cl, fs = live
     r = c.post("/v1/models/llm-example:session", headers=H, json={"timeout_s": 600})

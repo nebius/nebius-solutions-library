@@ -13,6 +13,84 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   `stack.sh` exports at apply time. Before: the token was frozen into the plan and the fresh environment value was
   ignored at apply ("Ignoring variable when applying a saved plan"), so three reviewed platform applies on 2026-10-14
   failed every Helm write with an expired token. docs/OPERATIONS.md "Saved plans".
+## api 0.11.86, jobs 0.1.25
+
+(0.11.86 / 0.1.25 supersede the unreleased 0.11.85 / 0.1.24 candidate after review; everything of it is included.)
+
+- Shared scratch placement is constrained in the rendered Pod, not only judged: `shared_scratch_available` returns
+  the eligible GPU-free shared-fs pools that hold the caller, and the render conjoins `serverless2.nebius/pool In
+  [those]` into the required node affinity next to `shared-fs In [true]`; under CPU-quota saturation Kueue therefore
+  queues the caller for its CPU pool instead of taking a shared-fs GPU flavor. The transfer-only export retry is
+  judged the same way at its own creation and refused (409, the reason) when the leaf cannot be placed then, never
+  rendered on a GPU flavor or on a per-call claim. Tests model Kueue with a saturated CPU flavor: the constrained
+  render queues (no flavor), the unconstrained one would have taken the GPU flavor.
+- `call.sh` checks the two jq writes themselves (exit status and that the file parses: a short write leaves a
+  non-empty fragment) before the rename and the sync: the capture manifest (failure → outcome unknown, marker kept,
+  nothing delivered, exit 4) and RESULT.json (failure → removed, no export state claimed, exit 6). Regression: a jq
+  stub that writes a partial document and exits 1 at each boundary.
+
+## api 0.11.85, jobs 0.1.24 (unreleased candidate, superseded by 0.11.86 / 0.1.25)
+
+(0.11.85 / 0.1.24 supersede the unreleased 0.11.84 / 0.1.23 candidate after review; everything of it is included.)
+
+- Shared scratch placement proven, not assumed: `shared_scratch_available` judges the caller's OWN requests (main,
+  uploader, the provisioning init; no GPU) against the per-node fit of the region's GPU-FREE pools that mount the
+  shared filesystem (`fit.fitting(..., shared_fs=True, gpu_free=True)`): a region whose only shared-fs pools are GPU
+  pools falls back to the per-call claim ("only GPU pools of <cluster> mount the shared filesystem": a Kueue-managed
+  caller would otherwise be admitted on a GPU flavor and occupy a GPU node for 100m, or stay Pending where no flavor
+  matches), as does a GPU-free shared-fs pool too small for the caller, and a claim that exists but is not Bound.
+  The shared-fs expression is added to the pod's required node affinity by conjunction with whatever the execution
+  profile already requires, never by overwriting it.
+- `call.sh` fails explicitly at every durability boundary (the script runs without errexit, so the 0.1.23 `durable`
+  calls were advisory): the one-POST marker not durable → no POST, marker removed, exit 6 (retryable; a marker that
+  could not even be removed makes the next attempt refuse to post); the captured response not durable → outcome
+  unknown for good, nothing delivered, exit 4 (never re-posted); the manifest not durable → nothing delivered,
+  exit 6 (a fresh attempt delivers the durable capture without posting); RESULT.json not durable → removed, no
+  export success claimed, exit 6. Tests drive the caller with a failing `sync` at each boundary and through the
+  restart that follows.
+
+## api 0.11.84, jobs 0.1.23 (unreleased candidate, superseded by 0.11.85 / 0.1.24)
+
+- Durable endpoint calls on the tenant's shared scratch (docs/JOBS.md "Scratch storage"), opt-in per endpoint model
+  (`call_scratch: shared`; default `network` unchanged): the caller's capture lives on the tenant's existing
+  `scratch-shared` claim at the API-derived leaf `calls/<op>` (a subPath; main and the uploader never see the tenant
+  directory) instead of a per-call block claim whose attach cost ~50 s per call. A trusted init container provisions
+  exactly that leaf (root with CHOWN/FOWNER/DAC_OVERRIDE only). `call.sh` fsyncs the one-POST marker, the capture,
+  the manifest and RESULT.json (jobs 0.1.23). The uploader empties the leaf only after the acknowledged delivery and
+  a proof of the capture (manifest, sha256, RESULT.json; `scratch.sh`), removes symlinks as links and never follows
+  them, refuses foreign-owned entries, never deletes the shared claim; the empty leaf is the recorded GC gap (no
+  age-based reaping, no scanning of other work). `:export` and a CPU delivery retry mount the same leaf. Fallback to
+  the per-call claim, recorded on the Job, where the region/cluster/namespace cannot carry it. `tools/scratch-test.sh`
+  in `make check`. Includes 0.11.83 (sessions cold attachment) and 0.11.82.
+
+## api 0.11.83
+
+(0.11.83 supersedes the unreleased 0.11.82 candidate: tags are immutable; everything of 0.11.82 is included.)
+
+- Cold attachment of a live session (docs/API.md "Sessions", migration 20): the attach wait no longer runs from the
+  hook's bind (before the endpoint has a pod) but from the first Ready replica the reconciler observes for the
+  session's endpoint in its region, recorded ONCE (`ready_seen_at`, a compare-and-swap; a later readiness flap never
+  moves it) together with `attach_deadline_at` (`attach_wait_s` after it, capped by the admitted `deadline_at`).
+  The hard bound stays the admitted deadline: a session that never sees a Ready replica ends `unattached` there,
+  no extra reservation, no extension. Endpoint status is read once per (model, region) per sweep; a status that
+  cannot be read is unknown (neither Ready nor idle: nothing changes). The public session carries `phase`
+  (`claimed`, `starting`, `waiting_for_worker`, `attached`, `ended`), `ready_seen_at` and `attach_deadline_at`, no
+  token, no pod identity; no GPU time is advertised for a session that never attached. PostgreSQL-backed tests:
+  cold start longer than the wait then ready and attach; ready but no worker expires at the attach deadline;
+  never-ready ends at the admitted deadline; a flap never extends; two regions judged separately; concurrent
+  sweeps record readiness once and end a session once.
+
+## api 0.11.82 (unreleased candidate, superseded by 0.11.83)
+
+- Sessions (docs/API.md "Sessions"), before any enablement: `POST /v1/models/<id>:session` refuses a `timeout_s`
+  above the endpoint's transport deadline (a single-node endpoint's revision timeout, the model's `timeout_s`, 600 s
+  by default; a multi-node endpoint has none) with a 400 naming the bound, instead of admitting a stream Knative
+  would cut mid-way with no record; nothing is shortened silently; `timeout_s` left out now defaults to that
+  deadline (3600 without one) instead of a fixed 3600 that the transport could not carry. The idle shutdown of multi-node endpoints counts
+  bound and attached sessions as activity. The no-reconnect rule is stated as kept. PostgreSQL-backed tests of the
+  session transitions (compare-and-swap bind across replicas, attach fencing, release idempotency, cancel) and of
+  the sweep (expired claim, unattached binding, deadline cancel request, lost worker, deferred settlement) run in
+  `make check` like the lease tests. Sessions stay off (`sessions.enabled` false); no interface changed.
 
 ## api 0.11.81, fleet chart 0.1.12
 

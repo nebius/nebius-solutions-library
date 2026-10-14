@@ -753,8 +753,11 @@ def test_sessions_bind_once_attach_release_once_and_sweep(database, monkeypatch)
     assert f"{s3['id']}:expired" in sessions.sweep() and sessions.get(s3["id"])["usage"] == "none"
     s4 = sessions.create(h, "demo", "owner-1", "stt", "north", "eu-north1", 600, 1)
     sessions.bind(s4["claim_token"], "stt")
-    with db.pool().connection() as c:
-        c.execute("update sessions set bound_at = now() - interval '2 minutes' where id = %s", (s4["id"],))
+    with db.pool().connection() as c:  # api 0.11.83: the attach wait runs from the first observed Ready replica
+        c.execute(
+            "update sessions set ready_seen_at = now() - interval '2 minutes', attach_deadline_at = now() - interval '1 minute' where id = %s",
+            (s4["id"],),
+        )
     assert f"{s4['id']}:unattached" in sessions.sweep()
     g = sessions.get(s4["id"])
     assert g["state"] == "ended" and g["usage"] == "unknown" and g["settled_at"] is not None

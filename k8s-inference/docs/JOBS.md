@@ -731,3 +731,31 @@ the uploader still syncs `/work` to the bucket, but a preempted pod's scratch is
 run must checkpoint to object storage itself and `:resume` is not available (`resumable` stays false).
 Every run pod carries seccomp `RuntimeDefault`, no capabilities and no privilege escalation; the tenant
 namespace enforces Pod Security `baseline`.
+
+**Durable endpoint calls on the tenant's shared scratch (`call_scratch: shared`, endpoint models, opt-in).** An
+endpoint call with application I/O keeps its capture (request, response, manifest) on a retained volume so a
+replacement attempt delivers it without a second inference POST. By default that volume is a per-call network claim
+(`<op>-work`), whose provisioning and attach cost ~50 s before the caller's first byte on Nebius (measured: scheduled
+09:06:05, attached 09:06:58). With `call_scratch: shared` on the endpoint model the caller's `/work` is instead the
+tenant's shared-scratch claim (`scratch-shared`, charts/tenant: one static RWX volume per tenant namespace rooted at
+the tenant's own directory on the region's shared filesystem) at the API-derived leaf `calls/<operation>`, a kubelet
+subPath: main and the uploader mount the leaf only, never the tenant's directory; no claim is created or attached, the
+filesystem is on the node already. The same leaf is what a CPU delivery retry and `:export` mount (`scratch-leaf`
+annotation; no PVC lookup), so the one-POST rule and the retained capture hold unchanged. The leaf is provisioned by a
+trusted init container (`scratch.sh provision`: the runner image as root with exactly CHOWN/FOWNER/DAC_OVERRIDE,
+PSA-baseline allowed; the kubelet creates a missing subPath directory root-owned 0755, the init makes that one
+directory `10001:10001 2770` and exits; idempotent). Publication is durable, not assumed: `call.sh` fsyncs the
+one-POST marker before the POST, the capture before its manifest, the manifest and RESULT.json after writing (a
+stream that reached a shared filesystem's server is not on disk yet). Cleanup is the uploader's, on exactly the owned
+leaf, only after the delivery is acknowledged by the API and the capture proven (`scratch.sh proof`: manifest complete,
+`response.bin` hashes to the manifest's sha256, RESULT.json says export succeeded): `scratch.sh cleanup` removes the
+leaf's entries, every one owned by the runner, symlinks as links and never followed, nothing outside the mount; the
+empty leaf directory stays (the pod cannot unlink its own mount point) and is the recorded GC gap, never scanned or
+reaped by age. A failed or unknown delivery keeps everything, as a kept volume does (`:export` retries). The shared
+claim is never deleted. The pod lands only on nodes that mount the shared filesystem (`shared-fs` affinity). Where the
+region has no shared filesystem, the cluster is unknown to the fit table, or the tenant namespace has no claim, the
+caller falls back to the per-call claim and records why (`scratch: network`, `scratch-fallback`). The judgement is
+the caller's own placement, not the region's: a GPU-free pool (system or CPU; a caller never occupies a GPU node) that
+mounts the filesystem must hold the caller's requests on one node and the claim must be Bound, else the fallback; the
+shared-fs requirement joins the pod's required affinity by conjunction with anything an execution profile already
+requires. Runs and multi-node runs are unchanged (their scratch stays `network` / `local-nvme`).

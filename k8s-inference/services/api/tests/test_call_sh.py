@@ -44,6 +44,17 @@ exit 0
 """
 
 
+SYNC_STUB = r"""#!/bin/bash
+# a scripted sync: SYNC_FAIL=all fails every call; SYNC_FAIL=after:N fails from the (N+1)th call on; the count persists
+n=0; [ -f "$SYNC_COUNT" ] && n=$(cat "$SYNC_COUNT"); n=$((n + 1)); echo "$n" > "$SYNC_COUNT"
+case "${SYNC_FAIL:-}" in
+  all) exit 1;;
+  after:*) [ "$n" -gt "${SYNC_FAIL#after:}" ] && exit 1;;
+esac
+exit 0
+"""
+
+
 def _run(tmp_path, binding, script, env=None, work_files=None):
     work = tmp_path / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -58,6 +69,23 @@ def _run(tmp_path, binding, script, env=None, work_files=None):
     stub = bin_ / "curl"
     stub.write_text(STUB)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    sync = bin_ / "sync"  # every run sees the scripted sync; without SYNC_FAIL it always succeeds
+    sync.write_text(SYNC_STUB)
+    sync.chmod(sync.stat().st_mode | stat.S_IEXEC)
+    jq = bin_ / "jq"  # JQ_FAIL=manifest|result: that one jq write emits a partial document and exits 1 (a short write)
+    jq.write_text(
+        "#!/bin/bash\nreal=$(command -v -p jq || echo /usr/bin/jq)\n"
+        'case "${JQ_FAIL:-}" in\n'
+        '  manifest) for a in "$@"; do [[ "$a" == *capture_complete:true* ]] && { printf \'{"operation_id":"op-1","attempt_id\'; exit 1; }; done;;\n'
+        '  result) for a in "$@"; do [[ "$a" == *export:\\"succeeded\\"* ]] && { printf \'{"result_ref":"app://\'; exit 1; }; done;;\n'
+        'esac\nexec "$real" "$@"\n'
+    )
+    jq.chmod(jq.stat().st_mode | stat.S_IEXEC)
+    mv = bin_ / "mv"  # MV_FAIL=<basename>: the rename of exactly that file fails (a write/rename failure at a boundary)
+    mv.write_text(
+        '#!/bin/bash\nif [ -n "${MV_FAIL:-}" ] && [ "$(basename "${@: -1}")" = "$MV_FAIL" ]; then echo "mv: refused $MV_FAIL" >&2; exit 1; fi\nexec /bin/mv "$@"\n'
+    )
+    mv.chmod(mv.stat().st_mode | stat.S_IEXEC)
     calls, scr = tmp_path / "calls.txt", tmp_path / "script.txt"
     calls.write_text("")
     scr.write_text("\n".join(script) + "\n")
@@ -75,6 +103,7 @@ def _run(tmp_path, binding, script, env=None, work_files=None):
         "AUTH_HEADER": "Bearer k",
         "ADMITTED": "t",
         "BACKOFF_BASE": "0",
+        "SYNC_COUNT": str(tmp_path / "sync.count"),
         **(env or {}),
     }
     # call.sh does `cd /work`: run it in a shell that maps /work to the temp directory through a wrapper
@@ -264,3 +293,145 @@ def test_caller_names_its_operation_and_attempt_next_to_the_admission(tmp_path):
     headers.write_text("")
     r, _work, _calls = _run(tmp_path / "plain", BINDING, script, env={"ADMITTED": "", "HEADERS": str(headers)})
     assert r.returncode == 0 and "x-serverless2-operation" not in headers.read_text()
+
+
+QUICK = {"READY_BACKOFF_BASE": "0", "READY_MAX_WAIT": "5"}
+FULL = [
+    "GET https://ep.example/health 200 ok",
+    'POST https://ep.example/v1/chat 200 {"choices":[]}',
+    "PUT https://objects.example/put/response 200",
+    "PUT https://objects.example/put/call 200",
+]
+
+
+def _posts(calls):
+    return [c for c in calls if c.startswith("POST https://ep.example")]
+
+
+def _puts(calls):
+    return [c for c in calls if c.startswith("PUT ")]
+
+
+def test_sync_failure_before_the_post_means_no_post_and_a_retryable_exit(tmp_path):
+    """The one-POST marker could not be made durable: nothing is posted, the marker is taken back, exit 6 (retryable);
+    the restart (sync working again) posts exactly once and delivers."""
+    script = list(FULL)
+    r, work, calls = _run(tmp_path, BINDING, script, env={**QUICK, "SYNC_FAIL": "all"})
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert _posts(calls) == [] and _puts(calls) == []
+    assert not (work / "posted.json").exists() and not (work / "call.json").exists()
+    assert not (work / "RESULT.json").exists()  # the failure record itself could not be made durable: none is claimed
+    # the restart on the same work directory, sync healthy: one POST, delivered
+    (tmp_path / "sync.count").unlink(missing_ok=True)
+    r2, work, calls2 = _run(tmp_path, BINDING, script, env=QUICK)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert len(_posts(calls2)) == 1 and len(_puts(calls2)) == 2
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True
+
+
+def test_sync_failure_after_the_post_keeps_the_outcome_unknown_and_never_reposts(tmp_path):
+    """The response was captured but could not be made durable: outcome unknown for good (exit 4), nothing delivered,
+    no manifest; the restart sees the marker and refuses to post again."""
+    script = list(FULL)
+    # the marker's sync (1st call) succeeds, the capture's sync (2nd) fails
+    r, work, calls = _run(tmp_path, BINDING, script, env={**QUICK, "SYNC_FAIL": "after:1"})
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and _puts(calls) == []
+    assert (work / "posted.json").exists() and not (work / "call.json").exists()
+    assert not (work / "RESULT.json").exists()
+    assert "could not be made durable" in r.stdout
+    (tmp_path / "sync.count").unlink(missing_ok=True)
+    r2, work, calls2 = _run(tmp_path, BINDING, script, env=QUICK)
+    assert r2.returncode == 4 and _posts(calls2) == [] and _puts(calls2) == []  # never a second POST
+    assert json.loads((work / "call.json").read_text())["outcome"] == "unknown"
+
+
+def test_manifest_or_result_sync_failure_defers_without_a_false_success(tmp_path):
+    """The bytes are durable but the manifest is not: nothing delivered, exit 6; the restart delivers the complete
+    capture without posting. RESULT.json not durable after a delivery: removed, exit 6, no export success claimed."""
+    script = list(FULL)
+    r, work, calls = _run(
+        tmp_path, BINDING, script, env={**QUICK, "SYNC_FAIL": "after:2"}
+    )  # marker ok, capture ok, manifest fails
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and _puts(calls) == [] and not (work / "RESULT.json").exists()
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True  # the bytes it names are durable
+    (tmp_path / "sync.count").unlink(missing_ok=True)
+    r2, work, calls2 = _run(tmp_path, BINDING, FULL[2:], env=QUICK)
+    assert r2.returncode == 0 and _posts(calls2) == [] and len(_puts(calls2)) == 2
+    assert json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
+
+
+def test_result_sync_failure_never_claims_export_success(tmp_path):
+    """RESULT.json itself not durable after a delivery: removed, exit 6, nothing claims success; the capture stays
+    complete for the next attempt."""
+    r, work, calls = _run(
+        tmp_path, BINDING, list(FULL), env={**QUICK, "SYNC_FAIL": "after:3"}
+    )  # marker, capture, manifest ok
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and len(_puts(calls)) == 2 and not (work / "RESULT.json").exists()
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True
+
+
+def test_marker_write_or_rename_failure_means_no_post(tmp_path):
+    """The one-POST marker could not be created (its rename fails): no POST, nothing claimed, exit 6; the restart on a
+    healthy filesystem posts once."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "MV_FAIL": "posted.json"})
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert _posts(calls) == [] and _puts(calls) == []
+    assert not (work / "posted.json").exists() and not (work / "posted.json.tmp").exists()
+    r2, work, calls2 = _run(tmp_path, BINDING, list(FULL), env=QUICK)
+    assert r2.returncode == 0 and len(_posts(calls2)) == 1
+
+
+def test_manifest_rename_failure_keeps_the_marker_and_the_unknown_outcome(tmp_path):
+    """call.json could not be renamed into place after the POST: outcome unknown (exit 4), posted.json stays, nothing
+    delivered; the restart refuses to post again."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "MV_FAIL": "call.json"})
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and _puts(calls) == []
+    assert (work / "posted.json").exists() and not (work / "call.json").exists()
+    assert not (work / "RESULT.json").exists() or json.loads((work / "RESULT.json").read_text())["export"] == "failed"
+    r2, work, calls2 = _run(tmp_path, BINDING, list(FULL), env=QUICK)
+    assert r2.returncode == 4 and _posts(calls2) == []
+
+
+def test_result_rename_failure_never_claims_export_success(tmp_path):
+    """RESULT.json could not be renamed into place after a delivery: no success claimed, exit 6; the capture stays
+    complete and the restart delivers it again without posting."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "MV_FAIL": "RESULT.json"})
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and len(_puts(calls)) == 2 and not (work / "RESULT.json").exists()
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True
+    r2, work, calls2 = _run(tmp_path, BINDING, FULL[2:], env=QUICK)
+    assert (
+        r2.returncode == 0
+        and _posts(calls2) == []
+        and json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
+    )
+
+
+def test_partial_manifest_write_keeps_the_outcome_unknown(tmp_path):
+    """jq writes a partial manifest and fails: the fragment is never renamed into place, the outcome is unknown
+    (exit 4), posted.json stays, nothing is delivered; the restart refuses to post again."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "JQ_FAIL": "manifest"})
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and _puts(calls) == []
+    assert (
+        (work / "posted.json").exists() and not (work / "call.json").exists() and not (work / "call.json.tmp").exists()
+    )
+    r2, work, calls2 = _run(tmp_path, BINDING, list(FULL), env=QUICK)
+    assert r2.returncode == 4 and _posts(calls2) == []
+
+
+def test_partial_result_write_never_claims_export_success(tmp_path):
+    """jq writes a partial RESULT.json and fails after a delivery: nothing claims success, exit 6; the capture stays
+    complete and the restart delivers it again without posting."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "JQ_FAIL": "result"})
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and len(_puts(calls)) == 2
+    assert not (work / "RESULT.json").exists() and not (work / "RESULT.json.tmp").exists()
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True
+    r2, work, calls2 = _run(tmp_path, BINDING, FULL[2:], env=QUICK)
+    assert r2.returncode == 0 and _posts(calls2) == []
+    assert json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"

@@ -47,7 +47,7 @@ OUTCOMES = ("done", "cancelled", "disconnected", "busy", "error")
 COLUMNS = (
     "id, tenant, owner, key_hash, model, cluster, region, state, connection, pod, pod_namespace, pod_uid, "
     "worker_session_id, gpu_bound, created_at, expires_at, deadline_at, bound_at, attached_at, cancel_requested_at, "
-    "cancel_reason, ended_at, outcome, gpu_seconds, usage, settled_at"
+    "cancel_reason, ended_at, outcome, gpu_seconds, usage, settled_at, ready_seen_at, attach_deadline_at"
 )
 
 
@@ -72,14 +72,26 @@ def _ts(t) -> str | None:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ") if t else None
 
 
+def phase_of(s: dict) -> str:
+    """The truthful place of a session: `claimed` (no connection yet), `starting` (bound; the endpoint has shown no
+    Ready replica since: a pod may be cold-starting, no GPU is allocated to this session), `waiting_for_worker`
+    (bound; a Ready replica was observed, the worker has not attached: the attach wait runs), `attached`, `ended`."""
+    if s["state"] == "bound":
+        return "waiting_for_worker" if s.get("ready_seen_at") else "starting"
+    return s["state"]
+
+
 def public(s: dict) -> dict:
-    """The owner's view of a session (no pod identity, no key hash)."""
+    """The owner's view of a session (no pod identity, no key hash, no token)."""
     return {
         "id": s["id"],
         "model": s["model"],
         "cluster": s["cluster"],
         "region": s["region"],
         "status": s["state"],
+        "phase": phase_of(s),
+        "ready_seen_at": _ts(s.get("ready_seen_at")),
+        "attach_deadline_at": _ts(s.get("attach_deadline_at")),
         "outcome": s["outcome"],
         "cancel_requested": s["cancel_requested_at"] is not None,
         "cancel_reason": s["cancel_reason"],
@@ -103,6 +115,32 @@ def gpus_per_replica(m: dict) -> int:
         return int(g.split("x", 1)[0]) if "x" in g else 0
     except ValueError:
         return 0
+
+
+def transport_deadline_s(m: dict) -> int | None:
+    """The longest connection the endpoint's transport carries (docs/API.md "Sessions"): a single-node (Knative)
+    endpoint ends every request at its revision timeout (`timeout_s` of the model, the catalog's `runtime.timeout`,
+    600 s by default; the fleet's Knative config bounds it), WebSocket or NDJSON alike, with no record on the
+    session; a multi-node endpoint's route carries no request timeout (`request: 0s`). None = no transport bound."""
+    if int(m.get("nodes") or 1) > 1:
+        return None
+    t = (m.get("runtime") or {}).get("timeout")
+    try:
+        return int(t) if t is not None else 600
+    except (TypeError, ValueError):
+        return 600
+
+
+def open_on(model: str) -> int:
+    """Sessions bound or attached on a model right now: an idle-shutdown must count them as activity (the stream
+    makes no stamped call of its own). 0 without the feature."""
+    if not enabled():
+        return 0
+    with db.pool().connection() as c:
+        r = c.execute(
+            "select count(*) from sessions where model = %s and state in ('bound', 'attached')", (model,)
+        ).fetchone()
+    return int(r[0]) if r else 0
 
 
 # ---- transitions ------------------------------------------------------------------------------------------------
@@ -333,17 +371,48 @@ def verify_worker(token: str, s: dict, endpoint_model) -> dict:
 
 
 # ---- the sweep (reconcile loop) -------------------------------------------------------------------------------------
+def endpoint_ready(model: str, region: str, cache: dict) -> bool | None:
+    """Whether the session's endpoint has a Ready replica in its region: True, False, or None when the status cannot
+    be read (unknown is unknown: never Ready, never idle). One read per (model, region) per sweep (`cache`)."""
+    key = (model, region)
+    if key in cache:
+        return cache[key]
+    verdict: bool | None = None
+    try:
+        import catalog
+
+        m = catalog.get(model)
+        if m and m.get("k8s_name") and m.get("namespace"):
+            st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m.get("nodes") or 1))
+            status = (st or {}).get("status")
+            verdict = (
+                True
+                if status == "ready"
+                else (False if status in ("scaled-to-zero", "deploying", "unavailable", "error") else None)
+            )
+    except Exception as e:  # noqa: BLE001 - unknown, not a verdict
+        log.debug("session sweep: endpoint status of %s in %s unknown: %s", model, region, e)
+        verdict = None
+    cache[key] = verdict
+    return verdict
+
+
 def sweep() -> list[str]:
     """Every 15 s on each replica (idempotent): a claim nobody bound before it expired ends at zero (no worker was
-    reached); a bound session no worker attached within the attach wait ends unknown and is fenced; an attached
-    session past its deadline gets a cancel request; an attached session whose pod (exact UID) is gone or finished
-    ends unknown; ended sessions left unsettled by a crash are settled. Returns `<id>:<what>`."""
+    reached); a bound session is `starting` until its endpoint shows a Ready replica, which is recorded ONCE
+    (`ready_seen_at`, never reset by a later flap) together with the attach deadline (`attach_wait_s` from then,
+    capped by the admitted `deadline_at`); a bound session no worker attached by that deadline, or that never saw a
+    Ready replica by its admitted deadline, ends `unattached` with usage unknown and is fenced; an attached session
+    past its deadline gets a cancel request; an attached session whose pod (exact UID) is gone or finished ends
+    unknown; ended sessions left unsettled by a crash are settled. Endpoint status is read once per (model, region)
+    per sweep. Returns `<id>:<what>`."""
     if not enabled():
         return []
     out = []
     with db.pool().connection() as c:
         rows = c.execute(f"select {COLUMNS} from sessions where state <> 'ended' or settled_at is null").fetchall()
     now = datetime.now(timezone.utc)
+    ready_cache: dict = {}
     for r in rows:
         s = _row(r)
         sid = s["id"]
@@ -352,9 +421,25 @@ def sweep() -> list[str]:
                 if s["state"] == "claimed" and s["expires_at"] <= now:
                     if _end(c, sid, "claimed", "expired", 0.0, "none"):
                         out.append(f"{sid}:expired")
-                elif s["state"] == "bound" and s["bound_at"] + timedelta(seconds=cfg.SESSION_ATTACH_WAIT_S) <= now:
-                    if _end(c, sid, "bound", "unattached", None, "unknown"):
-                        out.append(f"{sid}:unattached")
+                elif s["state"] == "bound":
+                    if s["deadline_at"] <= now:
+                        # the hard bound: the admitted deadline, whatever the endpoint did (never-ready included)
+                        if _end(c, sid, "bound", "unattached", None, "unknown"):
+                            out.append(f"{sid}:unattached")
+                    elif s["ready_seen_at"] is None:
+                        if endpoint_ready(s["model"], s["region"], ready_cache) is True:
+                            # recorded once: a compare-and-swap on ready_seen_at, so concurrent sweeps and later flaps
+                            # never move the attach deadline
+                            n = c.execute(
+                                "update sessions set ready_seen_at = now(), attach_deadline_at = least(now() + %s * interval '1 second', deadline_at) "
+                                "where id = %s and state = 'bound' and ready_seen_at is null",
+                                (cfg.SESSION_ATTACH_WAIT_S, sid),
+                            ).rowcount
+                            if n:
+                                out.append(f"{sid}:ready-seen")
+                    elif s["attach_deadline_at"] is not None and s["attach_deadline_at"] <= now:
+                        if _end(c, sid, "bound", "unattached", None, "unknown"):
+                            out.append(f"{sid}:unattached")
                 elif s["state"] == "attached":
                     if s["deadline_at"] <= now and s["cancel_requested_at"] is None:
                         c.execute(

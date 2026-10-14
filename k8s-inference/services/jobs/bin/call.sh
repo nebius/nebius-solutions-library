@@ -45,6 +45,13 @@ backoff() {   # exponential, BACKOFF_BASE (5 s) x 2^n, capped at BACKOFF_MAX (30
 
 binding() { [ -n "$PRIV" ] && [ -f "$PRIV/$1" ] && cat "$PRIV/$1"; }
 
+durable() {   # the named files (and the directory entries) reach stable storage before anything depends on them:
+  # a node that dies right after a write must not leave a marker or capture that only the page cache had seen; on a
+  # shared filesystem a stream that reached the server is not yet on disk either. busybox sync takes files (-f: the
+  # containing filesystem); the whole-system sync is the fallback
+  sync -f "$@" 2>/dev/null || sync -f . 2>/dev/null || sync
+}
+
 ready_pause() {   # readiness only: READY_BACKOFF_BASE (2 s) x 2^(n-1), capped at READY_BACKOFF_MAX (10 s); never the POST's backoff
   local e=$(( $1 - 1 )); [ "$e" -gt 4 ] && e=4
   local s=$(( ${READY_BACKOFF_BASE:-2} * (1 << e) )); [ "$s" -gt "${READY_BACKOFF_MAX:-10}" ] && s=${READY_BACKOFF_MAX:-10}
@@ -99,12 +106,27 @@ deliver() {   # upload the capture; with refresh, fresh URLs first, and once mor
 
 finish() {   # $1 = export state; RESULT.json is what the uploader's attempt record carries (upload.sh record mode)
   local ref; ref=$(binding result_ref)
+  local wrote=0
   if [ "$1" = succeeded ]; then
-    jq -cn --arg r "$ref" --arg a "${CAPTURE_ATTEMPT:-${POD_NAME:-}}" '{result_ref:$r, export:"succeeded", capture_attempt_id:$a}' > RESULT.json.tmp
+    jq -cn --arg r "$ref" --arg a "${CAPTURE_ATTEMPT:-${POD_NAME:-}}" '{result_ref:$r, export:"succeeded", capture_attempt_id:$a}' > RESULT.json.tmp && wrote=1
   else
-    jq -cn --arg r "$ref" --arg e "${2:-}" '{export:"failed", error:$e} + (if $r != "" then {result_ref_pending:$r} else {} end)' > RESULT.json.tmp
+    jq -cn --arg r "$ref" --arg e "${2:-}" '{export:"failed", error:$e} + (if $r != "" then {result_ref_pending:$r} else {} end)' > RESULT.json.tmp && wrote=1
   fi
-  mv RESULT.json.tmp RESULT.json
+  # the write itself is checked (jq's exit status, and the file parses as JSON: a short write leaves a non-empty
+  # fragment), then the rename, then the sync
+  if [ "$wrote" != 1 ] || ! jq -e . RESULT.json.tmp > /dev/null 2>&1 || ! mv RESULT.json.tmp RESULT.json || ! durable RESULT.json .; then
+    # no export state may be claimed by a record that was not written, not renamed, or that a node loss could erase:
+    # whatever is there is taken back and the caller ends retryable (exit 6); a fresh attempt delivers the kept
+    # capture again (idempotent PUTs) and finishes
+    rm -f RESULT.json RESULT.json.tmp; echo "RESULT.json could not be written durably: removed (no export state is claimed)"; return 1
+  fi
+  return 0
+}
+
+not_durable_exit() {   # $1 = what: a durability failure AFTER the POST: the capture (if any) stays, nothing is delivered,
+  # the outcome is unknown (exit 4: never re-posted; nothing to export until a complete durable capture exists)
+  echo "$1 could not be made durable: outcome unknown, not delivering, not posting again" | tee /dev/termination-log 2>/dev/null
+  exit 4
 }
 
 if [ "${IO_MODE:-managed}" != application ]; then
@@ -142,8 +164,8 @@ if [ "${TRANSFER_ONLY:-0}" = 1 ]; then
   # the captured outcome, so a delivered error never becomes a successful inference
   if [ -f call.json ] && [ -f response.bin ] && [ "$(jq -r '.capture_complete // false' call.json)" = true ]; then
     CAPTURE_ATTEMPT=$(jq -r '.attempt_id // empty' call.json)
-    if deliver; then finish succeeded; done_with "$(jq -r '.http_status // 0' call.json)"; fi
-    finish failed "upload of the retained capture failed again"; exit 0
+    if deliver; then finish succeeded && done_with "$(jq -r '.http_status // 0' call.json)"; exit 6; fi
+    finish failed "upload of the retained capture failed again" || true; exit 0
   fi
   echo "no complete capture on the work volume: nothing to export (inference is not repeated)"
   finish failed "no complete capture to export"; exit 3
@@ -152,8 +174,8 @@ fi
 if [ -f call.json ] && [ "$(jq -r '.capture_complete // false' call.json)" = true ]; then
   echo "a complete capture exists already (a previous attempt of this operation): delivering it, not calling again"
   CAPTURE_ATTEMPT=$(jq -r '.attempt_id // empty' call.json)
-  if deliver; then finish succeeded; done_with "$(jq -r '.http_status // 0' call.json)"; fi
-  finish failed "upload failed"; exit 0
+  if deliver; then finish succeeded && done_with "$(jq -r '.http_status // 0' call.json)"; exit 6; fi
+  finish failed "upload failed" || true; exit 0
 fi
 
 # the request: inline in the binding, or fetched at transfer time (a queued call may outlive a URL minted at submission)
@@ -209,7 +231,17 @@ fi
 n=0
 while :; do
   posted_epoch=$(date -u +%s)
-  jq -cn --arg a "${POD_NAME:-$(hostname)}" --argjson e "$posted_epoch" '{attempt_id:$a, posted_at:($e|todate)}' > posted.json.tmp && mv posted.json.tmp posted.json
+  # the one-POST marker: written, renamed into place and on stable storage BEFORE the POST, each step checked (the
+  # script runs without errexit): a marker that was not created, not renamed or not synced means NO POST. The attempt
+  # ends retryable (exit 6) with the marker taken back (it names a POST that did not happen); a marker that could not
+  # even be removed makes the next attempt refuse to post (exit 4)
+  if ! jq -cn --arg a "${POD_NAME:-$(hostname)}" --argjson e "$posted_epoch" '{attempt_id:$a, posted_at:($e|todate)}' > posted.json.tmp \
+     || ! [ -s posted.json.tmp ] || ! mv posted.json.tmp posted.json || ! [ -s posted.json ] || ! durable posted.json .; then
+    rm -f posted.json posted.json.tmp
+    finish failed "the one-POST marker could not be made durable; the request was NOT posted" || true
+    echo "one-POST marker not durable: not posting (retryable)" > /dev/termination-log 2>/dev/null
+    exit 6
+  fi
   code=$(curl -sS -o response.bin -D headers.txt -w '%{http_code} %{time_starttransfer} %{time_total} %{size_download}' -X POST "$URL" \
          -H 'Content-Type: application/json' "${curl_auth[@]}" --data-binary @request.bin --max-time "${CALL_TIMEOUT:-3600}" 2>out/last_error.txt) || code="000 0 0 0"
   read -r http t_first t_total size <<< "$code"
@@ -233,13 +265,41 @@ completed_epoch=$(date -u +%s)
 jq -cn --arg op "${OPERATION:-}" --arg a "${POD_NAME:-$(hostname)}" --argjson st "${http:-0}" --arg ct "${ctype:-application/octet-stream}" \
    --argjson sz "$(stat -c %s response.bin)" --arg sha "$sha" --argjson p "$posted_epoch" --argjson c "$completed_epoch" --argjson tf "${t_first:-0}" --argjson tt "${t_total:-0}" \
    '{operation_id:$op, attempt_id:$a, http_status:$st, content_type:$ct, size_bytes:$sz, sha256:$sha,
-     timings:{posted_at:($p|todate), first_byte_at:(($p + ($tf|floor))|todate), completed_at:($c|todate), duration_s:$tt}, capture_complete:true}' > call.json.tmp && mv call.json.tmp call.json
+     timings:{posted_at:($p|todate), first_byte_at:(($p + ($tf|floor))|todate), completed_at:($c|todate), duration_s:$tt}, capture_complete:true}' > call.json.tmp \
+  || manifest_written=0
+if [ "${manifest_written:-1}" != 1 ] || ! jq -e . call.json.tmp > /dev/null 2>&1; then
+  # the manifest write itself failed (jq error or a short write leaving a fragment): the POST was made, no attempt may
+  # trust a capture without its manifest: outcome unknown for good (posted.json stays), nothing delivered
+  rm -f call.json.tmp
+  finish failed "inference outcome unknown: the capture manifest could not be written (HTTP $http)" || true
+  not_durable_exit "the capture manifest"
+fi
+if ! durable response.bin headers.txt .; then
+  # the capture first, then its manifest: a manifest never names bytes that are not on stable storage. The POST was
+  # made: the outcome is unknown for good (no manifest; posted.json stays), nothing is delivered, nothing re-posted
+  rm -f call.json.tmp
+  finish failed "inference outcome unknown: the captured response could not be made durable (HTTP $http)" || true
+  not_durable_exit "the captured response"
+fi
+if ! [ -s call.json.tmp ] || ! mv call.json.tmp call.json; then
+  # the manifest could not be written or renamed into place: the POST was made, the response may be there, but no
+  # attempt can trust it without its manifest: outcome unknown for good (posted.json stays), nothing delivered
+  rm -f call.json.tmp
+  finish failed "inference outcome unknown: the capture manifest could not be written (HTTP $http)" || true
+  not_durable_exit "the capture manifest"
+fi
+if ! durable call.json .; then
+  # the bytes are durable, the manifest may not be: nothing is delivered now; a fresh attempt finds either the complete
+  # manifest (and delivers without posting) or none (and refuses to post: posted.json). Retryable
+  echo "capture manifest not durable: deferring delivery to a fresh attempt (retryable)" > /dev/termination-log 2>/dev/null
+  exit 6
+fi
 CAPTURE_ATTEMPT="${POD_NAME:-$(hostname)}"
 case "$http" in
   2*) ;;
   4*) echo "the endpoint answered $http (the caller's error): the response is captured and delivered as is";;
   *) echo "the endpoint answered $http (the endpoint's error): captured and delivered as is";;
 esac
-if deliver; then finish succeeded; done_with "$http"; fi
-finish failed "upload of the capture failed; the capture is kept on the work volume for POST /v1/operations/<id>:export"
+if deliver; then finish succeeded && done_with "$http"; exit 6; fi
+finish failed "upload of the capture failed; the capture is kept on the work volume for POST /v1/operations/<id>:export" || true
 exit 0

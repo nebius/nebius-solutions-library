@@ -153,7 +153,10 @@ class SessionRequest(BaseModel):
     """`POST /v1/models/{model}:session` (docs/API.md "Sessions")."""
 
     model_config = ConfigDict(extra="forbid")
-    timeout_s: int = Field(default=3600, ge=60, le=86400)  # the session's deadline from its creation
+    timeout_s: int | None = Field(
+        default=None, ge=60, le=86400
+    )  # the session's deadline from its creation; default: the
+    # endpoint's transport deadline (a single-node endpoint's timeout_s), 3600 without one (multi-node)
     region: str | None = None  # a cluster id or region of the model's deployments (docs/API.md)
 
 
@@ -163,6 +166,9 @@ class Session(BaseModel):
     cluster: str | None = None
     region: str
     status: Literal["claimed", "bound", "attached", "ended"]
+    phase: Literal["claimed", "starting", "waiting_for_worker", "attached", "ended"] | None = None
+    ready_seen_at: str | None = None  # the first Ready replica observed while bound (once; never reset)
+    attach_deadline_at: str | None = None  # attach_wait_s after it, capped by deadline_at
     outcome: str | None = None
     cancel_requested: bool
     cancel_reason: str | None = None
@@ -368,6 +374,9 @@ class ModelSpec(BaseModel):
     env_secrets: SkipValidation[list[str] | None] = None
     pod_metadata: SkipValidation[PodMetadataSpec | None] = None
     automount_service_account_token: SkipValidation[bool | None] = None
+    # endpoint calls with application I/O: where the caller keeps its durable capture (docs/JOBS.md "Scratch storage"):
+    # `network` (the per-call claim, default) or `shared` (the tenant's shared-scratch leaf, no per-call block device)
+    call_scratch: SkipValidation[Literal["network", "shared"] | None] = None
     port: SkipValidation[int | None] = None
     protocol: SkipValidation[Literal["http", "openai", "websocket", "grpc"] | None] = None
     path: SkipValidation[str | None] = None
