@@ -392,6 +392,60 @@ def _fit_terms(pod: dict, r: dict, terms: list, placement: dict | None, region: 
     return placement
 
 
+def _is_number(v) -> bool:
+    import math
+
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def check_parameter_bounds(parameters: list, values: dict) -> None:
+    """The operator's declared bounds on a class's parameters (docs/JOBS.md "Parameters"), checked on the EFFECTIVE
+    values (the caller's input over the region's and the class's defaults) before any reservation or Job: a `number`
+    with `min`/`max` (inclusive) and `integer: true` (whole numbers only); a `select` with `options` (exactly one of
+    them); a `boolean`. A malformed numeric (a string, a boolean, NaN/inf, a fraction where an integer is declared) is
+    refused, never coerced. Parameters without bounds behave as before; a class declaring none is untouched."""
+    for p in parameters:
+        name, kind = p.get("name"), str(p.get("type") or "string")
+        if name not in values or values[name] is None:
+            continue
+        v = values[name]
+        bounded = any(k in p for k in ("min", "max", "integer", "options"))
+        if kind == "number" and (bounded or not isinstance(v, str)):
+            if not _is_number(v):
+                raise HTTPException(400, f"parameter {name}: a finite number is required, not {v!r}")
+            if p.get("integer") and float(v) != int(v):
+                raise HTTPException(400, f"parameter {name}: an integer is required, not {v!r}")
+            if "min" in p and v < p["min"]:
+                raise HTTPException(400, f"parameter {name}: {v!r} is below the minimum {p['min']}")
+            if "max" in p and v > p["max"]:
+                raise HTTPException(400, f"parameter {name}: {v!r} is above the maximum {p['max']}")
+            if p.get("integer"):
+                values[name] = int(v)
+        elif kind == "select" and p.get("options") is not None:
+            options = list(p["options"])
+            if isinstance(v, bool) or v not in options and str(v) not in [str(o) for o in options]:
+                raise HTTPException(400, f"parameter {name}: {v!r} is not one of {options}")
+        elif kind == "boolean" and bounded and not isinstance(v, bool):
+            raise HTTPException(400, f"parameter {name}: a boolean is required, not {v!r}")
+
+
+def check_gpu_bound(job: dict, rendered: dict, model_name: str) -> None:
+    """`job.maxGpus` (the operator's bound on a run's GPUs: nodes x GPUs per node, docs/JOBS.md "Parameters"), on the
+    rendered shape, before any reservation or Job; a class without it is untouched."""
+    bound = job.get("maxGpus")
+    if bound in (None, ""):
+        return
+    try:
+        nodes, gpus, limit = int(rendered.get("nodes", 1) or 1), int(rendered.get("gpu", 0) or 0), int(bound)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"model {model_name}: nodes, gpu and job.maxGpus must be integers")
+    if nodes * gpus > limit:
+        raise HTTPException(
+            400,
+            f"model {model_name}: {nodes} node(s) x {gpus} GPU(s) = {nodes * gpus} GPUs exceeds the class's maxGpus ({limit})",
+        )
+
+
 def build_run(
     name: str,
     model: dict,
@@ -449,8 +503,10 @@ def build_run(
     ]
     if missing:
         raise HTTPException(400, f"missing required parameters {missing}")
+    check_parameter_bounds(model.get("parameters", []), values)  # the operator's declared bounds, before anything else
     values["operation"] = name
     r = _render(job, values)
+    check_gpu_bound(job, r, model["name"])  # job.maxGpus: nodes x GPUs per node, on the rendered shape
     r["image"] = normalise_image(str(r.get("image") or ""))  # after the parameters: `{{image}}` is now a reference
     if argument_parameter := job.get("argsParameter"):
         arguments = values.get(argument_parameter, [])
