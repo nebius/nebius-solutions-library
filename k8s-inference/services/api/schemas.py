@@ -402,6 +402,9 @@ class ModelSpec(BaseModel):
     work_mount_aliases: SkipValidation[list[dict[str, str]] | None] = (
         None  # [{path: /abs/canonical, scope: attempt | run}]: the work volume at a canonical path (docs/JOBS.md "Work mount aliases")
     )
+    assets: SkipValidation[list[dict[str, str]] | None] = (
+        None  # [{alias, mount_path}]: restricted assets of the fleet registry, granted to the tenant, main-only read-only (docs/JOBS.md)
+    )
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
 

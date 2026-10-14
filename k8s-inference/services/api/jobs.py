@@ -71,6 +71,35 @@ from status import is_jobset, is_manager_job, is_mirror, normalise
 log = logging.getLogger("api.jobs")
 
 
+def _assets_registry() -> dict:
+    """The fleet's restricted assets (docs/JOBS.md "Restricted assets"): alias -> {kind, host_path, gid, sha256, size}."""
+    return dict(kube.fleet().get("assets") or {})
+
+
+def _asset_shared_path(a: dict) -> str | None:
+    """An asset's path relative to the shared weights filesystem root (what `weights`/`data` subPaths are relative to);
+    None when the asset lives elsewhere."""
+    hp = str(a.get("host_path") or "")
+    for root in ("/mnt/weights",):
+        if hp.startswith(root + "/"):
+            return hp[len(root) + 1 :]
+    return None
+
+
+def _private_guard(path: str, what: str) -> None:
+    """A `weights` or `data` subPath (caller-selectable through parameters) may not reach a registered asset: not its
+    path, nothing under it, and no ancestor of it (the parent is root-only, but a container running as root reads a
+    0440 root-owned file through an ancestor mount: the kubelet bind-mounts the subPath as root). Assets are mounted
+    through `assets`, with a grant, main-only, read-only, never through the shared claims."""
+    for alias, a in _assets_registry().items():
+        rel = _asset_shared_path(a)
+        if rel and _overlaps(path, rel):
+            raise HTTPException(
+                400,
+                f"{what}: {path!r} reaches the restricted asset {alias!r}; assets are mounted through `assets` with a grant",
+            )
+
+
 def _mount_data(r: dict, pod: dict, containers: list) -> None:
     """`job.data` (docs/JOBS.md "Shared data"): a directory of the tenant's area on the region's shared filesystem
     (the tenant's RWX claim, the one `checkpoints: shared` uses), mounted read-only at `dataMountPath` (default /data)
@@ -82,6 +111,7 @@ def _mount_data(r: dict, pod: dict, containers: list) -> None:
     if ".." in path.split("/"):
         raise HTTPException(400, "data: a relative directory, no parent references")
     ro = str(r.get("dataReadOnly", True)).lower() not in ("false", "0", "no")
+    _private_guard(f"tenants/{(pod.get('_tenant') or '*')}/data/{path}", "data")
     pod["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC, "readOnly": ro}})
     for c in containers:
         c["volumeMounts"].append(
@@ -112,6 +142,7 @@ def _mount_weights(r: dict, pod: dict, containers: list) -> None:
         return
     if ".." in path.split("/"):
         raise HTTPException(400, "weights: a relative directory, no parent references")
+    _private_guard(path, "weights")
     pod["volumes"].append(
         {"name": "weights", "persistentVolumeClaim": {"claimName": WEIGHTS_SHARED_PVC, "readOnly": True}}
     )
@@ -183,6 +214,57 @@ def work_aliases(r: dict) -> list[dict]:
             raise HTTPException(400, f"workMountAliases: {path} overlaps another alias")
         out.append({"path": path, "scope": scope, "slug": re.sub(r"[^A-Za-z0-9._-]+", "-", path.strip("/"))})
     return out
+
+
+def _mount_assets(r: dict, pod: dict, main: dict, tenant: str) -> str | None:
+    """`job.assets` (docs/JOBS.md "Restricted assets"): every entry mounts the tenant's claim `asset-<alias>` (the
+    tenant chart's static read-only volume rooted at the asset) on `main` only, read-only twice (claim and mount), at a
+    bounded absolute path that overlaps no other mount (data, weights, checkpoints, shm, work aliases); the asset's
+    group goes into the pod's supplemental groups (every container carries it; only main has a mount; no ownership
+    change anywhere). Alias and grant come from the fleet document, never from the request. Returns the identity
+    string recorded on the Job (`alias@sha256:…` or `alias@inventory:…`)."""
+    specs = r.get("assets") or []
+    if not specs:
+        return None
+    if not isinstance(specs, list) or len(specs) > MAX_ALIASES:
+        raise HTTPException(400, f"assets: a list of at most {MAX_ALIASES} {{alias, mountPath}} entries")
+    registry = _assets_registry()
+    granted = set(((kube.fleet().get("tenants") or {}).get(tenant) or {}).get("assets") or [])
+    gids, identity, seen = set(), [], []
+    for x in specs:
+        if not isinstance(x, dict):
+            raise HTTPException(400, "assets: each entry is {alias, mountPath}")
+        alias, path = str(x.get("alias") or ""), str(x.get("mountPath") or "")
+        a = registry.get(alias)
+        if a is None:
+            raise HTTPException(400, f"assets: {alias!r} is not a registered asset of this fleet")
+        if alias not in granted:
+            raise HTTPException(400, f"assets: {alias!r} is not granted to tenant {tenant!r}")
+        if (
+            not path.startswith("/")
+            or path == "/"
+            or path != os.path.normpath(path)
+            or not re.fullmatch(r"[A-Za-z0-9._/-]{2,200}", path)
+        ):
+            raise HTTPException(400, f"assets: {path!r} is not a bounded absolute mount path")
+        if any(_overlaps(path, p) for p in ALIAS_RESERVED):
+            raise HTTPException(400, f"assets: {path} is under a reserved path")
+        for m in main.get("volumeMounts") or []:
+            if _overlaps(path, m["mountPath"]):
+                raise HTTPException(400, f"assets: {path} overlaps the mount {m['mountPath']}")
+        if any(_overlaps(path, p) for p in seen):
+            raise HTTPException(400, f"assets: {path} overlaps another asset mount")
+        seen.append(path)
+        pod["volumes"].append(
+            {"name": f"asset-{alias}", "persistentVolumeClaim": {"claimName": f"asset-{alias}", "readOnly": True}}
+        )
+        main["volumeMounts"].append({"name": f"asset-{alias}", "mountPath": path, "readOnly": True})
+        gids.add(int(a.get("gid") or 65532))
+        kind = "sha256" if str(a.get("kind") or "file") == "file" else "inventory"
+        identity.append(f"{alias}@{kind}:{a.get('sha256') or 'unpinned'}")
+    sc = pod.setdefault("securityContext", {})
+    sc["supplementalGroups"] = sorted(set(sc.get("supplementalGroups") or []) | gids)
+    return ";".join(identity)
 
 
 def _alias_dir(a: dict) -> str:
@@ -470,10 +552,16 @@ def build_run(
             raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
         if work_aliases(r):
             raise HTTPException(400, "workMountAliases apply to single-node runs (/work is node-local per pod there)")
+        if r.get("assets"):
+            raise HTTPException(400, "assets apply to single-node runs")
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
+    pod["_tenant"] = tenant
     _mount_data(r, pod, [main])
     _mount_weights(r, pod, [main])
     _mount_aliases(r, [main], fetch)  # after the data and weights mounts: an alias may overlap none of them
+    if ident := _mount_assets(r, pod, main, tenant):  # last: an asset may overlap no mount at all, aliases included
+        meta["annotations"][f"{LABEL}/assets"] = ident
+    pod.pop("_tenant", None)
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))

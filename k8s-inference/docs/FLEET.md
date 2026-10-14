@@ -61,6 +61,7 @@ fleet = {
         }
       }
       cpu_pools = { ... }              # optional CPU-only pools, tainted serverless2.nebius/cpu-pool
+  assets = { <alias> = { kind = "file" | "tree", host_path = "/mnt/weights/...", gid = 65532, sha256 = "...", size = N } }  # restricted assets (docs/JOBS.md)
     }
   }
   prices = { "<platform>" = { on_demand = 4.50, spot = 0.79 }, ... }   # USD per GPU-hour (a default table

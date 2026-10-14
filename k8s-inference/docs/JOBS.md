@@ -35,6 +35,7 @@ job:
   inputs: "{{input_prefix}}"      # default: the input_prefix parameter
   uploadExcludes: "--exclude 'scratch/*'"
   workMountAliases: [{ path: /mnt/fs2-scientific/work, scope: attempt }]   # optional (docs/JOBS.md "Work mount aliases"): the work volume at a canonical path
+  assets: [{ alias: af3-params, mountPath: /models/af3.bin.zst }]          # optional (docs/JOBS.md "Restricted assets"): a registered, granted asset on main, read-only
 gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # classes the image runs on, PREFERRED FIRST (scheduling profile)
 deployments:                      # optional: the regions the run class may land in (default: every region of the fleet); per-region parameter defaults and price
   hub:           { price_per_gpu_hour: 2.15, parameters: { nb_min_ci: "16000" } }
@@ -302,6 +303,38 @@ mounted read-only at `/weights` (or `mount_path`) through the tenant's read-only
 thus read what an endpoint seeded without copying it; it cannot write there (the tenant's writable area is `data`).
 Every run's image reference goes through the region's cache like an endpoint's (`registry.serverless2.local/...`,
 docs/IMAGES.md), whether it comes from the job class or from the caller's `image` parameter.
+
+## Restricted assets
+
+A licensed parameter file or a pinned private tree (AlphaFold 3 parameters, a BindCraft/PyRosetta tree) reaches a run
+through three operator-owned pieces; no request or model-request field can choose a path, a claim, a group or an image:
+
+1. *Registry* (`terraform.tfvars` `assets`, in the fleet document as `assets.yaml`): `alias: {kind: file | tree,
+   host_path, gid (65532), sha256, size}`. `sha256` is the file's digest or, for a tree, the inventory digest (the tree's
+   directory is already named by it); it is recorded on every run that mounts the alias
+   (`serverless2.nebius/assets: af3-params@sha256:…` / `bindcraft-tree@inventory:…`), never computed per run.
+2. *Grant* (`tenants.<name>.assets`): the tenant chart renders, per granted alias, one static PersistentVolume rooted
+   **at the asset itself** (`hostPath` of type `File` or `Directory`, `ReadOnlyMany`) and the claim `asset-<alias>` in
+   the tenant namespace. The volume root is the file or the pinned tree: no parent to traverse from inside a pod, no
+   sibling in the volume, no `subPath`. The staging parents stay root-only (the kubelet performs the bind mount as root).
+   A tenant without the grant has no claim: a class naming the alias is refused at render.
+3. *Class* (`job.assets: [{alias, mountPath}]`, public spec `assets: [{alias, mount_path}]`, admin-defined): the claim is
+   mounted on `main` **only**, read-only on the claim reference and on the mount, at a bounded absolute path that
+   overlaps no other mount (data, weights, checkpoints, shm, work aliases); the asset's `gid` is added to the pod's
+   `supplementalGroups` (every container carries the group; only `main` has a mount; a group without a mount reads
+   nothing). Single-node runs only.
+
+Ownership never changes: `fsGroup: 10001` stays on the pod for the work volume and emptyDirs (the volume types the
+kubelet applies ownership management to), and a hostPath volume is never chowned by the kubelet, so the files keep
+`0440 root:<gid>` (directories `0550`). `main` may run as any user: it reads through the group. The sidecars keep
+`/work` exactly as before. Proof after a run: `stat -c '%U:%G %a' <host_path>` on the node is unchanged.
+
+The shared claims cannot reach an asset: a `weights` or `data` path that equals, lies under, or is an ancestor of a
+registered asset's path on the shared filesystem is refused (a container running as root would read a 0440 root-owned
+file through an ancestor mount). What the platform cannot prove is an application that copies the file into `/work`
+itself: that stays the application's licence responsibility. CPU and GPU stage classes declare their own assets: the
+AF3 prep class names the public database through `weights` and no asset; the GPU class names `af3-params` and no
+database.
 
 ## Execution options
 

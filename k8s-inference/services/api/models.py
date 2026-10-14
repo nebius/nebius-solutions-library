@@ -415,6 +415,24 @@ def _validate_variants(s: dict, kind: str) -> None:
         routing.setdefault("default", "priority")
 
 
+def _assets_spec(raw) -> list[dict]:
+    """`assets: [{alias, mount_path}]`: shape checked here (the registry and the grant are checked at render, against
+    the fleet document of the moment)."""
+    if not isinstance(raw, list) or len(raw) > 4:
+        raise HTTPException(400, "assets: a list of at most 4 {alias, mount_path} entries")
+    out = []
+    for x in raw:
+        if not isinstance(x, dict) or not re.fullmatch(
+            r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", str(x.get("alias") or "")
+        ):
+            raise HTTPException(400, "assets: alias is a DNS label")
+        path = str(x.get("mount_path") or "")
+        if not path.startswith("/") or path == "/":
+            raise HTTPException(400, "assets: mount_path is an absolute path")
+        out.append({"alias": x["alias"], "mountPath": path})
+    return out
+
+
 def _work_aliases(raw) -> list[dict]:
     import jobs  # the render's own validation (jobs.work_aliases), at registration already
 
@@ -653,6 +671,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "scratch": s.get("scratch", "network"),
             # canonical aliases of the work volume (docs/JOBS.md "Work mount aliases"): operator-owned, validated here
             **({"workMountAliases": _work_aliases(s["work_mount_aliases"])} if s.get("work_mount_aliases") else {}),
+            # restricted assets (docs/JOBS.md "Restricted assets"): operator-owned aliases of the fleet registry
+            **({"assets": _assets_spec(s["assets"])} if s.get("assets") else {}),
             "env": dict(s.get("env") or {}),
             "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
             # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class chosen at submission picks one

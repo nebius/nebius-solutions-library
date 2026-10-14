@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.68, fleet chart 0.1.9, tenant chart 0.3.4 (= 0.11.64 + the 0.11.67 lineage hotfix + restricted assets)
+
+- Restricted assets (docs/JOBS.md "Restricted assets"): an operator registry in the fleet document (`assets`: file or
+  pinned tree on the weights filesystem, gid, sha256, size), a per-tenant grant (`tenants.<name>.assets`) that the
+  tenant chart renders as a static read-only volume rooted at the asset itself (`hostPath` File/Directory, claim
+  `asset-<alias>`), and a run-class binding (`job.assets` / spec `assets: [{alias, mount_path}]`) that mounts the claim
+  on `main` only, read-only twice, at a bounded path overlapping no other mount, with the asset's group as a supplemental
+  group; no fsGroup rewrite (hostPath volumes are never chowned); identity recorded on the Job. `weights`/`data` paths that
+  reach a registered asset (itself, below it, or an ancestor) are refused. Single-node runs only.
+
 ## api 0.11.67 (hotfix on 0.11.63; supersedes the unapplied 0.11.65; 0.11.64 is the separate isolation candidate)
 
 - Manual `:resume` links its successor (docs/JOBS.md "Resume"): the resumed operation gets the durable successor mark

@@ -277,6 +277,45 @@
           },
           "additionalProperties": false,
           "description": "per-node reserve of the system pool left to the platform's add-ons; the rest budgets the CPU-only `system` flavor"
+        },
+        "assets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "host_path"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "tree"
+                ]
+              },
+              "host_path": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "gid": {
+                "type": "integer"
+              },
+              "sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "size": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          }
         }
       }
     },
