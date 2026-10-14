@@ -1254,10 +1254,36 @@ class FakeKeys:
                 "stage": m.get("stage"),
                 "state": m["state"],
                 "predecessor": m["predecessor"],
+                "retire_marked_at": m.get("retire_marked_at"),
+                "created_at": m.get("created_at"),
             }
             if m
             else None
         )
+
+    def mark_member_retiring(self, operation):
+        from datetime import datetime, timezone
+
+        m = next(
+            (m for m in getattr(self, "members", []) if m["operation"] == operation and m["state"] == "active"), None
+        )
+        if m is None or (m["predecessor"] is None and m.get("kind") != "child"):
+            return None
+        self.calls.append(("mark", operation))
+        m.setdefault("retire_marked_at", None)
+        if m["retire_marked_at"] is None:
+            m["retire_marked_at"] = datetime.now(timezone.utc)
+        return m["retire_marked_at"]
+
+    def confirm_member_created(self, operation):
+        self.calls.append(("confirm", operation))
+        m = next(
+            (m for m in getattr(self, "members", []) if m["operation"] == operation and m["state"] == "active"), None
+        )
+        if m is None:
+            return False
+        m["retire_marked_at"] = None
+        return True
 
     def prepare_run_member(
         self, root, operation, predecessor, gpus, timeout_s, transfer_only=False, kind="continuation", stage=None
@@ -1462,6 +1488,8 @@ def fake_keys(monkeypatch):
         "run_members",
         "stage_head",
         "member_of",
+        "mark_member_retiring",
+        "confirm_member_created",
         "reservation_key",
         "declare_graph",
         "graph_of",

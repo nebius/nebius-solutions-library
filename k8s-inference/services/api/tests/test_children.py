@@ -902,7 +902,13 @@ def test_a_child_export_retry_follows_the_child_lineage_and_the_broker_serves_it
     retry = r.json()["id"]
     assert retry == f"{child}-x1"
     m = keys.member_of(retry)
-    assert m == {"root": op, "kind": "child", "stage": "u1", "state": "active", "predecessor": child}
+    assert {k: m[k] for k in ("root", "kind", "stage", "state", "predecessor")} == {
+        "root": op,
+        "kind": "child",
+        "stage": "u1",
+        "state": "active",
+        "predecessor": child,
+    }
     with db.pool().connection() as conn:
         assert conn.execute("select requests from key_reservations where operation = %s", (op,)).fetchone()[0] == 2
     env, _ = _env(fake.jobs[(NS, retry)])

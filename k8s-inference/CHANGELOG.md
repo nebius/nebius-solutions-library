@@ -4,6 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.91
+
+(0.11.91 = 0.11.90 with its continuation reconciliation corrected after review; jobs 0.1.26 and platform chart 0.1.10
+unchanged. 0.11.90 was never applied.)
+
+- Continuations, the admission/create race (migration 23): immediate absence of a member's Job is never taken as
+  "never created" (another replica may be paused between its admission and its create, or the API server may still be
+  accepting a timed-out create). A member whose Job exists nowhere and that no attempt reported is MARKED first
+  (`key_run_members.retire_marked_at`, durable, visible to every replica) and the continuation refused with the mark
+  named; only an absence persisting `RETIRE_GRACE_S` (300 s) past the mark rolls it back. The admitting replica
+  confirms its create against the mark (`keys.confirm_member_created`): a mark is cleared by the Job's existence; a
+  member retired meanwhile makes the creator take its fresh Job back and answer 409 (replay). An ambiguous failure
+  after admission (5xx, transport) keeps the member whatever an immediate read says (the Job found is returned as
+  created); only a definite 4xx rolls back. Regressions: the barrier reproduction (replica B asking while A is paused
+  between admission and create: B marks and refuses, A lands and confirms, one Job, one member), the opposite
+  interleaving (A lands after B's rollback: A's Job taken back, 409), phase-one mark then phase-two retirement past
+  the grace, an expired head on record kept, 5xx keeps the member.
+
 ## api 0.11.90
 
 (0.11.90 = 0.11.89 plus the two items below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)

@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.90", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.91", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -203,7 +203,12 @@ def _require_current(p: Principal, source: str, root: str) -> None:
         if e.status_code != 404:
             raise
         if _phantom_head(p.namespace, member["root"] if member["kind"] in ("stage", "child") else root, head):
-            return  # the head never existed: continue_run reads the real head
+            return  # the head never existed (confirmed past the grace): continue_run reads the real head
+        raise HTTPException(
+            409,
+            f"operation {source} was continued by {head}, whose Job is not readable; if it is being created, retry once it "
+            f"exists; if it never existed, it is retired automatically {RETIRE_GRACE_S} s after its first sighting: replay then",
+        )
     raise HTTPException(
         409,
         f"operation {source} was continued by {head}; continue {head} (the current member of its lineage), not {source}",
@@ -256,23 +261,51 @@ def continue_run(root: str, build, transfer_only: bool = False, ns: str | None =
         pending["name"] = job["metadata"]["name"]
 
     try:
-        return build(admit)
+        result = build(admit)
     except Exception as e:
         if pending.get("name"):
             found = _reconcile_continuation(pending["name"], ns, e)
             if found is not None:
-                return found, True  # created; the answer was lost: the member stays, the Job is the continuation
-        raise
+                result = found, True  # created; the answer was lost: the member stays, the Job is the continuation
+            else:
+                raise
+        else:
+            raise
+    name = pending.get("name")
+    if name and not keys.confirm_member_created(name):
+        # another replica retired this admission while the create was in flight (it saw no Job, marked the member,
+        # and the absence outlasted the grace): the Job just created is unaccounted and is taken back; the caller
+        # replays and is admitted after the real head. The member is the authority, never the Job alone
+        job = result[0] if isinstance(result, tuple) else result
+        if ns is not None:
+            try:
+                jobs.cancel(ns, name, job.get("_region") or REGION)
+            except HTTPException as e:
+                log.warning(
+                    "continuation %s: retired during its create and its Job could not be removed: %s", name, e.detail
+                )
+        log.warning("continuation %s: retired by another replica during its create; the Job is taken back", name)
+        raise HTTPException(409, f"continuation {name} was retired during its creation; replay the request")
+    return result
+
+
+RETIRE_GRACE_S = 300  # the absence of a marked member's Job must outlast this before the member is rolled back
 
 
 def _phantom_head(ns: str, root: str, head: str) -> bool:
-    """A lineage head whose Job does not exist anywhere, that no attempt ever reported and whose member is still
-    active is the trace of a create that never happened (an API process that died between the admission and the
-    create, or a transport failure this API could not reconcile at the time): its member is rolled back (the
-    confirmed absence) so the lineage continues from the real head. Anything else (a Job that ran and expired has
-    records; an unreachable cluster is not an absence) keeps the head."""
+    """A lineage head whose Job exists nowhere, that no attempt ever reported and whose member is still active may be
+    the trace of a create that never happened — or an admission another replica is about to create (paused between
+    its admission and its create, or a create the API server is still accepting after a timeout). Immediate absence
+    proves nothing, so the retirement has two phases, both durable: the first sighting MARKS the member
+    (`keys.mark_member_retiring`; the admitting replica confirms its create against that mark and takes its Job back
+    when the member is gone); only an absence that persists past RETIRE_GRACE_S after the mark rolls the member back
+    (the confirmed absence). Returns True only after that rollback. A Job that exists clears any mark; a Job that ran
+    and expired has records; an unreachable cluster is not an absence."""
     try:
         jobs.find(ns, head)
+        m = keys.member_of(head)
+        if m and m.get("retire_marked_at") is not None:
+            keys.confirm_member_created(head)  # the Job is there after all: the mark goes
         return False
     except HTTPException as e:
         if e.status_code != 404:
@@ -282,9 +315,25 @@ def _phantom_head(ns: str, root: str, head: str) -> bool:
     m = keys.member_of(head)
     if not m or m["state"] != "active" or (m["predecessor"] is None and m["kind"] != "child"):
         return False
+    marked = keys.mark_member_retiring(head)
+    if marked is None:
+        return False
+    age = (datetime.now(timezone.utc) - marked).total_seconds()
+    if age < RETIRE_GRACE_S:
+        log.info(
+            "continuation %s of %s: no Job, no record; marked for retirement %.0f s ago, grace %d s",
+            head,
+            root,
+            age,
+            RETIRE_GRACE_S,
+        )
+        return False
     if keys.rollback_run_member(head):
         log.warning(
-            "continuation %s of %s: no Job, no attempt record, member active: retired as never created", head, root
+            "continuation %s of %s: no Job and no record %.0f s after the mark: retired as never created",
+            head,
+            root,
+            age,
         )
         return True
     return False
@@ -292,30 +341,34 @@ def _phantom_head(ns: str, root: str, head: str) -> bool:
 
 def _reconcile_continuation(name: str, ns: str | None, e: Exception):
     """After a builder raised past the admission: a definite refusal (4xx: the API server refused the create, nothing
-    exists) rolls the member back; anything else (5xx, a transport error: the create may have been accepted) is
-    checked against the cluster when the namespace is known: the Job found is returned (the member stays), a confirmed
-    absence rolls the member back, an unreachable cluster keeps the member for `_phantom_head` to settle later.
-    Returns the Job when it exists, else None."""
+    exists) rolls the member back; anything else (5xx, a transport error) is ambiguous: the API server may still be
+    accepting the create, so the member is KEPT whatever an immediate read says; the Job found is returned (the
+    continuation exists), an absence is left to the two-phase retirement (`_phantom_head`) and to the caller's replay
+    (a replay of the same request is admitted as a replay of the member). Returns the Job when it exists, else None."""
     definite = isinstance(e, HTTPException) and e.status_code < 500
-    if not definite and ns is not None:
-        try:
-            job, _ = jobs.find(ns, name)
-            log.warning("continuation %s: created, the answer was lost (%s); member kept", name, str(e)[:120])
-            return job
-        except HTTPException as f:
-            if f.status_code != 404:
-                log.warning(
-                    "continuation %s: creation unconfirmed (%s) and unreadable (%s): member kept",
-                    name,
-                    str(e)[:80],
-                    f.detail,
-                )
-                return None
-    elif not definite:
-        log.warning("continuation %s: creation unconfirmed (%s), namespace unknown: member kept", name, str(e)[:120])
+    if not definite:
+        if ns is not None:
+            try:
+                job, _ = jobs.find(ns, name)
+                log.warning("continuation %s: created, the answer was lost (%s); member kept", name, str(e)[:120])
+                return job
+            except HTTPException as f:
+                if f.status_code != 404:
+                    log.warning(
+                        "continuation %s: creation unconfirmed (%s), cluster unreadable (%s): member kept",
+                        name,
+                        str(e)[:80],
+                        f.detail,
+                    )
+                    return None
+        log.warning(
+            "continuation %s: creation unconfirmed (%s): member kept, never rolled back on an immediate absence",
+            name,
+            str(e)[:120],
+        )
         return None
     try:
-        keys.rollback_run_member(name)  # confirmed absent (or definitely refused): no Job exists
+        keys.rollback_run_member(name)  # definitely refused: no Job exists
     except Exception as x:  # noqa: BLE001
         log.warning("rollback of continuation %s: %s", name, x)
     return None

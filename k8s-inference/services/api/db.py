@@ -356,6 +356,14 @@ create table if not exists operation_marks (
     drop index if exists endpoint_children_one_active;
     create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
     """,
+    # 23: the retirement mark of a run member (docs/API.md "Keys"; app._phantom_head): a member whose Job exists nowhere
+    # and that no attempt reported is first MARKED (durable, visible to every replica, to the admitting one included),
+    # and rolled back only when the absence persists past the grace after the mark; the admitting replica confirms its
+    # create against the mark (clears it, or deletes the Job it created when the member is gone). Immediate absence is
+    # never a proof of "never created".
+    """
+    alter table key_run_members add column if not exists retire_marked_at timestamptz;
+    """,
 ]
 
 _pool = None
