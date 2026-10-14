@@ -14,7 +14,7 @@
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-north1"
+region       = "eu-west2"
 environment  = "prod"
 project_name = "osmo-prod"
 
@@ -40,8 +40,8 @@ cpu_nodes_assign_public_ip = false
 # -----------------------------------------------------------------------------
 gpu_nodes_count_per_group  = 2
 gpu_node_groups            = 2
-gpu_nodes_platform         = "gpu-h200-sxm"
-gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+gpu_nodes_platform         = null  # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null  # Use the selected region's default from locals.tf
 gpu_disk_type              = "NETWORK_SSD"
 gpu_disk_size_gib          = 1023
 gpu_nodes_assign_public_ip = false

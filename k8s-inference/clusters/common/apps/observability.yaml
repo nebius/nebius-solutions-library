@@ -1,0 +1,6 @@
+name: observability
+component: observability
+namespace: monitoring
+wave: '2'
+placement: all
+kind: manifests

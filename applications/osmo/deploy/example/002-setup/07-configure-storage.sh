@@ -28,29 +28,37 @@ log_info "Retrieving storage configuration from Terraform..."
 
 S3_BUCKET=$(get_tf_output "storage_bucket.name" "../001-iac" 2>/dev/null || echo "")
 S3_ENDPOINT=$(get_tf_output "storage_bucket.endpoint" "../001-iac" 2>/dev/null || echo "")
+S3_REGION=$(get_tf_output "storage_bucket.region" "../001-iac" 2>/dev/null || echo "")
 
-# Require NEBIUS_REGION (set by nebius-env-init.sh)
-if [[ -z "${NEBIUS_REGION:-}" ]]; then
-    log_error "NEBIUS_REGION is not set. Run 'source ../000-prerequisites/nebius-env-init.sh' first."
-    exit 1
-fi
-
-# Default endpoint if not set
-if [[ -z "$S3_ENDPOINT" ]]; then
-    S3_ENDPOINT="https://storage.${NEBIUS_REGION}.nebius.cloud"
-fi
-S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
+STORAGE_OUTPUT_MISSING=false
 
 if [[ -z "$S3_BUCKET" ]]; then
-    log_error "Could not retrieve storage bucket name from Terraform"
+    log_error "Could not retrieve the storage bucket name from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ -z "$S3_ENDPOINT" ]]; then
+    log_error "Could not retrieve the storage bucket endpoint from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ -z "$S3_REGION" ]]; then
+    log_error "Could not retrieve the storage bucket region from Terraform"
+    STORAGE_OUTPUT_MISSING=true
+fi
+
+if [[ "$STORAGE_OUTPUT_MISSING" == true ]]; then
     echo ""
     echo "Make sure you have run 'terraform apply' in deploy/001-iac"
     echo "and that storage is enabled in your terraform.tfvars"
     exit 1
 fi
 
+S3_ENDPOINT=$(normalize_nebius_storage_endpoint "${S3_ENDPOINT}")
+
 log_success "Storage bucket: ${S3_BUCKET}"
 log_success "Storage endpoint: ${S3_ENDPOINT}"
+log_success "Storage region: ${S3_REGION}"
 
 # -----------------------------------------------------------------------------
 # Sync osmo-storage secret and verify direct bucket access
@@ -64,7 +72,7 @@ if ! sync_osmo_storage_secret "${OSMO_NS}" "${SCRIPT_DIR}/../001-iac"; then
 fi
 
 log_info "Probing Nebius Object Storage with osmo-storage credentials..."
-if probe_nebius_bucket_rw "${OSMO_NS}" "${S3_BUCKET}" "${S3_ENDPOINT}" "${NEBIUS_REGION}"; then
+if probe_nebius_bucket_rw "${OSMO_NS}" "${S3_BUCKET}" "${S3_ENDPOINT}" "${S3_REGION}"; then
     log_success "Object Storage probe passed"
 else
     log_error "Object Storage probe failed with the current osmo-storage credentials"
@@ -119,7 +127,7 @@ done
 # AWS_* env vars into the pods.
 BACKEND_URI="s3://${S3_BUCKET}"
 OVERRIDE_URL="${S3_ENDPOINT}"
-REGION="${NEBIUS_REGION}"
+REGION="${S3_REGION}"
 S3_ACCESS_KEY=$(get_kubernetes_secret_value "${OSMO_NS}" osmo-storage "access-key-id")
 S3_SECRET_KEY=$(get_kubernetes_secret_value "${OSMO_NS}" osmo-storage "secret-access-key")
 

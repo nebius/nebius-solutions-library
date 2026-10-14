@@ -44,7 +44,7 @@ terraform apply
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -65,7 +65,7 @@ instance_count = 1
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -95,7 +95,7 @@ If you prefer, you can also mount a bucket into your file system.
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -115,8 +115,9 @@ This will mount the bucket into the given directory, or into `/mnt/s3` if no dir
 
 
 ```
-preset = "8gpu-128vcpu-1600gb"
-platform = "gpu-h100-sxm"
+preset = "8gpu-192vcpu-2768gb"
+platform = "gpu-b300-sxm"
+boot_image_family = "ubuntu24.04-cuda13.0"
 
 users = [
   {
@@ -128,7 +129,7 @@ users = [
 public_ip = true
 instance_count = 2
 
-fabric = "fabric-6"
+fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2.
 
 ```
 This will create a GPU cluster and add all vms inside there. This gives them the possibility to connect over Infiniband. 

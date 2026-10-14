@@ -8,7 +8,7 @@ resource "helm_release" "gpu-operator" {
   atomic           = true
   timeout          = 600
 
-  set = [
+  set = concat([
     # Node Feature Discovery
     {
       name  = "nfd.enabled"
@@ -98,5 +98,10 @@ resource "helm_release" "gpu-operator" {
       name  = "gds.enabled"
       value = var.gds_enabled
     },
-  ]
+    ], var.cdi_enabled == null ? [] : [
+    {
+      name  = "cdi.enabled"
+      value = var.cdi_enabled
+    },
+  ])
 }

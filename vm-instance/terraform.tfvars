@@ -4,9 +4,10 @@
 
 #preset = "16vcpu-64gb"
 #platform = "cpu-d3"
-#preset = "8gpu-128vcpu-1600gb"
-preset   = "1gpu-16vcpu-200gb"
-platform = "gpu-h200-sxm"
+#preset = "8gpu-192vcpu-2768gb"
+preset            = "1gpu-24vcpu-346gb"
+platform          = "gpu-b300-sxm"
+boot_image_family = "ubuntu24.04-cuda13.0"
 
 users = [
   {
@@ -26,4 +27,4 @@ preemptible    = false
 shared_filesystem_id = ""
 mount_bucket         = ""
 
-fabric = "fabric-n"
+fabric = "" # For the 8-GPU B300 preset, set this to "eu-west2-a" to create a GPU cluster.

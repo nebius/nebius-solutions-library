@@ -11,8 +11,6 @@ resource "nebius_mk8s_v1_cluster" "this" {
       public_endpoint = {}
     }
 
-    etcd_cluster_size = var.etcd_cluster_size
-
     audit_logs = {}
   }
 

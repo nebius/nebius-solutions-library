@@ -144,6 +144,11 @@ resource "kubernetes_deployment_v1" "metadata_service" {
             value = "http://prometheus-server.o11y.svc.cluster.local:80"
           }
 
+          env {
+            name  = "NIM_PORTS_JSON"
+            value = jsonencode(local.nim_proxy_ports)
+          }
+
           port {
             container_port = 8080
           }

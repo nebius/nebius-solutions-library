@@ -1,0 +1,28 @@
+{{- /*
+Worker scheduling queues (docs/FLEET.md "Tenants"), one cohort .Values.cohort:
+  default                   the fleet's capacity: nominal GPU/CPU/memory quota of every SHARED pool (pool max minus warm
+                            endpoints minus the per-node reserve); only the platform's `models/endpoints` LocalQueue
+                            queues here, the tenants' queues borrow from it.
+  <tenant>-default          the tenant's queue: nominal 0 on shared pools, borrowing up to the pool's capacity (capped by
+                            the tenant's gpu_quota), ordered reserved -> on-demand -> spot, smallest preset first;
+                            a pool in the tenant's dedicated_pools is the tenant's nominal quota and is lent to nobody.
+  <tenant>-prefer-<class>   the same with the preferred class first, then the other classes by price (one profile per
+                            class of the WHOLE fleet: a fleet-placed job may land in a region without that class).
+Tenants compete for the fleet's capacity through Kueue's weighted fair sharing (fleet.tenants.<name>.fair_share_weight,
+clusters/common/values/kueue.yaml `fairSharing`). The tenant LocalQueues (charts/tenant) carry the profile names and
+point at <tenant>-<profile> everywhere; the helpers fleet.lenderQueue and fleet.tenantQueue render both kinds on the
+manager too (manager-queues.yaml).
+*/ -}}
+{{- if not (include "fleet.isControl" .) }}
+{{- $region := include "fleet.region" . | fromYaml }}
+{{- $pools := $region.r.pools }}
+{{- $bare := dict }}{{ range $n, $_ := $pools }}{{ $_ := set $bare $n $n }}{{ end }}
+{{- $f := .Values.fleet }}
+{{- $systems := dict "system" (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $region.r.system_pool) | fromYaml) }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $pools "bare" $bare "systems" $systems) }}
+{{- range $tn, $tc := default dict $f.tenants }}
+{{- range $prefer := prepend (include "fleet.classes" (include "fleet.allPools" $f | fromYaml) | fromYamlArray) "" }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $pools "bare" $bare "admissionCheck" "" "systems" $systems) }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -36,9 +36,9 @@ Ensure that the S3 configuration is correctly set up in `~/.config/rclone/rclone
 type = s3
 provider = AWS
 env_auth = false
-region = eu-north1
+region = eu-west2
 no_check_bucket = true
-endpoint = https://storage.eu-north1.nebius.cloud:443
+endpoint = https://storage.eu-west2.nebius.cloud:443
 acl = private
 bucket_acl = private
 access_key_id = <your-access-key-id>

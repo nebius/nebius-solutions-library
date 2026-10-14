@@ -1,0 +1,6 @@
+name: scheduling
+component: scheduling
+namespace: kueue-system
+wave: '1'
+placement: all
+kind: manifests

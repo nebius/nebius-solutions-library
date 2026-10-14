@@ -1,0 +1,49 @@
+# Helm values for the dcgm-exporter Application (worker clusters); version pinned in clusters/common/apps/dcgm-exporter.yaml.
+# NVIDIA DCGM exporter on every GPU node (any serverless2.nebius/pool except system). Runs with the node default (nvidia)
+# container runtime like the device plugin; no GPU request so it never blocks a workload. Pods are matched to GPUs
+# through the kubelet pod-resources socket (labels pod/namespace/container on each metric).
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: serverless2.nebius/pool
+          operator: Exists
+        - key: serverless2.nebius/pool
+          operator: NotIn
+          values:
+          - system
+        # L40S: the DCGM profiling module fails to watch the DCGM_FI_PROF_* fields on Nebius L40S VMs ("The
+        # third-party Profiling module returned an unrecoverable error", exporter exits). Those nodes are served
+        # by the dcgm-exporter-l40s release (same chart, counters without profiling fields). Label present from
+        # node registration (set by Nebius), unlike GFD's nvidia.com/gpu.family.
+        - key: nebius.com/gpu-name
+          operator: NotIn
+          values:
+          - L40S
+tolerations:
+- key: nvidia.com/gpu
+  operator: Exists
+  effect: NoSchedule
+- key: DeletionCandidateOfClusterAutoscaler
+  operator: Exists
+  effect: PreferNoSchedule
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 10s
+  honorLabels: true
+  additionalLabels:
+    release: kube-prometheus-stack
+kubernetes:
+  enablePodLabels: true
+  podLabelAllowlistRegex:
+  - serving.kserve.io/inferenceservice
+  - job-name
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

@@ -1,0 +1,3 @@
+# generated per-run artifacts (contain node names / run-specific data)
+soak-report-*.txt
+soak-monitor-*.log

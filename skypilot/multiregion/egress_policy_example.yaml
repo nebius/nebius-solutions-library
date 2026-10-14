@@ -1,0 +1,15 @@
+apiVersion: cilium.io/v2
+kind: CiliumEgressGatewayPolicy
+metadata:
+  name: test
+spec:
+  selectors:
+  - podSelector:
+      matchLabels:
+        test: alpha  # select traffic from pods labeled test=alpha
+  destinationCIDRs:
+  - "0.0.0.0/0"      # "0.0.0.0/0" will send all external traffic through the gateway, or choose a specific CIDR to forward
+  egressGateway:
+    nodeSelector:
+      matchLabels:
+        io.cilium/egress-gateway: "true" 

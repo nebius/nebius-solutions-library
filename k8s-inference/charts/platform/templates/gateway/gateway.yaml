@@ -1,0 +1,118 @@
+{{- if index .Values.components "gateway" }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+# Data-plane HA: two Envoy proxy replicas per Gateway behind the LoadBalancer / ClusterIP Services, spread across
+# the system nodes, with a PodDisruptionBudget so a node drain never takes the edge down. The external Service
+# carries the static address the cloud stage allocated (`nebius.com/load-balancer-allocation-id`) and, in internal
+# mode, the private load-balancer type (values `gateway.serviceAnnotations`).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: external
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        name: knative-external
+        type: LoadBalancer
+        externalTrafficPolicy: Cluster   # Nebius LB does not support Local
+        annotations:
+          {{- toYaml .Values.gateway.serviceAnnotations | nindent 10 }}
+      envoyDeployment:
+        replicas: 2
+        pod:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-external }
+      envoyPDB:
+        minAvailable: 1
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: internal
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        name: knative-internal
+        type: ClusterIP
+      envoyDeployment:
+        replicas: 2
+        pod:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector:
+                matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-internal }
+      envoyPDB:
+        minAvailable: 1
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: serverless2-external
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: eg
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: external
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: { from: All }
+    - name: https
+      protocol: HTTPS
+      port: 443
+      {{- if not .Values.role.control }}
+      hostname: {{ printf "*.%s" .Values.host | quote }}   # the cluster's gateway domain (<ip>.sslip.io or <cluster id>.<domain>)
+      {{- end }}                                            # the control cluster answers the regions' ext-auth under their hosts (templates/api api-authorize)
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: {{ .Values.gateway.wildcardSecret }}    # the cluster's public hostnames (api, app, grafana, ...): the Certificate the platform stage renders
+          - group: ""
+            kind: Secret
+            name: models-tls          # the model endpoints' hostnames, kept by the fleet's API (models-tls.yaml)
+      allowedRoutes:
+        namespaces: { from: All }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: serverless2-internal
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: eg
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: internal
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: { from: All }
+{{- end }}

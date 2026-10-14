@@ -36,3 +36,9 @@ variable "mig_strategy" {
     error_message = "Invalid MIG strategy '${coalesce(var.mig_strategy, "null")}'. Must be one of ['none', 'single', 'mixed'] or left unset."
   }
 }
+
+variable "cdi_enabled" {
+  description = "Whether to explicitly enable CDI for the GPU Operator."
+  type        = bool
+  default     = null
+}

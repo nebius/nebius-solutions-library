@@ -1,0 +1,6 @@
+name: gateway
+component: gateway
+namespace: envoy-gateway-system
+wave: '1'
+placement: all
+kind: manifests

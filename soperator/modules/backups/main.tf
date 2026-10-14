@@ -20,22 +20,38 @@ resource "terraform_data" "backups_service_account_ready" {
   }
 }
 
-# TODO: replace it with more granular access binding as it becomes available
-data "nebius_iam_v1_group" "editors" {
-  name      = "editors"
-  parent_id = var.iam_tenant_id
+resource "nebius_iam_v1_group" "backups" {
+  name      = "${var.instance_name}-backup"
+  parent_id = var.iam_project_id
+}
+
+resource "nebius_iam_v1_access_permit" "backups" {
+  # Object access supports backup/restore/prune; viewer adds bucket metadata reads.
+  for_each = toset(["storage.object-editor", "storage.viewer"])
+
+  parent_id   = nebius_iam_v1_group.backups.id
+  resource_id = var.backups_bucket_id
+  role        = each.value
 }
 
 resource "nebius_iam_v1_group_membership" "backups_service_account_group" {
-  depends_on = [terraform_data.backups_service_account_ready]
+  depends_on = [
+    terraform_data.backups_service_account_ready,
+    nebius_iam_v1_access_permit.backups,
+  ]
 
-  parent_id = data.nebius_iam_v1_group.editors.id
+  parent_id = nebius_iam_v1_group.backups.id
   member_id = nebius_iam_v1_service_account.backups_service_account.id
+
+  lifecycle {
+    # For migration from the tenant editors group: establish bucket access before removing the old membership.
+    create_before_destroy = true
+  }
 }
 
 # TODO: replace this mess with proper nebius provider resources as they become available
 resource "terraform_data" "k8s_backups_bucket_access_secret" {
-  depends_on = [terraform_data.backups_service_account_ready]
+  depends_on = [nebius_iam_v1_group_membership.backups_service_account_group]
 
   triggers_replace = {
     namespace           = var.soperator_namespace

@@ -44,14 +44,18 @@ resource "nebius_mk8s_v1_node_group" "controller" {
     }
 
     filesystems = concat(
-      [
+      var.filestores.controller_spool != null
+      ? [
         {
           attach_mode = "READ_WRITE"
           mount_tag   = var.filestores.controller_spool.mount_tag
           existing_filesystem = {
             id = var.filestores.controller_spool.id
           }
-        },
+        }
+      ]
+      : [],
+      [
         {
           attach_mode = "READ_WRITE"
           mount_tag   = var.filestores.jail.mount_tag
@@ -84,13 +88,13 @@ resource "nebius_mk8s_v1_node_group" "controller" {
     )
 
     network_interfaces = [{
-      public_ip_address = local.node_ssh_access.enabled ? {} : null
+      public_ip_address = local.node_ssh_access_public_ip.enabled ? {} : null
       subnet_id         = var.vpc_subnet_id
     }]
 
     os = "ubuntu24.04"
 
-    cloud_init_user_data = local.node_ssh_access.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
+    cloud_init_user_data = local.node_cloud_init.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
   }
 
   lifecycle {

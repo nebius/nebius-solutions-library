@@ -57,6 +57,12 @@ variable "mig_strategy" {
   }
 }
 
+variable "cdi_enabled" {
+  description = "Whether to explicitly enable CDI for the GPU Operator."
+  type        = bool
+  default     = null
+}
+
 variable "gds_enabled" {
   description = "Enable GPU Direct Storage support."
   type        = bool

@@ -3,21 +3,16 @@ locals {
     enabled = length(var.node_ssh_access_users) > 0
   }
 
+  node_ssh_access_public_ip = {
+    enabled = local.node_ssh_access.enabled && var.node_ssh_access_public_ip
+  }
+
   node_cloud_init = {
-    enabled = length(var.node_ssh_access_users) > 0 || length(var.nvidia_config_lines) > 0
-    cloud_init_data = templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-      ssh_users                  = var.node_ssh_access_users
-      nvidia_config_lines        = var.nvidia_config_lines
-      local_nvme_enabled         = false
-      local_nvme_mount_path      = "/mnt/local-nvme"
-      local_nvme_filesystem_type = "ext4"
-    })
+    enabled = local.node_ssh_access.enabled || var.use_default_apparmor_profile
     cloud_init_data_no_nvidia = templatefile("${path.module}/templates/cloud_init.yaml.tftpl", {
-      ssh_users                  = var.node_ssh_access_users
-      nvidia_config_lines        = []
-      local_nvme_enabled         = false
-      local_nvme_mount_path      = "/mnt/local-nvme"
-      local_nvme_filesystem_type = "ext4"
+      ssh_users                    = var.node_ssh_access_users
+      use_default_apparmor_profile = var.use_default_apparmor_profile
+      nvidia_config_lines          = []
     })
   }
 
