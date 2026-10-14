@@ -398,6 +398,14 @@ create table if not exists operation_marks (
     create unique index if not exists sessions_idempotency on sessions (tenant, owner, idempotency_key)
         where idempotency_key is not null;
     """,
+    # 28: unit retry of endpoint children (docs/JOBS.md "Endpoint children"): a unit whose child ended WITHOUT a delivered
+    # capture (the cascade of a parent that finished without a successor, a failed caller) is reopened by a live attempt
+    # of a later parent of the same root as a new incarnation (`<root>-c-<sha>-r<n>`: a new Job, binding and ledger
+    # member); the row keeps the unit's identity and names its previous child
+    """
+    alter table endpoint_children add column if not exists incarnation int not null default 1;
+    alter table endpoint_children add column if not exists previous_child text;
+    """,
 ]
 
 _pool = None

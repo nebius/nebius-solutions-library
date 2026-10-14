@@ -77,8 +77,25 @@ def enabled() -> bool:
     return db.enabled()
 
 
-def child_id(root: str, unit_id: str) -> str:
-    return f"{root}-c-{hashlib.sha256(unit_id.encode()).hexdigest()[:10]}"
+def child_id(root: str, unit_id: str, incarnation: int = 1) -> str:
+    """The child operation of a unit: deterministic per (root, unit); a retry of the unit (docs/JOBS.md "Endpoint
+    children", unit retry) is the next incarnation, `-r<n>`: a new Job, binding and ledger member for the same unit."""
+    base = f"{root}-c-{hashlib.sha256(unit_id.encode()).hexdigest()[:10]}"
+    return base if incarnation <= 1 else f"{base}-r{incarnation}"
+
+
+def _delivered(row: dict) -> bool:
+    """Whether the unit's current child delivered its capture (the one inference per unit happened): an ended unit
+    with a capture is final and replays; one without may be retried by a later parent of the same root."""
+    import attempts
+
+    recs = attempts.for_operation(row["child"]) if attempts.enabled() else []
+    if (row.get("delivery") or "platform") == "application":
+        return any(r.get("capture") for r in recs)
+    try:
+        return capture_of(row) is not None
+    except HTTPException:
+        return False
 
 
 def binding_ref(child: str) -> str:
@@ -237,7 +254,8 @@ def _remaining_s(job: dict) -> int | None:
 
 _ROW = (
     "root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, created_at, ended_at, "
-    "namespace, region, timeout_s, request, cancel_requested_at, reason, transport, model_image, binding_ref, delivery"
+    "namespace, region, timeout_s, request, cancel_requested_at, reason, transport, model_image, binding_ref, delivery, "
+    "incarnation, previous_child"
 )
 
 
@@ -323,6 +341,8 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
         "reason": row["reason"],
         "created_at": _ts(row["created_at"]),
         "ended_at": _ts(row["ended_at"]),
+        "incarnation": int(row.get("incarnation") or 1),
+        "previous_child": row.get("previous_child"),
         "result_ref": None,
         "capture": None,
         "attempt": None,
@@ -486,9 +506,10 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 3))", (root,))
         existing = c.execute(
-            "select child, request_sha256, state from endpoint_children where root = %s and unit_id = %s",
+            "select child, request_sha256, state, incarnation from endpoint_children where root = %s and unit_id = %s",
             (root, unit_id),
         ).fetchone()
+        retry = False
         if existing:
             if existing[1] != h:
                 raise HTTPException(
@@ -502,10 +523,13 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                     "update endpoint_children set transport = %s where root = %s and unit_id = %s",
                     (json.dumps(transport), root, unit_id),
                 )
-        else:
-            n = c.execute("select count(*) from endpoint_children where root = %s", (root,)).fetchone()[0]
-            if n >= max_units:
-                raise HTTPException(409, f"run {root}: {max_units} children already (child_max_units of {m['name']})")
+            if existing[2] == "ended" and not _delivered(_get(root, unit_id)):
+                # unit retry: the child ended without its one inference (the cascade of a parent that finished without
+                # a successor, a failed caller); a live attempt of a later parent of the same root asks for the same
+                # bound request again: the unit reopens as the next incarnation (a new Job, binding and ledger member;
+                # the earlier child's Job and records stay as history). An ended unit WITH a capture is final: replay.
+                retry = True
+        if retry or not existing:
             active = c.execute(
                 "select child, unit_id, state from endpoint_children where root = %s and state in ('pending', 'active')",
                 (root,),
@@ -524,6 +548,36 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                 timeout = min(timeout, remaining)
             if timeout < MIN_REMAINING_S:
                 raise HTTPException(400, f"timeout_s must leave at least {MIN_REMAINING_S} s")
+        if retry:
+            incarnation = int(existing[3] or 1) + 1
+            child = child_id(root, unit_id, incarnation)
+            c.execute(
+                "update endpoint_children set child = %s, parent = %s, parent_pod = %s, parent_pod_uid = %s, "
+                "state = 'pending', ended_at = null, reason = null, cancel_requested_at = null, namespace = %s, "
+                "region = %s, timeout_s = %s, transport = %s, model_image = %s, binding_ref = %s, incarnation = %s, "
+                "previous_child = %s where root = %s and unit_id = %s and state = 'ended'",
+                (
+                    child,
+                    parent,
+                    identity["pod"],
+                    identity["uid"],
+                    ns,
+                    child_region,
+                    timeout,
+                    json.dumps(transport),
+                    image,
+                    binding_ref(child),
+                    incarnation,
+                    existing[0],
+                    root,
+                    unit_id,
+                ),
+            )
+            pending = True
+        elif not existing:
+            n = c.execute("select count(*) from endpoint_children where root = %s", (root,)).fetchone()[0]
+            if n >= max_units:
+                raise HTTPException(409, f"run {root}: {max_units} children already (child_max_units of {m['name']})")
             c.execute(
                 "insert into endpoint_children (root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, namespace, region, timeout_s, request, transport, model_image, binding_ref, delivery) values (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
@@ -550,7 +604,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
         return readback(ns, root, unit_id), False  # replay / readback after a lost response
     row = _get(root, unit_id)
     complete(row, parent_ann=ann, tenant=tenant, key_hash=key_hash, synchronous=True)
-    return readback(ns, root, unit_id), not bool(existing)
+    return readback(ns, root, unit_id), retry or not bool(existing)
 
 
 def _binding_data(row: dict, admitted: str) -> dict[str, str]:

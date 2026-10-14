@@ -1438,3 +1438,74 @@ async def _parent_only_info(key, control=False):
         "scopes": ["run:submit", "invoke:async"] + (["run:control"] if control else []),
         "max_budget": None,
     }  # the rig's principal otherwise (the parent run is its own)
+
+
+def test_a_unit_whose_child_ended_undelivered_is_retried_by_the_next_continuation(rig, monkeypatch):
+    """Unit retry (api 0.11.107, migration 28; the first live LeRobot chain, 2026-10-14): the parent fails, the cascade
+    cancels its child before any inference (readiness refused), the row ends `cancelled: parent ... finished without a
+    successor`; an hour later the owner resumes the root. The resumed parent's live attempt asks for the SAME unit and
+    bound request: before, the API replayed the ended row (200, no capture, no way to run the unit again under that
+    root); now the unit reopens as incarnation 2 (`<child>-r2`: a new Job, binding and ledger member), the earlier
+    child's Job stays as history, the readback names the lineage. An ended unit WITH a capture stays final (replay,
+    never a second inference); a different request is 409; one open child per root as before."""
+    c, fake, op, identity = rig
+    child = _post(c, op, "u1").json()["child"]
+    # the parent finishes without a successor: the cascade cancels the child, its member settles, the row ends
+    fake.jobs[(NS, op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    assert children.sweep() == [f"{child}:cancelled"]
+    keys.release(child, None)
+    children.sweep()
+    rb = children.readback(NS, op, "u1")
+    assert rb["state"] == "ended" and "finished without a successor" in rb["reason"] and rb["capture"] is None
+    assert rb["incarnation"] == 1 and rb["previous_child"] is None
+    # a continuation of the same root with a live attempt asks for the same unit: the unit reopens as incarnation 2
+    succ = json.loads(json.dumps(fake.jobs[(NS, op)]))
+    succ["status"] = {"startTime": "2026-10-14T18:37:13Z"}
+    succ["metadata"]["name"] = f"{op}-r1"
+    succ["metadata"]["annotations"][f"{LABEL}/resumed-from"] = op
+    fake.jobs[(NS, f"{op}-r1")] = succ
+    fake.jobs[(NS, op)]["metadata"]["annotations"][f"{LABEL}/successor"] = f"{op}-r1"
+    sp = pod(f"{op}-r1", "Running")
+    sp["metadata"]["uid"] = "uid-parent-r1"
+    fake.pods.append(sp)
+    monkeypatch.setattr(
+        children,
+        "verify_parent_token",
+        lambda token: {**identity, "pod": sp["metadata"]["name"], "uid": "uid-parent-r1"},
+    )
+    r = _post(c, f"{op}-r1", "u1")
+    assert r.status_code == 201, r.text
+    new = r.json()
+    assert new["child"] == f"{child}-r2" and new["incarnation"] == 2 and new["previous_child"] == child
+    assert new["parent"] == f"{op}-r1" and new["state"] == "active" and new["reason"] is None
+    # the earlier child never started here, so its cancel deleted its Job (a started one stays as history, as live)
+    assert (NS, child) not in fake.jobs and (NS, f"{child}-r2") in fake.jobs
+    m = keys.member_of(f"{child}-r2")
+    assert m["kind"] == "child" and m["state"] == "active" and m["stage"] == "u1"
+    assert (NS, f"binding-{child}-r2") in fake.secrets and (NS, f"{child}-r2-auth") in fake.secrets
+    # replay by the same live parent: the same child, never a third; a different request: 409; another unit: 409
+    r2 = _post(c, f"{op}-r1", "u1")
+    assert r2.status_code == 200 and r2.json()["child"] == f"{child}-r2"
+    assert _post(c, f"{op}-r1", "u1", {"prompt": "other"}).status_code == 409
+    assert _post(c, f"{op}-r1", "u2").status_code == 409
+    assert [k[1] for k in fake.jobs if k[1].startswith(f"{child}")] == [f"{child}-r2"]
+    # the owner reads the unit's current child and its lineage through either handle
+    o = c.get(f"/v1/operations/{op}/children/u1", headers=H).json()
+    assert o["child"] == f"{child}-r2" and o["previous_child"] == child and o["incarnation"] == 2
+    assert c.get(f"/v1/operations/{op}-r1/children/u1", headers=H).json()["child"] == f"{child}-r2"
+    # a delivered unit is final: the retry delivers its capture and ends; the same request replays, no -r3
+    fake.bucket[f"operations/{child}-r2/call.json"] = {
+        "capture_complete": True,
+        "sha256": "ab" * 32,
+        "content_type": "video/mp4",
+        "size_bytes": 3,
+        "http_status": 200,
+    }
+    _finish(fake, f"{child}-r2")
+    keys.release(f"{child}-r2", 0.0)
+    children.sweep()
+    rb = children.readback(NS, op, "u1")
+    assert rb["state"] == "ended" and rb["capture"] is not None
+    r3 = _post(c, f"{op}-r1", "u1")
+    assert r3.status_code == 200 and r3.json()["child"] == f"{child}-r2" and r3.json()["incarnation"] == 2
+    assert (NS, f"{child}-r3") not in fake.jobs
