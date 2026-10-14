@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.84, jobs 0.1.23
+
+- Durable endpoint calls on the tenant's shared scratch (docs/JOBS.md "Scratch storage"), opt-in per endpoint model
+  (`call_scratch: shared`; default `network` unchanged): the caller's capture lives on the tenant's existing
+  `scratch-shared` claim at the API-derived leaf `calls/<op>` (a subPath; main and the uploader never see the tenant
+  directory) instead of a per-call block claim whose attach cost ~50 s per call. A trusted init container provisions
+  exactly that leaf (root with CHOWN/FOWNER/DAC_OVERRIDE only). `call.sh` fsyncs the one-POST marker, the capture,
+  the manifest and RESULT.json (jobs 0.1.23). The uploader empties the leaf only after the acknowledged delivery and
+  a proof of the capture (manifest, sha256, RESULT.json; `scratch.sh`), removes symlinks as links and never follows
+  them, refuses foreign-owned entries, never deletes the shared claim; the empty leaf is the recorded GC gap (no
+  age-based reaping, no scanning of other work). `:export` and a CPU delivery retry mount the same leaf. Fallback to
+  the per-call claim, recorded on the Job, where the region/cluster/namespace cannot carry it. `tools/scratch-test.sh`
+  in `make check`. Includes 0.11.83 (sessions cold attachment) and 0.11.82.
+
 ## api 0.11.83
 
 (0.11.83 supersedes the unreleased 0.11.82 candidate: tags are immutable; everything of 0.11.82 is included.)

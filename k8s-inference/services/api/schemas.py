@@ -374,6 +374,9 @@ class ModelSpec(BaseModel):
     env_secrets: SkipValidation[list[str] | None] = None
     pod_metadata: SkipValidation[PodMetadataSpec | None] = None
     automount_service_account_token: SkipValidation[bool | None] = None
+    # endpoint calls with application I/O: where the caller keeps its durable capture (docs/JOBS.md "Scratch storage"):
+    # `network` (the per-call claim, default) or `shared` (the tenant's shared-scratch leaf, no per-call block device)
+    call_scratch: SkipValidation[Literal["network", "shared"] | None] = None
     port: SkipValidation[int | None] = None
     protocol: SkipValidation[Literal["http", "openai", "websocket", "grpc"] | None] = None
     path: SkipValidation[str | None] = None

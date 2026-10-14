@@ -45,6 +45,13 @@ backoff() {   # exponential, BACKOFF_BASE (5 s) x 2^n, capped at BACKOFF_MAX (30
 
 binding() { [ -n "$PRIV" ] && [ -f "$PRIV/$1" ] && cat "$PRIV/$1"; }
 
+durable() {   # the named files (and the directory entries) reach stable storage before anything depends on them:
+  # a node that dies right after a write must not leave a marker or capture that only the page cache had seen; on a
+  # shared filesystem a stream that reached the server is not yet on disk either. busybox sync takes files (-f: the
+  # containing filesystem); the whole-system sync is the fallback
+  sync -f "$@" 2>/dev/null || sync -f . 2>/dev/null || sync
+}
+
 ready_pause() {   # readiness only: READY_BACKOFF_BASE (2 s) x 2^(n-1), capped at READY_BACKOFF_MAX (10 s); never the POST's backoff
   local e=$(( $1 - 1 )); [ "$e" -gt 4 ] && e=4
   local s=$(( ${READY_BACKOFF_BASE:-2} * (1 << e) )); [ "$s" -gt "${READY_BACKOFF_MAX:-10}" ] && s=${READY_BACKOFF_MAX:-10}
@@ -105,6 +112,7 @@ finish() {   # $1 = export state; RESULT.json is what the uploader's attempt rec
     jq -cn --arg r "$ref" --arg e "${2:-}" '{export:"failed", error:$e} + (if $r != "" then {result_ref_pending:$r} else {} end)' > RESULT.json.tmp
   fi
   mv RESULT.json.tmp RESULT.json
+  durable RESULT.json .
 }
 
 if [ "${IO_MODE:-managed}" != application ]; then
@@ -210,6 +218,7 @@ n=0
 while :; do
   posted_epoch=$(date -u +%s)
   jq -cn --arg a "${POD_NAME:-$(hostname)}" --argjson e "$posted_epoch" '{attempt_id:$a, posted_at:($e|todate)}' > posted.json.tmp && mv posted.json.tmp posted.json
+  durable posted.json .   # the one-POST rule survives a node loss: the marker is on stable storage before the POST
   code=$(curl -sS -o response.bin -D headers.txt -w '%{http_code} %{time_starttransfer} %{time_total} %{size_download}' -X POST "$URL" \
          -H 'Content-Type: application/json' "${curl_auth[@]}" --data-binary @request.bin --max-time "${CALL_TIMEOUT:-3600}" 2>out/last_error.txt) || code="000 0 0 0"
   read -r http t_first t_total size <<< "$code"
@@ -233,7 +242,10 @@ completed_epoch=$(date -u +%s)
 jq -cn --arg op "${OPERATION:-}" --arg a "${POD_NAME:-$(hostname)}" --argjson st "${http:-0}" --arg ct "${ctype:-application/octet-stream}" \
    --argjson sz "$(stat -c %s response.bin)" --arg sha "$sha" --argjson p "$posted_epoch" --argjson c "$completed_epoch" --argjson tf "${t_first:-0}" --argjson tt "${t_total:-0}" \
    '{operation_id:$op, attempt_id:$a, http_status:$st, content_type:$ct, size_bytes:$sz, sha256:$sha,
-     timings:{posted_at:($p|todate), first_byte_at:(($p + ($tf|floor))|todate), completed_at:($c|todate), duration_s:$tt}, capture_complete:true}' > call.json.tmp && mv call.json.tmp call.json
+     timings:{posted_at:($p|todate), first_byte_at:(($p + ($tf|floor))|todate), completed_at:($c|todate), duration_s:$tt}, capture_complete:true}' > call.json.tmp
+durable response.bin headers.txt .   # the capture first, then its manifest: a manifest never names bytes that are not there
+mv call.json.tmp call.json
+durable call.json .
 CAPTURE_ATTEMPT="${POD_NAME:-$(hostname)}"
 case "$http" in
   2*) ;;

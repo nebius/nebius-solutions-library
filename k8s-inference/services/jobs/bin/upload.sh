@@ -188,7 +188,16 @@ if [ "$EXIT" = "0" ]; then
   delivered=false
   if [ "$MODE" = record ]; then [ -f /work/RESULT.json ] && delivered=true; else [ "$EXPORT" = succeeded ] && delivered=true; fi
   if [ -n "${API_URL:-}" ] && [ "$ACK" != 200 ]; then delivered=false; fi
-  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$delivered" = true ]; then
+  if [ "${SCRATCH:-}" = shared ]; then
+    # a durable endpoint call on the tenant's shared scratch (scratch.sh): the leaf is emptied only with the delivery
+    # acknowledged by the API and the capture proven intact (manifest, hash, RESULT.json); anything else keeps it
+    # (export retry, recovery, retention), exactly as a kept volume; the shared claim is never deleted
+    if [ "$delivered" = true ] && [ "${KEEP_SCRATCH:-false}" != "true" ] && /usr/local/bin/scratch.sh proof /work; then
+      /usr/local/bin/scratch.sh cleanup /work 10001 || echo "scratch leaf ${SCRATCH_LEAF:-?} kept: cleanup refused (see above)"
+    else
+      echo "scratch leaf ${SCRATCH_LEAF:-?} kept: delivery not proven/acknowledged (export=$EXPORT ack=$ACK result=$([ -f /work/RESULT.json ] && echo yes || echo no)); POST /v1/operations/$OPERATION:export retries the delivery"
+    fi
+  elif [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$delivered" = true ]; then
     curl -sS -o /dev/null -w "pvc delete %{http_code}\n" --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE \
       "$API/api/v1/namespaces/$POD_NAMESPACE/persistentvolumeclaims/$PVC_NAME"
   elif [ -n "${PVC_NAME:-}" ]; then
