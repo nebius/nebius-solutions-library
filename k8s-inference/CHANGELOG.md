@@ -30,6 +30,12 @@ OOM-killed at 512Mi on 2026-10-14 20:45 and 20:48 under concurrent owner reads);
   `failed_at`. Observed: boltzgen root op-b60c9ff341028d80 FAILED at 20:23 with 7 never-launched stages active and its
   slot held until an owner cancel 21 minutes later; the deadline was 4.5 days away.
 
+- Gang status (docs/JOBS.md "Multi-node runs"): a gang's delivery authority is its newest incarnation's rank 0 record
+  (`attempts.authority`), never a peer's: every peer records `export_state` `n/a`, and the handle took the newest
+  SUCCEEDED record with an export state as the delivering one, so a 2x1 MPI epoch whose rank 0 had committed its
+  result and whose rank 1 recorded afterwards read EXPORT_FAILED "missing RESULT" (op-1309949ff76ab3c3 epoch 5, 2026-10-14). A
+  new incarnation with only a peer on record stays FINALIZING instead of borrowing the previous coordinator's result.
+
 - Fleet operator keys from Terraform (docs/API.md "Fleet operators"): `fleet_operator_keys` (a set of names, default
   empty) bootstraps keys of tenant `platform` with role `fleet` through the existing key machinery (random_password,
   Secret, `python -m keys bootstrap` Job) and prints them in the sensitive output `fleet_operator_keys`; tenant keys,
