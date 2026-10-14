@@ -153,7 +153,10 @@ class SessionRequest(BaseModel):
     """`POST /v1/models/{model}:session` (docs/API.md "Sessions")."""
 
     model_config = ConfigDict(extra="forbid")
-    timeout_s: int = Field(default=3600, ge=60, le=86400)  # the session's deadline from its creation
+    timeout_s: int | None = Field(
+        default=None, ge=60, le=86400
+    )  # the session's deadline from its creation; default: the
+    # endpoint's transport deadline (a single-node endpoint's timeout_s), 3600 without one (multi-node)
     region: str | None = None  # a cluster id or region of the model's deployments (docs/API.md)
 
 

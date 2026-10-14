@@ -105,6 +105,32 @@ def gpus_per_replica(m: dict) -> int:
         return 0
 
 
+def transport_deadline_s(m: dict) -> int | None:
+    """The longest connection the endpoint's transport carries (docs/API.md "Sessions"): a single-node (Knative)
+    endpoint ends every request at its revision timeout (`timeout_s` of the model, the catalog's `runtime.timeout`,
+    600 s by default; the fleet's Knative config bounds it), WebSocket or NDJSON alike, with no record on the
+    session; a multi-node endpoint's route carries no request timeout (`request: 0s`). None = no transport bound."""
+    if int(m.get("nodes") or 1) > 1:
+        return None
+    t = (m.get("runtime") or {}).get("timeout")
+    try:
+        return int(t) if t is not None else 600
+    except (TypeError, ValueError):
+        return 600
+
+
+def open_on(model: str) -> int:
+    """Sessions bound or attached on a model right now: an idle-shutdown must count them as activity (the stream
+    makes no stamped call of its own). 0 without the feature."""
+    if not enabled():
+        return 0
+    with db.pool().connection() as c:
+        r = c.execute(
+            "select count(*) from sessions where model = %s and state in ('bound', 'attached')", (model,)
+        ).fetchone()
+    return int(r[0]) if r else 0
+
+
 # ---- transitions ------------------------------------------------------------------------------------------------
 def create(
     key_hash: str, tenant: str, owner: str, model: str, cluster: str | None, region: str, timeout_s: int, gpus: int

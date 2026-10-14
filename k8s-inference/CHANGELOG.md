@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.82
+
+- Sessions (docs/API.md "Sessions"), before any enablement: `POST /v1/models/<id>:session` refuses a `timeout_s`
+  above the endpoint's transport deadline (a single-node endpoint's revision timeout, the model's `timeout_s`, 600 s
+  by default; a multi-node endpoint has none) with a 400 naming the bound, instead of admitting a stream Knative
+  would cut mid-way with no record; nothing is shortened silently; `timeout_s` left out now defaults to that
+  deadline (3600 without one) instead of a fixed 3600 that the transport could not carry. The idle shutdown of multi-node endpoints counts
+  bound and attached sessions as activity. The no-reconnect rule is stated as kept. PostgreSQL-backed tests of the
+  session transitions (compare-and-swap bind across replicas, attach fencing, release idempotency, cancel) and of
+  the sweep (expired claim, unattached binding, deadline cancel request, lost worker, deferred settlement) run in
+  `make check` like the lease tests. Sessions stay off (`sessions.enabled` false); no interface changed.
+
 ## api 0.11.81, fleet chart 0.1.12
 
 (0.11.81 supersedes the unreleased 0.11.80 candidate after review: tags are immutable, so the review fixes below are a
