@@ -22,7 +22,9 @@ case "$1 $2 ${3:-}" in
   "iam static-key issue") name=$(printf '%s\n' "$@" | grep -A1 -- '--name' | tail -1)
      if [ "${RK_NO_ID:-0}" = 1 ]; then printf '{"token":"tok-%s","operation":{"id":"op1"}}' "$name"
      else printf '{"token":"tok-%s","operation":{"id":"op1","resource_id":"statickey-%s"}}' "$name" "$name"; fi ;;
-  "iam static-key find") tok=$(printf '%s\n' "$@" | grep -A1 -- '--token' | tail -1); printf '{"metadata":{"id":"found-%s"}}' "${tok#tok-}" ;;
+  "iam static-key find") tok=$(printf '%s\n' "$@" | grep -A1 -- '--token' | tail -1)
+     # FindStaticKeyResponse: the key wrapped under static_key (a top-level metadata is NOT what the CLI returns)
+     printf '{"static_key":{"metadata":{"id":"found-%s","parent_id":"project-fake","name":"%s-image-cache-x","created_at":"2026-10-14T06:40:17Z"},"spec":{"account":{"service_account":{"id":"serviceaccount-fake"}},"service":"CONTAINER_REGISTRY","expires_at":"2027-10-14T00:00:00Z"},"status":{"active":true}}}' "${tok#tok-}" "${tok#tok-}" ;;
   *) echo "unexpected nebius $*" >&2; exit 9 ;;
 esac
 FAKE

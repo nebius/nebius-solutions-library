@@ -36,6 +36,14 @@ emit() { python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 print("export REGISTRY_STATIC_KEY=" + repr(d["key"]) + "   # key id " + d.get("id", "?") + " (" + sys.argv[1] + ")")' "$file"; }
+# The key a token belongs to (FindStaticKeyResponse, nebius/iam/v1/static_key_service.proto: {"static_key": {"metadata":
+# {"id": ...}, ...}}, the key wrapped, not a top-level metadata): the exact ownership proof, and the id of a key whose
+# issue response carried none. Empty when the CLI fails or the token is unknown.
+find_id() { nebius iam static-key find --token "$1" --format json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+key = d.get("static_key") or d.get("staticKey") or d
+print((key.get("metadata") or {}).get("id") or "")' 2>/dev/null || true; }
 
 exec 9>"$dir/.registry-key.lock"
 flock -w "${REGISTRY_KEY_LOCK_WAIT:-60}" 9 || { echo "!! another issue or import is running for $name" >&2; exit 1; }
@@ -47,7 +55,7 @@ if [ -n "$import" ]; then
   if [ "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("id", ""))' "$file.tmp")" = "" ]; then
     # the former data source recorded "" as every key's id: resolve it from the token (static-key find)
     token=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["key"])' "$file.tmp")
-    kid=$(nebius iam static-key find --token "$token" --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("metadata", {}).get("id", ""))' || true)
+    kid=$(find_id "$token")
     python3 -c 'import json, sys; f = sys.argv[1]; d = json.load(open(f)); d["id"] = sys.argv[2]; json.dump(d, open(f, "w"))' "$file.tmp" "$kid"
   fi
   mv "$file.tmp" "$file"; chmod 600 "$file"
@@ -88,7 +96,7 @@ if not token:
 print(json.dumps({"key": token, "id": kid}))' > "$file.tmp"
 if [ "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$file.tmp")" = "" ]; then
   token=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["key"])' "$file.tmp")
-  kid=$(nebius iam static-key find --token "$token" --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("metadata", {}).get("id", ""))' || true)
+  kid=$(find_id "$token")
   python3 -c 'import json, sys; f = sys.argv[1]; d = json.load(open(f)); d["id"] = sys.argv[2]; json.dump(d, open(f, "w"))' "$file.tmp" "$kid"
   [ -n "$kid" ] || echo "!! key issued (name $name-image-cache-$suffix) but its id could not be resolved; find it with: nebius iam static-key find --token <token>" >&2
 fi

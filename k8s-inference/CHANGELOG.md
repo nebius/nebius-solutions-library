@@ -29,7 +29,9 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   issue and import share one lock per fleet.
   The id is read from the response's `operation.resource_id` (`IssueStaticKeyResponse` is `{token, operation}`; the
   former parser read `metadata.id` and recorded `""` for every key it issued) and, failing that, resolved from the
-  token with `nebius iam static-key find --token` (the exact ownership proof of any key: its own token names it).
+  token with `nebius iam static-key find --token` (the exact ownership proof of any key: its own token names it;
+  `FindStaticKeyResponse` wraps the key under `static_key`, so the id is `static_key.metadata.id`: a first version of
+  this follow-up read a top-level `metadata` and recorded `""` on import).
   Its file lives under `~/.config/serverless2/<name>/registry-key.json` (0600), never in a checkout.
 - Migration for a fleet with the old cache: `export REGISTRY_STATIC_KEY="$(python3 -c 'import json; print(json.load(open("stack/.secrets/<name>-registry-key.json"))["key"])')"`
   (or run the script's `--import stack/.secrets/<name>-registry-key.json`), then `./stack.sh plan` shows no change to
