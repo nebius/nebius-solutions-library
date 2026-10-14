@@ -109,9 +109,11 @@ def _lifecycle_fields(r: dict) -> dict:
         )
         if r.get(k) is not None
     }
-    # the incarnation-frozen restore triple (docs/JOBS.md "Restoring a gang") is part of every attempt's projection,
-    # explicitly null for a fresh start: a gang restore reads every peer's triple, and "absent" is not "fresh"
-    out.update({k: r.get(k) for k in ("resume_checkpoint_ref", "resume_source_epoch", "resume_source")})
+    # the incarnation-frozen restore triple (docs/JOBS.md "Restoring a gang"): present exactly on a gang's
+    # authenticated records (the start ACK froze it there; an explicit null triple = nothing to restore), absent else
+    import attempts
+
+    out.update(attempts.restore_fields(r))
     export = r.get("export_state") or r.get("export")
     if export is not None:
         out["export_state"] = export
@@ -173,10 +175,6 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
                 # observed on the live pod: its UID and, for a JobSet pod, its rank and incarnation (the labels the
                 # Job and JobSet controllers stamp); the record's observation, when it has one, replaces them below
                 **_pod_gang_fields(p),
-                # the restore triple is known from the record only (the start ACK froze it); null until then
-                "resume_checkpoint_ref": None,
-                "resume_source_epoch": None,
-                "resume_source": None,
             }
         )
     for r in records or []:

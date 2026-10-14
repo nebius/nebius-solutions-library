@@ -9,17 +9,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 (0.11.109 = 0.11.108 plus the restore triple on every attempt entry and the Knative Service as the rollout witness; jobs
 0.1.27 and platform chart 0.1.12 unchanged; no migration.)
 
-- Gang attempts (docs/JOBS.md "Restoring a gang"): every `attempts[]` entry of the owner's operation carries
-  `resume_checkpoint_ref`, `resume_source_epoch` and `resume_source`, explicitly null for a fresh start (a live pod
-  without its record too); before, the keys were omitted when null, so a fresh gang's peers showed no triple while
-  the current attempt did, and a restore that reads every peer's triple refused it (op-a229254b4a059926, 2026-10-14).
-  A resumed incarnation shows the identical frozen triple on every peer; earlier incarnations keep their own.
+- Gang attempts (docs/JOBS.md "Restoring a gang"): every `attempts[]` entry of a gang record (an observed rank, where
+  the start ACK froze the pointer) carries `resume_checkpoint_ref`, `resume_source_epoch` and `resume_source`, all
+  three null when the ACK decided there is nothing to restore (a fresh start); before, null keys were omitted, so a
+  fresh gang's peers showed no triple while the current attempt did, and a restore that reads every peer's triple
+  refused it (op-a229254b4a059926, 2026-10-14). Rows the ACK never decided (a single-pod attempt, a live pod without
+  its record) carry no such keys: absent is not fresh. A resumed incarnation shows the identical frozen triple on
+  every peer; earlier incarnations keep their own.
 - Endpoints (docs/API.md "Execution identity and rollout state"): the rollout's reconciliation witness is the predictor
   Knative Service (its `generation == observedGeneration` and its template image equal to the InferenceService's
   desired image), reported as `service_generation`, `service_observed_generation`, `service_image`; KServe 0.20 writes
   the Service's observedGeneration onto the InferenceService, so a never edited ISVC showed `generation 1 / observed
   2` for good and every ready Knative app read as "not reconciled" in the admin display (SAM2 proof, 2026-10-14).
-  Without a predictor Service (RawDeployment) the ISVC's own generations decide as before. Nothing weakened: the
+  In proven RawDeployment mode (the ISVC's own `deploymentMode`) the ISVC generations decide as before; in Knative
+  mode an unreadable predictor Service is "not converged" with the reason, never a fallback. Nothing weakened: the
   revision identity, the ready Revision's image and the serving pods' images are still all required.
 
 ## api 0.11.108

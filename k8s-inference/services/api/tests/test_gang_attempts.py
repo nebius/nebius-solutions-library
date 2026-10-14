@@ -376,11 +376,11 @@ def test_the_owner_sees_the_observed_gang_fields_on_the_current_attempt_and_ever
     assert (o["attempt_id"], o["epoch"], o["pod_uid"], o["gang_rank"], o["gang_restart"]) == (coord, 2, "uid-c0", 0, 1)
     assert o["checkpoint_ref"] == "c" * 64  # the coordinator's publication
     by = {a["attempt_id"]: a for a in o["attempts"]}
-    # the frozen restore triple is on EVERY attempt entry: explicitly null for a fresh start (both peers here); a gang
-    # restore reads each peer's triple, and an absent key is not "fresh"
+    # the frozen restore triple is on every GANG record's entry (the start ACK froze it there): explicitly null for
+    # a fresh start on both peers; a gang restore reads each peer's triple, and an absent key is not "fresh"
     triple = ("resume_checkpoint_ref", "resume_source_epoch", "resume_source")
-    for a in o["attempts"]:
-        assert all(k in a for k in triple), a
+    for x in (coord, peer, f"{op}-workers-0-0-zzzzz"):
+        assert all(k in by[x] for k in triple), by[x]
     assert all(by[x][k] is None for x in (coord, peer) for k in triple)
     assert all(k in o for k in triple)
     assert (by[coord]["pod_uid"], by[coord]["gang_rank"], by[coord]["gang_restart"]) == ("uid-c0", 0, 1)
@@ -631,3 +631,65 @@ def test_the_owner_sees_the_same_frozen_restore_triple_on_every_peer_of_a_resume
             None,
             None,
         )
+
+
+def test_the_restore_triple_is_absent_not_null_where_no_gang_ack_decided_it(client, monkeypatch):
+    """Absent versus null: a record without an observed gang rank (a single-pod attempt, a row the ACK never froze a
+    pointer for) and a live pod without its record carry NO restore keys; only a gang record carries them, null
+    meaning "decided: nothing to restore". A restore authority that requires every peer's triple is never fed a
+    manufactured null for an undecided row."""
+    import copy
+
+    import catalog
+    from test_api import H
+
+    c, fake = client
+    ns = "tenant-demo"
+    base = copy.deepcopy(catalog.get("batch-example"))
+    monkeypatch.setattr(catalog, "get", lambda name, _b=base: _b if name == "batch-example" else None)
+    r = c.post(
+        "/v1/models/batch-example:invoke",
+        json={"input": {"input_prefix": "s3://serverless2-demo-eu-north1/in"}},
+        headers=H,
+    )
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    live = f"{op}-livepod"
+    fake.pods.append(
+        {
+            "metadata": {
+                "name": live,
+                "namespace": ns,
+                "uid": "uid-live",
+                "labels": {"job-name": op, f"{kube.LABEL}/tenant": "demo"},
+            },
+            "spec": {"nodeName": "node-1"},
+            "status": {
+                "phase": "Running",
+                "startTime": "2026-10-14T12:00:00Z",
+                "containerStatuses": [{"name": "main", "state": {"running": {"startedAt": "2026-10-14T12:00:01Z"}}}],
+            },
+        }
+    )
+    single = {
+        **_record(op, f"{op}-single", "failed", epoch=1, exit_code=1, region="eu-north1"),
+        "operation": op,
+        "root": op,
+        "role": "run",
+        "tenant": "demo",
+        "namespace": ns,
+        "mode": "run",
+        "model": "batch-example",
+        "pod_uid": "uid-s",
+        "gang_rank": None,
+        "gang_restart": None,
+    }
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [single] if root == op else [])
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    o = c.get(f"/v1/operations/{op}", headers=H).json()
+    by = {a["attempt_id"]: a for a in o["attempts"]}
+    triple = ("resume_checkpoint_ref", "resume_source_epoch", "resume_source")
+    assert not any(k in by[f"{op}-single"] for k in triple), by[f"{op}-single"]  # no gang rank: undecided, absent
+    assert not any(k in by[live] for k in triple), by[live]  # a live pod without its record: absent
+    assert not any(k in o for k in triple), {k: o.get(k) for k in triple}  # the current attempt: absent as well
