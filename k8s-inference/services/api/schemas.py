@@ -396,6 +396,9 @@ class ModelSpec(BaseModel):
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
     scratch: SkipValidation[Literal["network", "local-nvme"] | None] = None
+    work_mount_aliases: SkipValidation[list[dict[str, str]] | None] = (
+        None  # [{path: /abs/canonical, scope: attempt | run}]: the work volume at a canonical path (docs/JOBS.md "Work mount aliases")
+    )
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
 
@@ -515,7 +518,7 @@ class Attempt(BaseModel):
     export_state: ExportState | None = None
     result_ref: str | None = None
     checkpoint_ref: str | None = None
-    image_digest: str | None = None
+    image_digest: str | None = None  # the runtime digest observed on the pod, or the record's
     operation: str | None = None
     image: str | None = None
     gpu_seconds: float | None = None
@@ -639,6 +642,9 @@ class Operation(BaseModel):
     checkpoint_ref: str | None = None
     checkpoint_generation: int | None = None
     image_digest: str | None = None
+    image_digest_state: Literal["observed", "pending", "unknown"] | None = (
+        None  # observed = exact runtime digest; pending = the attempt runs, the kubelet has not reported it yet (transient); unknown = ended without one
+    )
     finalize_attempts: int | None = None
     finalizing_by: str | None = None
 

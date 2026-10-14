@@ -126,10 +126,13 @@ def history(operation: str) -> list[dict]:
 
 
 # ---- transitions ------------------------------------------------------------------------------------------------
-def prepare(operation: str, attempt: str, region: str, model: str) -> dict:
+def prepare(operation: str, attempt: str, region: str, model: str, caller_gone=None) -> dict:
     """The hook, on the verified inference POST of `attempt`: the one live execution of the operation. Another
     attempt's POST while one is prepared or attached is refused (409); the same attempt replays its row; after a
-    terminal row the new attempt gets its own row (the earlier evidence is kept)."""
+    terminal row the new attempt gets its own row (the earlier evidence is kept). `caller_gone(attempt)`: the hook's
+    exact read of an earlier caller pod (gone or finished, by name in the caller's namespace): a row that earlier
+    caller only *prepared* (the worker never attached) is closed so its replacement pod (a preempted caller's) can
+    post; an attached row is never freed this way (the worker settles it, or the reconciler confirms its loss)."""
     with db.pool().connection() as c, c.transaction():
         _lock(c, operation)
         if _fenced(c, operation):
@@ -140,6 +143,13 @@ def prepare(operation: str, attempt: str, region: str, model: str) -> dict:
             "select attempt, state from native_executions where operation = %s and state in ('prepared', 'attached')",
             (operation,),
         ).fetchone()
+        if live and live[0] != attempt and live[1] == "prepared" and caller_gone and caller_gone(live[0]):
+            c.execute(
+                "update native_executions set state = 'closed', released_at = now(), outcome = 'caller replaced' "
+                "where operation = %s and attempt = %s and state = 'prepared'",
+                (operation, live[0]),
+            )
+            live = None
         if live and live[0] != attempt:
             raise HTTPException(
                 409,
@@ -342,6 +352,18 @@ def sweep() -> list[str]:
         if r2:
             out.append(f"{e['operation']}:lost")
     return out
+
+
+def caller_gone(namespace: str, pod: str, region: str) -> bool:
+    """An endpoint call's caller pod, by exact name in its own namespace: gone (404) or finished. Anything else
+    (alive, or an API lookup that failed) keeps its prepared row: fail closed."""
+    try:
+        obj = retry(kube.core(region).read_namespaced_pod, pod, namespace)
+    except ApiException as e:
+        return e.status == 404
+    except Exception:
+        return False
+    return (obj.status.phase if obj.status else None) in ("Succeeded", "Failed")
 
 
 def _worker_gone(e: dict) -> bool:

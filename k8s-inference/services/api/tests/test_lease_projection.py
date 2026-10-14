@@ -85,3 +85,26 @@ def test_ca_bundle_rides_as_a_value_when_the_fleet_has_one(monkeypatch):
         assert _env(c)["S2_CA_PEM"].startswith("-----BEGIN CERTIFICATE-----")
     with pytest.raises(Exception, match="native_lease"):
         g._entry({**PLAIN, "native_lease": "always"}, test_api.FLEET)
+
+
+def test_lifecycle_digest_is_observed_on_the_live_pod_and_states_are_explicit():
+    import attempts
+
+    rows = [
+        {"operation": "op-1", "pod": "op-1-abc", "epoch": 1, "status": "started", "image_digest": None, "revision": 3}
+    ]
+    pod = {"metadata": {"name": "op-1-abc"}, "status": {"containerStatuses": [{"name": "main", "imageID": ""}]}}
+    out = attempts.lifecycle("op-1", "op-1", rows, None, pods=[pod])
+    assert out["image_digest"] is None and out["image_digest_state"] == "pending"
+    pod["status"]["containerStatuses"][0]["imageID"] = "registry.serverless2.local/nebius/m@sha256:abc"
+    out = attempts.lifecycle("op-1", "op-1", rows, None, pods=[pod])
+    assert (
+        out["image_digest"] == "registry.serverless2.local/nebius/m@sha256:abc"
+        and out["image_digest_state"] == "observed"
+    )
+    rows[0]["image_digest"] = "registry.serverless2.local/nebius/m@sha256:rec"  # the record, once it has one, wins
+    assert attempts.lifecycle("op-1", "op-1", rows, None, pods=[pod])["image_digest"].endswith(":rec")
+    ended = [{**rows[0], "image_digest": None, "status": "failed"}]
+    out = attempts.lifecycle("op-1", "op-1", ended, None, pods=[])
+    assert out["image_digest"] is None and out["image_digest_state"] == "unknown"
+    assert attempts.lifecycle("op-1", "op-1", [], None)["image_digest_state"] is None

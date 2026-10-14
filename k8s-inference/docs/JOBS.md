@@ -34,6 +34,7 @@ job:
   s3Env: true                     # envFrom Secret `s3` (AWS_* for the tenant bucket) on the main container
   inputs: "{{input_prefix}}"      # default: the input_prefix parameter
   uploadExcludes: "--exclude 'scratch/*'"
+  workMountAliases: [{ path: /mnt/fs2-scientific/work, scope: attempt }]   # optional (docs/JOBS.md "Work mount aliases"): the work volume at a canonical path
 gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # classes the image runs on, PREFERRED FIRST (scheduling profile)
 deployments:                      # optional: the regions the run class may land in (default: every region of the fleet); per-region parameter defaults and price
   hub:           { price_per_gpu_hour: 2.15, parameters: { nb_min_ci: "16000" } }
@@ -103,6 +104,33 @@ podFailurePolicy:
     - { action: Ignore, onPodConditions: [{ type: DisruptionTarget, status: "True" }] }   # drain, preemption, node loss
     - { action: Ignore, onExitCodes: { containerName: main, operator: In, values: [137, 143] } }   # SIGKILL, SIGTERM
 ```
+
+## Work mount aliases
+
+An application that writes to a fixed canonical path (a retained collector reads `/mnt/fs2-scientific/work`, say) gets
+the run's **own work volume** mounted there as well: `job.workMountAliases: [{path, scope}]` (public spec
+`work_mount_aliases`), operator-owned on the run class, at most four entries. Nothing new is created: the alias is the
+same `work` volume (the per-operation claim, or the node-local scratch of `scratch: local-nvme`) mounted a second
+time on `main`, with `/work` unchanged, so everything under the alias is uploaded, kept across a resume and finalized
+like the rest of `/work`.
+
+- `scope: attempt` (default): the alias shows `/work/aliases/<slug>/<pod name>/`, the attempt's own directory, through
+  a `subPathExpr` the API renders from the pod's own name (`$(S2_POD_NAME)`, downward API; the name is
+  platform-owned, a class that sets that variable is refused; nothing a caller sends reaches the expression). A retry or a
+  resume on the kept volume is a new pod and so a new directory: attempts never share a canonical writable output, and the
+  attempt record (`attempt_id`) names the subtree. The CPU finalizer sees the **finalized** attempt's directory (the API
+  sets the name to that pod's, a literal).
+- `scope: run`: `/work/aliases/<slug>/`, one directory per run (shared by its attempts on the kept volume).
+- `<slug>` is the path with `/` turned into `-` (`mnt-fs2-scientific-work`).
+
+Validation at registration and at render: absolute, normalised, no `..`, `[A-Za-z0-9._/-]`; never `/`, `/work` or
+anything under it, nor under `/dev /proc /sys /etc /run /var /tmp /usr /bin /sbin /lib /lib64 /boot /root
+/opt/serverless2`; no overlap with another alias or with any mount of the pod (data, weights, checkpoint, shm);
+single-node runs only. The fetch init container creates the attempt directory `2770`, owned by the runner user and the
+pod's `fsGroup` (every container of the pod carries that group, whatever user the model image runs as; setgid keeps the
+files group-owned for the uploader), tenant-private rather than world-writable: a subPath directory the kubelet creates
+is root-owned and a non-root model could not write it. No symlink, no
+privilege, no host path, no shared tenant mount: the alias cannot reach anything the run does not already own.
 
 ## Resume
 
@@ -376,6 +404,11 @@ describe the pod it comes from). The control API keeps the posted records in the
 without a bucket. Every operation reports `root_operation_id` (the first operation of a resume chain), `attempt_id`
 (the newest pod), `epoch` (monotonic over the chain), `revision` (a cursor: `GET /v1/operations/<id>?since=<revision>`
 answers 304 while nothing changed), `cluster`, `image_digest`, `export_state`, `result_ref` and `checkpoint_ref`.
+`image_digest` is the exact **runtime** digest of the attempt's main container (`containerStatuses[main].imageID`),
+never the expected image: the uploader waits for it (bounded) before its start record and republishes the start record
+once when it appears later; the API also fills a start record from the pod it reads and, at `GET` time, takes the
+newest attempt's live pod. `image_digest_state` says what a null means: `pending` (the attempt runs, the kubelet has not
+reported it yet: transient, a reader retries the `GET`), `unknown` (the attempt ended without one), `observed`.
 
 Fencing: the first record of a pod opens an epoch; a terminal record from a pod whose epoch is no longer the chain's
 newest is refused (409), as is a success after `:cancel`. A worker that returns after a network partition therefore

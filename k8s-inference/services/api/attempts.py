@@ -118,6 +118,8 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
             body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
         if cur and cur[1] in TERMINAL and status == "started":
             return _row(c, operation, pod)  # a late duplicate of the current attempt's start record
+        if status == "started" and not body.get("image_digest"):
+            body = {**body, "image_digest": _pod_digest(region, ns, pod)}  # observed on the pod, or still None
         if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
             raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
         export = body.get("export") or (
@@ -341,6 +343,19 @@ def _marks(operation: str):
         ).fetchone()
 
 
+def _pod_digest(region: str | None, namespace: str, pod: str) -> str | None:
+    """The main container's imageID as the API reads it on the pod right now; None when not reported yet or unreadable
+    (the record then stays `pending` and the live read at GET time converges it)."""
+    try:
+        obj = kube.core(region or kube.REGION).read_namespaced_pod(pod, namespace)
+    except Exception:
+        return None
+    for cs in (obj.status.container_statuses if obj.status else None) or []:
+        if cs.name == MAIN_CONTAINER and cs.image_id:
+            return cs.image_id
+    return None
+
+
 def marks_for(operations: set[str]) -> dict[str, tuple]:
     """`_marks` for many operations in one query (the operation list)."""
     if not enabled() or not operations:
@@ -353,11 +368,42 @@ def marks_for(operations: set[str]) -> dict[str, tuple]:
     return {r[0]: tuple(r[1:]) for r in rows}
 
 
-def lifecycle(operation: str, root: str, rows: list[dict], marks: tuple | None | bool = False) -> dict:
+MAIN_CONTAINER = "main"
+
+
+def observed_digest(pods: list | None, pod_name: str | None) -> str | None:
+    """The runtime image digest of the attempt's main container as the API observes it on the live pod
+    (`containerStatuses[main].imageID`): what actually runs, never the expected image. None until the kubelet reports it."""
+    for p in pods or []:
+        if ((p.get("metadata") or {}).get("name")) != pod_name:
+            continue
+        for cs in (p.get("status") or {}).get("containerStatuses") or []:
+            if cs.get("name") == MAIN_CONTAINER and cs.get("imageID"):
+                return cs["imageID"]
+    return None
+
+
+def digest_state(latest: dict | None, digest: str | None) -> str | None:
+    """`observed`: the exact runtime digest is on record or on the live pod; `pending`: the attempt runs and the kubelet
+    has not reported it yet (transient, converges within seconds: a reader retries); `unknown`: the attempt ended
+    without one (never guessed from the expected image)."""
+    if not latest:
+        return None
+    if digest:
+        return "observed"
+    return "pending" if latest.get("status") == "started" else "unknown"
+
+
+def lifecycle(
+    operation: str, root: str, rows: list[dict], marks: tuple | None | bool = False, pods: list | None = None
+) -> dict:
     """The lifecycle fields of an operation (docs/API.md): root, newest attempt and epoch, revision cursor, export
-    and finalization state. `marks`: the operation's mark row when the caller fetched it already (`marks_for`)."""
+    and finalization state. `marks`: the operation's mark row when the caller fetched it already (`marks_for`).
+    `pods`: the operation's live pods as the API read them: the image digest comes from the newest attempt's pod when
+    its record does not carry it yet (the uploader's start record can precede the kubelet's imageID)."""
     mine = [r for r in rows if r["operation"] == operation]
     latest = mine[-1] if mine else None
+    digest = (latest.get("image_digest") or observed_digest(pods, latest.get("pod"))) if latest else None
     revision = max([r.get("revision") or 0 for r in rows] + [0])
     m = _marks(operation) if marks is False else marks
     if m:
@@ -370,7 +416,8 @@ def lifecycle(operation: str, root: str, rows: list[dict], marks: tuple | None |
         "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
         "result_ref": latest.get("result_ref") if latest else None,
         "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
-        "image_digest": latest.get("image_digest") if latest else None,
+        "image_digest": digest,
+        "image_digest_state": digest_state(latest, digest),
         # the canonical cluster id (configured name); the Nebius region is the operation's `region`
         "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
         "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,

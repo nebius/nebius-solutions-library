@@ -114,7 +114,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.62", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.63", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -740,7 +740,10 @@ def _authorize_model(
         # leases"); a retry attempt's POST while another attempt's execution is prepared or attached is refused here,
         # so no two native executions overlap under one reservation
         region = _admission_region.get((operation, attempt)) or REGION
-        leases.prepare(operation, attempt, region, m["name"])
+        ns = p.namespace
+        leases.prepare(
+            operation, attempt, region, m["name"], caller_gone=lambda old: leases.caller_gone(ns, old, region)
+        )
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
     if not admitted and p.role != keys.ROUTER["role"]:
@@ -1292,7 +1295,7 @@ def list_operations(
         name, root = j["metadata"]["name"], _root(j)
         op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
         if attempts.enabled():
-            op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name)))
+            op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name), pods=j.get("_pods")))
         out.append(op)
     return out
 
@@ -1545,7 +1548,7 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     name = job["metadata"]["name"]
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
-    op.update(attempts.lifecycle(name, root, records))
+    op.update(attempts.lifecycle(name, root, records, pods=job.get("_pods")))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
         op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(
             job["_region"]

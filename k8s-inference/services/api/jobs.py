@@ -20,6 +20,7 @@ host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the re
 import json
 import logging
 import os
+import re
 
 import urllib3
 from fastapi import HTTPException
@@ -123,6 +124,100 @@ def _mount_weights(r: dict, pod: dict, containers: list) -> None:
                 "readOnly": True,
             }
         )
+
+
+ALIAS_ROOT = "aliases"  # under /work: aliases/<slug>[/<pod>] is what an alias path shows (delivered with /work)
+POD_NAME_ENV = "S2_POD_NAME"  # platform-owned: the pod's own name (downward API), the attempt subdirectory of an alias
+ALIAS_RESERVED = (
+    "/work",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/etc",
+    "/run",
+    "/var",
+    "/tmp",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/boot",
+    "/root",
+    "/opt/serverless2",
+)
+MAX_ALIASES = 4
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
+
+
+def work_aliases(r: dict) -> list[dict]:
+    """A run class's `workMountAliases` (docs/JOBS.md "Work mount aliases"): bounded absolute paths at which the run's
+    own work volume is mounted again, `scope: attempt` (default: a per-attempt subdirectory, the pod's own name, so
+    retries and resumes on the kept volume never share a canonical writable output) or `run` (one directory on the
+    volume). Validated, never caller-supplied: a reserved or overlapping path is refused."""
+    raw = r.get("workMountAliases")
+    if not raw:
+        return []
+    if not isinstance(raw, list) or len(raw) > MAX_ALIASES:
+        raise HTTPException(400, f"workMountAliases: a list of at most {MAX_ALIASES} {{path, scope}} entries")
+    out: list[dict] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            raise HTTPException(400, "workMountAliases: each entry is {path, scope}")
+        path, scope = str(x.get("path") or ""), str(x.get("scope") or "attempt")
+        if scope not in ("attempt", "run"):
+            raise HTTPException(400, f"workMountAliases: scope is attempt or run, not {scope!r}")
+        if (
+            not path.startswith("/")
+            or path == "/"
+            or path != os.path.normpath(path)
+            or not re.fullmatch(r"[A-Za-z0-9._/-]{2,200}", path)
+        ):
+            raise HTTPException(400, f"workMountAliases: {path!r} is not a bounded absolute path")
+        if any(_overlaps(path, p) for p in ALIAS_RESERVED):
+            raise HTTPException(400, f"workMountAliases: {path} is under a reserved path ({', '.join(ALIAS_RESERVED)})")
+        if any(_overlaps(path, a["path"]) for a in out):
+            raise HTTPException(400, f"workMountAliases: {path} overlaps another alias")
+        out.append({"path": path, "scope": scope, "slug": re.sub(r"[^A-Za-z0-9._-]+", "-", path.strip("/"))})
+    return out
+
+
+def _alias_dir(a: dict) -> str:
+    return f"{ALIAS_ROOT}/{a['slug']}" + (f"/$({POD_NAME_ENV})" if a["scope"] == "attempt" else "")
+
+
+def _mount_aliases(r: dict, containers: list[dict], fetch: dict) -> None:
+    """The aliases on `main` (and so on the CPU finalizer, which keeps main's mounts): the same `work` volume at the
+    alias path with an operator-owned `subPathExpr` from the pod's own name (`$(S2_POD_NAME)`, downward API; no
+    customer interpolation); the fetch init container pre-creates the directories group-writable for the pod's
+    fsGroup (kubelet-created subPath directories are root-owned 0755, which a non-root model could not write; 2770, not
+    world-writable). No symlink, no privilege, no new volume."""
+    aliases = work_aliases(r)
+    if not aliases:
+        return
+    pod_name = {"name": POD_NAME_ENV, "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}
+    for c in containers:
+        if any(e.get("name") == POD_NAME_ENV for e in c.get("env") or []):
+            raise HTTPException(400, f"env {POD_NAME_ENV} is platform-owned (the alias attempt directory)")
+        for a in aliases:
+            for m in c.get("volumeMounts") or []:
+                if _overlaps(a["path"], m["mountPath"]):
+                    raise HTTPException(400, f"workMountAliases: {a['path']} overlaps the mount {m['mountPath']}")
+        c["env"] = list(c.get("env") or []) + [dict(pod_name)]
+        for a in aliases:
+            m = {"name": "work", "mountPath": a["path"]}
+            if a["scope"] == "attempt":
+                m["subPathExpr"] = _alias_dir(a)
+            else:
+                m["subPath"] = _alias_dir(a)
+            c["volumeMounts"].append(m)
+    fetch["env"] = list(fetch.get("env") or []) + [
+        dict(pod_name),  # before WORK_ALIAS_DIRS: the kubelet expands $(S2_POD_NAME) from the earlier entry
+        {"name": "WORK_ALIAS_DIRS", "value": ":".join(_alias_dir(a) for a in aliases)},
+    ]
 
 
 def build_run(
@@ -373,9 +468,12 @@ def build_run(
     if nodes > 1:
         if (ex or {}).get("retry") or _class_retry(r):
             raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
+        if work_aliases(r):
+            raise HTTPException(400, "workMountAliases apply to single-node runs (/work is node-local per pod there)")
         return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
     _mount_data(r, pod, [main])
     _mount_weights(r, pod, [main])
+    _mount_aliases(r, [main], fetch)  # after the data and weights mounts: an alias may overlap none of them
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
@@ -1383,6 +1481,12 @@ def export_again(
                 {"name": "WORK_DIR", "value": "/work"},
             ]
         elif c["name"] == "main":
+            # the canonical work aliases (docs/JOBS.md "Work mount aliases") show the finalized attempt's own directory:
+            # the pod name in the alias expression is the finalized pod's, a literal, not this pod's
+            c["env"] = [
+                {"name": POD_NAME_ENV, "value": str(done.get("pod") or "")} if e.get("name") == POD_NAME_ENV else e
+                for e in c.get("env") or []
+            ]
             c.update(
                 {
                     "image": RUNNER_IMAGE,

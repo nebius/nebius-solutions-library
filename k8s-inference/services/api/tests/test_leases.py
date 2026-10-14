@@ -31,7 +31,7 @@ class FakeLeases:
     def get(self, op):
         return copy.deepcopy(self.rows.get(op))
 
-    def prepare(self, op, attempt, region, model):
+    def prepare(self, op, attempt, region, model, caller_gone=None):
         self.calls.append(("prepare", op, attempt))
         cur = self.rows.get(op)
         if cur and cur["attempt"] != attempt and cur["state"] in ("prepared", "attached"):

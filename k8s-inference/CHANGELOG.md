@@ -4,6 +4,23 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.63, jobs 0.1.21
+
+- Work mount aliases (docs/JOBS.md "Work mount aliases"): `job.workMountAliases` / spec `work_mount_aliases`
+  `[{path, scope: attempt | run}]` mounts the run's own work volume at a canonical absolute path on `main` (and so on the
+  CPU finalizer, which sees the finalized attempt's directory); `scope: attempt` is a per-attempt subdirectory from the
+  pod's own name (`$(S2_POD_NAME)`, platform-owned, no caller interpolation), so retries and resumes never share a
+  canonical writable output. Reserved and overlapping paths refused, single-node runs only, no new storage, no host path,
+  no symlink. The fetch init container (jobs 0.1.21) creates the directories `2770` for the pod's fsGroup (tenant-private).
+- Attempt image digest, observed and convergent (docs/JOBS.md "Attempts and finalization"): the uploader (jobs 0.1.21)
+  waits, bounded, for the kubelet's `imageID` of main before its start record and republishes the start record once when
+  the digest appears later; the API fills a start record from the pod it reads and, at GET time, from the newest
+  attempt's live pod. `image_digest_state: observed | pending | unknown` on the operation says what a null means
+  (`pending` is transient). Never the expected image.
+- Native execution leases: a row an earlier caller only prepared (never attached) whose pod is gone or finished (exact
+  read) is closed as `caller replaced` when the replacement pod posts, so a preempted async caller's replacement is not
+  refused for the rest of the call; an attached row is never freed this way.
+
 ## api 0.11.62
 
 - Durable terminal fence for native executions (docs/API.md "Native execution leases"): the join writes

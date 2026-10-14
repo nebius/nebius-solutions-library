@@ -65,6 +65,13 @@ def _gpus(pod: dict) -> int:
 RECORD_STATUS = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}
 
 
+def _pod_digest(p: dict) -> str | None:
+    for cs in (p.get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == "main" and cs.get("imageID"):
+            return cs["imageID"]
+    return None
+
+
 def _lifecycle_fields(r: dict) -> dict:
     """What an attempt record carries beyond the pod's state (the uploader's `export`, the database's `export_state`)."""
     out = {k: r.get(k) for k in ("result_ref", "checkpoint_ref", "image_digest", "epoch") if r.get(k) is not None}
@@ -123,6 +130,9 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
                 "reason": reason if s != "SUCCEEDED" else None,
                 "exit_code": term.get("exitCode"),
                 "_gpus": _gpus(p),
+                # the runtime digest the API observes on the pod (containerStatuses[main].imageID); the record's value,
+                # when it has one, replaces it below
+                "image_digest": _pod_digest(p),
             }
         )
     for r in records or []:

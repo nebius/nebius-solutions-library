@@ -415,6 +415,12 @@ def _validate_variants(s: dict, kind: str) -> None:
         routing.setdefault("default", "priority")
 
 
+def _work_aliases(raw) -> list[dict]:
+    import jobs  # the render's own validation (jobs.work_aliases), at registration already
+
+    return [{"path": a["path"], "scope": a["scope"]} for a in jobs.work_aliases({"workMountAliases": raw})]
+
+
 def _retry_policy(r) -> dict:
     """`retry: {max_attempts 1..10, on_exit_codes [1..255] (default [137, 143])}` of a run class spec."""
     from schemas import RETRY_MAX_ATTEMPTS
@@ -640,6 +646,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "pvcSizeGi": int(s.get("disk_gi", 50)),
             "graceSeconds": int(s.get("grace_seconds", 300)),
             "scratch": s.get("scratch", "network"),
+            # canonical aliases of the work volume (docs/JOBS.md "Work mount aliases"): operator-owned, validated here
+            **({"workMountAliases": _work_aliases(s["work_mount_aliases"])} if s.get("work_mount_aliases") else {}),
             "env": dict(s.get("env") or {}),
             "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
             # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class chosen at submission picks one

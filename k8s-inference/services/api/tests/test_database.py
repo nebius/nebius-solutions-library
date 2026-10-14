@@ -822,6 +822,22 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     with pytest.raises(HTTPException) as e:  # a retry pod's POST while the first is prepared: refused at the hook
         leases.prepare(op, a2, "eu-north1", "cosmos")
     assert e.value.status_code == 409 and "waits" in e.value.detail
+    with pytest.raises(HTTPException) as e:  # the hook read the first caller pod: alive -> still refused
+        leases.prepare(op, a2, "eu-north1", "cosmos", caller_gone=lambda old: False)
+    assert e.value.status_code == 409 and "waits" in e.value.detail
+    # the first caller pod is gone (preempted before its worker attached): its prepared row is closed as replaced
+    # and the replacement pod's POST prepares its own; the earlier evidence stays on record
+    e2 = leases.prepare(op, a2, "eu-north1", "cosmos", caller_gone=lambda old: old == a1)
+    assert e2["state"] == "prepared" and e2["attempt"] == a2
+    assert [(h["attempt"], h["state"], h.get("outcome")) for h in leases.history(op)] == [
+        (a1, "closed", "caller replaced"),
+        (a2, "prepared", None),
+    ]
+    # back to the first attempt for the rest of the scenario: its own row is terminal now, so it posts no new one
+    with pytest.raises(HTTPException) as e:
+        leases.attach(op, a1, me, "req-1")
+    assert e.value.status_code == 409
+    a1, a2 = a2, "op-native-1-ghi"
     with pytest.raises(HTTPException) as e:  # a stale attempt cannot attach
         leases.attach(op, a2, me, "req-x")
     assert e.value.status_code == 409 and "stale" in e.value.detail
@@ -859,7 +875,7 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     # row; the first attempt's evidence stays
     e2 = leases.prepare(op, a2, "eu-north1", "cosmos")
     assert e2["state"] == "prepared" and e2["attempt"] == a2 and e2["pod_uid"] is None
-    assert [x["attempt"] for x in leases.history(op)] == [a1, a2]
+    assert [x["attempt"] for x in leases.history(op)] == ["op-native-1-abc", a1, a2]  # the replaced row stays
     leases.attach(op, a2, me, "req-2")
     assert leases.release(op, a2, me, "req-2", "done", 12.5)["gpu_seconds"] == 12.5
     # the caller finished: the join sums the evidence; one unknown attempt makes the whole unknown

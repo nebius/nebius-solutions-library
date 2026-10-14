@@ -21,7 +21,7 @@ MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"; ACK=
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token; TOKEN=$(cat "$TOKEN_FILE"); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
-MAIN="${MAIN_CONTAINER:-main}"; EXIT=""; POD="{}"; SEEN=0
+MAIN="${MAIN_CONTAINER:-main}"; EXIT=""; POD="{}"; SEEN=0; DIGEST_SEEN=0
 
 pod() { TOKEN=$(cat "$TOKEN_FILE"); POD=$(curl -sS --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$POD_URL" 2>/dev/null || echo '{}'); }
 field() { jq -r --arg m "$MAIN" "$1" <<<"$POD"; }
@@ -53,6 +53,7 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   pool=$(field '.spec.nodeSelector["serverless2.nebius/pool"] // empty')
   image=$(field '.spec.containers[]? | select(.name==$m) | .image // empty')
   digest=$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')
+  [ -n "$digest" ] && DIGEST_SEEN=1   # the exact runtime digest is on record from this record on
   # the application's finalization record (docs/JOBS.md "Attempts and finalization"): RESULT.json next to the
   # outputs names the committed result and checkpoint; without it an application-managed run is not delivered.
   # CHECKPOINT.json ({"checkpoint_ref": ..., "generation": N}) is the live pointer the application publishes while it
@@ -155,11 +156,21 @@ while true; do
       # the attempt is on record from its first second: a node that dies without warning (a stopped spot VM
       # sends no SIGTERM, measured on a B300 spot node) leaves this "started" record, which the
       # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
+      # the kubelet reports main's runtime image digest (imageID) seconds after the start, sometimes after this
+      # container already runs: wait for it, bounded, so the start record carries the exact digest the attempt runs
+      # (docs/JOBS.md "Attempts and finalization"); a digest that appears later is republished below
+      for _ in $(seq 1 "${DIGEST_WAIT_POLLS:-15}"); do
+        [ -n "$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')" ] && break
+        sleep 2 & wait $!; pod
+      done
       record started
       [ "$MODE" = record ] || aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
     fi
     SEEN=1; gone=0
     checkpoint_changed && record started     # the live pointer, fenced and acknowledged through the API
+    if [ "$DIGEST_SEEN" = 0 ] && [ -n "$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')" ]; then
+      record started                         # the digest arrived after the start record: published once, same attempt
+    fi
   elif [ "$SEEN" = 1 ]; then
     gone=$((gone + 1))                        # main's processes are gone; the kubelet can take a while to post the exit code
     if [ "$gone" -ge "${EXIT_CODE_POLLS:-40}" ]; then
