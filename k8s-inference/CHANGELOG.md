@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## platform stage: `iam_token` is an ephemeral input (saved plans take the token at apply time)
+
+- `stack/platform/config.tf`: `variable "iam_token"` is `ephemeral = true` (Terraform ≥ 1.10; the stages require ≥ 1.12).
+  The Kubernetes, Helm and kubectl provider configurations keep referencing it; nothing else may (`tools/check.sh`
+  asserts the variable is ephemeral and sensitive and that `var.iam_token` appears in `providers.tf` only). A saved
+  plan no longer carries the token, and `terraform apply <plan>` reads `TF_VAR_iam_token` afresh from the environment
+  `stack.sh` exports at apply time. Before: the token was frozen into the plan and the fresh environment value was
+  ignored at apply ("Ignoring variable when applying a saved plan"), so three reviewed platform applies on 2026-10-14
+  failed every Helm write with an expired token. docs/OPERATIONS.md "Saved plans".
+
 ## api 0.11.81, fleet chart 0.1.12
 
 (0.11.81 supersedes the unreleased 0.11.80 candidate after review: tags are immutable, so the review fixes below are a

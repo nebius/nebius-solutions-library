@@ -381,6 +381,16 @@ Two ways keep the same operation (no resume, no new root):
    flavors; a new pod of the same operation runs.
 The static PVs keep no node affinity (immutable once created; the flavor label is the guard for new runs).
 
+## Saved plans
+
+`./stack.sh tf platform <id> -- plan -out=<file>` then, after review, `./stack.sh tf platform <id> -- apply <file>`.
+The IAM token is an ephemeral input (`stack/platform/config.tf` `iam_token`): a plan file never contains it, and the
+apply takes the token `stack.sh` exports at apply time, so a plan reviewed for longer than a token's lifetime still
+applies with a fresh token (before api 0.11.85's stack change the token was frozen into the plan and Terraform
+ignored the environment at apply: "Ignoring variable when applying a saved plan", then every Helm write failed with
+the expired token). Everything else in a saved plan is frozen as usual: the cloud state read, the chart values, the
+secret inputs (`secrets.*_env`, sensitive but not ephemeral: they are part of the plan's resource data).
+
 ## Patching
 
 - CI (`.github/workflows/k8s-inference.yml` at the library's root) runs on every pull request and push

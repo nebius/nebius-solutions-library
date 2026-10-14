@@ -64,11 +64,18 @@ locals {
   platform_values             = module.config.platform_values[var.target]
 }
 
-# The Nebius IAM access token for the Kubernetes and Helm providers of this cluster; stack.sh sets
+# The Nebius IAM access token for the Kubernetes, Helm and kubectl providers of this cluster; stack.sh sets
 # TF_VAR_iam_token from NEBIUS_IAM_TOKEN (`nebius iam get-access-token`), exactly as k8s-training does.
+# Ephemeral (Terraform >= 1.10; this stage requires >= 1.12): the value is never written into a saved plan or the state,
+# and `terraform apply <saved plan>` reads it again from the environment at apply time. Until this change the token
+# was frozen into the plan file and Terraform ignored the fresh environment value at apply ("Ignoring variable when
+# applying a saved plan"), so a plan reviewed longer than the token's lifetime failed every Helm write with an expired
+# token (2026-10-14, three platform applies). Provider configuration may reference ephemeral values; no resource,
+# output or local may (tools/check.sh asserts the variable is ephemeral and referenced by providers.tf only).
 variable "iam_token" {
   type      = string
   sensitive = true
+  ephemeral = true
 }
 
 # Secret inputs named in terraform.tfvars `secrets` (the names of environment variables): stack.sh exports each named

@@ -43,6 +43,20 @@ check_terraform() {
     tf "$d" init -backend=false -input=false > /dev/null
     tf "$d" validate -no-color > /dev/null; echo "   ok $d"
   done
+  step "iam_token is an ephemeral, sensitive input referenced by the platform providers only (a saved plan never freezes it)"
+  "$PYTHON" - "$ROOT" <<'PYEOF7'
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+cfg = (root / "stack/platform/config.tf").read_text()
+m = re.search(r'variable "iam_token" \{(.*?)\n\}', cfg, re.S)
+assert m, "stack/platform/config.tf: no variable iam_token"
+body = m.group(1)
+assert re.search(r"\bephemeral\s*=\s*true", body), "iam_token must be ephemeral = true (a saved plan would freeze the token)"
+assert re.search(r"\bsensitive\s*=\s*true", body), "iam_token must be sensitive = true"
+users = sorted(str(p.relative_to(root)) for p in (root / "stack").rglob("*.tf") if ".terraform" not in p.parts and "var.iam_token" in p.read_text())
+assert users == ["stack/platform/providers.tf"], f"var.iam_token must be referenced by stack/platform/providers.tf only, found in {users}"
+print("   ok iam_token: ephemeral + sensitive, referenced by stack/platform/providers.tf only")
+PYEOF7
   step "terraform.tfvars.example passes the schema validations"
   tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
 }

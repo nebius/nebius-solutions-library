@@ -23,10 +23,11 @@ export TF_IN_AUTOMATION=1
 [ "$cmd" = check ] && exec "$ROOT/tools/check.sh" "$@"
 # Authentication, the same way as the library's other solutions: an IAM access token of the Nebius CLI's active
 # profile (`nebius profile activate <name>` to switch), read by the Nebius provider from NEBIUS_IAM_TOKEN and
-# passed to the Kubernetes/Helm providers as TF_VAR_iam_token. The CLI hands out its cached token, whose remaining
-# lifetime is unknown here, so the token is fetched again before every stage run (a token that expires inside one
-# stage fails that stage with "Unauthorized"; re-run it). Set NEBIUS_IAM_TOKEN yourself (CI: a service-account
-# token) to skip the CLI calls.
+# passed to the Kubernetes/Helm providers as TF_VAR_iam_token (an ephemeral variable: never in a plan file or the
+# state; `tf platform <id> -- apply <saved plan>` takes the token this script exports at apply time, however old the
+# plan is). The CLI hands out its cached token, whose remaining lifetime is unknown here, so the token is fetched
+# again before every stage run (a token that expires inside one stage fails that stage with "Unauthorized"; re-run
+# it). Set NEBIUS_IAM_TOKEN yourself (CI: a service-account token) to skip the CLI calls.
 TOKEN_FROM_CLI=0
 [ -n "${NEBIUS_IAM_TOKEN:-}" ] || TOKEN_FROM_CLI=1
 token() { [ "$TOKEN_FROM_CLI" = 1 ] && NEBIUS_IAM_TOKEN="$(nebius iam get-access-token)"; export NEBIUS_IAM_TOKEN TF_VAR_iam_token="$NEBIUS_IAM_TOKEN"; }
