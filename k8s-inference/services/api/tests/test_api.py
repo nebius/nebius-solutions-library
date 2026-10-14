@@ -1472,6 +1472,9 @@ def fake_keys(monkeypatch):
     ):
         monkeypatch.setattr(keys, name, getattr(fk, name))
     monkeypatch.setattr(db, "enabled", lambda: True)  # the fleet API: it has the database
+    # no settlement on an owner's read in the fake world (it would reach the real pool with no database behind it);
+    # the billing pass is faked per test, the read-settlement itself is tested against PostgreSQL (test_settle_on_read)
+    monkeypatch.setattr(appmod, "_settle_on_read", lambda p, job, region: False)
     import leases
 
     monkeypatch.setattr(leases, "get", lambda op: None)  # no native execution unless a test fakes leases itself

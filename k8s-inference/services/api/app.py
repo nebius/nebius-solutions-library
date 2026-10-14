@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.105", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.106", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -2241,7 +2241,15 @@ async def attach_session(id: str, body: schemas.SessionAttach, authorization: st
     a cancel or the deadline it fails for good."""
     _s, worker = await _worker_session(id, authorization)
     s = await asyncio.to_thread(sessions.attach, id, body.connection, worker, body.worker_session_id)
-    return {**sessions.public(s), "connection": s["connection"]}
+    return {**sessions.public(s), "connection": s["connection"], "owner": _session_owner_context(s)}
+
+
+def _session_owner_context(s: dict) -> dict:
+    """The trusted owner context of a session for the worker that attached to it (docs/API.md "Sessions"), as the
+    native execution routes give it (`_owner_context`): the session's durable row (tenant, the stable opaque owner id
+    the admitting key's principal resolved to, the model), written at creation and never changed. Never a request
+    header, never a group derived from the session id, never the key; absent from every public (owner-facing) read."""
+    return {"tenant": s["tenant"], "owner": s["owner"], "model": s["model"]}
 
 
 @app.post("/internal/sessions/{id}:release", include_in_schema=False)
@@ -2266,6 +2274,7 @@ async def watch_session(id: str, authorization: str = Header(default="")):
         "cancel_requested": s["cancel_requested_at"] is not None,
         "cancel_reason": s["cancel_reason"],
         "deadline_at": sessions._ts(s["deadline_at"]),
+        "owner": _session_owner_context(s),
     }
 
 

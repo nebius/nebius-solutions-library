@@ -174,23 +174,26 @@ def unsettled(job: dict) -> bool:
 
 
 class _SettlementLock:
-    """One settlement per operation at a time across API replicas and the CronJob (a Postgres transaction-scoped
-    advisory lock; `pg_try_advisory_xact_lock`: a second settler skips instead of waiting). Every step behind it is
-    idempotent anyway (the `charges` receipt is unique per operation, the ledger release conditional, the annotation
-    a patch): the lock only avoids duplicate work. Without the database, or when the lock cannot be taken (the pool is
-    gone), the settlement proceeds unlocked on that idempotency."""
+    """One settlement per operation at a time across API replicas and the CronJob: a Postgres transaction-scoped
+    advisory lock (`pg_try_advisory_xact_lock`: a second settler skips instead of waiting) on a DEDICATED short-lived
+    connection, never one of the pool's: the settlement behind it takes pool connections of its own (the ledger, the
+    attempt records, the charge), and a lock holding a pool slot would starve them under concurrent settlements
+    (max_size 4). Every step behind the lock is idempotent anyway (the `charges` receipt is unique per operation, the
+    ledger release conditional, the annotation a patch): the lock only avoids duplicate work. Without the database,
+    or when the connection cannot be made, the settlement proceeds unlocked on that idempotency."""
 
     def __init__(self, operation: str):
-        self.operation, self._ctx, self._conn, self.held = operation, None, None, False
+        self.operation, self._conn, self.held, self.locked = operation, None, False, False
 
     def __enter__(self):
         if not db.enabled():
             return self
         try:
-            self._ctx = db.pool().connection()
-            self._conn = self._ctx.__enter__()
-            self._tx = self._conn.transaction()
-            self._tx.__enter__()
+            import psycopg
+
+            from config import DATABASE_URL
+
+            self._conn = psycopg.connect(DATABASE_URL, autocommit=False, connect_timeout=5)
             self.held = bool(
                 self._conn.execute(
                     "select pg_try_advisory_xact_lock(hashtextextended(%s, 5))", (self.operation,)
@@ -204,16 +207,16 @@ class _SettlementLock:
         return self
 
     def _release(self):
-        try:
-            if getattr(self, "_tx", None) is not None:
-                self._tx.__exit__(None, None, None)
-        finally:
-            self._tx = None
-            if self._ctx is not None:
-                try:
-                    self._ctx.__exit__(None, None, None)
-                finally:
-                    self._ctx = None
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.rollback()  # ends the transaction: the advisory lock goes with it
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def __exit__(self, *exc):
         self._release()
@@ -222,7 +225,7 @@ class _SettlementLock:
     @property
     def skip(self) -> bool:
         """True when another settler holds the operation right now."""
-        return getattr(self, "locked", False) and not self.held
+        return self.locked and not self.held
 
 
 async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None) -> bool:
