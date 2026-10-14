@@ -178,3 +178,78 @@ def test_unfinished_foreign_and_unmeasured_reads_keep_the_pass_semantics(databas
     assert _charges(fake, op2) == 0
     assert float(_sql("select spent_gpu_seconds from keys where hash = %s", (h,))[0][0]) == 218.0  # op only
     assert asyncio.run(billing.bill_once()) == 0  # the pass finds nothing left to do
+
+
+def test_a_cancelled_gang_settles_once_kueue_holds_nothing_of_it(client, monkeypatch):
+    """A cancelled JobSet never gets Complete/Failed (suspended, its pods deleted, a manager's worker copy removed), so
+    the pass and the owner's read never settled it and the key stayed reserved (the first MPI cancel, 2026-10-14). It
+    settles once its cancel is on record, it is suspended, no pod of it is left and Kueue holds nothing of it (its
+    Workload gone, deactivated or finished): measured from the rank records like a finished run; not before."""
+    import asyncio
+
+    import attempts
+    import billing
+    import jobs
+    import kube
+    from config import LABEL
+
+    _c, fake = client
+    name = "op-gang-cancel-1"
+    js = {
+        "apiVersion": "jobset.x-k8s.io/v1alpha2",
+        "kind": "JobSet",
+        "metadata": {
+            "name": name,
+            "namespace": NS,
+            "uid": "uid-gang-cancel-1",
+            "labels": {f"{LABEL}/mode": "run", f"{LABEL}/tenant": "demo", f"{LABEL}/model": "distributed-run"},
+            "annotations": {f"{LABEL}/key": "k" * 64, f"{LABEL}/cancelled": "true"},
+        },
+        "spec": {"suspend": True, "managedBy": "kueue.x-k8s.io/multikueue", "replicatedJobs": []},
+        "status": {},
+    }
+    rec = {
+        "operation": name,
+        "root": name,
+        "pod": f"{name}-workers-0-0-abcde",
+        "status": "failed",
+        "exit_code": 1,
+        "started_at": "2026-10-14T18:43:43Z",
+        "ended_at": "2026-10-14T18:45:43Z",
+        "gpus": 1,
+        "gpu_class": "h100",
+        "role": "run",
+        "gang_rank": 0,
+    }
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [rec] if root == name else [])
+    monkeypatch.setattr(jobs, "get", lambda ns, n, region: dict(js))
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {"uid-gang-cancel-1": "north"})
+    monkeypatch.setattr(kube, "cluster_region", lambda c: "eu-north1")
+    monkeypatch.setattr(billing, "cost_of", lambda job, m, records, region: (billing.measured_usage(job, records), 0.0))
+    patched = []
+    monkeypatch.setattr(jobs, "patch_jobset", lambda ns, n, region, body: patched.append((n, body)))
+    released = []
+    import keys
+
+    monkeypatch.setattr(keys, "release", lambda op, s=None: released.append((op, s)) or True)
+    monkeypatch.setattr(db, "enabled", lambda: True)
+
+    async def fake_add(token, usd, operation, gpu_s):
+        return 0.0
+
+    monkeypatch.setattr(billing, "add_spend", fake_add)
+    # Kueue still holds the Workload (the eviction not through yet): not over, nothing settled
+    monkeypatch.setattr(kube, "workload_inactive", lambda ns, uid, region="control": False)
+    assert billing.unsettled(js, NS, "control") is False
+    assert asyncio.run(billing.settle_job("control", NS, dict(js), {})) is False and not released
+    # the Workload deactivated/gone: over; settled from the rank record (120 s x 1 GPU), the key released, billed
+    monkeypatch.setattr(kube, "workload_inactive", lambda ns, uid, region="control": True)
+    assert billing.unsettled(js, NS, "control") is True
+    assert asyncio.run(billing.settle_job("control", NS, dict(js), {})) is True
+    assert released == [(name, 120.0)]
+    assert patched and patched[-1][1]["metadata"]["annotations"][f"{LABEL}/gpu-seconds"] == "120.0"
+    # a cancelled JobSet that is not suspended, or still has a pod, is not over
+    monkeypatch.setattr(kube, "workload_inactive", lambda ns, uid, region="control": True)
+    assert billing.cancelled_over({**js, "spec": {**js["spec"], "suspend": False}}, NS, "control") is False
+    assert billing.cancelled_over({**js, "_pods": [{"metadata": {"name": "p"}}]}, NS, "control") is False

@@ -1457,7 +1457,7 @@ def test_a_unit_whose_child_ended_undelivered_is_retried_by_the_next_continuatio
     children.sweep()
     rb = children.readback(NS, op, "u1")
     assert rb["state"] == "ended" and "finished without a successor" in rb["reason"] and rb["capture"] is None
-    assert rb["incarnation"] == 1 and rb["previous_child"] is None
+    assert rb["incarnation"] == 1 and rb["previous_child"] is None and rb["can_retry"] is True
     # a continuation of the same root with a live attempt asks for the same unit: the unit reopens as incarnation 2
     succ = json.loads(json.dumps(fake.jobs[(NS, op)]))
     succ["status"] = {"startTime": "2026-10-14T18:37:13Z"}
@@ -1473,7 +1473,10 @@ def test_a_unit_whose_child_ended_undelivered_is_retried_by_the_next_continuatio
         "verify_parent_token",
         lambda token: {**identity, "pod": sp["metadata"]["name"], "uid": "uid-parent-r1"},
     )
-    r = _post(c, f"{op}-r1", "u1")
+    # without the explicit retry: the ended unit replays as before (the truth, no reopen); the retry is opt-in
+    r0 = _post(c, f"{op}-r1", "u1")
+    assert r0.status_code == 200 and r0.json()["child"] == child and r0.json()["state"] == "ended"
+    r = _post(c, f"{op}-r1", "u1", retry=True)
     assert r.status_code == 201, r.text
     new = r.json()
     assert new["child"] == f"{child}-r2" and new["incarnation"] == 2 and new["previous_child"] == child
@@ -1505,7 +1508,78 @@ def test_a_unit_whose_child_ended_undelivered_is_retried_by_the_next_continuatio
     keys.release(f"{child}-r2", 0.0)
     children.sweep()
     rb = children.readback(NS, op, "u1")
-    assert rb["state"] == "ended" and rb["capture"] is not None
+    assert rb["state"] == "ended" and rb["capture"] is not None and rb["can_retry"] is False
     r3 = _post(c, f"{op}-r1", "u1")
     assert r3.status_code == 200 and r3.json()["child"] == f"{child}-r2" and r3.json()["incarnation"] == 2
+    r4 = _post(c, f"{op}-r1", "u1", retry=True)
+    assert r4.status_code == 409 and "infers once" in r4.text
     assert (NS, f"{child}-r3") not in fake.jobs
+
+
+def test_a_unit_retry_is_refused_for_the_same_parent_and_for_an_outcome_unknown_child(rig, monkeypatch):
+    """The retry is for a LATER parent of the root only (the parent that owned the ended child cannot retry its own
+    unit), and never for a child whose inference was posted with an unknown outcome (call.sh exit 4): that unit stays
+    `undelivered` for the application's own recovery, never a second inference."""
+    import attempts
+
+    c, fake, op, identity = rig
+    child = _post(c, op, "u1").json()["child"]
+    children._end(op, "u1", "test: ended without a capture")
+    keys.release(child, None)
+    # the same parent (still live) asking with retry: refused; without retry: the ended row replays
+    r = _post(c, op, "u1", retry=True)
+    assert r.status_code == 409 and "later continuation" in r.text
+    assert _post(c, op, "u1").status_code == 200
+    # a later continuation, but the child's last attempt posted its inference and lost the answer (exit 4): refused
+    succ = json.loads(json.dumps(fake.jobs[(NS, op)]))
+    succ["status"] = {"startTime": "2026-10-14T18:37:13Z"}
+    succ["metadata"]["name"] = f"{op}-r1"
+    succ["metadata"]["annotations"][f"{LABEL}/resumed-from"] = op
+    fake.jobs[(NS, f"{op}-r1")] = succ
+    sp = pod(f"{op}-r1", "Running")
+    sp["metadata"]["uid"] = "uid-parent-r1"
+    fake.pods.append(sp)
+    monkeypatch.setattr(
+        children,
+        "verify_parent_token",
+        lambda token: {**identity, "pod": sp["metadata"]["name"], "uid": "uid-parent-r1"},
+    )
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(
+        attempts,
+        "for_operation",
+        lambda root: [{"operation": child, "root": child, "status": "failed", "exit_code": 4, "capture": None}]
+        if root == child
+        else [],
+    )
+    assert children.readback(NS, op, "u1")["can_retry"] is False  # exit 4: the readback says so first
+    r = _post(c, f"{op}-r1", "u1", retry=True)
+    assert r.status_code == 409 and "outcome" in r.text and "unknown" in r.text
+    assert (NS, f"{child}-r2") not in fake.jobs
+    # exit 3 (transfer-only, nothing captured) and a 4xx answer with its manifest (exit 2 + capture): not retried
+    for rec in (
+        {"operation": child, "root": child, "status": "failed", "exit_code": 3, "capture": None},
+        {"operation": child, "root": child, "status": "failed", "exit_code": 2, "capture": {"http_status": 422}},
+    ):
+        monkeypatch.setattr(attempts, "for_operation", lambda root, _r=rec: [_r] if root == child else [])
+        assert children.readback(NS, op, "u1")["can_retry"] is False
+        assert _post(c, f"{op}-r1", "u1", retry=True).status_code == 409
+    # exit 2 (refused before its inference) with no capture: can_retry, retried
+    monkeypatch.setattr(
+        attempts,
+        "for_operation",
+        lambda root: [{"operation": child, "root": child, "status": "failed", "exit_code": 2, "capture": None}]
+        if root == child
+        else [],
+    )
+    assert children.readback(NS, op, "u1")["can_retry"] is True
+    monkeypatch.setattr(
+        attempts,
+        "for_operation",
+        lambda root: [{"operation": child, "root": child, "status": "failed", "exit_code": 2, "capture": None}]
+        if root == child
+        else [],
+    )
+    r = _post(c, f"{op}-r1", "u1", retry=True)
+    assert r.status_code == 201 and r.json()["child"] == f"{child}-r2", r.text

@@ -370,6 +370,9 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
                 k: a.get(k)
                 for k in ("pod", "epoch", "status", "exit_code", "export_state", "result_ref", "image_digest")
             }
+    # the authoritative retry verdict for a caller (docs/JOBS.md "Endpoint children", unit retry): the unit ended
+    # without its one inference; a LATER parent of the root may POST the same bound request with `retry: true`
+    out["can_retry"] = bool(row["state"] == "ended" and out["capture"] is None and _never_inferred(recs))
     try:
         job, region = jobs.find(row["namespace"] or ns, row["child"])
         op = jobs.normalise(job)
@@ -428,6 +431,29 @@ def _input_of(body: dict) -> tuple[dict | None, dict | None, dict]:
     if not str(tr.get("input_url") or "").startswith("https://"):
         raise HTTPException(400, "input_ref needs transport.input_url (https) the caller fetches the request from")
     return None, {"sha256": ref["sha256"], "size_bytes": size}, tr
+
+
+def _not_inferred(row: dict) -> bool:
+    """Whether the unit's current child definitely never ran its one inference: no attempt at all (never started, or
+    cancelled before its pod ran), or its last attempt ended before the inference POST (call.sh exit 2: refused
+    before/at readiness, a definite 4xx with no capture; exit 3: nothing captured, transfer-only) with no capture on
+    record. Never an outcome-unknown attempt (exit 4: the POST went out, the answer was lost) and never a capture."""
+    import attempts
+
+    recs = attempts.for_operation(row["child"]) if attempts.enabled() else []
+    return _never_inferred(recs)
+
+
+def _never_inferred(recs: list) -> bool:
+    """From a child's attempt records: no attempt at all (never started, or cancelled before its pod ran), or the
+    last attempt ended before the inference POST (call.sh exit 2 with no capture manifest: refused before/at
+    readiness; a 4xx answer to the POST itself carries a manifest and is a capture). Exit 3 (nothing captured,
+    transfer-only), exit 4 (posted, outcome unknown) and every attempt with a capture (0/2/5: the inference happened,
+    delivered or not) are never "not inferred"."""
+    if not recs:
+        return True
+    last = recs[-1]
+    return not last.get("capture") and last.get("exit_code") == 2
 
 
 def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
@@ -523,11 +549,29 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                     "update endpoint_children set transport = %s where root = %s and unit_id = %s",
                     (json.dumps(transport), root, unit_id),
                 )
-            if existing[2] == "ended" and not _delivered(_get(root, unit_id)):
-                # unit retry: the child ended without its one inference (the cascade of a parent that finished without
-                # a successor, a failed caller); a live attempt of a later parent of the same root asks for the same
-                # bound request again: the unit reopens as the next incarnation (a new Job, binding and ledger member;
-                # the earlier child's Job and records stay as history). An ended unit WITH a capture is final: replay.
+            if existing[2] == "ended" and body.get("retry") is True:
+                # unit retry, explicit (docs/JOBS.md "Endpoint children"): the caller asks to run the unit again. Only a
+                # LATER parent of the root (an owner's continuation, not the parent that owned the ended child) may, with
+                # the same bound request, and only for a child that definitely never inferred (no capture, no
+                # outcome-unknown attempt): the unit reopens as the next incarnation (a new Job, binding and ledger
+                # member; the earlier child's Job and records stay as history). Without `retry` the ended row replays.
+                row_now = _get(root, unit_id)
+                if _delivered(row_now):
+                    raise HTTPException(
+                        409, f"unit {unit_id} of {root} delivered its capture ({existing[0]}); a unit infers once"
+                    )
+                if parent == row_now["parent"] or not ann.get(f"{LABEL}/resumed-from"):
+                    raise HTTPException(
+                        409,
+                        f"unit {unit_id} of {root}: only a later continuation of the root (an owner's resume) retries a "
+                        f"unit; {parent} is the parent that owned {existing[0]}",
+                    )
+                if not _not_inferred(row_now):
+                    raise HTTPException(
+                        409,
+                        f"unit {unit_id} of {root}: the outcome of {existing[0]} is unknown (its inference was posted); "
+                        "it is not retried",
+                    )
                 retry = True
         if retry or not existing:
             active = c.execute(

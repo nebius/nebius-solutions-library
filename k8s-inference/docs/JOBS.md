@@ -775,12 +775,16 @@ scope and budget but **not** the key's model allow-list: the child model was all
 `child_endpoints`, so a key granted the parent class alone drives its children without being granted the child
 endpoints (a direct call of the key to the child endpoint stays refused).
 
-**Unit retry.** A unit whose child ended without delivering its capture (the cascade of a parent that finished
-without a successor, a failed or refused caller) is not final: a live attempt of a later parent of the same root
-(a resume) asking for the same bound request reopens it as the next incarnation (`<root>-c-<sha>-r<n>`: a new Job,
-binding and ledger member for the same unit; the earlier child's Job and records stay as history); the readback and
-the owner route carry `incarnation` and `previous_child`. An ended unit with a capture stays final: the same request
-replays it, there is never a second inference for a delivered unit.
+**Unit retry (explicit).** A unit whose child ended without delivering its capture is not necessarily final: a live
+attempt of a **later** parent of the same root (the owner's resume, never the parent that owned the ended child)
+may POST the same bound request with `retry: true`; the unit then reopens as the next incarnation
+(`<root>-c-<sha>-r<n>`: a new Job, binding and ledger member for the same unit; the earlier child's Job and records
+stay as history) and the readback and the owner route carry `incarnation` and `previous_child`. The retry is refused
+(409, naming why) for the same parent, for a unit that delivered its capture (a unit infers once), and for a child
+whose inference was posted with an unknown outcome (call.sh exit 4: the application's own recovery, never a second
+inference); only a child that definitely never inferred (no attempt, or exit 2/3 with no capture) is retried.
+Without `retry` the ended row replays as before. The readback carries `can_retry` (the same verdict a
+retry would get, before the later-parent rule): a caller decides from it, never from a status guess.
 
 **The capture (the native one-POST protocol, docs/API.md "Endpoint calls").** The child is rendered as an
 application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written on the API's own

@@ -166,11 +166,36 @@ async def bill_once() -> int:
     return n
 
 
-def unsettled(job: dict) -> bool:
-    """Whether a Job (or JobSet) is one the billing pass would settle now: finished, admitted on a key, not billed
-    yet, not a worker's transient copy of a manager Job."""
+def unsettled(job: dict, ns: str | None = None, region: str | None = None) -> bool:
+    """Whether a Job (or JobSet) is one the billing pass would settle now: admitted on a key, not billed yet, not a
+    worker's transient copy of a manager Job, and over: finished (Complete/Failed), or a cancelled JobSet that is over
+    (`cancelled_over`: a cancelled JobSet never reaches a terminal condition)."""
     ann = (job.get("metadata") or {}).get("annotations") or {}
-    return BILLED not in ann and KEY in ann and finished(job) and not jobs.is_mirror(job)
+    if BILLED in ann or KEY not in ann or jobs.is_mirror(job):
+        return False
+    return finished(job) or cancelled_over(job, ns, region)
+
+
+def cancelled_over(job: dict, ns: str | None, region: str | None) -> bool:
+    """A cancelled JobSet (jobs.cancel: the Workload deactivated, the JobSet suspended, the pods deleted; a manager's
+    worker copy removed by MultiKueue) never gets Complete or Failed, so `finished` never sees it and its key stayed
+    reserved (the first MPI cancel, 2026-10-14). It is over for the settlement when its cancel is on record, it is
+    suspended, and Kueue holds nothing of it any more (kube.workload_inactive on the cluster that holds the Workload:
+    the manager, or the worker for a pinned run) and no pod of it is left where it ran. Usage then settles from the
+    attempt records exactly as for a finished run (measured, or unknown when a rank has no end on record)."""
+    md = job.get("metadata") or {}
+    ann = md.get("annotations") or {}
+    if not ann.get(f"{LABEL}/cancelled") or not jobs.is_jobset(job) or not (job.get("spec") or {}).get("suspend"):
+        return False
+    if ns is None or region is None or not md.get("uid"):
+        return False
+    if job.get("_pods"):
+        return False
+    try:
+        return kube.workload_inactive(ns, md["uid"], region)
+    except Exception as e:  # noqa: BLE001 - unknown is not over
+        log.warning("billing %s: workload state unknown: %s", md.get("name"), e)
+        return False
 
 
 class _SettlementLock:
@@ -235,7 +260,7 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
     kept), an endpoint call's join with its native execution (deferred while a worker is attached)."""
     cache = cache if cache is not None else {}
     ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
-    if not unsettled(job):
+    if not unsettled(job, ns, region):
         return False
     with _SettlementLock(name) as lock:
         if lock.skip:
@@ -247,7 +272,7 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
             except Exception as e:  # noqa: BLE001 - unreadable now: settled by a later pass
                 log.warning("billing %s/%s: re-read failed: %s", region, name, e)
                 return False
-            if not unsettled(fresh):
+            if not unsettled(fresh, ns, region):
                 return False
             fresh.pop("_pods", None)
             job = {**job, "metadata": fresh["metadata"], "status": fresh["status"]}

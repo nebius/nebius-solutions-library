@@ -1853,7 +1853,7 @@ def _settle_on_read(p: Principal, job: dict, region: str | None) -> bool:
     `pending` until the next pass (every 2 minutes). Nothing changes for an unfinished operation, an unmeasured one
     (`unknown`, the reservation kept) or a native call whose worker is still attached (deferred). Never fails the
     read: an error is logged and the pass settles later."""
-    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job):
+    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job, p.namespace, _home(job)):
         return False
     try:
         return asyncio.run(billing.settle_job(_home(job), p.namespace, dict(job)))
