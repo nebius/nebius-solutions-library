@@ -193,13 +193,15 @@ def test_capabilities_are_intersected_per_pool_before_a_pool_counts(monkeypatch)
     with pytest.raises(HTTPException) as e:
         _build("op-nv", nvme_run, {"regions": ["north"], "classes": ["h100"]})
     assert e.value.status_code == 400 and "with local NVMe" in e.value.detail
-    # a run that fits the small shared-fs pool is constrained to it alone (never the big one it cannot mount)
+    # a run that fits the small shared-fs pool (and the NVMe pool's node, which mounts it too) is constrained to those
+    # two: never the big pool it cannot mount
     small = _model(
         {**CPU_CLASS, "id": "sm", "cpu": "4", "memory": "8Gi", "ephemeral_storage": "10Gi", "weights": {"path": "x"}}
     )
     job = _build("op-sm", small, {"regions": ["north"]})
     terms = _affinity(job)
-    assert terms[f"{LABEL}/pool"]["values"] == ["small-fs"] and terms[f"{LABEL}/shared-fs"]["values"] == ["true"]
+    assert terms[f"{LABEL}/pool"]["values"] == ["nvme-1x", "small-fs"]
+    assert terms[f"{LABEL}/shared-fs"]["values"] == ["true"] and "big-no-fs" not in terms[f"{LABEL}/pool"]["values"]
 
 
 def test_fit_is_computed_on_the_final_rendered_pod(monkeypatch):
