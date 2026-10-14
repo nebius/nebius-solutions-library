@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.87", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.88", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -152,7 +152,9 @@ def _job_deadline(job: dict) -> int | None:
     return int(d) if d else None
 
 
-def continuation_admission(root: str, predecessor: str | None, transfer_only: bool = False, stage: str | None = None):
+def continuation_admission(
+    root: str, predecessor: str | None, transfer_only: bool = False, stage: str | None = None, kind: str = "stage"
+):
     """The admission a continuation builder calls with its rendered Job, right before creating it: the member joins
     the run's reservation on the root's original key (keys.prepare_run_member: key still valid, current head, budget
     for its GPU bound, the slot reused or re-acquired). The returned callable raises HTTPException with the ledger's
@@ -167,7 +169,7 @@ def continuation_admission(root: str, predecessor: str | None, transfer_only: bo
                 _job_gpus(job),
                 _job_deadline(job),
                 transfer_only,
-                **({"kind": "stage", "stage": stage} if stage else {}),
+                **({"kind": kind, "stage": stage} if stage else {}),
             )
         except keys.KeyLimit as e:
             raise HTTPException(e.status, e.detail)
@@ -185,7 +187,12 @@ def _require_current(p: Principal, source: str, root: str) -> None:
     member = keys.member_of(root)
     if member is None:
         return
-    head = keys.stage_head(member["root"], member["stage"]) if member["kind"] == "stage" else keys.run_head(root)
+    if member["kind"] == "stage":
+        head = keys.stage_head(member["root"], member["stage"])
+    elif member["kind"] == "child":
+        head = keys.child_head(member["root"], member["stage"])
+    else:
+        head = keys.run_head(root)
     if head in (None, source):
         return
     try:
@@ -209,11 +216,17 @@ def continue_run(root: str, build, transfer_only: bool = False):
     if not db.enabled():
         return build(None)
     member = keys.member_of(root)
+    kind = "stage"
     if member and member["kind"] == "stage":
         # a stage of a graph (docs/JOBS.md "Stage composition"): its continuations follow the stage's own head inside
         # the graph root's run (the root's key, slot and budget), never the root's lineage or a sibling's
         root, stage = member["root"], member["stage"]
         head = keys.stage_head(root, stage)
+    elif member and member["kind"] == "child":
+        # an endpoint child (docs/JOBS.md "Endpoint children"): its transfer-only export retry follows the child's own
+        # head (its unit's lineage) inside the parent run's ledger; nothing is inferred or counted again
+        root, stage, kind = member["root"], member["stage"], "child"
+        head = keys.child_head(root, stage)
     else:
         stage = None
         head = keys.run_head(root)
@@ -222,7 +235,7 @@ def continue_run(root: str, build, transfer_only: bool = False):
     pending: dict = {}
 
     def admit(job: dict) -> None:
-        continuation_admission(root, head, transfer_only, stage=stage)(job)
+        continuation_admission(root, head, transfer_only, stage=stage, kind=kind)(job)
         pending["name"] = job["metadata"]["name"]
 
     try:
@@ -1824,6 +1837,26 @@ async def create_child(parent: str, body: dict, authorization: str = Header(defa
     identity = await asyncio.to_thread(children.verify_parent_token, token)
     out, created = await asyncio.to_thread(children.create, identity, parent, body or {})
     return JSONResponse(out, status_code=201 if created else 200)
+
+
+@app.post("/internal/operations/{child}:refresh", include_in_schema=False)
+async def refresh_child(child: str, request: Request, authorization: str = Header(default="")):
+    """The refresh broker of an endpoint child's caller (docs/JOBS.md "Endpoint children"; services/jobs/bin/call.sh
+    `refresh`): with the child's own operation-scoped token, the renewable input URL and fresh presigned PUT URLs for
+    the capture at the platform-owned destination."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(501, "endpoint children need the fleet database")
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer token")
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    return await asyncio.to_thread(
+        children.refresh, child, authorization[7:].strip(), body if isinstance(body, dict) else {}
+    )
 
 
 @app.get("/internal/operations/{parent}/children/{unit_id}", include_in_schema=False)

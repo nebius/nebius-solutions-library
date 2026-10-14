@@ -676,7 +676,8 @@ token or credential of the binding reaches them. The call's reservation on the k
 ## Endpoint children
 
 A run class may let its live attempts ask the platform for bounded asynchronous endpoint calls as **children** of
-their root, without any customer credential in the worker and without an application scheduler:
+their root, without any customer credential in the worker, without storage credentials in the worker, and without an
+application scheduler:
 
 ```yaml
 child_endpoints: [cosmos3-nano-s2-r1]   # operator allowlist: endpoint models only
@@ -684,37 +685,95 @@ child_max_units: 16384                  # explicit bound of children per root (1
 ```
 
 The render then gives `main` its own pod-bound ServiceAccount token (`S2_PARENT_TOKEN_FILE`, projected, 1 h, renewed)
-and the control API's URL (`S2_API_URL`, `S2_OPERATION`, `S2_CHILD_ENDPOINTS`, `S2_CHILD_MAX_UNITS`). The attempt
-calls, with that token as its bearer:
+and the control API's URL (`S2_API_URL`, `S2_OPERATION`, `S2_CHILD_ENDPOINTS`, `S2_CHILD_MAX_UNITS`), and FREEZES the
+allow-list and the bound on the Job (annotations `child-endpoints`, `child-max-units`): a later change of the class
+neither widens nor moves a running run's grant, and a run rendered without the grant has none. The attempt calls,
+with that token as its bearer:
 
 | Call | Answer |
 |---|---|
-| `POST /internal/operations/<run>/children` `{unit_id, model, input, timeout_s?, region?}` | 201 the child; 200 the existing child of that unit when the request is the same (a replay, a readback after a lost response, a successor attempt of the same root); 409 when the unit already has a child with a different request |
-| `GET /internal/operations/<run>/children/<unit_id>` | the child: `child` (its operation id), `status`, `output_prefix` (the child's captured response under the tenant bucket, readable with the run's own S3 credentials), `request_sha256`, `state` (`active`/`ended`), timestamps |
+| `POST /internal/operations/<run>/children` `{unit_id, model, input \| input_ref, transport?, timeout_s?, region?}` | 201 the child; 200 the existing child of that unit when the bound request is the same (a replay, a readback after a lost response, a successor attempt of the same root; renewed `transport` URLs are taken); 409 when the unit already has a child with a different request; 503 when the intent is recorded but its creation did not confirm (replay the same request: it reads the intent back and finishes it) |
+| `GET /internal/operations/<run>/children/<unit_id>` | the readback (below) |
 
-Fail-closed rules, in order: the token must be a bound pod token of a tenant namespace (TokenReview on the parent's
-cluster: namespace, pod name, exact pod UID); the pod must be a live attempt of the named run (among its pods by UID,
-Running/Pending; the run not finished, cancelled or superseded; its root's reservation open); the model must be in
-the class's `child_endpoints` and an endpoint; the unit's request hash must match an existing child or no child may
-exist for the unit; at most `child_max_units` children per root; **one active child per root** (409 naming the
-active one until it ended); the parent's remaining deadline must leave at least 60 s, and the child's timeout is
-capped by it. Identity is deterministic: `<root>-c-<sha256(unit_id)[:10]>`; children of a root are keyed by the root,
-so an allowed successor attempt reads its predecessor's child back before any new submit; no replay ever creates a
-second execution for a unit.
+**The request.** `input` (an inline object, up to 48 KiB: it travels in the child's private binding as
+`request.json`) or `input_ref: {sha256, size_bytes?}` with `transport: {input_url}` (an https URL the caller fetches
+the exact request body from at transfer time; the caller verifies the bytes against the bound sha256 before its one
+POST and refuses other bytes; a 512 MiB reference video goes this way, never through the Job object). The **bound
+request** is `{model, input | input_ref.sha256, timeout_s, region}` and is immutable per unit (`request_sha256`);
+transfer URLs are renewable and never part of it: a replay of the same bound request with a new `transport.input_url`
+renews what the broker serves, nothing else. The child model's image is recorded at admission (`model_image`); an
+intent is never completed against another image.
+
+**The capture (the native one-POST protocol, docs/API.md "Endpoint calls").** The child is rendered as an
+application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written, owned by the
+root's owner), `IO_MODE=application`, the readiness probe, exactly **one inference POST** per operation (the durable
+`posted.json` marker: a lost response is an unknown outcome, `exit 4`, never a second POST, whatever the status;
+408/429-at-the-edge/5xx/000 are a capture or an unknown outcome, not retries), the response bytes and their manifest
+(`call.json`: sha256, media type from the response headers, size, HTTP status, producing attempt, timings) made
+durable on the retained work volume (`<child>-work`, or the tenant's shared-scratch leaf when the model says
+`call_scratch: shared`) BEFORE delivery. Delivery goes to a platform-owned destination,
+`s3://<tenant bucket of the child's region>/operations/<child>/response.bin` + `call.json`, through presigned PUT URLs
+the API itself mints for the child on demand: the binding's `refresh_url` is `POST /internal/operations/<child>:refresh`
+on this API and its `refresh_token` the child's own operation-scoped token (the admission HMAC). The broker answers
+only a request that proves that token, names the child (or one of its transfer-only export retries `<child>-x<n>`)
+holding a live reservation on the root's key, and names a **live attempt** (a Pending/Running pod) of that operation;
+a stale pod, a settled operation or another model's token gets 401/403/409 and delivers nothing. The input phase
+returns the parent's current `input_url`; the output phase returns one-hour PUT URLs for the two objects (any content
+type). A failed delivery leaves the capture on the volume: the owner's `POST /v1/operations/<child>:export` renders the
+transfer-only retry (TRANSFER_ONLY: nothing is inferred again), admitted as a `child` member after the child's own
+head in the parent run's ledger (no second request), served by the same broker with the same binding.
+
+**The readback** (authoritative past the Job's TTL: the durable row, the destination, the attempt records; nothing is
+guessed from a prefix): `child`, `state` (`pending` | `active` | `ended`), `status` (the Job's while it exists, else the
+record's, else `PENDING`/`ENDED`/`UNKNOWN`), `request`, `request_sha256`, `model_image`, `timeout_s`, `region`,
+`result_ref` (the stable `s3://…/response.bin`), `capture` (None until delivered; else `sha256`, `content_type`,
+`size_bytes`, `http_status`, `attempt_id`, `timings`, `delivered: true`, and `download_url`, a one-hour presigned GET
+of that one object for the live attempt of the root: attempt-scoped, no tenant credentials), `attempt` (the latest
+record: pod, status, exit code, export state, image digest), `outcome`: `succeeded` (a delivered capture with a 2xx)
+| `failed` (a delivered endpoint error, or ended without a capture: refused, cancelled, lost) | `undelivered`
+(the producing attempt captured, exit 0/2/5, and failed only its delivery: `exportable: true`, the owner's `:export`)
+| `unknown` (exit 4: posted, no response captured; exit 3: nothing captured; not exportable, never inferred again
+under this unit) | `pending`. A parent marks a unit done only on `succeeded`, and resolves a lost answer by reading the
+SAME unit back, never by a new unit.
+
+**Fail-closed rules, in order:** the token must be a bound pod token of a tenant namespace (TokenReview on the
+parent's cluster: namespace, pod name, exact pod UID); the pod must be a live attempt of the named run (among its pods
+by UID, Running/Pending; the run not finished, cancelled or superseded; its root's reservation open); the model must
+be in the frozen allow-list and an endpoint; the key's endpoint-call policy holds (a finite GPU-second budget: 501, as
+for any endpoint call); the unit's bound request must match an existing child or no child may exist for the unit; at
+most `child_max_units` children per root (ended ones counted: a bound on executions); **one open child per root**
+(`pending` or `active`: 409 naming it until its terminal settlement); the parent's remaining deadline must leave at
+least 60 s, and the child's timeout is capped by it. Identity is deterministic: `<root>-c-<sha256(unit_id)[:10]>`;
+children of a root are keyed by the root, so an allowed successor attempt reads its predecessor's child back before any
+new submit; no replay ever creates a second execution for a unit.
+
+**Lifecycle (a durable intent, finished deterministically).** The row is written FIRST (`pending`, with the namespace,
+the resolved region, the effective timeout, the bound request and the transport); completion is the ledger member
+(idempotent), the binding, then the caller Job (found, or created; AlreadyExists is the same Job), then `active`. An
+API process that dies in between, or a create whose answer was lost (the Job may exist), leaves the intent pending
+with its identity: the next replay of the same request and the reconciler's sweep (every 15 s) finish it from the row
+alone; nothing is rolled back unless the Job's absence is confirmed and the refusal definite (the ledger's 4xx, the API
+server's definite 4xx: synchronously nothing stays recorded; from the sweep the row ends with `reason: refused: …`).
+`active` lasts until the child's **terminal settlement**: its run member settled by billing (the key release joined
+with the worker's native execution lease), or, for a never-started child deleted by its cancel, at that deletion. A
+cancel (the root's cancel route at once; the sweep's cascade for a parent that is cancelled, finished without a
+successor, or gone) is issued to the child's Job and to its worker (the lease's cancel request) and recorded
+(`cancel_requested_at`, `reason`), and the row stays open until the settlement: no next child starts while the old
+caller or worker may still be draining. A finished parent WITH a successor (a resume) is judged by the successor. A
+child whose Job is gone with nothing to settle is ended as `lost`.
 
 Accounting, on the root's ledger (`keys.prepare_run_member` kind `child`): the root's concurrency slot is shared (no
-second slot); each child counts **one request** against the key's request budget and rate window; the key's
-endpoint-call policy applies unchanged (a key with a finite GPU-second budget gets the same 501 as any endpoint call:
-shared endpoint GPU time is not metered per call, so a child reserves no GPU bound); the child settles as a run member
-(its key release joined with the worker's native execution, as every endpoint call's); the root closes only when
-nothing is active, children included. The child's caller is the platform's caller pod (as every endpoint call's), carrying ONLY
-an operation-scoped credential: `Bearer s2-admitted.<token>`, the admission token (HMAC of the root's key hash, the
-child model and the child operation), which the gateway hook accepts by rebuilding the principal from the key record
-by hash and only while the child holds a live reservation (it dies with cancel and settlement, and is useless for any
-other operation or model). No customer or admin key is stored or forwarded, and the parent worker never sees a bearer;
-the call goes through the model's gateway (never LiteLLM's pass-through). Cancelling the root cancels its
-active children (the cancel route at once, the reconciler's sweep every 15 s, durably); a child that ended is
-recorded `ended`. A run class without `child_endpoints` renders exactly as before.
+second slot); each child counts **one request** against the key's request budget and rate window (a transfer-only
+retry none); the key's endpoint-call policy applies unchanged (a key with a finite GPU-second budget gets the same 501
+as any endpoint call: shared endpoint GPU time is not metered per call, so a child reserves no GPU bound); the child
+settles as a run member; the root closes only when nothing is active, children included. The child's caller is the
+platform's caller pod (as every endpoint call's), carrying ONLY an operation-scoped credential: `Bearer
+s2-admitted.<token>`, the admission token (HMAC of the root's key hash, the child model and the child operation),
+which the gateway hook accepts by rebuilding the principal from the key record by hash and only while the child holds
+a live reservation (it dies with cancel and settlement, and is useless for any other operation or model). No customer
+or admin key is stored or forwarded, the parent worker never sees a bearer or a storage credential; the call goes
+through the model's gateway (never LiteLLM's pass-through). A run class without `child_endpoints` renders exactly as
+before.
 
 ## Status mapping
 

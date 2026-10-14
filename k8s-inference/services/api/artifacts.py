@@ -84,6 +84,19 @@ def presign_upload(ns: str, filename: str, content_type: str, expires_s: int, re
     }
 
 
+def presign_put(ns: str, uri: str, expires_s: int, region: str = REGION) -> dict:
+    """A presigned PUT for one exact object of the tenant's bucket in `region` (an endpoint child's capture
+    destination, docs/JOBS.md "Endpoint children"): any content type (the caller sends the captured one)."""
+    s = storage(ns, region)
+    if not uri.startswith(f"s3://{s['bucket']}/"):
+        raise HTTPException(403, "object is not in the tenant's bucket of that region")
+    key = uri[len(f"s3://{s['bucket']}/") :]
+    url = s["client"].generate_presigned_url(
+        "put_object", Params={"Bucket": s["bucket"], "Key": key}, ExpiresIn=expires_s
+    )
+    return {"uri": uri, "url": url, "method": "PUT", "expires_in_s": expires_s}
+
+
 def operation_of(uri: str) -> str | None:
     """The operation whose uploader owns an object: `s3://<bucket>/operations/<id>/...` (the output prefix of every
     run and endpoint-call Job, `jobs.output_prefix`); None for other objects (uploads)."""

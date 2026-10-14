@@ -4,7 +4,40 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.87, platform chart 0.1.10
+## api 0.11.88, jobs 0.1.26, platform chart 0.1.10
+
+(0.11.88 supersedes the unreleased 0.11.87 candidate after review; everything of it is included.)
+
+- Endpoint children, the capture: the child is rendered as a native application-I/O endpoint call (docs/JOBS.md
+  "Endpoint children"): its request in a platform-written private binding (inline `input`, or `input_ref.sha256` +
+  a renewable `transport.input_url` the caller verifies against the bound sha256 before posting), ONE inference POST
+  per operation (the durable marker; a lost response is an unknown outcome, never a second POST), the response bytes
+  and their manifest (sha256, media type, size, status, producing attempt) durable on the retained work volume before
+  delivery to a platform-owned destination `s3://<bucket>/operations/<child>/{response.bin,call.json}` through
+  presigned PUT URLs the API mints on demand as the child's refresh broker (`POST /internal/operations/<child>:refresh`,
+  the child's own operation-scoped token, a live attempt of the child or of its transfer-only export retry required).
+  No tenant or bucket credential reaches the parent or the caller. `:export` of a child is admitted as a `child` member
+  after the child's own head (`keys.child_head`; no second request) and served by the same broker.
+- Endpoint children, the request: the bound request is `{model, input | input_ref.sha256, timeout_s, region}`
+  (not the input alone); renewable URLs are outside it; the allow-list and bound are the ones frozen on the parent's
+  Job (no fallback to the current class); the child model's image is recorded at admission and an intent is never
+  completed against another image.
+- Endpoint children, the readback: authoritative past the Job's TTL: the durable row, the capture manifest from the
+  destination (sha256, media type, size, HTTP status, attempt), a one-hour presigned download URL for the live
+  attempt of the root (attempt-scoped, one object), the latest attempt record, and `outcome` (`succeeded` | `failed`
+  | `undelivered` + `exportable` | `unknown` | `pending`): exit 4/3 are unknown and not exportable, never "undelivered".
+- Endpoint children, the lifecycle (migration 22): the row is a durable intent written before the member and the
+  Job (`pending` → `active` → `ended`, reason recorded); a crash in between or an ambiguous create (the Job may exist)
+  leaves the intent pending and the next replay or the sweep finishes it deterministically (found or created; one
+  Job, one member); rollback only on confirmed absence + definite refusal (`keys.rollback_run_member` now also for a
+  child member: its request leaves the root's reservation); a cancel is issued and recorded and the row stays open
+  until the terminal settlement (billing's release joined with the lease; a never-started child settles at its
+  deletion), so no next child starts while the old caller or worker drains; the sweep's cascade covers cancelled,
+  finished-without-successor and gone parents (a finished parent with a successor is judged by the successor).
+- jobs 0.1.26: call.sh verifies a fetched request against the binding's `input_sha256` (an endpoint child's bound
+  input reference) before its one POST; other bytes mean no POST (exit 2). Nothing else of the caller changed.
+
+## api 0.11.87, platform chart 0.1.10 (unreleased candidate, superseded by 0.11.88)
 
 - Endpoint children (docs/JOBS.md "Endpoint children"; migration 21): an operator-allowlisted, bounded primitive by
   which a LIVE attempt of a run asks the platform for an asynchronous endpoint call as a child of its root. A run

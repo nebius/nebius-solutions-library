@@ -194,6 +194,16 @@ elif [ -f "$PRIV/request.json" ]; then
 else
   finish failed "the binding has neither request.json nor input_url"; exit 2
 fi
+# the bound request (input_sha256 in the binding: an endpoint child's immutable input reference, docs/JOBS.md "Endpoint
+# children"): the bytes a renewable URL served must be exactly the bound ones, or nothing is posted (the caller's error)
+bound_sha=$(binding input_sha256)
+if [ -n "$bound_sha" ]; then
+  have_sha=$(sha256sum request.bin | cut -d' ' -f1)
+  if [ "$have_sha" != "$bound_sha" ]; then
+    echo "the fetched request ($have_sha) is not the bound input ($bound_sha): not posting"
+    finish failed "the request body does not match the bound input_sha256 ($have_sha != $bound_sha)"; exit 2
+  fi
+fi
 
 # exactly one inference POST per operation: a previous attempt of this pod's Job that posted and died leaves
 # posted.json without call.json; its outcome is unknown and is never re-posted (exit 4: the operation FAILS with that
