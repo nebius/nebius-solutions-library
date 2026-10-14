@@ -799,6 +799,10 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                 raise HTTPException(400, "child_max_units: 1..65536")
             job["childEndpoints"] = sorted(set(ce))
             job["childMaxUnits"] = n
+            delivery = str(s.get("child_delivery") or "platform")
+            if delivery not in ("platform", "application"):
+                raise HTTPException(400, "child_delivery: platform | application")
+            job["childDelivery"] = delivery
         elif s.get("child_max_units") is not None:
             raise HTTPException(400, "child_max_units applies with child_endpoints")
         if s.get("pull_secret"):

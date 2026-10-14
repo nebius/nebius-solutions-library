@@ -58,9 +58,10 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   # outputs names the committed result and checkpoint; without it an application-managed run is not delivered.
   # CHECKPOINT.json ({"checkpoint_ref": ..., "generation": N}) is the live pointer the application publishes while it
   # runs; the acknowledged pointer is written back to CHECKPOINT.ack.json
-  local result="" ckpt="" gen=""
+  local result="" ckpt="" gen="" cap=""
   if [ -f /work/RESULT.json ]; then
     result=$(jq -r '.result_ref // empty' /work/RESULT.json 2>/dev/null); ckpt=$(jq -r '.checkpoint_ref // empty' /work/RESULT.json 2>/dev/null)
+    cap=$(jq -c '.capture // empty' /work/RESULT.json 2>/dev/null)   # the caller's capture manifest (docs/JOBS.md "Endpoint children")
   fi
   if [ -z "$ckpt" ] && [ -f /work/CHECKPOINT.json ]; then
     ckpt=$(jq -r '.checkpoint_ref // empty' /work/CHECKPOINT.json 2>/dev/null); gen=$(jq -r '.generation // empty' /work/CHECKPOINT.json 2>/dev/null)
@@ -73,9 +74,10 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   jq -cn --arg op "$OPERATION" --arg pod "$POD_NAME" --arg node "$node" --arg pool "$pool" --arg st "$1" --argjson exit "${EXIT:-null}" \
     --argjson gpus "${GPUS:-0}" --arg cls "${GPU_CLASS:-}" --arg s "$started" --arg e "$ended" --arg img "$image" --arg dg "$digest" \
     --arg exp "${EXPORT:-}" --arg res "$result" --arg ck "$ckpt" --arg gen "$gen" --arg mode "$([ "$MODE" = record ] && echo application || echo managed)" \
-    --arg opmode "${OPERATION_MODE:-}" --arg model "${MODEL:-}" \
+    --arg opmode "${OPERATION_MODE:-}" --arg model "${MODEL:-}" --arg cap "$cap" \
     '{operation:$op,pod:$pod,node:$node,pool:$pool,status:$st,exit_code:$exit,gpus:$gpus,gpu_class:$cls,started_at:$s,ended_at:$e,
       image:$img,image_digest:$dg,io_mode:$mode} + (if $exp != "" then {export:$exp} else {} end)
+      + (if $cap != "" then {capture:($cap|fromjson)} else {} end)
       + (if $opmode != "" then {mode:$opmode} else {} end) + (if $model != "" then {model:$model} else {} end)
       + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)
       + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "$REC/$POD_NAME.json"

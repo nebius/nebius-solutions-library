@@ -667,6 +667,7 @@ def build_run(
         _project_parent_identity(pod, name, r)
         meta["annotations"][f"{LABEL}/child-endpoints"] = ",".join(r["childEndpoints"])
         meta["annotations"][f"{LABEL}/child-max-units"] = str(int(r.get("childMaxUnits") or 0))
+        meta["annotations"][f"{LABEL}/child-delivery"] = str(r.get("childDelivery") or "platform")
     job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
     if (fz := r.get("finalize")) and fz.get("onExitCodes"):
         # "compute done, delivery pending" ends the Job at once: the GPU computation is never restarted by the Job's

@@ -440,6 +440,9 @@ class ModelSpec(BaseModel):
     # ask the platform to call as bounded async children, and the explicit bound on their number per root
     child_endpoints: SkipValidation[list[str] | None] = None
     child_max_units: SkipValidation[int | None] = None
+    child_delivery: SkipValidation[str | None] = (
+        None  # platform (default: the tenant bucket) | application (the parent's broker)
+    )
 
 
 class Error(BaseModel):
@@ -904,6 +907,19 @@ class ExecutionCapabilitiesRetry(BaseModel):
     default_exit_codes: list[int] | None = None
 
 
+class ExecutionCapabilitiesEndpointChildren(BaseModel):
+    """Endpoint children of a run (docs/JOBS.md "Endpoint children"): absent on an API without them."""
+
+    api: str | None = None
+    delivery: list[str] | None = None  # platform | application
+    transport: list[str] | None = None  # refresh | static
+    request: list[str] | None = None  # input | input_ref
+    capture_record: bool | None = None
+    readback: list[str] | None = None
+    observed_attempt_fields: list[str] | None = None
+    preflight: str | None = None
+
+
 class ExecutionCapabilities(BaseModel):
     io_modes: list[Literal["managed", "application"]] | None = None
     async_private_io: ExecutionCapabilitiesAsyncPrivateIO | None = None
@@ -915,6 +931,7 @@ class ExecutionCapabilities(BaseModel):
     finalize: ExecutionCapabilitiesFinalize | None = None
     recovery: ExecutionCapabilitiesRecovery | None = None
     retry: ExecutionCapabilitiesRetry | None = None  # docs/JOBS.md "Retries"
+    endpoint_children: ExecutionCapabilitiesEndpointChildren | None = None
 
 
 class FleetInfo(BaseModel):

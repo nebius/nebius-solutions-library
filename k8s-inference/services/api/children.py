@@ -89,7 +89,12 @@ def binding_ref(child: str) -> str:
 
 
 def bound_request(
-    model: str, inp: dict | None, input_ref: dict | None, timeout_s: int | None, region: str | None
+    model: str,
+    inp: dict | None,
+    input_ref: dict | None,
+    timeout_s: int | None,
+    region: str | None,
+    result_ref: str | None = None,
 ) -> dict:
     """The immutable execution request of a unit: the model, the input (inline) or the input reference (its sha256),
     and the requested settings. Transfer URLs are renewable and never part of it; the effective timeout (capped by the
@@ -99,6 +104,8 @@ def bound_request(
         req["input_ref"] = {"sha256": input_ref["sha256"], "size_bytes": input_ref.get("size_bytes")}
     else:
         req["input"] = inp
+    if result_ref:
+        req["result_ref"] = result_ref  # application delivery: the application's immutable reference is bound too
     return req
 
 
@@ -180,6 +187,41 @@ def _frozen_allowlist(job: dict, m: dict) -> tuple[list[str], int]:
     return allowed, int(ann.get(f"{LABEL}/child-max-units") or 0)
 
 
+def _frozen_delivery(job: dict) -> str:
+    """The delivery mode the parent was RENDERED with (`child-delivery` annotation): `platform` (the tenant bucket, the
+    API's own refresh broker) or `application` (the parent's broker: external storage, docs/JOBS.md)."""
+    return str((job["metadata"].get("annotations") or {}).get(f"{LABEL}/child-delivery") or "platform")
+
+
+def preflight_parent(ns: str, m: dict) -> None:
+    """At the PARENT's admission (`:invoke` of a class with `child_endpoints`), before anything is admitted: with
+    `child_delivery: platform` every allowlisted child endpoint's region must hold the tenant's capture backend (the
+    tenant bucket: children run where the endpoint is, not where the parent lands), else 400 naming region, model and
+    the fix; with `application` nothing is probed or created (external storage: the parent's broker delivers)."""
+    import artifacts
+
+    jb = m.get("job") or {}
+    if not jb.get("childEndpoints"):
+        return
+    if str(jb.get("childDelivery") or "platform") == "application":
+        return
+    for cid in jb["childEndpoints"]:
+        cm = catalog.get(cid)
+        if cm is None:
+            raise HTTPException(400, f"child endpoint {cid} of {m['name']} is not in the catalog")
+        for region in cm.get("regions") or [REGION]:
+            try:
+                artifacts.storage(ns, kube.cluster_region(region) or region)
+            except HTTPException as e:
+                raise HTTPException(
+                    400,
+                    f"class {m['name']}: child endpoint {cid} runs in {region}, where tenant {ns[len(TENANT_NS_PREFIX):]} has "
+                    f"no capture backend ({e.detail}); with external storage declare child_delivery: application and have the "
+                    "parent pass each child's delivery (transport.refresh_url + refresh_token, or response_url + call_url) "
+                    "and an immutable result_ref",
+                )
+
+
 def _remaining_s(job: dict) -> int | None:
     """Seconds left of the parent's enforced deadline (activeDeadlineSeconds from its start), None without one."""
     spec = job.get("spec") or {}
@@ -195,7 +237,7 @@ def _remaining_s(job: dict) -> int | None:
 
 _ROW = (
     "root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, created_at, ended_at, "
-    "namespace, region, timeout_s, request, cancel_requested_at, reason, transport, model_image, binding_ref"
+    "namespace, region, timeout_s, request, cancel_requested_at, reason, transport, model_image, binding_ref, delivery"
 )
 
 
@@ -287,13 +329,21 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
         "status": None,
         "outcome": "pending",
     }
+    out["delivery"] = row.get("delivery") or "platform"
+    recs = attempts.for_operation(row["child"]) if attempts.enabled() and row["state"] != "pending" else []
     if row["state"] != "pending":
-        try:
-            out["result_ref"] = result_ref(row["namespace"] or ns, row["region"], row["child"])
-        except HTTPException:
-            pass
-        out["capture"] = capture_of(row)
-        recs = attempts.for_operation(row["child"]) if attempts.enabled() else []
+        if out["delivery"] == "application":
+            # the application's reference and the capture the platform's uploader recorded (durable past the Job; no
+            # platform-owned object, no download URL: the live parent fetches the exact object through its own broker)
+            out["result_ref"] = (row["request"] or {}).get("result_ref")
+            cap = next((r.get("capture") for r in reversed(recs) if r.get("capture")), None)
+            out["capture"] = {**cap, "uri": out["result_ref"], "delivered": True} if cap else None
+        else:
+            try:
+                out["result_ref"] = result_ref(row["namespace"] or ns, row["region"], row["child"])
+            except HTTPException:
+                pass
+            out["capture"] = capture_of(row)
         if recs:
             a = recs[-1]
             out["attempt"] = {
@@ -377,6 +427,28 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     job, region, root, m = _live_parent(identity, parent)
     ns = identity["namespace"]
     allowed, max_units = _frozen_allowlist(job, m)
+    delivery = _frozen_delivery(job)
+    app_result_ref = None
+    if delivery == "application":
+        # the parent's broker delivers (external storage): each child request carries its application delivery (the
+        # renewable broker, or static URLs) and the application's immutable reference for the captured object
+        app_result_ref = str(body.get("result_ref") or "")
+        if not app_result_ref or len(app_result_ref) > 512:
+            raise HTTPException(
+                400, "result_ref: the application's immutable reference for the captured object (1..512 chars)"
+            )
+        has_broker = str(transport.get("refresh_url") or "").startswith("https://") and bool(
+            transport.get("refresh_token")
+        )
+        has_static = str(transport.get("response_url") or "").startswith("https://") and str(
+            transport.get("call_url") or ""
+        ).startswith("https://")
+        if not has_broker and not has_static:
+            raise HTTPException(
+                400,
+                "application delivery: transport needs refresh_url (https) + refresh_token (the application's broker, "
+                "call.sh's refresh contract), or static response_url + call_url (https)",
+            )
     if not allowed:
         raise HTTPException(403, f"run class {m['name']} declares no child endpoints")
     if model not in allowed:
@@ -384,7 +456,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     cm = catalog.get(model)
     if cm is None or cm.get("mode") == "run":
         raise HTTPException(400, f"child model {model} is not an endpoint")
-    req = bound_request(model, inp, input_ref, req_timeout, body.get("region"))
+    req = bound_request(model, inp, input_ref, req_timeout, body.get("region"), app_result_ref)
     h = request_hash(req)
     child = child_id(root, unit_id)
     ann = job["metadata"].get("annotations") or {}
@@ -407,7 +479,8 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     if not PUBLIC_API_URL:
         raise HTTPException(503, "endpoint children need PUBLIC_API_URL (the child's refresh broker is this API)")
     _cluster, child_region = api._deployment_of(cm, req["region"])  # definite (400/404) before anything is recorded
-    result_ref(ns, child_region, child)  # the tenant's storage in that region exists (404/503 before any record)
+    if delivery == "platform":
+        result_ref(ns, child_region, child)  # the tenant's storage in that region exists (404/503 before any record)
     image = str((cm.get("runtime") or {}).get("image") or "")
     # the durable intent first, under the one-open-child and per-unit identities (compare-and-swap on the primary key)
     with db.pool().connection() as c, c.transaction():
@@ -452,7 +525,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
             if timeout < MIN_REMAINING_S:
                 raise HTTPException(400, f"timeout_s must leave at least {MIN_REMAINING_S} s")
             c.execute(
-                "insert into endpoint_children (root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, namespace, region, timeout_s, request, transport, model_image, binding_ref) values (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s)",
+                "insert into endpoint_children (root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, namespace, region, timeout_s, request, transport, model_image, binding_ref, delivery) values (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     root,
                     unit_id,
@@ -469,6 +542,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                     json.dumps(transport),
                     image,
                     binding_ref(child),
+                    delivery,
                 ),
             )
             pending = True
@@ -481,14 +555,26 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
 
 def _binding_data(row: dict, admitted: str) -> dict[str, str]:
     """The child's private binding (docs/API.md "Endpoint calls"): the request (inline) or its bound sha256 (fetched
-    through the renewable input_url the refresh broker serves), the refresh broker (this API, the child's own
-    operation-scoped token), the stable result reference. No customer key, no storage credential."""
-    data = {
-        "refresh_url": f"{PUBLIC_API_URL}/internal/operations/{row['child']}:refresh",
-        "refresh_token": admitted,
-        "result_ref": result_ref(row["namespace"], row["region"], row["child"]),
-    }
-    req = row["request"]
+    through the renewable input_url), the stable result reference, and the delivery: `platform` = this API as the
+    refresh broker with the child's own operation-scoped token and a platform-owned destination; `application` = the
+    parent's broker (its refresh_url/refresh_token: the same call.sh refresh contract, the child's projected identity
+    token on every call when the parent's execution had one) or the application's static URLs, and the application's
+    own immutable result_ref. No customer key, no storage credential, in either mode."""
+    req, tr = row["request"], row.get("transport") or {}
+    if row.get("delivery") == "application":
+        data = {"result_ref": str(req.get("result_ref") or "")}
+        if tr.get("refresh_url"):
+            data["refresh_url"], data["refresh_token"] = tr["refresh_url"], tr.get("refresh_token") or ""
+        else:
+            data["response_url"], data["call_url"] = tr.get("response_url") or "", tr.get("call_url") or ""
+        if tr.get("input_url"):
+            data["input_url"] = tr["input_url"]
+    else:
+        data = {
+            "refresh_url": f"{PUBLIC_API_URL}/internal/operations/{row['child']}:refresh",
+            "refresh_token": admitted,
+            "result_ref": result_ref(row["namespace"], row["region"], row["child"]),
+        }
     if req.get("input_ref"):
         data["input_sha256"] = req["input_ref"]["sha256"]
     else:
@@ -572,14 +658,28 @@ def complete(
                     keys.rollback_run_member(child)
                     return _refuse(row, f"the child's binding was refused: {e.detail}", e.status_code, synchronous)
                 return _ambiguous(row, f"binding: {e.detail}", synchronous)
-            prefix = f"s3://{result_ref(ns, row['region'], child)[5:].split('/', 1)[0]}/operations/{child}"
+            prefix = (
+                ""
+                if row.get("delivery") == "application"
+                else f"s3://{result_ref(ns, row['region'], child)[5:].split('/', 1)[0]}/operations/{child}"
+            )
+            # the parent's FROZEN execution (its Job's annotation, never the current tenant config): the child's caller
+            # runs under the same workload identity (call.sh sends its own projected token to the broker) and the
+            # same execution profile; the parent's placement/recovery/graph options do not apply to a call
+            try:
+                pex = json.loads(parent_ann.get(f"{LABEL}/execution") or "null") or {}
+            except ValueError:
+                pex = {}
+            ex = {"io_mode": "application", "private_input_ref": row["binding_ref"]}
+            for k in ("identity", "profile"):
+                if pex.get(k):
+                    ex[k] = pex[k]
             # the child's caller carries ONLY the operation-scoped credential: the admission token (HMAC of the root's
             # key hash, the child model and the child operation), presented as `Bearer s2-admitted.<token>`; the
             # gateway hook rebuilds the principal from the key record by hash and accepts it only while the child
             # holds a live reservation. No customer or admin key is stored or forwarded; the call goes through the
             # model's gateway (never LiteLLM's pass-through, which would need a key). Application I/O: the request
             # from the binding, one durable POST, the capture delivered to the platform-owned destination
-            ex = {"io_mode": "application", "private_input_ref": row["binding_ref"]}
             cjob, secret = jobs.build_async(
                 child,
                 {**cm, "litellm_route": None},
@@ -601,6 +701,10 @@ def complete(
             a[f"{LABEL}/child-unit"] = unit_id
             a[f"{LABEL}/child-request-sha256"] = row["request_sha256"]
             jobs._inherit_owner(cjob, parent_ann)
+            if ex.get("profile"):  # the parent's execution profile selects the child's network policy as well
+                cjob["spec"]["template"].setdefault("metadata", {}).setdefault("labels", {})[
+                    f"{LABEL}/execution-profile"
+                ] = ex["profile"]["name"]
             try:
                 jobs.create(ns, cjob, row["region"], secret)
             except HTTPException as e:
@@ -666,6 +770,10 @@ def refresh(child: str, token: str, body: dict) -> dict:
     row = by_child(child)
     if row is None or not token:
         raise HTTPException(401, "no such child or no token")
+    if row.get("delivery") == "application":
+        raise HTTPException(
+            409, f"child {child} delivers through the application's broker; this API mints nothing for it"
+        )
     op_id = str(body.get("operation_id") or child)
     if op_id != child and not re.fullmatch(re.escape(child) + r"-x[0-9]+", op_id):
         raise HTTPException(400, f"operation_id must be the child {child} or one of its export retries")

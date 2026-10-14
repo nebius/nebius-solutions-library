@@ -762,6 +762,26 @@ type). A failed delivery leaves the capture on the volume: the owner's `POST /v1
 transfer-only retry (TRANSFER_ONLY: nothing is inferred again), admitted as a `child` member after the child's own
 head in the parent run's ledger (no second request), served by the same broker with the same binding.
 
+**Application delivery (external storage).** A tenant whose storage the platform does not own (`storage = external`:
+no `tenant-storage` Secret) declares `child_delivery: application` on the class. At the PARENT's admission the API
+checks that first (`platform` on such a tenant: 400 before anything is admitted, naming the child endpoint's region and
+the fix; `application`: nothing is probed or created). Each child request then carries the application's delivery
+and reference: `transport: {refresh_url, refresh_token}` (the parent's broker: the SAME call.sh refresh contract,
+`POST refresh_url {operation_id, attempt_id, phase}` with `Bearer refresh_token` → `{input_url?, response_url,
+call_url}`; the child's caller sends its own projected identity token as `X-Workload-Identity` when the parent's
+execution had one) or static `transport: {response_url, call_url, input_url?}`, and **`result_ref`** (the application's
+immutable reference for the captured object, ≤ 512 chars, part of the bound request). The child's caller inherits the
+parent's FROZEN execution (`identity`, `profile` from the parent Job's annotation, never the current tenant config), the
+binding gets the application's keys (no platform broker, no platform destination), and no customer key or storage
+credential enters the child. The capture becomes durable through the platform's own uploader: call.sh's RESULT.json
+carries the manifest it just made durable (`capture: {sha256, content_type, size_bytes, http_status, capture_attempt_id
+= the ORIGINAL producer, posted_at, completed_at}`), the uploader posts it with the attempt record (`attempts.capture`,
+migration 25: allowlisted bounded fields, immutable per operation lineage: a transfer-only retry re-posts the same
+manifest, a contradicting one is 409). The readback then takes `capture` from that record, `result_ref` is the
+application's, there is no `download_url` (the live parent fetches the exact object through its own broker), and only a
+delivered capture makes `outcome: succeeded`. The platform's `:refresh` broker answers 409 for such a child. The
+capability block `execution.endpoint_children` (`GET /v1/fleet`) advertises `delivery: [platform, application]`.
+
 **The readback** (authoritative past the Job's TTL: the durable row, the destination, the attempt records; nothing is
 guessed from a prefix). The owner reads the same readback with its key: `GET /v1/operations/<run>/children/<unit_id>`
 (scope `read:operations`; `<run>` the root or any member of the run, the unit is keyed by the durable root; another

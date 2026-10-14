@@ -4,6 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.100, jobs 0.1.27
+
+(0.11.100 = 0.11.99 plus application delivery for endpoint children; platform chart 0.1.11 unchanged; migration 25.)
+
+- Endpoint children on a tenant with external storage (docs/JOBS.md "Endpoint children", "Application delivery"): a
+  class declares `child_delivery: application`; the PARENT's admission preflights the capture backend (platform mode on
+  an external tenant: 400 before admission, naming the region/model/fix; application mode: no storage probe at all;
+  before: the child POST answered 404 after admission); each child request carries the application's delivery
+  (`transport.refresh_url` + `refresh_token`, the existing call.sh refresh contract, or static URLs) and an immutable
+  `result_ref` bound into the request; the child's caller inherits the parent's frozen execution (identity, profile)
+  so the broker receives the child's own projected identity token; no customer key or storage credential enters the
+  child; the capture is recorded durably by the platform's uploader (`attempts.capture`: sha256, media type, size,
+  status, the ORIGINAL producing attempt, timings; allowlisted, immutable per lineage, 409 on contradiction) and the
+  readback takes it from there with no download URL; the platform broker refuses such a child (409); replay with
+  renewed transport rewrites only the binding's URL/token keys. `execution.endpoint_children` capability block.
+- jobs 0.1.27: call.sh's RESULT.json carries the capture manifest (`capture` object) it just made durable; upload.sh
+  forwards it with the attempt record. Nothing else of the one-POST protocol changed.
+
 ## api 0.11.99
 
 (0.11.99 = 0.11.98 plus the observer fields; jobs 0.1.26 and platform chart 0.1.11 unchanged; no migration.)

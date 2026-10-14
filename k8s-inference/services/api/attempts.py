@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
+from psycopg.types.json import Json
 
 import db
 import kube
@@ -151,13 +152,15 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         export = body.get("export") or (
             "n/a" if body.get("io_mode") == "application" and status != "succeeded" else None
         )
+        capture = _capture_of(body.get("capture"), operation, root, c)
         c.execute(
             """insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
                         image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster,
-                        mode, model, io_mode, gang_rank, gang_restart, pod_uid)
-                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s)
+                        mode, model, io_mode, gang_rank, gang_restart, pod_uid, capture)
+                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
                      on conflict (operation, pod) do update set
                         cluster = coalesce(excluded.cluster, attempts.cluster),
+                        capture = coalesce(excluded.capture, attempts.capture),
                         gang_rank = coalesce(excluded.gang_rank, attempts.gang_rank),
                         gang_restart = coalesce(excluded.gang_restart, attempts.gang_restart),
                         pod_uid = coalesce(excluded.pod_uid, attempts.pod_uid),
@@ -202,9 +205,55 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                 gang.get("rank") if gang else None,
                 gang.get("restart") if gang else None,
                 facts["uid"],  # the observed UID of every pod; an unreadable pod keeps the UID its row already has
+                Json(capture) if capture is not None else None,
             ),
         )
         return _row(c, operation, pod)
+
+
+CAPTURE_SHA = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _capture_of(raw, operation: str, root: str, c) -> dict | None:
+    """The capture manifest the platform's uploader forwards from the caller's RESULT.json (docs/JOBS.md "Endpoint
+    children"): only these bounded fields, checked, and immutable per operation lineage: a transfer-only retry re-posts
+    the ORIGINAL producing attempt's manifest (same sha256, same producer: idempotent); a manifest that contradicts one
+    already on record for the lineage (`<root>` or its `-x<n>` retries) is refused (409), never an overwrite."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            400, "capture: an object {sha256, content_type, size_bytes, http_status, capture_attempt_id, ...}"
+        )
+    sha = str(raw.get("sha256") or "")
+    if not CAPTURE_SHA.match(sha):
+        raise HTTPException(400, "capture.sha256: 64 hex digits")
+    ct = str(raw.get("content_type") or "application/octet-stream")[:128]
+    size, st = raw.get("size_bytes"), raw.get("http_status")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise HTTPException(400, "capture.size_bytes: a non-negative integer")
+    if not isinstance(st, int) or isinstance(st, bool) or not 100 <= st <= 599:
+        raise HTTPException(400, "capture.http_status: an HTTP status")
+    producer = str(raw.get("capture_attempt_id") or "")[:253]
+    if not producer:
+        raise HTTPException(400, "capture.capture_attempt_id: the attempt that captured the response")
+    cap = {"sha256": sha, "content_type": ct, "size_bytes": size, "http_status": st, "capture_attempt_id": producer}
+    for k in ("posted_at", "completed_at"):
+        if raw.get(k):
+            cap[k] = str(raw[k])[:40]
+    lineage = c.execute(
+        "select capture from attempts where capture is not null and (operation = %s or operation = %s or operation like %s) limit 1",
+        (operation, root, root + "-x%"),
+    ).fetchone()
+    if lineage and lineage[0]:
+        have = lineage[0]
+        if have.get("sha256") != sha or have.get("capture_attempt_id") != producer:
+            raise HTTPException(
+                409,
+                f"capture contradicts the record of {root}: on record {have.get('sha256')} by {have.get('capture_attempt_id')}, "
+                f"posted {sha} by {producer}; a capture is immutable per operation",
+            )
+    return cap
 
 
 JOBSET_NAME_LABEL = "jobset.sigs.k8s.io/jobset-name"
@@ -296,7 +345,7 @@ def gang_status(rows: list[dict]) -> str | None:
 COLS = (
     "operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image, image_digest, status, exit_code, "
     "started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, revision, updated_at, role, cluster, "
-    "mode, model, io_mode, gang_rank, gang_restart, pod_uid"
+    "mode, model, io_mode, gang_rank, gang_restart, pod_uid, capture"
 )
 
 

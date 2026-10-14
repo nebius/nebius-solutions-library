@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.99", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.100", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -937,6 +937,12 @@ async def invoke(
         if region not in m["regions"] and kube.cluster_region(region) not in m["regions"]:
             raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
         region = region if region in m["regions"] else kube.cluster_region(region)
+        if (m.get("job") or {}).get("childEndpoints"):
+            import children
+
+            # endpoint children (docs/JOBS.md "Endpoint children"): the capture backend the children will need is
+            # checked NOW, before any admission, so a parent is never accepted whose children could not deliver
+            await asyncio.to_thread(children.preflight_parent, p.namespace, m)
     else:
         _cluster, region = _deployment_of(
             m, req.region

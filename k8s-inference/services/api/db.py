@@ -372,6 +372,14 @@ create table if not exists operation_marks (
     alter table attempts add column if not exists pod_uid text;
     create index if not exists attempts_gang on attempts (operation, gang_restart);
     """,
+    # 25: application delivery of endpoint children (docs/JOBS.md "Endpoint children"): the row records which delivery
+    # the child was admitted with; the attempt record carries the capture manifest the platform's uploader posted
+    # (sha256, media type, size, status, the ORIGINAL producing attempt, timings) so a child's capture is durable and
+    # authoritative on a tenant whose storage the platform does not own
+    """
+    alter table endpoint_children add column if not exists delivery text not null default 'platform';
+    alter table attempts add column if not exists capture jsonb;
+    """,
 ]
 
 _pool = None
