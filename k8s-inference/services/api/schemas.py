@@ -645,6 +645,32 @@ class GraphStatus(BaseModel):
     waiting: list[str] | None = None  # the dependency-gated stages
 
 
+class ChildReadback(BaseModel):
+    """One endpoint child of a run, read back by its owner or by a live attempt of the run (docs/JOBS.md "Endpoint
+    children"): the durable row, the authoritative capture manifest once delivered, the latest attempt record."""
+
+    model_config = ConfigDict(extra="allow")
+    root: str
+    unit_id: str
+    child: str
+    parent: str | None = None
+    model: str | None = None
+    model_image: str | None = None
+    request_sha256: str
+    request: dict[str, Any] | None = None
+    state: Literal["pending", "active", "ended"]
+    status: str | None = None
+    outcome: Literal["pending", "succeeded", "failed", "undelivered", "unknown"]
+    exportable: bool | None = None
+    reason: str | None = None
+    result_ref: str | None = None
+    capture: dict[str, Any] | None = None
+    attempt: dict[str, Any] | None = None
+    cancel_requested_at: str | None = None
+    created_at: str | None = None
+    ended_at: str | None = None
+
+
 class Operation(BaseModel):
     id: str
     name: str | None = None
@@ -671,6 +697,7 @@ class Operation(BaseModel):
     graph: GraphStatus | None = None  # a root that declared stages
     stage: GraphStage | None = None  # a run that is a stage of a root's graph
     resumed_from: str | None = None
+    child: dict[str, Any] | None = None  # an endpoint child: {root, unit, parent} (docs/JOBS.md "Endpoint children")
     resumable: bool | None = None
     gpu_class: str | None = None
     image: str | None = None

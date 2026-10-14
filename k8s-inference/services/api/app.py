@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.89", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.90", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -202,17 +202,24 @@ def _require_current(p: Principal, source: str, root: str) -> None:
     except HTTPException as e:
         if e.status_code != 404:
             raise
+        if _phantom_head(p.namespace, member["root"] if member["kind"] in ("stage", "child") else root, head):
+            return  # the head never existed: continue_run reads the real head
     raise HTTPException(
         409,
         f"operation {source} was continued by {head}; continue {head} (the current member of its lineage), not {source}",
     )
 
 
-def continue_run(root: str, build, transfer_only: bool = False):
+def continue_run(root: str, build, transfer_only: bool = False, ns: str | None = None):
     """Run a continuation builder (jobs.resume/export_again/switch_class/recover, given as a callable taking the
     admission callback) under the run's ledger: the new member follows the current head; a builder that fails after
-    admission with no Job created rolls the member back. Without a ledger for the root (no database, a run admitted
-    before the ledger existed) the builder runs unadmitted, as for an unbounded key."""
+    admission is reconciled against the cluster before anything is rolled back (`_reconcile_continuation`: a create
+    whose answer was lost keeps its member and is returned as created; only a confirmed absence after a definite
+    refusal rolls the member back). A head whose Job was never created (a member left by an earlier lost create) is
+    retired first (`_phantom_head`). Without a ledger for the root (no database, a run admitted before the ledger
+    existed) the builder runs unadmitted, as for an unbounded key. `ns` (the tenant namespace) enables both
+    reconciliations; without it the old behaviour holds for definite refusals and an ambiguous failure keeps the
+    member (never a blind rollback of a member whose Job may exist)."""
     if not db.enabled():
         return build(None)
     member = keys.member_of(root)
@@ -230,6 +237,16 @@ def continue_run(root: str, build, transfer_only: bool = False):
     else:
         stage = None
         head = keys.run_head(root)
+    for _ in range(3):  # bounded: a phantom head is retired and the head read again
+        if head is None or ns is None or head == root or not _phantom_head(ns, root, head):
+            break
+        head = (
+            keys.stage_head(root, stage)
+            if kind == "stage" and stage
+            else keys.child_head(root, stage)
+            if kind == "child"
+            else keys.run_head(root)
+        )
     if head is None:
         return build(None)
     pending: dict = {}
@@ -240,13 +257,68 @@ def continue_run(root: str, build, transfer_only: bool = False):
 
     try:
         return build(admit)
-    except Exception:
+    except Exception as e:
         if pending.get("name"):
-            try:
-                keys.rollback_run_member(pending["name"])  # the builder raised at create: no Job exists
-            except Exception as e:  # noqa: BLE001
-                log.warning("rollback of continuation %s: %s", pending["name"], e)
+            found = _reconcile_continuation(pending["name"], ns, e)
+            if found is not None:
+                return found, True  # created; the answer was lost: the member stays, the Job is the continuation
         raise
+
+
+def _phantom_head(ns: str, root: str, head: str) -> bool:
+    """A lineage head whose Job does not exist anywhere, that no attempt ever reported and whose member is still
+    active is the trace of a create that never happened (an API process that died between the admission and the
+    create, or a transport failure this API could not reconcile at the time): its member is rolled back (the
+    confirmed absence) so the lineage continues from the real head. Anything else (a Job that ran and expired has
+    records; an unreachable cluster is not an absence) keeps the head."""
+    try:
+        jobs.find(ns, head)
+        return False
+    except HTTPException as e:
+        if e.status_code != 404:
+            return False
+    if attempts.enabled() and any(r["operation"] == head for r in attempts.for_operation(root)):
+        return False
+    m = keys.member_of(head)
+    if not m or m["state"] != "active" or (m["predecessor"] is None and m["kind"] != "child"):
+        return False
+    if keys.rollback_run_member(head):
+        log.warning(
+            "continuation %s of %s: no Job, no attempt record, member active: retired as never created", head, root
+        )
+        return True
+    return False
+
+
+def _reconcile_continuation(name: str, ns: str | None, e: Exception):
+    """After a builder raised past the admission: a definite refusal (4xx: the API server refused the create, nothing
+    exists) rolls the member back; anything else (5xx, a transport error: the create may have been accepted) is
+    checked against the cluster when the namespace is known: the Job found is returned (the member stays), a confirmed
+    absence rolls the member back, an unreachable cluster keeps the member for `_phantom_head` to settle later.
+    Returns the Job when it exists, else None."""
+    definite = isinstance(e, HTTPException) and e.status_code < 500
+    if not definite and ns is not None:
+        try:
+            job, _ = jobs.find(ns, name)
+            log.warning("continuation %s: created, the answer was lost (%s); member kept", name, str(e)[:120])
+            return job
+        except HTTPException as f:
+            if f.status_code != 404:
+                log.warning(
+                    "continuation %s: creation unconfirmed (%s) and unreadable (%s): member kept",
+                    name,
+                    str(e)[:80],
+                    f.detail,
+                )
+                return None
+    elif not definite:
+        log.warning("continuation %s: creation unconfirmed (%s), namespace unknown: member kept", name, str(e)[:120])
+        return None
+    try:
+        keys.rollback_run_member(name)  # confirmed absent (or definitely refused): no Job exists
+    except Exception as x:  # noqa: BLE001
+        log.warning("rollback of continuation %s: %s", name, x)
+    return None
 
 
 def settle_deleted(job: dict) -> None:
@@ -1775,6 +1847,7 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
             root,
             lambda admit: jobs.export_async(p.namespace, orig["metadata"]["name"], _home(orig), m, admit=admit),
             transfer_only=True,
+            ns=p.namespace,
         )
         return _continued(p, job, created, region)
     finalize = None
@@ -1819,8 +1892,30 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
             admit=admit,
         ),
         transfer_only=True,
+        ns=p.namespace,
     )
     return _continued(p, job, created, region)
+
+
+@app.get("/v1/operations/{id}/children/{unit_id}", responses={200: {"model": schemas.ChildReadback}})
+def read_child_unit(id: str, unit_id: str, p: Principal = Depends(scoped("read:operations"))):
+    """The owner's read-only readback of one endpoint child of a run (docs/JOBS.md "Endpoint children"): the same
+    authoritative readback the live attempt gets (the durable row, the capture manifest, the attempt record, the
+    live or terminal state), fenced to the operation's owner (`id`: the root or any member of the run), without the
+    attempt-scoped download URL (an owner reads the capture through GET /v1/operations/<child>, its own operation).
+    404 for an unknown unit or another owner's run; nothing is persisted and no id is guessed."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(404, f"operation {id}: no child units (no fleet database)")
+    job, _region = _owned(p, id, follow=False)
+    root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or job["metadata"]["name"]
+    out = children.readback(p.namespace, root, unit_id)
+    if out is None:
+        raise HTTPException(404, f"operation {root}: no child unit {unit_id!r}")
+    if out.get("capture"):
+        out["capture"] = {k: v for k, v in out["capture"].items() if k not in ("download_url", "download_expires_in_s")}
+    return out
 
 
 @app.post("/internal/operations/{parent}/children", include_in_schema=False)
@@ -2234,6 +2329,7 @@ def resume(
             admit=admit,
             restart_from_inputs=bool(req.restart_from_inputs),
         ),
+        ns=p.namespace,
     )
     return _continued(p, job, created, region)
 

@@ -932,3 +932,60 @@ def test_a_child_export_retry_follows_the_child_lineage_and_the_broker_serves_it
     # a second :export while the retry runs reads it back (one active retry); after it the lineage head is the retry
     assert c.post(f"/v1/operations/{child}:export", headers=H).status_code == 200
     assert keys.child_head(op, "u1") == retry
+
+
+def test_the_owner_reads_a_unit_back_without_signed_urls_and_a_foreign_owner_gets_404(rig, monkeypatch):
+    """GET /v1/operations/{parent}/children/{unit}: the owner's read-only readback (scope read:operations), the same
+    authority as the attempt's, keyed by the durable root (a resumed member names it too), without the attempt-scoped
+    download URL; another owner's run and an unknown unit are 404; the child's own Operation names root/unit/parent."""
+    import copy
+
+    import auth
+
+    c, fake, op, identity = rig
+    child = _post(c, op, "u1", {"prompt": "x"}).json()["child"]
+    fake.bucket[f"operations/{child}/call.json"] = {
+        "capture_complete": True,
+        "http_status": 200,
+        "sha256": "cd" * 32,
+        "content_type": "video/mp4",
+        "size_bytes": 10,
+        "attempt_id": f"{child}-abc",
+    }
+    r = c.get(f"/v1/operations/{op}/children/u1", headers=H)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["child"] == child and body["root"] == op and body["unit_id"] == "u1" and body["state"] == "active"
+    assert body["outcome"] == "succeeded" and body["capture"]["sha256"] == "cd" * 32 and body["model_image"]
+    assert "download_url" not in body["capture"] and "download_expires_in_s" not in body["capture"]
+    assert "download_url" in children.readback(NS, op, "u1")["capture"]  # the attempt's route keeps it
+    assert c.get(f"/v1/operations/{op}/children/none", headers=H).status_code == 404
+    # a resumed member of the run names the same durable root: the same unit reads back
+    succ = copy.deepcopy(fake.jobs[(NS, op)])
+    succ["metadata"]["name"] = f"{op}-r1"
+    succ["metadata"]["annotations"][f"{LABEL}/resumed-from"] = op
+    fake.jobs[(NS, f"{op}-r1")] = succ
+    assert c.get(f"/v1/operations/{op}-r1/children/u1", headers=H).json()["child"] == child
+    # the child's own public Operation carries its root, unit and parent
+    r = c.get(f"/v1/operations/{child}", headers=H)
+    assert r.status_code == 200 and r.json()["child"] == {"root": op, "unit": "u1", "parent": op}, r.text
+    assert c.get(f"/v1/operations/{op}", headers=H).json().get("child") is None
+    # another owner of the tenant: the run does not exist for it (404), the child neither
+    from test_api import KEY_INFO
+
+    async def info(key):
+        if key == "sk-other":
+            return {
+                **copy.deepcopy(KEY_INFO),
+                "metadata": {"tenant": "demo", "legacy": {"principal_id": "someone-else"}},
+            }
+        if key == "sk-good":
+            return copy.deepcopy(KEY_INFO)
+        raise HTTPException(401, "invalid API key")
+
+    monkeypatch.setattr(auth, "key_info", info)
+    other = {"Authorization": "Bearer sk-other"}
+    assert c.get(f"/v1/operations/{op}/children/u1", headers=other).status_code == 404
+    assert c.get(f"/v1/operations/{child}", headers=other).status_code == 404
+    # no key, or a key without the scope: refused before any lookup
+    assert c.get(f"/v1/operations/{op}/children/u1").status_code == 401

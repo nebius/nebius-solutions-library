@@ -4,6 +4,23 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.90
+
+(0.11.90 = 0.11.89 plus the two items below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)
+
+- Endpoint children, the owner's readback: `GET /v1/operations/<run>/children/<unit_id>` (scope `read:operations`,
+  the operation's owner; `<run>` the root or any member, the unit keyed by the durable root) returns the same
+  authoritative readback the live attempt gets, without the attempt-scoped download URL; the child's own Operation
+  carries `child: {root, unit, parent}` (docs/JOBS.md "Endpoint children").
+- Continuations (resume, export retry, fallback, recovery, finalizer): a builder that fails after the admission is
+  reconciled against the cluster before anything is rolled back: a create whose answer was lost keeps its member and
+  the call returns the created Job (202); only a definite refusal (4xx) or a confirmed absence rolls the member back;
+  an unreachable cluster keeps it. A lineage head whose Job exists nowhere, with no attempt record and an active member
+  (the trace of a create that never happened) is retired, bounded, so the lineage continues from the real head instead
+  of refusing every continuation with "continued by <phantom>"; a head that ran and expired (on record) is kept.
+  Before, every exception after admission rolled the member back, so a continuation created with a lost answer ran
+  unaccounted (and an export retry was rendered twice).
+
 ## api 0.11.89
 
 (0.11.89 = 0.11.88 plus the endpoint resources addendum below; jobs 0.1.26 and platform chart 0.1.10 unchanged.)

@@ -165,3 +165,109 @@ def test_a_failed_continuation_create_rolls_its_member_back(client, admin_keys, 
     kinds = [x[0] for x in fake_keys.calls]
     assert "prepare" in kinds and kinds[-1] == "rollback"
     assert [m["operation"] for m in fake_keys.members] == [oid]  # the member is gone, the root stays
+
+
+def _exportable(c, cluster, monkeypatch):
+    """A finished run with one failed-export attempt on record: `:export` renders its transfer-only retry."""
+    _auth(monkeypatch, {"sk-good": _principal("p1", max_concurrent=1)})
+    oid = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}}).json()["id"]
+    cluster.jobs[("tenant-demo", oid)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
+    rows = [{**_record(oid, f"{oid}-a", export="failed"), "operation": oid}]
+    monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
+    return oid, rows
+
+
+def test_a_continuation_created_with_a_lost_answer_keeps_its_member_and_is_returned(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """jobs.create accepted the Job but the answer was lost (a transport error after the create): the member is NOT
+    rolled back (the Job exists and must stay accounted); the call returns the created continuation (202)."""
+    import jobs
+
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    real = jobs.create
+
+    def created_but_lost(ns, job, region="eu-north1", secret=None):
+        real(ns, job, region, secret)
+        raise OSError("connection reset after the create")
+
+    monkeypatch.setattr(jobs, "create", created_but_lost)
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert r.status_code == 202, r.text
+    x1 = r.json()["id"]
+    assert ("tenant-demo", x1) in cluster.jobs
+    assert ("rollback", x1) not in fake_keys.calls and fake_keys.member_of(x1)["state"] == "active"
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, x1, oid)]
+
+
+def test_a_continuation_refused_or_confirmed_absent_rolls_its_member_back(client, admin_keys, fake_keys, monkeypatch):
+    """The API server answered 5xx and the Job is confirmed absent, or refused the create definitively (4xx): the member
+    goes (as before); the error reaches the caller."""
+    import jobs
+
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    monkeypatch.setattr(
+        jobs,
+        "create",
+        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
+            api.HTTPException(502, "kubernetes (eu-north1): 503 Service Unavailable")
+        ),
+    )
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert r.status_code == 502
+    x1 = f"{oid}-x1"
+    assert (
+        ("rollback", x1) in fake_keys.calls
+        and fake_keys.member_of(x1) is None
+        and ("tenant-demo", x1) not in cluster.jobs
+    )
+    monkeypatch.setattr(
+        jobs,
+        "create",
+        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
+            api.HTTPException(404, "tenant namespace is not onboarded")
+        ),
+    )
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert r.status_code == 404 and fake_keys.member_of(x1) is None
+    assert len([x for x in fake_keys.calls if x[0] == "rollback"]) == 2
+
+
+def test_a_phantom_head_is_retired_and_a_head_that_ran_is_kept(client, admin_keys, fake_keys, monkeypatch):
+    """A lineage head whose Job exists nowhere, with no attempt record and an active member, is the trace of a create
+    that never happened: it is rolled back and the lineage continues from the real head. A head whose Job expired
+    after it ran (an attempt record exists) is kept: the continuation is refused as before (continue the head)."""
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    phantom = f"{oid}-x1"
+    fake_keys.members.append(
+        {
+            "operation": phantom,
+            "root": oid,
+            "predecessor": oid,
+            "state": "active",
+            "kind": "continuation",
+            "stage": None,
+            "note": None,
+        }
+    )
+    assert fake_keys.run_head(oid) == phantom and ("tenant-demo", phantom) not in cluster.jobs
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert r.status_code == 202, r.text
+    assert ("rollback", phantom) in fake_keys.calls  # retired: confirmed absent
+    new = r.json()["id"]
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, new, oid)]  # after the real head (the root)
+    assert fake_keys.run_head(oid) == new and ("tenant-demo", new) in cluster.jobs
+    # a head that ran and whose Job expired: on record, kept; the stale source is refused with the head named
+    del cluster.jobs[("tenant-demo", new)]
+    rows.append({**_record(new, f"{new}-b", export="failed"), "operation": new})
+    rollbacks = len([x for x in fake_keys.calls if x[0] == "rollback"])
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)
+    assert r.status_code in (409, 404) and "continue" in r.text
+    assert len([x for x in fake_keys.calls if x[0] == "rollback"]) == rollbacks  # on record: never retired

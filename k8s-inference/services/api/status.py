@@ -364,6 +364,16 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         "error": error,
         "input": inp,
         "resumed_from": ann.get(f"{LABEL}/resumed-from"),
+        # an endpoint child (docs/JOBS.md "Endpoint children"): the run it belongs to, its unit, the attempt that asked
+        "child": (
+            {
+                "root": ann[f"{LABEL}/child-root"],
+                "unit": ann.get(f"{LABEL}/child-unit"),
+                "parent": ann.get(f"{LABEL}/child-of"),
+            }
+            if ann.get(f"{LABEL}/child-root")
+            else None
+        ),
         "gpu_class": labels.get(f"{LABEL}/gpu-class"),
         "image": ann.get(f"{LABEL}/image"),
         "resumable": status in ("FAILED", "CANCELLED", "EXPORT_FAILED")

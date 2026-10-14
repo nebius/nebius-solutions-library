@@ -143,7 +143,12 @@ def ledger_head(ns: str, operation: str) -> str | None:
         m = keys.member_of(operation)
         if not m:
             return None
-        head = keys.stage_head(m["root"], m["stage"]) if m["kind"] == "stage" else keys.run_head(m["root"])
+        if m["kind"] == "stage":
+            head = keys.stage_head(m["root"], m["stage"])
+        elif m["kind"] == "child":  # an endpoint child: its own lineage (its export retries), never the run's head
+            head = keys.child_head(m["root"], m["stage"])
+        else:
+            head = keys.run_head(m["root"])
     except Exception as e:  # noqa: BLE001 - an unreadable ledger leaves the handle on the named operation
         log.warning("ledger head of %s: %s", operation, e)
         return None
