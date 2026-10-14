@@ -1351,3 +1351,90 @@ def test_a_control_api_binds_the_child_where_it_delivers_and_the_copy_lands_in_t
     assert len([k for k in north.jobs if k[1].startswith(f"{op}-c-")]) == 1
     assert len([k for k in control.secrets if k[1].startswith("binding-")]) == 1
     assert c.get(f"/v1/operations/{op}/children/u1", headers=H).status_code == 200
+
+
+def test_a_parent_only_grant_reaches_exactly_its_live_child_and_nothing_else(rig, monkeypatch):
+    """The LeRobot shape (2026-10-14): the key is granted the parent run class only (`models: [lerobot-worker]`,
+    scopes `run:submit` + `invoke:async`, never the child endpoint). The child's caller, with the operation-scoped
+    credential, probes readiness and posts its one inference on exactly its child, model and live attempt (the
+    delegation is the run class's frozen `child_endpoints`, proven at admission); the key itself still cannot call
+    the child endpoint directly, and the credential is refused for another model, another unit, another attempt, a
+    cancelled child and a settled one. No owner grant is widened."""
+    c, fake, op, identity = rig
+    with db.pool().connection() as conn, conn.transaction():
+        conn.execute(
+            "update keys set models = %s::jsonb, scopes = %s::jsonb where hash = %s",
+            (json.dumps(["lerobot-worker"]), json.dumps(["run:submit", "invoke:async"]), keys.key_hash("sk-good")),
+        )
+    import auth
+    import leases
+
+    monkeypatch.setattr(auth, "key_info", lambda key: _parent_only_info(key))
+    r = _post(c, op, "u1")
+    assert r.status_code == 201, r.text
+    child = r.json()["child"]
+    other = children.child_id(op, "u2")  # one child at a time: another unit's id never holds a reservation
+    secret = fake.secrets[(NS, f"{child}-auth")]["stringData"]
+    caller = pod(child, "Running")
+    caller["metadata"]["labels"][f"{LABEL}/mode"] = "async"
+    fake.pods.append(caller)
+    api._admission_cache.clear()
+    hdr = {
+        "Authorization": secret["authorization"],
+        "x-serverless2-admitted": secret["admitted"],
+        "x-serverless2-operation": child,
+        "x-serverless2-attempt": caller["metadata"]["name"],
+    }
+    monkeypatch.setattr(api, "_endpoint_model", lambda eid: catalog.get("cosmos-nano"))
+    monkeypatch.setattr(leases, "prepare", lambda operation, attempt, region, model, caller_gone=None: None)
+    # the key itself: the parent class only; a direct call to the child endpoint is refused
+    r = c.get("/internal/authorize/cosmos-nano/v1/health/ready", headers=H)
+    assert r.status_code == 403 and "not allowed to use model" in r.text, r.text
+    # the delegated caller: readiness and the inference POST on exactly its child/model/attempt
+    r = c.get("/internal/authorize/cosmos-nano/v1/health/ready", headers=hdr)
+    assert r.status_code == 200 and r.headers["x-serverless2-operation"] == child, r.text
+    r = c.post("/internal/authorize/cosmos-nano/generate", headers=hdr)
+    assert r.status_code == 200 and r.headers["x-serverless2-attempt"] == caller["metadata"]["name"], r.text
+    # another model with the same credential (the parent class is a run, cosmos-big another endpoint): refused
+    monkeypatch.setattr(api, "_endpoint_model", lambda eid: catalog.get(eid))
+    assert c.post("/internal/authorize/lerobot-worker/generate", headers=hdr).status_code in (401, 403, 404)
+    assert c.post("/internal/authorize/cosmos-big/generate", headers=hdr).status_code in (401, 403)
+    monkeypatch.setattr(api, "_endpoint_model", lambda eid: catalog.get("cosmos-nano"))
+    # another unit's child, another attempt: refused (the proof is per child and live pod)
+    api._admission_cache.clear()
+    assert (
+        c.get(
+            "/internal/authorize/cosmos-nano/v1/health/ready", headers={**hdr, "x-serverless2-operation": other}
+        ).status_code
+        == 401
+    )
+    # a stale/unknown attempt is not a proof: the call falls back to the key's own grant, which has no cosmos-nano (403)
+    assert c.get(
+        "/internal/authorize/cosmos-nano/v1/health/ready", headers={**hdr, "x-serverless2-attempt": f"{child}-zzzzz"}
+    ).status_code in (401, 403)
+    # cancelled (the owner's cancel needs run:control; the model grant stays the parent class): the credential dies
+    # with the cascade; settled: nothing left
+    monkeypatch.setattr(auth, "key_info", lambda key: _parent_only_info(key, control=True))
+    assert c.post(f"/v1/operations/{op}:cancel", headers=H).status_code == 200
+    api._admission_cache.clear()
+    assert c.get("/internal/authorize/cosmos-nano/v1/health/ready", headers=hdr).status_code != 200
+    keys.release(child, 0.0)
+    keys.release(op, 0.0)
+    api._admission_cache.clear()
+    assert c.get("/internal/authorize/cosmos-nano/v1/health/ready", headers=hdr).status_code == 401
+
+
+async def _parent_only_info(key, control=False):
+    """The auth layer's view of the parent-only customer key (the rig's `sk-good` with the narrowed grant)."""
+    from fastapi import HTTPException
+
+    from test_api import KEY_INFO
+
+    if key != "sk-good":
+        raise HTTPException(401, "invalid API key")
+    return {
+        **KEY_INFO,
+        "models": ["lerobot-worker"],
+        "scopes": ["run:submit", "invoke:async"] + (["run:control"] if control else []),
+        "max_budget": None,
+    }  # the rig's principal otherwise (the parent run is its own)

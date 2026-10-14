@@ -159,103 +159,187 @@ async def bill_once() -> int:
             except ApiException as e:
                 log.warning("billing: list jobs in %s/%s: %s", region, ns, e.reason)
                 continue
-            pods, clusters = None, None
+            cache: dict = {}  # the namespace's pods and Workload placements, read once per pass
             for job in items:
-                ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
-                if BILLED in ann or KEY not in ann or not finished(job) or jobs.is_mirror(job):
-                    continue  # a worker's copy of a manager Job is transient; the manager's Job is billed
-                if job["metadata"].get("labels", {}).get(f"{LABEL}/mode") == "async":
-                    # an endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md
-                    # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here. The
-                    # release is a JOIN with the worker's native execution (docs/API.md "Native execution leases"):
-                    # while the worker is attached nothing is freed, whatever the caller did
-                    try:
-                        value, how = 0.0, "no ledger"
-                        if db.enabled():
-                            m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
-                            settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
-                            if not settle_now:
-                                log.info("billing %s/%s: deferred, %s", region, name, how)
-                                continue
-                            keys.release(name, value)
-                            leases.mark_settled(name)
-                        seconds = "unknown" if value is None else f"{value}"
-                        _annotate(
-                            region,
-                            ns,
-                            name,
-                            {
-                                BILLED: "0" if value is not None else "unknown",
-                                f"{LABEL}/gpu-seconds": seconds,
-                                f"{LABEL}/native": how,
-                            },
-                            job,
-                        )
-                        if f"{LABEL}/execution" in ann:
-                            execution.sweep_copies(ns, name)
-                        n += 1
-                    except Exception as e:  # noqa: BLE001 - retried on the next run
-                        log.warning("settlement of endpoint call %s failed: %s", name, e)
-                    continue
-                price_region = region
-                if jobs.is_manager_job(job):
-                    if clusters is None:
-                        clusters = kube.workload_clusters(ns)
-                    cluster = clusters.get(job["metadata"].get("uid", ""))
-                    price_region = kube.cluster_region(cluster) if cluster else None
-                    job[
-                        "_pods"
-                    ] = []  # the worker's pods are gone with its copy: the uploader's records are the attempts
-                else:
-                    if pods is None:
-                        raw = retry(kube.core(region).list_namespaced_pod, ns, label_selector=f"{LABEL}/mode=run").items
-                        pods = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
-                    job["_pods"] = [
-                        p
-                        for p in pods
-                        if (
-                            p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name")
-                            or p["metadata"].get("labels", {}).get("job-name")
-                        )
-                        == name
-                    ]
-                root = ann.get(f"{LABEL}/resumed-from") or name
-                records = attempts.for_operation(root) if attempts.enabled() else []
-                records = [r for r in records if r["operation"] == name] or artifacts.attempt_records(
-                    ns, name, region, jobs.output_prefix(job)
-                )
-                if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
-                    release_volume(job, ns, region)  # delivered: the volume may go (an EXPORT_FAILED run keeps it)
-                try:
-                    identity = job["metadata"].get("uid")
-                    if not identity:
-                        raise ValueError("job UID is required for accounting")
-                    measured = measured_usage(job, records)
-                    if measured is None:
-                        # nothing trustworthy to charge: the key's reservation stays on record as unknown GPU time
-                        # (keys.settle_run_member None); an operator settles it later (keys.settle_unknown)
-                        if db.enabled():
-                            keys.release(name, None)
-                        done = {BILLED: "unknown", f"{LABEL}/gpu-seconds": "unknown"}
-                        _annotate(region, ns, name, done, job)
-                        log.warning("billing %s/%s: GPU time not measured; reservation kept as unknown", region, name)
-                        n += 1
-                        continue
-                    gpu_s, usd = cost_of(
-                        job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region
-                    )
-                    total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
-                    if db.enabled():
-                        keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
-                    done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
-                    _annotate(region, ns, name, done, job)
-                    if f"{LABEL}/execution" in ann:
-                        execution.sweep_copies(ns, name)  # this attempt only: its successor may still be running
-                    log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)
+                if await settle_job(region, ns, job, cache):
                     n += 1
-                except Exception as e:  # noqa: BLE001 - unbilled, retried on the next run
-                    log.warning("billing %s failed: %s", name, e)
     return n
+
+
+def unsettled(job: dict) -> bool:
+    """Whether a Job (or JobSet) is one the billing pass would settle now: finished, admitted on a key, not billed
+    yet, not a worker's transient copy of a manager Job."""
+    ann = (job.get("metadata") or {}).get("annotations") or {}
+    return BILLED not in ann and KEY in ann and finished(job) and not jobs.is_mirror(job)
+
+
+class _SettlementLock:
+    """One settlement per operation at a time across API replicas and the CronJob (a Postgres transaction-scoped
+    advisory lock; `pg_try_advisory_xact_lock`: a second settler skips instead of waiting). Every step behind it is
+    idempotent anyway (the `charges` receipt is unique per operation, the ledger release conditional, the annotation
+    a patch): the lock only avoids duplicate work. Without the database, or when the lock cannot be taken (the pool is
+    gone), the settlement proceeds unlocked on that idempotency."""
+
+    def __init__(self, operation: str):
+        self.operation, self._ctx, self._conn, self.held = operation, None, None, False
+
+    def __enter__(self):
+        if not db.enabled():
+            return self
+        try:
+            self._ctx = db.pool().connection()
+            self._conn = self._ctx.__enter__()
+            self._tx = self._conn.transaction()
+            self._tx.__enter__()
+            self.held = bool(
+                self._conn.execute(
+                    "select pg_try_advisory_xact_lock(hashtextextended(%s, 5))", (self.operation,)
+                ).fetchone()[0]
+            )
+            self.locked = True
+        except Exception as e:  # noqa: BLE001 - no lock: the idempotent steps still settle once
+            log.warning("settlement lock of %s unavailable (%s); settling unlocked", self.operation, e)
+            self._release()
+            self.locked = False
+        return self
+
+    def _release(self):
+        try:
+            if getattr(self, "_tx", None) is not None:
+                self._tx.__exit__(None, None, None)
+        finally:
+            self._tx = None
+            if self._ctx is not None:
+                try:
+                    self._ctx.__exit__(None, None, None)
+                finally:
+                    self._ctx = None
+
+    def __exit__(self, *exc):
+        self._release()
+        return False
+
+    @property
+    def skip(self) -> bool:
+        """True when another settler holds the operation right now."""
+        return getattr(self, "locked", False) and not self.held
+
+
+async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None) -> bool:
+    """Settle one finished, unbilled Job or JobSet (the billing pass for one operation; `cache` shares the
+    namespace's pods and Workload placements between the calls of one pass). Returns True when it settled now.
+    Called by the CronJob's pass and by the owner's read of a finished operation (app.get_operation): the same
+    semantics in both, once per operation (the lock, then the `billed` annotation re-read from the API server under
+    it): a run's measured GPU seconds from its attempt records (nothing trustworthy -> `unknown`, the reservation
+    kept), an endpoint call's join with its native execution (deferred while a worker is attached)."""
+    cache = cache if cache is not None else {}
+    ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
+    if not unsettled(job):
+        return False
+    with _SettlementLock(name) as lock:
+        if lock.skip:
+            return False
+        if lock.held:
+            # under the lock: the authoritative object (another settler may have finished a moment ago)
+            try:
+                fresh = jobs.get(ns, name, region)
+            except Exception as e:  # noqa: BLE001 - unreadable now: settled by a later pass
+                log.warning("billing %s/%s: re-read failed: %s", region, name, e)
+                return False
+            if not unsettled(fresh):
+                return False
+            fresh.pop("_pods", None)
+            job = {**job, "metadata": fresh["metadata"], "status": fresh["status"]}
+            ann = job["metadata"].get("annotations") or {}
+        if job["metadata"].get("labels", {}).get(f"{LABEL}/mode") == "async":
+            # an endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md
+            # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here. The
+            # release is a JOIN with the worker's native execution (docs/API.md "Native execution leases"):
+            # while the worker is attached nothing is freed, whatever the caller did
+            try:
+                value, how = 0.0, "no ledger"
+                if db.enabled():
+                    m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
+                    settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
+                    if not settle_now:
+                        log.info("billing %s/%s: deferred, %s", region, name, how)
+                        return False
+                    keys.release(name, value)
+                    leases.mark_settled(name)
+                seconds = "unknown" if value is None else f"{value}"
+                _annotate(
+                    region,
+                    ns,
+                    name,
+                    {
+                        BILLED: "0" if value is not None else "unknown",
+                        f"{LABEL}/gpu-seconds": seconds,
+                        f"{LABEL}/native": how,
+                    },
+                    job,
+                )
+                if f"{LABEL}/execution" in ann:
+                    execution.sweep_copies(ns, name)
+                return True
+            except Exception as e:  # noqa: BLE001 - retried on the next run
+                log.warning("settlement of endpoint call %s failed: %s", name, e)
+                return False
+        price_region = region
+        if jobs.is_manager_job(job):
+            if cache.get("clusters") is None:
+                cache["clusters"] = kube.workload_clusters(ns)
+            cluster = cache["clusters"].get(job["metadata"].get("uid", ""))
+            price_region = kube.cluster_region(cluster) if cluster else None
+            job["_pods"] = []  # the worker's pods are gone with its copy: the uploader's records are the attempts
+        else:
+            if cache.get("pods") is None:
+                raw = retry(kube.core(region).list_namespaced_pod, ns, label_selector=f"{LABEL}/mode=run").items
+                cache["pods"] = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
+            job["_pods"] = [
+                p
+                for p in cache["pods"]
+                if (
+                    p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name")
+                    or p["metadata"].get("labels", {}).get("job-name")
+                )
+                == name
+            ]
+        root = ann.get(f"{LABEL}/resumed-from") or name
+        records = attempts.for_operation(root) if attempts.enabled() else []
+        records = [r for r in records if r["operation"] == name] or artifacts.attempt_records(
+            ns, name, region, jobs.output_prefix(job)
+        )
+        if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
+            release_volume(job, ns, region)  # delivered: the volume may go (an EXPORT_FAILED run keeps it)
+        try:
+            identity = job["metadata"].get("uid")
+            if not identity:
+                raise ValueError("job UID is required for accounting")
+            measured = measured_usage(job, records)
+            if measured is None:
+                # nothing trustworthy to charge: the key's reservation stays on record as unknown GPU time
+                # (keys.settle_run_member None); an operator settles it later (keys.settle_unknown)
+                if db.enabled():
+                    keys.release(name, None)
+                done = {BILLED: "unknown", f"{LABEL}/gpu-seconds": "unknown"}
+                _annotate(region, ns, name, done, job)
+                log.warning("billing %s/%s: GPU time not measured; reservation kept as unknown", region, name)
+                return True
+            gpu_s, usd = cost_of(
+                job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region
+            )
+            total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
+            if db.enabled():
+                keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
+            done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
+            _annotate(region, ns, name, done, job)
+            if f"{LABEL}/execution" in ann:
+                execution.sweep_copies(ns, name)  # this attempt only: its successor may still be running
+            log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)
+            return True
+        except Exception as e:  # noqa: BLE001 - unbilled, retried on the next run
+            log.warning("billing %s failed: %s", name, e)
+            return False
 
 
 if __name__ == "__main__":
