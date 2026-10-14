@@ -51,6 +51,23 @@ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t inspectorRecordEventTrace(struct inspectorEventTraceInfo* evtTrace,
                                           int eventIndex,
                                           struct inspectorCollInfo* collInfo) {
+  // Lean-mode hot-path fix -- evtTrace[eventIndex] (and the collEvtTrk.sn
+  // counter it depends on) is read in exactly one place in this whole
+  // codebase: inspectorCompletedCollVerbose, itself only ever called
+  // when enableNcclInspectorDumpVerbose is true. calculateMaxKernelExecTimeUsecs
+  // (the function that actually produces the lean-mode-dumped
+  // coll_exec_time_us) reads only tsStartUsec/tsCompletedUsec directly,
+  // never evtTrace[]/collEvtTrk.sn -- re-verified directly against
+  // current code before cutting this, same discipline as
+  // inspectorUpdateCollPerf's own collEvtTrk-copy gate below. This call
+  // runs once per collective (COLL_START/STOP) and up to three times per
+  // kernel channel (KERNEL_START/RECORD/STOP), each paying a real
+  // gettimeofday() call that lean mode (the default) never needs.
+  // Skipping it entirely in lean mode removes that cost without
+  // changing verbose-mode behavior at all.
+  if (!inspectorIsDumpVerboseEnabled()) {
+    return collInfo->collEvtTrk.sn;
+  }
   evtTrace[eventIndex].ts = inspectorGetTime();
   evtTrace[eventIndex].sn = ++collInfo->collEvtTrk.sn; // Increment coll sequence counter
 
@@ -529,7 +546,6 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
     return ncclSuccess;
   }
   uint64_t type = *(uint64_t *)eHandle;
-  inspectorResult_t res = inspectorSuccess;
 
   if (type == ncclProfileColl || type == ncclProfileP2p) {
     struct inspectorCollInfo *collInfo = (struct inspectorCollInfo *)eHandle;
@@ -540,20 +556,104 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
                               collInfo);
     // P32 -- DeRef no longer destroys collInfo->guard early (see
     // inspectorRetireCollInfo's own docstring); unconditionally unlock
-    // regardless of res now, instead of skipping unlock on the
+    // regardless of its result now, instead of skipping unlock on the
     // assumption the struct/lock might already be gone.
-    res = inspectorPluginCollInfoDeRef(collInfo);
+    inspectorPluginCollInfoDeRef(collInfo);
     inspectorUnlockRWLock(&collInfo->guard);
     return ncclSuccess;
   } else if (type == ncclProfileKernelCh) {
-    struct inspectorKernelChInfo *kernelChInfo
-      = (struct inspectorKernelChInfo *)eHandle;
+    // Lock-merge fix (this session) -- this branch's entire body moved
+    // into inspectorPluginRecordEventState's ncclProfilerKernelChStop
+    // handling, which now does this logical transition's full work
+    // (its own original body plus this one) under a single lock
+    // acquisition instead of two. Safe because this is a real, confirmed
+    // invariant of NCCL's own call protocol, not an assumption: NCCL
+    // 2.28's ncclProfilerStopKernelChEvent (plugin/profiler.cc) is the
+    // ONLY call site anywhere in NCCL for either recordEventState(...,
+    // ncclProfilerKernelChStop, ...) or stopEvent() on a kernelEventHandle,
+    // and it always calls them back-to-back on the same thread with
+    // nothing intervening -- re-verified directly against the real NCCL
+    // 2.28.9 source tree before cutting this, not assumed from the
+    // profiler.h header alone. No other code path reaches this branch,
+    // so leaving it as a no-op here is correct, not just an optimization.
+    return ncclSuccess;
+  }
+  return ncclSuccess;
+}
+
+/*
+ * Description:
+ *
+ *   Records the state of a profiling event for the NCCL Inspector
+ *   plugin.
+ *
+ * Thread Safety:
+ *
+ *   Thread-safe (updates event state as needed).
+ *
+ * Input:
+ *   void* eHandle - event handle.
+ *   ncclProfilerEventState_t eState - event state.
+ *   ncclProfilerEventStateArgs_t* eStateArgs - event state arguments.
+ *
+ * Output:
+ *   Event state is updated as needed.
+ *
+ * Return:
+ *   ncclResult_t - success or error code.
+ *
+ */
+__hidden ncclResult_t inspectorPluginRecordEventState(void* eHandle,
+                                                      ncclProfilerEventState_t eState,
+                                                      ncclProfilerEventStateArgs_t* eStateArgs) {
+  if (eHandle == nullptr || eStateArgs == nullptr)
+    return ncclSuccess;
+
+  uint64_t type = *(uint64_t *)eHandle;
+
+  if (type == ncclProfileKernelCh && eState == ncclProfilerKernelChStop) {
+    struct inspectorKernelChInfo *kernelChInfo = (struct inspectorKernelChInfo *)eHandle;
     struct inspectorCollInfo *collInfo = kernelChInfo->collInfo;
+    inspectorResult_t res = inspectorSuccess;
     if (collInfo && (collInfo->type == ncclProfileColl || collInfo->type == ncclProfileP2p)) {
+      // Lock-merge fix (this session): single acquisition covering both
+      // this function's own original work AND inspectorPluginStopEvent's
+      // ncclProfileKernelCh work -- see that (now empty) branch's own
+      // comment for the confirmed NCCL call-order invariant this relies
+      // on.
       inspectorLockWr(&collInfo->guard);
-      struct inspectorEventTraceInfo *krnlEvtTrk =
-        collInfo->collEvtTrk.kernelCh[kernelChInfo->channelId].evntTrace;
+
+      struct inspectorEventTraceInfo *krnlEvtTrk
+        = collInfo->collEvtTrk.kernelCh[kernelChInfo->channelId].evntTrace;
       inspectorRecordEventTrace(krnlEvtTrk,
+                                NCCL_INSP_EVT_TRK_KERNEL_RECORD,
+                                collInfo);
+      kernelChInfo->stopGpuClk = eStateArgs->kernelCh.pTimer;
+      if (kernelChInfo->startGpuClk != 0) {
+        // P32 -- see inspectorRetireCollInfo's docstring: DeRef never
+        // destroys collInfo/its guard early any more, so unlock
+        // unconditionally below regardless of res.
+        res = inspectorPluginCollInfoDeRef(collInfo);
+        if (res == inspectorReturn) {
+          // Previously this function just warned and fell through to
+          // its own unlock+return, since nothing further touched
+          // collInfo in this (then-separate) function. Now that the
+          // former stopEvent body runs below in the same critical
+          // section, a bail-out here is required, not optional: it
+          // mirrors the identical defensive check the old stopEvent
+          // branch already made on its own (later) deref, for the
+          // same "genuinely unexpected under the intended protocol"
+          // condition.
+          WARN("NCCL Inspector unnatural refcount-to-zero: inspectorPluginRecordEventState (channel=%u) -- retired safely", kernelChInfo->channelId);
+          inspectorUnlockRWLock(&collInfo->guard);
+          return ncclSuccess;
+        }
+      }
+
+      // --- begin former inspectorPluginStopEvent(ncclProfileKernelCh) body ---
+      struct inspectorEventTraceInfo *krnlEvtTrkStop =
+        collInfo->collEvtTrk.kernelCh[kernelChInfo->channelId].evntTrace;
+      inspectorRecordEventTrace(krnlEvtTrkStop,
                                 NCCL_INSP_EVT_TRK_KERNEL_STOP,
                                 collInfo);
       kernelChInfo->tsCompletedUsec = inspectorGetTime();
@@ -570,7 +670,7 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
       // processing of this now-retired object, rather than crash.
       res = inspectorPluginCollInfoDeRef(collInfo);
       if (res == inspectorReturn) {
-        WARN("NCCL Inspector unnatural refcount-to-zero: inspectorPluginStopEvent:ncclProfileKernelCh (channel=%u) -- retired safely, not processed further", kernelChInfo->channelId);
+        WARN("NCCL Inspector unnatural refcount-to-zero: inspectorPluginRecordEventState:kernelChStop (channel=%u) -- retired safely, not processed further", kernelChInfo->channelId);
         inspectorUnlockRWLock(&collInfo->guard);
         return ncclSuccess;
       }
@@ -623,64 +723,7 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
         return ncclSuccess;
       }
       inspectorUnlockRWLock(&collInfo->guard);
-    }
-    return ncclSuccess;
-  }
-  return ncclSuccess;
-}
-
-/*
- * Description:
- *
- *   Records the state of a profiling event for the NCCL Inspector
- *   plugin.
- *
- * Thread Safety:
- *
- *   Thread-safe (updates event state as needed).
- *
- * Input:
- *   void* eHandle - event handle.
- *   ncclProfilerEventState_t eState - event state.
- *   ncclProfilerEventStateArgs_t* eStateArgs - event state arguments.
- *
- * Output:
- *   Event state is updated as needed.
- *
- * Return:
- *   ncclResult_t - success or error code.
- *
- */
-__hidden ncclResult_t inspectorPluginRecordEventState(void* eHandle,
-                                                      ncclProfilerEventState_t eState,
-                                                      ncclProfilerEventStateArgs_t* eStateArgs) {
-  if (eHandle == nullptr || eStateArgs == nullptr)
-    return ncclSuccess;
-
-  uint64_t type = *(uint64_t *)eHandle;
-
-  if (type == ncclProfileKernelCh && eState == ncclProfilerKernelChStop) {
-    struct inspectorKernelChInfo *kernelChInfo = (struct inspectorKernelChInfo *)eHandle;
-    struct inspectorCollInfo *collInfo = kernelChInfo->collInfo;
-    inspectorResult_t res = inspectorSuccess;
-    if (collInfo && (collInfo->type == ncclProfileColl || collInfo->type == ncclProfileP2p)) {
-      inspectorLockWr(&collInfo->guard);
-      struct inspectorEventTraceInfo *krnlEvtTrk
-        = collInfo->collEvtTrk.kernelCh[kernelChInfo->channelId].evntTrace;
-      inspectorRecordEventTrace(krnlEvtTrk,
-                                NCCL_INSP_EVT_TRK_KERNEL_RECORD,
-                                collInfo);
-      kernelChInfo->stopGpuClk = eStateArgs->kernelCh.pTimer;
-      if (kernelChInfo->startGpuClk != 0) {
-        // P32 -- see inspectorRetireCollInfo's docstring: DeRef never
-        // destroys collInfo/its guard early any more, so unlock
-        // unconditionally below regardless of res.
-        res = inspectorPluginCollInfoDeRef(collInfo);
-        if (res == inspectorReturn) {
-          WARN("NCCL Inspector unnatural refcount-to-zero: inspectorPluginRecordEventState (channel=%u) -- retired safely", kernelChInfo->channelId);
-        }
-      }
-      inspectorUnlockRWLock(&collInfo->guard);
+      // --- end former inspectorPluginStopEvent(ncclProfileKernelCh) body ---
     }
   }
   return ncclSuccess;

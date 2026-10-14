@@ -1641,6 +1641,10 @@ void inspectorUpdateCollPerf(struct inspectorCompletedCollInfo *completedColl,
   }
 }
 
+bool inspectorIsDumpVerboseEnabled() {
+  return enableNcclInspectorDumpVerbose;
+}
+
 /*
  * Description:
  *

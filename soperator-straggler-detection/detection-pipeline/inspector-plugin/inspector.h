@@ -171,9 +171,21 @@ struct inspectorCommInfo {
   // guards this structure at all, unlike the single-slot design it
   // replaces.
   struct inspectorCompletedCollInfo ringBuf[INSPECTOR_RING_CAPACITY];
-  uint64_t ringHead;          // producer-owned; published with release so the consumer's acquire-load is guaranteed to see the fully-written slot
-  uint64_t ringTail;          // consumer-owned; published with release once per drain so the producer's acquire-load sees freed capacity promptly
-  uint64_t queueDropsTotal;   // cumulative; incremented atomically by the producer on every drop-newest event; surfaced in every dumped record (never silent) and in a rate-limited [WARN] (fires on drop counts 1, 2, 4, 8, 16, ... -- exact powers of two, never silent but never log-spamming either)
+  // False-sharing fix (this session): ringHead and ringTail are each
+  // pinned to their own 64-byte cache line. Previously they were two
+  // adjacent plain uint64_t fields guaranteed to share one cache line --
+  // confirmed structurally, not assumed -- meaning the producer's
+  // release-store to ringHead on every single completed collective
+  // invalidated the consumer's cached copy of ringTail (and vice versa
+  // on every drain), a real cross-core coherency cost the lock-free
+  // design doesn't need to pay. queueDropsTotal is producer-only
+  // (written only here, read only by the dump thread for the
+  // once-per-dump-cycle snapshot), so it shares ringHead's line
+  // deliberately rather than taking a third padded line for a field
+  // that was never part of the actual hot read/write race.
+  alignas(64) uint64_t ringHead;  // producer-owned; published with release so the consumer's acquire-load is guaranteed to see the fully-written slot
+  uint64_t queueDropsTotal;       // cumulative; incremented atomically by the producer on every drop-newest event; surfaced in every dumped record (never silent) and in a rate-limited [WARN] (fires on drop counts 1, 2, 4, 8, 16, ... -- exact powers of two, never silent but never log-spamming either)
+  alignas(64) uint64_t ringTail;  // consumer-owned; published with release once per drain so the producer's acquire-load sees freed capacity promptly
 
   // P32's deferred-free retirement queue (see inspector_plugin.cc's own
   // inspectorRetireCollInfo docstring for the real use-after-free bug
@@ -261,6 +273,10 @@ inspectorResult_t inspectorUnlockRWLock(pthread_rwlock_t* lockRef);
 inspectorResult_t inspectorGlobalInit(int rank);
 inspectorResult_t inspectorGlobalFinalize();
 uint64_t inspectorGetTime();
+// Exposes inspector.cc's file-local enableNcclInspectorDumpVerbose to
+// inspector_plugin.cc's hot path (inspectorRecordEventTrace) -- see that
+// function's own gating comment for why this is read on every event.
+bool inspectorIsDumpVerboseEnabled();
 inspectorResult_t inspectorAddComm(struct inspectorCommInfo **commInfo,
                                    const char* commName, uint64_t commHash,
                                    int nNodes, int nranks, int rank);

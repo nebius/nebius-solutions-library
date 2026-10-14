@@ -2270,3 +2270,98 @@ way:
   **~22-25/hour** and, from a separate 3-hour blind-test session,
   **~22-38/hour (settling around ~32/hour across three runs)** — both
   PROBABLE/LOG-ONLY, not paged.
+
+**Follow-up — Inspector hot-path micro-overhead investigation, three real
+removable costs found and fixed, overhead impact honestly re-measured**:
+investigated whether the inline (synchronous, NCCL-callback-thread) path
+had any further squeezable overhead beyond the already-shipped lean-mode
+`collEvtTrk`-copy skip, or was already near its architectural floor.
+Traced the exact call sequence precisely (not assumed) and found three
+real, independently-confirmed, narrowly-scoped issues, none touching
+NCCL itself:
+1. **`inspectorRecordEventTrace`'s own internal `gettimeofday()` calls ran
+   unconditionally in lean mode**, populating `evtTrace[]`/`collEvtTrk.sn`
+   data that `calculateMaxKernelExecTimeUsecs` (the function that actually
+   produces the lean-mode-dumped `coll_exec_time_us`) never reads —
+   re-verified directly against current code. Gated the whole function
+   body behind `enableNcclInspectorDumpVerbose` (a new
+   `inspectorIsDumpVerboseEnabled()` accessor exposes inspector.cc's
+   file-local flag to inspector_plugin.cc), mirroring the existing
+   `collEvtTrk`-copy-skip precedent exactly. Direct microbenchmark on this
+   hardware: `gettimeofday()` ≈ 24.5ns/call; this call ran up to 3x per
+   kernel channel plus 2x per collective.
+2. **Redundant lock/unlock cycle for the kernelCh-stop transition** —
+   `inspectorPluginRecordEventState` (state `ncclProfilerKernelChStop`)
+   and `inspectorPluginStopEvent` (type `ncclProfileKernelCh`) each
+   independently acquired+released the same per-collective
+   `collInfo->guard`. Confirmed directly against the real NCCL 2.28.9
+   source (`plugin/profiler.cc`'s `ncclProfilerStopKernelChEvent`) that
+   these two calls are the ONLY call site anywhere in NCCL for either API
+   on a kernelEventHandle, always issued back-to-back on the same thread
+   with nothing intervening — a real, verified invariant, not an
+   assumption. Merged both bodies into a single critical section inside
+   `inspectorPluginRecordEventState`; `inspectorPluginStopEvent`'s
+   `ncclProfileKernelCh` branch is now a documented no-op. A new bail-out
+   was required (not just copy-paste) on the first deref's
+   already-existing "unnatural refcount-to-zero" defensive check, since
+   collInfo is now touched further in the same critical section where
+   previously the function simply ended there.
+3. **False sharing between `ringHead` and `ringTail`** — confirmed
+   structurally: both were adjacent plain `uint64_t` fields in
+   `inspectorCommInfo`, guaranteed to share a cache line, so the
+   producer's release-store on every completed collective invalidated the
+   consumer's cached `ringTail` (and vice versa on every drain). Fixed
+   with `alignas(64)` on both fields; `queueDropsTotal` deliberately kept
+   on `ringHead`'s line (producer-only field, never part of the real
+   hot-path read/write race).
+
+Built clean, `-Wall -Wextra`, zero warnings (one new `-Wunused-but-set-
+variable` surfaced by gutting `inspectorPluginStopEvent`'s kernelCh
+branch, fixed by dropping the now-single-use, never-checked `res`
+variable in that function — matches the existing pattern there of never
+checking that particular deref's return value).
+
+**Full revalidation**:
+- `tools/self_test.sh`: clean PASS, exact rank-match, 0 new
+  `CHECK-FAILED`.
+- **Overhead re-measured, same shapes/methodology as the figures already
+  on record, n≥3 interleaved ON/OFF windows**:
+  - **Megatron TP4/PP4/DP1** (same 2-node/16-GPU shape, 500 iterations/
+    window, first 10 warmup iterations excluded): pooled **189.732ms/iter
+    (ON) vs 169.184ms/iter (OFF) — ~12.14% relative overhead** (n=1470
+    each). Against the existing ~12.3% (pre-ring-buffer-fix) / ~13.1%
+    (post-ring-buffer-fix) / ~12.0% pooled (post-gRetireLock+collEvtTrk-
+    gate fix) figures, this is a ~0.1-percentage-point difference —
+    **not a visible improvement, and reported honestly as such.** This
+    shape's own individual paired-window spread here (window 1: 10.71%,
+    window 2: 10.77%, window 3: 15.05%) already exceeds that difference,
+    same conclusion as the prior "~12.0% pooled" entry's own "roughly
+    consistent, not precisely quantified" framing. The most
+    likely explanation: these three fixes each remove nanosecond-to-low-
+    microsecond-scale cost, several orders of magnitude below this
+    shape's own ~15-18ms per-iteration stdev on this shared cluster — a
+    real, correct fix is not guaranteed to be a *measurable* one at this
+    macro scale, and this is exactly that case, not a failed fix.
+  - **nanoGPT DDP** (2-node/16-GPU shape, 1000 steps/window, iteration 0
+    excluded as pure init/compile cost): pooled **41.935ms/iter (ON) vs
+    39.488ms/iter (OFF) — ~6.20% relative overhead** (n=150 each,
+    stdev ~5.4ms both conditions). **This is the first real result ever
+    recorded for this shape** — `workloads/nanogpt/run_shape1_nomonitor.sh`
+    existed as an A/B harness since early in this project but had no
+    documented result from actually being run (§5.2 above). Not
+    comparable to a prior fixed-vs-unfixed delta for this specific shape
+    since none exists; reported as a fresh baseline, not an isolated
+    measurement of these three fixes' own effect.
+  - Both sweeps run back-to-back on the same real cluster, same session,
+    immediately before the `queue_drops_total` check below, to keep
+    cluster-load conditions as comparable as possible across workloads.
+- **`queue_drops_total` regression check, real MoE run, patched plugin**:
+  300-step `workloads/moe/run_moe_nanogpt.sh`, 16 ranks, default
+  `INSPECTOR_RING_CAPACITY=256`. Real, observed per-rank max drop counts
+  ranged 2,407-9,954 across the 16 real dump files produced. This sits
+  **within** the already-documented range for this exact capacity/config
+  (prior investigation: 2-15,506 across multiple runs, characterized as a
+  genuinely large-but-not-clearly-bounded tail, not a well-characterized
+  peak) — not a new outlier, not evidence these fixes regressed drop
+  behavior. The counter and its rate-limited `[WARN]` mechanism are
+  confirmed still functioning correctly (never silent) post-fix.

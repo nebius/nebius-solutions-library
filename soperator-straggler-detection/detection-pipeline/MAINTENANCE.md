@@ -34,11 +34,11 @@ this project's own history of things that actually broke:
    error, just silent non-detection, because self-dispatching workload
    launchers `cd` before the relative path resolves (README.md §8, line
    1333). Always pass an absolute path.
-4. **Overhead is not one number.** Five different measurements exist
-   (4.5x / ~6.5% / ~12.3% / ~13.1% / ~12.0%) across different workload
-   shapes, scales, and pipeline states (§8). Never quote one of these as
-   "the" overhead figure, and re-measure after any workload/scale/plugin
-   change rather than reusing an old number.
+4. **Overhead is not one number.** Seven different measurements exist
+   (4.5x / ~6.5% / ~12.3% / ~13.1% / ~12.0% / ~12.14% / ~6.20%) across
+   different workload shapes, scales, and pipeline states (§8). Never
+   quote one of these as "the" overhead figure, and re-measure after any
+   workload/scale/plugin change rather than reusing an old number.
 5. **VictoriaMetrics' own two real "up but wrong" failure modes are now
    watched (`[VM-DOWN]`/`[VM-RECOVERED]`, §2) — but know their actual
    shapes if you're ever debugging around them.** A destroyed data
@@ -1052,7 +1052,7 @@ reading it would be actively misled rather than honestly told
 
 ## 8. Overhead/performance — all current numbers, none permanent
 
-Five distinct measurements exist, each under different conditions — never
+Seven distinct measurements exist, each under different conditions — never
 treat one as "the" number, and re-measure after any workload-shape, scale,
 or plugin change:
 
@@ -1075,11 +1075,26 @@ one-line summary and a pointer):
    n=980 each) — DESIGN_NOTES.md §5.1, line 1941. Explicitly labeled a
    small, directionally real improvement, not dramatic — run-to-run spread
    exceeds the apparent gain.
+6. Same shape, after the hot-path micro-overhead fixes (ungated
+   `inspectorRecordEventTrace` timestamp calls, merged kernelCh-stop lock
+   cycle, `ringHead`/`ringTail` cache-line padding): **~12.14%** pooled
+   (n=1470 each, 3 interleaved windows) — DESIGN_NOTES.md §5.2, "Inspector
+   hot-path micro-overhead investigation". **Not a visible improvement
+   over #5** — these three fixes remove nanosecond-to-low-microsecond-scale
+   cost, well below this shape's own ~15-18ms/iter run-to-run noise.
+   Confirmed real and correct (clean build, `self_test.sh` PASS, no
+   `queue_drops_total` regression under MoE) but not a macro-overhead win
+   at this scale — keep them for correctness/hygiene, not for throughput.
+7. **nanoGPT DDP, first-ever recorded result for this shape**: **~6.20%**
+   relative (41.935ms vs 39.488ms/iter, n=150 each) — DESIGN_NOTES.md
+   §5.2, same entry as #6. No prior fixed-vs-unfixed baseline exists for
+   this shape to compare against; this is a fresh number, not a delta.
 
-**Rule:** re-measure overhead (same methodology as #3-5: n≥500 steady-state
-iterations, ON vs OFF) whenever a new workload shape, a scale change, or an
-Inspector-plugin change lands. Don't reuse an old number across a
-meaningfully different condition.
+**Rule:** re-measure overhead (same methodology as #3-7: n≥500 steady-state
+iterations — or n≥150 for nanoGPT DDP's much shorter per-iteration time —
+ON vs OFF, n≥3 interleaved windows) whenever a new workload shape, a scale
+change, or an Inspector-plugin change lands. Don't reuse an old number
+across a meaningfully different condition.
 
 ## 9. Version-to-version risk areas — when you touch X, re-check Y
 
