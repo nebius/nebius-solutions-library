@@ -59,6 +59,7 @@ def test_same_principal_multiple_keys_and_other_principal_direct_paths(client, a
     del cluster.jobs[("tenant-demo", oid)]
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda _: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     rows = [
         {
             "operation": oid,

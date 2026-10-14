@@ -203,6 +203,7 @@ def test_operation_reports_lifecycle_and_revision_cursor(client, monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == op else [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     got = c.get(f"/v1/operations/{op}", headers=H).json()
     assert (
@@ -232,6 +233,7 @@ def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypat
     fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(
         attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="failed"), "operation": op}]

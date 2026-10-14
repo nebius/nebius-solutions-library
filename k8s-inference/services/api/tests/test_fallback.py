@@ -236,6 +236,7 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     acked = {}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(attempts, "verify_runner_token", lambda token: ("eu-south1", "tenant-demo", f"{op}-pq52n"))
     monkeypatch.setattr(
@@ -543,6 +544,7 @@ def test_admitted_queued_run_names_its_cluster_phase_and_wait(client, monkeypatc
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
     monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
     r = c.post(
@@ -686,6 +688,7 @@ def test_resume_uses_the_acknowledged_checkpoint_pointer(client, monkeypatch):
     fake.pvcs.pop(("tenant-demo", f"{op}-work"), None)  # abrupt loss: the volume is gone with the node
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(
         attempts,
         "for_operation",
@@ -754,6 +757,7 @@ def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow
     ]
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == "op-gone" else [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     got = c.get("/v1/operations/op-gone", headers=H)
     assert (
         got.status_code == 200
@@ -764,5 +768,6 @@ def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow
     assert c.get("/v1/operations/op-unknown", headers=H).status_code == 404
     # a superseded handle whose Job expired resolves through the database link
     monkeypatch.setattr(attempts, "_marks", lambda operation: (3, None, "op-gone") if operation == "op-old" else None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     assert c.get("/v1/operations/op-old", headers=H).json()["id"] == "op-gone"
     assert c.post("/v1/operations/op-gone:cancel", headers=H).status_code == 409

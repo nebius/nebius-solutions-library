@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.65 (hotfix on 0.11.63; 0.11.64 is the separate isolation candidate)
+
+- Manual `:resume` links its successor (docs/JOBS.md "Resume"): the resumed operation gets the durable successor mark
+  and, while its Job exists, the `successor` annotation, as fallback and recovery always did. Until now a public resume
+  of a FAILED run left the original handle on its own terminal state for ever once its Job expired (TTL), and a graph
+  child waiting on that root kept seeing the FAILED original; `GET /v1/operations/<original>` now follows to the new head
+  and the stage gate waits on the successor's state: the handle of a resumed operation is its lineage head, as it
+  already was for fallback and recovery (`resumed_from` and `root_operation_id` still name the lineage). `:resume`,
+  `:export` and `:cancel` act on the operation named (a resume or export of an older member is refused naming the
+  head, as before). The run ledger's lineage head is the authority behind the link: a handle follows it even when no
+  annotation or mark exists (a continuation admitted on 0.11.63), with the owner check on the named operation and on
+  the head alike. `:cancel` by a graph root's id cancels the graph also once the root's Job expired (its stages and
+  the root lineage's head, a resumed root still queued or running, are cancelled and the graph is closed); an expired
+  operation that is no graph root is over (409). No other change against 0.11.63.
 ## api 0.11.64, platform chart 0.1.7
 
 - Ingress isolation (docs/API.md "Ingress isolation"): `ingress_isolation: declared-ports` on an endpoint model renders a

@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 import attempts
 import config as cfg
+import db
 import execution
 import jobs
 import keys
@@ -129,6 +130,35 @@ def stage_of(job: dict) -> dict | None:
 
 
 # ---- the state of an operation, from what is durable, without a principal ---------------------------------------
+def ledger_head(ns: str, operation: str) -> str | None:
+    """The newest member of the operation's own lineage in the run ledger (keys.run_head / stage_head) when it is a
+    compute continuation (a resume, fallback or recovery): the authoritative link, also for one admitted before api
+    0.11.65 recorded successor marks on a manual resume. None when the ledger does not know the operation, when it is
+    the head itself, when the head is an export retry or finalizer of it (`export-of` / `finalize-of`: the compute
+    attempt stays the handle and reports the delivery, docs/JOBS.md "Attempts and finalization"), or when the head's
+    Job cannot be read (never a blind jump)."""
+    if not db.enabled():
+        return None
+    try:
+        m = keys.member_of(operation)
+        if not m:
+            return None
+        head = keys.stage_head(m["root"], m["stage"]) if m["kind"] == "stage" else keys.run_head(m["root"])
+    except Exception as e:  # noqa: BLE001 - an unreadable ledger leaves the handle on the named operation
+        log.warning("ledger head of %s: %s", operation, e)
+        return None
+    if not head or head == operation:
+        return None
+    try:
+        hj, _r = jobs.find(ns, head)
+    except HTTPException:
+        return None
+    ann = hj["metadata"].get("annotations") or {}
+    if ann.get(f"{LABEL}/export-of") or ann.get(f"{LABEL}/finalize-of"):
+        return None
+    return head
+
+
 def state_of(ns: str, operation: str) -> dict:
     """{"status", "result_ref", "attempt_id", "operation"} of an operation, as the gate sees it: the live Job
     (following fallback/recovery successors) with its durable attempt records, else the durable rows of an expired
@@ -146,7 +176,7 @@ def state_of(ns: str, operation: str) -> dict:
                 raise
             if not attempts.enabled():
                 return {"operation": current, "status": None}
-            nxt = attempts.successor_of(current)
+            nxt = attempts.successor_of(current) or ledger_head(ns, current)
             if nxt and nxt != current:
                 current = nxt
                 continue
@@ -164,7 +194,7 @@ def state_of(ns: str, operation: str) -> dict:
                 root = op.get("resumed_from") or current
                 op.update(_delivered(op, current, root))
             return _state(current, op)
-        nxt = (job["metadata"].get("annotations") or {}).get(f"{LABEL}/successor")
+        nxt = (job["metadata"].get("annotations") or {}).get(f"{LABEL}/successor") or ledger_head(ns, current)
         if nxt and nxt != current:
             current = nxt
             continue

@@ -37,6 +37,7 @@ def test_second_export_retry_follows_the_current_head_not_the_compute_job(client
     cluster.jobs[("tenant-demo", oid)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     rows = [{**_record(oid, f"{oid}-a", export="failed"), "operation": oid}]
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows)

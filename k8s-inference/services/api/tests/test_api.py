@@ -939,7 +939,9 @@ def test_resume_reuses_the_volume_in_the_same_region(client):
     )
     owners = [o["uid"] for o in fake.pvcs[("tenant-demo", f"{oid}-work")]["metadata"]["ownerReferences"]]
     assert owners == [f"uid-{oid}", f"uid-{oid}-r1"]  # the volume now outlives either Job
-    assert c.get(f"/v1/operations/{oid}", headers=H).json()["resumable"] is True
+    # the original's handle is its lineage head now (the resumed Job, QUEUED): the lineage is not resumable until it ends
+    head = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert head["id"] == f"{oid}-r1" and head["resumed_from"] == oid and head["resumable"] is False
     # the resumed run fails again: the next resume chains from the root name
     new["status"] = {"startTime": "x", "conditions": [{"type": "Failed", "status": "True"}]}
     r = c.post(f"/v1/operations/{oid}-r1:resume", headers=H)

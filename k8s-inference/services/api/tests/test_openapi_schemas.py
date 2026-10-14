@@ -369,6 +369,7 @@ def test_lifecycle_chain_and_finalizer_views_are_declared(client, admin_keys, fa
         covered(a, "Attempt", "Attempt synthesized from its record")
     assert syn["status"] in enum("OperationStatus")
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     del fake.jobs[("tenant-demo", op)]
     gone = c.get(f"/v1/operations/{op}", headers=H)
     assert gone.status_code == 200 and gone.json()["reason"]

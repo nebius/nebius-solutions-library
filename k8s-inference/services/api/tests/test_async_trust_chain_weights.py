@@ -119,6 +119,7 @@ def test_cancelled_parent_shows_its_running_resumed_child_as_running(client, adm
     monkeypatch.setattr(attempts, "for_operation", lambda root: [r for r in rows if r["operation"].startswith(root)])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(attempts, "latest_checkpoint", lambda root: None)
     root = c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}}).json()["id"]
@@ -152,7 +153,8 @@ def test_cancelled_parent_shows_its_running_resumed_child_as_running(client, adm
     direct = c.get(f"/v1/operations/{child}", headers=H).json()
     assert direct["status"] == "RUNNING"
     parent = c.get(f"/v1/operations/{root}", headers=H).json()
-    assert parent["status"] == "CANCELLED"
+    # the parent's handle is its lineage head: the running child (api 0.11.65); the parent's own end is in the chain
+    assert parent["id"] == child and parent["status"] == "RUNNING" and parent["root_operation_id"] == root
     by_op = {(a["operation"], a["status"]) for a in parent["attempts"]}
     assert (child, "RUNNING") in by_op and (root, "CANCELLED") in by_op or (root, "PREEMPTED") in by_op
     assert not any(a["operation"] == child and a["status"] == "PREEMPTED" for a in parent["attempts"])

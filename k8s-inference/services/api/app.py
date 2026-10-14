@@ -114,7 +114,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.64", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.66", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1304,9 +1304,16 @@ def _root(job: dict) -> str:
     return (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or job["metadata"]["name"]
 
 
+def _ledger_head(ns: str, operation: str) -> str | None:
+    return stages.ledger_head(ns, operation)
+
+
 def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
-    """The operation's Job. A handle that capacity fallback superseded resolves to its current successor (the
-    original stays readable, docs/SCHEDULING.md); an operation whose Job expired is served from its durable rows."""
+    """The operation's Job. A handle that a continuation superseded (capacity fallback, recovery, a manual resume)
+    resolves to its current successor: the successor annotation on the Job, the durable mark once the Job is gone,
+    and the run ledger's lineage head as the authority behind both (the original stays readable through its rows);
+    an operation whose Job expired is served from its durable rows. The owner check applies to every operation on the
+    way, the named one and the head."""
     current, previous = id, None
     for _ in range(16):
         try:
@@ -1332,18 +1339,22 @@ def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
                 }
             }
             _check_operation_owner(p, synthetic_job)
-            nxt = attempts.successor_of(current)
+            synthetic = attempts.synthesize(current, p.tenant)
+            nxt = attempts.successor_of(current) or (_ledger_head(p.namespace, current) if follow else None)
             if follow and nxt and nxt != current:
+                if synthetic is not None:  # the named operation's durable view stands in when its head is gone too
+                    previous = ({**synthetic_job, "_synthetic": synthetic}, synthetic.get("region"))
                 current = nxt
                 continue
-            synthetic = attempts.synthesize(current, p.tenant)
             if synthetic is None:
                 if previous is not None:  # a successor that is marked but not created yet: the original stands
                     return previous
                 raise
             return {**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")
         _check_operation_owner(p, job)
-        nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor")
+        nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor") or (
+            _ledger_head(p.namespace, current) if follow else None
+        )
         if follow and nxt and nxt != current:
             current, previous = nxt, (job, region)
             continue
@@ -1652,7 +1663,7 @@ def get_result(id: str, p: Principal = Depends(scoped("read:results"))):
 def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:control"))):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
-    orig, region = _owned(p, id)
+    orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
@@ -1951,9 +1962,12 @@ def _owner_context(operation: str) -> dict | None:
 
 @app.post("/v1/operations/{id}:cancel", responses={200: {"model": schemas.Operation}})
 def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
-    job, region = _owned(p, id)
+    job, region = _owned(p, id, follow=False)  # cancel the operation named, never its continuation
     if job.get("_synthetic"):
-        raise HTTPException(409, f"operation {id} is over; nothing to cancel")
+        # the Job is gone (TTL). A graph root is still the handle its owner cancels the graph by (docs/JOBS.md "Stage
+        # composition"): every stage member and the root lineage's head go, nothing attaches any more; any other
+        # expired operation has nothing left to cancel
+        return _cancel_graph_of(p, id, job)
     current = job["metadata"]["name"]
     op = _operation(p, job, id, region)
     if op.get("finalizing_by"):  # the root's handle: a cancel stops its active finalizer, the root stays as it is
@@ -1969,13 +1983,49 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
         leases.request_cancel(current, "cancelled by the owner")  # a request to the attached worker, never a release
     root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
     if db.enabled() and (g := keys.graph_of(root)) and not g.get("cancelled_at"):
-        # the root of a graph: every stage goes with it, nothing attaches any more (docs/JOBS.md "Stage composition")
-        why = f"cancelled by the caller with root {root}"
-        names = stages.cancel_members(p.namespace, root, why)
-        keys.cancel_graph(root, why)
+        # the root of a graph: every stage goes with it, and so does the root lineage's current head (a resumed root
+        # that is still queued or running); nothing attaches any more (docs/JOBS.md "Stage composition")
+        names = _cancel_graph_members(p, root, current)
         op["graph"] = stages.graph_view(p.namespace, keys.graph_of(root))
         op["status"] = "CANCELLED"
         log.info("cancel %s: stages cancelled: %s", root, names)
+    return op
+
+
+def _cancel_graph_members(p: Principal, root: str, current: str) -> list[str]:
+    """The graph's cancellation: its stage members, and the root lineage's head when that is another, still active
+    operation (a manual continuation of the root): marked, stopped, settled like any cancel. The graph is closed."""
+    why = f"cancelled by the caller with root {root}"
+    names = stages.cancel_members(p.namespace, root, why)
+    head = keys.run_head(root)
+    if head and head != current:
+        try:
+            hj, hr = jobs.find(p.namespace, head)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            hj = None
+        if hj is not None and not status.finished(hj):
+            attempts.mark_cancelled(head)
+            settle_deleted(jobs.cancel(p.namespace, head, _home(hj)))
+            names.append(head)
+    keys.cancel_graph(root, why)
+    return names
+
+
+def _cancel_graph_of(p: Principal, id: str, synthetic: dict) -> dict:
+    """`:cancel` on an operation whose Job expired: a graph root still cancels its graph (the stages and the root
+    lineage's head); anything else is over."""
+    root = (synthetic["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    if not (db.enabled() and (g := keys.graph_of(root))):
+        raise HTTPException(409, f"operation {id} is over; nothing to cancel")
+    op = dict(synthetic["_synthetic"])
+    if not g.get("cancelled_at"):
+        attempts.mark_cancelled(id)
+        names = _cancel_graph_members(p, root, id)
+        log.info("cancel %s (expired root): graph cancelled: %s", root, names)
+    op["graph"] = stages.graph_view(p.namespace, keys.graph_of(root))
+    op["status"] = "CANCELLED"
     return op
 
 
@@ -1993,7 +2043,7 @@ def resume(
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
-    orig, region = _owned(p, id)
+    orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):

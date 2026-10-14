@@ -265,6 +265,7 @@ def test_a_gone_private_call_keeps_its_provenance_on_the_durable_path(client, ad
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     oid = "op-llm-example-gone"
     rows = [
         {
@@ -347,6 +348,7 @@ def test_a_delivered_error_capture_stays_failed_on_the_root_live_and_after_gc(
     # after the Job is gone: served from the rows, same answer
     del cluster.jobs[("tenant-demo", oid)]
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     synth = {
         "id": oid,
         "mode": "async",

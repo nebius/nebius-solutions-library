@@ -126,6 +126,7 @@ def live(client, admin_keys, fake_keys, monkeypatch):
     monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
     monkeypatch.setattr(api.kube, "stamp_last_request", lambda *a, **k: None)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "enabled", lambda: False)
     fl = FakeLeases()
     for name in ("get", "history", "prepare", "attach", "release", "request_cancel", "mark_settled"):

@@ -134,6 +134,14 @@ privilege, no host path, no shared tenant mount: the alias cannot reach anything
 
 ## Resume
 
+A resumed operation names its successor: durably (the attempt marks the handle and the stage gate follow, also once
+the original Job expired) and on its Job while it exists. `GET /v1/operations/<original>` therefore answers with the
+current head of the lineage (the original stays readable through its rows), a graph child waiting on a resumed
+dependency waits on the successor's state, and a second `:resume` of the original is refused naming the head. The run
+ledger's lineage head (`keys.run_head`, `stage_head`) is the authority behind the link: the handle follows it even
+without an annotation or mark, and the owner check applies to the named operation and to the head. `:cancel` by a
+graph root's id cancels the graph (its stages and the root lineage's head) also once the root's Job expired.
+
 **Automatic.** A spot interruption, node drain or eviction fails the pod with `DisruptionTarget`
 (or kills `main` with 137/143). The rule above does not count it against `backoffLimit`; the Job
 controller starts a replacement pod, which attaches the same PVC (the volume is regional, so the

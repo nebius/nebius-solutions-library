@@ -177,6 +177,7 @@ def test_operation_list_and_replays_report_from_the_durable_records(client, monk
     queried = []
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == op else [])
     monkeypatch.setattr(attempts, "for_operations", lambda roots: queried.append(set(roots)) or {op: rows})
     monkeypatch.setattr(attempts, "marks_for", lambda names: queried.append(set(names)) or {op: (5, None, None)})

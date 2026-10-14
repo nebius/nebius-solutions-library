@@ -84,6 +84,7 @@ def failed_run(client, monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: [x for x in rows if x["root"] == root])
     monkeypatch.setattr(attempts, "_marks", lambda operation: marks.get(operation))
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: marks.__setitem__(operation, (1, "now", None)))
     return c, fake, op, rows, marks
 
@@ -472,6 +473,7 @@ def test_finalizer_of_a_fleet_run_is_pinned_to_the_admitting_cluster(client, mon
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     r = c.post(f"/v1/operations/{op}:export", headers=H)
     assert r.status_code == 202, r.text
     x1 = fake.jobs[(NS, f"{op}-x1")]

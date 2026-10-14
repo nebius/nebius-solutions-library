@@ -1874,4 +1874,30 @@ def resume(
                     m["subPath"] = f"checkpoints/{root}"
     if admit:
         admit(job)  # the run's ledger admits the member before its Job exists (app.continuation_admission)
-    return create(ns, job, region)
+    created, was_created = create(ns, job, region)
+    _link_successor(ns, name, new, region, jobset=is_jobset(orig))
+    return created, was_created
+
+
+def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = False) -> None:
+    """The resumed operation names its successor, durably and on its Job: the durable mark (operation_marks) is what
+    the public handle (app._owned) and the stage gate (stages.state_of) follow once the original Job is gone (TTL), and
+    it fences the original's late progress records; the annotation serves the handle while the Job still exists. Until
+    0.11.63 only fallback and recovery linked their successor: a manual `:resume` left the original handle on its own
+    terminal state (FAILED, epoch 1) for ever once its Job expired, and a graph child waiting on that root kept seeing
+    the FAILED original. Idempotent: a replayed resume marks the same successor again."""
+    import attempts
+
+    try:
+        attempts.mark_successor(name, new)
+    except Exception as e:  # noqa: BLE001 - the annotation below still links while the Job exists; the mark is retried on replay
+        log.warning("successor mark %s -> %s: %s", name, new, e)
+    body = {"metadata": {"annotations": {f"{LABEL}/successor": new}}}
+    try:
+        if jobset:
+            patch_jobset(ns, name, region, body)
+        else:
+            retry(kube.batch(region).patch_namespaced_job, name, ns, body)
+    except ApiException as e:
+        if e.status != 404:  # the original expired (TTL): the durable mark is the link
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")

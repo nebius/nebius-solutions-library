@@ -69,7 +69,11 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
+<<<<<<< HEAD
   "sha256": "1b02da89bb7aee244338353173753f5e5446d3e2b891abe875857afb6b64a0c6"
+=======
+  "sha256": "4a35d98b5e36ff6d5eaf6389b6ffcc6d9fe95fd7c7d19e9ff47db88223c2113c"
+>>>>>>> 1c7d65008 (api 0.11.65 (hotfix on 0.11.63): a resumed operation's handle is its lineage head)
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
