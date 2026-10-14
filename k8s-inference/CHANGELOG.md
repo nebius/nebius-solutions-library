@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.60
+
+- Rollout convergence is observed, never inferred from revision names (0.11.59 was never deployed): the
+  InferenceService's spec generation must be reconciled (`observed_generation`), the created, ready and rolled-out
+  revisions one, the latest ready Revision object's stored image equal to the spec's desired image (valid for a
+  scaled-to-zero immutable revision, no pod needed), and every ready pod on that image (by digest or reference);
+  `regions[].rollout` carries the evidence and a `reason` when not converged, which the convergence fence (409) names.
+
 ## api 0.11.59
 
 - Run classes carry a sanitized `execution` identity on the public model (`image`, `immutable`, `images`,

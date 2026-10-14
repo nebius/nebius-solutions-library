@@ -75,8 +75,12 @@ ever), `retry` (docs/JOBS.md "Retries") and `finalize` (whether an application f
 args, env, secrets, volumes or profiles. Endpoints carry `execution: null`.
 
 An endpoint's `regions[].rollout` is its revision state: `latest_created`, `latest_ready`, `latest_rolled_out`,
-`serving_images` (what the ready pods run) and `converged` (the three revisions are one; a property of the revisions,
-true for a converged endpoint at zero). Knative routes to the latest *ready* revision, so after a spec change the
+`generation`/`observed_generation`, `desired_image` (the spec's), `revision_image` and `revision_image_digest` (the
+latest ready Revision object's: stored template evidence, valid at zero), `serving_images` (what the ready pods run),
+`converged` and `reason`. `converged` holds only when all of these are observed, never from revision names alone: the
+controller reconciled the current spec (observed generation = generation; the pre-reconcile window after a catalog
+change still shows the old revisions as one), the created, ready and rolled-out revisions are one, the ready
+Revision's image equals the desired image, and every ready pod runs it (by digest or reference). Knative routes to the latest *ready* revision, so after a spec change the
 previous revision serves until the new one is ready: the model's `image` is the spec, the rollout state is what
 serves. An endpoint call may set `execution.require_converged: true`: it is refused (409, the revisions named) while
 the rollout is not converged. Every endpoint call records the ready revision and its serving image at admission

@@ -113,7 +113,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.59", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.60", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -951,11 +951,9 @@ def _rollout_fence(m: dict, region: str, ex: dict | None) -> dict | None:
     rollout = st.get("rollout")
     if ex and ex.get("require_converged"):
         if not rollout or not rollout.get("converged"):
+            why = (rollout or {}).get("reason") or "rollout state unavailable"
             raise HTTPException(
-                409,
-                f"endpoint {m['name']} rollout not converged in {region}: created {rollout.get('latest_created') if rollout else None}, "
-                f"ready {rollout.get('latest_ready') if rollout else None}, rolled out {rollout.get('latest_rolled_out') if rollout else None}"
-                " (execution.require_converged)",
+                409, f"endpoint {m['name']} rollout not converged in {region}: {why} (execution.require_converged)"
             )
     return rollout
 

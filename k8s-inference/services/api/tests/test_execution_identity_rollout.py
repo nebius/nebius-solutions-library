@@ -94,17 +94,20 @@ def test_run_class_projects_its_execution_identity_without_the_spec(client, admi
     assert multi["job"]["images"]["h100"].endswith("/img:h")
 
 
-def _pod(ready=True, image_id="docker://img@sha256:abc"):
-    cs = NS(name="kserve-container", ready=ready, image="img:5", image_id=image_id)
+def _pod(ready=True, image_id="docker://cr.example/m@sha256:5555", image="cr.example/m:5"):
+    cs = NS(name="kserve-container", ready=ready, image=image, image_id=image_id)
     return NS(
         metadata=NS(creation_timestamp=None, labels={}),
         status=NS(phase="Running", container_statuses=[cs], conditions=[]),
     )
 
 
-def _isvc(created, ready, rolled, ready_cond=True):
+def _isvc(created, ready, rolled, generation=2, observed=2, image="cr.example/m:5", ready_cond=True):
     return {
+        "metadata": {"generation": generation},
+        "spec": {"predictor": {"containers": [{"name": "kserve-container", "image": image}]}},
         "status": {
+            "observedGeneration": observed,
             "conditions": [{"type": "Ready", "status": "True" if ready_cond else "False"}],
             "components": {
                 "predictor": {
@@ -113,26 +116,79 @@ def _isvc(created, ready, rolled, ready_cond=True):
                     "latestRolledoutRevision": rolled,
                 }
             },
-        }
+        },
     }
 
 
-def test_rollout_state_reads_revisions_and_serving_images(monkeypatch):
-    kube._isvc_cache.clear()
-    diverged = _rollout_of(monkeypatch, _isvc("m-00005", "m-00004", "m-00004"), [_pod()])
-    assert diverged["converged"] is False and diverged["latest_ready"] == "m-00004"
-    assert diverged["serving_images"] == ["docker://img@sha256:abc"]
-    converged_zero = _rollout_of(monkeypatch, _isvc("m-00005", "m-00005", "m-00005"), [])
-    assert converged_zero["converged"] is True and converged_zero["serving_images"] == []  # zero-hot: converged
-    converged = _rollout_of(monkeypatch, _isvc("m-00005", "m-00005", "m-00005"), [_pod(), _pod(ready=False)])
-    assert converged["converged"] is True and len(converged["serving_images"]) == 1
-    unknown = _rollout_of(monkeypatch, {"status": {}}, [])
-    assert unknown["converged"] is False and unknown["latest_created"] is None
+def _revision(image="cr.example/m:5", digest="cr.example/m@sha256:5555"):
+    return {"spec": {"containers": [{"image": image}]}, "status": {"containerStatuses": [{"imageDigest": digest}]}}
 
 
-def _rollout_of(monkeypatch, isvc, pods):
+def test_rollout_converges_only_on_observed_generation_revision_image_and_pods(monkeypatch):
+    """Revision names alone are never image proof: convergence needs the controller to have reconciled the current
+    spec (observedGeneration == generation: the pre-reconcile window after a catalog image change still shows the old
+    revisions as one), one revision, the ready Revision's stored image equal to the spec's (valid at zero, from the
+    Revision object), and every ready pod on that image (by digest or reference)."""
+    # converged at zero: the stored Revision proves the image, no pod needed
+    zero = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {"m-5": _revision()})
+    assert zero["converged"] is True and zero["serving_images"] == [] and zero["reason"] is None
+    assert zero["revision_image"] == "cr.example/m:5" == zero["desired_image"] and zero["generation"] == 2
+    # the pre-reconcile window: the spec moved to a new image (generation 3), the controller has not observed it, the
+    # old revisions are still one -> not converged
+    window = _rollout_of(
+        monkeypatch,
+        _isvc("m-5", "m-5", "m-5", generation=3, observed=2, image="cr.example/m:6"),
+        [],
+        {"m-5": _revision()},
+    )
+    assert (
+        window["converged"] is False and "not reconciled" in window["reason"] and "not the desired" in window["reason"]
+    )
+    # reconciled, one revision, but the ready Revision's image is not the spec's -> not converged
+    stale = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5", image="cr.example/m:6"), [], {"m-5": _revision()})
+    assert (
+        stale["converged"] is False
+        and "ready revision image cr.example/m:5 is not the desired cr.example/m:6" in stale["reason"]
+    )
+    # diverged revisions (the new one Pending, the old one serving)
+    diverged = _rollout_of(
+        monkeypatch,
+        _isvc("m-6", "m-5", "m-5", generation=3, observed=3, image="cr.example/m:6"),
+        [_pod()],
+        {"m-5": _revision()},
+    )
+    assert diverged["converged"] is False and "revisions differ" in diverged["reason"]
+    assert diverged["serving_images"] == ["docker://cr.example/m@sha256:5555"]
+    # converged with a ready pod on the Revision's digest, one starting pod ignored
+    hot = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [_pod(), _pod(ready=False)], {"m-5": _revision()})
+    assert hot["converged"] is True and len(hot["serving_images"]) == 1
+    # a ready pod on another image than the ready Revision (a stray replica) -> not converged
+    stray = _rollout_of(
+        monkeypatch,
+        _isvc("m-5", "m-5", "m-5"),
+        [_pod(image_id="docker://cr.example/m@sha256:4444")],
+        {"m-5": _revision()},
+    )
+    assert stray["converged"] is False and "another image" in stray["reason"]
+    # the Revision object missing, or an empty status: not converged, never a guess
+    missing = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {})
+    assert missing["converged"] is False and missing["revision_image"] is None
+    assert _rollout_of(monkeypatch, {"status": {}}, [], {})["converged"] is False
+
+
+def _rollout_of(monkeypatch, isvc, pods, revisions):
+    from kubernetes.client.rest import ApiException
+
     kube._isvc_cache.clear()
-    api = NS(get_namespaced_custom_object=lambda g, v, ns, plural, name, **kw: isvc)
+
+    def get_obj(g, v, ns, plural, name, **kw):
+        if plural == "inferenceservices":
+            return isvc
+        if name in revisions:
+            return revisions[name]
+        raise ApiException(status=404, reason="NotFound")
+
+    api = NS(get_namespaced_custom_object=get_obj)
     core = NS(list_namespaced_pod=lambda ns, label_selector="", **kw: NS(items=pods))
     monkeypatch.setattr(kube, "api", lambda region="eu-north1": api)
     monkeypatch.setattr(kube, "core", lambda region="eu-north1": core)
@@ -157,6 +213,7 @@ def test_require_converged_fences_an_endpoint_call_and_records_the_ready_revisio
             "latest_rolled_out": "r-4",
             "serving_images": ["img@sha256:4"],
             "converged": False,
+            "reason": "revisions differ (created r-5, ready r-4, rolled out r-4)",
         }
     }
     monkeypatch.setattr(
@@ -170,11 +227,13 @@ def test_require_converged_fences_an_endpoint_call_and_records_the_ready_revisio
         "execution": {"io_mode": "application", "private_input_ref": "call-1", "require_converged": True},
     }
     r = c.post("/v1/models/llm-example:invoke", json=body, headers=H)
-    assert r.status_code == 409 and "not converged" in r.json()["detail"] and "r-5" in r.json()["detail"], r.text
+    assert (
+        r.status_code == 409 and "not converged" in r.json()["detail"] and "revisions differ" in r.json()["detail"]
+    ), r.text
     assert not [k for k in cl.jobs if k[0] == NS_T]  # nothing admitted
     # converged at zero: admitted, the ready revision and image recorded on the call
     state["rollout"].update(
-        {"latest_ready": "r-5", "latest_rolled_out": "r-5", "serving_images": [], "converged": True}
+        {"latest_ready": "r-5", "latest_rolled_out": "r-5", "serving_images": [], "converged": True, "reason": None}
     )
     monkeypatch.setattr(
         kube,

@@ -456,8 +456,16 @@ class ModelRollout(BaseModel):
     latest_created: str | None = None
     latest_ready: str | None = None
     latest_rolled_out: str | None = None
+    generation: int | None = None  # the InferenceService's spec generation and what the controller reconciled
+    observed_generation: int | None = None
+    desired_image: str | None = (
+        None  # the spec's image; `revision_image` the ready Revision's (stored template evidence)
+    )
+    revision_image: str | None = None
+    revision_image_digest: str | None = None
     serving_images: list[str] | None = None
-    converged: bool | None = None
+    converged: bool | None = None  # reconciled + one revision + revision image == desired + ready pods on it
+    reason: str | None = None  # why not converged
 
 
 class Model(BaseModel):

@@ -301,35 +301,98 @@ def _startup(pods: list) -> dict:
     return out
 
 
-def _rollout(isvc: dict, pods: list) -> dict:
-    """The revision state of a KServe endpoint (docs/API.md "Models"): Knative routes to the latest *ready* revision,
-    so after a spec change the previous revision serves until the new one is ready. `converged`: the created, ready
-    and rolled-out revisions are one (a property of the revisions: true for a converged endpoint at zero, with no
-    pod); `serving_images`: what the ready pods run (image ids when the kubelet reports them)."""
-    pred = (isvc.get("status") or {}).get("components", {}).get("predictor") or {}
+def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -> dict:
+    """The revision state of a KServe endpoint (docs/API.md "Execution identity and rollout state"). Knative routes
+    to the latest *ready* revision, so after a spec change the previous revision serves until the new one is ready.
+    `converged` holds only when every one of these is observed, never from revision names alone: the controller has
+    reconciled the current spec (`status.observedGeneration == metadata.generation`: the pre-reconcile window after a
+    catalog change still shows the old revisions as one); the created, ready and rolled-out revisions are one; the
+    latest ready Revision object's container image equals the InferenceService's desired image (stored template
+    evidence: valid for a scaled-to-zero immutable revision with no pod); and every ready pod runs that image (by
+    reference, or by the Revision's resolved digest). `serving_images`: what the ready pods run."""
+    md, st = isvc.get("metadata") or {}, isvc.get("status") or {}
+    pred = (st.get("components") or {}).get("predictor") or {}
     created, ready_rev, rolled = (
         pred.get("latestCreatedRevision"),
         pred.get("latestReadyRevision"),
         pred.get("latestRolledoutRevision"),
     )
+    generation, observed = md.get("generation"), st.get("observedGeneration")
+    desired = _desired_image(isvc)
+    revision_image, revision_digest = None, None
+    if ready_rev:
+        try:
+            rev = retry(
+                api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, "revisions", ready_rev
+            )
+            containers = (rev.get("spec") or {}).get("containers") or [{}]
+            revision_image = containers[0].get("image")
+            statuses = (rev.get("status") or {}).get("containerStatuses") or [{}]
+            revision_digest = statuses[0].get("imageDigest")
+        except ApiException:
+            pass
     images: list[str] = []
     for p in pods:
-        st = getattr(p, "status", None)
-        if not st or st.phase != "Running" or not all(c.ready for c in (st.container_statuses or [])):
+        pst = getattr(p, "status", None)
+        if not pst or pst.phase != "Running" or not all(c.ready for c in (pst.container_statuses or [])):
             continue
-        for c in st.container_statuses or []:
-            if getattr(c, "name", None) in ("kserve-container", "main") or len(st.container_statuses) == 1:
+        for c in pst.container_statuses or []:
+            if getattr(c, "name", None) in ("kserve-container", "main") or len(pst.container_statuses) == 1:
                 ref = getattr(c, "image_id", None) or getattr(c, "image", None)
                 if ref and ref not in images:
                     images.append(ref)
     known = [r for r in (created, ready_rev, rolled) if r]
+    revisions_one = bool(created) and len(set(known)) == 1 and ready_rev == created
+    reconciled = generation is not None and observed == generation
+    image_matches = bool(desired) and revision_image == desired
+    pods_match = all(_same_image(i, revision_image, revision_digest) for i in images)
+    reasons = []
+    if not reconciled:
+        reasons.append(f"spec generation {generation} not reconciled (observed {observed})")
+    if not revisions_one:
+        reasons.append(f"revisions differ (created {created}, ready {ready_rev}, rolled out {rolled})")
+    if not image_matches:
+        reasons.append(f"ready revision image {revision_image} is not the desired {desired}")
+    if not pods_match:
+        reasons.append("a ready pod runs another image than the ready revision")
     return {
         "latest_created": created,
         "latest_ready": ready_rev,
         "latest_rolled_out": rolled,
+        "generation": generation,
+        "observed_generation": observed,
+        "desired_image": desired,
+        "revision_image": revision_image,
+        "revision_image_digest": revision_digest,
         "serving_images": images,
-        "converged": bool(created) and len(set(known)) == 1 and ready_rev == created,
+        "converged": reconciled and revisions_one and image_matches and pods_match,
+        "reason": "; ".join(reasons) or None,
     }
+
+
+def _desired_image(isvc: dict) -> str | None:
+    """The image the InferenceService's spec asks for: the predictor's first container (as the API renders it)."""
+    pred = (isvc.get("spec") or {}).get("predictor") or {}
+    containers = pred.get("containers") or []
+    if containers and containers[0].get("image"):
+        return containers[0]["image"]
+    model = pred.get("model") or {}
+    return model.get("image") or None
+
+
+def _same_image(ref: str, image: str | None, digest: str | None) -> bool:
+    """A ready pod's image reference (`image_id` with the registry's digest, or the tag reference) against the
+    Revision's image and resolved digest: equal by digest when either side carries one, else by reference."""
+    if not ref or not (image or digest):
+        return False
+    tails = {x.split("@", 1)[1] for x in (ref, image or "", digest or "") if "@" in x}
+    if "@" in ref and (
+        digest and digest.split("@", 1)[-1] in ref or (image and "@" in image and tails and len(tails) == 1)
+    ):
+        return True
+    if digest and ref.endswith(digest.split("@", 1)[-1]):
+        return True
+    return ref == image
 
 
 def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) -> dict:
@@ -397,7 +460,7 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 status = "error"
             else:
                 status = "scaled-to-zero" if ready and not pods else "deploying"
-            out = {"status": status, "replicas_ready": n, **_startup(pods), "rollout": _rollout(i, pods)}
+            out = {"status": status, "replicas_ready": n, **_startup(pods), "rollout": _rollout(i, pods, region, ns)}
             if status == "error":
                 out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:
