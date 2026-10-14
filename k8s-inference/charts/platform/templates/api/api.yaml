@@ -98,6 +98,9 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
+  - apiGroups: [serving.knative.dev]              # the endpoint's rollout state (services/api/kube.py _rollout): the latest
+    resources: [revisions]                         # ready Revision's stored image is the proof a scaled-to-zero endpoint converged
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

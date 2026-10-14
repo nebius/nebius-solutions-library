@@ -4,6 +4,12 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## platform chart 0.1.5
+
+- The API reads Knative Revisions in the models namespace (`serving.knative.dev` revisions get/list): the latest ready
+  Revision's stored image is the convergence proof of an endpoint (api 0.11.60); without the rule the rollout state
+  reports "not converged" with the Revision unknown on every cluster.
+
 ## api 0.11.60
 
 - Rollout convergence is observed, never inferred from revision names (0.11.59 was never deployed): the
