@@ -56,10 +56,16 @@ locals {
   # the chart's own shape. `images.source` is the registry the cloud stage created (`cloud_facts` below: the cloud
   # state in the platform stage, a placeholder in tools/check.sh, which renders the charts without any cloud access).
   chart_fleet = {
-    name           = local.f.name
-    labels         = local.f.labels
-    node_reserve   = { cpu = local.f.node_reserve.cpu, memory_gib = local.f.node_reserve.memory_gib }
-    capacity_order = local.f.capacity_order
+    name   = local.f.name
+    labels = local.f.labels
+    node_reserve = {
+      cpu                = local.f.node_reserve.cpu
+      memory_gib         = local.f.node_reserve.memory_gib
+      ephemeral_fraction = local.f.node_reserve.ephemeral_fraction
+      ephemeral_gib      = local.f.node_reserve.ephemeral_gib
+    }
+    system_boot_disk_gib = 128 # stack/modules/cluster main.tf: the system nodes' boot disk is fixed
+    capacity_order       = local.f.capacity_order
     images = {
       host      = local.images_host
       source    = local.images_source

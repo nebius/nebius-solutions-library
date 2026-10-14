@@ -110,8 +110,17 @@
             },
             "memory_gib": {
               "type": "number"
+            },
+            "ephemeral_fraction": {
+              "type": "number"
+            },
+            "ephemeral_gib": {
+              "type": "number"
             }
           }
+        },
+        "system_boot_disk_gib": {
+          "type": "number"
         },
         "capacity_order": {
           "type": "array",

@@ -161,6 +161,19 @@ endpoint to Kueue (`queue.name`; the `models` namespace is Kueue-managed),
 in which case its replicas count in the quota exactly and the floor must be
 0 for them; the API does not use that mode.
 
+## Ephemeral storage
+
+A run class may request the kubelet's node-local scratch (`ephemeral_storage` / `ephemeralStorage`, docs/JOBS.md "Run
+class"). Kueue admits a request only for a resource the ClusterQueue covers, so every queue covers `ephemeral-storage`
+and every flavor budgets it from the pool's boot disk: per node `boot_disk_gib x node_reserve.ephemeral_fraction`
+(0.85) `- node_reserve.ephemeral_gib` (4 Gi), times the pool's nodes (the same `max_nodes` minus the warm floor as
+for CPU and memory); the `system` flavor from the system nodes' fixed 128 GiB disk. The budget stays under what the
+kubelet reports allocatable (measured on this fleet: ~109.6 Gi of a 128 GiB disk, ~444.4 Gi of a 512 GiB one; the
+budget is 104 and 431 Gi), which keeps the system reservation, the image cache and the containers' writable layers
+their headroom. The quota is an admission bound, not a provisioning: a pod's actual scratch is still the node's disk,
+and a `local-nvme` scratch class lands on NVMe pools as before. Tune `node_reserve.ephemeral_fraction` /
+`ephemeral_gib` per fleet when a node image reserves more.
+
 ## Tenants
 
 `charts/tenant` renders, per cluster, the tenant namespace with one LocalQueue per profile (`default`,

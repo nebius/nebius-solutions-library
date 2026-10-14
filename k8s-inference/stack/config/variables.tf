@@ -20,6 +20,12 @@ variable "fleet" {
     node_reserve = optional(object({
       cpu        = optional(number, 2)
       memory_gib = optional(number, 20)
+      # Ephemeral storage (the kubelet's node-local scratch on the boot disk) a pool flavor may admit per node: the
+      # boot disk x `ephemeral_fraction` minus `ephemeral_gib`, under what the kubelet reports allocatable (measured:
+      # a 128 GiB boot disk reports ~109.6 Gi, a 512 GiB one ~444.4 Gi; 0.85 x disk - 4 gives 104 / 431 Gi): the
+      # system's reservation, the image cache and the writable layers keep their headroom. Nothing is provisioned.
+      ephemeral_fraction = optional(number, 0.85)
+      ephemeral_gib      = optional(number, 4)
     }), {})
     # Order of capacity types inside a GPU class in every preference queue (reservations first).
     capacity_order = optional(list(string), ["reserved", "on_demand", "spot"])
@@ -363,6 +369,10 @@ variable "fleet" {
   validation {
     condition     = contains(["open", "proprietary", "auto"], var.fleet.gpu_operator.kernel_module) && (!var.fleet.gpu_operator.gds || var.fleet.gpu_operator.kernel_module != "proprietary")
     error_message = "gpu_operator.kernel_module is open, proprietary or auto; GPUDirect Storage (gds) needs the open kernel modules."
+  }
+  validation {
+    condition     = var.fleet.node_reserve.ephemeral_fraction > 0 && var.fleet.node_reserve.ephemeral_fraction <= 1 && var.fleet.node_reserve.ephemeral_gib >= 0
+    error_message = "node_reserve.ephemeral_fraction is in (0, 1] and node_reserve.ephemeral_gib is 0 or more (a reserve larger than the disk's share budgets zero scratch, which is allowed)."
   }
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,22}$", var.fleet.name))
