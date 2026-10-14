@@ -154,3 +154,45 @@ def test_fetch_creates_the_alias_directories_tenant_private(tmp_path):
     env["WORK_ALIAS_DIRS"] = "aliases/mnt-x/op-1-fghij"
     assert subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True).returncode == 0
     assert (work / "aliases/mnt-x/op-1-fghij").is_dir()
+
+
+def test_export_and_finalizer_renders_with_aliases(client, admin_keys):
+    """BindCraft probes on 0.11.70: a transfer-only export of a class with work aliases raised UnboundLocalError (the
+    finalizer-only attempt record was read in the export branch) and the finalizer did not get the literal pod name.
+    Now: the export renders, main keeps the downward-API expression (its main only exits 0); the finalizer's main carries
+    the finalized attempt's pod name as a literal, so its alias mounts show that attempt's directory."""
+    c, fake = client
+    spec = {
+        **SPEC,
+        "id": "alias-fin",
+        "finalize": {
+            "command": "python finish.py",
+            "on_exit_codes": [75],
+            "timeout_s": 900,
+            "cpu": "1",
+            "memory": "2Gi",
+        },
+    }
+    assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 201
+    r = c.post("/v1/models/alias-fin:invoke", json={"mode": "run", "input": {}}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    m = catalog.get("alias-fin")
+    defaults = {"output_prefix": "s3://b/p"}
+    export, _ = jobs.export_again("tenant-demo", op, "eu-north1", m, defaults)
+    em = next(x for x in export["spec"]["template"]["spec"]["containers"] if x["name"] == "main")
+    env = {e["name"]: e for e in em["env"]}
+    assert env["S2_POD_NAME"] == {"name": "S2_POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}
+    assert [mm for mm in em["volumeMounts"] if mm.get("subPathExpr")], "the alias mounts are retained on the export"
+    fz, _ = jobs.export_again(
+        "tenant-demo",
+        op,
+        "eu-north1",
+        m,
+        defaults,
+        finalize={"spec": m["job"]["finalize"], "attempt": {"pod": f"{op}-abcde", "epoch": 1, "exit_code": 75}},
+    )
+    fm = next(x for x in fz["spec"]["template"]["spec"]["containers"] if x["name"] == "main")
+    assert {e["name"]: e for e in fm["env"]}["S2_POD_NAME"] == {"name": "S2_POD_NAME", "value": f"{op}-abcde"}
+    assert [mm for mm in fm["volumeMounts"] if mm.get("subPathExpr")]

@@ -1565,6 +1565,12 @@ def export_again(
             # the model's own image (the finalized attempt's digest when on record, else the pinned revision's image) and
             # its fixed finalize command; CPU only; the attempt it finalizes named in the environment (docs/JOBS.md)
             done = finalize.get("attempt") or {}
+            # the canonical work aliases (docs/JOBS.md "Work mount aliases") show the finalized attempt's own directory:
+            # the pod name in the alias expression is the finalized pod's, a literal, not this pod's
+            c["env"] = [
+                {"name": POD_NAME_ENV, "value": str(done.get("pod") or "")} if e.get("name") == POD_NAME_ENV else e
+                for e in c.get("env") or []
+            ]
             c.update(
                 {
                     "image": done.get("image_digest") or c["image"],
@@ -1591,12 +1597,8 @@ def export_again(
                 {"name": "WORK_DIR", "value": "/work"},
             ]
         elif c["name"] == "main":
-            # the canonical work aliases (docs/JOBS.md "Work mount aliases") show the finalized attempt's own directory:
-            # the pod name in the alias expression is the finalized pod's, a literal, not this pod's
-            c["env"] = [
-                {"name": POD_NAME_ENV, "value": str(done.get("pod") or "")} if e.get("name") == POD_NAME_ENV else e
-                for e in c.get("env") or []
-            ]
+            # a transfer-only export: main only exits 0 on the kept volume; its work aliases keep the rendered expression
+            # (this pod's own, empty, directory), nothing of the finalizer's context applies here
             c.update(
                 {
                     "image": RUNNER_IMAGE,

@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.71
+
+- Export of a run class with work mount aliases: the transfer-only export render read the finalizer's attempt record
+  (UnboundLocalError on 0.11.63–0.11.70 for a class with aliases and no finalizer); the export now keeps the rendered
+  alias expression (its main only exits 0), and the literal finalized pod name is set on the finalizer's main, where it
+  belongs. Nothing else changes against 0.11.70.
+
 ## api 0.11.70
 
 - Restricted assets: a class may name up to eight assets (was four; work mount aliases keep four), one bound for the
