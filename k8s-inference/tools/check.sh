@@ -247,6 +247,28 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
     print(f"   ok dispatcher RBAC {cid}: batch/jobs {sorted(verbs)} covers the source's calls {sorted(called)}, read-only")
 assert found, "no cluster rendered the dispatcher ClusterRole"
 EOF3
+  "$PYTHON" - "$TMP" <<'EOF5'
+import sys, yaml
+tmp = sys.argv[1]
+# the API reads Knative Revisions in `models` on every cluster that runs endpoints (services/api/kube.py _rollout: the
+# ready Revision's stored image is the convergence proof): the control API's own Role and the regional agent's Role
+# both carry the read-only rule, and nothing wider on that group
+seen = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "Role" and o["metadata"].get("namespace") == "models"
+             and o["metadata"]["name"] in ("serverless2-api-endpoints", "serverless2-api-agent-models")]
+    for role in roles:
+        rules = [r for r in role["rules"] if "serving.knative.dev" in r.get("apiGroups", [])]
+        assert rules, f"{cid}: Role {role['metadata']['name']} grants no serving.knative.dev read (kube._rollout needs revisions get/list)"
+        for r in rules:
+            assert set(r.get("resources", [])) <= {"revisions"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on serving.knative.dev; revisions only"
+            assert set(r["verbs"]) <= {"get", "list"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on revisions: read-only"
+        assert any("revisions" in r.get("resources", []) and {"get", "list"} <= set(r["verbs"]) for r in rules), f"{cid}: Role {role['metadata']['name']}: revisions get+list missing"
+        seen += 1
+        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only")
+assert seen, "no cluster rendered an API Role in the models namespace"
+EOF5
 }
 
 check_tests() {

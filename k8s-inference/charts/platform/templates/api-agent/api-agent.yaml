@@ -61,6 +61,9 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]           # ready replicas of an endpoint (services/api/kube.py endpoint_status)
+  - apiGroups: [serving.knative.dev]
+    resources: [revisions]
+    verbs: [get, list]           # the endpoint's rollout state (kube.py _rollout): the ready Revision's stored image
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

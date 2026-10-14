@@ -6,9 +6,11 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 ## platform chart 0.1.5
 
-- The API reads Knative Revisions in the models namespace (`serving.knative.dev` revisions get/list): the latest ready
-  Revision's stored image is the convergence proof of an endpoint (api 0.11.60); without the rule the rollout state
-  reports "not converged" with the Revision unknown on every cluster.
+- The API reads Knative Revisions in the models namespace (`serving.knative.dev` revisions get/list) on every cluster:
+  the control API's own Role (`serverless2-api-endpoints`) and the regional agent's Role (`serverless2-api-agent-models`,
+  what the control API reaches a GPU region with). The latest ready Revision's stored image is the convergence proof of
+  an endpoint (api 0.11.60); without the rule the rollout state reports "not converged" with the Revision unknown.
+  `tools/check.sh` asserts both rendered Roles carry the read-only rule.
 
 ## api 0.11.60
 
