@@ -205,7 +205,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.94")
+        api        = optional(string, "0.11.95")
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.26")
         ops        = optional(string, "0.1.12")
@@ -261,6 +261,15 @@ variable "fleet" {
       }), {})
       api_rate_limit_per_minute = optional(number, 600)
       grafana_public            = optional(bool, true)
+    }), {})
+
+    # Knative Serving on every cluster (charts/platform knative-serving): the longest request/revision timeout an
+    # endpoint may declare (`timeout_s`, seconds). The SAME value reaches Knative's config-defaults
+    # (max-revision-timeout-seconds) and the API (KNATIVE_MAX_REVISION_TIMEOUT_S), which refuses a definition above it
+    # at registration (400) instead of storing an endpoint that never reconciles. Raise it for long inferences (a
+    # medical pipeline at 7500 s); never lower it below a registered endpoint's timeout_s.
+    knative = optional(object({
+      max_revision_timeout_s = optional(number, 3600)
     }), {})
 
     # Transitional acceptance of the admission tokens of API releases up to 0.11.53 at the gateway hook (key-only, key+model)

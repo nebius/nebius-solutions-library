@@ -142,6 +142,9 @@ spec:
           # dedicated control cluster, the region's name in single-cluster mode), the public hostnames (the API refuses
           # to start while a value still carries example.invalid), LITELLM_URL, REGION_KUBECONFIGS, the fleet database
           env:
+            # the SAME value Knative's config-defaults got (max-revision-timeout-seconds): registration refuses an
+            # endpoint timeout_s above it instead of storing a definition that never reconciles
+            - { name: KNATIVE_MAX_REVISION_TIMEOUT_S, value: {{ .Values.knative.maxRevisionTimeoutSeconds | quote }} }
             {{- toYaml .Values.api.env | nindent 12 }}
           volumeMounts:
             - { name: kubeconfigs, mountPath: /etc/kubeconfigs, readOnly: true }

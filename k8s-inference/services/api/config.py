@@ -112,6 +112,9 @@ JOB_BACKOFF_LIMIT = int(
 )  # application failures before a Job is FAILED (disruptions do not count)
 JOB_PVC_SIZE_GI = int(os.environ.get("JOB_PVC_SIZE_GI", "50"))
 SYNC_TIMEOUT_S = int(os.environ.get("SYNC_TIMEOUT_S", "600"))
+# Knative Serving's max-revision-timeout-seconds of this fleet (charts/platform values.knative.maxRevisionTimeoutSeconds,
+# fleet.knative.max_revision_timeout_s): the ceiling of an endpoint's timeout_s; the chart sets both from one value
+KNATIVE_MAX_REVISION_TIMEOUT_S = int(os.environ.get("KNATIVE_MAX_REVISION_TIMEOUT_S", "3600"))
 AUTH_CACHE_S = int(os.environ.get("AUTH_CACHE_S", "30"))
 LABEL = "serverless2.nebius"
 # OIDC issuer of every region's cluster ("<region>=<url>,..."): what a storage provider's federation trusts for the
