@@ -141,9 +141,9 @@ def test_rollout_converges_only_on_observed_generation_revision_image_and_pods(m
         [],
         {"m-5": _revision()},
     )
-    assert (
-        window["converged"] is False and "not reconciled" in window["reason"] and "not the desired" in window["reason"]
-    )
+    # on KServe the witness is the predictor Service: in that window it still carries the old image (not propagated)
+    assert window["converged"] is False and "spec not propagated" in window["reason"]
+    assert "not the desired" in window["reason"]
     # reconciled, one revision, but the ready Revision's image is not the spec's -> not converged
     stale = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5", image="cr.example/m:6"), [], {"m-5": _revision()})
     assert (
@@ -179,14 +179,37 @@ def test_rollout_converges_only_on_observed_generation_revision_image_and_pods(m
     assert absent["converged"] is False and "revisions differ" in absent["reason"]
 
 
-def _rollout_of(monkeypatch, isvc, pods, revisions):
+def _ksvc(generation, observed, image):
+    """The predictor Knative Service as KServe renders it (the reconciliation witness, kube._rollout)."""
+    return {
+        "metadata": {"generation": generation},
+        "spec": {"template": {"spec": {"containers": [{"image": image}]}}},
+        "status": {"observedGeneration": observed},
+    }
+
+
+def _rollout_of(monkeypatch, isvc, pods, revisions, ksvc="derived"):
     from kubernetes.client.rest import ApiException
 
     kube._isvc_cache.clear()
+    if ksvc == "derived":
+        # a predictor Service consistent with the ISVC: reconciled at the ISVC's observed generation; its template
+        # carries the desired image once the ISVC's own generation was observed, else the ready Revision's (not yet
+        # propagated)
+        md, st = isvc.get("metadata") or {}, isvc.get("status") or {}
+        observed = st.get("observedGeneration")
+        desired = kube._desired_image(isvc)
+        ready = ((st.get("components") or {}).get("predictor") or {}).get("latestReadyRevision")
+        rev_image = ((revisions.get(ready) or {}).get("spec") or {}).get("containers", [{}])[0].get("image")
+        ksvc = _ksvc(observed, observed, desired if md.get("generation") == observed else rev_image)
 
     def get_obj(g, v, ns, plural, name, **kw):
         if plural == "inferenceservices":
             return isvc
+        if plural == "services":
+            if ksvc is None:
+                raise ApiException(status=404, reason="NotFound")
+            return ksvc
         if name in revisions:
             return revisions[name]
         raise ApiException(status=404, reason="NotFound")
@@ -278,3 +301,37 @@ def api_module():
     import app
 
     return app
+
+
+def test_rollout_takes_the_predictor_service_as_the_reconciliation_witness_on_kserve(monkeypatch):
+    """KServe 0.20 writes the predictor Knative Service's observedGeneration onto the InferenceService (a never
+    edited ISVC shows generation 1 / observed 2 for good: the SAM2 proof, 2026-10-14), so the ISVC generations are
+    no witness. The predictor Service is: converged when it reconciled its own current spec (generation ==
+    observedGeneration) and that spec carries the ISVC's desired image; not reconciled while its generation leads its
+    observation; not propagated while its template still carries another image. Without a predictor Service
+    (RawDeployment) the ISVC's own generations decide, as before. Nothing is weakened to >= or to the image alone."""
+    isvc = _isvc("m-5", "m-5", "m-5", generation=1, observed=2)
+    live = _rollout_of(monkeypatch, isvc, [], {"m-5": _revision()}, ksvc=_ksvc(2, 2, "cr.example/m:5"))
+    assert live["converged"] is True and live["reason"] is None
+    assert (live["generation"], live["observed_generation"]) == (1, 2)
+    assert (live["service_generation"], live["service_observed_generation"]) == (2, 2)
+    assert live["service_image"] == "cr.example/m:5"
+    # the Service's own spec moved (generation 3) and Knative has not observed it: not reconciled
+    lead = _rollout_of(monkeypatch, isvc, [], {"m-5": _revision()}, ksvc=_ksvc(3, 2, "cr.example/m:5"))
+    assert lead["converged"] is False and "predictor Service generation 3 not reconciled (observed 2)" in lead["reason"]
+    # the ISVC asks for m:6, the Service still carries m:5: the spec was not propagated yet (never >=, never image-only)
+    moved = _isvc("m-5", "m-5", "m-5", generation=2, observed=2, image="cr.example/m:6")
+    behind = _rollout_of(monkeypatch, moved, [], {"m-5": _revision()}, ksvc=_ksvc(2, 2, "cr.example/m:5"))
+    assert behind["converged"] is False and "spec not propagated" in behind["reason"]
+    assert "not the desired cr.example/m:6" in behind["reason"]  # the ready Revision is behind as well
+    # a reconciled Service carrying m:6 while the ready Revision still runs m:5: propagated, revision not yet ready
+    rolling = _rollout_of(monkeypatch, moved, [], {"m-5": _revision()}, ksvc=_ksvc(3, 3, "cr.example/m:6"))
+    assert rolling["converged"] is False and "spec not propagated" not in rolling["reason"]
+    assert "ready revision image cr.example/m:5 is not the desired cr.example/m:6" in rolling["reason"]
+    # no predictor Service (RawDeployment): the ISVC's own generations decide, exactly as before
+    raw_ok = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {"m-5": _revision()}, ksvc=None)
+    assert raw_ok["converged"] is True and raw_ok["service_generation"] is None
+    raw_window = _rollout_of(
+        monkeypatch, _isvc("m-5", "m-5", "m-5", generation=3, observed=2), [], {"m-5": _revision()}, ksvc=None
+    )
+    assert raw_window["converged"] is False and "spec generation 3 not reconciled (observed 2)" in raw_window["reason"]

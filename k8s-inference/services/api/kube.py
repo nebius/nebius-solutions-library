@@ -332,7 +332,7 @@ def _startup(pods: list) -> dict:
     return out
 
 
-def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -> dict:
+def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", name: str | None = None) -> dict:
     """The revision state of a KServe endpoint (docs/API.md "Execution identity and rollout state"). Knative routes
     to the latest *ready* revision, so after a spec change the previous revision serves until the new one is ready.
     `converged` holds only when every one of these is observed, never from revision names alone: the controller has
@@ -350,6 +350,27 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -
     )
     generation, observed = md.get("generation"), st.get("observedGeneration")
     desired = _desired_image(isvc)
+    # KServe (0.20) writes the predictor Knative Service's observedGeneration onto the InferenceService status, so
+    # `status.observedGeneration == metadata.generation` is not the controller's witness for the ISVC spec (a never
+    # edited ISVC shows generation 1 / observed 2 for good once KServe mutated its own Service). The witness is the
+    # predictor Service itself: Knative reconciled its current spec (its generation == its observedGeneration) AND
+    # that spec carries the ISVC's desired image (KServe propagated the current ISVC spec into it). Without a
+    # predictor Service (RawDeployment) the ISVC's own generations decide, as before.
+    service_generation = service_observed = service_image = None
+    service_seen = False
+    svc_name = f"{name or md.get('name') or ''}-predictor" if (name or md.get("name")) else None
+    if svc_name:
+        try:
+            ksvc = retry(
+                api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, "services", svc_name
+            )
+            service_seen = True
+            service_generation = (ksvc.get("metadata") or {}).get("generation")
+            service_observed = (ksvc.get("status") or {}).get("observedGeneration")
+            tmpl = ((ksvc.get("spec") or {}).get("template") or {}).get("spec") or {}
+            service_image = ((tmpl.get("containers") or [{}])[0]).get("image")
+        except ApiException:
+            pass
     revision_image, revision_digest = None, None
     if ready_rev:
         try:
@@ -375,12 +396,27 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -
     # all three must be present and one: KServe omits latestRolledoutRevision until the first rollout completed, and
     # "absent" is then "not converged", never "the other two agree"
     revisions_one = bool(created) and bool(ready_rev) and bool(rolled) and created == ready_rev == rolled
-    reconciled = generation is not None and observed == generation
+    if service_seen:
+        service_reconciled = service_generation is not None and service_observed == service_generation
+        propagated = bool(desired) and service_image == desired
+        reconciled = service_reconciled and propagated
+    else:
+        service_reconciled = propagated = True
+        reconciled = generation is not None and observed == generation
     image_matches = bool(desired) and revision_image == desired
     pods_match = all(_same_image(i, revision_image, revision_digest) for i in images)
     reasons = []
     if not reconciled:
-        reasons.append(f"spec generation {generation} not reconciled (observed {observed})")
+        if service_seen and not service_reconciled:
+            reasons.append(
+                f"predictor Service generation {service_generation} not reconciled (observed {service_observed})"
+            )
+        elif service_seen:
+            reasons.append(
+                f"predictor Service image {service_image} is not the desired {desired} (spec not propagated)"
+            )
+        else:
+            reasons.append(f"spec generation {generation} not reconciled (observed {observed})")
     if not revisions_one:
         reasons.append(f"revisions differ (created {created}, ready {ready_rev}, rolled out {rolled})")
     if not image_matches:
@@ -393,6 +429,9 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models") -
         "latest_rolled_out": rolled,
         "generation": generation,
         "observed_generation": observed,
+        "service_generation": service_generation,
+        "service_observed_generation": service_observed,
+        "service_image": service_image,
         "desired_image": desired,
         "revision_image": revision_image,
         "revision_image_digest": revision_digest,
@@ -492,7 +531,12 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 status = "error"
             else:
                 status = "scaled-to-zero" if ready and not pods else "deploying"
-            out = {"status": status, "replicas_ready": n, **_startup(pods), "rollout": _rollout(i, pods, region, ns)}
+            out = {
+                "status": status,
+                "replicas_ready": n,
+                **_startup(pods),
+                "rollout": _rollout(i, pods, region, ns, name=name),
+            }
             if status == "error":
                 out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:
