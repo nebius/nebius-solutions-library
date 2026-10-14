@@ -96,15 +96,22 @@ def _capable(cid: str, pool: str, node: dict, shared_fs: bool, local_nvme: bool)
 
 
 def candidates(
-    clusters: list[str] | None = None, pools: set[str] | None = None, shared_fs: bool = False, local_nvme: bool = False
+    clusters: list[str] | None = None,
+    pools: set[str] | None = None,
+    shared_fs: bool = False,
+    local_nvme: bool = False,
+    gpu_free: bool = False,
 ):
     """(cluster id, pool label, node) of every candidate pool: on `clusters` (or everywhere), among `pools` (or all),
-    with the required capabilities."""
+    with the required capabilities; `gpu_free`: only pools whose nodes carry no GPU (the system and CPU pools: a pod
+    that requests no GPU and must not occupy a GPU node, e.g. an endpoint caller)."""
     for cid, by_pool in table().items():
         if clusters is not None and cid not in clusters:
             continue
         for pool, node in (by_pool or {}).items():
             if pools is not None and pool not in pools:
+                continue
+            if gpu_free and (node or {}).get("kind") == "gpu":
                 continue
             if _capable(cid, pool, node or {}, shared_fs, local_nvme):
                 yield cid, pool, node or {}
@@ -116,10 +123,11 @@ def fitting(
     pools: set[str] | None = None,
     shared_fs: bool = False,
     local_nvme: bool = False,
+    gpu_free: bool = False,
 ) -> dict[str, list[str]]:
     """{pool label: [cluster ids]} of the candidate pools (see `candidates`) whose node holds the requests."""
     out: dict[str, list[str]] = {}
-    for cid, pool, node in candidates(clusters, pools, shared_fs, local_nvme):
+    for cid, pool, node in candidates(clusters, pools, shared_fs, local_nvme, gpu_free):
         if holds(node, req):
             out.setdefault(pool, []).append(cid)
     return {k: sorted(v) for k, v in sorted(out.items())}

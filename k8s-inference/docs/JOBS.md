@@ -754,5 +754,8 @@ empty leaf directory stays (the pod cannot unlink its own mount point) and is th
 reaped by age. A failed or unknown delivery keeps everything, as a kept volume does (`:export` retries). The shared
 claim is never deleted. The pod lands only on nodes that mount the shared filesystem (`shared-fs` affinity). Where the
 region has no shared filesystem, the cluster is unknown to the fit table, or the tenant namespace has no claim, the
-caller falls back to the per-call claim and records why (`scratch: network`, `scratch-fallback`). Runs and multi-node
-runs are unchanged (their scratch stays `network` / `local-nvme`).
+caller falls back to the per-call claim and records why (`scratch: network`, `scratch-fallback`). The judgement is
+the caller's own placement, not the region's: a GPU-free pool (system or CPU; a caller never occupies a GPU node) that
+mounts the filesystem must hold the caller's requests on one node and the claim must be Bound, else the fallback; the
+shared-fs requirement joins the pod's required affinity by conjunction with anything an execution profile already
+requires. Runs and multi-node runs are unchanged (their scratch stays `network` / `local-nvme`).

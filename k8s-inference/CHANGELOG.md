@@ -4,7 +4,27 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.84, jobs 0.1.23
+## api 0.11.85, jobs 0.1.24
+
+(0.11.85 / 0.1.24 supersede the unreleased 0.11.84 / 0.1.23 candidate after review; everything of it is included.)
+
+- Shared scratch placement proven, not assumed: `shared_scratch_available` judges the caller's OWN requests (main,
+  uploader, the provisioning init; no GPU) against the per-node fit of the region's GPU-FREE pools that mount the
+  shared filesystem (`fit.fitting(..., shared_fs=True, gpu_free=True)`): a region whose only shared-fs pools are GPU
+  pools falls back to the per-call claim ("only GPU pools of <cluster> mount the shared filesystem": a Kueue-managed
+  caller would otherwise be admitted on a GPU flavor and occupy a GPU node for 100m, or stay Pending where no flavor
+  matches), as does a GPU-free shared-fs pool too small for the caller, and a claim that exists but is not Bound.
+  The shared-fs expression is added to the pod's required node affinity by conjunction with whatever the execution
+  profile already requires, never by overwriting it.
+- `call.sh` fails explicitly at every durability boundary (the script runs without errexit, so the 0.1.23 `durable`
+  calls were advisory): the one-POST marker not durable → no POST, marker removed, exit 6 (retryable; a marker that
+  could not even be removed makes the next attempt refuse to post); the captured response not durable → outcome
+  unknown for good, nothing delivered, exit 4 (never re-posted); the manifest not durable → nothing delivered,
+  exit 6 (a fresh attempt delivers the durable capture without posting); RESULT.json not durable → removed, no
+  export success claimed, exit 6. Tests drive the caller with a failing `sync` at each boundary and through the
+  restart that follows.
+
+## api 0.11.84, jobs 0.1.23 (unreleased candidate, superseded by 0.11.85 / 0.1.24)
 
 - Durable endpoint calls on the tenant's shared scratch (docs/JOBS.md "Scratch storage"), opt-in per endpoint model
   (`call_scratch: shared`; default `network` unchanged): the caller's capture lives on the tenant's existing

@@ -980,12 +980,9 @@ def build_async(
     # model says `call_scratch: shared` and the region and namespace can carry it, else the per-call claim; a transfer-
     # only retry keeps whatever the original had (`pvc` or `scratch_leaf_of`)
     leaf, fallback = None, ""
-    if ex and (scratch_leaf_of or (not pvc and (model.get("runtime") or {}).get("callScratch") == "shared")):
-        if scratch_leaf_of:
-            leaf = scratch_leaf_of
-        else:
-            ok, fallback = shared_scratch_available(f"{TENANT_NS_PREFIX}{tenant}", region)
-            leaf = scratch_leaf(name) if ok else None
+    want_shared = bool(ex) and (
+        bool(scratch_leaf_of) or (not pvc and (model.get("runtime") or {}).get("callScratch") == "shared")
+    )
     if model.get("litellm_route"):
         url, auth = LITELLM_URL + model["litellm_route"], f"Bearer {key}"
     else:
@@ -1052,7 +1049,22 @@ def build_async(
         + ([{"name": "trust", "mountPath": TRUST_DIR, "readOnly": True}] if trust else []),
         "securityContext": RUNNER_SECURITY_CONTEXT,
     }
+    uploader = _uploader(name, region, output_prefix, None)
+    if want_shared:
+        if scratch_leaf_of:
+            leaf = scratch_leaf_of  # a transfer-only retry keeps the original's leaf, whatever the table says now
+        else:  # judged on the caller's own requests (main, uploader, the provisioning init)
+            probe = {
+                "containers": [main, uploader],
+                "initContainers": [
+                    {"name": "scratch-provision", "resources": {"requests": SCRATCH_PROVISION_REQUESTS}}
+                ],
+            }
+            ok, fallback = shared_scratch_available(f"{TENANT_NS_PREFIX}{tenant}", region, probe)
+            leaf = scratch_leaf(name) if ok else None
     work = None if leaf else (pvc or (f"{name}-work" if ex else None))
+    if work:
+        uploader["env"].append({"name": "PVC_NAME", "value": work})
     pod = {
         "restartPolicy": "Never",
         "serviceAccountName": EXECUTOR_SA,
@@ -1066,7 +1078,7 @@ def build_async(
         # (upload.sh main_alive) and `finished` when it is gone; in separate namespaces it never sees either and the
         # attempt is never opened (the application's refresh broker then refuses the caller for good: a deadlock)
         "shareProcessNamespace": True,
-        "containers": [main, _uploader(name, region, output_prefix, work)],
+        "containers": [main, uploader],
         "volumes": [
             {"name": "work", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
             if leaf
@@ -1146,7 +1158,7 @@ def _mount_scratch_leaf(pod: dict, leaf: str) -> None:
             "name": "scratch-provision",
             "image": RUNNER_IMAGE,
             "command": ["/usr/local/bin/scratch.sh", "provision", "/work"],
-            "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "200m", "memory": "64Mi"}},
+            "resources": {"requests": dict(SCRATCH_PROVISION_REQUESTS), "limits": {"cpu": "200m", "memory": "64Mi"}},
             "volumeMounts": [{"name": "work", "mountPath": "/work", "subPath": leaf}],
             "securityContext": {
                 **CONTAINER_HARDENING,
@@ -1157,12 +1169,23 @@ def _mount_scratch_leaf(pod: dict, leaf: str) -> None:
             },
         }
     ] + list(pod.get("initContainers") or [])
-    terms = [{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}]
-    pod["affinity"] = {
-        "nodeAffinity": {
-            "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
-        }
-    }
+    _and_required(pod, {"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
+
+
+def _and_required(pod: dict, expr: dict) -> None:
+    """Add a required node-affinity expression by CONJUNCTION with whatever the pod already requires (an execution
+    profile, a class): every existing nodeSelectorTerm gains it (terms are ORed, expressions within a term ANDed); a
+    pod without a required affinity gets one term. Nothing already required is dropped or widened."""
+    aff = pod.setdefault("affinity", {})
+    node = aff.setdefault("nodeAffinity", {})
+    req = node.setdefault("requiredDuringSchedulingIgnoredDuringExecution", {})
+    terms = req.setdefault("nodeSelectorTerms", [])
+    if not terms:
+        terms.append({"matchExpressions": []})
+    for t in terms:
+        exprs = t.setdefault("matchExpressions", [])
+        if expr not in exprs:
+            exprs.append(dict(expr))
 
 
 TRUST_DIR = "/etc/ssl/fleet"
@@ -1199,26 +1222,53 @@ def scratch_leaf(name: str) -> str:
 
 
 _shared_scratch_cache: dict = {}
+SCRATCH_PROVISION_REQUESTS = {"cpu": "50m", "memory": "32Mi"}
 
 
-def shared_scratch_available(ns: str, region: str) -> tuple[bool, str]:
-    """Whether a durable endpoint call in `ns` on `region` can keep its capture on the tenant's shared-scratch leaf:
-    the region's cluster has a pool whose nodes mount the shared filesystem (fit.yaml `shared_fs`, docs/SCHEDULING.md
-    "Per-node fit") and the tenant namespace holds the claim (charts/tenant, rendered where the region has the
-    filesystem). (False, why) otherwise: the caller falls back to the per-call claim, and says so."""
+def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str]:
+    """Whether the durable endpoint call rendered as `pod` (its containers' and init containers' requests; no GPU, no
+    GPU toleration of its own) can keep its capture on the tenant's shared-scratch leaf in `ns` on `region`: the
+    region's cluster has a GPU-FREE pool (system or CPU: an endpoint caller never occupies a GPU node) whose nodes
+    mount the shared filesystem AND whose one node holds the caller's requests (fit.yaml, docs/SCHEDULING.md
+    "Per-node fit": the judgement Kueue's flavor order and the scheduler make; a shared-fs affinity only a GPU flavor
+    satisfies would put a 100m caller on a GPU node, or leave it Pending where no flavor matches), and the tenant
+    namespace holds the claim, Bound. (False, why) otherwise: the per-call claim, and the Job says why."""
+    import fit
+
     cid = kube.cluster_id_or_none(region)
     table = kube.fleet().get("fit") or {}
     if not cid or cid not in table:
         return False, f"no per-node fit table for {region} (fleet chart < 0.1.12 or unknown cluster)"
-    if not any((n or {}).get("shared_fs") for n in (table.get(cid) or {}).values()):
-        return False, f"no pool of {cid} mounts the shared filesystem"
+    req = fit.pod_requests(pod)
+    if req["gpu"]:
+        return False, "the caller requests a GPU (never for a shared-scratch leaf)"
+    if not fit.fitting(req, [cid], shared_fs=True, gpu_free=True):
+        gpu_free_shared = any(
+            (n or {}).get("shared_fs") and (n or {}).get("kind") != "gpu" for n in (table.get(cid) or {}).values()
+        )
+        if gpu_free_shared:
+            return (
+                False,
+                f"no GPU-free pool of {cid} that mounts the shared filesystem holds the caller ({fit.describe(req)})",
+            )
+        if fit.fitting(req, [cid], shared_fs=True):
+            return False, f"only GPU pools of {cid} mount the shared filesystem (a caller never occupies a GPU node)"
+        return False, f"no GPU-free pool of {cid} mounts the shared filesystem"
     key = (ns, region)
     hit = _shared_scratch_cache.get(key)
     if hit and hit[0] > time.time():
         return hit[1]
     try:
-        retry(kube.core(region).read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
-        out = (True, "")
+        core = kube.core(region)
+        claim = core.api_client.sanitize_for_serialization(
+            retry(core.read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
+        )
+        phase = ((claim or {}).get("status") or {}).get("phase")
+        out = (
+            (True, "")
+            if phase == "Bound"
+            else (False, f"claim {SHARED_SCRATCH_PVC} in {ns} on {region} is not Bound ({phase or 'no status'})")
+        )
     except ApiException as e:
         out = (
             False,
