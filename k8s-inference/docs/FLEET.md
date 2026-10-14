@@ -154,7 +154,21 @@ Control cluster (Kueue MultiKueue manager):
 Endpoints: Knative scales them (a revision superseded by a newer one is
 collected after an hour; a model whose first revision never becomes Ready
 keeps its Pending pod and GPU request until the model is changed or deleted,
-Knative never collects the latest revision). The API pins every endpoint
+Knative never collects the latest revision). A superseded revision that never
+became Ready (a crash-looping container, no node for its GPUs) also keeps its
+initial replica, and so its GPU request, until Knative's activation timeout:
+the revision's progress deadline plus 30 s, measured from its PodAutoscaler's
+`Active=Unknown` transition (`kubectl -n models get podautoscaler
+<model>-predictor-0000N -o jsonpath='{.status.conditions}'`). The fleet's
+deadline is `progress-deadline: 3600s` (`charts/platform/templates/knative-serving`,
+sized for a trillion-parameter model on a cold node), so on a pool that cannot
+add a node the new revision waits up to an hour for the old one's GPU;
+on a pool with room the autoscaler adds a node and the new revision starts
+beside it. Future knob, not implemented: Knative reads a per-revision
+`serving.knative.dev/progress-deadline` annotation before the fleet default,
+so the renderer could carry a per-model startup deadline (a small model's
+never-ready revision would release its GPU in minutes while the giants keep
+the hour). The API pins every endpoint
 deployment to a pool (`docs/SCHEDULING.md` "What a model declares"), so
 endpoints stay outside Kueue and their warm replicas are the static
 `endpoint_floor_gpus` deduction of their pool. The renderer can also hand an
