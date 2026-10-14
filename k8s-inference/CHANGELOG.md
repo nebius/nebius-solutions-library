@@ -4,6 +4,19 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## charts/platform 0.1.13
+
+(chart only; api 0.11.112 and every image unchanged; no migration.)
+
+- The API's endpoint Roles in the `models` namespace (`serverless2-api-endpoints` on the control cluster,
+  `serverless2-api-agent-models` for the regional agent) read `services` of serving.knative.dev next to `revisions`,
+  get/list only. The KServe rollout witness of api 0.11.109 (`kube._rollout`) reads the predictor Knative Service's
+  generation, observedGeneration and template image and reports an unreadable Service as "not converged"; without
+  the grant that read was 403 on every Knative-mode endpoint, so a call with `execution.require_converged` (the
+  Scientific App's whole native-async path) was refused 409 "rollout not converged … predictor Service … not readable
+  (403)" before admission (Cosmos3 Nano transfer-video, 2026-10-14 22:07 UTC; RawDeployment endpoints were not
+  affected). tools/check.sh's render test now requires both resources on both Roles and nothing wider.
+
 ## api 0.11.112
 
 - Endpoint children commit their inherited tenant/owner and actual endpoint model

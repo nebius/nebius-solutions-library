@@ -3,7 +3,7 @@ name: platform
 description: The platform's own manifests for one cluster of the fleet, one component per template directory (api, gateway, knative-serving, observability, ops, scheduling, grafana-route, edge, node-config, dispatcher, and the identities api-agent, fleet-access, tenant-clusterrole). Rendered by the platform stage (data.helm_template) with the per-cluster values stack/config computes (hostnames, images, roles, feature flags) and applied server-side in the component's wave next to the upstream Helm releases; never installed as a Helm release.
 type: application
 kubeVersion: ">= 1.31.0-0"
-version: 0.1.12
+version: 0.1.13
 appVersion: "2"
 maintainers:
   - name: Nebius solutions library

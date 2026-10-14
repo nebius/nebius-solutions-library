@@ -68,8 +68,11 @@ rules:
     resources: [pods]
     verbs: [get, list]           # ready replicas of an endpoint (services/api/kube.py endpoint_status)
   - apiGroups: [serving.knative.dev]
-    resources: [revisions]
-    verbs: [get, list]           # the endpoint's rollout state (kube.py _rollout): the ready Revision's stored image
+    resources: [revisions, services]
+    verbs: [get, list]           # the endpoint's rollout state (kube.py _rollout): the ready Revision's stored image and,
+                                 # since api 0.11.109, the predictor Service's generation/observedGeneration/template image
+                                 # (unreadable = not converged: a require_converged call was refused 409 on every Knative-mode
+                                 # endpoint while this Role lacked services, Cosmos3 Nano 2026-10-14)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

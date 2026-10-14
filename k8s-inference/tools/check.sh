@@ -372,11 +372,12 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
              and o["metadata"]["name"] in ("serverless2-api-endpoints", "serverless2-api-agent-models")]
     for role in roles:
         rules = [r for r in role["rules"] if "serving.knative.dev" in r.get("apiGroups", [])]
-        assert rules, f"{cid}: Role {role['metadata']['name']} grants no serving.knative.dev read (kube._rollout needs revisions get/list)"
+        assert rules, f"{cid}: Role {role['metadata']['name']} grants no serving.knative.dev read (kube._rollout needs revisions and services get/list)"
         for r in rules:
-            assert set(r.get("resources", [])) <= {"revisions"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on serving.knative.dev; revisions only"
-            assert set(r["verbs"]) <= {"get", "list"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on revisions: read-only"
-        assert any("revisions" in r.get("resources", []) and {"get", "list"} <= set(r["verbs"]) for r in rules), f"{cid}: Role {role['metadata']['name']}: revisions get+list missing"
+            assert set(r.get("resources", [])) <= {"revisions", "services"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on serving.knative.dev; revisions and services only"
+            assert set(r["verbs"]) <= {"get", "list"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on serving.knative.dev: read-only"
+        for resource in ("revisions", "services"):  # the ready Revision's image, and the predictor Service's generations (0.11.109 witness)
+            assert any(resource in r.get("resources", []) and {"get", "list"} <= set(r["verbs"]) for r in rules), f"{cid}: Role {role['metadata']['name']}: {resource} get+list missing (a require_converged call is refused 409 while the predictor Service is unreadable)"
         # the opt-in ingress policy (services/api/render_endpoint.py _ingress_policy) is applied and deleted by the same Roles:
         # ciliumnetworkpolicies only on cilium.io, nothing wider (no clusterwide policies, no other Cilium objects)
         cil = [r for r in role["rules"] if "cilium.io" in r.get("apiGroups", [])]
@@ -393,7 +394,7 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
             if "configmaps" in r.get("resources", []):
                 assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on configmaps"
         seen += 1
-        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only; ciliumnetworkpolicies and configmaps scoped")
+        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions and services, read-only; ciliumnetworkpolicies and configmaps scoped")
 assert seen, "no cluster rendered an API Role in the models namespace"
 EOF5
 }

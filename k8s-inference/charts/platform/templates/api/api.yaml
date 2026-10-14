@@ -105,8 +105,8 @@ rules:
     resources: [pods]
     verbs: [get, list]
   - apiGroups: [serving.knative.dev]              # the endpoint's rollout state (services/api/kube.py _rollout): the latest
-    resources: [revisions]                         # ready Revision's stored image is the proof a scaled-to-zero endpoint converged
-    verbs: [get, list]
+    resources: [revisions, services]               # ready Revision's stored image, and the predictor Service's generations and
+    verbs: [get, list]                             # template image (0.11.109 witness; unreadable = not converged = 409)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
