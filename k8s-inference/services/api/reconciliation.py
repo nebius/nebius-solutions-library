@@ -155,10 +155,10 @@ def idle_shutdown() -> list[str]:
     return stopped
 
 
-def continue_run(root: str, build, transfer_only: bool = False):
+def continue_run(root: str, build, transfer_only: bool = False, ns: str | None = None):
     from app import continue_run as _continue_run  # app imports this module; resolved at call time
 
-    return _continue_run(root, build, transfer_only)
+    return _continue_run(root, build, transfer_only, ns=ns)
 
 
 def settle_deleted(job: dict) -> None:
@@ -226,6 +226,7 @@ def fallback_switch() -> list[str]:
                         remaining,
                         admit=admit,
                     ),
+                    ns=ns,
                 )
                 moved.append(new["metadata"]["name"])
                 log.info(
@@ -356,6 +357,7 @@ def unschedulable_switch() -> list[str]:
                     lambda admit: jobs.switch_unschedulable(
                         ns, name, REGION, m, catalog.fleet_params(m), why, admit=admit
                     ),
+                    ns=ns,
                 )
                 moved.append(new["metadata"]["name"])
                 log.info("unschedulable switch: %s/%s -> %s (%s)", ns, name, new["metadata"]["name"], why)
@@ -492,6 +494,7 @@ def recovery_switch() -> list[str]:
                         timeout_s=remaining_s,
                         admit=admit,
                     ),
+                    ns=ns,
                 )
                 marks = attempts._marks(name)
                 if marks and marks[1]:  # cancelled while we were moving it: cancel the successor, too

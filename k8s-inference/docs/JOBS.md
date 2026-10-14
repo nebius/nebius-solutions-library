@@ -724,7 +724,11 @@ transfer-only retry (TRANSFER_ONLY: nothing is inferred again), admitted as a `c
 head in the parent run's ledger (no second request), served by the same broker with the same binding.
 
 **The readback** (authoritative past the Job's TTL: the durable row, the destination, the attempt records; nothing is
-guessed from a prefix): `child`, `state` (`pending` | `active` | `ended`), `status` (the Job's while it exists, else the
+guessed from a prefix). The owner reads the same readback with its key: `GET /v1/operations/<run>/children/<unit_id>`
+(scope `read:operations`; `<run>` the root or any member of the run, the unit is keyed by the durable root; another
+owner's run and an unknown unit are 404) — identical, minus the attempt-scoped `download_url` (the owner reads the
+capture object through `GET /v1/operations/<child>`, its own operation, which also carries `child: {root, unit,
+parent}`). Fields: `child`, `state` (`pending` | `active` | `ended`), `status` (the Job's while it exists, else the
 record's, else `PENDING`/`ENDED`/`UNKNOWN`), `request`, `request_sha256`, `model_image`, `timeout_s`, `region`,
 `result_ref` (the stable `s3://…/response.bin`), `capture` (None until delivered; else `sha256`, `content_type`,
 `size_bytes`, `http_status`, `attempt_id`, `timings`, `delivered: true`, and `download_url`, a one-hour presigned GET
