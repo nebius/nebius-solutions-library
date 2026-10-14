@@ -376,6 +376,13 @@ def test_the_owner_sees_the_observed_gang_fields_on_the_current_attempt_and_ever
     assert (o["attempt_id"], o["epoch"], o["pod_uid"], o["gang_rank"], o["gang_restart"]) == (coord, 2, "uid-c0", 0, 1)
     assert o["checkpoint_ref"] == "c" * 64  # the coordinator's publication
     by = {a["attempt_id"]: a for a in o["attempts"]}
+    # the frozen restore triple is on EVERY attempt entry: explicitly null for a fresh start (both peers here); a gang
+    # restore reads each peer's triple, and an absent key is not "fresh"
+    triple = ("resume_checkpoint_ref", "resume_source_epoch", "resume_source")
+    for a in o["attempts"]:
+        assert all(k in a for k in triple), a
+    assert all(by[x][k] is None for x in (coord, peer) for k in triple)
+    assert all(k in o for k in triple)
     assert (by[coord]["pod_uid"], by[coord]["gang_rank"], by[coord]["gang_restart"]) == ("uid-c0", 0, 1)
     assert (by[peer]["pod_uid"], by[peer]["gang_rank"], by[peer]["gang_restart"], by[peer]["epoch"]) == (
         "uid-p1",
@@ -523,3 +530,104 @@ def test_jobset_failure_policy_rule_names_are_valid_for_the_jobset_webhook(monke
     assert rules[0]["action"] == "FailJobSet" and rules[0]["onJobFailureReasons"] == ["PodFailurePolicy"]
     pod_rules = js["spec"]["replicatedJobs"][0]["template"]["spec"]["podFailurePolicy"]["rules"]
     assert pod_rules[0]["action"] == "FailJob" and pod_rules[0]["onExitCodes"]["values"] == [75]
+
+
+def test_the_owner_sees_the_same_frozen_restore_triple_on_every_peer_of_a_resumed_gang(client, monkeypatch):
+    """A resumed incarnation (epoch 2) froze its restore pointer at its first ACK and copied it to every sibling
+    (api 0.11.101): the owner's attempts[] carries the identical triple on the coordinator and on the peer, and the
+    current attempt carries it too; the earlier incarnation's entries carry their own (null) triple, never the newer
+    one. The MPI gateway restores from every peer's triple (op-a229254b4a059926, 2026-10-14)."""
+    import copy
+
+    import catalog
+    import execution
+    from test_api import MULTINODE_FLEET, H
+
+    c, fake = client
+    ns = "tenant-demo"
+    monkeypatch.setattr(kube, "fleet", lambda: MULTINODE_FLEET)
+    monkeypatch.setattr(
+        execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}}
+    )
+    base = copy.deepcopy(catalog.get("distributed-run"))
+    monkeypatch.setattr(catalog, "get", lambda name, _b=base: _b if name == "distributed-run" else None)
+    body = {
+        "input": {
+            "image": "x/y:1",
+            "command": "mpirun",
+            "nodes": 2,
+            "gpus_per_node": 8,
+            "interconnect": "required",
+            "checkpoints": "shared",
+        },
+        "execution": {"io_mode": "application"},
+    }
+    r = c.post("/v1/models/distributed-run:invoke", json=body, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    coord, peer = f"{op}-workers-0-0-ccccc", f"{op}-workers-0-1-ddddd"
+    common = {
+        "operation": op,
+        "root": op,
+        "io_mode": "application",
+        "role": "run",
+        "tenant": "demo",
+        "namespace": ns,
+        "mode": "run",
+        "model": "distributed-run",
+    }
+    frozen = {"resume_checkpoint_ref": "c" * 64, "resume_source_epoch": 1, "resume_source": "committed"}
+    rows = [
+        {
+            **_record(op, f"{op}-workers-0-0-aaaaa", "failed", epoch=1, exit_code=1, region="eu-north1"),
+            **common,
+            "gang_rank": 0,
+            "gang_restart": 0,
+            "pod_uid": "uid-a",
+            "checkpoint_ref": "c" * 64,
+        },
+        {
+            **_record(op, f"{op}-workers-0-1-bbbbb", "failed", epoch=1, exit_code=1, region="eu-north1"),
+            **common,
+            "gang_rank": 1,
+            "gang_restart": 0,
+            "pod_uid": "uid-b",
+        },
+        {
+            **_record(op, coord, "started", epoch=2, region="eu-north1"),
+            **common,
+            "gang_rank": 0,
+            "gang_restart": 1,
+            "pod_uid": "uid-c",
+            **frozen,
+        },
+        {
+            **_record(op, peer, "started", epoch=2, region="eu-north1"),
+            **common,
+            "gang_rank": 1,
+            "gang_restart": 1,
+            "pod_uid": "uid-d",
+            **frozen,
+        },
+    ]
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [x for x in rows if x["root"] == root])
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    got = c.get(f"/v1/operations/{op}", headers=H)
+    assert got.status_code == 200, got.text
+    o = got.json()
+    by = {a["attempt_id"]: a for a in o["attempts"]}
+    for x in (coord, peer):
+        assert (by[x]["resume_checkpoint_ref"], by[x]["resume_source_epoch"], by[x]["resume_source"]) == (
+            "c" * 64,
+            1,
+            "committed",
+        ), by[x]
+    assert by[coord]["epoch"] == 2 and by[peer]["epoch"] == 2
+    assert (o["resume_checkpoint_ref"], o["resume_source_epoch"], o["resume_source"]) == ("c" * 64, 1, "committed")
+    for x in (f"{op}-workers-0-0-aaaaa", f"{op}-workers-0-1-bbbbb"):
+        assert (by[x]["resume_checkpoint_ref"], by[x]["resume_source_epoch"], by[x]["resume_source"]) == (
+            None,
+            None,
+            None,
+        )

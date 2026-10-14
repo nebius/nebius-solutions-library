@@ -86,8 +86,10 @@ An endpoint's `regions[].rollout` is its revision state: `latest_created`, `late
 `generation`/`observed_generation`, `desired_image` (the spec's), `revision_image` and `revision_image_digest` (the
 latest ready Revision object's: stored template evidence, valid at zero), `serving_images` (what the ready pods run),
 `converged` and `reason`. `converged` holds only when all of these are observed, never from revision names alone: the
-controller reconciled the current spec (observed generation = generation; the pre-reconcile window after a catalog
-change still shows the old revisions as one), the created, ready and rolled-out revisions are one, the ready
+controller reconciled the current spec (the predictor Knative Service's `service_generation` = `service_observed_generation`
+and its `service_image` = the desired image: KServe writes the Service's observed generation onto the InferenceService, so
+the ISVC's own `generation`/`observed_generation` are informational there; without a predictor Service they decide; the
+pre-reconcile window after a catalog change still shows the old revisions as one), the created, ready and rolled-out revisions are one, the ready
 Revision's image equals the desired image, and every ready pod runs it (by digest or reference). Knative routes to the latest *ready* revision, so after a spec change the
 previous revision serves until the new one is ready: the model's `image` is the spec, the rollout state is what
 serves. An endpoint call may set `execution.require_converged: true`: it is refused (409, the revisions named) while
