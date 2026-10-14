@@ -4,6 +4,24 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.103
+
+(0.11.103 = 0.11.102 plus the child binding's cluster and the log shipper on CPU pools; jobs 0.1.27 and platform chart
+0.1.12 unchanged; no migration. `clusters/common/values/alloy.yaml` changes: the Alloy DaemonSet rolls once per cluster.)
+
+- Endpoint children (docs/JOBS.md "Endpoint children"): the child's private binding is written on the API's own cluster,
+  where every delivery reads bindings (a caller's `PUT /v1/bindings/{ref}` lands there too), and `jobs.create` names
+  that cluster explicitly; the `<child>-private` copy still lands in the child's region with its Job. Before, a
+  control-cluster API wrote the binding in the child's region and the delivery looked on the control cluster: every
+  child of a fleet-placed run was refused 404 "no such binding", the intent rolled back and an orphan `binding-<child>`
+  Secret stayed in the region (the first live LeRobot child, 2026-10-14). Regression: a control API, the parent and the
+  child endpoint in a region; the binding on control, claimed and owned; the copy and the Job in the region; nothing
+  orphaned; the replay reads the same child back.
+- Logs (docs/OBSERVABILITY.md): the Alloy log shipper tolerates the CPU-pool taint (`serverless2.nebius/cpu-pool`), so
+  runs on CPU pools ship their logs; before, no shipper ran on those nodes and `GET /v1/operations/{id}/logs` was empty
+  for every CPU-pool run (the pod's files go with the worker Job). `tools/check.sh` asserts the shipper tolerates every
+  worker-pool taint the cluster module places.
+
 ## api 0.11.102
 
 (0.11.102 = 0.11.101 plus operator-declared parameter bounds; jobs 0.1.27 and platform chart unchanged; no migration.)

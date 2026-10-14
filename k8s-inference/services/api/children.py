@@ -650,8 +650,12 @@ def complete(
         if cjob is None:
             admitted = api._admitted_token(key_hash, cm["name"], child)
             try:
+                # the binding lives where the API's delivery reads it (the API's own cluster, as a caller's
+                # PUT /v1/bindings/{ref}): jobs.create -> execution.deliver claims it there and copies it into the
+                # child's region (`<child>-private`, next to the Job); written in the child's region instead, the
+                # delivery never finds it (404, the intent rolled back, an orphan Secret in the region)
                 execution.put_binding(
-                    ns, tenant, row["binding_ref"], _binding_data(row, admitted), owner, False, None, row["region"]
+                    ns, tenant, row["binding_ref"], _binding_data(row, admitted), owner, False, None, REGION
                 )
             except HTTPException as e:
                 if e.status_code < 500 and e.status_code != 409:

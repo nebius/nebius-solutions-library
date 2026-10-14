@@ -25,7 +25,7 @@ import keys
 import kube
 import models as models_mod
 from config import LABEL
-from test_api import FLEET, H, client, cluster, pod  # noqa: F401
+from test_api import FLEET, FakeCluster, H, client, cluster, pod  # noqa: F401
 from test_call_sh import _run
 from test_database import LEGACY, database  # noqa: F401
 
@@ -1068,10 +1068,12 @@ def _external_rig(database, client, monkeypatch, delivery="application"):
     return c, fake
 
 
-def _ext_parent(c, fake, monkeypatch, execution_block=None):
-    """The parent on an external-storage tenant is itself an application-I/O run (the SciAI shape): no platform bucket."""
+def _ext_parent(c, fake, monkeypatch, execution_block=None, region=None):
+    """The parent on an external-storage tenant is itself an application-I/O run (the SciAI shape): no platform bucket.
+    `region` pins the run (a control-cluster API creating it in a region); `fake` is the cluster its pod runs on."""
     ex = {"io_mode": "application", **(execution_block or {})}
-    r = c.post("/v1/models/lerobot-ext:invoke", json={"input": {}, "execution": ex}, headers=H)
+    body = {"input": {}, "execution": ex, **({"region": region} if region else {})}
+    r = c.post("/v1/models/lerobot-ext:invoke", json=body, headers=H)
     assert r.status_code == 202, r.text
     op = r.json()["id"]
     p = pod(op, "Running")
@@ -1294,3 +1296,58 @@ def test_application_delivery_readback_takes_the_capture_from_the_platform_recor
                 {**rec, "operation": f"{child}-x3", "root": child, "status": "succeeded", "capture": bad},
             )
         assert e.value.status_code == 400, bad
+
+
+def test_a_control_api_binds_the_child_where_it_delivers_and_the_copy_lands_in_the_child_region(
+    database, client, monkeypatch
+):
+    """The fleet topology (docs/ARCHITECTURE.md): the API runs on the control cluster (REGION=control), the child
+    endpoint is deployed in a region. Bindings live where the API's delivery reads them (the API's own cluster, as a
+    caller's `PUT /v1/bindings/{ref}`); the per-operation copy lands in the child's region with the child's Job.
+    Regression for the first live LeRobot child (2026-10-14): the binding was written in the child's region, the
+    delivery looked on the control cluster, 404 "no such binding", the intent rolled back and an orphan binding stayed
+    in the region."""
+    c, control = _external_rig(database, client, monkeypatch)
+    north = FakeCluster()
+    both = {"control": control, "eu-north1": north}
+    monkeypatch.setattr(kube, "regions", lambda: ["control", "eu-north1"])
+    monkeypatch.setattr(kube, "batch", lambda region="control": both[region])
+    monkeypatch.setattr(kube, "core", lambda region="control": both[region])
+    monkeypatch.setattr(kube, "HUB_REGION", "eu-north1")
+    import execution
+
+    for mod in (api, jobs, artifacts, execution, children, models_mod):
+        monkeypatch.setattr(mod, "REGION", "control")
+    monkeypatch.setattr(models_mod, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io"})  # the region's gateway
+    # the parent runs in the region (its Job and pod there, created by the control API); the child endpoint is deployed there
+    op = _ext_parent(
+        c, north, monkeypatch, {"workload_identity_ref": "lab", "profile_ref": "sealed"}, region="eu-north1"
+    )
+    assert (NS, op) in north.jobs and (NS, op) not in control.jobs
+    r = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/u1", transport=APP_TRANSPORT)
+    assert r.status_code == 201, r.text
+    child = r.json()["child"]
+    assert r.json()["region"] == "eu-north1"
+    # the binding where the delivery reads it (the API's cluster), claimed by the child, owned by the parent's owner
+    binding = control.secrets[(NS, f"binding-{child}")]
+    assert (NS, f"binding-{child}") not in north.secrets  # no orphan in the region
+    ann = binding["metadata"]["annotations"]
+    assert ann[f"{LABEL}/operation"] == child and ann[f"{LABEL}/owner"]
+    assert json.loads(binding["data"]["request.json"]) == {"prompt": "x"}
+    # the copy and the caller Job in the child's region, nothing of the child on control
+    copy_ = north.secrets[(NS, f"{child}-private")]
+    assert copy_["data"] == binding["data"]
+    assert copy_["metadata"]["labels"][f"{LABEL}/operation"] == child
+    assert (NS, f"{child}-private") not in control.secrets
+    assert (NS, child) in north.jobs and (NS, child) not in control.jobs
+    with db.pool().connection() as conn:
+        row = conn.execute(
+            "select state, region from endpoint_children where root = %s and unit_id = %s", (op, "u1")
+        ).fetchone()
+    assert row == ("active", "eu-north1")
+    # the replay reads the same child back: one binding, one copy, one Job
+    r2 = _post(c, op, "u1", {"prompt": "x"}, result_ref="app://results/u1", transport=APP_TRANSPORT)
+    assert r2.status_code == 200 and r2.json()["child"] == child
+    assert len([k for k in north.jobs if k[1].startswith(f"{op}-c-")]) == 1
+    assert len([k for k in control.secrets if k[1].startswith("binding-")]) == 1
+    assert c.get(f"/v1/operations/{op}/children/u1", headers=H).status_code == 200
