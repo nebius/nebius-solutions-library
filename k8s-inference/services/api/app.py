@@ -113,7 +113,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.58", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.59", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -830,6 +830,8 @@ def _invoke_job(
             raise HTTPException(
                 400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
             )
+    if ex and ex.get("require_converged") and mode != "async":
+        raise HTTPException(400, "execution.require_converged applies to endpoint calls (mode async)")
     allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
     if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
         # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
@@ -838,6 +840,7 @@ def _invoke_job(
     if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
         raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
     if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
+        rollout = _rollout_fence(m, region, ex)
         application = bool(ex and ex.get("io_mode") == "application")
         output_prefix = (
             "" if application else f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
@@ -889,6 +892,13 @@ def _invoke_job(
     # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
     ann = job["metadata"].setdefault("annotations", {})
     ann[f"{cfg.LABEL}/owner"] = p.owner
+    if mode == "async" and rollout:
+        # what the first request could reach at admission (docs/API.md "Models"): evidence of the ready revision and its
+        # image then, not per-request provenance (Knative adds no revision to a response)
+        if rollout.get("latest_ready"):
+            ann[f"{cfg.LABEL}/endpoint-revision"] = str(rollout["latest_ready"])
+        if rollout.get("serving_images"):
+            ann[f"{cfg.LABEL}/endpoint-image"] = str(rollout["serving_images"][0])[:1000]
     if stage:
         stages.mark_waiting(job, stage["root"], stage["id"], stages.dependencies(graph, stage["id"]))
     if db.enabled():
@@ -927,6 +937,27 @@ def _require_delegation(p: Principal, model: str, root: str, stage: str) -> None
         raise HTTPException(403, f"model {model} is not granted to this key (the root's class does not delegate to it)")
     if keys.reservation_key(root) != keys.key_hash(p.key):
         raise HTTPException(403, f"model {model} is not granted to this key (root {root} is not active on this key)")
+
+
+def _rollout_fence(m: dict, region: str, ex: dict | None) -> dict | None:
+    """The endpoint's revision state at admission of an endpoint call (kube._rollout); with
+    `execution.require_converged` the call is refused (409) while the created, ready and rolled-out revisions differ
+    (a new revision Pending, the previous one serving). A converged endpoint at zero passes: the fence reads the
+    revisions, not the pods. Without the option the state is only recorded."""
+    try:
+        st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m.get("nodes") or 1))
+    except Exception:  # noqa: BLE001
+        st = {}
+    rollout = st.get("rollout")
+    if ex and ex.get("require_converged"):
+        if not rollout or not rollout.get("converged"):
+            raise HTTPException(
+                409,
+                f"endpoint {m['name']} rollout not converged in {region}: created {rollout.get('latest_created') if rollout else None}, "
+                f"ready {rollout.get('latest_ready') if rollout else None}, rolled out {rollout.get('latest_rolled_out') if rollout else None}"
+                " (execution.require_converged)",
+            )
+    return rollout
 
 
 def _stage_request(
@@ -1517,6 +1548,10 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
         op.update(_delivered(op, name, root))  # a retry or finalizer that delivered closes the original
     _stage_fields(p, op, job, root)
+    ann = job["metadata"].get("annotations") or {}
+    if ann.get(f"{cfg.LABEL}/endpoint-revision") or ann.get(f"{cfg.LABEL}/endpoint-image"):
+        op["endpoint_revision"] = ann.get(f"{cfg.LABEL}/endpoint-revision")
+        op["endpoint_image"] = ann.get(f"{cfg.LABEL}/endpoint-image")
     return op
 
 

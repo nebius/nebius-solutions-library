@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.59
+
+- Run classes carry a sanitized `execution` identity on the public model (`image`, `immutable`, `images`,
+  `gpu_classes`, `nodes`, `delegates`, `retry`, `finalize`; never the container configuration) and a non-null
+  top-level `image` (docs/API.md "Execution identity and rollout state"): a key granted a class discovers it
+  without `spec` (restricted keys saw `image: null`, `spec: null`).
+- Endpoints report their rollout state (`regions[].rollout`: created, ready and rolled-out revisions, serving images,
+  `converged`); an endpoint call may require convergence (`execution.require_converged`: 409 while diverged, admitted
+  at zero when converged) and records the ready revision and image at admission (`endpoint_revision`,
+  `endpoint_image`), labelled as admission-time evidence.
+
 ## api 0.11.58
 
 - Billing prices a run pinned to its admitting cluster (a resume on the kept volume: region label `north`, a cluster

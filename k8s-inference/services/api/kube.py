@@ -301,6 +301,37 @@ def _startup(pods: list) -> dict:
     return out
 
 
+def _rollout(isvc: dict, pods: list) -> dict:
+    """The revision state of a KServe endpoint (docs/API.md "Models"): Knative routes to the latest *ready* revision,
+    so after a spec change the previous revision serves until the new one is ready. `converged`: the created, ready
+    and rolled-out revisions are one (a property of the revisions: true for a converged endpoint at zero, with no
+    pod); `serving_images`: what the ready pods run (image ids when the kubelet reports them)."""
+    pred = (isvc.get("status") or {}).get("components", {}).get("predictor") or {}
+    created, ready_rev, rolled = (
+        pred.get("latestCreatedRevision"),
+        pred.get("latestReadyRevision"),
+        pred.get("latestRolledoutRevision"),
+    )
+    images: list[str] = []
+    for p in pods:
+        st = getattr(p, "status", None)
+        if not st or st.phase != "Running" or not all(c.ready for c in (st.container_statuses or [])):
+            continue
+        for c in st.container_statuses or []:
+            if getattr(c, "name", None) in ("kserve-container", "main") or len(st.container_statuses) == 1:
+                ref = getattr(c, "image_id", None) or getattr(c, "image", None)
+                if ref and ref not in images:
+                    images.append(ref)
+    known = [r for r in (created, ready_rev, rolled) if r]
+    return {
+        "latest_created": created,
+        "latest_ready": ready_rev,
+        "latest_rolled_out": rolled,
+        "serving_images": images,
+        "converged": bool(created) and len(set(known)) == 1 and ready_rev == created,
+    }
+
+
 def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) -> dict:
     """Live state for the catalog: ready / scaled-to-zero / deploying / unavailable, the ready replicas and the
     start-up timing of the newest pod. KServe InferenceService (one pod per replica) or, for `nodes` > 1, the
@@ -366,7 +397,7 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 status = "error"
             else:
                 status = "scaled-to-zero" if ready and not pods else "deploying"
-            out = {"status": status, "replicas_ready": n, **_startup(pods)}
+            out = {"status": status, "replicas_ready": n, **_startup(pods), "rollout": _rollout(i, pods)}
             if status == "error":
                 out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:

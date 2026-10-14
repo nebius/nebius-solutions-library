@@ -203,6 +203,8 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         if not (STAGE_ID.match(spec.stage.id) and _ref(spec.stage.root, "stage.root")):
             raise HTTPException(400, "execution.stage: id (letters, digits, -) and root are required")
         ex["stage"] = {"root": spec.stage.root, "id": spec.stage.id}
+    if spec.require_converged:
+        ex["require_converged"] = True
     if spec.retry:
         codes = sorted({int(c) for c in spec.retry.on_exit_codes})
         if not codes or any(not 1 <= c <= 255 for c in codes):

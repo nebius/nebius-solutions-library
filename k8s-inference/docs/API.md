@@ -64,7 +64,27 @@ preferred first; `regions` defaults to every region with a pool of one of the cl
 defines a run class instead (`cpu`, `memory`, `cpu_limit`, `memory_limit`, `ephemeral_storage`, `ephemeral_storage_limit`, `disk_gi`, `scratch`, `parameters`, `delegates`, `retry`; requests are what the scheduler guarantees, limits what a container may grow to; `delegates` names the run classes a graph rooted on this class may bind stages to, docs/JOBS.md "Delegated stages"). The full field list is
 the module docstring of `services/api/models.py`; the response schema is `Model` in `services/api/schemas.py`.
 
-### Scaling
+#### Execution identity and rollout state
+
+A run class carries `execution` on `GET /v1/models` and `GET /v1/models/<id>`, for every key granted the class
+(`spec`, the container configuration, stays fleet administrators'): `image` (the reference as registered, normalised
+to the fleet's logical registry host; the top-level `image` is the same), `immutable` (true when the reference is
+digest-pinned), `images` (per-GPU-class references, without `default`), `gpu_classes`, `nodes`, `delegates` (the
+operator-approved child class ids, docs/JOBS.md "Delegated stages": no grant is implied, submission is authorised as
+ever), `retry` (docs/JOBS.md "Retries") and `finalize` (whether an application finalizer exists). Never the command,
+args, env, secrets, volumes or profiles. Endpoints carry `execution: null`.
+
+An endpoint's `regions[].rollout` is its revision state: `latest_created`, `latest_ready`, `latest_rolled_out`,
+`serving_images` (what the ready pods run) and `converged` (the three revisions are one; a property of the revisions,
+true for a converged endpoint at zero). Knative routes to the latest *ready* revision, so after a spec change the
+previous revision serves until the new one is ready: the model's `image` is the spec, the rollout state is what
+serves. An endpoint call may set `execution.require_converged: true`: it is refused (409, the revisions named) while
+the rollout is not converged. Every endpoint call records the ready revision and its serving image at admission
+(`endpoint_revision`, `endpoint_image` on the handle): admission-time evidence of what the first request could
+reach, not per-request provenance (no response names its revision), and subject to a concurrent update after
+admission.
+
+## Scaling
 
 `scaling` is one vocabulary (`ScalingSpec` in `services/api/schemas.py`), the same on a model definition, on
 `GET /v1/endpoints` and on `PATCH /v1/endpoints/{id}`: `min` and `max` replicas per region;

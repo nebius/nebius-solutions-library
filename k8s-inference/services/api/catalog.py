@@ -179,7 +179,7 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "gpu": m.get("gpu", "none"),
         "price": price,
         "price_per_call": m.get("price_per_call"),
-        "image": m.get("image"),
+        "image": m.get("image") or ((m.get("job") or {}).get("image") if m["mode"] == "run" else None),
         "protocol": m.get("protocol"),
         "cold_start_s": m.get("cold_start_s"),
         "cold_start_class": m.get("cold_start_class"),
@@ -190,6 +190,38 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
         "spec": m.get("spec"),
         "example": m.get("example"),  # a valid request body (the console's "Test request" tab)
         "regions": region_status or [{"region": r, "status": "ready"} for r in m["regions"]],
+        "execution": execution_identity(m) if m["mode"] == "run" else None,
+    }
+
+
+def _int_or_none(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def execution_identity(m: dict) -> dict:
+    """The sanitized execution identity of a run class (docs/API.md "Models"): the image reference as registered,
+    whether it is digest-pinned, the per-class images, the classes, the node count, the operator-approved delegate
+    ids, the retry policy, whether a finalizer exists. Never the command, args, env, secrets, volumes or profiles."""
+    job = m.get("job") or {}
+    image = job.get("image")
+    images = job.get("images") if isinstance(job.get("images"), dict) else None
+    retry = job.get("retry") if isinstance(job.get("retry"), dict) else None
+    return {
+        "image": image,
+        "immutable": bool(image and "@sha256:" in image),
+        "images": {k: v for k, v in images.items() if k != "default"} if images else None,
+        "gpu_classes": list(m.get("gpu_classes") or []),
+        "nodes": _int_or_none(job.get("nodes", 1)),  # a template token (`{{nodes}}`): decided per run
+        "delegates": list(m.get("delegates") or []),
+        "retry": (
+            {"max_attempts": int(retry["maxAttempts"]), "on_exit_codes": list(retry.get("onExitCodes") or [137, 143])}
+            if retry and retry.get("maxAttempts")
+            else None
+        ),
+        "finalize": bool(job.get("finalize")),
     }
 
 
