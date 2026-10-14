@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.93
+
+(0.11.93 = 0.11.92 without the last post-admission rollback; jobs 0.1.26 and platform chart 0.1.10 unchanged.
+0.11.90–0.11.92 were never applied.)
+
+- Continuations: a builder that fails after its admission never rolls the member back any more, not even on a
+  definite 4xx: that 4xx proves only this caller's create was refused, while another replica that admitted the same
+  intent (one shared member) may have created the operation. In every case the member stays a pending admission:
+  the Job found is returned (whoever created it), otherwise the same request replays the intent. Regression: both
+  replicas observe the prior head, A pauses after its admission, B replays and creates the Job, A's create is refused
+  with a 4xx: nothing rolled back, one Job, one member.
+
 ## api 0.11.92
 
 (0.11.92 = 0.11.91 with its automatic retirement WITHDRAWN after review; jobs 0.1.26 and platform chart 0.1.10

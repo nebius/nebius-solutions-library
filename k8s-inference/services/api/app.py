@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.92", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.93", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -282,37 +282,33 @@ def _pending_admission(ns: str, root: str, head: str) -> bool:
 
 
 def _reconcile_continuation(name: str, ns: str | None, e: Exception):
-    """After a builder raised past the admission: a definite refusal (4xx: the API server refused the create, nothing
-    exists) rolls the member back; anything else (5xx, a transport error) is ambiguous: the API server may still be
-    accepting the create, so the member is KEPT whatever an immediate read says; the Job found is returned (the
-    continuation exists), an absence leaves a pending admission that the same request replays. Returns the Job when it
-    exists, else None."""
-    definite = isinstance(e, HTTPException) and e.status_code < 500
-    if not definite:
-        if ns is not None:
-            try:
-                job, _ = jobs.find(ns, name)
-                log.warning("continuation %s: created, the answer was lost (%s); member kept", name, str(e)[:120])
-                return job
-            except HTTPException as f:
-                if f.status_code != 404:
-                    log.warning(
-                        "continuation %s: creation unconfirmed (%s), cluster unreadable (%s): member kept",
-                        name,
-                        str(e)[:80],
-                        f.detail,
-                    )
-                    return None
-        log.warning(
-            "continuation %s: creation unconfirmed (%s): member kept as a pending admission (the same request replays it)",
-            name,
-            str(e)[:120],
-        )
-        return None
-    try:
-        keys.rollback_run_member(name)  # definitely refused: no Job exists
-    except Exception as x:  # noqa: BLE001
-        log.warning("rollback of continuation %s: %s", name, x)
+    """After a builder raised past the admission: the member is NEVER rolled back here. A definite refusal (4xx)
+    proves only that THIS caller's create was refused, not that no other replica created the operation (both may have
+    admitted the same intent: one member, two creates); an ambiguous failure (5xx, transport) may still be accepted by
+    the API server. So the member stays a pending admission in every case: the Job found is returned (the
+    continuation exists, whoever created it); otherwise the same request replays the intent (continue_run admits it as
+    a replay of the member and creates the Job). Returns the Job when it exists, else None."""
+    if ns is not None:
+        try:
+            job, _ = jobs.find(ns, name)
+            log.warning(
+                "continuation %s: its Job exists although this create failed (%s); member kept", name, str(e)[:120]
+            )
+            return job
+        except HTTPException as f:
+            if f.status_code != 404:
+                log.warning(
+                    "continuation %s: create failed (%s), cluster unreadable (%s): member kept",
+                    name,
+                    str(e)[:80],
+                    f.detail,
+                )
+                return None
+    log.warning(
+        "continuation %s: create failed (%s): member kept as a pending admission (the same request replays it)",
+        name,
+        str(e)[:120],
+    )
     return None
 
 

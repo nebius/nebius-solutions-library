@@ -209,36 +209,66 @@ def test_a_continuation_created_with_a_lost_answer_keeps_its_member_and_is_retur
     assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, x1, oid)]
 
 
-def test_a_definite_refusal_rolls_back_and_an_ambiguous_failure_never_does(client, admin_keys, fake_keys, monkeypatch):
-    """A 4xx from the API server is definite: the member goes. A 5xx or a transport error is ambiguous (the server may
-    still accept the timed-out create): the member is KEPT whatever an immediate read says; the error reaches the
-    caller, who replays."""
+def test_no_failure_after_admission_rolls_the_member_back(client, admin_keys, fake_keys, monkeypatch):
+    """A 5xx or a transport error after admission may still be accepted by the API server; a 4xx proves only that THIS
+    caller's create was refused. Either way the member stays a pending admission (never rolled back); the error reaches
+    the caller, whose replay of the same request is admitted as a replay of the member and creates the Job."""
     import jobs
 
     c, cluster = client
     oid, rows = _exportable(c, cluster, monkeypatch)
-    monkeypatch.setattr(
-        jobs,
-        "create",
-        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
-            api.HTTPException(502, "kubernetes (eu-north1): 503 Service Unavailable")
-        ),
-    )
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 502
+    real = jobs.create
     x1 = f"{oid}-x1"
-    assert ("rollback", x1) not in fake_keys.calls and fake_keys.member_of(x1)["state"] == "active"  # kept
-    assert ("tenant-demo", x1) not in cluster.jobs
-    monkeypatch.setattr(
-        jobs,
-        "create",
-        lambda ns, job, region="eu-north1", secret=None: (_ for _ in ()).throw(
-            api.HTTPException(404, "tenant namespace is not onboarded")
-        ),
-    )
-    fake_keys.members = [m for m in fake_keys.members if m["operation"] != x1]  # the kept member, retired elsewhere
-    r = c.post(f"/v1/operations/{oid}:export", headers=H)
-    assert r.status_code == 404 and ("rollback", x1) in fake_keys.calls and fake_keys.member_of(x1) is None
+    for code in (502, 404):
+        monkeypatch.setattr(
+            jobs,
+            "create",
+            lambda ns, job, region="eu-north1", secret=None, code=code: (_ for _ in ()).throw(
+                api.HTTPException(code, "kubernetes refused" if code == 404 else "kubernetes (eu-north1): 503")
+            ),
+        )
+        r = c.post(f"/v1/operations/{oid}:export", headers=H)
+        assert r.status_code == code
+        assert not [x for x in fake_keys.calls if x[0] == "rollback"] and fake_keys.member_of(x1)["state"] == "active"
+        assert ("tenant-demo", x1) not in cluster.jobs
+    monkeypatch.setattr(jobs, "create", real)
+    r = c.post(f"/v1/operations/{oid}:export", headers=H)  # the same intent: admitted as a replay, created now
+    assert r.status_code == 202 and r.json()["id"] == x1 and ("tenant-demo", x1) in cluster.jobs
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]
+
+
+def test_barrier_a_definite_refusal_of_one_replica_never_deletes_the_member_another_replica_backed(
+    client, admin_keys, fake_keys, monkeypatch
+):
+    """Root's final same-intent barrier: A and B both observe the prior head (no pending admission), A pauses right
+    after its admission; B's whole request runs (its admission is a replay of the shared member) and creates the valid
+    Job; A's create is then refused definitively (a 4xx of its own). A's member is the shared one and B's Job stands
+    on it: nothing is rolled back, A answers with its error, one Job, one member."""
+    import jobs
+
+    c, cluster = client
+    oid, rows = _exportable(c, cluster, monkeypatch)
+    real = jobs.create
+    seen: dict = {}
+
+    def paused_then_refused(ns, job, region="eu-north1", secret=None):
+        name = job["metadata"]["name"]
+        assert fake_keys.member_of(name)["state"] == "active" and ("tenant-demo", name) not in cluster.jobs
+        monkeypatch.setattr(jobs, "create", real)
+        b = c.post(f"/v1/operations/{oid}:export", headers=H)  # B: replay of the shared member, creates the Job
+        seen["b"] = (b.status_code, b.json())
+        assert ("tenant-demo", name) in cluster.jobs
+        raise api.HTTPException(403, "forbidden: this replica's create was refused")  # A's own definite refusal
+
+    monkeypatch.setattr(jobs, "create", paused_then_refused)
+    a = c.post(f"/v1/operations/{oid}:export", headers=H)
+    x1 = f"{oid}-x1"
+    assert seen["b"][0] == 202 and seen["b"][1]["id"] == x1, seen["b"]
+    assert a.status_code in (200, 202, 403), a.text  # A: its own refusal, or B's Job found and returned
+    assert not [x for x in fake_keys.calls if x[0] == "rollback"]  # the shared member is never deleted
+    assert fake_keys.member_of(x1)["state"] == "active" and ("tenant-demo", x1) in cluster.jobs
+    assert [m["operation"] for m in fake_keys.members if m["operation"].startswith(f"{oid}-x")] == [x1]
+    assert [x[1:4] for x in fake_keys.calls if x[0] == "prepare"] == [(oid, x1, oid), (oid, x1, oid)]
 
 
 def test_a_pending_admission_is_never_retired_and_only_the_same_intent_replays_it(
