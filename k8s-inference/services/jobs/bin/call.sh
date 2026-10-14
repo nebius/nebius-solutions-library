@@ -45,6 +45,12 @@ backoff() {   # exponential, BACKOFF_BASE (5 s) x 2^n, capped at BACKOFF_MAX (30
 
 binding() { [ -n "$PRIV" ] && [ -f "$PRIV/$1" ] && cat "$PRIV/$1"; }
 
+ready_pause() {   # readiness only: READY_BACKOFF_BASE (2 s) x 2^(n-1), capped at READY_BACKOFF_MAX (10 s); never the POST's backoff
+  local e=$(( $1 - 1 )); [ "$e" -gt 4 ] && e=4
+  local s=$(( ${READY_BACKOFF_BASE:-2} * (1 << e) )); [ "$s" -gt "${READY_BACKOFF_MAX:-10}" ] && s=${READY_BACKOFF_MAX:-10}
+  sleep "$s"
+}
+
 refresh() {   # $1 = phase (input|output): fresh URLs from the application, or the static ones from the binding
   local url token body attempt_id
   url=$(binding refresh_url); token=$(binding refresh_token)
@@ -179,14 +185,24 @@ if [ -f posted.json ]; then
 fi
 
 # readiness first, with an idempotent GET through the same gateway (a cold or scaled-to-zero endpoint is woken by it and
-# answers when it serves); the inference POST goes to an endpoint that answers, so the edge never cuts a cold start
+# answers when it serves); the inference POST goes to an endpoint that answers, so the edge never cuts a cold start.
+# The gateway and the activator HOLD the GET while the replica starts, so a probe that ends without an answer (000 after
+# READY_TIMEOUT) says only "not yet": the probes are frequent and short (READY_TIMEOUT 30 s, pauses 2 s doubling to
+# READY_BACKOFF_MAX 10 s), so a replica that becomes ready is seen within about 40 s, never minutes later (the previous
+# exponential pause reached 320 s by the sixth probe). Bounded by READY_MAX_WAIT (default CALL_TIMEOUT) of wall-clock
+# time: past it the call fails explicitly (exit 5, FAILED) instead of running into the Job's deadline. The probe counter
+# is its own: the inference POST's retry budget starts fresh below and the POST is still made exactly once.
 if [ -n "${READY_URL:-}" ]; then
-  n=0
+  n=0; ready_start=$SECONDS; ready_max=${READY_MAX_WAIT:-${CALL_TIMEOUT:-3600}}
   while :; do
-    code=$(curl -sS -o out/ready.txt -w '%{http_code}' "$READY_URL" "${curl_auth[@]}" --max-time 120 2>out/ready_error.txt) || code=000
+    code=$(curl -sS -o out/ready.txt -w '%{http_code}' "$READY_URL" "${curl_auth[@]}" --max-time "${READY_TIMEOUT:-30}" 2>out/ready_error.txt) || code=000
     n=$((n + 1)); echo "$(date -u +%FT%TZ) readiness probe $n -> HTTP $code"
     case "$code" in 2*|405) break;; 401|403) echo "readiness probe refused ($code): $(head -c 200 out/ready.txt)"; finish failed "the endpoint refused the call's key ($code)"; exit 2;; esac
-    backoff $n
+    if [ $(( SECONDS - ready_start )) -ge "$ready_max" ]; then
+      echo "endpoint not ready after $(( SECONDS - ready_start ))s ($n probes, last HTTP $code): giving up before the inference"
+      finish failed "the endpoint did not become ready within ${ready_max}s ($n probes, last HTTP $code)"; exit 5
+    fi
+    ready_pause $n
   done
 fi
 

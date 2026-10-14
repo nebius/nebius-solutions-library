@@ -327,7 +327,9 @@ def verify_worker(token: str, s: dict, endpoint_model) -> dict:
         raise HTTPException(403, "the pod belongs to no endpoint of this fleet")
     if m["name"] != s["model"] or ns != m["namespace"]:
         raise HTTPException(403, f"the pod serves {m['name']}, the session is for {s['model']}")
-    return {"pod": pod, "namespace": ns, "uid": uid, "region": region}
+    import leases
+
+    return {"pod": pod, "namespace": ns, "uid": uid, "region": region, "restart_count": leases.worker_restarts(obj)}
 
 
 # ---- the sweep (reconcile loop) -------------------------------------------------------------------------------------

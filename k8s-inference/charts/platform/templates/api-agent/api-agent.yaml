@@ -43,6 +43,9 @@ rules:
   - apiGroups: [gateway.envoyproxy.io]
     resources: [securitypolicies]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [cilium.io]   # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
+    resources: [ciliumnetworkpolicies]
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, create, patch, delete]

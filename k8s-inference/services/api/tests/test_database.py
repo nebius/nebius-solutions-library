@@ -956,7 +956,9 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     assert leases.sweep() == [] and leases.get(op2)["state"] == "attached"  # a failed lookup is not a loss
     monkeypatch.setattr(leases, "_worker_gone", lambda e: False)
     assert leases.sweep() == [] and leases.get(op2)["state"] == "attached"
-    monkeypatch.setattr(leases, "_worker_gone", lambda e: e["pod_uid"] == "uid-x")
+    monkeypatch.setattr(
+        leases, "_worker_gone", lambda e: "worker container restarted (0 -> 1)" if e["pod_uid"] == "uid-x" else None
+    )
     assert leases.sweep() == [f"{op2}:lost"]
     assert leases.settle_decision(op2, required=False) == (True, None, "worker lost")
     keys.release(op2, None)

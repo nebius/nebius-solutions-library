@@ -390,6 +390,9 @@ class ModelSpec(BaseModel):
     native_lease: SkipValidation[Literal["optional", "required"] | None] = (
         None  # endpoints: whether the worker must attach to each call's native execution (docs/API.md)
     )
+    ingress_isolation: SkipValidation[Literal["declared-ports"] | None] = (
+        None  # endpoints: a CiliumNetworkPolicy admits only the platform's data path into the pods (docs/API.md)
+    )
     retry: SkipValidation[dict[str, Any] | None] = (
         None  # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
     )
@@ -496,6 +499,7 @@ class Model(BaseModel):
     parameters: list[ModelParameter] | None = None
     execution: ModelExecution | None = None  # run classes: the sanitized execution identity
     native_lease: Literal["optional", "required"] | None = None  # endpoints: docs/API.md "Native execution leases"
+    ingress_isolation: Literal["declared-ports"] | None = None  # endpoints: docs/API.md "Ingress isolation"
 
 
 class SyncResponse(BaseModel):
@@ -549,6 +553,9 @@ class NativeExecution(BaseModel):
     cancel_requested: bool | None = None
     settled: bool | None = None
     attempts: list[dict[str, Any]] | None = None  # every attempt's evidence, oldest first
+    lost_reason: str | None = (
+        None  # why the reconciler marked it lost: pod gone | pod replaced | pod finished | worker container restarted (...)
+    )
 
 
 class NativeAttach(BaseModel):

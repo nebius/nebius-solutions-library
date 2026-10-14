@@ -229,7 +229,7 @@
  },
  "rbac.authorization.k8s.io/Role/models/serverless2-api-agent-models": {
   "component": "api-agent",
-  "sha256": "f66665cb3c318af33af89466f64a3a810de4d6c9db356976bc99420def132594"
+  "sha256": "517008b4fb0a70ca68cf0df2b8a121028246c49333def9ac69eef6ad47b6149c"
  },
  "rbac.authorization.k8s.io/Role/monitoring/serverless2-api-agent-monitoring": {
   "component": "api-agent",

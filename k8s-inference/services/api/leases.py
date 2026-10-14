@@ -52,7 +52,8 @@ LIVE = ("prepared", "attached")
 OUTCOMES = ("done", "cancelled", "error", "disconnected")
 COLUMNS = (
     "operation, attempt, state, pod, pod_namespace, pod_uid, worker_request_id, region, model, prepared_at, "
-    "attached_at, released_at, outcome, gpu_seconds, lane_seconds, cancel_requested_at, cancel_reason, settled_at"
+    "attached_at, released_at, outcome, gpu_seconds, lane_seconds, cancel_requested_at, cancel_reason, settled_at, "
+    "restart_count, lost_reason"
 )
 
 
@@ -98,6 +99,7 @@ def public(e: dict | None, history: list[dict] | None = None) -> dict | None:
             "gpu_seconds": float(x["gpu_seconds"]) if x["gpu_seconds"] is not None else None,
             "cancel_requested": x["cancel_requested_at"] is not None,
             "settled": x["settled_at"] is not None,
+            "lost_reason": x.get("lost_reason"),
         }
 
     out = one(e)
@@ -211,9 +213,17 @@ def attach(operation: str, attempt: str, worker: dict, worker_request_id: str | 
             raise HTTPException(409, f"operation {operation}: its reservation is released; attach refused")
         r = c.execute(
             "update native_executions set state = 'attached', attached_at = now(), pod = %s, pod_namespace = %s, "
-            "pod_uid = %s, worker_request_id = %s where operation = %s and attempt = %s and state = 'prepared' "
-            "and cancel_requested_at is null returning operation",
-            (worker["pod"], worker["namespace"], worker["uid"], worker_request_id, operation, attempt),
+            "pod_uid = %s, worker_request_id = %s, restart_count = %s where operation = %s and attempt = %s "
+            "and state = 'prepared' and cancel_requested_at is null returning operation",
+            (
+                worker["pod"],
+                worker["namespace"],
+                worker["uid"],
+                worker_request_id,
+                worker.get("restart_count"),
+                operation,
+                attempt,
+            ),
         ).fetchone()
         if r is None:
             raise HTTPException(409, f"operation {operation}: attach of attempt {attempt} lost the race; refused")
@@ -341,13 +351,14 @@ def sweep() -> list[str]:
             continue
         if not gone:
             continue
+        why = gone if isinstance(gone, str) else "pod gone"
         with db.pool().connection() as c, c.transaction():
             _lock(c, e["operation"])
             r2 = c.execute(
-                "update native_executions set state = 'lost', released_at = now(), outcome = 'lost', "
+                "update native_executions set state = 'lost', released_at = now(), outcome = 'lost', lost_reason = %s, "
                 "lane_seconds = extract(epoch from (now() - attached_at)) "
                 "where operation = %s and attempt = %s and state = 'attached' returning operation",
-                (e["operation"], e["attempt"]),
+                (why, e["operation"], e["attempt"]),
             ).fetchone()
         if r2:
             out.append(f"{e['operation']}:lost")
@@ -366,17 +377,32 @@ def caller_gone(namespace: str, pod: str, region: str) -> bool:
     return (obj.status.phase if obj.status else None) in ("Succeeded", "Failed")
 
 
-def _worker_gone(e: dict) -> bool:
-    """Confirmed loss only: the pod by exact UID no longer exists or finished."""
+def _worker_gone(e: dict):
+    """Confirmed loss only, as a reason (falsy = alive): the pod by exact UID no longer exists, finished, or its worker
+    container restarted since the attach (same pod, same UID: the kubelet restarted the engine, its GPU state and the
+    request are gone, nothing will release; the restart count of the non-queue-proxy containers is recorded at attach
+    and compared here). Readiness, a timeout or an unreadable API never count."""
     try:
         obj = retry(kube.core(e["region"]).read_namespaced_pod, e["pod"], e["pod_namespace"])
     except ApiException as ex:
         if ex.status == 404:
-            return True
+            return "pod gone"
         raise
     if obj.metadata.uid != e["pod_uid"]:
-        return True
-    return (obj.status.phase if obj.status else None) in ("Succeeded", "Failed")
+        return "pod replaced"
+    if (obj.status.phase if obj.status else None) in ("Succeeded", "Failed"):
+        return "pod finished"
+    now = worker_restarts(obj)
+    if e.get("restart_count") is not None and now > e["restart_count"]:
+        return f"worker container restarted ({e['restart_count']} -> {now})"
+    return None
+
+
+def worker_restarts(obj) -> int:
+    """The restart count of the worker's containers (every container but Knative's queue-proxy, whose restart loses no
+    engine state)."""
+    statuses = (obj.status.container_statuses if obj.status else None) or []
+    return sum(int(cs.restart_count or 0) for cs in statuses if cs.name != "queue-proxy")
 
 
 LEASE_MODES = ("optional", "required")

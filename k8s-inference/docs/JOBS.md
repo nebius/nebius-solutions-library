@@ -597,7 +597,8 @@ for the uploader's attempt record: the operation is `SUCCEEDED` only with that r
 with `TRANSFER_ONLY=1`: it delivers the complete capture and never calls the endpoint again (no complete capture: the
 retry fails with "nothing to export"); while it runs the root reports `FINALIZING`, `finalizing_by` and the retry's
 `attempt_id` (`attempt_role: export`). Any other status from the endpoint is captured and delivered as well: the operation is
-`FAILED` (exit 2 for a 4xx, the caller's error; exit 5 for another status, the endpoint's error) and
+`FAILED` (exit 2 for a 4xx, the caller's error; exit 5 for another status, the endpoint's error, or an endpoint that
+did not become ready within `READY_MAX_WAIT`, the call's timeout by default) and
 `GET /v1/operations/{id}/result` reports `export_state: succeeded` with the `result_ref` of that delivered error
 response; a re-delivery through `:export` ends with the same captured outcome, so a delivered error never becomes a
 success, live or after the Job is gone. A FAILED call whose delivery failed (`export_state: failed`, a complete capture)

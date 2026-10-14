@@ -529,6 +529,11 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             if s["native_lease"] not in ("optional", "required"):
                 raise HTTPException(400, "native_lease: optional | required")
             runtime["nativeLease"] = s["native_lease"]
+        if s.get("ingress_isolation"):
+            # opt-in (docs/API.md "Ingress isolation"): nothing changes for an endpoint that does not name it
+            if s["ingress_isolation"] != "declared-ports":
+                raise HTTPException(400, "ingress_isolation: declared-ports")
+            runtime["ingressIsolation"] = s["ingress_isolation"]
         if s.get("pull_secret"):
             runtime["imagePullSecrets"] = [s["pull_secret"]]
         w = s.get("weights") or {}
@@ -730,6 +735,8 @@ PLURALS = {
     # multi-node endpoints (runtime.nodes > 1): the replica group, its leader Service's route to the gateway
     "LeaderWorkerSet": kube.LWS,
     "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes"),
+    # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
+    "CiliumNetworkPolicy": ("cilium.io", "v2", "ciliumnetworkpolicies"),
 }
 
 

@@ -289,6 +289,12 @@ create table if not exists operation_marks (
         reason    text
     );
     """,
+    # 18: the worker container's restart count at attach (a restart within the same pod loses the worker's state: a
+    # confirmed loss, like a gone pod) and why an execution was lost
+    """
+    alter table native_executions add column if not exists restart_count integer;
+    alter table native_executions add column if not exists lost_reason text;
+    """,
 ]
 
 _pool = None

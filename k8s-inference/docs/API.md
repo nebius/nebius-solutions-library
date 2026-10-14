@@ -316,7 +316,7 @@ operation, on the existing ledger (the operation's member; nothing new is queued
 | `POST /internal/executions/<op>:attach` `{attempt, worker_request_id}` | the worker pod (its own ServiceAccount token; TokenReview, pod UID, the endpoint's own pod, the call's model) | **atomically before it enqueues GPU work**: `prepared → attached` for the prepared attempt only; a stale attempt, another pod or no prepared execution is 409 and the worker fails closed (it does not run the request). Idempotent for the same (operation, attempt, pod UID, worker_request_id): a dropped response is retried safely |
 | `GET /internal/executions/<op>` | the attached worker only | `cancel_requested`, `cancel_reason`: the cooperative abort signal |
 | `POST /internal/executions/<op>:release` `{attempt, worker_request_id, outcome, gpu_seconds}` | the attached pod, after its own settlement (natural completion, or the stop ACK of a drain) | `attached → released` for exactly that attempt, pod and request id (a stale same-pod release naming another attempt or request id is 409); `lane_seconds` (wall-clock occupancy, attached → released, always recorded) distinct from `gpu_seconds` (only what the worker measured; null = unknown, never zero). Idempotent for the same tuple. Frees nothing by itself |
-| lost | the reconciler | an attached execution whose pod, by exact UID, no longer exists or finished: `lost`, usage unknown. Never from readiness, a timeout, or an API lookup that failed: those keep it attached and the slot held |
+| lost | the reconciler | an attached execution whose pod, by exact UID, no longer exists or finished, **or whose worker container restarted inside the same pod** (the restart count of the non-queue-proxy containers at attach is recorded and compared: same pod, same UID, but the engine's state and the request are gone and nothing will release): `lost`, usage unknown, `lost_reason` says which. Never from readiness, a timeout, or an API lookup that failed: those keep it attached and the slot held |
 | closed | the join (billing) | the caller is over and the live execution was never attached: closed in the same transaction that decides the settlement, so a delayed worker cannot attach and enqueue GPU work after the reservation went (attach → 409) |
 | owner context | the lease routes → the attached worker | `attach` and `GET` answer with `owner: {tenant, owner, model}` from the operation's durable owner record (written at admission, pod-authenticated to read): the trusted owner group a worker may key its own state on; never a client header, never the tenant/key-alias headers |
 | cancel | `:cancel` on the call, the deadline | a request (`cancel_requested`) to the attached worker; the caller Job is stopped as before; nothing is released |
@@ -366,6 +366,30 @@ required mode or on any refusal: fail closed, do not run the request; `LeaseUnav
 (`gpu_seconds` only as measured, `None` = unknown). Transport errors are retried with the same tuple (idempotent on
 the API), a 4xx/409 answer is final for the request. The worker keys its own state on `exe.owner`
 (`{tenant, owner, model}`), never on a client header.
+
+### Ingress isolation (declared ports)
+
+An engine that binds a second port on every interface (a vendor NIM on 9000 behind the wrapper the endpoint declares on
+8080) is reachable on that port by any pod that can reach the pod's IP, with no key, no markers and no lease. Tenant
+pods cannot (their egress is an allow-list, `docs/OPERATIONS.md` "Tenant isolation"), but the `models` namespace carries
+no policy of its own, so another model's container could. `ingress_isolation: declared-ports` on an endpoint model
+(opt-in; nothing changes for a model that does not name it) renders one more object next to the endpoint's, a namespaced
+`CiliumNetworkPolicy <id>-ingress` on that endpoint's pods, which admits only:
+
+| from | to | why |
+|---|---|---|
+| the node (`host`, `remote-node` entities) | every port | kubelet probes, the queue-proxy drain on preStop |
+| `envoy-gateway-system` | 8012, 8112 (queue-proxy http1/h2c); a multi-node leader: the declared port | the gateway's data path: every request the endpoint serves comes this way, through the key check, the markers and the lease |
+| `knative-serving` (Knative shape only) | 8012, 8112, 9090 | the activator (scale from zero, bursts) and the autoscaler's queue-proxy scrape |
+| Prometheus (`monitoring`) | 9090, 9091 (queue-proxy metrics); multi-node: the declared port | the fleet's metrics |
+| the replica group's own pods (multi-node only) | every port | NCCL and the engine's own group ports |
+
+Everything else into the pods is dropped: the second port, the declared container port itself (the queue-proxy reaches it
+over localhost), from any other model, tenant or namespace. Egress is not touched (the lease client's path to the control
+API stays). Cilium policies are allow-lists that add up, so the object widens nothing elsewhere; it is applied, updated
+and deleted with the endpoint's other objects (platform chart 0.1.7 gives both API Roles `ciliumnetworkpolicies` in
+`models`, nothing wider). A required-lease endpoint should opt in: its lease protocol protects only what arrives through
+the gateway.
 
 ## Bindings and execution options (runs, and endpoint calls with private I/O)
 

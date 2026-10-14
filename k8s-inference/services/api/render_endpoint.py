@@ -77,6 +77,7 @@ DEFAULTS: dict = {
     "volumes": [],
     "persistentVolumes": [],
     "nativeLease": "",  # optional | required: the pod gets the lease client's token and env (docs/API.md)
+    "ingressIsolation": "",  # declared-ports: a CiliumNetworkPolicy admits only the data path into the pod (docs/API.md)
     "readinessProbe": {},
     "livenessProbe": {},
     "securityContext": {},
@@ -664,6 +665,79 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
     return [lws, service, route]
 
 
+# Knative's data path into an endpoint pod is the queue-proxy: 8012 (http1) and 8112 (h2c) carry every request the
+# gateway or the activator sends (the user container is reached over localhost only); 9090 is the queue-proxy's
+# autoscaler metrics, 9091 the user metrics it proxies (PodMonitor `knative-queue-proxy`); 8022 (drain) is called by the
+# kubelet (host entity). A multi-node endpoint has no queue-proxy: its leader Service targets the declared port.
+QUEUE_PROXY_DATA = ("8012", "8112")
+QUEUE_PROXY_METRICS = ("9090", "9091")
+
+
+def _tcp(ports) -> list[dict]:
+    return [{"ports": [{"port": str(p), "protocol": "TCP"} for p in ports]}]
+
+
+def _ingress_policy(v: dict, nodes: int) -> dict:
+    """`ingress_isolation: declared-ports` (docs/API.md "Ingress isolation"): a namespaced CiliumNetworkPolicy on this
+    endpoint's pods that admits only the platform's own data path on the declared ports (the gateway and the Knative
+    activator to the queue-proxy, or to the container port of a multi-node leader), the node (kubelet probes, drain),
+    Prometheus to the metrics ports, and the replica group's own pods (multi-node). Every other ingress is dropped: a
+    second port an engine binds on 0.0.0.0 (a NIM on 9000 behind a wrapper on 8080), the container port itself, from
+    any other model, tenant or namespace. Egress is not touched (the lease client's path stays). Cilium policies are
+    allow-lists that add up: this one widens nothing anywhere else."""
+    name, ns = v["name"], v["namespace"]
+    multi = nodes > 1
+    data = [str(v.get("port"))] if multi else list(QUEUE_PROXY_DATA)
+    metrics = [str(v.get("port"))] if multi else list(QUEUE_PROXY_METRICS)
+    selector = (
+        {"matchLabels": {f"{LABEL}/model": name}}
+        if multi
+        else {"matchLabels": {"serving.kserve.io/inferenceservice": name}}
+    )
+    ingress = [
+        {
+            "fromEntities": ["host", "remote-node"]
+        },  # kubelet probes and the queue-proxy drain (:8022), node-local traffic
+        {
+            "fromEndpoints": [{"matchLabels": {"io.kubernetes.pod.namespace": "envoy-gateway-system"}}],
+            "toPorts": _tcp(data),
+        },
+    ]
+    if not multi:
+        ingress.append(  # the activator (scale from zero, burst) and the autoscaler's queue-proxy scrape
+            {
+                "fromEndpoints": [{"matchLabels": {"io.kubernetes.pod.namespace": "knative-serving"}}],
+                "toPorts": _tcp(data + ["9090"]),
+            }
+        )
+    ingress.append(
+        {
+            "fromEndpoints": [
+                {"matchLabels": {"io.kubernetes.pod.namespace": "monitoring", "app.kubernetes.io/name": "prometheus"}}
+            ],
+            "toPorts": _tcp(metrics),
+        }
+    )
+    if multi:
+        ingress.append(  # the group's own pods (NCCL, the engine's own ports): every port, nothing else selects them
+            {
+                "fromEndpoints": [
+                    {"matchLabels": {"io.kubernetes.pod.namespace": ns, "leaderworkerset.sigs.k8s.io/name": name}}
+                ]
+            }
+        )
+    return {
+        "apiVersion": "cilium.io/v2",
+        "kind": "CiliumNetworkPolicy",
+        "metadata": {"name": f"{name}-ingress", "namespace": ns, "labels": _labels(v)},
+        "spec": {
+            "description": f"{name}: only the platform's data path on the declared ports reaches the endpoint's pods",
+            "endpointSelector": selector,
+            "ingress": ingress,
+        },
+    }
+
+
 def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
     """The gateway's authorization of the endpoint's external routes through the API's authorizer."""
     name = v["name"]
@@ -768,6 +842,10 @@ def render(
     docs = [_securitypolicy(v, api_backend)]
     docs += [_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes)
     docs += _localmodelcache(v) + _pvcs(v)
+    if v.get("ingressIsolation"):
+        if str(v["ingressIsolation"]) != "declared-ports":
+            raise _fail("ingress_isolation: declared-ports is the only mode", v["name"])
+        docs.append(_ingress_policy(v, nodes))
     return sorted(
         docs,
         key=lambda d: (KIND_ORDER.get(d["kind"], len(KIND_ORDER)), d["kind"] if d["kind"] not in KIND_ORDER else ""),

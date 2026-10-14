@@ -4,6 +4,28 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.64, platform chart 0.1.7
+
+- Ingress isolation (docs/API.md "Ingress isolation"): `ingress_isolation: declared-ports` on an endpoint model renders a
+  namespaced `CiliumNetworkPolicy <id>-ingress` on that endpoint's pods admitting only the platform's data path (the
+  gateway and the Knative activator to the queue-proxy, or to the declared port of a multi-node leader), the node,
+  Prometheus and the replica group's own pods; a second port an engine binds on 0.0.0.0, and the container port itself,
+  are reachable from no other model, tenant or namespace. Opt-in: nothing changes for a model that does not name it;
+  egress is not touched. The platform chart gives both API Roles `ciliumnetworkpolicies` in `models` (check.sh invariant).
+- Native execution leases: a worker container that restarted inside the same pod (same UID) is a confirmed loss: the
+  restart count of the non-queue-proxy containers is recorded at attach (migration 18) and compared by the sweep;
+  `lost_reason` on the handle says why an execution was lost (pod gone | pod replaced | pod finished | worker container
+  restarted). A queue-proxy restart, readiness, a timeout or an unreadable API still never count.
+
+## jobs 0.1.22
+
+- Caller readiness (services/jobs/bin/call.sh): the gateway holds a readiness GET while a cold replica starts, so a probe
+  that ends without an answer only means "not yet"; the probes are now short (`READY_TIMEOUT` 30 s, was 120 s) with
+  pauses of 2 s doubling to `READY_BACKOFF_MAX` 10 s (was 5 s doubling to 320 s), so a ready replica is seen within about
+  40 s instead of minutes; bounded by `READY_MAX_WAIT` (default the call's timeout) of wall-clock time, past which the
+  call fails explicitly (exit 5) instead of running into the Job's deadline. The inference POST keeps its own backoff and
+  retry budget and is still made exactly once.
+
 ## api 0.11.63, jobs 0.1.21
 
 - Work mount aliases (docs/JOBS.md "Work mount aliases"): `job.workMountAliases` / spec `work_mount_aliases`

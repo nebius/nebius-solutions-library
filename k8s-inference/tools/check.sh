@@ -273,8 +273,15 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
             assert set(r.get("resources", [])) <= {"revisions"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on serving.knative.dev; revisions only"
             assert set(r["verbs"]) <= {"get", "list"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on revisions: read-only"
         assert any("revisions" in r.get("resources", []) and {"get", "list"} <= set(r["verbs"]) for r in rules), f"{cid}: Role {role['metadata']['name']}: revisions get+list missing"
+        # the opt-in ingress policy (services/api/render_endpoint.py _ingress_policy) is applied and deleted by the same Roles:
+        # ciliumnetworkpolicies only on cilium.io, nothing wider (no clusterwide policies, no other Cilium objects)
+        cil = [r for r in role["rules"] if "cilium.io" in r.get("apiGroups", [])]
+        assert cil, f"{cid}: Role {role['metadata']['name']} grants nothing on cilium.io (the ingress policy needs ciliumnetworkpolicies)"
+        for r in cil:
+            assert set(r.get("resources", [])) <= {"ciliumnetworkpolicies"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on cilium.io"
+            assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on ciliumnetworkpolicies"
         seen += 1
-        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only")
+        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only; ciliumnetworkpolicies scoped")
 assert seen, "no cluster rendered an API Role in the models namespace"
 EOF5
 }
