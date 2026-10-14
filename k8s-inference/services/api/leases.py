@@ -209,7 +209,9 @@ def attach(operation: str, attempt: str, worker: dict, worker_request_id: str | 
             )
         if cancel_at is not None:
             raise HTTPException(409, f"operation {operation}: cancelled before the worker attached; attach refused")
-        if keys.reservation_key(operation) is None:
+        # the operation's live reservation: its own, or its root's for an active member (an endpoint child shares its
+        # root's slot and has no row of its own; the first LeRobot child on 109 was refused here with a live root)
+        if keys.reservation_key_of(operation) is None:
             raise HTTPException(409, f"operation {operation}: its reservation is released; attach refused")
         r = c.execute(
             "update native_executions set state = 'attached', attached_at = now(), pod = %s, pod_namespace = %s, "

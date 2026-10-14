@@ -706,8 +706,9 @@ def test_a_gangs_shared_checkpoint_leaf_is_provisioned_for_the_ranks_before_they
     pod = js["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
     assert any(v["name"] == "checkpoints" for v in pod["volumes"])
     inits = pod.get("initContainers") or []
-    assert inits and inits[0]["name"] == "checkpoint-provision", inits
-    init = inits[0]
+    init = next((c for c in inits if c["name"] == "checkpoint-provision"), None)
+    assert init is not None, inits
+    assert [c["name"] for c in inits][-1] == "checkpoint-provision"  # after the existing inits (the input fetch first)
     assert init["command"] == ["/usr/local/bin/scratch.sh", "provision", "/work/checkpoint"]
     root = js["metadata"]["name"]
     assert init["volumeMounts"] == [

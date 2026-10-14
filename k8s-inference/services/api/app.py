@@ -389,13 +389,7 @@ ADMITTED_BEARER_PREFIX = "s2-admitted."
 def _reservation_key_of(operation: str) -> str | None:
     """The key (hash) an operation is admitted on: its own reservation, or, for a member of a run (a continuation, a
     stage, an endpoint child), its root's; None when nothing live holds it (released, settled, cancelled)."""
-    h = keys.reservation_key(operation)
-    if h:
-        return h
-    member = keys.member_of(operation)
-    if not member or member.get("state") not in (None, "active"):
-        return None
-    return keys.reservation_key(member["root"]) if member.get("root") else None
+    return keys.reservation_key_of(operation)
 
 
 def _admitted_principal(token: str, operation: str, model: str) -> Principal:

@@ -885,7 +885,7 @@ def _multinode(
         # shared-scratch caller provisions EXACTLY that leaf (chown 10001:10001, chmod 2770 of the mount point, not
         # recursive, nothing outside it) before any rank starts; idempotent on a restart or a resume (existing files
         # untouched); every rank pod runs it (the leaf is shared, the second one finds it done)
-        pod["initContainers"] = [_checkpoint_provision(root)] + list(pod.get("initContainers") or [])
+        pod["initContainers"] = list(pod.get("initContainers") or []) + [_checkpoint_provision(root)]  # after fetch
     _mount_data(r, pod, [main])
     _mount_weights(r, pod, [main])
     rank = {
