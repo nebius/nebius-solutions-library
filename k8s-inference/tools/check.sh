@@ -102,8 +102,9 @@ for q in queues:
     for f in q["spec"]["resourceGroups"][0]["flavors"]:
         res = {r["name"]: r for r in f["resources"]}
         assert "ephemeral-storage" in res, f"{cid}: {q['metadata']['name']}/{f['name']}: no ephemeral-storage entry"
-        budget = res["ephemeral-storage"].get("nominalQuota") or res["ephemeral-storage"].get("borrowingLimit") or 0
-        assert str(budget).endswith("Gi") and int(str(budget)[:-2]) > 0, f"{cid}: {q['metadata']['name']}/{f['name']}: ephemeral-storage budget {budget!r}"
+        e = res["ephemeral-storage"]
+        budget = e.get("nominalQuota") if e.get("nominalQuota") not in (None, 0) else e.get("borrowingLimit", e.get("nominalQuota"))
+        assert str(budget).endswith("Gi") and int(str(budget)[:-2]) >= 0, f"{cid}: {q['metadata']['name']}/{f['name']}: ephemeral-storage budget {budget!r} (a quantity in Gi, zero allowed: a fleet may reserve the whole disk)"
     fl = q["spec"]["resourceGroups"][0]["flavors"]
     first = [f for f in fl if f["name"] in system]
     rest = [f for f in fl if f["name"] not in system]

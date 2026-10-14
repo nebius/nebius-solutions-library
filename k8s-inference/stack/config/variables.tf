@@ -371,6 +371,10 @@ variable "fleet" {
     error_message = "gpu_operator.kernel_module is open, proprietary or auto; GPUDirect Storage (gds) needs the open kernel modules."
   }
   validation {
+    condition     = var.fleet.node_reserve.ephemeral_fraction > 0 && var.fleet.node_reserve.ephemeral_fraction <= 1 && var.fleet.node_reserve.ephemeral_gib >= 0
+    error_message = "node_reserve.ephemeral_fraction is in (0, 1] and node_reserve.ephemeral_gib is 0 or more (a reserve larger than the disk's share budgets zero scratch, which is allowed)."
+  }
+  validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,22}$", var.fleet.name))
     error_message = "fleet.name: lowercase letters, digits and dashes, 2-23 characters (it prefixes cloud resource names)."
   }
