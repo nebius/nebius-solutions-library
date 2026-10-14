@@ -4,6 +4,27 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.110
+
+(0.11.110 = 0.11.109 plus the fleet operator surface; jobs 0.1.27 and platform chart 0.1.12 unchanged; no migration.)
+
+- Fleet operators (docs/API.md "Fleet operators"): a key with `metadata.role=fleet` (tenant `platform`, minted only by
+  the fleet's own bootstrap, `python -m keys bootstrap` with role `fleet`; never by a tenant admin, never by an
+  import) gets the explicit cross-tenant surface `GET /v1/fleet/tenants[/{tenant}]` (the fleet document's tenants and
+  every tenant with keys on record: quota, fair share, dedicated pools, assets, key counts, spend, what the keys hold)
+  and `/v1/fleet/tenants/{tenant}/keys` (list, create, `:import`, PATCH budget/models/expiry, `:block` and unblock,
+  DELETE) through the tenant's own key functions with the same safe projection. Tenant admins stay tenant-scoped (403
+  on the fleet surface); the fleet operator is no tenant admin (403 on `/v1/keys`) and runs nothing. Same database,
+  same auth: no new identity store.
+
+- Multi-node runs (docs/JOBS.md "Multi-node runs"): with `checkpoints: shared` every rank pod (and the gang's CPU
+  finalizer) runs the trusted scratch provisioning init container on exactly the gang's checkpoint leaf
+  (`checkpoints/<root>` on the tenant's shared claim, the same mount) before main and the uploader: the kubelet
+  creates a missing subPath directory root-owned 0755 and the ranks (10001, no capability) could not write it (the
+  first real 2x1 MPI run on a fresh root, 2026-10-14: `/work/checkpoint` not writable while `/work` was). chown
+  10001:10001 and chmod 2770 of the mount point only, not recursive, CHOWN/FOWNER/DAC_OVERRIDE only, idempotent on
+  a restart or a resume; a local-checkpoint gang is untouched.
+
 ## api 0.11.109
 
 (0.11.109 = 0.11.108 plus the restore triple on every attempt entry and the Knative Service as the rollout witness; jobs

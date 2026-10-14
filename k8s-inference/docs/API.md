@@ -161,7 +161,7 @@ the torch.compile cache survives a restart (the first start of a trillion-parame
 ## Keys
 
 A key is `sk-` + 40 characters, shown once at creation; the fleet database (`keys` table, `services/api/keys.py`)
-holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`),
+holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`, `fleet`),
 model allow-list (empty = every model), budget in USD (null = unlimited), spend, expiry and block flag. Every
 API checks the key on every request (hash lookup, cached `AUTH_CACHE_S` = 30 s): blocked, expired and
 budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke`, the operations and the
@@ -294,6 +294,22 @@ plain deployment the image of its pool's GPU class. Regions named under `deploym
 runs; a region without variants keeps the automatic pool choice. A redefinition that drops a variant (or a region)
 removes its service, its LiteLLM deployment and, once Knative has torn its routes down, its authorizer; a dropped
 warm variant holds no GPUs beyond that.
+
+## Fleet operators
+
+A fleet operator is a key with `metadata.role=fleet` in the platform's own tenant (`platform`, next to the router
+key), minted only by the fleet's bootstrap (`python -m keys bootstrap` with `KEY_SPEC` role `fleet`; a tenant admin
+cannot mint one and an import refuses the role). It has the explicit cross-tenant surface and nothing else:
+
+| Route | What |
+|---|---|
+| `GET /v1/fleet/tenants`, `GET /v1/fleet/tenants/<tenant>` | every tenant of the fleet: the fleet document's (`charts/fleet` tenants.yaml: `gpu_quota`, `fair_share_weight`, `dedicated_pools`, `assets`, `in_fleet_document`) and every tenant with keys on record, with `keys`, `admins`, `blocked` counts, `spend` (USD over its keys) and `usage` (operations in flight, reserved and unknown GPU seconds over its keys). The platform's own keys are not a tenant |
+| `GET /v1/fleet/tenants/<tenant>/keys` | the tenant's keys exactly as its admin lists them (the same safe projection: never a hash or a value) |
+| `POST /v1/fleet/tenants/<tenant>/keys`, `POST …/keys:import`, `PATCH …/keys/<alias>`, `POST …/keys/<alias>:block[?blocked=false]`, `DELETE …/keys/<alias>` | the tenant's own key functions with an explicit tenant: a user key (no pass-through routes), an import under the tenant's rules, budget / model allow-list (the grant) / expiry, block or unblock (the record stays), revoke; the audit names the fleet operator (`fleet:<alias>`) |
+
+A tenant admin is refused on this surface (403): its authority is tenant-scoped and unchanged. The fleet operator
+is refused on the tenant surface (`/v1/keys`) and, with a `read:catalog`-only key, on every model and operation
+route: it manages, it does not run.
 
 ## Sessions (live streams to an endpoint)
 

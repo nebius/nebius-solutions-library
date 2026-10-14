@@ -252,3 +252,16 @@ def admin(p: Principal = Depends(principal)) -> Principal:
     if (p.info.get("metadata") or {}).get("role") != "admin":
         raise HTTPException(403, "endpoint scaling and key management need a key with metadata.role=admin")
     return p
+
+
+FLEET_ROLE = "fleet"  # the fleet operator (docs/API.md "Fleet operators"): tenants, their keys and usage, nothing else
+
+
+def fleet_operator(p: Principal = Depends(principal)) -> Principal:
+    """A fleet operator key (`metadata.role=fleet`, minted only by the fleet's own bootstrap: `python -m keys
+    bootstrap` with role fleet, never by a tenant admin or an import): the explicit cross-tenant surface under
+    `/v1/fleet/tenants`. A tenant admin's authority is untouched (it is not a fleet operator and the fleet operator
+    is not a tenant admin: `admin` refuses it)."""
+    if p.role != FLEET_ROLE:
+        raise HTTPException(403, "fleet-wide tenant and key management needs a key with metadata.role=fleet")
+    return p

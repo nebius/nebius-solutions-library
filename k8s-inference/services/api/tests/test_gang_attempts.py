@@ -693,3 +693,38 @@ def test_the_restore_triple_is_absent_not_null_where_no_gang_ack_decided_it(clie
     assert not any(k in by[f"{op}-single"] for k in triple), by[f"{op}-single"]  # no gang rank: undecided, absent
     assert not any(k in by[live] for k in triple), by[live]  # a live pod without its record: absent
     assert not any(k in o for k in triple), {k: o.get(k) for k in triple}  # the current attempt: absent as well
+
+
+def test_a_gangs_shared_checkpoint_leaf_is_provisioned_for_the_ranks_before_they_start(monkeypatch):
+    """The kubelet creates a missing subPath directory root-owned 0755; the ranks run as 10001 without any
+    capability, so a fresh root's `/work/checkpoint` was unwritable (the first real 2x1 MPI run, 2026-10-14). With
+    `checkpoints: shared` every rank pod runs the trusted scratch provisioning init on EXACTLY that leaf (the same
+    mount: the claim at `checkpoints/<root>`; chown 10001:10001 and chmod 2770 of the mount point, not recursive,
+    CHOWN/FOWNER/DAC_OVERRIDE only) before main and the uploader; a local-checkpoint gang has no such init; the
+    gang's CPU finalizer provisions the same leaf."""
+    js = _render(monkeypatch, {**FINALIZE, "checkpoints": "shared"} if "checkpoints" not in FINALIZE else FINALIZE)
+    pod = js["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    assert any(v["name"] == "checkpoints" for v in pod["volumes"])
+    inits = pod.get("initContainers") or []
+    assert inits and inits[0]["name"] == "checkpoint-provision", inits
+    init = inits[0]
+    assert init["command"] == ["/usr/local/bin/scratch.sh", "provision", "/work/checkpoint"]
+    root = js["metadata"]["name"]
+    assert init["volumeMounts"] == [
+        {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
+    ]
+    main = next(c for c in pod["containers"] if c["name"] == "main")
+    assert {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"} in main[
+        "volumeMounts"
+    ]
+    sc = init["securityContext"]
+    assert sc["runAsUser"] == 0 and sc["runAsNonRoot"] is False
+    assert sc["capabilities"] == {"drop": ["ALL"], "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]}
+    assert init["resources"]["limits"] == {"cpu": "200m", "memory": "64Mi"}
+    # the ranks themselves stay as they are: non-root, no capability added
+    assert "runAsUser" not in (main.get("securityContext") or {}) or main["securityContext"]["runAsUser"] != 0
+    # a local-checkpoint gang: no shared leaf, no provisioning init
+    local = _render(monkeypatch, {**FINALIZE, "checkpoints": "local"})
+    lpod = local["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    assert not any(v["name"] == "checkpoints" for v in lpod["volumes"])
+    assert not [c for c in (lpod.get("initContainers") or []) if c["name"] == "checkpoint-provision"]

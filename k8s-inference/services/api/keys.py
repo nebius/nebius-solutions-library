@@ -1192,6 +1192,50 @@ def rollback_run_member(operation: str) -> bool:
         return True
 
 
+def tenants_on_record() -> dict[str, dict]:
+    """Every tenant the keys table knows (docs/API.md "Fleet operators"): key counts by role and blocked state, and
+    the tenant's spend (USD) summed over its keys. The platform's own keys (the router, fleet operators) are not a
+    tenant and are left out."""
+    with _connection() as c:
+        rows = c.execute(
+            "select tenant, role, blocked, count(*), coalesce(sum(spend), 0) from keys where tenant <> %s "
+            "group by tenant, role, blocked order by tenant",
+            (ROUTER["tenant"],),
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for tenant, role, blocked, n, spend in rows:
+        t = out.setdefault(tenant, {"keys": 0, "blocked": 0, "admins": 0, "spend": 0.0})
+        t["keys"] += int(n)
+        t["spend"] += float(spend)
+        if blocked:
+            t["blocked"] += int(n)
+        if role == "admin":
+            t["admins"] += int(n)
+    return out
+
+
+def tenant_usage(tenant: str) -> dict:
+    """What a tenant's keys hold right now beyond their spend (the per-key `run_usage`, summed): operations in
+    flight, GPU seconds reserved by active work, GPU seconds of attempts that ended without a trustworthy
+    measurement (kept against the budgets)."""
+    with _connection() as c:
+        active, reserved = c.execute(
+            "select count(*), coalesce(sum(r.gpu_seconds), 0) from key_reservations r join keys k on k.hash = r.key_hash "
+            "where k.tenant = %s",
+            (tenant,),
+        ).fetchone()
+        unknown = c.execute(
+            "select coalesce(sum(m.gpu_bound), 0) from key_run_members m join keys k on k.hash = m.key_hash "
+            "where k.tenant = %s and m.state = 'unknown'",
+            (tenant,),
+        ).fetchone()[0]
+    return {
+        "active_operations": int(active),
+        "reserved_gpu_seconds": float(reserved),
+        "unknown_gpu_seconds": float(unknown),
+    }
+
+
 def run_usage(h: str) -> dict:
     """What a key holds beyond its spend: reserved GPU seconds (bounds of active work), unknown GPU seconds (attempts
     without a trustworthy measurement) and the operations in flight."""
