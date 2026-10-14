@@ -58,6 +58,7 @@ from reconciliation import fallback_switch as fallback_switch
 from reconciliation import idle_shutdown as idle_shutdown
 from reconciliation import recovery_switch as recovery_switch
 from reconciliation import release_stale_reservations as release_stale_reservations
+from reconciliation import unschedulable_switch as unschedulable_switch
 from schemas import INVOKE_TIMEOUT_MAX_S as INVOKE_TIMEOUT_MAX_S
 from schemas import (
     BindingRequest,
@@ -114,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.79", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.80", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -760,10 +761,9 @@ def _authorize_model(
         elif leases.mode_of(m) == "required":
             # a direct POST to an endpoint whose worker requires a lease carries no markers: the worker refuses it
             # (required mode fails closed, unchanged); named here so the refusal is attributable from the API log
-            log.info(
-                "authorize %s: direct POST by %s carries no markers (the model requires a native lease: the worker refuses it)",
+            log.info(  # no caller identity in this line: the shared telemetry carries no customer identities
+                "authorize %s: a direct POST carries no markers (the model requires a native lease: the worker refuses it)",
                 m["name"],
-                p.info.get("key_alias") or p.tenant,
             )
     if not admitted and p.role != keys.ROUTER["role"]:
         # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is

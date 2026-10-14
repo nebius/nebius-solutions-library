@@ -3,7 +3,7 @@ name: fleet
 description: Scheduling view of the fleet definition for one cluster. Worker (regional GPU) clusters get Kueue ResourceFlavors per pool, the fleet's `default` lender ClusterQueue with the shared pool capacity, one `<tenant>-default` and `<tenant>-prefer-<gpu-class>` ClusterQueue per tenant and GPU class (preferred class first, reserved before on-demand before spot, then the other classes by price, weighted fair sharing between the tenants), image pre-pull DaemonSets per pool, the image cache configuration and the price ConfigMap; the control cluster gets the MultiKueue objects (clusters, configs, admission checks) and the same queues as the fleet-wide manager view.
 type: application
 kubeVersion: ">= 1.31.0-0"
-version: 0.1.11
+version: 0.1.12
 appVersion: "2"
 maintainers:
   - name: Nebius solutions library

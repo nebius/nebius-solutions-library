@@ -116,6 +116,44 @@ for n, d in flavors.items():
 for n, want in (("prep", "true"), ("scratch-only", "false")):
     if n in flavors:
         assert flavors[n]["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") == want, f"{cid}: CPU pool {n} must carry shared-fs={want}"
+# per-node fit (docs/SCHEDULING.md "Per-node fit", api 0.11.80): fit.yaml of the fleet document names what ONE node of every
+# flavor admits, from the same helpers that size the quotas: every worker flavor has an entry, the entry's cpu/memory per node
+# times the pool's nodes never exceeds the lender queue's nominal quota of that flavor (the same arithmetic, so the API never
+# admits a shape Kueue's per-node budget would not), and the fit never claims more than the flavor's quota per node
+cm = next((d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "fleet-prices"), None)
+assert cm and "fit.yaml" in cm["data"], f"{cid}: fleet-prices carries no fit.yaml (per-node fit)"
+fit = yaml.safe_load(cm["data"]["fit.yaml"]) or {}
+pools = yaml.safe_load(cm["data"]["pools.yaml"]) or {}
+worker_flavors = [n for n, d in flavors.items() if (d["spec"].get("nodeLabels") or {}).get("serverless2.nebius/pool")]
+if worker_flavors:
+    assert cid in fit, f"{cid}: fit.yaml has no entry for this cluster"
+else:  # the control cluster (manager view): fit.yaml carries every region, as pools.yaml does
+    regions = {p["region"] for p in pools.values()}
+    assert regions <= set(fit), f"{cid}: fit.yaml (manager view) misses regions {sorted(regions - set(fit))}"
+lender = next((q for q in queues if q["metadata"]["name"] == "default"), None)
+nominal = {}
+if lender:
+    for fl in lender["spec"]["resourceGroups"][0]["flavors"]:
+        nominal[fl["name"]] = {r["name"]: str(r.get("nominalQuota", 0)) for r in fl["resources"]}
+def gi(v):
+    v = str(v)
+    return float(v[:-2]) if v.endswith("Gi") else float(v) / 2**30
+for n, d in flavors.items():
+    label = (d["spec"].get("nodeLabels") or {}).get("serverless2.nebius/pool")
+    if not label:
+        continue
+    entry = fit[cid].get(label)
+    assert entry, f"{cid}: flavor {n} (pool {label}) has no fit.yaml entry"
+    assert entry["kind"] in ("system", "cpu", "gpu") and float(entry["cpu"]) >= 0 and float(entry["memory_gib"]) >= 0, f"{cid}: fit {label}: {entry}"
+    assert (entry["kind"] == "gpu") == (d["metadata"].get("labels", {}).get("serverless2.nebius/gpu-class", "none") != "none"), f"{cid}: fit {label} kind {entry['kind']} disagrees with the flavor"
+    assert entry["shared_fs"] == (d["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") == "true"), f"{cid}: fit {label} shared_fs disagrees with flavor {n}"
+    if n in nominal and n in pools and entry["kind"] == "gpu":
+        nodes = int(pools[n]["max_nodes"])
+        assert float(entry["cpu"]) * nodes >= float(nominal[n]["cpu"]), f"{cid}: fit {label} cpu {entry['cpu']} x {nodes} nodes < the queue's {nominal[n]['cpu']}"
+        assert float(entry["memory_gib"]) * nodes >= gi(nominal[n]["memory"]), f"{cid}: fit {label} memory"
+        assert float(entry["cpu"]) <= float(nominal[n]["cpu"]) or nodes == 0, f"{cid}: fit {label} claims more cpu per node than the whole flavor's quota"
+        assert int(entry["gpus"]) == int(pools[n]["gpus_per_node"]), f"{cid}: fit {label} gpus {entry['gpus']} != preset {pools[n]['gpus_per_node']}"
+print(f"   ok per-node fit {cid}: fit.yaml covers {len([n for n, d in flavors.items() if (d['spec'].get('nodeLabels') or {}).get('serverless2.nebius/pool')])} flavors, per-node x nodes >= queue nominal")
 for q in queues:
     covered = q["spec"]["resourceGroups"][0]["coveredResources"]
     assert "ephemeral-storage" in covered, f"{cid}: {q['metadata']['name']} does not cover ephemeral-storage (a run requesting node-local scratch would be NoMatchingFlavor)"

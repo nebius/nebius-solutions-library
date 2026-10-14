@@ -342,6 +342,46 @@ def _mount_aliases(r: dict, containers: list[dict], fetch: dict) -> None:
     ]
 
 
+def _fit_terms(pod: dict, r: dict, terms: list, placement: dict | None, region: str | None, name: str):
+    """Per-node fit (docs/SCHEDULING.md "Per-node fit", services/api/fit.py): the pools whose ONE node holds the pod's
+    effective requests, conjunctive with everything already decided (an explicit `pool:`, the GPU class pools, the
+    shared-fs and local-NVMe terms stay as they are; this only narrows the pool set and the candidate clusters). No
+    pool at all: 400 `impossible shape` (nothing is enlarged or reduced on the caller's behalf). Without fit.yaml
+    (an older fleet chart) nothing changes. Returns the (possibly narrowed) placement."""
+    import fit
+
+    if not fit.table():
+        return placement
+    req = fit.pod_requests(pod)
+    if placement is not None:
+        clusters = list(placement.get("regions") or []) or None
+    else:  # pinned to a region: its clusters
+        clusters = [c for c, x in kube.fleet().get("clusters", {}).items() if (x or {}).get("region") == region] or None
+    pool_term = next((t for t in terms if t["key"] == f"{LABEL}/pool"), None)
+    candidates = {r["pool"]} if r.get("pool") else (set(pool_term["values"]) if pool_term else None)
+    holds = fit.fitting(req, clusters, candidates)
+    if not holds:
+        what = f"the class's pool {r['pool']}" if r.get("pool") else "any eligible pool"
+        raise HTTPException(
+            400,
+            f"impossible shape: the run's pod needs {fit.describe(req)} on one node and no node of {what} holds it; "
+            f"the largest candidate node admits {fit.largest(clusters, candidates)} (the per-node reserves of the fleet "
+            'apply; docs/SCHEDULING.md "Per-node fit")',
+        )
+    if not r.get("pool"):
+        if pool_term:
+            pool_term["values"] = sorted(holds)
+        else:
+            terms.append({"key": f"{LABEL}/pool", "operator": "In", "values": sorted(holds)})
+    if placement is not None and placement.get("regions"):
+        fits = sorted({c for cs in holds.values() for c in cs})
+        keep = [c for c in placement["regions"] if c in fits]
+        if keep and keep != list(placement["regions"]):
+            placement = {**placement, "regions": keep}
+    log.debug("fit %s: %s -> pools %s", name, fit.describe(req), sorted(holds))
+    return placement
+
+
 def build_run(
     name: str,
     model: dict,
@@ -549,6 +589,7 @@ def build_run(
         # node that mounts it can run it; Kueue skips a flavor whose nodeLabels contradict this (the system flavor
         # unless weights_filesystem.mount_on_system), docs/FLEET.md "Filesystem-aware placement"
         terms.append({"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
+    placement = _fit_terms(pod, r, terms, placement, region, name)
     if terms:
         pod["affinity"] = {
             "nodeAffinity": {
@@ -1776,6 +1817,133 @@ def switch_class(
             kube.activate_workload(ns, md.get("uid", ""), region)
         except Exception as e:  # noqa: BLE001
             log.warning("fallback: restoring %s/%s after a failed successor: %s", ns, name, e)
+        raise
+    import attempts
+
+    attempts.mark_successor(name, new)
+    return created, was_created
+
+
+def switch_unschedulable(
+    ns: str, name: str, region: str, model: dict, defaults: dict, why: str, admit=None
+) -> tuple[dict, bool]:
+    """Same-root recovery of an admitted run whose pod can never schedule where Kueue put it (docs/SCHEDULING.md
+    "Per-node fit", reconciliation.unschedulable_switch): nothing of it ran (every pod Pending, unbound), so the run is
+    created again as `<root>-rN` from the same input, placement and class, rendered with the per-node fit affinity;
+    the original is fenced first exactly as a fallback is (suspended, named after its successor: status SUPERSEDED, its
+    Workload deactivated so the worker's copy and its pod go and Kueue never admits it again), then the successor is
+    admitted on the run's ledger and created; a failed admission or create restores the original. The owner, the root
+    operation id and the durable handle stay the run's (lineage: resumed-from, recovered-from, the successor mark)."""
+    orig = get(ns, name, region)
+    op = normalise(orig)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    started = [
+        p
+        for p in orig.get("_pods") or []
+        if (p.get("spec") or {}).get("nodeName") or (p.get("status") or {}).get("phase") != "Pending"
+    ]
+    if (
+        op["status"] not in ("QUEUED", "RUNNING")
+        or started
+        or ann.get(f"{LABEL}/successor")
+        or ann.get(f"{LABEL}/cancelled")
+    ):
+        raise HTTPException(
+            409, f"operation {name} is {op['status']} with {len(started)} started attempt(s); no unschedulable switch"
+        )
+    import catalog
+
+    model = catalog.pinned(model, ann)
+    try:
+        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
+    except ValueError:
+        ex = {}
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    n = 1 + sum(
+        1
+        for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500)
+        if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root
+    )
+    new = f"{root}-r{n}"
+    d = dict(defaults)
+    out = output_prefix(orig) or ""
+    d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
+    gpu_class = labels.get(f"{LABEL}/gpu-class") or None
+    pl = ex.get("placement") or {}
+    tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
+        f"{LABEL}/regions"
+    )
+    placement = {
+        "manager": True,
+        "profile": labels.get("kueue.x-k8s.io/queue-name") or profile_of(model),
+        "classes": [gpu_class] if gpu_class else (pl.get("gpu_preference") or []),
+        "regions": tmpl_regions.split(",")
+        if tmpl_regions
+        else (
+            [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
+            or pl.get("allowed_clusters")
+            or model["regions"]
+        ),
+    }
+    job = build_run(
+        new,
+        model,
+        op["input"],
+        labels[f"{LABEL}/tenant"],
+        ann.get(f"{LABEL}/name"),
+        None,
+        op["timeout_s"],
+        labels.get(f"{LABEL}/priority"),
+        None,
+        d,
+        ann.get(f"{LABEL}/key"),
+        placement=placement,
+        gpu_class=gpu_class,
+        ex=ex,
+    )
+    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
+    _inherit_owner(job, ann)
+    job["metadata"]["annotations"][f"{LABEL}/recovered-from"] = name
+    job["metadata"]["annotations"][f"{LABEL}/recovery"] = why
+    execution.deliver(
+        ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
+    )
+    try:
+        retry(
+            kube.batch(region).patch_namespaced_job,
+            name,
+            ns,
+            {
+                "metadata": {"annotations": {f"{LABEL}/successor": new, f"{LABEL}/recovery": why}},
+                "spec": {"suspend": True},
+            },
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    try:
+        kube.deactivate_workload(ns, md.get("uid", ""), region)  # the worker's copy and its Pending pod go
+    except Exception as e:  # noqa: BLE001 - the Job is suspended either way
+        log.warning("unschedulable switch: deactivate workload of %s/%s: %s", ns, name, e)
+    try:
+        if admit:
+            admit(job)
+        created, was_created = create(ns, job, region)
+    except Exception:
+        try:  # nothing was created: the original stays as it was
+            retry(
+                kube.batch(region).patch_namespaced_job,
+                name,
+                ns,
+                {
+                    "metadata": {"annotations": {f"{LABEL}/successor": None, f"{LABEL}/recovery": None}},
+                    "spec": {"suspend": False},
+                },
+            )
+            kube.activate_workload(ns, md.get("uid", ""), region)
+        except Exception as e:  # noqa: BLE001
+            log.warning("unschedulable switch: restoring %s/%s after a failed successor: %s", ns, name, e)
         raise
     import attempts
 

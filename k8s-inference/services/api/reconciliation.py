@@ -8,6 +8,7 @@ Authorization policies stay until the corresponding predictor routes have disapp
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -231,6 +232,134 @@ def fallback_switch() -> list[str]:
     return moved
 
 
+UNSCHEDULABLE_WAIT_S = int(os.environ.get("UNSCHEDULABLE_WAIT_S", "600"))  # how long a pod must sit unschedulable
+UNSCHEDULABLE_MAX_SWITCHES = 2  # per root: a shape that keeps landing where it cannot fit is an operator's call
+UNSCHEDULABLE_REASON = "Unschedulable"
+
+
+def _unschedulable_since(pod: dict) -> datetime | None:
+    """When the scheduler last said the pod cannot be placed (PodScheduled=False, reason Unschedulable), None otherwise."""
+    for c in (pod.get("status") or {}).get("conditions") or []:
+        if c.get("type") == "PodScheduled" and c.get("status") == "False" and c.get("reason") == UNSCHEDULABLE_REASON:
+            t = c.get("lastTransitionTime")
+            return datetime.fromisoformat(str(t).replace("Z", "+00:00")) if t else None
+    return None
+
+
+def unschedulable_switch() -> list[str]:
+    """Admitted runs whose pod can never schedule where Kueue put it (docs/SCHEDULING.md "Per-node fit"): every pod of
+    the run is Pending and unbound, the newest has been `Unschedulable` for UNSCHEDULABLE_WAIT_S, and the pool the
+    worker's Kueue assigned (the pod's injected nodeSelector) has no node that holds the pod's requests (fit.yaml). Such a
+    run is moved to a successor on the same root rendered with the fit affinity (jobs.switch_unschedulable), at most
+    UNSCHEDULABLE_MAX_SWITCHES times per root. A pod that merely waits for a node of a pool that CAN hold it (a pool
+    scaling from zero, a full pool: temporarily unavailable) is left alone; a shape no pool anywhere holds is an
+    impossible shape: annotated once (`unschedulable`), never moved, the operator decides. Control API only."""
+    import fit
+
+    if not FLEET_MANAGER or not fit.table():
+        return []
+    moved = []
+    now = datetime.now(timezone.utc)
+    try:
+        namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
+    except Exception:  # noqa: BLE001
+        return []
+    for ns in namespaces:
+        try:
+            b = kube.batch()
+            items = [
+                b.api_client.sanitize_for_serialization(j)
+                for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items
+            ]
+        except Exception:  # noqa: BLE001
+            continue
+        clusters = None
+        for item in items:
+            md = item["metadata"]
+            ann = md.get("annotations") or {}
+            name = md["name"]
+            if (
+                not jobs.is_manager_job(item)
+                or status.finished(item)
+                or ann.get(f"{cfg.LABEL}/successor")
+                or ann.get(f"{cfg.LABEL}/cancelled")
+                or ann.get(f"{cfg.LABEL}/unschedulable")
+                or (item.get("spec") or {}).get("suspend")
+            ):
+                continue
+            if clusters is None:
+                clusters = kube.workload_clusters(ns)
+            if not clusters.get(md.get("uid", "")):
+                continue  # not placed: Kueue has not admitted it anywhere (that is the queue, not this)
+            try:
+                job = jobs.get(ns, name, REGION)
+                pods = job.get("_pods") or []
+                if not pods or job.get("_pods_unknown"):
+                    continue
+                if any(
+                    (p.get("spec") or {}).get("nodeName") or (p.get("status") or {}).get("phase") != "Pending"
+                    for p in pods
+                ):
+                    continue  # an attempt started (or ended): never an unschedulable switch
+                newest = pods[-1]
+                since = _unschedulable_since(newest)
+                if since is None or (now - since).total_seconds() < UNSCHEDULABLE_WAIT_S:
+                    continue
+                holds = fit.assigned_pool_holds(newest)
+                if holds is None or holds:
+                    continue  # unknown pool/table (no judgement) or a pool that can hold it: waiting for a node
+                req = fit.pod_requests(newest.get("spec") or {})
+                anywhere = fit.fitting(req)
+                pool = ((newest.get("spec") or {}).get("nodeSelector") or {}).get(f"{cfg.LABEL}/pool")
+                cluster = job.get("_cluster")
+                if not anywhere:
+                    _annotate(
+                        ns,
+                        name,
+                        {
+                            f"{cfg.LABEL}/unschedulable": f"impossible shape: the pod needs {fit.describe(req)} on one node; "
+                            f"no pool of the fleet holds it (assigned {cluster}/{pool}); the largest node admits {fit.largest()}"
+                        },
+                    )
+                    log.warning("unschedulable %s/%s: impossible shape, left to the operator", ns, name)
+                    continue
+                root = ann.get(f"{cfg.LABEL}/resumed-from") or name
+                done = sum(
+                    1
+                    for j in items
+                    if (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root
+                    and str((j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/recovery") or "").startswith(
+                        "unschedulable"
+                    )
+                )
+                if done >= UNSCHEDULABLE_MAX_SWITCHES:
+                    _annotate(
+                        ns,
+                        name,
+                        {
+                            f"{cfg.LABEL}/unschedulable": f"{done} unschedulable switches on this root already; left to the operator"
+                        },
+                    )
+                    continue
+                m = catalog.require(md["labels"].get(f"{cfg.LABEL}/model", ""))
+                why = (
+                    f"unschedulable on {cluster}/{pool} for {int((now - since).total_seconds())} s: the pod needs "
+                    f"{fit.describe(req)} on one node and no node of that pool holds it; re-placed on the pools whose node does "
+                    f"({', '.join(sorted(anywhere))})"
+                )
+                new, _ = continue_run(
+                    root,
+                    lambda admit: jobs.switch_unschedulable(
+                        ns, name, REGION, m, catalog.fleet_params(m), why, admit=admit
+                    ),
+                )
+                moved.append(new["metadata"]["name"])
+                log.info("unschedulable switch: %s/%s -> %s (%s)", ns, name, new["metadata"]["name"], why)
+            except Exception:  # noqa: BLE001
+                log.exception("unschedulable switch of %s/%s failed", ns, name)
+    return moved
+
+
 def _lost(op: dict, job: dict) -> tuple[dict | None, str | None]:
     """The confirmed infrastructure loss of a run, if any: (the lost attempt, why) when no attempt is RUNNING and the
     newest attempt that ran ended PREEMPTED (a pod with DisruptionTarget or deleted, an uploader record `interrupted`,
@@ -391,6 +520,7 @@ async def _reconcile_loop():
             await asyncio.to_thread(idle_shutdown)
             await asyncio.to_thread(fallback_switch)
             await asyncio.to_thread(recovery_switch)
+            await asyncio.to_thread(unschedulable_switch)
             await asyncio.to_thread(reconcile_models)
             await asyncio.to_thread(release_stale_reservations)
             await asyncio.to_thread(gate_stages)

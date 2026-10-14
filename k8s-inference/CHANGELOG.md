@@ -4,6 +4,31 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.80, fleet chart 0.1.12
+
+- Per-node fit (docs/SCHEDULING.md "Per-node fit"). Kueue admits against a flavor's aggregate quota and never checks
+  that one node holds the pod: on 2026-10-14 an AlphaFold 3 MCP pipeline (16.1 CPU, 64.25 Gi, 32 Gi ephemeral,
+  GPU-free) was refused by the CPU pool's ephemeral quota for the moment, fell through the flavor order to
+  `h100-reserved-1x`, whose aggregate CPU covered it while its nodes admit 14, and stayed Pending for ever holding
+  that flavor's quota. Fleet chart 0.1.12 publishes `fit.yaml` in the fleet document (what one node of every pool
+  admits, from the quota helpers with one node); the render constrains every run to the pools whose node holds the
+  pod's effective requests (cpu, memory, ephemeral-storage, GPUs; main + uploader; conjunctive with the explicit
+  `pool:`, the class pools, `shared-fs` and `local-nvme`; placement regions narrowed to clusters with a fitting pool)
+  and refuses at submission a shape no candidate pool holds (400 `impossible shape`, naming the largest candidate
+  node); an explicit `pool:` that cannot hold the pod is refused, never widened. A fitting pool whose quota is busy
+  stays QUEUED (temporarily unavailable). Nothing is reduced or enlarged on the caller's behalf. `tools/check.sh`
+  asserts `fit.yaml` against the ClusterQueues on every cluster. Without `fit.yaml` nothing changes.
+- Same-root recovery of an admitted-but-unschedulable run (`reconciliation.unschedulable_switch`,
+  `jobs.switch_unschedulable`): every pod Pending and unbound, the newest `Unschedulable` for `UNSCHEDULABLE_WAIT_S`
+  (600 s), the assigned pool unable to hold it → a successor `<root>-r<n>` with the fit affinity from the same input,
+  placement, class and key, the original fenced exactly as a fallback (`SUPERSEDED`, Workload deactivated, Job
+  suspended), lineage and the owner's handle preserved, a failed create restores the original; a pool that can hold
+  the pod is left waiting, a started attempt is never switched, an impossible shape is annotated once
+  (`serverless2.nebius/unschedulable`), at most two switches per root. Topology-Aware Scheduling is left for its
+  own qualification.
+- The gateway hook's direct-POST log line names the model only (no key alias, no tenant): the shared telemetry
+  carries no customer identities. The admitted-POST line (operation, attempt) is unchanged.
+
 ## api 0.11.79, platform chart 0.1.9
 
 - Operation status/result stay readable when usage is unknown: `billing.py` settles a run or a native endpoint call

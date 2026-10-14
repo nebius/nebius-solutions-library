@@ -332,7 +332,10 @@ system nodes stays there (finalizers, export retries, small CPU classes); one th
 admitted against the pool's quota, lands Pending with the pool's node selector and toleration (Kueue injects both),
 the node group scales up, the pod runs, the group scales back down. The manager mirrors the flavors and quotas, so a
 fleet-placed CPU run goes to a region whose CPU pool has room. No class setting is needed; a class may still pin
-`pool: <name>`. `tools/check.sh` asserts the order (system, CPU pools, GPU pools) and the tolerations.
+`pool: <name>`. `tools/check.sh` asserts the order (system, CPU pools, GPU pools) and the tolerations. The flavor
+order alone is an aggregate decision: a GPU-free run that does not fit the CPU pool's quota for the moment would move
+on to a GPU pool whose aggregate CPU covers it while no single node does; the API's per-node fit
+(docs/SCHEDULING.md "Per-node fit", `fit.yaml` of the fleet document) keeps such a run on the pools whose node holds it.
 
 ## Filesystem-aware placement
 

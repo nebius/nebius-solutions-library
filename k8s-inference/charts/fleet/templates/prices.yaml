@@ -36,6 +36,29 @@ data:
       tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
     {{- end }}
     {{- end }}
+  fit.yaml: |
+    {{- /* per-node fit (docs/SCHEDULING.md "Per-node fit"): what ONE node of each pool admits, by cluster id and pool
+           label, from the same helpers that size the Kueue quotas (fleet.quota / fleet.cpuPoolQuota / fleet.systemQuota
+           with one node, no endpoint floor): the API refuses a pod shape no node of a candidate pool can hold and
+           constrains a run to the pools whose node holds it, so Kueue's aggregate quota never admits a pod that no
+           single node fits (api 0.11.80). shared_fs as the flavors' nodeLabels (worker-flavors.yaml). */}}
+    {{- range $rn, $r := $f.regions }}
+    {{- if or (include "fleet.isControl" $) (eq $r.id $.Values.cluster) }}
+    {{- $fs := default dict $r.weights_filesystem }}
+    {{- $fsOn := and (default false $fs.enabled) true }}
+    {{- $sq := include "fleet.systemQuota" (dict "fleet" $f "system_pool" (merge (dict "node_count" 1) (default dict $r.system_pool))) | fromYaml }}
+    {{ $r.id }}:
+      system: { kind: system, gpus: 0, cpu: {{ $sq.cpu }}, memory_gib: {{ $sq.memoryGi }}, ephemeral_gib: {{ $sq.ephemeralGi }}, shared_fs: {{ if and $fsOn (default false $fs.mount_on_system) }}true{{ else }}false{{ end }} }
+      {{- range $pn, $p := (default dict $r.cpu_pools) }}
+      {{- $q := include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" (merge (dict "max_nodes" 1) $p)) | fromYaml }}
+      {{ $pn }}: { kind: cpu, gpus: 0, cpu: {{ $q.cpu }}, memory_gib: {{ $q.memoryGi }}, ephemeral_gib: {{ $q.ephemeralGi }}, shared_fs: {{ if and $fsOn (or (not (hasKey $p "shared_filesystem")) (eq (toString $p.shared_filesystem) "true")) }}true{{ else }}false{{ end }} }
+      {{- end }}
+      {{- range $pn, $p := $r.pools }}
+      {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (merge (dict "max_nodes" 1 "endpoint_floor_gpus" 0) $p)) | fromYaml }}
+      {{ $pn }}: { kind: gpu, gpus: {{ $q.gpu }}, cpu: {{ $q.cpu }}, memory_gib: {{ $q.memoryGi }}, ephemeral_gib: {{ $q.ephemeralGi }}, shared_fs: {{ if $fsOn }}true{{ else }}false{{ end }} }
+      {{- end }}
+    {{- end }}
+    {{- end }}
   clusters.yaml: |
     {{- /* cluster id (MultiKueueCluster name, pools' `region`, catalog deployments) -> the Nebius region and project:
            what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region) */}}
