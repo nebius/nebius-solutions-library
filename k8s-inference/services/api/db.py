@@ -307,6 +307,7 @@ create table if not exists operation_marks (
         annotations   jsonb not null default '{}'::jsonb,
         timeout_s     integer,
         output_prefix text,
+        managed_by    text,
         created_at    timestamptz not null default now()
     );
     """,

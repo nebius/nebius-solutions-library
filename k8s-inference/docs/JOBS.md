@@ -145,9 +145,12 @@ and annotations, region, timeout, output prefix), kept past the Job's TTL. When 
 gone (the Job's TTL garbage-collects the claim it owns) and no checkpoint pointer exists, `:resume` with
 `restart_from_inputs: true` renders the run again from that record on a fresh work volume on the same cluster, as a
 continuation of the same root (`<root>-rN`, annotation `restarted-from-inputs`): same owner, key, class binding and
-execution block, the current placement rules. Without the flag the resume is refused (409) so a checkpoint is never
-dropped unnoticed; a root admitted before 0.11.74 has no record and is refused (404 "submit a new run"): nothing is
-reconstructed from thin air. The run
+execution block, the current placement rules. A fleet-placed root restarts as a manager Job placed by the fleet again
+(the record keeps its `managedBy`; never a plain Job on the manager's cluster, never the old worker pin); a
+single-cluster root restarts on its own cluster. The terminal state comes from the durable attempt rows: a SUCCEEDED
+root is never restarted (409, its result stands), CANCELLED and FAILED may be. Without the flag the resume is refused
+(409) so a checkpoint is never dropped unnoticed; a root admitted before 0.11.74 has no record and is refused (404
+"submit a new run"): nothing is reconstructed from thin air. The run
 ledger's lineage head (`keys.run_head`, `stage_head`) is the authority behind the link: the handle follows it even
 without an annotation or mark, and the owner check applies to the named operation and to the head. `:cancel` by a
 graph root's id cancels the graph (its stages and the root lineage's head) also once the root's Job expired.

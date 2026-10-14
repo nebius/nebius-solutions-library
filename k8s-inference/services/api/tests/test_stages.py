@@ -11,6 +11,7 @@ import pytest
 
 import attempts
 import auth
+import catalog
 import execution
 import jobs
 import reconciliation
@@ -883,3 +884,150 @@ def test_restart_from_inputs_resumes_an_expired_failed_root_from_its_admission_r
     assert c.get(f"/v1/operations/{root}", headers=H).json()["id"] == succ  # the handle follows
     assert reconciliation.gate_stages() == []
     assert "root QUEUED" in cl.jobs[(NS, g0)]["metadata"]["annotations"][stages.WAIT_REASON]
+
+
+def _admission_from(job, region, managed_by=None):
+    return {
+        "operation": job["metadata"]["name"],
+        "tenant": "demo",
+        "region": region,
+        "labels": dict(job["metadata"]["labels"]),
+        "annotations": dict(job["metadata"]["annotations"]),
+        "timeout_s": job["spec"].get("activeDeadlineSeconds"),
+        "output_prefix": jobs.output_prefix(job),
+        "managed_by": managed_by,
+    }
+
+
+def test_restart_of_an_expired_fleet_placed_root_is_placed_by_the_fleet_again(world, monkeypatch):
+    """Root review of 0.11.74: the record was taken at creation on the manager's cluster (control), and the rebuilt
+    original carried no `managedBy`, so a restart would have rendered a plain Job pinned to control. Now the record keeps
+    `managedBy`; the restart is a manager Job placed by the fleet (regions annotation, no worker pin, no control pin),
+    on a fresh volume; the single-cluster case restarts on its own cluster."""
+    import admissions
+
+    c, cl, fk, rows, cancelled, root = world
+    m = catalog.get("hello-run")
+    fleet_job = jobs.build_run(
+        "op-fleet-1",
+        m,
+        {"output_prefix": "s3://b/p"},
+        "demo",
+        None,
+        None,
+        600,
+        None,
+        region=None,
+        placement={"manager": True, "classes": ["h100"], "regions": ["hub"]},
+    )
+    assert jobs.is_manager_job(fleet_job)
+    fleet_job["metadata"]["annotations"]["serverless2.nebius/owner"] = "p1"
+    rec = _admission_from(fleet_job, "eu-north1", managed_by=fleet_job["spec"]["managedBy"])
+    monkeypatch.setattr(admissions, "get", lambda operation: rec if operation == "op-fleet-1" else None)
+    monkeypatch.setattr(
+        attempts,
+        "synthesize",
+        lambda operation, tenant: {
+            "id": operation,
+            "status": "FAILED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 1,
+        },
+    )
+    new, created = jobs.resume(
+        NS, "op-fleet-1", "eu-north1", m, {"output_prefix": "s3://b/p"}, idem="k-fleet", restart_from_inputs=True
+    )
+    assert created and new["metadata"]["name"].startswith("op-fleet-1-r-")
+    assert jobs.is_manager_job(new), "the restart is a fleet-placed manager Job again"
+    # placed by the fleet again: no region pin, no node selector; the regions annotation is the dispatcher's input, which a
+    # manager resume leaves empty (the class decides), exactly like a resume of a live manager Job
+    assert "nodeSelector" not in new["spec"]["template"]["spec"]
+    assert new["metadata"]["labels"].get("serverless2.nebius/region") in (None, "")  # the fleet decides, no pin
+    assert jobs.placement_regions(new) == []
+    assert new["metadata"]["annotations"].get("serverless2.nebius/pinned-cluster") is None
+    assert not any(k.endswith("/cluster") for k in new["metadata"]["labels"]), new["metadata"]["labels"]
+    vol = next(v for v in new["spec"]["template"]["spec"]["volumes"] if v["name"] == "work")
+    assert vol["persistentVolumeClaim"]["claimName"] == f"{new['metadata']['name']}-work"
+    assert new["metadata"]["annotations"]["serverless2.nebius/owner"] == "p1"
+    assert new["metadata"]["annotations"]["serverless2.nebius/restarted-from-inputs"] == "op-fleet-1"
+    # the same key replays the same continuation, nothing new
+    again, created2 = jobs.resume(
+        NS, "op-fleet-1", "eu-north1", m, {"output_prefix": "s3://b/p"}, idem="k-fleet", restart_from_inputs=True
+    )
+    assert not created2 and again["metadata"]["name"] == new["metadata"]["name"]
+    # single-cluster: the restart stays on its own cluster
+    single = jobs.build_run(
+        "op-single-1",
+        m,
+        {"output_prefix": "s3://b/p"},
+        "demo",
+        None,
+        None,
+        600,
+        None,
+        "eu-north1",
+        {"output_prefix": "s3://b/p"},
+    )
+    rec2 = _admission_from(single, "eu-north1")
+    monkeypatch.setattr(admissions, "get", lambda operation: rec2 if operation == "op-single-1" else None)
+    new2, _ = jobs.resume(NS, "op-single-1", "eu-north1", m, {"output_prefix": "s3://b/p"}, restart_from_inputs=True)
+    assert not jobs.is_manager_job(new2) and new2["metadata"]["labels"]["serverless2.nebius/region"] == "eu-north1"
+
+
+def test_restart_refuses_a_succeeded_root_and_keeps_the_stale_and_owner_fences(world, monkeypatch):
+    import admissions
+
+    c, cl, fk, rows, cancelled, root = world
+    _fail(cl, rows, root)
+    for r in rows:
+        r.setdefault("model", "hello-run")
+    rec = _admission_from(cl.jobs[(NS, root)], "eu-north1")
+    del cl.jobs[(NS, root)]
+    monkeypatch.setattr(admissions, "get", lambda operation: rec if operation == root else None)
+    # SUCCEEDED on the durable rows: never restarted
+    monkeypatch.setattr(
+        attempts,
+        "synthesize",
+        lambda operation, tenant: {
+            "id": operation,
+            "status": "SUCCEEDED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 1,
+            "result_ref": "s3://b/r",
+        }
+        if operation == root
+        else None,
+    )
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
+    assert r.status_code == 409 and "SUCCEEDED" in r.json()["detail"], r.text
+    # CANCELLED: may be restarted like a FAILED one
+    monkeypatch.setattr(
+        attempts,
+        "synthesize",
+        lambda operation, tenant: {
+            "id": operation,
+            "status": "CANCELLED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 1,
+        }
+        if operation == root
+        else None,
+    )
+    assert (
+        c.post(
+            f"/v1/operations/{root}:resume",
+            headers={**H, "Authorization": "Bearer sk-other"},
+            json={"restart_from_inputs": True},
+        ).status_code
+        == 404
+    )
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
+    assert r.status_code == 202, r.text
+    succ = r.json()["id"]
+    # the original is a stale handle now: a further resume names the head
+    r = c.post(f"/v1/operations/{root}:resume", headers=H, json={"restart_from_inputs": True})
+    assert r.status_code == 409 and succ in r.json()["detail"], r.text
+    assert c.get(f"/v1/operations/{root}", headers=H).json()["id"] == succ

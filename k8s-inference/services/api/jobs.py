@@ -1935,7 +1935,12 @@ def resume(
                 404,
                 f"operation {name}: its Job expired and it has no admission record (admitted before api 0.11.74); submit a new run",
             )
-        orig = admissions.as_job(rec)
+        import attempts
+
+        durable = attempts.synthesize(name, rec["tenant"]) if attempts.enabled() else None
+        orig = admissions.as_job(rec, (durable or {}).get("status"))
+        if (durable or {}).get("status") == "SUCCEEDED":
+            raise HTTPException(409, f"operation {name} SUCCEEDED; its result stands, nothing to restart")
     expired = bool(orig.get("_expired"))
     op = normalise(orig)
     md = orig["metadata"]
@@ -1970,20 +1975,23 @@ def resume(
         # the new attempt needs neither the old volume nor the old region: a fresh volume where the fleet places it
         ex = {**(ex or {}), "recovery": {**((ex or {}).get("recovery") or {}), "checkpoint_ref": checkpoint_ref}}
         pvc, worker = None, (worker if not placement else None)
+    elif expired:
+        # the work volume went with the Job (it owned the claim): a restart from the recorded inputs on a fresh volume,
+        # asked for explicitly so a checkpoint is never dropped unnoticed; a fleet-placed run is placed by the fleet
+        # again (manager Job, no worker pin), a single-cluster run restarts on its own cluster
+        if not restart_from_inputs:
+            raise HTTPException(
+                409,
+                f"operation {name}: its Job and work volume expired; a resume renders it again from its recorded inputs "
+                "on a fresh volume: pass restart_from_inputs: true (or a checkpoint_ref)",
+            )
+        pvc, worker = None, (None if is_manager_job(orig) else worker)
     elif not worker:
         raise HTTPException(409, f"operation {name} never reached a worker; submit a new run")
     if checkpoint_ref:
         pass
     elif expired:
-        # the work volume went with the Job (it owned the claim): a restart from the recorded inputs on a fresh volume,
-        # on the same cluster (its pools, its filesystem), asked for explicitly so a checkpoint is never dropped unnoticed
-        if not restart_from_inputs:
-            raise HTTPException(
-                409,
-                f"operation {name}: its Job and work volume expired; a resume renders it again from its recorded inputs on a "
-                "fresh volume: pass restart_from_inputs: true (or a checkpoint_ref)",
-            )
-        pvc = None
+        pass  # decided above: fresh volume, fleet placement for a manager run
     elif is_jobset(orig):
         if ann.get(f"{LABEL}/checkpoints") != "shared":
             raise HTTPException(

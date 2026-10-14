@@ -4,6 +4,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.75 (supersedes the unapplied 0.11.74)
+
+- Restart from inputs, placement-correct: the admission record keeps the run's MultiKueue `managedBy`, so the restart of
+  an expired fleet-placed root is a manager Job placed by the fleet again (never a plain Job on the manager's cluster,
+  never a worker pin from before); a single-cluster root restarts on its own cluster. The terminal state comes from the
+  durable attempt rows: a SUCCEEDED root is never restarted (409, its result stands); CANCELLED and FAILED may be.
+  Regressions: fleet-manager admission → worker → TTL → restart; SUCCEEDED refused; stale handle after the restart names
+  the head; another principal 404; the same idempotency key replays the same continuation.
+
 ## api 0.11.74
 
 - Restart from inputs (docs/JOBS.md "Resume"): every run admitted from this version on leaves an admission record in the
