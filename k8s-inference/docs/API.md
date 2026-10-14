@@ -301,6 +301,12 @@ A fleet operator is a key with `metadata.role=fleet` in the platform's own tenan
 key), minted only by the fleet's bootstrap (`python -m keys bootstrap` with `KEY_SPEC` role `fleet`; a tenant admin
 cannot mint one and an import refuses the role). It has the explicit cross-tenant surface and nothing else:
 
+Set `fleet.fleet_operator_keys = ["rene"]` in `terraform.tfvars`, apply the control
+platform stage, then retrieve the sensitive login value with
+`./stack.sh output platform control -json fleet_operator_keys`. The default is an
+empty set. This reuses the existing key bootstrap and does not change tenant keys,
+create a customer bucket, add an expiry, or select an operator key for inference probes.
+
 | Route | What |
 |---|---|
 | `GET /v1/fleet/tenants`, `GET /v1/fleet/tenants/<tenant>` | every tenant of the fleet: the fleet document's (`charts/fleet` tenants.yaml: `gpu_quota`, `fair_share_weight`, `dedicated_pools`, `assets`, `in_fleet_document`) and every tenant with keys on record, with `keys`, `admins`, `blocked` counts, `spend` (USD over its keys) and `usage` (operations in flight, reserved and unknown GPU seconds over its keys). The platform's own keys are not a tenant |

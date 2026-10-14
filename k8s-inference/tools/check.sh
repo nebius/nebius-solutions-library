@@ -59,6 +59,8 @@ print("   ok iam_token: ephemeral + sensitive, referenced by stack/platform/prov
 PYEOF7
   step "terraform.tfvars.example passes the schema validations"
   tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
+  step "fleet operator configuration tests"
+  tf stack/config test -var-file="$EXAMPLE" -no-color
 }
 
 check_render() {

@@ -162,6 +162,9 @@ fleet = {
 
   # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys
   # (`./stack.sh output platform control -json tenant_keys`).
+  # Optional separate fleet-operator logins for cross-tenant key/usage management.
+  # Sensitive values: ./stack.sh output platform control -json fleet_operator_keys
+  fleet_operator_keys = [] # e.g. ["rene"]; never elevates a tenant admin
   tenants = {
     demo = {
       lifecycle_days = 90                  # run outputs expire after N days (0 = keep)

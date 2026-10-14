@@ -105,7 +105,14 @@ resource "kubernetes_secret_v1" "ngc" {
 # mirrored into LiteLLM for its OpenAI route) and so exists before any admin key could mint through the API.
 # Values are sensitive outputs (`tenant_keys`). A `-replace` of a key's random_password rotates it (same alias, spend kept).
 locals {
-  keys = local.role.control ? merge([for tn, t in local.tenants : { for kn, k in t.keys : "${tn}-${kn}" => merge(k, { tenant = tn, key = kn }) }]...) : {}
+  tenant_keys = local.role.control ? merge([for tn, t in local.tenants : { for kn, k in t.keys : "${tn}-${kn}" => merge(k, {
+    tenant = tn, key = kn, role = k.admin ? "admin" : "user"
+  }) }]...) : {}
+  operator_keys = local.role.control ? { for name in local.f.fleet_operator_keys : "platform-operator-${name}" => {
+    tenant     = "platform", key = name, role = "fleet", admin = false,
+    budget_usd = null, models = [], routes = []
+  } } : {}
+  keys = merge(local.tenant_keys, local.operator_keys)
   # the trust ConfigMap `api/trust` of the platform stage: the managed database's CA (and a private bundle, if any)
   key_job_mounts = concat([{ name = "trust", path = "/etc/ssl/msp", sub_path = null }],
   local.f.trust_bundle_pem == null ? [] : [{ name = "trust", path = "/etc/ssl/certs/ca-certificates.crt", sub_path = "ca.pem" }])
@@ -157,7 +164,7 @@ resource "kubernetes_job_v1" "key" {
           env {
             name = "KEY_SPEC"
             value = jsonencode({
-              alias  = each.key, tenant = each.value.tenant, role = each.value.admin ? "admin" : "user",
+              alias  = each.key, tenant = each.value.tenant, role = each.value.role,
               budget = each.value.budget_usd, models = each.value.models, routes = each.value.routes
             })
           }
@@ -213,7 +220,7 @@ resource "kubernetes_job_v1" "key" {
 # -json acceptance` gives it the inputs); `acceptance.probe = true` also runs the same script as a Job at apply
 # time, and the apply waits for it (up to 40 minutes on a cold region) and fails with it.
 locals {
-  first_key   = length(local.keys) > 0 ? sort(keys(local.keys))[0] : null
+  first_key   = length(local.tenant_keys) > 0 ? sort(keys(local.tenant_keys))[0] : null
   admin_keys  = sort([for k, v in local.keys : k if v.admin])
   first_admin = length(local.admin_keys) > 0 ? local.admin_keys[0] : null
   probe_on    = local.f.acceptance.probe && local.role.control && local.first_key != null

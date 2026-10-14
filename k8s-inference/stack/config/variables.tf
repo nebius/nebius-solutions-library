@@ -330,6 +330,9 @@ variable "fleet" {
       sha256    = optional(string)
       size      = optional(number)
     })), {})
+    # Fleet operators manage tenant/key metadata, not customer inference. Their keys use the existing
+    # bootstrap under tenant `platform`, remain separate from tenant admins, and are sensitive outputs.
+    fleet_operator_keys = optional(set(string), [])
     tenants = optional(map(object({
       regions           = optional(list(string)) # default: all regions
       lifecycle_days    = optional(number, 90)   # run outputs under operations/ expire after N days (0 = keep)
@@ -376,6 +379,14 @@ variable "fleet" {
     }), {})
 
   })
+
+  validation {
+    condition = alltrue([for name in var.fleet.fleet_operator_keys :
+      can(regex("^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$", name)) &&
+      !contains(flatten([for tn, t in var.fleet.tenants : [for kn in keys(t.keys) : "${tn}-${kn}"]]), "platform-operator-${name}")
+    ])
+    error_message = "fleet_operator_keys: names are DNS labels of at most 40 characters; platform-operator-<name> must not collide with a tenant key alias."
+  }
 
   validation {
     condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
