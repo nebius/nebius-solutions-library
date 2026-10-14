@@ -832,6 +832,16 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
                 force=True,
                 _content_type="application/apply-patch+yaml",
             )
+        elif kind == "ConfigMap":  # the endpoint's trust bundle file (render_endpoint._trust_configmap)
+            retry(
+                kube.core(region).patch_namespaced_config_map,
+                name,
+                ns,
+                doc,
+                field_manager=FIELD_MANAGER,
+                force=True,
+                _content_type="application/apply-patch+yaml",
+            )
         else:
             raise HTTPException(500, f"endpoint renderer produced an unexpected kind {kind}")
         applied.append(f"{kind}/{ns}/{name}")
@@ -891,6 +901,8 @@ def _delete(docs: list[dict], region: str) -> list[str]:
                 retry(kube.core(region).delete_namespaced_persistent_volume_claim, name, ns)
             elif kind == "Service":
                 retry(kube.core(region).delete_namespaced_service, name, ns)
+            elif kind == "ConfigMap":
+                retry(kube.core(region).delete_namespaced_config_map, name, ns)
         except ApiException as e:
             if e.status != 404:
                 raise HTTPException(502, f"{kind} {name}: {e.reason}")

@@ -343,7 +343,8 @@ attempt of that operation, seen before or never seen, is 409. Nothing can start 
 ### Lease clients
 
 A model opts in with `native_lease: optional | required`; the render then gives every pod of the endpoint exactly this,
-and nothing else changes in the apply shape (same four objects):
+and nothing else changes in the apply shape (same four objects; on a fleet with a CA bundle, plus one ConfigMap of the
+endpoint):
 
 | What | Where | Value |
 |---|---|---|
@@ -352,7 +353,9 @@ and nothing else changes in the apply shape (same four objects):
 | `S2_LEASE_TOKEN_FILE` | container env | the token file above |
 | `S2_LEASE_MODE` | container env | `optional` or `required` |
 | `S2_LEASE_AUDIENCE` | container env | the token's audience, for a client that mints nothing and checks what it was given |
-| `S2_CA_PEM` | container env, only on a fleet with a CA bundle (`/etc/ssl/msp` on the API) | public CA material (the same bundle the async caller mounts): the control hostnames are ACME-signed in public mode, so the system roots suffice and this is absent; in internal mode the client adds it to its trust |
+| trust bundle | file `/var/run/secrets/serverless2/ca-bundle.pem` in the same projected volume, only on a fleet with a CA bundle (`/etc/ssl/msp` on the API) | public CA material: the API's own merged roots (the system roots plus the fleet CAs, the same bundle the async caller mounts), whole, from the endpoint's ConfigMap `<name>-trust` in `models` (applied before, removed with the endpoint's other objects). The control hostnames are ACME-signed in public mode, so the system roots suffice and nothing is projected. Never an environment value: a bundle is hundreds of KB, above the kernel's single-argument bound, and a container with it in its environment never execs |
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` | container env, with the file above | the file above: the standard seams of OpenSSL/Python (`ssl.create_default_context`, what the shared client uses), requests, curl and the AWS SDKs; a client built on any of them trusts the fleet without a rebuild, and loses no public root (the file is the full merged bundle) |
+| `S2_CA_FILE` | container env, with the file above | the file above, for a client that wants the platform's bundle by name |
 
 The request's markers arrive as headers on the inference call (`x-serverless2-operation`, `x-serverless2-attempt`),
 forwarded by the gateway from the hook's verified context only (empty on a direct call; what a client sent is

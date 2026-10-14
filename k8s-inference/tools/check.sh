@@ -302,8 +302,16 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
         for r in cil:
             assert set(r.get("resources", [])) <= {"ciliumnetworkpolicies"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on cilium.io"
             assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on ciliumnetworkpolicies"
+        # the trust bundle file of a lease-enabled endpoint (render_endpoint._trust_configmap) is a ConfigMap of the endpoint:
+        # the same Roles apply and remove it; configmaps only, never secrets, in the core group
+        core = [r for r in role["rules"] if "" in r.get("apiGroups", [])]
+        assert any("configmaps" in r.get("resources", []) and {"get", "create", "patch", "delete"} <= set(r["verbs"]) for r in core), f"{cid}: Role {role['metadata']['name']}: configmaps get/create/patch/delete missing (the endpoint trust bundle)"
+        for r in core:
+            assert "secrets" not in r.get("resources", []), f"{cid}: Role {role['metadata']['name']} reaches secrets in models"
+            if "configmaps" in r.get("resources", []):
+                assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on configmaps"
         seen += 1
-        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only; ciliumnetworkpolicies scoped")
+        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions, read-only; ciliumnetworkpolicies and configmaps scoped")
 assert seen, "no cluster rendered an API Role in the models namespace"
 EOF5
 }

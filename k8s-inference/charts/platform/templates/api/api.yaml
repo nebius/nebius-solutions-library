@@ -83,6 +83,9 @@ rules:
   - apiGroups: [cilium.io]   # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
     resources: [ciliumnetworkpolicies]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]          # the trust bundle file of a lease-enabled endpoint (docs/API.md "Lease clients"): one ConfigMap
+    resources: [configmaps]  # per endpoint object, public CA material only, applied and removed with the endpoint
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints

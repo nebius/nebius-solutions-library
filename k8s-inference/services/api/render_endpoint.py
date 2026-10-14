@@ -28,6 +28,16 @@ from config import IMAGES_HOST, LABEL, PUBLIC_API_URL, SESSION_TOKEN_AUDIENCE
 # LEASE_AUDIENCE, the one the API's TokenReview expects), the control API's URL, and the files' paths as env.
 LEASE_DIR = "/var/run/secrets/serverless2"
 LEASE_AUDIENCE = SESSION_TOKEN_AUDIENCE or "serverless2"
+# the fleet's trust bundle (jobs.trust_bundle: the API's own merged roots, public material only), on a fleet whose control
+# hostnames are not publicly signed: projected as a FILE next to the token (a ConfigMap of the endpoint, one per
+# object name), never as an environment value (a full bundle is hundreds of KB: above the kernel's single-argument
+# bound, the container never execs). The standard OpenSSL seam (SSL_CERT_FILE) is what the pinned shared client
+# (services/lease-client/s2lease.py: ssl.create_default_context) and every SDK in the pod honour without a rebuild;
+# S2_CA_FILE names the same file for a client that wants it explicitly.
+TRUST_KEY = "ca-bundle.pem"
+TRUST_FILE = f"{LEASE_DIR}/{TRUST_KEY}"
+TRUST_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "AWS_CA_BUNDLE", "S2_CA_FILE")
+TRUST_MAX_BYTES = 1_000_000  # a ConfigMap holds 1 MiB; the bundle is projected whole or the render refuses, never cut
 
 POOL_LABEL = f"{LABEL}/pool"
 MODELS_NAMESPACE_DEFAULT = "models"
@@ -133,7 +143,7 @@ OMIT = (
 NOT_SETTINGS = ("paused", "price_per_gpu_hour", "parameters")
 # the order `helm template` printed the objects in (its install order: claims, then Services, then the custom
 # kinds by name); `apply` follows it, so the Service exists before the route that references it
-KIND_ORDER = {"PersistentVolumeClaim": 0, "Service": 1}
+KIND_ORDER = {"ConfigMap": 0, "PersistentVolumeClaim": 1, "Service": 2}  # the pod's mounts before the pod
 
 
 def _fail(what: str, obj: str) -> HTTPException:
@@ -346,6 +356,12 @@ def _volumes(v: dict) -> list[dict]:
                 },
             }
         )
+        if _trust(v):
+            # the fleet's trust bundle as a file beside the token (TRUST_FILE), from the endpoint's own ConfigMap
+            # (_trust_configmap, applied before the pod's object); required: a pod without its trust must not start
+            out[-1]["projected"]["sources"].append(
+                {"configMap": {"name": _trust_name(v), "items": [{"key": TRUST_KEY, "path": TRUST_KEY}]}}
+            )
     return out
 
 
@@ -359,11 +375,42 @@ def _lease_env(v: dict) -> list[dict]:
         {"name": "S2_LEASE_MODE", "value": str(v["nativeLease"])},
         {"name": "S2_LEASE_AUDIENCE", "value": LEASE_AUDIENCE},
     ]
-    if pem := trust_bundle():
-        # the fleet's CA bundle (public material only) when the control hostnames are not publicly signed: the same
-        # bundle the async caller gets (jobs.trust_bundle), as a value, no extra object in the apply shape
-        out.append({"name": "S2_CA_PEM", "value": pem})
+    if _trust(v):
+        # the fleet's CA bundle as a file (TRUST_FILE): the standard variables the async caller gets as well
+        # (jobs.py: OpenSSL/Python, requests, curl, the AWS SDKs) plus S2_CA_FILE; never the bundle itself as a value
+        out += [{"name": k, "value": TRUST_FILE} for k in TRUST_ENV]
     return out
+
+
+def _trust(v: dict) -> str | None:
+    """The bundle to project for this render (None without `native_lease` or on a fleet with public certificates):
+    read once per render (values() keeps it under `trustBundle`), the full file, never truncated."""
+    if not v.get("nativeLease"):
+        return None
+    if "trustBundle" not in v:
+        v["trustBundle"] = trust_bundle()
+    pem = v["trustBundle"]
+    if pem and len(pem.encode()) > TRUST_MAX_BYTES:
+        raise HTTPException(
+            500,
+            f"endpoint ({v['name']}): the fleet trust bundle ({len(pem.encode())} bytes) exceeds the projected bound",
+        )
+    return pem or None
+
+
+def _trust_name(v: dict) -> str:
+    return f"{v['name']}-trust"
+
+
+def _trust_configmap(v: dict) -> dict:
+    """The endpoint's trust bundle object: public CA material only (jobs.trust_bundle), the whole file under
+    TRUST_KEY; applied and deleted with the endpoint's other objects (models.apply / models._delete)."""
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": _trust_name(v), "namespace": v["namespace"], "labels": _labels(v)},
+        "data": {TRUST_KEY: _trust(v)},
+    }
 
 
 def trust_bundle() -> str | None:
@@ -842,6 +889,8 @@ def render(
     docs = [_securitypolicy(v, api_backend)]
     docs += [_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes)
     docs += _localmodelcache(v) + _pvcs(v)
+    if _trust(v):
+        docs.append(_trust_configmap(v))
     if v.get("ingressIsolation"):
         if str(v["ingressIsolation"]) != "declared-ports":
             raise _fail("ingress_isolation: declared-ports is the only mode", v["name"])

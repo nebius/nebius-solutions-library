@@ -4,6 +4,21 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.78, platform chart 0.1.8
+
+- Lease clients (docs/API.md "Lease clients"): on a fleet with a CA bundle, the bundle is projected as a FILE
+  (`/var/run/secrets/serverless2/ca-bundle.pem`, a second source of the `s2-lease` projected volume, from the
+  endpoint's own ConfigMap `<name>-trust` in `models`, applied before and removed with the endpoint's other objects)
+  and named by the standard variables `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` (the
+  async caller's set) plus `S2_CA_FILE`. `S2_CA_PEM` is no longer rendered: the full bundle (467 KB on the live
+  fleet) as an environment value exceeded the kernel's single-argument bound and the container never execed
+  (`exec /app/.venv/bin/python: argument list too long`). The bundle is projected whole (a render refuses above the
+  ConfigMap bound instead of cutting it). The shared client is unchanged (`services/lease-client/s2lease.py`,
+  sha256 `f96b274b…53885`): `ssl.create_default_context()` reads `SSL_CERT_FILE`, so an image built with it trusts
+  the fleet without a rebuild; verified against a live TLS listener in the tests. Platform chart 0.1.8: the two
+  endpoint Roles in `models` (`serverless2-api-endpoints`, `serverless2-api-agent-models`) gain `configmaps`
+  get/list/create/patch/delete (never secrets; `tools/check.sh` asserts the bound).
+
 ## api 0.11.77
 
 - Endpoint scratch (`empty_dirs`): a mount path may contain dots in its components (`/app/.cache`, an engine's hidden
