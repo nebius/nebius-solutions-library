@@ -389,6 +389,15 @@ create table if not exists operation_marks (
     alter table attempts add column if not exists resume_source_epoch int;
     alter table attempts add column if not exists resume_source text;
     """,
+    # 27: idempotent session creation (docs/API.md "Sessions"): an owner-scoped Idempotency-Key names at most one session
+    # (the unique index is the race arbiter across replicas); the semantic hash of the effective request (model,
+    # deployment, timeout_s, GPUs) tells a replay from a reuse of the key with another request (409)
+    """
+    alter table sessions add column if not exists idempotency_key text;
+    alter table sessions add column if not exists request_hash text;
+    create unique index if not exists sessions_idempotency on sessions (tenant, owner, idempotency_key)
+        where idempotency_key is not null;
+    """,
 ]
 
 _pool = None

@@ -1932,7 +1932,11 @@ def export_again(
         # the finalizer is ONE CPU pod, never the gang again: a single-node render of the model (no nodes, no GPU, no
         # fabric), its own small /work claim, the gang's shared checkpoint subPath mounted where the gang had it
         jb = dict(model.get("job") or {})
-        for k in ("nodes", "interconnect", "ibDevicesPerNode", "checkpoints"):
+        # Keep the admitted class's immutable image before dropping compute-only
+        # image selection. The CPU renderer has no GPU class; the finalizer below
+        # still prefers the finalized attempt's recorded digest when available.
+        jb["image"] = image_for_class(model, labels.get(f"{LABEL}/gpu-class"))
+        for k in ("nodes", "interconnect", "ibDevicesPerNode", "checkpoints", "images"):
             jb.pop(k, None)
         jb["gpu"] = 0
         jb["pvcSizeGi"] = JOB_PVC_SIZE_GI

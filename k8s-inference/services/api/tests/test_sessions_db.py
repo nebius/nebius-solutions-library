@@ -286,3 +286,98 @@ def test_concurrent_sweeps_record_readiness_once_and_end_once(cold):
         outs = list(ex.map(lambda _: sessions.sweep(), range(4)))
     assert sum(o.count(f"{sid}:unattached") for o in outs) == 1
     assert sessions.get(sid)["state"] == "ended"
+
+
+# ---- idempotent creation (api 0.11.104, migration 27) --------------------------------------------------------------
+def _idem(key, owner="p-1", timeout_s=600, model="speech"):
+    return sessions.create(KEY, "demo", owner, model, "hub", "eu-north1", timeout_s, 1, idempotency_key=key)
+
+
+def _rows(where="true", *args):
+    with db.pool().connection() as c:
+        return c.execute(f"select count(*) from sessions where {where}", args).fetchone()[0]
+
+
+def test_a_lost_create_answer_is_recovered_with_an_unused_claim_and_one_admission(live):
+    a = _idem("k1")
+    assert a["replay"] is False and a["claim_token"]
+    # the first answer never reached the client; the same request again: the same session, one row, one reservation,
+    # a usable claim that replaces the earlier token; nothing extended
+    b = _idem("k1")
+    assert b["id"] == a["id"] and b["replay"] is True and b["claim_token"] and b["claim_token"] != a["claim_token"]
+    assert (b["expires_at"], b["deadline_at"], b["created_at"]) == (a["expires_at"], a["deadline_at"], a["created_at"])
+    assert _rows("owner = %s", "p-1") == 1 and _reservation(a["id"]) is not None
+    assert _rows("id like 'ses-%%'") == 1
+    # bind once: the replaced token binds no more; the replayed one binds exactly once
+    with pytest.raises(HTTPException) as e:
+        sessions.bind(a["claim_token"], "speech")
+    assert e.value.status_code == 401
+    bound = sessions.bind(b["claim_token"], "speech")
+    assert bound["id"] == a["id"]
+    with pytest.raises(HTTPException):
+        sessions.bind(b["claim_token"], "speech")
+    # bound: the replay is the same id, no claim (replay denied), nothing re-issued, nothing moved
+    c = _idem("k1")
+    assert c["id"] == a["id"] and c["status"] == "bound" and c["replay"] is True and "claim_token" not in c
+    assert (c["expires_at"], c["deadline_at"]) == (a["expires_at"], a["deadline_at"])
+    # attached and ended: still the same id without a claim; the ledger settles once
+    sessions.attach(a["id"], bound["connection"], W1, "w-1")
+    d = _idem("k1")
+    assert d["id"] == a["id"] and d["status"] == "attached" and "claim_token" not in d
+    sessions.release(a["id"], W1, "done", 12.0)
+    e2 = _idem("k1")
+    assert e2["id"] == a["id"] and e2["status"] == "ended" and "claim_token" not in e2 and e2["gpu_seconds"] == 12.0
+    assert _rows("owner = %s", "p-1") == 1 and _reservation(a["id"]) is None  # settled: the reservation is spent
+    # the same key with another request (timeout, model or deployment) is a conflict, not a session
+    for kw in ({"timeout_s": 900}, {"model": "other-speech"}):
+        with pytest.raises(HTTPException) as x:
+            _idem("k1", **kw)
+        assert x.value.status_code == 409 and "Idempotency-Key" in x.value.detail
+    with pytest.raises(HTTPException) as x:
+        sessions.create(KEY, "demo", "p-1", "speech", "south", "eu-south1", 600, 1, idempotency_key="k1")
+    assert x.value.status_code == 409
+    # owner-scoped: a peer's same key is its own session; without a key every create is a new session
+    f = _idem("k1", owner="p-2")
+    assert f["id"] != a["id"] and f["replay"] is False and f["claim_token"]
+    assert _create()["id"] != _create()["id"]
+
+
+def test_concurrent_creates_under_one_key_make_one_session_one_admission_and_one_binding(live):
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        outs = list(ex.map(lambda _: _idem("race"), range(8)))
+    ids = {o["id"] for o in outs}
+    assert len(ids) == 1 and sum(1 for o in outs if o["replay"] is False) == 1
+    sid = ids.pop()
+    assert _rows("true") == 1 and _reservation(sid) is not None
+    with db.pool().connection() as c:
+        # the losers released their own admission: exactly one reservation of a session exists
+        assert c.execute("select count(*) from key_reservations where operation like 'ses-%'").fetchone()[0] == 1
+    # every answer carried a claim; exactly one of them (the last replacement) binds, the others are refused
+    tokens = [o["claim_token"] for o in outs]
+    assert len(set(tokens)) == len(tokens)
+    bound = 0
+    for t in tokens:
+        try:
+            sessions.bind(t, "speech")
+            bound += 1
+        except HTTPException as e:
+            assert e.status_code == 401
+    assert bound == 1
+
+
+def test_an_expired_or_cancelled_claim_replays_without_a_claim_and_is_never_extended(live):
+    a = _idem("k2")
+    _sql("update sessions set expires_at = now() - interval '1 second' where id = %s", a["id"])
+    b = _idem("k2")  # the claim TTL is over: no claim is re-issued, the TTL is not moved
+    assert b["id"] == a["id"] and "claim_token" not in b and b["status"] == "claimed"
+    with db.pool().connection() as c:
+        assert c.execute("select expires_at < now() from sessions where id = %s", (a["id"],)).fetchone()[0]
+    assert f"{a['id']}:expired" in sessions.sweep()
+    c2 = _idem("k2")
+    assert c2["id"] == a["id"] and c2["status"] == "ended" and c2["outcome"] == "expired" and "claim_token" not in c2
+    # a cancelled claim: ended, replayed as such
+    x = _idem("k3")
+    sessions.cancel(x["id"], "owner")
+    y = _idem("k3")
+    assert y["id"] == x["id"] and y["status"] == "ended" and y["cancel_requested"] and "claim_token" not in y
+    assert _rows("idempotency_key in ('k2', 'k3')") == 2

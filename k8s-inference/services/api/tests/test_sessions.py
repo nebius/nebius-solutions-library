@@ -36,7 +36,7 @@ class FakeSessions:
     def __init__(self):
         self.rows, self.calls = {}, []
 
-    def create(self, key_hash, tenant, owner, model, cluster_, region, timeout_s, gpus):
+    def create(self, key_hash, tenant, owner, model, cluster_, region, timeout_s, gpus, idempotency_key=None):
         sid = f"ses-{len(self.rows) + 1:016x}"
         self.calls.append(("create", key_hash, tenant, owner, model, cluster_, region, timeout_s, gpus))
         self.rows[sid] = {

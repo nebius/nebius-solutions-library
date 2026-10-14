@@ -420,3 +420,89 @@ def test_the_owner_sees_the_observed_gang_fields_on_the_current_attempt_and_ever
 
     monkeypatch.setattr(auth, "key_info", info)
     assert c.get(f"/v1/operations/{op}", headers={"Authorization": "Bearer sk-other"}).status_code == 404
+
+
+def test_the_finalizer_of_a_gang_with_per_class_images_runs_the_admitted_class_image(client, monkeypatch):
+    """A gang class with per-class images (`job.images {default, <class>}`, the MPI shape that fixes the run's image
+    identity) finalized on one CPU pod: the finalizer renders with the image of the class the gang was admitted on
+    (the Job's `gpu-class` label), `job.images` dropped with the other compute-only keys; the finalized attempt's
+    recorded digest still wins when on record. Before api 0.11.104 the CPU render cleared `gpu_classes` but kept
+    `job.images`, so build_run refused the finalizer (per-class images without a class): no delivery at all."""
+    import copy
+
+    import catalog
+    import execution
+    import models
+    from config import LABEL
+    from test_api import MULTINODE_FLEET, H
+
+    c, fake = client
+    ns = "tenant-demo"
+    monkeypatch.setattr(kube, "fleet", lambda: MULTINODE_FLEET)
+    base = copy.deepcopy(catalog.get("distributed-run"))
+    base["job"]["finalize"] = {
+        "command": "python -m deliver --finish",
+        "onExitCodes": [75],
+        "timeoutS": 900,
+        "cpu": "1",
+        "memory": "2Gi",
+    }
+    base["job"]["images"] = {"default": "x/mpi:7", "h200": "x/mpi:7"}  # the fleet's InfiniBand class (h200-ib-8x)
+    base["gpu_classes"] = ["h200"]
+    monkeypatch.setattr(catalog, "get", lambda name, _b=base: _b if name == "distributed-run" else None)
+    monkeypatch.setattr(
+        execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}}
+    )
+    fake.pvcs[(ns, jobs.SHARED_SCRATCH_PVC)] = {"metadata": {"name": jobs.SHARED_SCRATCH_PVC}}
+    body = {
+        "input": {
+            "image": "x/mpi:7",
+            "command": "mpirun gmx_mpi mdrun",
+            "nodes": 2,
+            "gpus_per_node": 8,
+            "interconnect": "required",
+            "checkpoints": "shared",
+        },
+        "execution": {"io_mode": "application"},
+    }
+    r = c.post("/v1/models/distributed-run:invoke", json=body, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    js = fake.custom[(ns, "jobsets", op)]
+    js["metadata"]["labels"][f"{LABEL}/gpu-class"] = "h200"  # the class the gang was admitted on
+    js["status"] = {"conditions": [{"type": "Failed", "status": "True", "message": "delivery pending"}]}
+    coord = f"{op}-workers-0-0-aaaaa"
+    rows = [
+        {
+            **_record(op, coord, "failed", epoch=1, exit_code=75, region="eu-north1"),
+            "operation": op,
+            "root": op,
+            "gang_rank": 0,
+            "gang_restart": 0,
+            "io_mode": "application",
+            "role": "run",
+        }
+    ]
+    rows[0].pop("image_digest", None)  # no digest on record: the class image is the only identity
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [x for x in rows if x["root"] == root])
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
+    r = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert r.status_code == 202, r.text
+    x1 = r.json()["id"]
+    j = fake.jobs[(ns, x1)]
+    spec = j["spec"]["template"]["spec"]
+    main = next(x for x in spec["containers"] if x["name"] == "main")
+    assert main["image"] == models.normalise_image("x/mpi:7") and "nvidia.com/gpu" not in str(main["resources"])
+    assert main["command"] == ["/bin/sh", "-c", "python -m deliver --finish"]
+    assert "nodeSelector" not in spec and (ns, "jobsets", x1) not in fake.custom
+    # the finalized attempt's recorded digest wins over the class image
+    rows[0]["image_digest"] = "x/mpi@sha256:0123"
+    del fake.jobs[(ns, x1)]
+    r = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert r.status_code == 202, r.text
+    main = next(
+        x for x in fake.jobs[(ns, r.json()["id"])]["spec"]["template"]["spec"]["containers"] if x["name"] == "main"
+    )
+    assert main["image"] == "x/mpi@sha256:0123"

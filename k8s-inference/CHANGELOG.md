@@ -4,6 +4,28 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.104
+
+(0.11.104 = 0.11.103 plus idempotent session creation and the gang finalizer's image with per-class images; jobs 0.1.27
+and platform chart 0.1.12 unchanged; migration 27.)
+
+- Sessions (docs/API.md "Sessions", "Idempotent creation"): `POST /v1/models/{model}:session` takes an owner-scoped
+  `Idempotency-Key` (1..200 chars) over the semantic request (effective model, deployment, timeout_s): the same request
+  again answers the same session (`replay: true`), one row, one admission; a concurrent duplicate loses the unique
+  index, releases its own admission and answers the winner's. While the session is still `claimed` (unexpired, not
+  cancelled) the replay carries a usable claim that replaces the earlier token (still exactly one connection ever
+  binds); once bound, attached or ended the replay is the same id without a claim; nothing is extended; the key with
+  another request is 409. Every create answers `replay`. Migration 27: `sessions.idempotency_key`, `request_hash`,
+  the unique index `(tenant, owner, idempotency_key)`. Tests: lost answer / repeat, bind once / replay denied,
+  conflict, peer 404, concurrent duplicates, expired and cancelled claims.
+- Gang finalization (docs/JOBS.md "Restoring a gang"): the one-CPU finalizer of a gang whose class carries per-class
+  images (`job.images {default, <class>}`, the shape that fixes a run's image identity) renders with the image of the
+  class the gang was admitted on (the `gpu-class` label), `job.images` dropped with the other compute-only keys; the
+  finalized attempt's recorded digest still wins. Before, the CPU render cleared `gpu_classes` but kept `job.images`
+  and the finalizer was refused (500 "job.images names classes ... not in gpu.classes []"): no delivery of the gang's
+  publication at all (the first real MPI run, 2026-10-14). Proposed and tested by the MPI agent
+  (S2-CPU-FINALIZER-CLASS-MAP); regression on the gang finalizer with and without a recorded digest.
+
 ## api 0.11.103
 
 (0.11.103 = 0.11.102 plus the child binding's cluster and the log shipper on CPU pools; jobs 0.1.27 and platform chart
