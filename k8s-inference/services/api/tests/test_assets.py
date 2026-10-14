@@ -200,3 +200,45 @@ def test_cpu_and_gpu_classes_declare_disjoint_assets(client, admin_keys, monkeyp
     assert any(v["name"] == "asset-af3-params" for v in gj["volumes"]) and not any(
         v["name"] == "weights" for v in gj["volumes"]
     )
+
+
+def test_export_retry_and_finalizer_never_carry_the_asset(client, admin_keys, monkeypatch):
+    """Main-compute-only (root review of the 0.11.68 candidate): a transfer-only export retry and the application
+    finalizer are the same class rendered again on the kept volume with a CPU container in main's place; they drop the
+    asset volumes, the mounts, the supplemental groups and the identity annotation. The compute Job keeps them."""
+    c, fake = client
+    _fleet(monkeypatch)
+    spec = _spec(
+        finalize={"command": "python finish.py", "on_exit_codes": [75], "timeout_s": 900, "cpu": "1", "memory": "2Gi"}
+    )
+    assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 201
+    m = catalog.get("af3-gpu")
+    _fleet(monkeypatch)
+    r = c.post("/v1/models/af3-gpu:invoke", json={"input": {}, "region": "eu-north1"}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    compute = fake.jobs[("tenant-demo", op)]
+    assert any(v["name"] == "asset-af3-params" for v in compute["spec"]["template"]["spec"]["volumes"])
+    assert compute["metadata"]["annotations"]["serverless2.nebius/assets"].startswith("af3-params@sha256:")
+    fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    defaults = {"output_prefix": "s3://b/p"}
+    export, _ = jobs.export_again("tenant-demo", op, "eu-north1", m, defaults)
+    done = {"pod": f"{op}-abc", "epoch": 1, "exit_code": 75}
+    fz, _ = jobs.export_again(
+        "tenant-demo", op, "eu-north1", m, defaults, finalize={"spec": m["job"]["finalize"], "attempt": done}
+    )
+    for j, role in ((export, "export"), (fz, "finalize")):
+        s = j["spec"]["template"]["spec"]
+        assert j["metadata"]["annotations"]["serverless2.nebius/attempt-role"] == role
+        assert not any(v["name"].startswith("asset-") for v in s["volumes"]), role
+        for ctr in s["containers"] + s.get("initContainers", []):
+            assert not any(mm["name"].startswith("asset-") for mm in ctr.get("volumeMounts") or []), (role, ctr["name"])
+        assert "supplementalGroups" not in (s.get("securityContext") or {}), role
+        assert "serverless2.nebius/assets" not in j["metadata"]["annotations"], role
+        assert s["securityContext"]["fsGroup"] == 10001  # the work volume's group stays
+        assert any(v["name"] == "work" for v in s["volumes"])  # the kept volume is still there
+    # the compute Job is untouched
+    s = fake.jobs[("tenant-demo", op)]["spec"]["template"]["spec"]
+    assert any(v["name"] == "asset-af3-params" for v in s["volumes"]) and s["securityContext"][
+        "supplementalGroups"
+    ] == [65532]

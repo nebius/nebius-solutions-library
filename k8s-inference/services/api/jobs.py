@@ -267,6 +267,24 @@ def _mount_assets(r: dict, pod: dict, main: dict, tenant: str) -> str | None:
     return ";".join(identity)
 
 
+def _strip_assets(job: dict) -> None:
+    """Restricted assets are for the compute attempt's `main` only (docs/JOBS.md "Restricted assets"): a Job rendered
+    again from the same class for a transfer-only export or the application finalizer (CPU, the runner or the model's
+    finalize command) drops the asset volumes, main's asset mounts, the supplemental groups they brought and the
+    identity annotation. Nothing else of the render changes."""
+    spec = job["spec"]["template"]["spec"]
+    names = {v["name"] for v in spec.get("volumes") or [] if str(v.get("name", "")).startswith("asset-")}
+    if not names:
+        return
+    spec["volumes"] = [v for v in spec["volumes"] if v["name"] not in names]
+    for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+        if c.get("volumeMounts"):
+            c["volumeMounts"] = [m for m in c["volumeMounts"] if m["name"] not in names]
+    if spec.get("securityContext"):
+        spec["securityContext"].pop("supplementalGroups", None)  # only assets add groups (docs/JOBS.md)
+    job["metadata"].get("annotations", {}).pop(f"{LABEL}/assets", None)
+
+
 def _alias_dir(a: dict) -> str:
     return f"{ALIAS_ROOT}/{a['slug']}" + (f"/$({POD_NAME_ENV})" if a["scope"] == "attempt" else "")
 
@@ -1513,6 +1531,7 @@ def export_again(
         gpu_class=labels.get(f"{LABEL}/gpu-class"),
         ex=ex,
     )
+    _strip_assets(job)  # main-compute-only: a transfer or finalizer container never sees a restricted asset
     spec = job["spec"]["template"]["spec"]
     spec["initContainers"] = []
     role = "finalize" if finalize else "export"

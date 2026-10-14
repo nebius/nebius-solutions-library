@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.69
+
+- Restricted assets are main-compute-only (root review of 0.11.68): a transfer-only export retry and the application
+  finalizer, which render the class again on the kept volume with a CPU container in main's place, drop the asset
+  volumes, main's asset mounts, the supplemental groups they brought and the identity annotation; the compute Job is
+  unchanged. Nothing else changes against 0.11.68.
+
 ## fleet chart 0.1.10, cluster module: CPU pools scheduled and mounted
 
 - CPU pools (docs/FLEET.md "CPU pools"): `regions.<r>.cpu_pools` now reach the scheduler: one Kueue ResourceFlavor per

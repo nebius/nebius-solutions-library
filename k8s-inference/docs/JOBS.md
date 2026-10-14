@@ -322,7 +322,9 @@ through three operator-owned pieces; no request or model-request field can choos
    mounted on `main` **only**, read-only on the claim reference and on the mount, at a bounded absolute path that
    overlaps no other mount (data, weights, checkpoints, shm, work aliases); the asset's `gid` is added to the pod's
    `supplementalGroups` (every container carries the group; only `main` has a mount; a group without a mount reads
-   nothing). Single-node runs only.
+   nothing). Single-node runs only. **Main-compute-only**: a transfer-only export retry and the application finalizer
+   (the class rendered again on the kept volume with a CPU container in main's place) carry no asset volume, mount or
+   group and no identity annotation.
 
 Ownership never changes: `fsGroup: 10001` stays on the pod for the work volume and emptyDirs (the volume types the
 kubelet applies ownership management to), and a hostPath volume is never chowned by the kubelet, so the files keep
