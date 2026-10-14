@@ -1,23 +1,13 @@
-data "external" "existing_network" {
-  program = ["bash", "${path.module}/scripts/validate-network.sh"]
-
-  query = {
-    network_id = var.vpc_network_id
-    parent_id  = var.parent_id
-  }
+data "nebius_vpc_v1_network" "existing_network" {
+  id = var.vpc_network_id
 }
 
 resource "terraform_data" "network_validation" {
-  input = data.external.existing_network.result
+  input = data.nebius_vpc_v1_network.existing_network.id
 
   lifecycle {
     precondition {
-      condition     = data.external.existing_network.result.network_exists == "true"
-      error_message = "VPC network ${var.vpc_network_id} was not found or could not be read with the current Nebius CLI credentials. ${data.external.existing_network.result.error}"
-    }
-
-    precondition {
-      condition     = data.external.existing_network.result.project_matches == "true"
+      condition     = data.nebius_vpc_v1_network.existing_network.parent_id == var.parent_id
       error_message = "VPC network ${var.vpc_network_id} does not belong to project ${var.parent_id}."
     }
   }

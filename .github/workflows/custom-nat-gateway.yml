@@ -1,0 +1,32 @@
+name: Custom NAT gateway validation
+
+on:
+  pull_request:
+    paths:
+      - 'custom-nat-gateway/**'
+      - 'modules/cloud-init/nat-gateway-cloud-init.tftpl'
+      - 'modules/cloud-init/private-vm-cloud-init.tftpl'
+      - '.github/workflows/custom-nat-gateway.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: custom-nat-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.11.4'
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+      - name: Initialize providers
+        run: terraform init -backend=false -input=false
+      - name: Validate configuration
+        run: terraform validate -no-color
+      - name: Run offline plan tests
+        run: terraform test -no-color -filter=tests/network_validation.tftest.hcl

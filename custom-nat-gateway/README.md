@@ -21,6 +21,12 @@ The gateway VM must stay in its own subnet. The private route table belongs on t
 3. Install [Terraform](https://www.terraform.io/).
 4. Install `jq`.
 
+The CLI, Bash and `jq` are used by the optional `environment.sh` setup helper.
+The VPC lookup during `terraform plan` uses the Nebius provider's credentials;
+it does not run a CLI command or require a separate CLI login. You can instead
+configure [provider authentication](https://docs.nebius.com/terraform-provider/authentication)
+directly and set `parent_id` without using the helper.
+
 ## Installation
 
 1. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID`, and `NEBIUS_REGION` in `environment.sh`.
@@ -104,9 +110,34 @@ If `deploy_test_vm = false`, Terraform still creates the gateway, route table, a
 
 ## Tests
 
-This example includes a `terraform test` smoke test.
+The offline tests use a mocked provider and create no cloud resources:
 
-The test checks:
+```bash
+terraform test -filter=tests/network_validation.tftest.hcl
+```
+
+They check the project ownership guard and both values of `deploy_test_vm`.
+
+The separate live smoke test creates real VMs, disks and networking resources,
+incurs charges, and attempts to destroy those resources when it finishes.
+It requires provider credentials with permission to read the existing VPC and
+create/delete resources in its project. Set the required inputs explicitly:
+
+```bash
+export TF_VAR_parent_id="project-..."
+export TF_VAR_vpc_network_id="vpcnetwork-..."
+export TF_VAR_ssh_public_key="$(jq -n --arg key "$(cat ~/.ssh/id_ed25519.pub)" '{key: $key}')"
+export TF_VAR_deploy_test_vm=true
+terraform test -filter=tests/main.tftest.hcl
+```
+
+Supply an existing SSH public key; replace the file path above if needed. Remove
+conflicting placeholder values from `terraform.tfvars` before running the test,
+because that file overrides `TF_VAR_*` values. Alternatively, pass the inputs
+using `-var` or `-var-file`, which take precedence over `terraform.tfvars`.
+Do not run unfiltered `terraform test` unless you intend to run the live test too.
+
+The live test checks:
 
 * the private subnet is attached to the custom route table
 * the default route points to the gateway private allocation
