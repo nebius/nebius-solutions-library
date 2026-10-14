@@ -4,6 +4,7 @@ moves to a successor on the same root rendered with the fit affinity; the origin
 a pod that merely waits for a node, a started attempt, an unplaced run, a cancelled run, an impossible shape, the
 switch bound and a failed create are the boundaries."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -197,3 +198,54 @@ def test_a_failed_create_restores_the_original(placed, monkeypatch):
     assert orig["spec"].get("suspend") is not True and not orig["metadata"]["annotations"].get(f"{LABEL}/successor")
     assert fences == []  # deactivated, then activated again
     assert (NS, f"{op}-r1") not in fake.jobs
+
+
+def test_a_bind_between_snapshot_and_fence_stops_the_switch(placed, monkeypatch):
+    """The pre-fence recheck: the pod binds after the first read (while the private input is delivered): nothing is
+    fenced, nothing created, the run proceeds."""
+    import execution
+
+    c, fake, op, job, fences = placed
+    p = _pending(op, "h100-reserved-1x")
+    fake.pods.append(p)
+
+    def bind(*a, **k):  # runs between the snapshot and the fence
+        p["spec"]["nodeName"], p["status"]["phase"] = "node-9", "Running"
+
+    monkeypatch.setattr(execution, "deliver", bind)
+    assert appmod.unschedulable_switch() == []
+    orig = fake.jobs[(NS, op)]
+    assert orig["spec"].get("suspend") is not True and not orig["metadata"]["annotations"].get(f"{LABEL}/successor")
+    assert fences == [] and (NS, f"{op}-r1") not in fake.jobs
+
+
+def test_a_bind_in_the_fence_window_is_recorded_never_pretended_away(placed, monkeypatch):
+    """The post-fence read: the pod bound in the last instants before the fence took effect; the switch records the
+    evidence on the original and on the successor's reason (the attempt's records stay accepted)."""
+    c, fake, op, job, fences = placed
+    p = _pending(op, "h100-reserved-1x")
+    fake.pods.append(p)
+    real = kube.deactivate_workload
+
+    def fence(ns, uid, region="eu-north1"):
+        p["spec"]["nodeName"], p["status"]["phase"] = "node-9", "Running"
+        p["status"]["containerStatuses"] = [
+            {"name": "main", "state": {"running": {"startedAt": "2026-10-14T08:00:00Z"}}}
+        ]
+        return real(ns, uid, region)
+
+    monkeypatch.setattr(kube, "deactivate_workload", fence)
+    assert appmod.unschedulable_switch() == [f"{op}-r1"]
+    orig = fake.jobs[(NS, op)]
+    ev = json.loads(orig["metadata"]["annotations"][f"{LABEL}/started-before-fence"])
+    assert (
+        ev[0]["pod"] == p["metadata"]["name"]
+        and ev[0]["node"] == "node-9"
+        and ev[0]["started_at"] == "2026-10-14T08:00:00Z"
+    )
+    assert "had bound to node-9" in orig["metadata"]["annotations"][f"{LABEL}/recovery"]
+    new = fake.jobs[(NS, f"{op}-r1")]
+    assert (
+        "had bound to node-9" in new["metadata"]["annotations"][f"{LABEL}/recovery"]
+        and "records are retained" in new["metadata"]["annotations"][f"{LABEL}/recovery"]
+    )

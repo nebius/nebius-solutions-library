@@ -306,7 +306,10 @@ fit structural (api 0.11.80, fleet chart 0.1.12):
 - The render (`jobs.py`, `services/api/fit.py`): the pod's effective requests (main + uploader; an init container's
   own request bounds it) must fit one node of a candidate pool. Candidates are the class's explicit `pool:` (then it
   is a 400 when it cannot hold the pod: nothing is widened to another pool), else the GPU class pools of the run,
-  else every pool; the eligible clusters are the run's placement regions (or the pinned region's). The fitting pools
+  else every pool, each intersected per (cluster, pool) with what the run requires besides size: the shared
+  filesystem (`shared_fs`) and local NVMe (`pools.yaml`), so a big node without the mount is no candidate; the fit is
+  computed on the final rendered pod (after the execution profile); the eligible clusters are the run's placement
+  regions (or the pinned region's). The fitting pools
   become `serverless2.nebius/pool In [...]`, conjunctive with the class, `shared-fs` and `local-nvme` terms (Kueue
   assigns only a flavor whose `nodeLabels` satisfy the affinity), and the placement regions are narrowed to clusters
   with a fitting pool. No pool anywhere: **400 `impossible shape`** at submission, naming the requests and the largest
@@ -325,7 +328,12 @@ fit structural (api 0.11.80, fleet chart 0.1.12):
   failed create restores the original; the owner's handle, the root id and the result path stay the run's. Nothing of
   the original ran, so nothing is lost or re-accounted. A pod whose pool CAN hold it (a pool scaling from zero, a
   full pool) is left waiting; a started attempt is never switched; a shape no pool holds is annotated once
-  (`serverless2.nebius/unschedulable`, the operator decides); at most two such switches per root.
+  (`serverless2.nebius/unschedulable`, the operator decides); at most two such switches per root. The assigned pool
+  is judged on the admitting cluster only (the same label may be a bigger preset elsewhere). The window between the
+  reconciler's snapshot and the fence is bounded from both sides: the pods are re-read immediately before the fence
+  (a binding meanwhile stops the switch, nothing fenced) and once more after it (a binding in the last instants is
+  recorded on the original, `serverless2.nebius/started-before-fence`, and in the successor's reason; the attempt's
+  records stay accepted).
 
 Not done here: Kueue's Topology-Aware Scheduling would make Kueue itself do per-node fit at admission; it changes the
 admission substrate and is qualified separately.

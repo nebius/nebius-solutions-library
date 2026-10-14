@@ -305,7 +305,7 @@ def unschedulable_switch() -> list[str]:
                 since = _unschedulable_since(newest)
                 if since is None or (now - since).total_seconds() < UNSCHEDULABLE_WAIT_S:
                     continue
-                holds = fit.assigned_pool_holds(newest)
+                holds = fit.assigned_pool_holds(newest, job.get("_cluster"))
                 if holds is None or holds:
                     continue  # unknown pool/table (no judgement) or a pool that can hold it: waiting for a node
                 req = fit.pod_requests(newest.get("spec") or {})

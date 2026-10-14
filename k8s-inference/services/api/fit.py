@@ -81,18 +81,47 @@ def holds(node: dict, req: dict) -> bool:
         return False
 
 
-def fitting(req: dict, clusters: list[str] | None = None, pools: set[str] | None = None) -> dict[str, list[str]]:
-    """{pool label: [cluster ids]} of the candidate pools (every pool of the fit table, or `pools`, on `clusters` or
-    everywhere) whose node holds the requests."""
-    out: dict[str, list[str]] = {}
+def _capable(cid: str, pool: str, node: dict, shared_fs: bool, local_nvme: bool) -> bool:
+    """The pool's node has what the run requires besides size: the shared filesystem (fit.yaml `shared_fs`, the
+    flavor's nodeLabels) and local NVMe (pools.yaml `local_nvme` of that cluster's pool); intersected per
+    (cluster, pool), never across clusters."""
+    if shared_fs and not node.get("shared_fs"):
+        return False
+    if local_nvme:
+        return any(
+            p.get("region") == cid and p.get("pool") == pool and p.get("local_nvme") in (True, "true")
+            for p in (kube.fleet().get("pools") or {}).values()
+        )
+    return True
+
+
+def candidates(
+    clusters: list[str] | None = None, pools: set[str] | None = None, shared_fs: bool = False, local_nvme: bool = False
+):
+    """(cluster id, pool label, node) of every candidate pool: on `clusters` (or everywhere), among `pools` (or all),
+    with the required capabilities."""
     for cid, by_pool in table().items():
         if clusters is not None and cid not in clusters:
             continue
         for pool, node in (by_pool or {}).items():
             if pools is not None and pool not in pools:
                 continue
-            if holds(node, req):
-                out.setdefault(pool, []).append(cid)
+            if _capable(cid, pool, node or {}, shared_fs, local_nvme):
+                yield cid, pool, node or {}
+
+
+def fitting(
+    req: dict,
+    clusters: list[str] | None = None,
+    pools: set[str] | None = None,
+    shared_fs: bool = False,
+    local_nvme: bool = False,
+) -> dict[str, list[str]]:
+    """{pool label: [cluster ids]} of the candidate pools (see `candidates`) whose node holds the requests."""
+    out: dict[str, list[str]] = {}
+    for cid, pool, node in candidates(clusters, pools, shared_fs, local_nvme):
+        if holds(node, req):
+            out.setdefault(pool, []).append(cid)
     return {k: sorted(v) for k, v in sorted(out.items())}
 
 
@@ -103,39 +132,33 @@ def describe(req: dict) -> str:
     )
 
 
-def largest(clusters: list[str] | None = None, pools: set[str] | None = None) -> str:
-    """The roomiest candidate node, for the refusal message: 'cpu 28, memory 112Gi, ephemeral-storage 50Gi (pool
-    cpu-batch-32 on north)'."""
+def largest(
+    clusters: list[str] | None = None, pools: set[str] | None = None, shared_fs: bool = False, local_nvme: bool = False
+) -> str:
+    """The roomiest candidate node (same candidates as `fitting`), for the refusal message: 'cpu 28, memory 112Gi,
+    ephemeral-storage 50Gi (pool cpu-batch-32 on north)'."""
     best, where = None, ""
-    for cid, by_pool in table().items():
-        if clusters is not None and cid not in clusters:
-            continue
-        for pool, node in (by_pool or {}).items():
-            if pools is not None and pool not in pools:
-                continue
-            key = (
-                float(node.get("cpu") or 0),
-                float(node.get("memory_gib") or 0),
-                float(node.get("ephemeral_gib") or 0),
-            )
-            if best is None or key > best:
-                best, where = key, f"pool {pool} on {cid}"
+    for cid, pool, node in candidates(clusters, pools, shared_fs, local_nvme):
+        key = (float(node.get("cpu") or 0), float(node.get("memory_gib") or 0), float(node.get("ephemeral_gib") or 0))
+        if best is None or key > best:
+            best, where = key, f"pool {pool} on {cid}"
     if best is None:
         return "no candidate pool"
     return f"cpu {best[0]:g}, memory {best[1]:g}Gi, ephemeral-storage {best[2]:g}Gi ({where})"
 
 
-def assigned_pool_holds(pod: dict) -> bool | None:
+def assigned_pool_holds(pod: dict, cluster: str | None) -> bool | None:
     """For an admitted pod: whether the pool Kueue assigned it (nodeSelector serverless2.nebius/pool, the flavor's
-    label) has a node that holds its requests; None when the table or the pool is unknown (no judgement)."""
+    label) ON THE CLUSTER THAT ADMITTED IT has a node that holds its requests; None when the cluster, the table or
+    that cluster's pool is unknown (no judgement). The same pool label can name a bigger preset in another cluster:
+    only the observed worker's entry counts."""
     from config import LABEL
 
     spec = pod.get("spec") or {}
     pool = (spec.get("nodeSelector") or {}).get(f"{LABEL}/pool")
-    if not pool or not table():
+    if not pool or not cluster or not table():
         return None
-    req = pod_requests(spec)
-    nodes = [by_pool[pool] for by_pool in table().values() if pool in (by_pool or {})]
-    if not nodes:
+    node = (table().get(cluster) or {}).get(pool)
+    if not node:
         return None
-    return any(holds(n, req) for n in nodes)
+    return holds(node, pod_requests(spec))

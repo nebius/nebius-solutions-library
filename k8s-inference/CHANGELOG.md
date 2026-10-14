@@ -4,7 +4,28 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.80, fleet chart 0.1.12
+## api 0.11.81, fleet chart 0.1.12
+
+(0.11.81 supersedes the unreleased 0.11.80 candidate after review: tags are immutable, so the review fixes below are a
+new tag; everything of 0.11.80 is included.)
+
+- Review fixes to the per-node fit and the unschedulable switch: (1) the assigned pool of an admitted pod is judged on
+  the cluster that admitted it only (`fit.assigned_pool_holds(pod, cluster)`): the same pool label can be a bigger
+  preset in another cluster and must not mask an impossible actual worker. (2) The shared-filesystem and local-NVMe
+  requirements are intersected per (cluster, pool) BEFORE a pool counts as a candidate (`fit.candidates`,
+  `fit.fitting(..., shared_fs, local_nvme)`): a node big enough but without the mount (or the NVMe) the run needs is
+  no candidate, the affinity never names a set of pools no single node realizes, the refusal names the capability
+  ("on one node with the shared filesystem") and the largest candidate is the largest capable one. (3) The fit is
+  computed on the FINAL rendered pod, after the execution profile reshaped it (an application io mode drops the
+  fetch init container), never on the shell before it. (4) The snapshot-to-fence window of
+  `jobs.switch_unschedulable` is bounded from both sides: the worker's pods are re-read immediately before the fence
+  (an attempt that bound meanwhile stops the switch: 409, nothing fenced, nothing created) and once more after it by
+  the snapshot's pod UIDs (a binding in the last instants is recorded on the original as
+  `serverless2.nebius/started-before-fence` {pod, uid, node, phase, started_at} and in both `recovery` reasons,
+  "its records are retained": the successor mark comes last, so the attempt's uploader records stay accepted);
+  nothing is pretended never-started.
+
+## api 0.11.80, fleet chart 0.1.12 (unreleased candidate, superseded by 0.11.81)
 
 - Per-node fit (docs/SCHEDULING.md "Per-node fit"). Kueue admits against a flavor's aggregate quota and never checks
   that one node holds the pod: on 2026-10-14 an AlphaFold 3 MCP pipeline (16.1 CPU, 64.25 Gi, 32 Gi ephemeral,

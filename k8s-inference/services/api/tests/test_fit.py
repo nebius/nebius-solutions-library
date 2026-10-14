@@ -91,12 +91,166 @@ def test_the_af3_shape_fits_only_the_cpu_pool(monkeypatch):
     )
     # the pool Kueue assigned on 0.11.78 (the pod's injected nodeSelector) cannot hold it; the CPU pool can
     pod = {"spec": {**AF3_POD, "nodeSelector": {f"{LABEL}/pool": "h100-reserved-1x"}}}
-    assert fit.assigned_pool_holds(pod) is False
+    assert fit.assigned_pool_holds(pod, "north") is False
     pod["spec"]["nodeSelector"][f"{LABEL}/pool"] = "cpu-batch-32"
-    assert fit.assigned_pool_holds(pod) is True
+    assert fit.assigned_pool_holds(pod, "north") is True
     pod["spec"]["nodeSelector"][f"{LABEL}/pool"] = "unknown-pool"
-    assert fit.assigned_pool_holds(pod) is None
-    assert fit.assigned_pool_holds({"spec": AF3_POD}) is None  # not admitted yet: no judgement
+    assert fit.assigned_pool_holds(pod, "north") is None
+    assert fit.assigned_pool_holds({"spec": AF3_POD}, "north") is None  # not admitted yet: no judgement
+    assert fit.assigned_pool_holds(pod, None) is None  # cluster unknown: no judgement
+
+
+def test_the_assigned_pool_is_judged_on_the_admitting_cluster_only(monkeypatch):
+    """The same pool label can be a bigger preset elsewhere: only the observed worker's node counts."""
+    hetero = {
+        "north": {
+            "h100-reserved-1x": {
+                "kind": "gpu",
+                "gpus": 1,
+                "cpu": 14,
+                "memory_gib": 180,
+                "ephemeral_gib": 431,
+                "shared_fs": True,
+            }
+        },
+        "south": {
+            "h100-reserved-1x": {
+                "kind": "gpu",
+                "gpus": 1,
+                "cpu": 30,
+                "memory_gib": 180,
+                "ephemeral_gib": 431,
+                "shared_fs": True,
+            }
+        },
+    }
+    monkeypatch.setattr(kube, "fleet", lambda: {**DOC, "fit": hetero})
+    pod = {"spec": {**AF3_POD, "nodeSelector": {f"{LABEL}/pool": "h100-reserved-1x"}}}
+    assert fit.assigned_pool_holds(pod, "north") is False  # the actual worker cannot hold it
+    assert fit.assigned_pool_holds(pod, "south") is True  # south's nodes of the same label could
+    assert fit.assigned_pool_holds(pod, "west") is None  # no such cluster in the table
+
+
+def test_capabilities_are_intersected_per_pool_before_a_pool_counts(monkeypatch):
+    """A node big enough but without the shared filesystem (or local NVMe) the run needs is no candidate: the
+    affinity never names a set of pools no single node realizes, and the refusal names the capability."""
+    doc = {
+        **DOC,
+        "pools": {
+            **POOLS,
+            "north-nvme-1x": {
+                "region": "north",
+                "pool": "nvme-1x",
+                "gpu_class": "h100",
+                "usd_per_gpu_hour": 2.0,
+                "local_nvme": True,
+            },
+        },
+        "fit": {
+            "north": {
+                "big-no-fs": {
+                    "kind": "cpu",
+                    "gpus": 0,
+                    "cpu": 60,
+                    "memory_gib": 200,
+                    "ephemeral_gib": 100,
+                    "shared_fs": False,
+                },
+                "small-fs": {
+                    "kind": "cpu",
+                    "gpus": 0,
+                    "cpu": 8,
+                    "memory_gib": 32,
+                    "ephemeral_gib": 100,
+                    "shared_fs": True,
+                },
+                "nvme-1x": {
+                    "kind": "gpu",
+                    "gpus": 1,
+                    "cpu": 8,
+                    "memory_gib": 180,
+                    "ephemeral_gib": 431,
+                    "shared_fs": True,
+                },
+            }
+        },
+    }
+    monkeypatch.setattr(kube, "fleet", lambda: doc)
+    monkeypatch.setattr(kube, "cluster_region", lambda cid: cid)
+    req = fit.pod_requests(AF3_POD)
+    assert fit.fitting(req) == {"big-no-fs": ["north"]}
+    assert fit.fitting(req, shared_fs=True) == {}  # the only big node has no shared filesystem
+    assert fit.fitting(req, local_nvme=True) == {}  # the NVMe pool's node is too small
+    big = fit.largest(shared_fs=True)  # the largest AMONG the capable ones: never the 60-CPU node without the mount
+    assert big.startswith("cpu 8, memory 180Gi") and "nvme-1x" in big and "60" not in big
+    # through the render: a run that mounts weights needs shared-fs; the big pool without it is no candidate
+    fs_run = _model({**CPU_CLASS, "id": "fs", "weights": {"path": "x"}})
+    with pytest.raises(HTTPException) as e:
+        _build("op-fs", fs_run, {"regions": ["north"]})
+    assert e.value.status_code == 400 and "with the shared filesystem" in e.value.detail and "cpu 8" in e.value.detail
+    # local-nvme scratch: the NVMe pool is the only candidate and its node is too small
+    nvme_run = _model({**CPU_CLASS, "id": "nv", "gpu": {"count": 1, "classes": ["h100"]}, "scratch": "local-nvme"})
+    with pytest.raises(HTTPException) as e:
+        _build("op-nv", nvme_run, {"regions": ["north"], "classes": ["h100"]})
+    assert e.value.status_code == 400 and "with local NVMe" in e.value.detail
+    # a run that fits the small shared-fs pool is constrained to it alone (never the big one it cannot mount)
+    small = _model(
+        {**CPU_CLASS, "id": "sm", "cpu": "4", "memory": "8Gi", "ephemeral_storage": "10Gi", "weights": {"path": "x"}}
+    )
+    job = _build("op-sm", small, {"regions": ["north"]})
+    terms = _affinity(job)
+    assert terms[f"{LABEL}/pool"]["values"] == ["small-fs"] and terms[f"{LABEL}/shared-fs"]["values"] == ["true"]
+
+
+def test_fit_is_computed_on_the_final_rendered_pod(monkeypatch):
+    """The execution profile reshapes the pod (application io mode drops the fetch init container): the fit must see
+    the pod as rendered, not the shell before the profile."""
+    import execution
+
+    monkeypatch.setattr(kube, "fleet", lambda: DOC)
+    monkeypatch.setattr(kube, "cluster_region", lambda cid: cid)
+    monkeypatch.setattr(
+        execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}}
+    )
+    m = _model(CPU_CLASS)
+    # a table so tight that only the final pod's own requests (main + uploader) fit: the fetch init container's
+    # request (500m) is bounded away by the effective-request rule, and an application profile removes it entirely
+    tight = {
+        "north": {
+            "cpu-batch-32": {
+                "kind": "cpu",
+                "gpus": 0,
+                "cpu": 16.2,
+                "memory_gib": 65,
+                "ephemeral_gib": 50,
+                "shared_fs": True,
+            }
+        }
+    }
+    monkeypatch.setattr(kube, "fleet", lambda: {**DOC, "fit": tight})
+    # main 16 + uploader 0.1 = 16.1 fits 16.2; with the fetch init container (0.5 cpu) the bound is still 16.1
+    job = _build("op-app", m, {"regions": ["north"]})
+    assert _affinity(job)[f"{LABEL}/pool"]["values"] == ["cpu-batch-32"]
+    ex = execution.resolve(execution.ExecutionSpec(io_mode="application"), "tenant-demo", m)
+    job = jobs.build_run(
+        "op-app2",
+        m,
+        {},
+        "demo",
+        None,
+        None,
+        None,
+        None,
+        None,
+        {"output_prefix": ""},
+        "k",
+        placement={"regions": ["north"]},
+        ex=ex,
+    )
+    spec = job["spec"]["template"]["spec"]
+    assert not [c for c in spec.get("initContainers", []) if c["name"] == "fetch"]  # the profile removed it
+    assert _affinity(job)[f"{LABEL}/pool"]["values"] == ["cpu-batch-32"]  # fit computed on the final pod
+    assert fit.pod_requests(spec)["cpu"] == pytest.approx(16.1)
 
 
 def _affinity(job):

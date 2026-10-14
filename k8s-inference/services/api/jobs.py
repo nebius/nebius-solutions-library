@@ -359,14 +359,21 @@ def _fit_terms(pod: dict, r: dict, terms: list, placement: dict | None, region: 
         clusters = [c for c, x in kube.fleet().get("clusters", {}).items() if (x or {}).get("region") == region] or None
     pool_term = next((t for t in terms if t["key"] == f"{LABEL}/pool"), None)
     candidates = {r["pool"]} if r.get("pool") else (set(pool_term["values"]) if pool_term else None)
-    holds = fit.fitting(req, clusters, candidates)
+    # the capabilities the other terms require, intersected per (cluster, pool) BEFORE a pool counts as feasible: a
+    # pool whose node is big enough but lacks the shared filesystem (or local NVMe) the run needs is no candidate, so
+    # the affinity never names a set of pools no single node realizes
+    need_fs = any(t["key"] == f"{LABEL}/shared-fs" for t in terms)
+    need_nvme = any(t["key"] == f"{LABEL}/local-nvme" for t in terms)
+    holds = fit.fitting(req, clusters, candidates, shared_fs=need_fs, local_nvme=need_nvme)
     if not holds:
         what = f"the class's pool {r['pool']}" if r.get("pool") else "any eligible pool"
+        caps = " with the shared filesystem" if need_fs else ""
+        caps += " with local NVMe" if need_nvme else ""
         raise HTTPException(
             400,
-            f"impossible shape: the run's pod needs {fit.describe(req)} on one node and no node of {what} holds it; "
-            f"the largest candidate node admits {fit.largest(clusters, candidates)} (the per-node reserves of the fleet "
-            'apply; docs/SCHEDULING.md "Per-node fit")',
+            f"impossible shape: the run's pod needs {fit.describe(req)} on one node{caps} and no node of {what} holds "
+            f"it; the largest candidate node admits {fit.largest(clusters, candidates, shared_fs=need_fs, local_nvme=need_nvme)} "
+            '(the per-node reserves of the fleet apply; docs/SCHEDULING.md "Per-node fit")',
         )
     if not r.get("pool"):
         if pool_term:
@@ -589,13 +596,6 @@ def build_run(
         # node that mounts it can run it; Kueue skips a flavor whose nodeLabels contradict this (the system flavor
         # unless weights_filesystem.mount_on_system), docs/FLEET.md "Filesystem-aware placement"
         terms.append({"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
-    placement = _fit_terms(pod, r, terms, placement, region, name)
-    if terms:
-        pod["affinity"] = {
-            "nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
-            }
-        }
     if r.get("imagePullSecret"):
         pod["imagePullSecrets"] = [{"name": r["imagePullSecret"]}]
     # the queue follows the class actually asked for: the pinned class, else the first of the run's (narrowed) class
@@ -633,6 +633,15 @@ def build_run(
     nodes = int(r.get("nodes", 1) or 1)
     if ex:
         execution.apply_run(pod, r, ex, name, S3_ENV_SECRET)  # io mode, identity, private input, profile (docs/JOBS.md)
+    # per-node fit over the FINAL pod (after the execution profile reshaped its containers: an application io mode drops
+    # the fetch init container, a profile may add one), then the affinity: every term above plus the fitting pools
+    placement = _fit_terms(pod, r, terms, placement, region, name)
+    if terms:
+        pod["affinity"] = {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
+            }
+        }
     if nodes > 1:
         if (ex or {}).get("retry") or _class_retry(r):
             raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
@@ -1824,6 +1833,33 @@ def switch_class(
     return created, was_created
 
 
+def _started_pods(pods: list) -> list[dict]:
+    """The pods of a run that bound to a node or left Pending (an attempt that started, or ended): {name, uid, node,
+    phase, started_at}; the evidence the unschedulable switch must never pretend away."""
+    out = []
+    for p in pods or []:
+        spec, st = p.get("spec") or {}, p.get("status") or {}
+        running = next(
+            (
+                (c.get("state") or {}).get("running", {}).get("startedAt")
+                for c in st.get("containerStatuses") or []
+                if (c.get("state") or {}).get("running")
+            ),
+            None,
+        )
+        if spec.get("nodeName") or st.get("phase") != "Pending" or running:
+            out.append(
+                {
+                    "pod": p["metadata"].get("name"),
+                    "uid": p["metadata"].get("uid"),
+                    "node": spec.get("nodeName"),
+                    "phase": st.get("phase"),
+                    "started_at": running or st.get("startTime"),
+                }
+            )
+    return out
+
+
 def switch_unschedulable(
     ns: str, name: str, region: str, model: dict, defaults: dict, why: str, admit=None
 ) -> tuple[dict, bool]:
@@ -1838,11 +1874,7 @@ def switch_unschedulable(
     op = normalise(orig)
     md = orig["metadata"]
     labels, ann = md.get("labels", {}), md.get("annotations", {})
-    started = [
-        p
-        for p in orig.get("_pods") or []
-        if (p.get("spec") or {}).get("nodeName") or (p.get("status") or {}).get("phase") != "Pending"
-    ]
+    started = _started_pods(orig.get("_pods"))
     if (
         op["status"] not in ("QUEUED", "RUNNING")
         or started
@@ -1852,6 +1884,7 @@ def switch_unschedulable(
         raise HTTPException(
             409, f"operation {name} is {op['status']} with {len(started)} started attempt(s); no unschedulable switch"
         )
+    snapshot_uids = {p["metadata"].get("uid") for p in orig.get("_pods") or []}
     import catalog
 
     model = catalog.pinned(model, ann)
@@ -1909,6 +1942,18 @@ def switch_unschedulable(
     execution.deliver(
         ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
     )
+    # the snapshot-to-fence window, bounded from both sides: (1) re-read the worker's pods immediately before the
+    # fence; an attempt that bound meanwhile stops the switch here (nothing fenced, nothing created); (2) after the
+    # fence, read the same pods (by the snapshot's UIDs) once more: a binding that slipped into the last instants is
+    # evidence that is recorded on the original and on the successor's reason, never pretended away (its uploader
+    # records stay accepted: the successor mark comes last)
+    fresh = _started_pods([p for p in (get(ns, name, region).get("_pods") or [])])
+    if fresh:
+        raise HTTPException(
+            409,
+            f"operation {name}: attempt {fresh[0]['pod']} bound to {fresh[0]['node'] or 'a node'} before the fence; no "
+            "unschedulable switch (the run is proceeding)",
+        )
     try:
         retry(
             kube.batch(region).patch_namespaced_job,
@@ -1927,11 +1972,39 @@ def switch_unschedulable(
     except Exception as e:  # noqa: BLE001 - the Job is suspended either way
         log.warning("unschedulable switch: deactivate workload of %s/%s: %s", ns, name, e)
     try:
+        late = _started_pods(
+            [p for p in (get(ns, name, region).get("_pods") or []) if p["metadata"].get("uid") in snapshot_uids]
+        )
+    except Exception:  # noqa: BLE001 - the worker's copy may be gone already: no evidence is not evidence of a start
+        late = []
+    if late:
+        note = f"attempt {late[0]['pod']} had bound to {late[0]['node'] or 'a node'} ({late[0]['phase']}) before the fence took effect; its records are retained"
+        why = f"{why}; {note}"
+        job["metadata"]["annotations"][f"{LABEL}/recovery"] = why
+        log.warning("unschedulable switch %s/%s: %s", ns, name, note)
+        try:
+            retry(
+                kube.batch(region).patch_namespaced_job,
+                name,
+                ns,
+                {
+                    "metadata": {
+                        "annotations": {
+                            f"{LABEL}/started-before-fence": json.dumps(late, sort_keys=True),
+                            f"{LABEL}/recovery": why,
+                        }
+                    }
+                },
+            )
+        except ApiException as e:
+            if e.status != 404:
+                raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    try:
         if admit:
             admit(job)
         created, was_created = create(ns, job, region)
     except Exception:
-        try:  # nothing was created: the original stays as it was
+        try:  # nothing was created: the original stays as it was (a recorded late start stays recorded)
             retry(
                 kube.batch(region).patch_namespaced_job,
                 name,
