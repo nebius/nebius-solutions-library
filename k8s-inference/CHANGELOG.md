@@ -24,7 +24,9 @@ member-aware reservation fence of the worker's attach; jobs 0.1.27 and platform 
   creates a missing subPath directory root-owned 0755 and the ranks (10001, no capability) could not write it (the
   first real 2x1 MPI run on a fresh root, 2026-10-14: `/work/checkpoint` not writable while `/work` was). chown
   10001:10001 and chmod 2770 of the mount point only, not recursive, CHOWN/FOWNER/DAC_OVERRIDE only, idempotent on
-  a restart or a resume; a local-checkpoint gang is untouched.
+  a restart or a resume; a local-checkpoint gang is untouched. A `:resume` rewrites the leaf to the ROOT's
+  (`checkpoints/<root>`) on every container of the rank pod, the provisioning init included (0c61979f9 rewrote the
+  main/uploader mounts only, so a same-root resume would have provisioned a fresh `checkpoints/<successor>`).
 
 - Native execution leases (docs/API.md "Native execution leases"): the worker's attach checks the operation's LIVE
   reservation through the durable run ledger (`keys.reservation_key_of`: its own reservation, or its root's for an
