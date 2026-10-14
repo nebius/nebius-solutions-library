@@ -765,8 +765,9 @@ renews what the broker serves, nothing else. The child model's image is recorded
 intent is never completed against another image.
 
 **The capture (the native one-POST protocol, docs/API.md "Endpoint calls").** The child is rendered as an
-application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written, owned by the
-root's owner), `IO_MODE=application`, the readiness probe, exactly **one inference POST** per operation (the durable
+application-I/O endpoint call: its request in the private binding (`binding-<child>`, platform-written on the API's own
+cluster like a caller's `PUT /v1/bindings/{ref}`, owned by the root's owner, delivered as the `<child>-private` copy into
+the child's region with its Job), `IO_MODE=application`, the readiness probe, exactly **one inference POST** per operation (the durable
 `posted.json` marker: a lost response is an unknown outcome, `exit 4`, never a second POST, whatever the status;
 408/429-at-the-edge/5xx/000 are a capture or an unknown outcome, not retries), the response bytes and their manifest
 (`call.json`: sha256, media type from the response headers, size, HTTP status, producing attempt, timings) made

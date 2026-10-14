@@ -1576,6 +1576,7 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
             ns,
             job["metadata"]["labels"][f"{LABEL}/tenant"],
             placement_regions(job) or [region],
+            region=REGION,  # bindings live on the API's own cluster, whatever region the Job is created in
             owner=operation_owner(ann, root),
         )
     was_created = True

@@ -72,6 +72,20 @@ for cid, c in plan["clusters"].items():
         if "runtime" in e and cid in e.get("deployments", {}):
             yaml.safe_dump(e, open(f"{tmp}/endpoint-{mid}-{cid}.yaml", "w"))
 EOF
+  step "the log shipper (clusters/common/values/alloy.yaml) tolerates every worker-pool taint the cluster module places (docs/OBSERVABILITY.md)"
+  "$PYTHON" - "$ROOT" <<'PYEOF8'
+import re, sys, pathlib, yaml
+root = pathlib.Path(sys.argv[1])
+tf = (root / "stack/modules/cluster/main.tf").read_text()
+taints = {m.group(1) for m in re.finditer(r'taints\s*=\s*\[\{\s*key\s*=\s*"([^"]+)"', tf)}
+assert taints >= {"nvidia.com/gpu", "serverless2.nebius/cpu-pool"}, f"cluster module taints changed: {sorted(taints)}"
+values = yaml.safe_load((root / "clusters/common/values/alloy.yaml").read_text())
+assert values["controller"]["type"] == "daemonset", "alloy must run as a DaemonSet (one shipper per node)"
+tol = {(t["key"], t.get("operator"), t.get("effect")) for t in values["controller"]["tolerations"]}
+for key in sorted(taints):
+    assert (key, "Exists", "NoSchedule") in tol, f"alloy does not tolerate the worker-pool taint {key}: runs on that pool have no logs"
+print("   ok alloy tolerates " + ", ".join(sorted(taints)))
+PYEOF8
   step "helm lint"
   first=$(echo "$clusters" | cut -d' ' -f1)
   helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
