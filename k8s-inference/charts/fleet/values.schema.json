@@ -253,6 +253,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "assets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             }
           }

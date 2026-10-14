@@ -61,7 +61,7 @@ def batch(region: str = REGION) -> client.BatchV1Api:
     return client.BatchV1Api(_client(region))
 
 
-_fleet_cache: dict = {"until": 0.0, "pools": {}, "clusters": {}}
+_fleet_cache: dict = {"until": 0.0, "pools": {}, "clusters": {}, "tenants": {}, "assets": {}}
 
 
 def fleet() -> dict:
@@ -77,6 +77,7 @@ def fleet() -> dict:
         _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
         _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
         _fleet_cache["clusters"] = yaml.safe_load(data.get("clusters.yaml") or "") or {}
+        _fleet_cache["assets"] = yaml.safe_load(data.get("assets.yaml") or "") or {}  # docs/JOBS.md "Restricted assets"
     except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
         pass
     _fleet_cache["until"] = time.time() + 60

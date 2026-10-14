@@ -29,6 +29,7 @@ resource "helm_release" "tenant" {
     cluster       = local.id
     fleet         = local.fleet_doc
     allowedImages = each.value.allowed_images
+    assets        = each.value.assets # restricted assets granted to this tenant (charts/tenant assets.yaml)
     # execution options (charts/tenant execution.yaml, namespace annotations): identities, profiles, the fleet's API hosts
     identities        = each.value.identities
     executionProfiles = each.value.execution_profiles

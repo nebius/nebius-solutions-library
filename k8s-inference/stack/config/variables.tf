@@ -307,6 +307,18 @@ variable "fleet" {
     # dedicated_pools: pool names (as in regions.*.pools) only this tenant may use (its queues carry only those
     # flavors; the shared queues exclude them). allowed_images: image prefixes a tenant's container-run may
     # use (empty = any image through the cache).
+    # Restricted assets (docs/JOBS.md "Restricted assets"): operator-registered files or pinned trees on the weights
+    # filesystem (host paths on the nodes that mount it), mounted read-only on a run's main container only, by run
+    # classes that name the alias, for tenants granted it (tenants.<name>.assets). kind: file | tree; gid: the group
+    # the files are readable by (added to the pod's supplemental groups; no ownership change ever); sha256: the file's
+    # digest, or a tree's inventory digest (identity recorded on every run); size: bytes, informational.
+    assets = optional(map(object({
+      kind      = string
+      host_path = string
+      gid       = optional(number, 65532)
+      sha256    = optional(string)
+      size      = optional(number)
+    })), {})
     tenants = optional(map(object({
       regions           = optional(list(string)) # default: all regions
       lifecycle_days    = optional(number, 90)   # run outputs under operations/ expire after N days (0 = keep)
@@ -314,6 +326,7 @@ variable "fleet" {
       fair_share_weight = optional(number, 1)        # Kueue weighted fair sharing between the tenants' queues (docs/FLEET.md "Tenants")
       dedicated_pools   = optional(list(string), []) # pools only this tenant's runs use: their quota is the tenant's alone, no endpoint lands there
       allowed_images    = optional(list(string), [])
+      assets            = optional(list(string), []) # restricted assets (fleet `assets`) this tenant's run classes may mount
       # Execution options of this tenant's runs (docs/JOBS.md "Execution options").
       storage = optional(string, "managed") # managed: a bucket and S3 key per region for the runs' inputs and outputs; external: none
       #                                       (runs use application-managed I/O only; identity, queues and keys as usual)
@@ -352,6 +365,12 @@ variable "fleet" {
     }), {})
 
   })
+
+  validation {
+    condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
+      && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
+    error_message = "assets: alias is a DNS label, kind is file or tree, host_path is absolute, sha256 is 64 hex digits; a tenant's assets name registered aliases."
+  }
 
   validation {
     condition = alltrue([for tn, t in var.fleet.tenants : contains(["managed", "external"], t.storage)

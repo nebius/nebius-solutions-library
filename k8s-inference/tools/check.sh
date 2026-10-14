@@ -66,7 +66,8 @@ for cid, c in plan["clusters"].items():
     worker = c["roles"]["worker"]
     yaml.safe_dump({"cluster": cid, "fleet": fleet, "prepull": {"enabled": worker, "images": []}}, open(f"{tmp}/fleet-{cid}.yaml", "w"))
     cluster = {"region": c["region"]} if worker else {"region": c["region"], "manager": True}
-    yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
+    grants = sorted({a for t in (fleet.get("tenants") or {}).values() for a in (t.get("assets") or [])})  # every granted asset renders once
+    yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}, "assets": grants}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
     for mid, e in catalog.items():
         if "runtime" in e and cid in e.get("deployments", {}):
             yaml.safe_dump(e, open(f"{tmp}/endpoint-{mid}-{cid}.yaml", "w"))

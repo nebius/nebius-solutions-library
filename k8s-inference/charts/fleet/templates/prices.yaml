@@ -47,7 +47,13 @@ data:
     {{- end }}
   tenants.yaml: |
     {{- range $tn, $t := (default dict $f.tenants) }}
-    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }} }
+    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }}, assets: {{ default list $t.assets | toJson }} }
+    {{- end }}
+  assets.yaml: |
+    {{- /* restricted assets (docs/JOBS.md "Restricted assets"): what a run class may name; the tenant chart renders the
+           granted ones as read-only static volumes; the API refuses a weights/data path that reaches one */}}
+    {{- range $an, $a := (default dict $f.assets) }}
+    {{ $an }}: { kind: {{ $a.kind }}, host_path: {{ $a.host_path | quote }}, gid: {{ default 65532 $a.gid }}, sha256: {{ default "" $a.sha256 | quote }}, size: {{ default 0 $a.size }} }
     {{- end }}
   list.yaml: |
     {{- range $platform, $pr := $f.prices }}

@@ -1,0 +1,53 @@
+{{- /*
+Restricted assets (docs/JOBS.md "Restricted assets"), worker clusters only: for every alias granted to this tenant
+(`assets`, from fleet.yaml tenants.<name>.assets), one static PersistentVolume rooted AT the asset itself (a hostPath of
+type File for a single file, Directory for a pinned tree: no parent to traverse from inside a pod, no sibling in the
+volume, no subPath to validate) and its ReadOnlyMany claim `asset-<alias>`. The API mounts the claim on a run's main
+container only, read-only, and adds the asset's group to the pod's supplemental groups; the kubelet applies no
+ownership change to a hostPath volume, so the files keep their modes (0440 root:<gid>, directories 0550). Pods see a
+PVC, never a hostPath: PSA baseline holds. An alias granted here but absent from the registry fails the render.
+*/ -}}
+{{- $c := include "tenant.cluster" . | fromYaml -}}
+{{- if not $c.manager }}
+{{- $registry := default dict (default dict .Values.fleet).assets }}
+{{- range $alias := .Values.assets }}
+{{- $a := index $registry $alias }}
+{{- if not $a }}{{ fail (printf "assets: %s is granted to tenant %s but not registered in fleet.assets" $alias $.Values.name) }}{{ end }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: asset-{{ $alias }}-{{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+    serverless2.nebius/asset: {{ $alias | quote }}
+spec:
+  capacity:
+    storage: 1Gi   # nominal: a static hostPath volume has no quota; the asset's size is in the registry
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: asset-private
+  claimRef:
+    name: asset-{{ $alias }}
+    namespace: {{ include "tenant.ns" $ }}
+  hostPath:
+    path: {{ $a.host_path | quote }}
+    type: {{ if eq (toString $a.kind) "file" }}File{{ else }}Directory{{ end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: asset-{{ $alias }}
+  namespace: {{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+    serverless2.nebius/asset: {{ $alias | quote }}
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: asset-private
+  volumeName: asset-{{ $alias }}-{{ include "tenant.ns" $ }}
+  resources:
+    requests:
+      storage: 1Gi
+{{- end }}
+{{- end }}

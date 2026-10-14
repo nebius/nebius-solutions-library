@@ -148,6 +148,13 @@ fleet = {
     registry_credentials_env = "REGISTRY_CREDENTIALS" # JSON {"<host>": {"username": "...", "password": "..."}}
   }
 
+  # Restricted assets (docs/JOBS.md "Restricted assets"): operator-registered files or pinned trees on the weights
+  # filesystem, mounted read-only on a run's main container only by the run classes that name them, for the tenants
+  # granted them (tenants.<name>.assets). The operator publishes the file (0440 root:<gid>, parents 0550 or tighter).
+  assets = {
+    example-weights = { kind = "file", host_path = "/mnt/weights/private/example/model.bin", gid = 65532, sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 1 }
+  }
+
   # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys
   # (`./stack.sh output platform control -json tenant_keys`).
   tenants = {
@@ -161,6 +168,7 @@ fleet = {
       # fair_share_weight = 2             # Kueue weighted fair sharing when the fleet is full
       # dedicated_pools   = ["h200-reserved-8x"]
       # allowed_images    = ["registry.serverless2.local/nebius/", "registry.serverless2.local/nvcr/nim/"]
+      assets = ["example-weights"]        # restricted assets this tenant's run classes may mount (fleet `assets`)
     }
   }
 

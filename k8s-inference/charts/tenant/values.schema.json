@@ -55,6 +55,7 @@
       "type": "string",
       "minLength": 1
     },
+    "assets": { "type": "array", "items": { "type": "string" } },
     "allowedImages": {
       "type": "array",
       "items": {
