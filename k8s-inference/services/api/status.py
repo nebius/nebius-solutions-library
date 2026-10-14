@@ -311,9 +311,24 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         # (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization") must be on record
         # the delivering attempt: the newest successful one that carries a delivery record (a multi-node run's rank 0
         # exports for every rank), else the newest successful one
-        last = next(
-            (a for a in reversed(attempts) if a["status"] == "SUCCEEDED" and a.get("export_state") is not None), None
-        ) or next((a for a in reversed(attempts) if a["status"] == "SUCCEEDED"), None)
+        if any(a.get("gang_rank") is not None for a in attempts):
+            # Peers record export_state='n/a': that is not a delivery failure or
+            # acknowledgement. Reuse lifecycle's newest-incarnation authority;
+            # never borrow a previous coordinator's result when only a peer has
+            # recorded in the new incarnation.
+            from attempts import authority
+
+            coordinator = authority(attempts)
+            last = (
+                coordinator
+                if coordinator and coordinator.get("gang_rank") == 0 and coordinator["status"] == "SUCCEEDED"
+                else None
+            )
+        else:
+            last = next(
+                (a for a in reversed(attempts) if a["status"] == "SUCCEEDED" and a.get("export_state") is not None),
+                None,
+            ) or next((a for a in reversed(attempts) if a["status"] == "SUCCEEDED"), None)
         execution = _json(ann.get(f"{LABEL}/execution")) or {}
         done_at = _ts(st.get("completionTime"))
         age = (datetime.now(timezone.utc) - done_at).total_seconds() if done_at else None

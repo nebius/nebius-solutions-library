@@ -109,6 +109,31 @@ def test_a_finalizing_pod_is_a_running_operation():
     assert status.normalise(job)["status"] == "RUNNING"
 
 
+@pytest.mark.parametrize("peer_first", [False, True])
+@pytest.mark.parametrize(
+    "export,ref,expected", [("committed", "result-5", "SUCCEEDED"), ("failed", None, "EXPORT_FAILED")]
+)
+def test_gang_peer_na_never_overrides_coordinator_delivery(peer_first, export, ref, expected):
+    name = "op-gang-delivery"
+    job = {**_job(name, {"io_mode": "application"}), "kind": "JobSet"}
+    leader = _record(name, "rank-zero", epoch=5, gang_rank=0, export_state=export, result_ref=ref)
+    peer = _record(name, "rank-one", epoch=5, gang_rank=1, export_state="n/a", started_at="2026-10-11T10:00:01Z")
+    rows = [peer, leader] if peer_first else [leader, peer]
+    operation = status.normalise(job, records=rows)
+    assert operation["status"] == expected
+    assert len(operation["attempts"]) == 2  # Both ranks remain visible and billable.
+
+
+def test_gang_new_peer_does_not_borrow_old_coordinator_result():
+    name = "op-gang-delivery"
+    job = {**_job(name, {"io_mode": "application"}), "kind": "JobSet"}
+    rows = [
+        _record(name, "old-leader", epoch=4, gang_rank=0, export_state="committed", result_ref="old"),
+        _record(name, "new-peer", epoch=5, gang_rank=1, export_state="n/a"),
+    ]
+    assert status.normalise(job, records=rows)["status"] == "FINALIZING"
+
+
 def test_lifecycle_fields_come_from_the_rows(monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: False)
     rows = [
