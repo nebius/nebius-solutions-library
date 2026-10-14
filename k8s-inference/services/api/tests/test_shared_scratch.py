@@ -34,7 +34,7 @@ GPU_ONLY_FIT = {"hub": {k: v for k, v in FIT["hub"].items() if k != "cpu-batch-8
 BOUND = {"metadata": {"name": SHARED_SCRATCH_PVC, "namespace": NS}, "status": {"phase": "Bound"}}
 
 
-def place(pod: dict, cluster_fit: dict) -> str | None:
+def place(pod: dict, cluster_fit: dict, saturated: set[str] = frozenset()) -> str | None:
     """What Kueue and the scheduler do with the rendered caller on a cluster, from the facts the fleet chart renders:
     Kueue walks the flavors in order (system, CPU pools, GPU pools), takes the first whose nodeLabels (`pool`,
     `shared-fs`) satisfy every required affinity expression and whose quota holds the requests (one node here), and
@@ -51,6 +51,8 @@ def place(pod: dict, cluster_fit: dict) -> str | None:
         exprs = t.get("matchExpressions") or []  # one term in every render here
     order = sorted(cluster_fit.items(), key=lambda kv: {"system": 0, "cpu": 1, "gpu": 2}[kv[1]["kind"]])
     for pool, node in order:
+        if pool in saturated:  # the flavor's quota is taken: Kueue moves on to the next flavor in order
+            continue
         labels = {f"{LABEL}/pool": pool, f"{LABEL}/shared-fs": "true" if node.get("shared_fs") else "false"}
         if not all(labels.get(e["key"]) in e["values"] for e in exprs if e["operator"] == "In"):
             continue
@@ -131,10 +133,29 @@ def test_caller_mounts_only_its_leaf_with_a_provisioning_init_and_no_claim_of_it
     assert ann[f"{LABEL}/scratch"] == "shared" and ann[f"{LABEL}/scratch-leaf"] == leaf and f"{LABEL}/pvc" not in ann
     terms = spec["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
     assert {"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]} in terms["matchExpressions"]
+    assert {"key": f"{LABEL}/pool", "operator": "In", "values": ["cpu-batch-8"]} in terms[
+        "matchExpressions"
+    ]  # the eligible pools
     # the main container is the caller as before (one POST rule lives in call.sh on the same /work)
     assert _main(job)["command"] == ["/usr/local/bin/call.sh"] and _env(_main(job))["IO_MODE"]["value"] == "application"
     # actual placement, not the rendered affinity: Kueue's flavor order lands this caller on the GPU-free shared-fs pool
     assert place(spec, FIT["hub"]) == "cpu-batch-8"
+    # CPU quota saturated while the shared-fs GPU flavor has room: the constrained render is admitted nowhere (QUEUED
+    # for its CPU pool), never on the GPU flavor; the shared-fs label alone would have taken the GPU flavor
+    assert place(spec, FIT["hub"], saturated={"cpu-batch-8"}) is None
+    label_only = {
+        **spec,
+        "affinity": {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}]}
+                    ]
+                }
+            }
+        },
+    }
+    assert place(label_only, FIT["hub"], saturated={"cpu-batch-8"}) == "h100-spot-1x"
 
 
 def test_export_retry_reuses_the_same_leaf_without_a_pvc_and_without_a_post(shared, monkeypatch):
@@ -161,6 +182,23 @@ def test_export_retry_reuses_the_same_leaf_without_a_pvc_and_without_a_post(shar
     ] == f"calls/{oid}"  # the ORIGINAL's leaf
     assert new["metadata"]["annotations"][f"{LABEL}/scratch-leaf"] == f"calls/{oid}"
     assert (NS, f"{oid}-work") not in cl.pvcs and (NS, f"{oid}-x1-work") not in cl.pvcs
+    rterms = spec["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
+    assert {"key": f"{LABEL}/pool", "operator": "In", "values": ["cpu-batch-8"]} in rterms["matchExpressions"]
+    assert place(spec, FIT["hub"], saturated={"cpu-batch-8"}) is None  # the retry waits for its CPU pool too
+    # the CPU pool gone from the table: the retry cannot be placed on the leaf now; refused with the reason, never a
+    # GPU flavor and never a per-call claim (the capture is on the leaf)
+    oid3 = _call(c)
+    job3 = cl.jobs[(NS, oid3)]
+    job3["status"] = {"conditions": [{"type": "Complete", "status": "True"}], "completionTime": "2026-10-14T09:00:00Z"}
+    rows.append({**_record(oid3, f"{oid3}-a", export="failed"), "operation": oid3, "io_mode": "application"})
+    monkeypatch.setattr(attempts, "for_operation", lambda root: [r for r in rows if r["operation"] == root])
+    fleet = dict(kube.fleet())
+    monkeypatch.setattr(kube, "fleet", lambda: {**fleet, "fit": GPU_ONLY_FIT})
+    jobs._shared_scratch_cache.clear()
+    r = c.post(f"/v1/operations/{oid3}:export", headers=H)
+    assert r.status_code == 409 and "cannot be placed now" in r.text and "only GPU pools" in r.text, r.text
+    assert (NS, f"{oid3}-x1") not in cl.jobs
+    monkeypatch.setattr(kube, "fleet", lambda: {**fleet, "fit": FIT})
     # the shared claim gone from the namespace: a fresh operation's export has nothing to mount, said plainly
     oid2 = _call(c)
     job2 = cl.jobs[(NS, oid2)]
@@ -267,10 +305,11 @@ def test_shared_fs_requirement_joins_an_existing_required_affinity_by_conjunctio
     assert len(terms) == 1 and terms[0]["matchExpressions"] == [
         {"key": "example.org/zone", "operator": "In", "values": ["a"]},
         {"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]},
-    ]  # both required, in one term (AND): nothing of the profile's requirement dropped or widened
+        {"key": f"{LABEL}/pool", "operator": "In", "values": ["cpu-batch-8"]},
+    ]  # all required, in one term (AND): nothing of the profile's requirement dropped or widened
     assert jobs.shared_scratch_available(
         NS, "eu-north1", {"containers": [{"name": "m", "resources": {"requests": {"nvidia.com/gpu": "1"}}}]}
-    ) == (False, "the caller requests a GPU (never for a shared-scratch leaf)")
+    ) == (False, "the caller requests a GPU (never for a shared-scratch leaf)", [])
 
 
 def test_leaf_names_are_api_derived_and_the_default_model_is_unchanged(shared):
@@ -280,5 +319,5 @@ def test_leaf_names_are_api_derived_and_the_default_model_is_unchanged(shared):
         with pytest.raises(Exception):
             jobs.scratch_leaf(bad)
     probe = {"containers": [{"name": "m", "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}}}]}
-    ok, why = jobs.shared_scratch_available(NS, "eu-west1", probe)  # a cluster the fit table does not know
-    assert ok is False and "no per-node fit table" in why
+    ok, why, pools = jobs.shared_scratch_available(NS, "eu-west1", probe)  # a cluster the fit table does not know
+    assert ok is False and "no per-node fit table" in why and pools == []

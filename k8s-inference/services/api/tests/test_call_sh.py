@@ -72,6 +72,15 @@ def _run(tmp_path, binding, script, env=None, work_files=None):
     sync = bin_ / "sync"  # every run sees the scripted sync; without SYNC_FAIL it always succeeds
     sync.write_text(SYNC_STUB)
     sync.chmod(sync.stat().st_mode | stat.S_IEXEC)
+    jq = bin_ / "jq"  # JQ_FAIL=manifest|result: that one jq write emits a partial document and exits 1 (a short write)
+    jq.write_text(
+        "#!/bin/bash\nreal=$(command -v -p jq || echo /usr/bin/jq)\n"
+        'case "${JQ_FAIL:-}" in\n'
+        '  manifest) for a in "$@"; do [[ "$a" == *capture_complete:true* ]] && { printf \'{"operation_id":"op-1","attempt_id\'; exit 1; }; done;;\n'
+        '  result) for a in "$@"; do [[ "$a" == *export:\\"succeeded\\"* ]] && { printf \'{"result_ref":"app://\'; exit 1; }; done;;\n'
+        'esac\nexec "$real" "$@"\n'
+    )
+    jq.chmod(jq.stat().st_mode | stat.S_IEXEC)
     mv = bin_ / "mv"  # MV_FAIL=<basename>: the rename of exactly that file fails (a write/rename failure at a boundary)
     mv.write_text(
         '#!/bin/bash\nif [ -n "${MV_FAIL:-}" ] && [ "$(basename "${@: -1}")" = "$MV_FAIL" ]; then echo "mv: refused $MV_FAIL" >&2; exit 1; fi\nexec /bin/mv "$@"\n'
@@ -400,3 +409,29 @@ def test_result_rename_failure_never_claims_export_success(tmp_path):
         and _posts(calls2) == []
         and json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"
     )
+
+
+def test_partial_manifest_write_keeps_the_outcome_unknown(tmp_path):
+    """jq writes a partial manifest and fails: the fragment is never renamed into place, the outcome is unknown
+    (exit 4), posted.json stays, nothing is delivered; the restart refuses to post again."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "JQ_FAIL": "manifest"})
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and _puts(calls) == []
+    assert (
+        (work / "posted.json").exists() and not (work / "call.json").exists() and not (work / "call.json.tmp").exists()
+    )
+    r2, work, calls2 = _run(tmp_path, BINDING, list(FULL), env=QUICK)
+    assert r2.returncode == 4 and _posts(calls2) == []
+
+
+def test_partial_result_write_never_claims_export_success(tmp_path):
+    """jq writes a partial RESULT.json and fails after a delivery: nothing claims success, exit 6; the capture stays
+    complete and the restart delivers it again without posting."""
+    r, work, calls = _run(tmp_path, BINDING, list(FULL), env={**QUICK, "JQ_FAIL": "result"})
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert len(_posts(calls)) == 1 and len(_puts(calls)) == 2
+    assert not (work / "RESULT.json").exists() and not (work / "RESULT.json.tmp").exists()
+    assert json.loads((work / "call.json").read_text())["capture_complete"] is True
+    r2, work, calls2 = _run(tmp_path, BINDING, FULL[2:], env=QUICK)
+    assert r2.returncode == 0 and _posts(calls2) == []
+    assert json.loads((work / "RESULT.json").read_text())["export"] == "succeeded"

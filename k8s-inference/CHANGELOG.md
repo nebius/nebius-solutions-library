@@ -4,7 +4,23 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.85, jobs 0.1.24
+## api 0.11.86, jobs 0.1.25
+
+(0.11.86 / 0.1.25 supersede the unreleased 0.11.85 / 0.1.24 candidate after review; everything of it is included.)
+
+- Shared scratch placement is constrained in the rendered Pod, not only judged: `shared_scratch_available` returns
+  the eligible GPU-free shared-fs pools that hold the caller, and the render conjoins `serverless2.nebius/pool In
+  [those]` into the required node affinity next to `shared-fs In [true]`; under CPU-quota saturation Kueue therefore
+  queues the caller for its CPU pool instead of taking a shared-fs GPU flavor. The transfer-only export retry is
+  judged the same way at its own creation and refused (409, the reason) when the leaf cannot be placed then, never
+  rendered on a GPU flavor or on a per-call claim. Tests model Kueue with a saturated CPU flavor: the constrained
+  render queues (no flavor), the unconstrained one would have taken the GPU flavor.
+- `call.sh` checks the two jq writes themselves (exit status and that the file parses: a short write leaves a
+  non-empty fragment) before the rename and the sync: the capture manifest (failure → outcome unknown, marker kept,
+  nothing delivered, exit 4) and RESULT.json (failure → removed, no export state claimed, exit 6). Regression: a jq
+  stub that writes a partial document and exits 1 at each boundary.
+
+## api 0.11.85, jobs 0.1.24 (unreleased candidate, superseded by 0.11.86 / 0.1.25)
 
 (0.11.85 / 0.1.24 supersede the unreleased 0.11.84 / 0.1.23 candidate after review; everything of it is included.)
 

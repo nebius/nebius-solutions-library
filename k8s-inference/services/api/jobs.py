@@ -1050,17 +1050,22 @@ def build_async(
         "securityContext": RUNNER_SECURITY_CONTEXT,
     }
     uploader = _uploader(name, region, output_prefix, None)
-    if want_shared:
+    pools: list[str] = []
+    if want_shared:  # judged on the caller's own requests (main, uploader, the provisioning init), retry included
+        probe = {
+            "containers": [main, uploader],
+            "initContainers": [{"name": "scratch-provision", "resources": {"requests": SCRATCH_PROVISION_REQUESTS}}],
+        }
+        ok, fallback, pools = shared_scratch_available(f"{TENANT_NS_PREFIX}{tenant}", region, probe)
         if scratch_leaf_of:
-            leaf = scratch_leaf_of  # a transfer-only retry keeps the original's leaf, whatever the table says now
-        else:  # judged on the caller's own requests (main, uploader, the provisioning init)
-            probe = {
-                "containers": [main, uploader],
-                "initContainers": [
-                    {"name": "scratch-provision", "resources": {"requests": SCRATCH_PROVISION_REQUESTS}}
-                ],
-            }
-            ok, fallback = shared_scratch_available(f"{TENANT_NS_PREFIX}{tenant}", region, probe)
+            # a transfer-only retry must reach the ORIGINAL's leaf: the same claim and placement rules, judged now; it
+            # cannot fall back to a per-call claim (the capture is on the leaf), so it is refused, visibly, instead
+            if not ok:
+                raise HTTPException(
+                    409, f"the retained capture on the shared-scratch leaf cannot be placed now: {fallback}"
+                )
+            leaf = scratch_leaf_of
+        else:
             leaf = scratch_leaf(name) if ok else None
     work = None if leaf else (pvc or (f"{name}-work" if ex else None))
     if work:
@@ -1100,7 +1105,7 @@ def build_async(
     if ex:
         execution.apply_async(pod, ex, name)
     if leaf:
-        _mount_scratch_leaf(pod, leaf)
+        _mount_scratch_leaf(pod, leaf, pools)
     meta = _meta(name, tenant, model["name"], "async", region, label, inp, idem, None, key_hash, execution=ex)
     if leaf:  # the capture is retained on the tenant's shared-scratch leaf (no claim of its own, nothing to attach)
         meta["annotations"][f"{LABEL}/scratch"] = "shared"
@@ -1136,7 +1141,7 @@ def build_async(
     return job, secret
 
 
-def _mount_scratch_leaf(pod: dict, leaf: str) -> None:
+def _mount_scratch_leaf(pod: dict, leaf: str, pools: list[str]) -> None:
     """The caller's /work on the tenant's shared-scratch claim at the leaf ONLY (a kubelet subPath on main and the
     uploader; neither sees the tenant's directory), plus the trusted provisioning init container: the kubelet creates
     a missing subPath directory root-owned 0755, so the runner image, as root with exactly CHOWN/FOWNER/DAC_OVERRIDE
@@ -1170,6 +1175,10 @@ def _mount_scratch_leaf(pod: dict, leaf: str) -> None:
         }
     ] + list(pod.get("initContainers") or [])
     _and_required(pod, {"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
+    # the eligible GPU-free pools only (shared_scratch_available): with the shared-fs label alone, a CPU pool at its
+    # quota lets Kueue take the next flavor whose nodes carry the label, a GPU pool; with the pool list the caller
+    # waits for its CPU pool (QUEUED), never a GPU node
+    _and_required(pod, {"key": f"{LABEL}/pool", "operator": "In", "values": sorted(pools)})
 
 
 def _and_required(pod: dict, expr: dict) -> None:
@@ -1225,24 +1234,28 @@ _shared_scratch_cache: dict = {}
 SCRATCH_PROVISION_REQUESTS = {"cpu": "50m", "memory": "32Mi"}
 
 
-def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str]:
+def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str, list[str]]:
     """Whether the durable endpoint call rendered as `pod` (its containers' and init containers' requests; no GPU, no
     GPU toleration of its own) can keep its capture on the tenant's shared-scratch leaf in `ns` on `region`: the
     region's cluster has a GPU-FREE pool (system or CPU: an endpoint caller never occupies a GPU node) whose nodes
     mount the shared filesystem AND whose one node holds the caller's requests (fit.yaml, docs/SCHEDULING.md
     "Per-node fit": the judgement Kueue's flavor order and the scheduler make; a shared-fs affinity only a GPU flavor
     satisfies would put a 100m caller on a GPU node, or leave it Pending where no flavor matches), and the tenant
-    namespace holds the claim, Bound. (False, why) otherwise: the per-call claim, and the Job says why."""
+    namespace holds the claim, Bound. (True, "", [eligible pool labels]) then, and the render CONJOINS `pool In
+    [those]` into the pod's required affinity (next to shared-fs): under CPU-quota saturation Kueue would otherwise
+    take the next flavor whose nodeLabels satisfy `shared-fs In [true]`, a GPU flavor; with the pool list the caller
+    waits QUEUED for its CPU pool, never a GPU node. (False, why, []) otherwise: the per-call claim, the Job says why."""
     import fit
 
     cid = kube.cluster_id_or_none(region)
     table = kube.fleet().get("fit") or {}
     if not cid or cid not in table:
-        return False, f"no per-node fit table for {region} (fleet chart < 0.1.12 or unknown cluster)"
+        return False, f"no per-node fit table for {region} (fleet chart < 0.1.12 or unknown cluster)", []
     req = fit.pod_requests(pod)
     if req["gpu"]:
-        return False, "the caller requests a GPU (never for a shared-scratch leaf)"
-    if not fit.fitting(req, [cid], shared_fs=True, gpu_free=True):
+        return False, "the caller requests a GPU (never for a shared-scratch leaf)", []
+    eligible = sorted(fit.fitting(req, [cid], shared_fs=True, gpu_free=True))
+    if not eligible:
         gpu_free_shared = any(
             (n or {}).get("shared_fs") and (n or {}).get("kind") != "gpu" for n in (table.get(cid) or {}).values()
         )
@@ -1250,14 +1263,20 @@ def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str
             return (
                 False,
                 f"no GPU-free pool of {cid} that mounts the shared filesystem holds the caller ({fit.describe(req)})",
+                [],
             )
         if fit.fitting(req, [cid], shared_fs=True):
-            return False, f"only GPU pools of {cid} mount the shared filesystem (a caller never occupies a GPU node)"
-        return False, f"no GPU-free pool of {cid} mounts the shared filesystem"
+            return (
+                False,
+                f"only GPU pools of {cid} mount the shared filesystem (a caller never occupies a GPU node)",
+                [],
+            )
+        return False, f"no GPU-free pool of {cid} mounts the shared filesystem", []
     key = (ns, region)
     hit = _shared_scratch_cache.get(key)
     if hit and hit[0] > time.time():
-        return hit[1]
+        ok, why = hit[1]
+        return ok, why, eligible if ok else []
     try:
         core = kube.core(region)
         claim = core.api_client.sanitize_for_serialization(
@@ -1279,7 +1298,7 @@ def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str
     except Exception as e:  # noqa: BLE001 - unknown is not available
         out = (False, f"claim lookup: {e}")
     _shared_scratch_cache[key] = (time.time() + 60, out)
-    return out
+    return out[0], out[1], eligible if out[0] else []
 
 
 def export_async(ns: str, name: str, region: str, model: dict, admit=None) -> tuple[dict, bool]:
