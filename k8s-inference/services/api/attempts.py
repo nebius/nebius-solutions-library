@@ -635,6 +635,20 @@ def digest_state(latest: dict | None, digest: str | None) -> str | None:
     return "pending" if latest.get("status") == "started" else "unknown"
 
 
+RESTORE_KEYS = ("resume_checkpoint_ref", "resume_source_epoch", "resume_source")
+
+
+def restore_fields(r: dict | None) -> dict:
+    """The restore triple of an attempt record as the owner sees it (docs/JOBS.md "Restoring a gang"): present exactly
+    on a gang's authenticated records (an observed `gang_rank`: the start ACK of such a record is where the pointer
+    is frozen, `_resume_for`, and a decided "nothing to restore" is an explicit null triple there); absent on every
+    other row (a single-pod attempt, a record without an observed rank, a live pod without its record), never a
+    manufactured null."""
+    if not r or r.get("gang_rank") is None:
+        return {}
+    return {k: r.get(k) for k in RESTORE_KEYS}
+
+
 def lifecycle(
     operation: str, root: str, rows: list[dict], marks: tuple | None | bool = False, pods: list | None = None
 ) -> dict:
@@ -667,8 +681,8 @@ def lifecycle(
         "pod_uid": latest.get("pod_uid") if latest else None,
         "gang_rank": latest.get("gang_rank") if latest else None,
         "gang_restart": latest.get("gang_restart") if latest else None,
-        # the incarnation-frozen resume pointer the gang was told to restore (the start ACK's), never "the latest"
-        "resume_checkpoint_ref": latest.get("resume_checkpoint_ref") if latest else None,
-        "resume_source_epoch": latest.get("resume_source_epoch") if latest else None,
-        "resume_source": latest.get("resume_source") if latest else None,
+        # the incarnation-frozen resume pointer the gang was told to restore (the start ACK's), never "the latest":
+        # the three keys are present only when the ACK decided them (`resume_source` on record: committed, explicit or
+        # fresh); an undecided row (unACKed, legacy) carries no triple, never a manufactured null
+        **restore_fields(latest),
     }

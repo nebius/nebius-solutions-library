@@ -102,9 +102,12 @@ def _pod(ready=True, image_id="docker://cr.example/m@sha256:5555", image="cr.exa
     )
 
 
-def _isvc(created, ready, rolled, generation=2, observed=2, image="cr.example/m:5", ready_cond=True):
+def _isvc(created, ready, rolled, generation=2, observed=2, image="cr.example/m:5", ready_cond=True, mode=None):
     return {
-        "metadata": {"generation": generation},
+        "metadata": {
+            "generation": generation,
+            **({"annotations": {"serving.kserve.io/deploymentMode": mode}} if mode else {}),
+        },
         "spec": {"predictor": {"containers": [{"name": "kserve-container", "image": image}]}},
         "status": {
             "observedGeneration": observed,
@@ -328,10 +331,19 @@ def test_rollout_takes_the_predictor_service_as_the_reconciliation_witness_on_ks
     rolling = _rollout_of(monkeypatch, moved, [], {"m-5": _revision()}, ksvc=_ksvc(3, 3, "cr.example/m:6"))
     assert rolling["converged"] is False and "spec not propagated" not in rolling["reason"]
     assert "ready revision image cr.example/m:5 is not the desired cr.example/m:6" in rolling["reason"]
-    # no predictor Service (RawDeployment): the ISVC's own generations decide, exactly as before
-    raw_ok = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {"m-5": _revision()}, ksvc=None)
+    # Knative mode and the predictor Service cannot be read: no witness, never a guess (not the ISVC rule)
+    unread = _rollout_of(monkeypatch, _isvc("m-5", "m-5", "m-5"), [], {"m-5": _revision()}, ksvc=None)
+    assert unread["converged"] is False and "predictor Service m-predictor not readable (404)" in unread["reason"]
+    # RawDeployment, proven by the ISVC's own mode: no Knative Service is expected, its generations decide as before
+    raw_ok = _rollout_of(
+        monkeypatch, _isvc("m-5", "m-5", "m-5", mode="RawDeployment"), [], {"m-5": _revision()}, ksvc=None
+    )
     assert raw_ok["converged"] is True and raw_ok["service_generation"] is None
     raw_window = _rollout_of(
-        monkeypatch, _isvc("m-5", "m-5", "m-5", generation=3, observed=2), [], {"m-5": _revision()}, ksvc=None
+        monkeypatch,
+        _isvc("m-5", "m-5", "m-5", generation=3, observed=2, mode="RawDeployment"),
+        [],
+        {"m-5": _revision()},
+        ksvc=None,
     )
     assert raw_window["converged"] is False and "spec generation 3 not reconciled (observed 2)" in raw_window["reason"]

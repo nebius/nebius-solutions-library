@@ -326,7 +326,9 @@ pointer of a COORDINATOR (rank 0, or an ordinary attempt of the chain) of an EAR
 row and copied to every sibling of the incarnation (migration 26), so all ranks restore the same state, a sibling that
 records later never sees a pointer committed by its own incarnation, and a late record of a rank keeps its own row's
 value. Never a peer's pointer, never "the latest" at read time. The owner-scoped operation shows the same three fields on
-its current attempt and on every `attempts[]` entry, so a broker authorises exactly the restored inputs. The application
+its current attempt and on every `attempts[]` entry of a gang record (an observed rank: the start ACK froze the triple
+there; all three null = decided, nothing to restore), and NO such keys on a row the ACK never decided (a single-pod
+attempt, a live pod without its record): absent is not "fresh". A broker authorises exactly the restored inputs. The application
 decides what to do with it (restore, or fail when the expected recovery identity is missing); the platform maintains no
 application pointer.
 

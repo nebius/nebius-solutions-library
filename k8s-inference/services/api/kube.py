@@ -358,8 +358,11 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
     # predictor Service (RawDeployment) the ISVC's own generations decide, as before.
     service_generation = service_observed = service_image = None
     service_seen = False
+    mode = str(st.get("deploymentMode") or (md.get("annotations") or {}).get("serving.kserve.io/deploymentMode") or "")
+    raw_deployment = mode.lower() == "rawdeployment"  # proven: no Knative Service is expected for this endpoint
     svc_name = f"{name or md.get('name') or ''}-predictor" if (name or md.get("name")) else None
-    if svc_name:
+    service_error = None
+    if svc_name and not raw_deployment:
         try:
             ksvc = retry(
                 api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, "services", svc_name
@@ -369,8 +372,8 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
             service_observed = (ksvc.get("status") or {}).get("observedGeneration")
             tmpl = ((ksvc.get("spec") or {}).get("template") or {}).get("spec") or {}
             service_image = ((tmpl.get("containers") or [{}])[0]).get("image")
-        except ApiException:
-            pass
+        except ApiException as e:
+            service_error = f"predictor Service {svc_name} not readable ({e.status})"
     revision_image, revision_digest = None, None
     if ready_rev:
         try:
@@ -400,14 +403,21 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
         service_reconciled = service_generation is not None and service_observed == service_generation
         propagated = bool(desired) and service_image == desired
         reconciled = service_reconciled and propagated
-    else:
+    elif raw_deployment or not svc_name:
+        # no Knative Service is expected (RawDeployment, proven by the ISVC's own mode): its generations decide
         service_reconciled = propagated = True
         reconciled = generation is not None and observed == generation
+    else:
+        # Knative mode and the predictor Service could not be read: no witness, never a guess
+        service_reconciled = propagated = False
+        reconciled = False
     image_matches = bool(desired) and revision_image == desired
     pods_match = all(_same_image(i, revision_image, revision_digest) for i in images)
     reasons = []
     if not reconciled:
-        if service_seen and not service_reconciled:
+        if service_error:
+            reasons.append(service_error)
+        elif service_seen and not service_reconciled:
             reasons.append(
                 f"predictor Service generation {service_generation} not reconciled (observed {service_observed})"
             )
