@@ -4,6 +4,17 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.102
+
+(0.11.102 = 0.11.101 plus operator-declared parameter bounds; jobs 0.1.27 and platform chart unchanged; no migration.)
+
+- Run classes (docs/JOBS.md "Parameters"): `parameters[].min`/`max`/`integer` for `number`, enforced `options` for
+  `select`, and `job.maxGpus` (nodes x GPUs per node) are checked at invoke on the effective values, before any
+  reservation or Job creation (400 naming the parameter and the bound): an operator catalog class with a templated
+  shape admits only operator-approved shapes under one model id, whatever key calls it directly (the app's own
+  validator was the only bound before). Malformed numerics (strings, booleans, NaN/inf, fractions where an integer is
+  declared) are refused, never coerced. Classes declaring no bounds are untouched (the bundled classes included).
+
 ## api 0.11.101
 
 (0.11.101 = 0.11.100 plus the gang resume pointer; jobs 0.1.27 and platform chart 0.1.11 unchanged; migration 26.)

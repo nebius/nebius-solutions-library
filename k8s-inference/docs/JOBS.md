@@ -59,7 +59,14 @@ Three run classes ship (`catalog/models`): `container-run` (any image and comman
 class), `hello-run` (CPU smoke test) and `distributed-run` (multi-node JobSet, "Multi-node runs"
 below). Application layers define their own run classes through the model API (`kind: job`).
 `parameters` is what a client shows and what `input` may contain (unknown names, or a missing
-`required` one, are a 400); `deployments.<cluster>.parameters` are per-region defaults the caller
+`required` one, are a 400). A parameter may carry the operator's bounds, enforced at invoke on the effective value
+(the caller's over the defaults) before any reservation or Job: a `number` with `min`/`max` (inclusive) and
+`integer: true` (whole numbers only; a string, a boolean, NaN/inf or a fraction is refused, never coerced), a `select`
+with `options` (exactly one of them). `job.maxGpus: N` bounds a class's whole shape (`nodes` x GPUs per node ≤ N) on
+the rendered values. A class declaring none of these behaves as before; the renderer's own refusals (a shape no pool
+has, the node maximum) stay. With these an operator catalog class with a templated shape (`nodes: "{{nodes}}"`,
+`gpu: "{{gpus_per_node}}"`) admits only operator-approved shapes under one model id, whatever key calls it directly.
+`deployments.<cluster>.parameters` are per-region defaults the caller
 never sees (pool, in-region image, tuning). `input_prefix` and `output_prefix` are always accepted;
 the API sets `output_prefix` to `s3://<tenant bucket of the region>/operations/<id>`.
 
