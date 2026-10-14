@@ -4,6 +4,22 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.106
+
+(0.11.106 = 0.11.105 plus the session attach's owner context and the settlement lock on its own connection; jobs 0.1.27
+and platform chart 0.1.12 unchanged; no migration.)
+
+- Sessions (docs/API.md "Sessions"): `POST /internal/sessions/{id}:attach` and `GET /internal/sessions/{id}` answer the
+  attached worker with `owner: {tenant, owner, model}` from the session's durable row (the admitting key's principal
+  resolved at creation; never a request header, never a group derived from the session id, never the key), as the
+  native execution attach does: a worker keys its own owner-fair state on it. Stable on a duplicate attach; the
+  exact-model and pod checks of the worker's identity are unchanged; nothing new in the owner-facing session reads.
+- Billing: the per-operation settlement lock (0.11.105, `billing._SettlementLock`) holds a dedicated short-lived
+  connection, never a pool slot: the settlement behind it takes pool connections of its own (ledger, attempt records,
+  charge), so with four concurrent settlements on 0.11.105 the pool (max 4) could starve and the readers stall 30 s
+  until the pool timeout (settled by the CronJob later; no wrong charge). Found through the test suite, where a fake
+  rig with no database behind the pool made the same wait visible as a stall.
+
 ## api 0.11.105
 
 (0.11.105 = 0.11.104 plus settlement on the owner's read, delegated child readiness and the JobSet rule name; jobs 0.1.27
