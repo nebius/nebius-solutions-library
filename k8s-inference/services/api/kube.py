@@ -239,13 +239,31 @@ def activate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     return len(items)
 
 
+# The Workloads of a tenant namespace, one list per WORKLOADS_CACHE_S (2 s). One owner read of a run with many members (a
+# graph with its stages, a run with finalizers; `jobs.list_ops`) asked for the same list once per manager Job (32 reads of
+# ~0.2 s on a 7-stage graph: 6.7 s of a 14 s read, api 0.11.110); a 2 s view is as fresh as the reads it serves, and
+# every consumer (the handle, the finalizer and retry counters, billing's and the reconciler's passes) re-reads on its next
+# pass anyway. 0 disables it (the tests).
+WORKLOADS_CACHE_S = float(os.environ.get("WORKLOADS_CACHE_S", "2"))
+_workloads_cache: dict[str, tuple[float, list]] = {}
+
+
+def _workloads(ns: str) -> list:
+    hit = _workloads_cache.get(ns) if WORKLOADS_CACHE_S > 0 else None
+    now = time.time()
+    if hit and hit[0] > now:
+        return hit[1]
+    items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get("items", [])
+    if WORKLOADS_CACHE_S > 0:
+        _workloads_cache[ns] = (now + WORKLOADS_CACHE_S, items)
+    return items
+
+
 def workload_reasons(ns: str) -> dict[str, str]:
     """Job uid -> why its Workload is not admitted (the condition messages Kueue writes): what a QUEUED operation
     reports as `reason`."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
-            "items", []
-        )
+        items = _workloads(ns)
     except ApiException:
         return {}
     out = {}
@@ -267,9 +285,7 @@ def workload_clusters(ns: str) -> dict[str, str]:
     status.clusterName while the worker's copy exists, afterwards the record the dispatcher wrote on the Workload
     (`serverless2.nebius/admitted-cluster`); absent while the run is only nominated (it may still move)."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
-            "items", []
-        )
+        items = _workloads(ns)
     except ApiException:
         return {}
     out = {}

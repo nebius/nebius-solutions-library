@@ -380,6 +380,8 @@ def client(monkeypatch, cluster):
         kube, "endpoint_status", lambda n, ns, region="eu-north1": {"status": "scaled-to-zero", "replicas_ready": 0}
     )
     monkeypatch.setattr(kube, "isvc", lambda n, ns, region="eu-north1": None)
+    monkeypatch.setattr(kube, "WORKLOADS_CACHE_S", 0.0)  # every read sees the fake's current Workloads
+    monkeypatch.setattr(kube, "_workloads_cache", {})
 
     async def fake_info(key):
         if key != "sk-good":

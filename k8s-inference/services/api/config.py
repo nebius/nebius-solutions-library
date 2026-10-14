@@ -187,3 +187,8 @@ SESSION_TOKEN_AUDIENCE = os.environ.get(
 # key, model, operation and attempt. ADMITTED_LEGACY accepts the key-only and key+model tokens of releases up to 0.11.53
 # for the callers they rendered while they drain; off on a target where nothing of them is in flight.
 ADMITTED_LEGACY = os.environ.get("ADMITTED_LEGACY", "false").lower() == "true"
+
+# Stage composition (docs/JOBS.md "Stage composition", "Failure settlement"): an open graph in which nothing is active
+# and a lineage head (the root or a stage) FAILED is the owner's to resume or cancel; when it stays so for this long
+# after the failure, the gate closes it (waiting stages retired, the root's slot released). 0 closes on the next pass.
+GRAPH_FAILURE_GRACE_S = int(os.environ.get("GRAPH_FAILURE_GRACE_S", "1800"))

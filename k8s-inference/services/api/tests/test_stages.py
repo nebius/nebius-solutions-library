@@ -12,6 +12,7 @@ import pytest
 import attempts
 import auth
 import catalog
+import config
 import execution
 import jobs
 import reconciliation
@@ -42,6 +43,9 @@ def world(client, admin_keys, fake_keys, monkeypatch):
     _auth(monkeypatch, {"sk-good": _principal("p1"), "sk-other": _principal("p2")})
     rows: list = []
     monkeypatch.setattr(attempts, "enabled", lambda: True)
+    # the records of this world ended on 2026-10-11: the failure settlement (its own tests) must not close a graph
+    # that a test holds open on a FAILED head
+    monkeypatch.setattr(config, "GRAPH_FAILURE_GRACE_S", 10**9)
     monkeypatch.setattr(attempts, "for_operation", lambda root: [r for r in rows if r["operation"].startswith(root)])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
@@ -1063,6 +1067,7 @@ def test_action_required_signal_appears_when_nothing_is_active_and_clears_on_res
             "attempt_id": f"{g1}-a",
             "actions": [f":resume {g1}", f":cancel {root}"],
             "dependents": ["collect"],
+            "failed_at": "2026-10-11T11:00:00Z",
         }
     ]
     st = {s["id"]: s for s in g["stages"]}
@@ -1117,3 +1122,118 @@ def test_an_active_sibling_suppresses_the_signal_and_multiple_failures_are_all_l
     assert c.post(f"/v1/operations/{root}:cancel", headers=H).status_code == 200
     op = _view(c, root)
     assert op["graph"]["status"] == "CANCELLED" and op["graph"]["action_required"] is False
+
+
+def test_a_root_that_failed_on_its_own_blocks_its_stages_and_the_gate_settles_the_graph_after_the_grace(
+    world, monkeypatch
+):
+    """Failure settlement (api 0.11.111): a root that FAILED before its stages ran is a blocking head of its graph
+    (`action_required`, `blocked_on` with stage "root" and when it failed); within GRAPH_FAILURE_GRACE_S nothing
+    changes (the owner may resume it); after it the gate retires the parked stages (deleted, settled at zero, the
+    reason on record), cancels the graph with the reason and the run closes (its slot released by the ledger); the
+    failed root's Job and attempt record stay as they were. Before, the graph stayed PENDING with its never-launched
+    stages active and the root's slot held until the deadline (op-b60c9ff341028d80, 2026-10-14)."""
+    c, cl, fk, rows, cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    col = _submit(c, root, "collect").json()["id"]
+    _fail(cl, rows, root)
+    assert reconciliation.gate_stages() == []  # within the grace: the owner's
+    op = _view(c, root)
+    g = op["graph"]
+    assert op["status"] == "FAILED" and g["status"] == "PENDING" and g["action_required"] is True
+    assert g["blocked_on"] == [
+        {
+            "stage": "root",
+            "operation": root,
+            "status": "FAILED",
+            "attempt_id": f"{root}-a",
+            "actions": [f":resume {root}", f":cancel {root}"],
+            "dependents": ["gpu-0", "gpu-1"],
+            "failed_at": "2026-10-11T11:00:00Z",
+        }
+    ]
+    assert sorted(g["waiting"]) == ["collect", "gpu-0", "gpu-1"]
+    assert all("_ended_at" not in s for s in g["stages"])
+    assert fk.graphs[root]["cancelled_at"] is None and all(
+        m["state"] == "active" for m in fk.members if m["root"] == root
+    )
+    # the grace passed (the records ended on 2026-10-11): one gate pass settles it
+    monkeypatch.setattr(config, "GRAPH_FAILURE_GRACE_S", 0)
+    out = reconciliation.gate_stages()
+    assert set(out) == {f"{g0}:cancelled", f"{g1}:cancelled", f"{col}:cancelled", f"{root}:closed"}
+    reason = fk.graphs[root]["reason"]
+    assert (
+        fk.graphs[root]["cancelled_at"]
+        and reason.startswith(f"root FAILED ({root})")
+        and "not resumed within 0 s" in reason
+    )
+    for n in (g0, g1, col):
+        assert (NS, n) not in cl.jobs and n in cancelled and ("settle", n, 0.0) in fk.calls
+        assert reason[:40] in next(m for m in fk.members if m["operation"] == n)["note"]
+    assert (NS, root) in cl.jobs and root not in cancelled  # the failed root: Job, volume and attempts untouched
+    assert not [x for x in fk.calls if x[0] == "settle" and x[1] == root]  # its charge is billing's, not the gate's
+    op = _view(c, root)
+    assert op["status"] == "FAILED" and op["graph"]["status"] == "FAILED" and op["graph"]["action_required"] is False
+    assert {s["id"]: s["status"] for s in op["graph"]["stages"]} == {
+        "gpu-0": "CANCELLED",
+        "gpu-1": "CANCELLED",
+        "collect": "CANCELLED",
+    }
+    assert reconciliation.gate_stages() == []  # closed: nothing to do, idempotent
+
+
+def test_a_failed_stage_head_settles_the_graph_after_the_grace_and_an_active_sibling_or_a_resume_holds_it(
+    world, monkeypatch
+):
+    """The same settlement for a FAILED stage head with its collector parked on it: an admitted (active) sibling
+    holds the graph open past the grace (it may still deliver); once nothing is active and the grace passed, the
+    gate retires the parked collector and closes the graph; the delivered sibling and the failed head are untouched.
+    A resume within the grace clears the signal, so nothing is settled (the existing resume test covers the rest)."""
+    c, cl, fk, rows, cancelled, root = world
+    g0 = _submit(c, root, "gpu-0").json()["id"]
+    g1 = _submit(c, root, "gpu-1").json()["id"]
+    col = _submit(c, root, "collect").json()["id"]
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _fail(cl, rows, g1)
+    monkeypatch.setattr(config, "GRAPH_FAILURE_GRACE_S", 0)
+    assert reconciliation.gate_stages() == []  # gpu-0 is admitted and QUEUED: active, the graph stays open
+    assert _view(c, root)["graph"]["action_required"] is False
+    _succeed(cl, rows, g0, "s3://b/g0")
+    assert set(reconciliation.gate_stages()) == {f"{col}:cancelled", f"{root}:closed"}
+    assert (NS, col) not in cl.jobs and col in cancelled and ("settle", col, 0.0) in fk.calls
+    assert (NS, g1) in cl.jobs and (NS, g0) in cl.jobs and g1 not in cancelled
+    reason = fk.graphs[root]["reason"]
+    assert reason.startswith(f"gpu-1 FAILED ({g1})") and "not resumed within 0 s" in reason
+    op = _view(c, root)
+    assert op["status"] == "FAILED" and op["graph"]["status"] == "FAILED"
+    assert {s["id"]: s["status"] for s in op["graph"]["stages"]} == {
+        "gpu-0": "SUCCEEDED",
+        "gpu-1": "FAILED",
+        "collect": "CANCELLED",
+    }
+
+
+def test_the_root_handle_reads_every_lineage_head_once(world, monkeypatch):
+    """The graph view remembers its Job lookups within one read (api 0.11.111): a 7-stage graph asked for the same
+    heads twice (the state, then the gated check), 14 reads of 0.5 s each on a FAILED boltzgen root (2026-10-14)."""
+    c, cl, fk, rows, cancelled, root = world
+    _submit(c, root, "gpu-0")
+    _submit(c, root, "gpu-1")
+    _submit(c, root, "collect")
+    _succeed(cl, rows, root, "s3://b/root")
+    reconciliation.gate_stages()
+    _succeed(cl, rows, next(m["operation"] for m in fk.members if m.get("stage") == "gpu-0"), "s3://b/g0")
+    _fail(cl, rows, next(m["operation"] for m in fk.members if m.get("stage") == "gpu-1"))
+    looked: list[str] = []
+    real = jobs.find
+
+    def find(ns, name):
+        looked.append(name)
+        return real(ns, name)
+
+    monkeypatch.setattr(jobs, "find", find)
+    op = _view(c, root)
+    assert op["graph"]["action_required"] is True and op["graph"]["waiting"] == ["collect"]
+    assert len(looked) == len(set(looked)) == 4, looked  # the handle's own read, then the three heads, each once

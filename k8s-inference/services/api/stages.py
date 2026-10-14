@@ -14,7 +14,7 @@ run again: a replayed submission of a stage that settled returns its durable sta
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -130,6 +130,25 @@ def stage_of(job: dict) -> dict | None:
 
 
 # ---- the state of an operation, from what is durable, without a principal ---------------------------------------
+def _find(ns: str, name: str, memo: dict | None) -> tuple[dict, str]:
+    """`jobs.find`, remembered within one read or gate pass (`memo`): a graph's view and the gate ask for the same
+    lineage heads several times (a dependency shared by every stage, the gated check after the state), each a Job
+    read plus the pods of its worker (14 reads, 6.8 s on a 7-stage graph, api 0.11.110). A 404 is remembered too."""
+    if memo is None:
+        return jobs.find(ns, name)
+    hit = memo.get(name)
+    if hit is None:
+        try:
+            hit = memo[name] = ("ok", jobs.find(ns, name))
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            hit = memo[name] = ("404", e)
+    if hit[0] == "404":
+        raise hit[1]
+    return hit[1]
+
+
 def ledger_head(ns: str, operation: str) -> str | None:
     """The newest member of the operation's own lineage in the run ledger (keys.run_head / stage_head) when it is a
     compute continuation (a resume, fallback or recovery): the authoritative link, also for one admitted before api
@@ -172,7 +191,7 @@ def ledger_head(ns: str, operation: str) -> str | None:
     return head
 
 
-def state_of(ns: str, operation: str) -> dict:
+def state_of(ns: str, operation: str, memo: dict | None = None) -> dict:
     """{"status", "result_ref", "attempt_id", "operation"} of an operation, as the gate sees it: the live Job
     (following fallback/recovery successors) with its durable attempt records, else the durable rows of an expired
     Job, else status None (nothing exists: not submitted yet). An export retry or finalizer that delivered after the
@@ -183,7 +202,7 @@ def state_of(ns: str, operation: str) -> dict:
     current = operation
     for _ in range(16):
         try:
-            job, _region = jobs.find(ns, current)
+            job, _region = _find(ns, current, memo)
         except HTTPException as e:
             if e.status_code != 404:
                 raise
@@ -234,6 +253,7 @@ def _state(current: str, op: dict) -> dict:
         "result_ref": op.get("result_ref"),
         "attempt_id": (op.get("exported_by_attempt_id") if delivered_by else None) or op.get("attempt_id"),
         "epoch": (op.get("exported_by_epoch") if delivered_by else None) or op.get("epoch"),
+        "ended_at": op.get("ended_at"),  # when a FAILED head failed: the failure settlement's clock (gate)
     }
 
 
@@ -244,7 +264,7 @@ def dependency_head(root: str, dep: str) -> str | None:
     return keys.run_head(root) if dep == ROOT else keys.stage_head(root, dep)
 
 
-def evaluate(ns: str, graph: dict, deps: list[str]) -> tuple[str, dict | str]:
+def evaluate(ns: str, graph: dict, deps: list[str], memo: dict | None = None) -> tuple[str, dict | str]:
     """What a stage's dependencies allow: ("ready", {dep: result}) when every dependency SUCCEEDED with a result_ref;
     ("failed", why) when one was CANCELLED or succeeded without a result (not runnable); ("waiting", why) otherwise
     (not submitted, queued, running, an export still retried, or FAILED: a failed dependency may be resumed, so its
@@ -252,7 +272,7 @@ def evaluate(ns: str, graph: dict, deps: list[str]) -> tuple[str, dict | str]:
     results, waiting = {}, []
     for dep in deps:
         head = dependency_head(graph["root"], dep)
-        st = state_of(ns, head) if head else {"operation": None, "status": None}
+        st = state_of(ns, head, memo) if head else {"operation": None, "status": None}
         if st["status"] == "CANCELLED":
             return "failed", f"dependency {dep} ({st['operation']}) CANCELLED"
         if st["status"] == "SUCCEEDED":
@@ -411,8 +431,8 @@ def gate() -> list[str]:
 
 
 def _gate_graph(ns: str, g: dict, now: datetime) -> list[str]:
-    root, out = g["root"], []
-    root_state = state_of(ns, keys.run_head(root) or root)
+    root, out, memo = g["root"], [], {}
+    root_state = state_of(ns, keys.run_head(root) or root, memo)
     if root_state["status"] == "CANCELLED":
         why = "root CANCELLED"
         out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
@@ -425,13 +445,14 @@ def _gate_graph(ns: str, g: dict, now: datetime) -> list[str]:
         out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
         keys.cancel_graph(root, why)
         return out + [f"{root}:closed"]
+    failed_dep = False
     for job in _stage_jobs(ns, root):
         if not is_waiting(job):
             continue
         st = stage_of(job) or {}
         name = job["metadata"]["name"]
         deps = st.get("depends_on") or dependencies(g, st.get("id") or "")
-        verdict, detail = evaluate(ns, g, deps)
+        verdict, detail = evaluate(ns, g, deps, memo)
         if verdict == "failed":
             _cancel_stage(ns, job, str(detail))
             out.append(f"{name}:cancelled")
@@ -445,15 +466,52 @@ def _gate_graph(ns: str, g: dict, now: datetime) -> list[str]:
                 _note_waiting(ns, job, f"not admitted: {e.detail}"[:300])
         else:
             _note_waiting(ns, job, f"waiting for {detail}"[:300])
+            if "FAILED (" in str(detail):
+                failed_dep = True
+    if not out and (failed_dep or root_state.get("status") == "FAILED"):
+        out += _settle_failure(ns, g, root_state, now, memo)
     return out
 
 
+def _settle_failure(ns: str, g: dict, root_state: dict, now: datetime, memo: dict) -> list[str]:
+    """Failure settlement (docs/JOBS.md "Stage composition"): an open graph that is the owner's to resume or cancel
+    (`action_required`: nothing active, a lineage head FAILED, the rest parked on it) and has been so for
+    GRAPH_FAILURE_GRACE_S after the newest failure is closed by the gate as the deadline closes it: the parked
+    stages are retired (never started: deleted, settled at zero, the reason on record), the graph is cancelled with
+    the reason, and the root's slot is released once nothing is active. The failed head's Job, volume, attempts and
+    charges are untouched; its lineage may still be continued afterwards (a `:resume` re-acquires the slot). Before
+    this (0.11.110) a root that failed on its own kept its slot and its never-launched stages active until the
+    graph's deadline, days later (boltzgen op-b60c9ff341028d80, 2026-10-14). A failure whose time is unknown waits
+    for the deadline."""
+    root = g["root"]
+    view = graph_view(ns, g, root_state=root_state, memo=memo)
+    if not view.get("action_required"):
+        return []
+    failed_at = [b["failed_at"] for b in view["blocked_on"] if b.get("failed_at")]
+    if len(failed_at) < len(view["blocked_on"]):
+        return []
+    newest = max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in failed_at)
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=timezone.utc)
+    if newest + timedelta(seconds=cfg.GRAPH_FAILURE_GRACE_S) > now:
+        return []
+    heads = ", ".join(f"{b['stage']} FAILED ({b['operation']})" for b in view["blocked_on"])
+    why = f"{heads}; not resumed within {cfg.GRAPH_FAILURE_GRACE_S} s of the failure: graph closed"[:300]
+    out = [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
+    keys.cancel_graph(root, why)
+    return out + [f"{root}:closed"]
+
+
 # ---- the root's view ------------------------------------------------------------------------------------------
-def graph_view(ns: str, g: dict) -> dict:
+def graph_view(ns: str, g: dict, root_state: dict | None = None, memo: dict | None = None) -> dict:
     """The root handle's `graph` (docs/API.md "Operations"): every declared stage with its dependencies, operation,
     status, attempt and reason; the graph's own status: PENDING while a stage is not settled, SUCCEEDED when every
     stage succeeded, FAILED when one failed or was cancelled or the graph was closed before every stage ran,
-    CANCELLED when the root was cancelled."""
+    CANCELLED when the root was cancelled. `root_state` (state_of the root's lineage head; read here when not given)
+    lets a root that FAILED on its own count as a failed head of the graph (`action_required`, `blocked_on`)."""
+    memo = {} if memo is None else memo
+    if root_state is None:
+        root_state = state_of(ns, keys.run_head(g["root"]) or g["root"], memo)
     lineages: dict[str, list[dict]] = {}
     for m in keys.run_members(g["root"]):
         if m.get("kind") == "stage":
@@ -464,7 +522,7 @@ def graph_view(ns: str, g: dict) -> dict:
         entry = {"id": sid, "depends_on": list(deps) or [ROOT], "operation": None, "status": None}
         if lineage:
             m = lineage[-1]
-            st = state_of(ns, m["operation"])
+            st = state_of(ns, m["operation"], memo)
             status = st.get("status") or ("CANCELLED" if m["state"] != "active" else "QUEUED")
             entry.update(
                 {
@@ -476,12 +534,13 @@ def graph_view(ns: str, g: dict) -> dict:
                     "result_ref": st.get("result_ref"),
                     "reason": m.get("note") or lineage[0].get("note"),
                     **({"continuations": len(lineage) - 1} if len(lineage) > 1 else {}),
+                    **({"_ended_at": st["ended_at"]} if status == "FAILED" and st.get("ended_at") else {}),
                 }
             )
             if status == "QUEUED":
                 # a QUEUED member is either admitted and waiting for a node (active: it will run) or dependency-gated
                 # (parked by the gate until its dependencies deliver: it cannot mask a failed dependency)
-                entry["gated"] = _gated(ns, m["operation"])
+                entry["gated"] = _gated(ns, m["operation"], memo)
         else:
             entry["status"] = "NOT_SUBMITTED"
         stages.append(entry)
@@ -501,7 +560,9 @@ def graph_view(ns: str, g: dict) -> dict:
         "cancelled": bool(g.get("cancelled_at")),
         **({"reason": g["reason"]} if g.get("reason") else {}),
     }
-    out.update(_action_required(g["root"], stages, overall))
+    out.update(_action_required(g["root"], stages, overall, root_state))
+    for s in stages:
+        s.pop("_ended_at", None)
     return out
 
 
@@ -512,24 +573,36 @@ ACTIVE = (
 )  # a member that will still change by itself (or by a delivery retry)
 
 
-def _gated(ns: str, operation: str) -> bool:
+def _gated(ns: str, operation: str, memo: dict | None = None) -> bool:
     """A QUEUED member parked by the gate (label stage-waiting), as opposed to one admitted and waiting for a node."""
     try:
-        job, _r = jobs.find(ns, operation)
+        job, _r = _find(ns, operation, memo)
     except HTTPException:
         return False
     return is_waiting(job)
 
 
-def _action_required(root: str, stages: list[dict], overall: str) -> dict:
+def _action_required(root: str, stages: list[dict], overall: str, root_state: dict | None = None) -> dict:
     """The owner-facing signal (docs/API.md "Operations"): an open graph in which nothing is active any more and at
     least one stage FAILED will not change without the owner (`:resume` the failed head, or `:cancel` the root).
     Projection only: no state is touched, nothing is failed or retried, the graph's deadline still closes it. A
     dependency-gated QUEUED member is not active (a parked collector cannot mask its failed dependency); an admitted
     QUEUED, RUNNING, FINALIZING or delivery-retryable sibling is, and suppresses the signal while it may still deliver.
     `blocked_on` carries bounded metadata only: the failed lineage head, its attempt, the actions and the direct
-    dependents parked on it."""
+    dependents parked on it. The root's own run is a head too (`stage` "root"): a root that FAILED before its stages
+    ran blocks every stage that depends on it."""
     failed = [s for s in stages if s["status"] == "FAILED"]
+    if root_state and root_state.get("status") == "FAILED" and overall == "PENDING":
+        failed.insert(
+            0,
+            {
+                "id": ROOT,
+                "operation": root_state.get("operation"),
+                "status": "FAILED",
+                "attempt_id": root_state.get("attempt_id"),
+                **({"_ended_at": root_state["ended_at"]} if root_state.get("ended_at") else {}),
+            },
+        )
     active = [s for s in stages if s["status"] in ACTIVE or (s["status"] == "QUEUED" and not s.get("gated", False))]
     waiting = [s["id"] for s in stages if s["status"] == "QUEUED" and s.get("gated")]
     blocked = [
@@ -540,6 +613,7 @@ def _action_required(root: str, stages: list[dict], overall: str) -> dict:
             "attempt_id": s.get("attempt_id"),
             "actions": [f":resume {s['operation']}", f":cancel {root}"],
             "dependents": [d["id"] for d in stages if s["id"] in (d.get("depends_on") or [])],
+            **({"failed_at": s["_ended_at"]} if s.get("_ended_at") else {}),
         }
         for s in failed
     ]

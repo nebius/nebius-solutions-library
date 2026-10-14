@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.110", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.111", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1625,12 +1625,13 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     members = sorted(
         [
             j
-            for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-            if _may_read_operation(p, j)
-            and (
-                j["metadata"]["name"] == root
-                or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root
+            for j in jobs.list_related(
+                p.namespace,
+                p.tenant,
+                lambda j: j["metadata"]["name"] == root
+                or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root,
             )
+            if _may_read_operation(p, j)
         ],
         key=lambda j: str(j["metadata"].get("creationTimestamp") or ""),
     )
@@ -1711,13 +1712,16 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
     `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
     xs = [
         j
-        for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-        if _may_read_operation(p, j)
-        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
-        and (
-            (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
-            or (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async"
+        for j in jobs.list_related(
+            p.namespace,
+            p.tenant,
+            lambda j: (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
+            and (
+                (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
+                or (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async"
+            ),
         )
+        if _may_read_operation(p, j)
     ]
     role = (
         "export" if xs and (xs[0]["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async" else "finalize"
@@ -1838,7 +1842,11 @@ def _stage_fields(p: Principal, op: dict, job: dict, root: str) -> None:
         return
     g = keys.graph_of(root)
     if g and g["tenant"] == p.tenant:
-        stages.apply_to_root(op, stages.graph_view(p.namespace, g))
+        head = keys.run_head(root) or root
+        own = op if op.get("id") == head else None  # this handle IS the root's lineage head: no second read of it
+        stages.apply_to_root(
+            op, stages.graph_view(p.namespace, g, root_state=stages._state(head, own) if own else None)
+        )
 
 
 def _settle_on_read(p: Principal, job: dict, region: str | None) -> bool:

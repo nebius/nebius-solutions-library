@@ -20,7 +20,7 @@ edge:
   caConfigMap: ""                       # internal mode: ConfigMap (namespace api, key ca.crt) that validates that hostname; empty = system roots
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.110
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.111
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.12
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.12
 api:                           # the control cluster only (clusters/common/apps/api.yaml)

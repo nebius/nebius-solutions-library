@@ -1481,9 +1481,7 @@ def export_async(ns: str, name: str, region: str, model: dict, admit=None) -> tu
                 409 if e.status == 404 else 502, f"shared scratch claim is gone from {ns}; nothing to export"
             )
     root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + sum(
-        1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x")
-    )
+    n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
     if n > EXPORT_RETRIES_MAX:
         raise HTTPException(409, f"operation {root}: {EXPORT_RETRIES_MAX} export retries used; submit a new call")
     new = f"{root}-x{n}"
@@ -1801,6 +1799,63 @@ def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], l
     return items, skipped
 
 
+def list_related(ns: str, tenant: str, keep, complete: bool = True) -> list[dict]:
+    """The tenant's live Jobs and JobSets (every reachable region) that `keep(job)` selects, and nothing else: the
+    bounded lookup of the few relatives of one operation (its finalizers `<root>-x<n>`, its continuations
+    `<root>-r<n>`) that `list_ops` listed AND completed for the tenant's every operation (every pod of every region,
+    one Workload read per manager Job: 7.5 s and the memory of it on every owner read of a failed run, the 24 s GETs
+    and the OOM-killed API pods of 2026-10-14, api 0.11.110). `complete` fills the selected Jobs in like `get` (their
+    pods, the worker's placement and reason: a handle needs them); a count of names does not. A region that cannot be
+    read is skipped (as `list_ops_all`): its relatives are absent, never a failure of the lookup."""
+    out = []
+    for r in kube.regions():
+        try:
+            b = kube.batch(r)
+            found = [
+                b.api_client.sanitize_for_serialization(j)
+                for j in retry(b.list_namespaced_job, ns, label_selector=f"{LABEL}/tenant={tenant}").items
+            ]
+            found += list_jobsets(ns, r, f"{LABEL}/tenant={tenant}")
+        except ApiException as e:
+            if e.status in (403, 404):  # tenant not onboarded in that region
+                continue
+            raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
+        except (urllib3.exceptions.HTTPError, OSError) as e:
+            log.warning("operations: region %s unreachable, skipped: %s", r, str(e)[:160])
+            continue
+        for j in found:
+            if is_mirror(j) or not keep(j):
+                continue
+            if not complete:
+                out.append(j)
+            elif is_manager_job(j):
+                out.append(_with_worker(j, ns, kube.workload_clusters(ns)))
+            else:
+                out.append(_with_pods(j, ns, r))
+    out.sort(key=lambda j: j["metadata"]["name"])
+    out.sort(key=lambda j: j["metadata"].get("creationTimestamp", ""), reverse=True)  # newest first, then id
+    return out
+
+
+def continuations(ns: str, tenant: str, root: str, recovered: bool = False) -> int:
+    """How many continuations `<root>-r<n>` the chain of `root` has (its live Jobs with `resumed-from` the root);
+    `recovered`: only the automatic ones (docs/SCHEDULING.md "Automatic recovery")."""
+    return len(
+        list_related(
+            ns,
+            tenant,
+            lambda j: (j["metadata"].get("annotations") or {}).get(f"{LABEL}/resumed-from") == root
+            and (not recovered or (j["metadata"].get("annotations") or {}).get(f"{LABEL}/recovered-from")),
+            complete=False,
+        )
+    )
+
+
+def export_retries(ns: str, tenant: str, root: str) -> int:
+    """How many export retries or finalizers `<root>-x<n>` the chain of `root` has (live Jobs)."""
+    return len(list_related(ns, tenant, lambda j: j["metadata"]["name"].startswith(f"{root}-x"), complete=False))
+
+
 def cancel(ns: str, name: str, region: str = REGION) -> dict:
     """A queued (never started) Job is deleted; a running one is stopped by a 1 s deadline and kept
     (status CANCELLED through the annotation), pods terminate within the grace period. For a manager
@@ -1973,9 +2028,7 @@ def export_again(
         except ApiException as e:
             raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
     root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + sum(
-        1 for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500) if j["metadata"]["name"].startswith(f"{root}-x")
-    )
+    n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
     if n > EXPORT_RETRIES_MAX:
         raise HTTPException(
             409, f"operation {root}: {EXPORT_RETRIES_MAX} export/finalization retries used; submit a new run"
@@ -2168,11 +2221,7 @@ def switch_class(
         ex = {}
     ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
     root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + sum(
-        1
-        for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500)
-        if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root
-    )
+    n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
     new = f"{root}-r{n}"
     d = dict(defaults)
     out = output_prefix(orig) or ""
@@ -2314,11 +2363,7 @@ def switch_unschedulable(
     except ValueError:
         ex = {}
     root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + sum(
-        1
-        for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500)
-        if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root
-    )
+    n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
     new = f"{root}-r{n}"
     d = dict(defaults)
     out = output_prefix(orig) or ""
@@ -2447,12 +2492,7 @@ def switch_unschedulable(
 
 def recoveries(ns: str, tenant: str, root: str) -> int:
     """How many automatic continuations the chain of `root` already has (docs/SCHEDULING.md "Automatic recovery")."""
-    return sum(
-        1
-        for j in list_ops(ns, tenant, None, 500)
-        if (j["metadata"].get("annotations") or {}).get(f"{LABEL}/resumed-from") == root
-        and (j["metadata"].get("annotations") or {}).get(f"{LABEL}/recovered-from")
-    )
+    return continuations(ns, tenant, root, recovered=True)
 
 
 def recover(
@@ -2677,11 +2717,7 @@ def resume(
 
         new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
     else:
-        n = 1 + sum(
-            1
-            for j in list_ops(ns, labels[f"{LABEL}/tenant"], None, 500)
-            if j["metadata"].get("annotations", {}).get(f"{LABEL}/resumed-from") == root
-        )
+        n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
         new = f"{root}-r{n}"
     out = output_prefix(orig) or ""
     d = dict(defaults)
