@@ -418,8 +418,10 @@ def _validate_variants(s: dict, kind: str) -> None:
 def _assets_spec(raw) -> list[dict]:
     """`assets: [{alias, mount_path}]`: shape checked here (the registry and the grant are checked at render, against
     the fleet document of the moment)."""
-    if not isinstance(raw, list) or len(raw) > 4:
-        raise HTTPException(400, "assets: a list of at most 4 {alias, mount_path} entries")
+    from jobs import MAX_ASSETS  # one bound for the registration and the render
+
+    if not isinstance(raw, list) or len(raw) > MAX_ASSETS:
+        raise HTTPException(400, f"assets: a list of at most {MAX_ASSETS} {{alias, mount_path}} entries")
     out = []
     for x in raw:
         if not isinstance(x, dict) or not re.fullmatch(

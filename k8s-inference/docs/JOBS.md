@@ -318,7 +318,8 @@ through three operator-owned pieces; no request or model-request field can choos
    the tenant namespace. The volume root is the file or the pinned tree: no parent to traverse from inside a pod, no
    sibling in the volume, no `subPath`. The staging parents stay root-only (the kubelet performs the bind mount as root).
    A tenant without the grant has no claim: a class naming the alias is refused at render.
-3. *Class* (`job.assets: [{alias, mountPath}]`, public spec `assets: [{alias, mount_path}]`, admin-defined): the claim is
+3. *Class* (`job.assets: [{alias, mountPath}]`, public spec `assets: [{alias, mount_path}]`, admin-defined, at most eight
+   entries): the claim is
    mounted on `main` **only**, read-only on the claim reference and on the mount, at a bounded absolute path that
    overlaps no other mount (data, weights, checkpoints, shm, work aliases); the asset's `gid` is added to the pod's
    `supplementalGroups` (every container carries the group; only `main` has a mount; a group without a mount reads

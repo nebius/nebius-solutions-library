@@ -4,6 +4,12 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.70
+
+- Restricted assets: a class may name up to eight assets (was four; work mount aliases keep four), one bound for the
+  registration and the render (`jobs.MAX_ASSETS`). BindCraft declares five. The registry, grant, reserved-path,
+  overlap and single-node guards are unchanged. Nothing else changes against 0.11.69.
+
 ## api 0.11.69
 
 - Restricted assets are main-compute-only (root review of 0.11.68): a transfer-only export retry and the application

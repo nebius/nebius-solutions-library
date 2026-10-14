@@ -145,7 +145,7 @@ def test_registry_grant_and_paths_are_enforced(client, admin_keys, monkeypatch):
     for raw, why in [
         ([{"alias": "Bad Alias", "mount_path": "/x"}], "DNS label"),
         ([{"alias": "a", "mount_path": "x"}], "absolute"),
-        ("a", "at most 4"),
+        ("a", "at most 8"),
     ]:
         r = c.post("/v1/models", json=_spec(id="af3-bad", assets=raw), headers=ADMIN)
         assert r.status_code == 400 and why in r.text, r.text
@@ -242,3 +242,60 @@ def test_export_retry_and_finalizer_never_carry_the_asset(client, admin_keys, mo
     assert any(v["name"] == "asset-af3-params" for v in s["volumes"]) and s["securityContext"][
         "supplementalGroups"
     ] == [65532]
+
+
+def test_the_asset_bound_is_eight(client, admin_keys, monkeypatch):
+    """BindCraft declares five exact operator assets (AF2, vanilla MPNN, soluble MPNN, the PyRosetta tree and its pinned
+    inventory file): five are accepted at registration and at render, nine are refused at both, and the registry, grant
+    and mount guards are unchanged by the bound."""
+    c, _ = client
+    reg = {
+        f"asset-{i}": {
+            "kind": "file",
+            "host_path": f"/mnt/weights/private/bc/{i}/f.bin",
+            "gid": 65532,
+            "sha256": "0" * 64,
+            "size": 1,
+        }
+        for i in range(9)
+    }
+    fleet = {
+        **FLEET,
+        "assets": reg,
+        "tenants": {"demo": {"assets": [f"asset-{i}" for i in range(8)]}},
+    }  # asset-8 registered, not granted
+    monkeypatch.setattr(kube, "fleet", lambda: fleet)
+    five = [{"alias": f"asset-{i}", "mount_path": f"/models/{i}"} for i in range(5)]
+    nine = [{"alias": f"asset-{i}", "mount_path": f"/models/{i}"} for i in range(9)]
+    r = c.post("/v1/models", json=_spec(id="bc-nine", assets=nine), headers=ADMIN)
+    assert r.status_code == 400 and "at most 8" in r.text, r.text
+    assert c.post("/v1/models", json=_spec(id="bc-five", assets=five), headers=ADMIN).status_code == 201
+    monkeypatch.setattr(kube, "fleet", lambda: fleet)
+    m = catalog.get("bc-five")
+    spec = _build(m)["spec"]["template"]["spec"]
+    main = next(x for x in spec["containers"] if x["name"] == "main")
+    assert sorted(v["name"] for v in spec["volumes"] if v["name"].startswith("asset-")) == [
+        f"asset-asset-{i}" for i in range(5)
+    ]
+    assert len([mm for mm in main["volumeMounts"] if mm["name"].startswith("asset-")]) == 5 and spec["securityContext"][
+        "supplementalGroups"
+    ] == [65532]
+    # the render bound and the guards, on the class directly
+    bad = copy.deepcopy(m)
+    bad["job"]["assets"] = [{"alias": f"asset-{i}", "mountPath": f"/models/{i}"} for i in range(9)]
+    with pytest.raises(HTTPException, match="at most 8"):
+        _build(bad)
+    bad["job"]["assets"] = [{"alias": f"asset-{i}", "mountPath": f"/models/{i}"} for i in range(8)]
+    _build(bad)  # eight: accepted
+    bad["job"]["assets"] = [{"alias": "asset-8", "mountPath": "/models/8"}]
+    with pytest.raises(HTTPException, match="not granted"):
+        _build(bad)
+    bad["job"]["assets"] = [{"alias": "asset-99", "mountPath": "/models/99"}]
+    with pytest.raises(HTTPException, match="not a registered"):
+        _build(bad)
+    bad["job"]["assets"] = [
+        {"alias": "asset-0", "mountPath": "/models/a"},
+        {"alias": "asset-1", "mountPath": "/models/a/b"},
+    ]
+    with pytest.raises(HTTPException, match="overlaps"):
+        _build(bad)

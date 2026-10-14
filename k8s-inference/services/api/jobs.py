@@ -178,6 +178,9 @@ ALIAS_RESERVED = (
     "/opt/serverless2",
 )
 MAX_ALIASES = 4
+MAX_ASSETS = (
+    8  # restricted assets per class (BindCraft: AF2, vanilla and soluble MPNN, the PyRosetta tree, its inventory)
+)
 
 
 def _overlaps(a: str, b: str) -> bool:
@@ -226,8 +229,8 @@ def _mount_assets(r: dict, pod: dict, main: dict, tenant: str) -> str | None:
     specs = r.get("assets") or []
     if not specs:
         return None
-    if not isinstance(specs, list) or len(specs) > MAX_ALIASES:
-        raise HTTPException(400, f"assets: a list of at most {MAX_ALIASES} {{alias, mountPath}} entries")
+    if not isinstance(specs, list) or len(specs) > MAX_ASSETS:
+        raise HTTPException(400, f"assets: a list of at most {MAX_ASSETS} {{alias, mountPath}} entries")
     registry = _assets_registry()
     granted = set(((kube.fleet().get("tenants") or {}).get(tenant) or {}).get("assets") or [])
     gids, identity, seen = set(), [], []
