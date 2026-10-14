@@ -15,9 +15,17 @@ and platform chart 0.1.12 unchanged; migration 27.)
   index, releases its own admission and answers the winner's. While the session is still `claimed` (unexpired, not
   cancelled) the replay carries a usable claim that replaces the earlier token (still exactly one connection ever
   binds); once bound, attached or ended the replay is the same id without a claim; nothing is extended; the key with
-  another request is 409. Every create answers `replay`. Migration 27: `sessions.idempotency_key`, `request_hash`,
+  another request is 409. A replay keeps the key's model grant, scope and validity checks but takes no new request
+  from the budget (the admission counted once: a key whose last request the session was recovers its lost answer,
+  never 402). Every create answers `replay`. Migration 27: `sessions.idempotency_key`, `request_hash`,
   the unique index `(tenant, owner, idempotency_key)`. Tests: lost answer / repeat, bind once / replay denied,
   conflict, peer 404, concurrent duplicates, expired and cancelled claims.
+- Keys (docs/API.md "Keys"): the admin listing `GET /v1/keys` (and the create/update answers) carries the same safe
+  limit and usage fields as the caller's own `GET /v1/keys/me` (`scopes`, `max_concurrent`, `budget_requests` /
+  `spent_requests`, `budget_gpu_seconds` / `spent_gpu_seconds`, `rate_limit`, `principal_id`, `usage`), plus
+  `blocked`; a retained blocked key (imported with unknown scopes, or blocked) now says `status: blocked` instead of
+  `active`; `exhausted` covers the request and GPU-second budgets as `/me` does. Never the hash, the raw metadata, the
+  legacy blob or a secret (`id` stays the alias). Migration admin parity for the console, no new feature.
 - Gang finalization (docs/JOBS.md "Restoring a gang"): the one-CPU finalizer of a gang whose class carries per-class
   images (`job.images {default, <class>}`, the shape that fixes a run's image identity) renders with the image of the
   class the gang was admitted on (the `gpu-class` label), `job.images` dropped with the other compute-only keys; the

@@ -1022,7 +1022,8 @@ class ApiKey(BaseModel):
     models: list[str] | None = None
     created_at: str | None = None
     expires_at: str | None = None
-    status: Literal["active", "exhausted", "expired"] | None = None
+    status: Literal["active", "exhausted", "expired", "blocked"] | None = None
+    blocked: bool | None = None  # a retained blocked key (imported with unknown scopes, or blocked by the admin)
     scopes: list[str] | None = None
     max_concurrent: int | None = None
     budget_requests: float | None = None

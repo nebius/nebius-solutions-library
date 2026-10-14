@@ -168,7 +168,10 @@ gateway's authorize hook of every endpoint hostname. The first keys of a fleet a
 control -json tenant_keys` prints them); an admin key then mints user keys of its tenant through
 `POST /v1/keys` (budget, models, `expires_days`), edits them (`PATCH`) and revokes them (`DELETE`), on the
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
-the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
+the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key. The admin
+listing `GET /v1/keys` carries the same safe limit and usage fields per key (`scopes`, `max_concurrent`, the request and
+GPU-second budgets with their spend, `rate_limit`, `principal_id`, `usage`) plus `blocked`; a retained blocked key says
+`status: blocked`; never the hash, the raw metadata or a secret (`id` is the alias).
 
 **Scopes and limits beyond the USD budget.** A key may carry `scopes` (what it may do; empty = everything of its
 role): `invoke:sync`, `invoke:async`, `run:submit`, `run:control` (cancel, resume, export), `read:catalog`,
@@ -318,6 +321,9 @@ compare-and-swap; a bind racing with the replay either wins first, then the repl
 token gone, 401). Once bound, attached or ended the replay is the same id without a claim: no second connection, no
 re-issued stream, no audio replayed. Nothing is extended: `expires_at` and `deadline_at` stay as admitted, an expired
 or cancelled claim replays without a claim. Without the header every create is a new session.
+A replay keeps the key's model grant, scope and validity checks but takes no new request from the budget: the
+admission counted once at the first create, so a key whose last request the session was recovers its lost answer
+(never 402); a new session is a new request and is refused as before.
 **No reconnect, by design and kept so:** a dropped connection ends at the worker (`disconnected`), the token binds once,
 a new session is a new admission; a client that needs continuity re-creates a session (the App's adapter owns that).
 **Cold attachment:** the hook binds the claim before the endpoint has a pod, so a bound session is `starting`
