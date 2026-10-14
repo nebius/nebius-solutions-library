@@ -4,7 +4,7 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
-## api 0.11.65 (hotfix on 0.11.63; 0.11.64 is the separate isolation candidate)
+## api 0.11.67 (hotfix on 0.11.63; supersedes the unapplied 0.11.65; 0.11.64 is the separate isolation candidate)
 
 - Manual `:resume` links its successor (docs/JOBS.md "Resume"): the resumed operation gets the durable successor mark
   and, while its Job exists, the `successor` annotation, as fallback and recovery always did. Until now a public resume
@@ -14,8 +14,9 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
   already was for fallback and recovery (`resumed_from` and `root_operation_id` still name the lineage). `:resume`,
   `:export` and `:cancel` act on the operation named (a resume or export of an older member is refused naming the
   head, as before). The run ledger's lineage head is the authority behind the link: a handle follows it even when no
-  annotation or mark exists (a continuation admitted on 0.11.63), with the owner check on the named operation and on
-  the head alike. `:cancel` by a graph root's id cancels the graph also once the root's Job expired (its stages and
+  annotation or mark exists (a continuation admitted on 0.11.63), also when the head's own Job expired (its durable
+  attempt rows tell a compute continuation from an export retry or finalizer), with the owner check on the named
+  operation and on the head alike. `:cancel` by a graph root's id cancels the graph also once the root's Job expired (its stages and
   the root lineage's head, a resumed root still queued or running, are cancelled and the graph is closed); an expired
   operation that is no graph root is over (409). No other change against 0.11.63.
 ## api 0.11.64, platform chart 0.1.7

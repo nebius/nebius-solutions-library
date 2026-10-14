@@ -207,8 +207,8 @@ variable "fleet" {
 <<<<<<< HEAD
         api        = optional(string, "0.11.66")
 =======
-        api        = optional(string, "0.11.65")
->>>>>>> 1c7d65008 (api 0.11.65 (hotfix on 0.11.63): a resumed operation's handle is its lineage head)
+        api        = optional(string, "0.11.66")
+>>>>>>> 4b031c4b5 (api 0.11.67 (hotfix on 0.11.63, supersedes the unapplied 0.11.65): an expired lineage head is followed from durable evidence)
         dispatcher = optional(string, "0.2.12")
         jobs       = optional(string, "0.1.22")
         ops        = optional(string, "0.1.12")

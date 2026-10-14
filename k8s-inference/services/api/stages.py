@@ -151,11 +151,19 @@ def ledger_head(ns: str, operation: str) -> str | None:
         return None
     try:
         hj, _r = jobs.find(ns, head)
-    except HTTPException:
-        return None
-    ann = hj["metadata"].get("annotations") or {}
-    if ann.get(f"{LABEL}/export-of") or ann.get(f"{LABEL}/finalize-of"):
-        return None
+    except HTTPException as e:
+        if e.status_code != 404:
+            return None
+        # the head's Job expired too (TTL): the durable attempt rows say what it was. An export retry or finalizer
+        # records its role; a compute continuation records `run` (or nothing yet, when it never started): followed
+        hj = None
+    if hj is not None:
+        ann = hj["metadata"].get("annotations") or {}
+        return None if ann.get(f"{LABEL}/export-of") or ann.get(f"{LABEL}/finalize-of") else head
+    if attempts.enabled():
+        rows = [r for r in attempts.for_operation(m["root"]) if r.get("operation") == head]
+        if any((r.get("role") or "run") in ("export", "finalize") for r in rows):
+            return None
     return head
 
 

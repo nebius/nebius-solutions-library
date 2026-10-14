@@ -641,8 +641,6 @@ def test_delegated_stage_needs_operator_delegation_declaration_owner_and_live_ro
         c.post("/v1/models/hello-run:invoke", headers=H, json={"input": {}, "execution": {"graph": bad}}).status_code
         == 400
     )
-<<<<<<< HEAD
-=======
 
 
 def test_manual_resume_links_its_successor_so_handle_and_gate_follow_after_ttl(world, monkeypatch):
@@ -774,4 +772,53 @@ def test_cancel_of_an_expired_graph_root_cancels_the_graph_and_the_root_lineage_
     assert r2.status_code == 200 and r2.json()["status"] == "CANCELLED"
     # the head's own handle is cancelled too, and the original's follows it
     assert c.get(f"/v1/operations/{root}", headers=H).json()["status"] == "CANCELLED"
->>>>>>> 1c7d65008 (api 0.11.65 (hotfix on 0.11.63): a resumed operation's handle is its lineage head)
+
+
+def test_original_and_head_both_expired_follow_through_the_ledger_and_durable_rows(world, monkeypatch):
+    """Live on API63 at 02:09: the original root's Job and the resumed root's Job (and pod) both TTL-expired; only the
+    durable rows and keys.run_head remain, and no mark was written. The original handle must still resolve to the head
+    from the rows alone (a compute continuation: role `run`); a head that was an export retry or finalizer (role on its
+    rows) is not followed: the compute attempt keeps reporting its delivery."""
+    c, cl, fk, rows, cancelled, root = world
+    _fail(cl, rows, root)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)  # API63 wrote none
+    monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    r = c.post(f"/v1/operations/{root}:resume", headers={**H, "Idempotency-Key": "k-both"}, json={})
+    assert r.status_code == 202, r.text
+    succ = r.json()["id"]
+    _fail(cl, rows, succ)  # the resumed root ran and failed (epoch 2 on record)
+    for r in rows:
+        r.setdefault("model", "hello-run")
+        r["root"] = root  # as the uploader records it: the lineage root (the owner record is by root)
+    del cl.jobs[(NS, root)]
+    del cl.jobs[(NS, succ)]  # both Jobs expired
+    views = {
+        root: {
+            "id": root,
+            "status": "FAILED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 1,
+            "attempt_id": f"{root}-a",
+        },
+        succ: {
+            "id": succ,
+            "status": "FAILED",
+            "region": "eu-north1",
+            "attempts": [],
+            "epoch": 2,
+            "attempt_id": f"{succ}-a",
+        },
+    }
+    monkeypatch.setattr(attempts, "synthesize", lambda operation, tenant: views.get(operation))
+    assert fk.run_head(root) == succ
+    op = c.get(f"/v1/operations/{root}", headers=H).json()
+    assert op.get("id") == succ and op.get("epoch") == 2 and op.get("attempt_id") == f"{succ}-a", op
+    assert c.get(f"/v1/operations/{root}", headers={**H, "Authorization": "Bearer sk-other"}).status_code == 404
+    assert stages.state_of(NS, root)["operation"] == succ
+    # the head was an export retry (its rows say so): the compute attempt stays the handle
+    for r in rows:
+        if r["operation"] == succ:
+            r["role"] = "export"
+    op = c.get(f"/v1/operations/{root}", headers=H).json()
+    assert op.get("id") == root and op.get("epoch") == 1, op
