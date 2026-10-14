@@ -380,6 +380,15 @@ create table if not exists operation_marks (
     alter table endpoint_children add column if not exists delivery text not null default 'platform';
     alter table attempts add column if not exists capture jsonb;
     """,
+    # 26: the incarnation-frozen resume pointer of a gang (docs/JOBS.md "Gang attempts"): chosen once when an incarnation
+    # opens (the newest COMMITTED coordinator pointer of an EARLIER epoch of the same root, else the explicit continuation
+    # reference the run was rendered with), stored on its first row and copied to every sibling of that incarnation, so
+    # all ranks restore the same state and a late rank never sees a newer same-epoch pointer; returned in the start ACK
+    """
+    alter table attempts add column if not exists resume_checkpoint_ref text;
+    alter table attempts add column if not exists resume_source_epoch int;
+    alter table attempts add column if not exists resume_source text;
+    """,
 ]
 
 _pool = None

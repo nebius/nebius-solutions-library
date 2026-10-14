@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.101
+
+(0.11.101 = 0.11.100 plus the gang resume pointer; jobs 0.1.27 and platform chart 0.1.11 unchanged; migration 26.)
+
+- Gang attempts (docs/JOBS.md "Restoring a gang"): the start ACK of every rank carries `resume_checkpoint_ref`,
+  `resume_source_epoch` and `resume_source` (`committed` | `explicit`), chosen once when the incarnation opens from the
+  newest committed coordinator pointer of an EARLIER epoch of the same root, else the explicit continuation reference
+  the run was rendered with; frozen on the incarnation's first row and copied to every sibling, so all ranks restore the
+  same state and no rank ever reads a same-epoch or peer pointer; the owner-scoped operation exposes the same three
+  fields on the current attempt and every `attempts[]` entry. Ordinary single-pod runs carry none. No application
+  pointer or ledger; the uploader's ACK handling is unchanged (the ACK already lands in `/work/attempts/.ack.json`).
+
 ## api 0.11.100, jobs 0.1.27
 
 (0.11.100 = 0.11.99 plus application delivery for endpoint children; platform chart 0.1.11 unchanged; migration 25.)

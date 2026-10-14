@@ -98,7 +98,18 @@ def _lifecycle_fields(r: dict) -> dict:
     """What an attempt record carries beyond the pod's state (the uploader's `export`, the database's `export_state`)."""
     out = {
         k: r.get(k)
-        for k in ("result_ref", "checkpoint_ref", "image_digest", "epoch", "pod_uid", "gang_rank", "gang_restart")
+        for k in (
+            "result_ref",
+            "checkpoint_ref",
+            "image_digest",
+            "epoch",
+            "pod_uid",
+            "gang_rank",
+            "gang_restart",
+            "resume_checkpoint_ref",
+            "resume_source_epoch",
+            "resume_source",
+        )
         if r.get(k) is not None
     }
     export = r.get("export_state") or r.get("export")

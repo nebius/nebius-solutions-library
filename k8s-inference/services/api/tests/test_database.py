@@ -1243,3 +1243,92 @@ def test_every_recorded_pod_carries_its_observed_uid_and_an_unreadable_one_keeps
             "north", "tenant-demo", "op-g-workers-0-1-bbbbb", {"operation": "op-g", "status": "started", "gpus": 8}
         )
     assert e.value.status_code == 409 and "unverifiable" in e.value.detail
+
+
+def test_a_gang_incarnation_restores_from_one_frozen_committed_pointer(database, monkeypatch):
+    """Migration 26 (docs/JOBS.md "Gang attempts"): the start ACK of EVERY rank of an incarnation carries the same
+    resume pointer, chosen once when the incarnation opens from the newest COMMITTED coordinator pointer of an EARLIER
+    epoch of the same root (never the current epoch, never a peer's, never "the latest" at read time); with nothing
+    committed yet, the explicit continuation reference the run was rendered with; a late rank of an older incarnation
+    keeps its own row's pointer; an ordinary single pod carries none."""
+    import db
+
+    db.migrate()
+    op = "op-mpi"
+    facts = {}
+
+    def pod_facts(region, ns, pod, operation):
+        g = facts.get(pod)
+        return {"uid": (g or {}).get("uid"), "digest": None, "gang": g, "read": bool(g and g.get("uid"))}
+
+    monkeypatch.setattr(attempts, "_pod_facts", pod_facts)
+    body = {
+        "operation": op,
+        "status": "started",
+        "gpus": 8,
+        "io_mode": "application",
+        "started_at": "2026-10-14T10:00:00Z",
+        "_explicit_checkpoint_ref": "app://ckpt/initial",
+    }
+    c0, p0 = f"{op}-workers-0-0-aaaaa", f"{op}-workers-0-1-bbbbb"
+    facts.update({c0: {"uid": "u0", "rank": 0, "restart": 0}, p0: {"uid": "u1", "rank": 1, "restart": 0}})
+    # incarnation 1: nothing committed by an earlier epoch: the explicit continuation reference, same for both ranks
+    a = attempts.record("north", "tenant-demo", p0, body)  # the peer starts first
+    b = attempts.record("north", "tenant-demo", c0, body)
+    assert (a["resume_checkpoint_ref"], a["resume_source"], a["resume_source_epoch"]) == (
+        "app://ckpt/initial",
+        "explicit",
+        None,
+    )
+    assert (b["resume_checkpoint_ref"], b["resume_source"]) == ("app://ckpt/initial", "explicit")
+    # the coordinator commits pointers; a peer's pointer is dropped (never a candidate)
+    attempts.record("north", "tenant-demo", c0, {**body, "checkpoint_ref": "app://ckpt/g1", "checkpoint_generation": 1})
+    attempts.record("north", "tenant-demo", c0, {**body, "checkpoint_ref": "app://ckpt/g2", "checkpoint_generation": 2})
+    attempts.record(
+        "north", "tenant-demo", p0, {**body, "checkpoint_ref": "app://ckpt/peer", "checkpoint_generation": 9}
+    )
+    # incarnation 2 (every pod recreated): the newest committed coordinator pointer of epoch 1, frozen for both ranks
+    c1, p1 = f"{op}-workers-0-0-ccccc", f"{op}-workers-0-1-ddddd"
+    facts.update({c1: {"uid": "u2", "rank": 0, "restart": 1}, p1: {"uid": "u3", "rank": 1, "restart": 1}})
+    x = attempts.record("north", "tenant-demo", p1, body)  # the peer first, again
+    assert (x["epoch"], x["resume_checkpoint_ref"], x["resume_source_epoch"], x["resume_source"]) == (
+        2,
+        "app://ckpt/g2",
+        1,
+        "committed",
+    )
+    y = attempts.record("north", "tenant-demo", c1, body)
+    assert (y["resume_checkpoint_ref"], y["resume_source_epoch"]) == ("app://ckpt/g2", 1)
+    # incarnation 2's coordinator commits a newer pointer: a sibling that records later in incarnation 2 still gets the
+    # FROZEN value (never a same-epoch pointer), and a late record of a rank keeps its own row's pointer
+    attempts.record("north", "tenant-demo", c1, {**body, "checkpoint_ref": "app://ckpt/g3", "checkpoint_generation": 3})
+    late = attempts.record("north", "tenant-demo", p1, {**body, "status": "started"})
+    assert (late["resume_checkpoint_ref"], late["resume_source_epoch"]) == ("app://ckpt/g2", 1)
+    # incarnation 3 restores from epoch 2's committed pointer
+    c2 = f"{op}-workers-0-0-eeeee"
+    facts[c2] = {"uid": "u4", "rank": 0, "restart": 2}
+    z = attempts.record("north", "tenant-demo", c2, body)
+    assert (z["epoch"], z["resume_checkpoint_ref"], z["resume_source_epoch"], z["resume_source"]) == (
+        3,
+        "app://ckpt/g3",
+        2,
+        "committed",
+    )
+    # the owner-scoped projections carry the same frozen values
+    life = attempts.lifecycle(op, op, attempts.for_operation(op))
+    assert (life["attempt_id"], life["resume_checkpoint_ref"], life["resume_source_epoch"]) == (c2, "app://ckpt/g3", 2)
+    rows = {r["pod"]: r for r in attempts.for_operation(op)}
+    assert rows[p1]["resume_checkpoint_ref"] == "app://ckpt/g2" and rows[c0]["resume_source"] == "explicit"
+    # an ordinary single pod: no gang, no resume pointer in its ACK
+    monkeypatch.setattr(
+        attempts,
+        "_pod_facts",
+        lambda region, ns, pod, operation: {"uid": "u9", "digest": None, "gang": None, "read": True},
+    )
+    solo = attempts.record(
+        "north",
+        "tenant-demo",
+        "op-solo-a",
+        {"operation": "op-solo", "status": "started", "gpus": 1, "_explicit_checkpoint_ref": "x"},
+    )
+    assert solo["resume_checkpoint_ref"] is None and solo["resume_source"] is None

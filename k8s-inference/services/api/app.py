@@ -115,7 +115,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.100", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.101", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -2066,6 +2066,11 @@ async def record_attempt(request: Request, authorization: str = Header(default="
         ) or "run"  # the platform's statement, never the pod's
         # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
         body["cluster"] = job.get("_cluster") or _cluster_of(region)
+        try:  # the explicit continuation reference the run was rendered with (CHECKPOINT_REF): the platform's statement
+            jex = json.loads((job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/execution") or "null") or {}
+            body["_explicit_checkpoint_ref"] = (jex.get("recovery") or {}).get("checkpoint_ref")
+        except ValueError:
+            body["_explicit_checkpoint_ref"] = None
     except HTTPException:
         body["root"] = operation  # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"

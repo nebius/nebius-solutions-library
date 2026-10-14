@@ -309,6 +309,20 @@ render states that contract to the run, `S2_RDMA_MEMLOCK_POLICY=node-unlimited`,
 `no_new_privs=0`) can accept the native path explicitly instead of probing for capabilities the platform never grants.
 No capability is added for it.
 
+**Restoring a gang: the incarnation-frozen pointer.** A JobSet `Recreate` restarts every rank with the environment it
+was rendered with (`CHECKPOINT_REF` is the explicit continuation reference of the render, if any); the newest committed
+state lives in the records. The start ACK of EVERY rank (the API's answer to its start record, which the uploader keeps
+at `/work/attempts/.ack.json`) therefore carries `resume_checkpoint_ref`, `resume_source_epoch` and `resume_source`:
+chosen ONCE when the incarnation opens (its first start record, whichever rank), as the newest committed checkpoint
+pointer of a COORDINATOR (rank 0, or an ordinary attempt of the chain) of an EARLIER epoch of the same root
+(`committed`, with that epoch), else the explicit continuation reference (`explicit`), else null; stored on that first
+row and copied to every sibling of the incarnation (migration 26), so all ranks restore the same state, a sibling that
+records later never sees a pointer committed by its own incarnation, and a late record of a rank keeps its own row's
+value. Never a peer's pointer, never "the latest" at read time. The owner-scoped operation shows the same three fields on
+its current attempt and on every `attempts[]` entry, so a broker authorises exactly the restored inputs. The application
+decides what to do with it (restore, or fail when the expected recovery identity is missing); the platform maintains no
+application pointer.
+
 ### Limits of multi-node runs
 
 What works, and where the edges are (sources: docs.nebius.com/compute/clusters/gpu,

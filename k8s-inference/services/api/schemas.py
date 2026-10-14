@@ -568,6 +568,9 @@ class Attempt(BaseModel):
     pod_uid: str | None = None  # observed on the pod (docs/JOBS.md "Gang attempts")
     gang_rank: int | None = None  # a JobSet pod's completion index, observed
     gang_restart: int | None = None  # the JobSet incarnation the pod belongs to, observed
+    resume_checkpoint_ref: str | None = None  # the incarnation-frozen pointer the gang was told to restore
+    resume_source_epoch: int | None = None  # the earlier epoch that committed it (None for an explicit reference)
+    resume_source: Literal["committed", "explicit"] | None = None
 
 
 class ChainMember(BaseModel):
@@ -707,6 +710,9 @@ class Operation(BaseModel):
     pod_uid: str | None = None  # the current attempt's observed pod UID (docs/JOBS.md "Gang attempts")
     gang_rank: int | None = None  # the current attempt's observed rank (a gang's coordinator: 0)
     gang_restart: int | None = None  # the current attempt's observed JobSet incarnation
+    resume_checkpoint_ref: str | None = None  # the incarnation-frozen pointer the current gang restores from
+    resume_source_epoch: int | None = None
+    resume_source: Literal["committed", "explicit"] | None = None
     resumable: bool | None = None
     gpu_class: str | None = None
     image: str | None = None
