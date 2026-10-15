@@ -12,12 +12,12 @@ nodesets:
     nodesets:
       %{~ for i, nodeset in nodesets ~}
       - name: ${nodeset.name}
+        nameNodeSelector: "slurm.nebius.ai/nodeset-name"
         %{~ if nodeset.range != null ~}
         range:
           firstOrdinal: ${nodeset.range.first_ordinal}
           lastOrdinal: ${nodeset.range.last_ordinal}
           suffix: ${jsonencode(nodeset.range.suffix)}
-        nameNodeSelector: "slurm.nebius.ai/nodeset-name"
         %{~ endif ~}
         annotations:
           slurm.nebius.ai/parental-cluster-ref: soperator
@@ -248,10 +248,6 @@ nodesets:
         enableHostUserNamespace: true
 
         priorityClass: soperator-worker-high-priority
-        %{~ if nodeset.range == null ~}
-        nodeSelector:
-          slurm.nebius.ai/nodeset-name: ${nodeset.name}
-        %{~ endif ~}
         %{~ if nodeset.resources.gpus > 0 ~}
         tolerations:
           - key: nvidia.com/gpu
