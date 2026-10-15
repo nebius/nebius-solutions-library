@@ -1,6 +1,6 @@
 output "regions" {
   description = "Supported regions."
-  value       = [for k, v in local.regions : v]
+  value       = local.supported_regions
 }
 
 output "platforms" {

@@ -164,7 +164,20 @@ locals {
     }
   }
 
+  # Grace has one thread per core. Do not reuse the x86 SMT topologies for
+  # presets with the same vCPU/memory name.
+  cpu_topologies_g1 = {
+    for vcpus in [2, 4, 8, 16, 32, 56, 112] : "${vcpus}vcpu-${vcpus * 4}gb" => {
+      boards            = 1
+      sockets_per_board = vcpus == 112 ? 2 : 1
+      cores_per_socket  = vcpus == 112 ? 56 : vcpus
+      threads_per_core  = 1
+      cpus              = vcpus
+    }
+  }
+
   cpu_topologies_by_platforms = tomap({
+    (local.platforms.cpu-g1) = tomap(local.cpu_topologies_g1)
     (local.platforms.cpu-e2) = tomap({
       (local.presets.p-2c-8g)    = local.cpu_topologies.c-2vcpu-8gb
       (local.presets.p-4c-16g)   = local.cpu_topologies.c-4vcpu-16gb
