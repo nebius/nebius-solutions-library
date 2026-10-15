@@ -47,6 +47,11 @@ resource "nebius_compute_v1_instance" "instance" {
 
   recovery_policy = var.preemptible ? "FAIL" : "RECOVER"
 
+  reservation_policy = (var.reservation_policy != "" || length(var.reservation_ids) > 0) ? {
+    policy          = var.reservation_policy != "" ? var.reservation_policy : "STRICT"
+    reservation_ids = length(var.reservation_ids) > 0 ? var.reservation_ids : null
+  } : null
+
 
 
   gpu_cluster = var.gpu_cluster != "" ? { id = var.gpu_cluster } : {}
