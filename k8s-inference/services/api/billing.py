@@ -283,12 +283,108 @@ async def bill_once() -> int:
     return n
 
 
+KNOWN_ZERO = f"{LABEL}/billed-correction"
+
+
+def no_pods_anywhere(job: dict, ns: str, region: str) -> bool:
+    """Strict: every worker (the manager's region and all workers) answered the pod list for this Job and none holds
+    a pod of it in ANY phase (a terminal, unrecorded pod is a run). An unreadable worker (anything but an absent
+    namespace) is not an absence. Contrast superseded_over, which only refuses non-terminal pods."""
+    for worker in dict.fromkeys([region, *kube.regions()]):
+        try:
+            pods = retry(kube.core(worker).list_namespaced_pod, ns, label_selector=jobs.pods_selector(job)).items
+        except ApiException as error:
+            if error.status == 404:
+                continue  # the namespace is absent there: nothing of the run can exist in it
+            return False
+        except Exception:  # noqa: BLE001 - unreadable is never evidence
+            return False
+        if pods:
+            return False
+    return True
+
+
+def known_zero(job: dict, records: list | None, ns: str | None, region: str | None) -> bool:
+    """The settle-time predicate (api 0.11.121): nothing measurable (measured_usage None), NO attempt record from any
+    source (database or bucket: an S3-only start without an end is an attempt, never a zero), and never_started on
+    authoritative reads."""
+    return not records and measured_usage(job, records) is None and never_started(job, ns, region)
+
+
+def never_started(job: dict, ns: str | None, region: str | None) -> bool:
+    """Provably zero GPU time (api 0.11.121), on authoritative reads only; anything unreadable, absent or ambiguous
+    proves nothing and leaves `unknown` as it is:
+    - a fenced predecessor: the successor annotation AND the durable successor mark agree (attempts.successor_of),
+      and the successor Job exists and is a class fallback of this run (`serverless2.nebius/fallback`), its creation
+      time being the fence;
+    - never resumed by Kueue: suspended, no startTime, no active counter, no Complete/Failed condition, a manager Job;
+    - stopped everywhere on successful reads (superseded_over) AND no pod of it in any phase in any worker
+      (no_pods_anywhere: a terminal unrecorded pod is a run), and no succeeded/failed counter on the Job;
+    - its own Workload still exists, exactly one, owned by this Job's UID, never admitted (no Admitted/QuotaReserved,
+      no admission, no cluster) and explicitly Admitted=False since a time not later than the fence
+      (kube.workload_admission; a missing, stray or duplicate Workload is not evidence);
+    - zero attempt records of this operation in the fleet database, read successfully (the uploader records
+      "started" within seconds of any pod); the bucket's best-effort read is never used as evidence.
+    A predecessor superseded by RECOVERY ran and has records: it never qualifies."""
+    md, st, sp = job.get("metadata") or {}, job.get("status") or {}, job.get("spec") or {}
+    ann = md.get("annotations") or {}
+    name, uid, successor = md.get("name"), md.get("uid"), ann.get(f"{LABEL}/successor")
+    conds = {c.get("type") for c in (st.get("conditions") or []) if c.get("status") == "True"}
+    if not (
+        successor
+        and successor != name
+        and uid
+        and ns
+        and region
+        and sp.get("suspend") is True
+        and not st.get("startTime")
+        and not st.get("active")
+        and not ({"Complete", "SuccessCriteriaMet", "Failed", "FailureTarget"} & conds)
+        and jobs.is_manager_job(job)
+        and not job.get("_pods")
+        and not st.get("succeeded")
+        and not st.get("failed")
+        and attempts.enabled()
+        and superseded_over(job, ns, region)
+        and no_pods_anywhere(job, ns, region)
+    ):
+        return False
+    try:
+        if attempts.successor_of(name) != successor:
+            return False
+        rows = [r for r in attempts.for_operation(ann.get(f"{LABEL}/resumed-from") or name) if r["operation"] == name]
+        if rows:
+            return False
+        succ = jobs.get(ns, successor, region)
+        s_ann = (succ.get("metadata") or {}).get("annotations") or {}
+        fence = (succ.get("metadata") or {}).get("creationTimestamp")
+        if not s_ann.get(f"{LABEL}/fallback") or not fence:
+            return False
+        w = kube.workload_admission(ns, uid, region)
+    except Exception as e:  # noqa: BLE001 - an unreadable answer is never evidence of zero
+        log.warning("billing %s/%s: never-started proof unavailable: %s", region, name, e)
+        return False
+    return bool(
+        w is not None
+        and not w["admitted"]
+        and not w["cluster"]
+        and w["not_admitted_since"]
+        and str(w["not_admitted_since"]) <= str(fence)
+    )
+
+
 def unsettled(job: dict, ns: str | None = None, region: str | None = None) -> bool:
     """Whether a Job (or JobSet) is one the billing pass would settle now: admitted on a key, not billed yet, not a
     worker's transient copy of a manager Job, and over: finished (Complete/Failed), a cancelled JobSet, or a fenced
-    predecessor whose Workload and Pods stopped (suspended Jobs never reach a terminal condition)."""
+    predecessor whose Workload and Pods stopped (suspended Jobs never reach a terminal condition). One revisit of an
+    already-billed Job: `unknown` on a predecessor that provably never started (never_started), so the known zero
+    replaces the unknown; every other unknown stays untouched."""
     ann = (job.get("metadata") or {}).get("annotations") or {}
-    if BILLED in ann or KEY not in ann or jobs.is_mirror(job):
+    if KEY not in ann or jobs.is_mirror(job):
+        return False
+    if BILLED in ann and (
+        ann.get(BILLED) != "unknown" or KNOWN_ZERO in ann or not db.enabled() or not never_started(job, ns, region)
+    ):
         return False
     return finished(job) or cancelled_over(job, ns, region) or superseded_over(job, ns, region)
 
@@ -502,6 +598,9 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
             if not identity:
                 raise ValueError("job UID is required for accounting")
             measured = measured_usage(job, records)
+            zero = known_zero(job, records, ns, region)
+            if zero:
+                measured = 0.0  # nothing ever ran (known_zero): a known zero, written next to the bill
             if measured is None:
                 # nothing trustworthy to charge: the key's reservation stays on record as unknown GPU time
                 # (keys.settle_run_member None); an operator settles it later (keys.settle_unknown)
@@ -516,8 +615,12 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
             )
             total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
             if db.enabled():
-                keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
+                released = keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
+                if zero and not released:
+                    keys.settle_unknown(name, 0.0)  # a member an earlier pass stored as unknown: settled at 0
             done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
+            if zero:
+                done[KNOWN_ZERO] = "known zero: fenced before admission, never admitted, no attempt record"
             _annotate(region, ns, name, done, job)
             if f"{LABEL}/execution" in ann:
                 execution.sweep_copies(ns, name)  # this attempt only: its successor may still be running

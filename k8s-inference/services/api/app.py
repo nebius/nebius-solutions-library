@@ -1715,6 +1715,8 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         mine = [a for a in all_attempts if a["operation"] == mid]
         measured = [a["gpu_seconds"] for a in mine if a["gpu_seconds"] is not None]
         unknown = any(a["gpu_seconds"] is None and a["status"] != "QUEUED" for a in mine)
+        if st.accounting_annotations(m).get(billing.BILLED) == "unknown" and not mine:
+            unknown = True  # a predecessor billed as unknown with no attempt on record is unknown, not 0 complete
         ann = st.accounting_annotations(m)
         if (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async":
             # Endpoint work is measured by its native worker, never by the CPU caller's pod duration.

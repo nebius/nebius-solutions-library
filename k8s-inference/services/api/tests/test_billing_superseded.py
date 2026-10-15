@@ -126,6 +126,141 @@ def test_active_kueue_and_missing_context_are_not_settled(stopped, monkeypatch):
     assert not billing.unsettled(job(), NS, "control")
 
 
+FENCE = "2026-10-15T19:32:54Z"
+
+
+@pytest.fixture
+def never_ran(stopped, monkeypatch):
+    """Q2 (op-cc97d4399365128b, 2026-10-15): the original moved to L40S while QUEUED; nothing of it ever ran. Every
+    proof source answers authoritatively: the durable fence, the successor Job annotated as a fallback (its creation
+    is the fence), zero database rows, exactly one owner-matched Workload with Admitted=False since before the fence
+    and no cluster, Kueue inactive, no pod in any worker (`stopped`)."""
+    world = {
+        "rows": [],
+        "successor": {
+            "metadata": {"name": NEXT, "creationTimestamp": FENCE, "annotations": {f"{L}/fallback": "rtx -> l40s"}}
+        },
+        "workload": {"admitted": False, "cluster": None, "active": None, "not_admitted_since": "2026-10-15T19:31:48Z"},
+    }
+    monkeypatch.setattr(attempts, "for_operation", lambda root: list(world["rows"]))
+    monkeypatch.setattr(jobs, "get", lambda ns, name, region: world["successor"])
+    monkeypatch.setattr(kube, "workload_admission", lambda ns, uid, region: world["workload"])
+    return world
+
+
+def _queued():
+    j = job()
+    j["status"] = {}  # never resumed: no startTime, no active counter, no condition
+    j["spec"]["managedBy"] = "kueue.x-k8s.io/multikueue"
+    # a GPU run (the live Q2 shape): a GPU template with no attempt measures None, never 0 (billing.measured_usage)
+    j["spec"]["template"] = {
+        "spec": {"containers": [{"name": "main", "resources": {"limits": {"nvidia.com/gpu": "1"}}}]}
+    }
+    return j
+
+
+def test_a_never_admitted_fallback_original_is_a_known_zero(never_ran):
+    assert billing.never_started(_queued(), NS, "control")
+    assert billing.known_zero(_queued(), [], NS, "control")
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"operation": ROOT, "pod": ROOT + "-a", "status": "started", "gpus": 1, "started_at": "2026-10-15T19:30:00Z"}],
+        [{"operation": ROOT, "pod": ROOT + "-a", "status": "succeeded", "gpus": 1}],
+    ],
+)
+def test_a_bucket_only_attempt_is_never_a_zero(never_ran, records):
+    """settle_job merges the database rows with the bucket's records: an S3-only start without an end (an incomplete
+    GPU attempt) or any recorded attempt keeps the unknown; known_zero needs zero records from every source."""
+    assert not billing.known_zero(_queued(), records, NS, "control")
+
+
+@pytest.mark.parametrize("counter", ["succeeded", "failed"])
+def test_a_job_with_a_terminal_counter_never_qualifies(never_ran, counter):
+    j = _queued()
+    j["status"] = {counter: 1}
+    assert not billing.never_started(j, NS, "control")
+
+
+def test_a_billed_unknown_original_is_revisited_only_with_the_proof(never_ran, monkeypatch):
+    j = _queued()
+    j["metadata"]["annotations"][billing.BILLED] = "unknown"
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    assert billing.unsettled(j, NS, "control")  # the one revisit of a billed Job
+    j["metadata"]["annotations"][billing.KNOWN_ZERO] = "done"
+    assert not billing.unsettled(j, NS, "control")  # corrected already: never twice
+    j["metadata"]["annotations"].pop(billing.KNOWN_ZERO)
+    j["metadata"]["annotations"][billing.BILLED] = "12.5"
+    assert not billing.unsettled(j, NS, "control")  # a measured bill is never revisited
+    j["metadata"]["annotations"][billing.BILLED] = "unknown"
+    never_ran["rows"] = [{"operation": ROOT, "pod": ROOT + "-a", "status": "started"}]
+    assert not billing.unsettled(j, NS, "control")  # an unknown with a record stays unknown
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "db-record",
+        "started",
+        "active",
+        "complete",
+        "workload-absent",
+        "workload-admitted",
+        "workload-cluster",
+        "no-admitted-false",
+        "admitted-false-after-fence",
+        "successor-not-fallback",
+        "successor-unreadable",
+        "workload-unreadable",
+        "db-unreadable",
+        "pods-present",
+        "pods-unreadable",
+        "kueue-active",
+        "fence-mismatch",
+    ],
+)
+def test_anything_short_of_the_full_proof_keeps_unknown(never_ran, stopped, monkeypatch, change):
+    j = _queued()
+    w = never_ran
+    if change == "db-record":  # any attempt record (a recovery predecessor, a lost worker): it ran
+        w["rows"] = [{"operation": ROOT, "pod": ROOT + "-a", "status": "interrupted"}]
+    elif change == "started":  # Kueue resumed it once
+        j["status"] = {"startTime": "2026-10-15T19:30:00Z"}
+    elif change == "active":
+        j["status"] = {"active": 1}
+    elif change == "complete":
+        j["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    elif change == "workload-absent":  # an absence proves nothing
+        w["workload"] = None
+    elif change == "workload-admitted":  # it was admitted once (an evicted, cleared, unrecorded start)
+        w["workload"] = {**w["workload"], "admitted": True}
+    elif change == "workload-cluster":
+        w["workload"] = {**w["workload"], "cluster": "south"}
+    elif change == "no-admitted-false":  # no explicit Admitted=False condition on record
+        w["workload"] = {**w["workload"], "not_admitted_since": None}
+    elif change == "admitted-false-after-fence":  # Admitted=False only after the move: admission history unclear
+        w["workload"] = {**w["workload"], "not_admitted_since": "2026-10-15T19:40:00Z"}
+    elif change == "successor-not-fallback":  # superseded by recovery, not by a class fallback
+        w["successor"]["metadata"]["annotations"] = {f"{L}/recovery": "node lost"}
+    elif change == "successor-unreadable":
+        monkeypatch.setattr(jobs, "get", lambda *a: (_ for _ in ()).throw(OSError("unreadable")))
+    elif change == "workload-unreadable":
+        monkeypatch.setattr(kube, "workload_admission", lambda *a: (_ for _ in ()).throw(ApiException(status=503)))
+    elif change == "db-unreadable":
+        monkeypatch.setattr(attempts, "for_operation", lambda root: (_ for _ in ()).throw(OSError("pool down")))
+    elif change == "pods-present":  # a terminal, unrecorded pod in a worker: stopped is not never-ran
+        stopped[0]["north"] = [{"status": {"phase": "Succeeded"}}]
+    elif change == "pods-unreadable":  # one worker unreadable: no proof
+        stopped[0]["south"] = ApiException(status=503)
+    elif change == "kueue-active":
+        monkeypatch.setattr(kube, "workload_inactive", lambda *a: False)
+    else:  # the durable fence names another successor
+        monkeypatch.setattr(attempts, "successor_of", lambda name: "someone-else")
+    assert not billing.never_started(j, NS, "control")
+
+
 @pytest.mark.parametrize("measured", [True, False])
 def test_real_ledger_settles_each_member_once_after_annotation_loss(database, monkeypatch, measured):
     db.migrate()

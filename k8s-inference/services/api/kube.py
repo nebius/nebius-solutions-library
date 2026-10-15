@@ -151,6 +151,49 @@ def cluster_id_or_none(region: str | None) -> str | None:
         return None
 
 
+def workload_admission(ns: str, job_uid: str, region: str = REGION) -> dict | None:
+    """The authoritative admission state of a Job's own Workload, for a proof that a run never ran: None unless
+    exactly one Workload carries the job-uid label AND an ownerReference with that UID (an absence, a stray or a
+    duplicate proves nothing); else {admitted, cluster, active, not_admitted_since}: admitted when Admitted or
+    QuotaReserved is True or an admission is recorded, cluster from status.clusterName or the admitted-cluster
+    annotation, not_admitted_since the lastTransitionTime of an explicit Admitted=False condition (None without
+    one). Read errors raise: an unreadable answer is never evidence (contrast workload_clusters, which answers
+    empty on failure)."""
+    items = retry(
+        api(region).list_namespaced_custom_object,
+        "kueue.x-k8s.io",
+        "v1beta2",
+        ns,
+        "workloads",
+        label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+    ).get("items", [])
+    owned = [
+        w
+        for w in items
+        if any(o.get("uid") == job_uid for o in ((w.get("metadata") or {}).get("ownerReferences") or []))
+    ]
+    if len(owned) != 1:
+        return None
+    w = owned[0]
+    st = w.get("status") or {}
+    conds = {c.get("type"): c for c in (st.get("conditions") or [])}
+    admitted = (
+        (conds.get("Admitted") or {}).get("status") == "True"
+        or (conds.get("QuotaReserved") or {}).get("status") == "True"
+        or bool(st.get("admission"))
+    )
+    cluster = st.get("clusterName") or ((w.get("metadata") or {}).get("annotations") or {}).get(
+        f"{LABEL}/admitted-cluster"
+    )
+    not_admitted = conds.get("Admitted") or {}
+    return {
+        "admitted": admitted,
+        "cluster": cluster,
+        "active": (w.get("spec") or {}).get("active"),
+        "not_admitted_since": not_admitted.get("lastTransitionTime") if not_admitted.get("status") == "False" else None,
+    }
+
+
 def workload_inactive(ns: str, job_uid: str, region: str = REGION) -> bool:
     """Whether nothing of a run can run any more as far as Kueue is concerned: its Workload (label job-uid) is gone,
     deactivated (`spec.active = false`, deactivate_workload) or finished (condition Finished=True). An unreadable
