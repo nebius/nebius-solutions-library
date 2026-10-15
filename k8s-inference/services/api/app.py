@@ -1687,14 +1687,17 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         a["operation"] = (by_pod.get(a.get("attempt_id")) or {}).get("operation") or name  # an expired member
         all_attempts.append(a)
     # a cancelled member's interrupted attempt is the cancel, not a preemption: the rule the member's own handle
-    # applies, from the Job's annotation while it exists and from the operation's cancel mark after that
+    # applies, from the Job's annotation while it exists; for an expired member (no Job) from its cancel mark, read
+    # once for all of them and never required (a failed read leaves the record's own status)
     cancelled_members = {
         m["metadata"]["name"] for m in members if (m["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")
     }
-    for mid in {a["operation"] for a in all_attempts} - cancelled_members:
-        mk = attempts._marks(mid) if attempts.enabled() else None
-        if mk and mk[1]:
-            cancelled_members.add(mid)
+    expired = {a["operation"] for a in all_attempts} - set(pods_by_member)
+    if expired and attempts.enabled():
+        try:
+            cancelled_members |= {o for o, mk in attempts.marks_for(expired).items() if mk and mk[1]}
+        except Exception as e:  # noqa: BLE001 - provenance of an expired member stays the record's
+            log.warning("chain of %s: cancel marks of expired members unavailable: %s", root, e)
     for mid in cancelled_members:
         st.cancel_attempt([a for a in all_attempts if a["operation"] == mid], True)
     for a in all_attempts:
