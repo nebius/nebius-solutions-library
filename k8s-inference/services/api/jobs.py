@@ -2252,10 +2252,14 @@ def switch_class(
         or (ex.get("placement") or {}).get("allowed_clusters")
         or model["regions"],
     }
+    # the candidate clusters of the NEXT class are the caller's (allowed_clusters, else the model's), never the
+    # original's template annotation: that one was narrowed by the per-node fit to the clusters holding a pool of
+    # the FIRST class (an RTX-only cluster), where the next class has no pool at all; build_run narrows it again
+    # for the next class. Only a run pinned to one cluster from the start (the `region` label) keeps that pin.
     tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
         f"{LABEL}/regions"
     )
-    if tmpl_regions:
+    if tmpl_regions and labels.get(f"{LABEL}/region"):
         placement["regions"] = tmpl_regions.split(",")
     job = build_run(
         new,
@@ -2395,8 +2399,10 @@ def switch_unschedulable(
         "manager": True,
         "profile": labels.get("kueue.x-k8s.io/queue-name") or profile_of(model),
         "classes": [gpu_class] if gpu_class else (pl.get("gpu_preference") or []),
+        # the caller's clusters (allowed_clusters, else the model's), re-narrowed by the fit for the pod as it is now;
+        # the original's template annotation only when the run is pinned to one cluster (see switch_class)
         "regions": tmpl_regions.split(",")
-        if tmpl_regions
+        if tmpl_regions and labels.get(f"{LABEL}/region")
         else (
             [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
             or pl.get("allowed_clusters")

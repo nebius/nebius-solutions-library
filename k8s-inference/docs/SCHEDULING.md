@@ -279,7 +279,9 @@ rendered for the first class of its preference (that class's image, `prefer-<cla
 affinity). The control API's reconcile loop (every 15 s) looks at fleet runs that are still unplaced (no worker
 admitted their Workload) after the wait bound and moves each to the next class of its preference
 (`jobs.switch_class`): `<root>-r<n>` is created for the next class with the remaining preference, carrying
-`serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s without capacity"), which the operation reports as
+`serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s without capacity"); the successor's candidate clusters are
+the caller's `allowed_clusters` (else the model's regions), narrowed by the per-node fit for the NEW class, never the
+original's already-narrowed list (api 0.11.119); an explicit single-cluster restriction is never widened. The operation reports the move as
 `reason` and `resumed_from`; the original Job stays as a readable handle (status `SUPERSEDED`, its Workload
 deactivated and the Job suspended so it never admits), names its `successor`, and `GET /v1/operations/<original>`
 returns the successor's state with `requested_id`; the fleet database keeps the link past the Job's lifetime. The last class of the preference

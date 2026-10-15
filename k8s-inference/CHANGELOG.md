@@ -4,6 +4,23 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.119
+
+(API image only; no chart, migration or RBAC change.)
+
+- Fallback to the next class (`jobs.switch_class`, the control API's reconcile loop): the successor was rendered with
+  the ORIGINAL Job's template `regions` annotation, which the per-node fit had already narrowed to the clusters holding
+  a pool of the FIRST class. On a fleet whose classes live in different clusters (RTX PRO 6000 on south, L40S on
+  north) the L40S successor was confined to south, `_fit_terms` found no candidate pool ("impossible shape ... admits
+  no candidate pool"), the reconciler logged "fallback of <op> failed" every 15 s and the run never moved
+  (op-479839daf5470638, 2026-10-15, under a bounded QA LocalQueue hold). The successor now starts from the caller's
+  `execution.placement.allowed_clusters` (else the model's regions) and is narrowed again for ITS class; an explicit
+  single-cluster restriction is never widened (the run keeps waiting, readable, no successor); a run pinned to one
+  cluster from the start (the `region` label) keeps its pin. The same rule applies to the unschedulable switch
+  (`jobs.switch_unschedulable`). Automatic recovery after infrastructure loss was not affected: it already starts from
+  the model's regions narrowed by the caller's `allowed_clusters` (`execution.narrow_placement`). Tests:
+  test_fallback.py (multi-cluster, explicit restriction, pinned).
+
 ## api 0.11.118
 
 (API image only; no chart, migration or RBAC change.)

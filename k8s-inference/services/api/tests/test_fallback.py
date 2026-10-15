@@ -136,6 +136,86 @@ def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
     assert appmod.fallback_switch() == []
 
 
+FIT_SPLIT = {  # one node of each pool; the RTX pool lives on us-central1 only, the L40S pool on eu-north1 only
+    "us-central1": {
+        "rtx6000-spot-1x": {
+            "kind": "gpu",
+            "gpus": 1,
+            "cpu": 14,
+            "memory_gib": 180,
+            "ephemeral_gib": 100,
+            "shared_fs": False,
+        }
+    },
+    "eu-north1": {
+        "l40s-spot-1x": {
+            "kind": "gpu",
+            "gpus": 1,
+            "cpu": 14,
+            "memory_gib": 44,
+            "ephemeral_gib": 100,
+            "shared_fs": False,
+        }
+    },
+}
+
+
+def _queued_split_run(c, fake, monkeypatch, allowed, pin=None):
+    monkeypatch.setattr(kube, "fleet", lambda: {**TWO_CLASS_FLEET, "fit": FIT_SPLIT})
+    m = _fold_model()
+    monkeypatch.setattr(catalog, "get", lambda name: m if name == "fold" else None)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    placement = {"gpu_preference": ["rtx-pro-6000", "l40s"], "fallback_wait_s": 60, "allowed_clusters": allowed}
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": {"placement": placement}}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    job = fake.jobs[("tenant-demo", op)]
+    assert job["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "us-central1"  # fit-narrowed
+    if pin:
+        job["metadata"]["labels"][f"{LABEL}/region"] = pin
+    job["metadata"]["creationTimestamp"] = "2026-10-05T20:00:00Z"
+    return op, job
+
+
+def test_fallback_is_not_confined_to_the_clusters_of_the_first_class(client, monkeypatch):
+    """op-479839daf5470638 (2026-10-15): the per-node fit had narrowed the original to the one cluster with an RTX pool;
+    switch_class copied that narrowed list onto the L40S successor, which that cluster cannot hold ("impossible
+    shape ... no candidate pool"), so the reconciler failed every 15 s and the run never moved. The successor is
+    placed among the caller's allowed clusters, narrowed again for ITS class."""
+    c, fake = client
+    op, _ = _queued_split_run(c, fake, monkeypatch, ["us-central1", "eu-north1"])
+    assert appmod.fallback_switch() == [f"{op}-r1"]
+    new = fake.jobs[("tenant-demo", f"{op}-r1")]
+    assert new["metadata"]["labels"][f"{LABEL}/gpu-class"] == "l40s"
+    assert new["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "eu-north1"  # narrowed for l40s
+    assert json.loads(new["metadata"]["annotations"][f"{LABEL}/execution"])["placement"]["allowed_clusters"] == [
+        "us-central1",
+        "eu-north1",
+    ]
+    assert fake.jobs[("tenant-demo", op)]["metadata"]["annotations"][f"{LABEL}/successor"] == f"{op}-r1"
+
+
+def test_fallback_never_widens_an_explicit_cluster_restriction(client, monkeypatch):
+    """The caller allowed one cluster only; the next class has no pool there: nothing moves, nothing widens, the
+    original stays queued and readable (no successor, not suspended)."""
+    c, fake = client
+    op, job = _queued_split_run(c, fake, monkeypatch, ["us-central1"])
+    assert appmod.fallback_switch() == []
+    assert f"{LABEL}/successor" not in job["metadata"]["annotations"] and not job["spec"].get("suspend")
+    assert ("tenant-demo", f"{op}-r1") not in fake.jobs
+    assert jobs.normalise(job)["status"] == "QUEUED"
+
+
+def test_fallback_keeps_a_run_pinned_to_one_cluster_pinned(client, monkeypatch):
+    """A run pinned to a cluster from the start (the `region` label) keeps its pin on a class switch: the pinned
+    cluster has no pool of the next class, so nothing moves and nothing widens."""
+    c, fake = client
+    op, job = _queued_split_run(c, fake, monkeypatch, ["us-central1", "eu-north1"], pin="us-central1")
+    assert appmod.fallback_switch() == []
+    assert f"{LABEL}/successor" not in job["metadata"]["annotations"]
+    assert ("tenant-demo", f"{op}-r1") not in fake.jobs
+
+
 def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypatch):
     """Custom cluster ids (tfvars `regions.<r>.id`, e.g. north/south) resolve to their Nebius region through the
     fleet document's clusters.yaml: kubeconfig choice, logs/metrics clients and admitted cancellation of a run that a
