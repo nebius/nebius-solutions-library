@@ -834,7 +834,7 @@ resources:
             values:
               checks:
                 manager:
-                  enableNodeReplacement: ${soperator_checks_node_replacement_enabled}
+                  enabledNodeReplacement: ${soperator_checks_node_replacement_enabled}
                   enableExtensiveCheck: ${soperator_checks_extensive_check_enabled}
                   env:
                     maintenanceIgnoreNodeLabels: "${join(",", slurm_cluster.maintenance_ignore_node_labels)}"
