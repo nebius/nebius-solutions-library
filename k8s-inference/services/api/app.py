@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.112", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.113", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1823,6 +1823,14 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
         op.update(_delivered(op, name, root))  # a retry or finalizer that delivered closes the original
+    if op["status"] == "EXPORT_FAILED" and jobs.work_volume_present(job, _home(job)) is False:
+        # the text above promises a kept volume and a transfer retry; neither holds once the claim is gone (an older
+        # uploader released it): say so, and offer no resume or export on it (`:export` answers 409 the same way)
+        op["error"] = (
+            "export failed after a successful run and its work volume is already gone: nothing is left to export, "
+            "submit the operation again"
+        )
+        op["resumable"] = False
     _stage_fields(p, op, job, root)
     ann = job["metadata"].get("annotations") or {}
     if ann.get(f"{cfg.LABEL}/endpoint-revision") or ann.get(f"{cfg.LABEL}/endpoint-image"):

@@ -576,9 +576,12 @@ delivery record is `FINALIZING` (the uploader may still be exporting or posting)
 must be verified (the sync succeeded and a second, size-only pass finds nothing left), its `STATUS.json` is published
 last, and the work volume is released only then; otherwise the operation is `EXPORT_FAILED`, the volume is kept, and
 `POST /v1/operations/<id>:export` runs the transfer again on that volume without the simulation (`<id>-x<n>`). The
-uploader releases the work volume only once delivery is durable: the export verified or RESULT.json present, and the
+uploader releases the work volume only once delivery is durable: the export verified, or RESULT.json present and not
+reporting `export: failed` (an endpoint caller whose own delivery failed keeps its capture for `:export`), and the
 API's acknowledgement of the final record (it retries the record four times); without that acknowledgement the
-volume stays, the operation shows FINALIZING/EXPORT_FAILED and `:export` re-delivers without recompute. With
+volume stays, the operation shows FINALIZING/EXPORT_FAILED and `:export` re-delivers without recompute. An
+EXPORT_FAILED operation whose own work volume no longer exists says so instead (`resumable: false`, `:export` 409):
+the promise of a kept volume is never made about a volume that is gone. With
 application-managed I/O the application writes `/work/RESULT.json` (`{"result_ref": "...", "checkpoint_ref": "..."}`)
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.

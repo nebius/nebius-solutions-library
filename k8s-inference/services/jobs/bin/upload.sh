@@ -185,10 +185,17 @@ while true; do
 done
 if [ "$EXIT" = "0" ]; then
   upload succeeded
-  # the work volume goes only once delivery is durable: the export verified (managed) or RESULT.json present
-  # (application), and the API acknowledged the final record when there is an API (else the bucket record stands)
+  # the work volume goes only once delivery is durable: the export verified (managed), or RESULT.json present and not
+  # reporting a failed export (application: a caller whose S3 delivery failed writes export=failed with the capture
+  # kept for the transfer-only retry; that volume must stay), and the API acknowledged the final record when there
+  # is an API (else the bucket record stands). The record itself was acknowledged either way: an acknowledged
+  # "export failed" is not a delivery.
   delivered=false
-  if [ "$MODE" = record ]; then [ -f /work/RESULT.json ] && delivered=true; else [ "$EXPORT" = succeeded ] && delivered=true; fi
+  if [ "$MODE" = record ]; then
+    [ -f /work/RESULT.json ] && jq -e '(.export // "n/a") != "failed"' /work/RESULT.json > /dev/null 2>&1 && delivered=true
+  else
+    [ "$EXPORT" = succeeded ] && delivered=true
+  fi
   if [ -n "${API_URL:-}" ] && [ "$ACK" != 200 ]; then delivered=false; fi
   if [ "${SCRATCH:-}" = shared ]; then
     # a durable endpoint call on the tenant's shared scratch (scratch.sh): the leaf is emptied only with the delivery

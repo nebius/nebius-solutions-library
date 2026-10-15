@@ -1851,6 +1851,24 @@ def continuations(ns: str, tenant: str, root: str, recovered: bool = False) -> i
     )
 
 
+def work_volume_present(job: dict, region: str) -> bool | None:
+    """Whether the operation's own work volume still exists: None when the operation has none of its own (a shared
+    scratch leaf, a JobSet with shared checkpoints, no volume), False when the claim is gone from the cluster (an
+    uploader released it, or the namespace was cleaned), True when it is there. One read; only for the states whose
+    public text promises a kept volume (EXPORT_FAILED), so that promise is never made about a volume that is gone."""
+    ann = job["metadata"].get("annotations") or {}
+    pvc = ann.get(f"{LABEL}/pvc")
+    if not pvc or ann.get(f"{LABEL}/scratch") == "shared":
+        return None
+    try:
+        retry(kube.core(region).read_namespaced_persistent_volume_claim, pvc, job["metadata"]["namespace"])
+    except ApiException as e:
+        if e.status == 404:
+            return False
+        raise
+    return True
+
+
 def export_retries(ns: str, tenant: str, root: str) -> int:
     """How many export retries or finalizers `<root>-x<n>` the chain of `root` has (live Jobs)."""
     return len(list_related(ns, tenant, lambda j: j["metadata"]["name"].startswith(f"{root}-x"), complete=False))

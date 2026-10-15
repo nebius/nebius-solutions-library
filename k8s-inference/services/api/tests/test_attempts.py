@@ -247,6 +247,34 @@ def test_operation_reports_lifecycle_and_revision_cursor(client, monkeypatch):
     assert res["export_state"] == "succeeded"
 
 
+def test_an_export_failed_run_whose_volume_is_gone_says_so_and_offers_no_export(client, monkeypatch):
+    """The uploader of op-bb1275a5f615d662 (2026-10-15) released the volume of a run whose export had failed; the
+    status kept promising a kept volume and a transfer retry. A gone claim is reported as gone."""
+    c, fake = client
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        json={"input": {"image": "x", "command": "y"}, "region": "eu-north1"},
+        headers=H,
+    )
+    op = r.json()["id"]
+    fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
+    monkeypatch.setattr(
+        attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="failed"), "operation": op}]
+    )
+    kept = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert kept["status"] == "EXPORT_FAILED" and "volume is kept" in kept["error"] and kept["resumable"] is True
+    del fake.pvcs[("tenant-demo", f"{op}-work")]  # released by an uploader, or cleaned up
+    gone = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert gone["status"] == "EXPORT_FAILED" and "already gone" in gone["error"] and gone["resumable"] is False
+    assert "volume is kept" not in gone["error"]
+    r = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert r.status_code == 409 and "gone" in r.text
+
+
 def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypatch):
     c, fake = client
     r = c.post(

@@ -4,6 +4,25 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.113, jobs 0.1.28
+
+(no chart change, no migration; the API deployment's `RUNNER_IMAGE` follows `images.versions.jobs`.)
+
+- jobs 0.1.28, `upload.sh`: a run with application-managed I/O released its work volume whenever `/work/RESULT.json`
+  existed and the API had acknowledged the final record, also when that record said `export: failed`. An endpoint
+  call whose inference succeeded but whose own S3 delivery was refused (Qwen op-bb1275a5f615d662, 2026-10-15: PUT 400,
+  then 403 under a full bucket) therefore lost the capture that `POST /v1/operations/<id>:export` needed, while the
+  operation kept promising a kept volume. The volume is now released only when RESULT.json does not report a failed
+  export (a result without an export state is the application's own delivery, as before); a failed export keeps it
+  with the `:export` hint in the uploader log. The transfer-only retry still never calls the endpoint (`TRANSFER_ONLY=1`
+  delivers the retained capture or exits 3) and renders without a GPU.
+- api 0.11.113: an `EXPORT_FAILED` operation whose own work volume no longer exists (released by an older uploader,
+  or cleaned up) reports that instead of a kept volume: `error` says the volume is gone and nothing is left to export,
+  `resumable` is false; `:export` answers 409 as before. One claim read, only on that status.
+- Tests: `services/api/tests/test_upload_sh.py` drives the uploader with a stub Kubernetes API and aws (failed export
+  keeps, delivered releases, no record keeps, unacknowledged record keeps, managed I/O releases only after a verified
+  export); `test_attempts.py` covers the gone-volume status and the 409.
+
 ## charts/platform 0.1.13
 
 (chart only; api 0.11.112 and every image unchanged; no migration.)
