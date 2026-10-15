@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.116", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.117", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -136,7 +136,10 @@ def _admit(
     try:
         return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request, run_member)
     except keys.KeyLimit as e:
-        raise HTTPException(e.status, e.detail)
+        # An endpoint may itself answer429 AFTER admission. Only this ledger
+        # refusal proves that no execution was admitted by this request.
+        headers = {"X-Serverless2-Admission": "refused"} if e.status == 429 else None
+        raise HTTPException(e.status, e.detail, headers=headers)
 
 
 def _job_deadline(job: dict) -> int | None:
@@ -1454,6 +1457,7 @@ def list_operations(
     limit: int = Query(50, le=500),
     model: str | None = None,
     cursor: str | None = None,
+    created_by_current_key: bool = False,
 ):
     """The caller's operations, newest first (`created_at` desc, then id asc: a stable order), as an array (unchanged
     shape). Every live operation of the tenant over the reachable regions AND every operation the durable attempt
@@ -1494,6 +1498,13 @@ def list_operations(
         if _may_read_operation(p, synthetic_job):
             entries.append((e["created_at"], e["operation"], None, e))
     # the stable order: created_at desc, then id asc (a root before its continuations created in the same second)
+    if created_by_current_key:
+        # Legacy clients can ask for the admitting key, not every key sharing this
+        # principal. The ordinary list's existing owner/model checks remain first.
+        if skipped or response.headers.get("X-Records-Skipped"):
+            raise HTTPException(503, "complete operation attribution is unavailable")
+        entries = _created_by_current_key(entries, p)
+        response.headers["X-Created-By-Current-Key"] = "true"
     entries.sort(key=lambda x: x[1])
     entries.sort(key=lambda x: x[0], reverse=True)
     if cursor:
@@ -1522,6 +1533,33 @@ def list_operations(
             if op is not None:
                 out.append(op)
     return out
+
+
+def _created_by_current_key(entries: list[tuple], p: Principal) -> list[tuple]:
+    names = {
+        value
+        for _, name, job, durable in entries
+        for value in (name, _root(job) if job is not None else durable["root"])
+    }
+    try:
+        durable_keys = keys.admitting_key_hashes(names)
+    except Exception:  # noqa: BLE001 - no DB error, private operation or key in the public response
+        raise HTTPException(503, "complete operation attribution is unavailable") from None
+    caller = keys.key_hash(p.key)
+    selected = []
+    for entry in entries:
+        _, name, job, durable = entry
+        root = _root(job) if job is not None else durable["root"]
+        evidence = durable_keys.get(name, set()) | durable_keys.get(root, set())
+        if job is not None:
+            observed = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/key")
+            if observed is not None:
+                evidence = evidence | {observed}
+        if len(evidence) != 1 or any(not isinstance(h, str) or not keys.HASH_RE.fullmatch(h) for h in evidence):
+            raise HTTPException(503, "complete operation attribution is unavailable")
+        if caller in evidence:
+            selected.append(entry)
+    return selected
 
 
 def _encode_cursor(created_at: str, id: str) -> str:

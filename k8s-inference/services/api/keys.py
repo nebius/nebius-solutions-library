@@ -806,6 +806,28 @@ def run_member(operation: str) -> dict | None:
     }
 
 
+def admitting_key_hashes(operations: set[str]) -> dict[str, set[str]]:
+    """Read existing admission provenance in one query, without inventing attribution.
+
+    Callers must first authorize each operation's tenant/owner/model. Sets deliberately
+    preserve conflicting evidence; no row (including when the DB is disabled) is unknown,
+    not proof that another key created the operation. Never serialize these hashes.
+    """
+    if not operations or not db.enabled():
+        return {}
+    names = sorted(operations)
+    with _connection() as c:
+        rows = c.execute(
+            "select operation, key_hash from key_run_members where operation = any(%s) "
+            "union all select operation, key_hash from key_reservations where operation = any(%s)",
+            (names, names),
+        ).fetchall()
+    result: dict[str, set[str]] = {}
+    for operation, fingerprint in rows:
+        result.setdefault(operation, set()).add(fingerprint)
+    return result
+
+
 def reservation_key(operation: str) -> str | None:
     """The key hash holding a live reservation for `operation` (its slot: admitted, not released); None otherwise. The
     gateway hook's proof that an admitted operation is active. A MEMBER of a run (a continuation, a stage, an endpoint

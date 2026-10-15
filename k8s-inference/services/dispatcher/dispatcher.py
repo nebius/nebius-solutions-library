@@ -363,6 +363,23 @@ def is_superseded(job) -> bool:
     return bool(((job.metadata.annotations or {}) if job is not None else {}).get(SUCCESSOR_ANN))
 
 
+def may_ensure_volume(job, wl: dict) -> bool:
+    """Only a live manager Job authorizes its work claim. Workload Finished can lag Job completion, after the
+    uploader has already released the claim. Unknown/deleted/replaced owners must not recreate it. This is a
+    creation/adoption fence only: terminal failed/export-needed claims remain references for the sweeper."""
+    if job is None or is_superseded(job) or getattr(job.metadata, "deletion_timestamp", None):
+        return False
+    owners = [o for o in wl["metadata"].get("ownerReferences") or [] if o.get("kind") in ("Job", "JobSet")]
+    if len(owners) != 1 or owners[0].get("kind") != "Job" or owners[0].get("name") != job.metadata.name:
+        return False
+    if owners[0].get("uid") and owners[0]["uid"] != getattr(job.metadata, "uid", None):
+        return False
+    return not any(
+        c.type in ("Complete", "Failed") and c.status == "True"
+        for c in getattr(getattr(job, "status", None), "conditions", None) or []
+    )
+
+
 def job_claim(job) -> str | None:
     """The work claim a manager Job's pod template names (a resume or finalizer shares the original's)."""
     tmpl = getattr(getattr(job, "spec", None), "template", None)
@@ -479,7 +496,7 @@ def owner_job(wl: dict) -> str | None:
     return None
 
 
-def ensure_pvc(w: dict, ns: str, claim: str, size_gi: str, job_name: str) -> None:
+def ensure_pvc(w: dict, ns: str, claim: str, size_gi: str, job_name: str, batch, wl: dict) -> None:
     """The run's work volume in the chosen worker; `job_name` is recorded so the adoption pass can make the
     worker's Job its owner. Idempotent (a resume reuses the original's volume)."""
     core = w["core"]
@@ -501,6 +518,15 @@ def ensure_pvc(w: dict, ns: str, claim: str, size_gi: str, job_name: str) -> Non
     except client.exceptions.ApiException as e:
         if e.status != 404:
             raise
+    # The namespace list can predate completion during this reconcile. Re-read only for a missing claim, as close
+    # to creation as possible; a timeout/404 is unknown, never permission to resurrect a released work volume.
+    try:
+        job = batch.read_namespaced_job(job_name, ns)
+    except Exception as e:  # noqa: BLE001 - fail closed without interrupting the rest of the reconcile
+        log.warning("manager job %s/%s unavailable before volume creation: %s", ns, job_name, type(e).__name__)
+        return
+    if not may_ensure_volume(job, wl):
+        return
     body = {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
@@ -648,11 +674,11 @@ def reconcile(core, custom, batch):
         vol = admitted_volume(wl, cname)
         if vol and vol[0] in workers:
             cname, ns, claim, size, job_name = vol
-            # a superseded Job's Workload is deactivated, not finished: its volume is never (re)created for it
+            # Workload Finished can lag a terminal Job. Missing/unreadable owners cannot authorize a new claim.
             idx = manager_jobs(batch, ns, jobs_cache)
-            if idx is not None and is_superseded(idx.get(job_name)):
+            if not may_ensure_volume(idx.get(job_name) if idx is not None else None, wl):
                 continue
-            ensure_pvc(workers[cname], ns, claim, size, job_name)
+            ensure_pvc(workers[cname], ns, claim, size, job_name, batch, wl)
     sweep_volumes(workers, batch, admitted, jobs_cache)
 
 

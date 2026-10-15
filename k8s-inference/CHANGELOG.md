@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.117, dispatcher 0.2.13
+
+- Optional `created_by_current_key=true` operation listing filters by the
+  original admitting key before pagination, after existing owner/model checks.
+  Unknown attribution or incomplete regional inventory returns503. Default
+  principal-scoped listing is unchanged; no new database schema or ACL ledger.
+- A ledger concurrency/rate refusal returns `X-Serverless2-Admission: refused`
+  on429. Model-side429 responses have no such marker: they may have executed.
+- Dispatcher volume creation now checks the exact authoritative manager Job,
+  not only its eventually updated Kueue Workload. A fresh manager read before
+  creating an absent claim prevents completed/superseded/unknown owners from
+  recreating released work storage. Existing failed/export-needed claims and
+  sweeper retention rules are unchanged. No permission or jobs-image change.
+
 ## api 0.11.116, charts/platform 0.1.14
 
 - An endpoint export member now reports the chain's cumulative usage state,

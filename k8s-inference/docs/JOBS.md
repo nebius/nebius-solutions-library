@@ -668,6 +668,10 @@ copy on the worker carries the pods. What differs from the regional path:
   the volume pass recorded on it, in any state: a FAILED, EXPORT_FAILED or cancelled handle keeps its
   volume for `:resume`/`:export` until the handle itself goes; a same-volume resume or finalizer counts
   from the moment its Job exists. Deletion completes only once no pod mounts the claim.
+  Creation requires the exact live manager Job, checked again after an absent
+  claim is observed. A lagging Workload cannot recreate storage for a completed
+  manager; an unavailable, deleted or replaced manager defers creation. This
+  fence does not delete retained failed/export-needed claims.
 - **Status.** The manager Job's status is MultiKueue's mirror of the worker's; while the run is
   active, attempts and logs use the worker's pods (the API finds the worker through the Workload's
   `status.clusterName`, `region` is null until then). After it finishes the worker's copy is gone

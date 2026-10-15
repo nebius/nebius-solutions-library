@@ -24,6 +24,14 @@ GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of 
 Idempotency-Key header on every mutating call
 ```
 
+The list optionally accepts `created_by_current_key=true`. After the usual
+owner/model checks it selects the original admitting key, before pagination,
+and returns `X-Created-By-Current-Key: true`. Continuations inherit their root's
+admission. Unknown/conflicting attribution or an incomplete regional inventory
+returns503, never a misleading empty page. Omit it for the unchanged
+principal-scoped inventory; it does not redefine the authorization of individual
+operation reads or controls.
+
 One entry point: `https://api.<control cluster host>` (the fleet's API on the control cluster: models, runs,
 operations, keys, sync and async calls for every region; `docs/ARCHITECTURE.md` "One API"). Streaming and
 WebSocket calls go to the endpoint's own gateway hostname (`https://<model>-predictor.models.<region host>`,
@@ -187,7 +195,12 @@ reserves its GPUs times its `timeout_s` (such a key must give `timeout_s` on a G
 measured GPU seconds replace the reservation when the attempt is billed; a sync call holds its slot for the
 call. One `:invoke` and the gateway authorization of its own proxied call count once; a call that reaches an
 endpoint hostname directly counts once at the hook; a replay with the same `Idempotency-Key` counts once.
-Exhausted budgets answer 402, a full concurrency slot or rate window 429. `GET /v1/keys/me` shows the limits,
+Exhausted budgets answer 402, a full concurrency slot or rate window 429. A429 from
+the invocation admission ledger carries `X-Serverless2-Admission: refused`:
+that invocation was not admitted. An endpoint's own429 does not carry the marker
+and must not be interpreted as proof of no execution. Preserve the same
+idempotency key when an invocation outcome is unknown.
+`GET /v1/keys/me` shows the limits,
 what was spent against them, and for imported keys the legacy `principal_id` and metadata.
 
 **Ownership and continuations.** Every operation records its owner (the key's principal, migration 9), so a key

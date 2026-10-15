@@ -69,7 +69,7 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "b5b9da9e868534b2864ba94f1a2c9705f37a14856bf20caf067508ad9317dc69"
+  "sha256": "97233bb8108d5c980e423cb457687447bd306db3acb572800e9dfbda5121e49a"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -77,7 +77,7 @@
  },
  "apps/Deployment/kueue-system/dispatcher": {
   "component": "dispatcher",
-  "sha256": "e0d14a4f1c370a87d083c5c9b37b0774b4882453f770d8614493b7fb69e03f8b"
+  "sha256": "04e4b7562c00dec2c23d9d69edbce9e383a328d841180f69e18a7223599c5ed4"
  },
  "apps/Deployment/monitoring/alert-sink": {
   "component": "observability",
@@ -85,7 +85,7 @@
  },
  "batch/CronJob/kueue-system/price-feed": {
   "component": "dispatcher",
-  "sha256": "dbb892d8e1933c0213879cbf97de397d0d247cd24415a79025211c825fd2edb7"
+  "sha256": "013860d3d6720a6d853ab27fe9666b5ecce133ff766dcd043a0da679ad78e680"
  },
  "batch/CronJob/monitoring/cost-export": {
   "component": "observability",
