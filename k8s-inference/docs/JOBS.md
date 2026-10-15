@@ -688,6 +688,15 @@ copy on the worker carries the pods. What differs from the regional path:
   a reader that arrives while another settler holds the operation; the CronJob (every 2 minutes) remains the settler
   of record for operations nobody reads.
 
+  A recovery predecessor that was permanently suspended and superseded may never
+  acquire a Kubernetes terminal condition. It settles its own measured attempts
+  after its durable fence, inactive Kueue workload and all worker Pods confirm
+  shutdown, without charging the successor's work again. The same billing pass
+  reclaims terminal Pods protecting a work PVC whose deletion was already
+  requested after delivery, with matching durable attempt and Pod identities.
+  Jobs, attempt history and separately shipped logs remain; active Pods, failed
+  undelivered volumes and PVC finalizers are never forcibly removed.
+
 The control cluster's tenant namespaces are rendered by the same chart (`clusters.control`,
 `manager: true`): namespace, the profile LocalQueues pointing at the manager ClusterQueues and the
 API's RoleBinding; nothing runs there.

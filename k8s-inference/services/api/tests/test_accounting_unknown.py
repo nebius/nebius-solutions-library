@@ -134,9 +134,13 @@ def test_endpoint_export_chain_uses_worker_measurement_not_cpu_attempts(
     monkeypatch.setattr(attempts, "for_operation", lambda _: records)
     monkeypatch.setattr(app.jobs, "list_related", lambda *a, **k: [root, transfer])
     monkeypatch.setattr(app, "_may_read_operation", lambda *a: True)
-    got = app._chain(SimpleNamespace(namespace="tenant-demo", tenant="demo"), status.normalise(root), root, name)
-    assert got["gpu_seconds"] == expected and got["gpu_seconds_complete"] is complete
-    assert got["cost"] == cost
-    assert got["chain"][0]["gpu_seconds"] == expected
-    assert got["chain"][1]["gpu_seconds"] == 0.0 and got["chain"][1]["gpu_seconds_complete"] is True
-    assert all(a["gpu_seconds"] == 0.0 for a in got["attempts"])  # those really are CPU pods
+    for queried in (root, transfer):
+        got = app._chain(
+            SimpleNamespace(namespace="tenant-demo", tenant="demo"), status.normalise(queried), queried, name
+        )
+        assert got["gpu_seconds"] == expected and got["gpu_seconds_complete"] is complete
+        assert got["usage"] == ("measured" if complete else "unknown")
+        assert got["cost"] == cost
+        assert got["chain"][0]["gpu_seconds"] == expected
+        assert got["chain"][1]["gpu_seconds"] == 0.0 and got["chain"][1]["gpu_seconds_complete"] is True
+        assert all(a["gpu_seconds"] == 0.0 for a in got["attempts"])  # those really are CPU pods

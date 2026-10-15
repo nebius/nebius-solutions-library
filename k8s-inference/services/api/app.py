@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.115", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.116", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1657,6 +1657,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
             round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None
         )  # unknown stays unknown
     chain, total, complete = [], 0.0, True
+    endpoint_usage = []
     for m in members:
         mid = m["metadata"]["name"]
         mine = [a for a in all_attempts if a["operation"] == mid]
@@ -1668,6 +1669,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
             value = st.measured(ann.get(f"{cfg.LABEL}/gpu-seconds"))
             measured = [value] if value is not None else []
             unknown = st.usage_of(ann) != "measured"
+            endpoint_usage.append(st.usage_of(ann))
         chain.append(
             {
                 "id": mid,
@@ -1707,6 +1709,11 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         "successor_created_at": successors[-1]["created_at"] if successors else None,
         "gpu_seconds": None if op.get("mode") == "async" and not complete and total == 0 else round(total, 1),
         "gpu_seconds_complete": complete,
+        **(
+            {"usage": "measured" if complete else "unknown" if "unknown" in endpoint_usage else "pending"}
+            if op.get("mode") == "async"
+            else {}
+        ),
         "cost": round(sum(billed), 6)
         if billed and (op.get("mode") != "async" or all(c["cost"] is not None for c in chain))
         else None,

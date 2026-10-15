@@ -251,6 +251,10 @@ is guessed); `chain` one entry per member (`id`, `created_at`, `status`, `gpu_cl
 (`gpu_seconds_complete: false` while an attempt has no end record); `successor_created_at` when the newest successor
 was created (its own first attempt may wait for capacity). An operation outside a chain carries none of these fields.
 
+For asynchronous endpoint chains, `usage` describes the cumulative native worker
+measurement too: querying a measured-zero export member does not turn unmeasured
+inference into measured usage. CPU caller/export Pod time is not endpoint GPU time.
+
 ## Stages
 
 A root that declared `execution.graph` carries `graph` on its handle (`status`, `stages[]` with `id`,

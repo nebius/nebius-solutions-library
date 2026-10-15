@@ -397,6 +397,24 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
         print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions and services, read-only; ciliumnetworkpolicies and configmaps scoped")
 assert seen, "no cluster rendered an API Role in the models namespace"
 EOF5
+  step "charts/platform: released-volume cleanup permissions stay tenant-bound"
+  "$PYTHON" - "$TMP" <<'EOF6'
+import sys, yaml
+tmp = sys.argv[1]
+seen = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "ClusterRole" and o["metadata"]["name"] == "serverless2-api-tenant"]
+    for role in roles:
+        for resource, expected in (("pods", {"get", "list", "delete"}),
+                                   ("persistentvolumeclaims", {"create", "get", "list", "patch", "delete"})):
+            rules = [r for r in role["rules"] if "" in r.get("apiGroups", []) and resource in r.get("resources", [])]
+            assert len(rules) == 1 and set(rules[0]["verbs"]) == expected, f"{cid}: unexpected tenant {resource} permissions"
+        assert not any(o["kind"] == "ClusterRoleBinding" and o.get("roleRef", {}).get("name") == role["metadata"]["name"] for o in objs), f"{cid}: tenant API role must not be cluster-bound"
+        seen += 1
+        print(f"   ok tenant cleanup RBAC {cid}: exact pods/PVC verbs, no cluster-wide binding")
+assert seen, "no cluster rendered the tenant API role"
+EOF6
 }
 
 check_tests() {

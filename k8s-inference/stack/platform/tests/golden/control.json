@@ -69,7 +69,7 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "d4470de92cc35469a5881d0e30f1db9a0e1a60ed9197085718064878559c9920"
+  "sha256": "b5b9da9e868534b2864ba94f1a2c9705f37a14856bf20caf067508ad9317dc69"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -221,7 +221,7 @@
  },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
   "component": "tenant-clusterrole",
-  "sha256": "a9ad5ab84800b533cde7e84c334d3633c405b71658e62b3cf691e27c3985f80e"
+  "sha256": "89c2a4182901c7940b62c2e8a1dd61f5401099fe41880b09ed0f4f61118eec88"
  },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-dispatcher": {
   "component": "dispatcher",

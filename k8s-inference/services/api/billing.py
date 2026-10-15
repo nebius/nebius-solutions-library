@@ -10,6 +10,7 @@ import json
 import logging
 import sys
 
+from kubernetes.client import V1DeleteOptions, V1Preconditions
 from kubernetes.client.rest import ApiException
 
 import artifacts
@@ -129,6 +130,121 @@ def release_volume(job: dict, ns: str, region: str) -> None:
             log.warning("release %s/%s: %s", ns, pvc, e.reason)
 
 
+def cleanup_released_pods(region: str, ns: str) -> int:
+    """Finish an already-requested work-volume deletion without shortening Job/attempt retention.
+
+    The uploader (or release_volume) has authorized PVC deletion. Kubernetes PVC protection still keeps it while
+    retained terminal Pods reference it. Remove only those exact Pods after checking *all* consumers, their terminal
+    owning Jobs and durable Pod-UID attempt receipts in one root. Jobs, attempts and shipped logs remain; a failed
+    export's retained PVC, an active/unknown consumer or incomplete provenance never authorizes cleanup.
+    """
+    if not attempts.enabled():
+        return 0
+    deleted = 0
+    try:
+        core, batch = kube.core(region), kube.batch(region)
+        claims = [
+            core.api_client.sanitize_for_serialization(p)
+            for p in retry(core.list_namespaced_persistent_volume_claim, ns, label_selector=f"{LABEL}/operation").items
+        ]
+        claims = [p for p in claims if p["metadata"].get("deletionTimestamp")]
+        if not claims:
+            return 0
+        # No operation/mode selector: even an unrelated reader blocks deletion of every consumer of this claim.
+        pods = [core.api_client.sanitize_for_serialization(p) for p in retry(core.list_namespaced_pod, ns).items]
+        records: dict = {}
+        for pvc in claims:
+            try:
+                targets = _released_pod_targets(pvc, pods, batch, ns, records)
+                for md in targets:
+                    try:
+                        retry(
+                            core.delete_namespaced_pod,
+                            md["name"],
+                            ns,
+                            body=V1DeleteOptions(
+                                preconditions=V1Preconditions(uid=md["uid"], resource_version=md["resourceVersion"])
+                            ),
+                        )
+                        deleted += 1
+                    except ApiException as e:
+                        if e.status not in (404, 409):  # gone or changed: reconsider on the next pass, never force
+                            raise
+            except Exception as e:  # noqa: BLE001 - incomplete evidence leaves this volume protected
+                log.warning(
+                    "released volume cleanup %s/%s/%s deferred (%s)",
+                    region,
+                    ns,
+                    pvc["metadata"]["name"],
+                    type(e).__name__,
+                )
+    except Exception as e:  # noqa: BLE001 - cleanup must not prevent accounting or imply absence on an API failure
+        log.warning("released volume cleanup %s/%s deferred (%s)", region, ns, type(e).__name__)
+    return deleted
+
+
+def _released_pod_targets(pvc: dict, pods: list[dict], batch, ns: str, records: dict) -> list[dict]:
+    md = pvc["metadata"]
+    operation = (md.get("labels") or {}).get(f"{LABEL}/operation")
+    if not md.get("uid") or not md.get("deletionTimestamp") or not operation:
+        return []
+    consumers = [
+        p
+        for p in pods
+        if any(
+            (v.get("persistentVolumeClaim") or {}).get("claimName") == md["name"]
+            for v in (p.get("spec") or {}).get("volumes") or []
+        )
+    ]
+    targets, roots, names = [], set(), set()
+    for pod in consumers:
+        pm = pod.get("metadata") or {}
+        if (
+            (pod.get("status") or {}).get("phase") not in {"Succeeded", "Failed"}
+            or pm.get("namespace") != ns
+            or not pm.get("uid")
+            or not pm.get("resourceVersion")
+        ):
+            return []
+        owners = [r for r in pm.get("ownerReferences") or [] if r.get("controller") is True]
+        if len(owners) != 1 or owners[0].get("kind") != "Job" or owners[0].get("apiVersion") != "batch/v1":
+            return []
+        owner = owners[0]
+        job = batch.api_client.sanitize_for_serialization(retry(batch.read_namespaced_job, owner["name"], ns))
+        jm = job.get("metadata") or {}
+        ann = jm.get("annotations") or {}
+        if (
+            not owner.get("uid")
+            or jm.get("uid") != owner["uid"]
+            or jm.get("namespace") != ns
+            or not finished(job)
+            or (job.get("status") or {}).get("active", 0)
+            or ann.get(f"{LABEL}/pvc") != md["name"]
+        ):
+            return []
+        root = ann.get(f"{LABEL}/resumed-from") or jm["name"]
+        roots.add(root)
+        names.add(jm["name"])
+        if len(roots) != 1:
+            return []
+        if root not in records:
+            records[root] = attempts.for_operation(root)
+        matches = [r for r in records[root] if r.get("pod") == pm["name"] and r.get("operation") == jm["name"]]
+        if len(matches) != 1:
+            return []
+        r = matches[0]
+        if (
+            r.get("root") != root
+            or r.get("namespace") != ns
+            or r.get("pod_uid") != pm["uid"]
+            or r.get("status") not in attempts.TERMINAL
+            or not r.get("ended_at")
+        ):
+            return []
+        targets.append(pm)
+    return targets if operation in roots | names else []
+
+
 def _annotate(region: str, ns: str, name: str, done: dict, job: dict | None = None) -> None:
     if job is not None and jobs.is_jobset(job):
         jobs.patch_jobset(ns, name, region, {"metadata": {"annotations": done}})
@@ -163,17 +279,57 @@ async def bill_once() -> int:
             for job in items:
                 if await settle_job(region, ns, job, cache):
                     n += 1
+            cleanup_released_pods(region, ns)  # also revisits already-billed Jobs whose PVC is still protected
     return n
 
 
 def unsettled(job: dict, ns: str | None = None, region: str | None = None) -> bool:
     """Whether a Job (or JobSet) is one the billing pass would settle now: admitted on a key, not billed yet, not a
-    worker's transient copy of a manager Job, and over: finished (Complete/Failed), or a cancelled JobSet that is over
-    (`cancelled_over`: a cancelled JobSet never reaches a terminal condition)."""
+    worker's transient copy of a manager Job, and over: finished (Complete/Failed), a cancelled JobSet, or a fenced
+    predecessor whose Workload and Pods stopped (suspended Jobs never reach a terminal condition)."""
     ann = (job.get("metadata") or {}).get("annotations") or {}
     if BILLED in ann or KEY not in ann or jobs.is_mirror(job):
         return False
-    return finished(job) or cancelled_over(job, ns, region)
+    return finished(job) or cancelled_over(job, ns, region) or superseded_over(job, ns, region)
+
+
+def superseded_over(job: dict, ns: str | None, region: str | None) -> bool:
+    """A fenced predecessor is over without a Kubernetes Complete/Failed condition.
+
+    Recovery suspends it permanently. Settle its own measured attempts once Kueue
+    is inactive and no copy has a live pod; never leave its logical slot reserved
+    merely because the successor finished instead of this suspended Job.
+    """
+    md = job.get("metadata") or {}
+    ann = md.get("annotations") or {}
+    successor = ann.get(f"{LABEL}/successor")
+    if not successor or successor == md.get("name") or (job.get("spec") or {}).get("suspend") is not True:
+        return False
+    if not ns or not region or not md.get("uid") or job.get("_pods_unknown"):
+        return False
+    try:
+        if not attempts.enabled() or attempts.successor_of(md["name"]) != successor:
+            return False  # the durable fence, not just an annotation, refuses any future predecessor publication
+        if not kube.workload_inactive(ns, md["uid"], region):
+            return False
+        for worker in dict.fromkeys([region, *kube.regions()]):
+            core = kube.core(worker)
+            try:
+                pods = retry(core.list_namespaced_pod, ns, label_selector=jobs.pods_selector(job)).items
+            except ApiException as error:
+                if error.status == 404:  # namespace absent, not an unreadable worker
+                    continue
+                raise
+            if any(
+                core.api_client.sanitize_for_serialization(p).get("status", {}).get("phase")
+                not in {"Succeeded", "Failed"}
+                for p in pods
+            ):
+                return False
+        return True
+    except Exception as error:  # noqa: BLE001 - unavailable worker is not a confirmed stop
+        log.warning("billing %s: predecessor stop unknown: %s", md.get("name"), error)
+        return False
 
 
 def cancelled_over(job: dict, ns: str | None, region: str | None) -> bool:

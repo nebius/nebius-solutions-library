@@ -4,6 +4,20 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.116, charts/platform 0.1.14
+
+- An endpoint export member now reports the chain's cumulative usage state,
+  not its own measured-zero transfer state when the inference remains unmeasured.
+- Suspended recovery predecessors settle through the existing idempotent ledger
+  after Kueue deactivation and verified worker shutdown. Their measured attempt
+  remains separate from the successor, avoiding permanently reserved slots.
+- The billing pass reclaims completed Pods that protect an already-released work
+  PVC only after terminal owner/attempt verification. It retains Jobs, durable
+  attempt history and separately shipped logs; no active Pods, retained failed
+  work volumes or PVC finalizers are removed. No jobs image or DB migration.
+  The existing namespace-bound API role adds only Pods delete and PVCs list to
+  perform that cleanup. No cluster-wide binding or new principal is added.
+
 ## api 0.11.115
 
 - Optional endpoint workers without native GPU metering now settle unknown, not

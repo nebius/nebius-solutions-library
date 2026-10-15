@@ -209,7 +209,7 @@
  },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
   "component": "tenant-clusterrole",
-  "sha256": "a9ad5ab84800b533cde7e84c334d3633c405b71658e62b3cf691e27c3985f80e"
+  "sha256": "89c2a4182901c7940b62c2e8a1dd61f5401099fe41880b09ed0f4f61118eec88"
  },
  "rbac.authorization.k8s.io/ClusterRoleBinding/_/multikueue-manager": {
   "component": "fleet-access",
