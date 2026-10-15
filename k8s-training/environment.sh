@@ -49,45 +49,36 @@ fi
 
 # Nebius service account
 NEBIUS_SA_NAME="k8s-training-sa"
-# A subshell keeps temporary files and error handling out of the caller's shell.
-NEBIUS_SA_ID=$(
-  NEBIUS_SA_LOOKUP_ERROR=$(mktemp) || exit 1
-  trap 'rm -f "$NEBIUS_SA_LOOKUP_ERROR"' EXIT
 
-  if NEBIUS_SA_RESPONSE=$(nebius iam service-account get-by-name \
-    --parent-id "${NEBIUS_PROJECT_ID}" \
-    --name "${NEBIUS_SA_NAME}" \
-    --format json 2>"$NEBIUS_SA_LOOKUP_ERROR"); then
-    cat "$NEBIUS_SA_LOOKUP_ERROR" >&2
-  else
-    # Only the explicit RPC status permits creation, not arbitrary "not found" text.
-    if ! grep -Eq 'rpc error: code = NotFound([[:space:]]|$)' "$NEBIUS_SA_LOOKUP_ERROR"; then
-      cat "$NEBIUS_SA_LOOKUP_ERROR" >&2
-      echo "Error: service-account lookup failed; not attempting creation." >&2
-      exit 1
-    fi
+if NEBIUS_SA_ID=$(nebius iam service-account get-by-name \
+  --parent-id "$NEBIUS_PROJECT_ID" \
+  --name "$NEBIUS_SA_NAME" \
+  --format 'jsonpath=.metadata.id'); then
+  NEBIUS_SA_ACTION="Using existing"
+else
+  NEBIUS_SA_LOOKUP_EXIT_CODE=$?
 
-    if ! NEBIUS_SA_RESPONSE=$(nebius iam service-account create \
-      --parent-id "${NEBIUS_PROJECT_ID}" \
-      --name "${NEBIUS_SA_NAME}" \
-      --format json); then
-      echo "Error: service-account creation failed." >&2
-      exit 1
-    fi
+  # Nebius CLI exit code 13 means Not Found. Stop on any other lookup error.
+  if [ "$NEBIUS_SA_LOOKUP_EXIT_CODE" -ne 13 ]; then
+    return "$NEBIUS_SA_LOOKUP_EXIT_CODE"
   fi
 
-  # Fail on malformed or missing IDs rather than continuing with an invalid account.
-  printf '%s\n' "$NEBIUS_SA_RESPONSE" | jq -er -s '
-    if length == 1 then
-      .[0].metadata.id | select(type == "string") | select(test("[^[:space:]]"))
-    else empty end
-  ' || {
-    echo "Error: service-account response did not contain a valid metadata.id." >&2
-    exit 1
-  }
-) || return 1
+  if NEBIUS_SA_ID=$(nebius iam service-account create \
+    --parent-id "$NEBIUS_PROJECT_ID" \
+    --name "$NEBIUS_SA_NAME" \
+    --format 'jsonpath=.metadata.id'); then
+    NEBIUS_SA_ACTION="Created"
+  else
+    return $?
+  fi
+fi
 
-echo "Using service account: $NEBIUS_SA_ID"
+if [ -z "$NEBIUS_SA_ID" ]; then
+  echo "Error: service-account command returned an empty ID." >&2
+  return 1
+fi
+
+echo "$NEBIUS_SA_ACTION service account: $NEBIUS_SA_ID"
 
 # Ensure service account is member of editors group
 NEBIUS_GROUP_EDITORS_ID=$(nebius iam group get-by-name \
