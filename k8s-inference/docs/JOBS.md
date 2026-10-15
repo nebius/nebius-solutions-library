@@ -631,7 +631,9 @@ Identity and accounting: the finalizer's `started` record opens the next epoch o
 chain is fenced); records carry `attempt_role` (`run`, `export`, `finalize`), stamped by the API from the Job it
 rendered, never from the pod's claim; `gpus 0`, no class, no GPU seconds billed. While a finalizer is active the
 root's handle (and every chain member's) reports `status: FINALIZING`, `finalizing_by`, and the finalizer pod's
-`attempt_id`, `epoch` and `attempt_role`; `:cancel` on the root cancels the active finalizer and leaves the root
+`attempt_id`, `epoch`, `attempt_role`, `cluster`, `pod_uid` and `image_digest` (with
+`image_digest_state`). A finalizer's missing UID or digest is unknown, never the
+old compute Pod's identity. `:cancel` on the root cancels the active finalizer and leaves the root
 FAILED with its volume; `finalize_attempts` counts them. `GET /v1/fleet` lists `execution.finalize`.
 
 ## Fleet placement (control cluster API, `FLEET_MANAGER=true`)

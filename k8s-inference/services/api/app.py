@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.113", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.114", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1709,7 +1709,8 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
 def _finalizers(p: Principal, name: str, root: str) -> dict:
     """The application finalizers of an operation (docs/JOBS.md "Finalization by the application"): how many ran
     (`finalize_attempts`) and, while one is QUEUED or RUNNING, the handle shows it: `status FINALIZING`,
-    `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
+    `finalizing_by`, and the finalizer pod's complete observed identity (the broker's current attempt).
+    Missing observations must clear the compute attempt's identity, never inherit it."""
     xs = [
         j
         for j in jobs.list_related(
@@ -1723,9 +1724,6 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
         )
         if _may_read_operation(p, j)
     ]
-    role = (
-        "export" if xs and (xs[0]["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async" else "finalize"
-    )
     out: dict = {"finalize_attempts": len(xs)}
     active = [
         j
@@ -1737,18 +1735,27 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
         a = sorted(active, key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))[-1]
         aname = a["metadata"]["name"]
         rows = [r for r in attempts.for_operation(root) if r["operation"] == aname]
-        latest = rows[-1] if rows else None
+        current = attempts.lifecycle(aname, root, rows, marks=None, pods=a.get("_pods"))
+        role = "export" if (a["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async" else "finalize"
         out.update(
             {
                 "status": "FINALIZING",
                 "finalizing_by": aname,
                 "error": None,
-                "attempt_id": latest.get("pod") if latest else None,
-                "epoch": latest.get("epoch") if latest else None,
                 "attempt_role": role,
-                "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region")))
-                if latest
-                else out.get("cluster"),
+                **{
+                    key: current[key]
+                    for key in (
+                        "attempt_id",
+                        "epoch",
+                        "cluster",
+                        "pod_uid",
+                        "image_digest",
+                        "image_digest_state",
+                        "gang_rank",
+                        "gang_restart",
+                    )
+                },
             }
         )
     return out

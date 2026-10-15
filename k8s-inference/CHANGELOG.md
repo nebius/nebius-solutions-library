@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.114
+
+- An active application finalizer or endpoint export retry now projects its own
+  observed Pod UID and runtime digest alongside its attempt ID, epoch, cluster
+  and role. Previously the root handle retained the finished compute Pod's UID;
+  a correctly verified finalizer token therefore could not obtain application
+  storage access. Pending or missing observations are unknown, not inherited
+  compute identity. Historical attempts and the source checkpoint stay intact.
+  No access-check relaxation, new storage grants, jobs image or database change.
+- Regression tests exercise CPU finalization and endpoint export, including a
+  queued finalizer and an incomplete start record with no observed UID/digest.
+
 ## api 0.11.113, jobs 0.1.28
 
 (no chart change, no migration; the API deployment's `RUNNER_IMAGE` follows `images.versions.jobs`.)

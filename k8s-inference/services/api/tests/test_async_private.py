@@ -166,7 +166,15 @@ def test_private_call_export_is_transfer_only_on_the_retained_capture(client, ad
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
-    rows = [{**_record(oid, f"{oid}-a", export="failed"), "operation": oid, "io_mode": "application"}]
+    rows = [
+        {
+            **_record(oid, f"{oid}-a", export="failed"),
+            "operation": oid,
+            "io_mode": "application",
+            "pod_uid": "caller-uid",
+            "image_digest": "registry.example/caller@sha256:0123",
+        }
+    ]
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
     r = c.post(f"/v1/operations/{oid}:export", headers=H)
     assert r.status_code == 202, r.text
@@ -238,6 +246,7 @@ def test_application_result_is_the_reference_and_an_export_retry_is_followed(
     x1 = c.post(f"/v1/operations/{oid}:export", headers=H).json()["id"]
     rows.append({**_record(x1, f"{x1}-b", st="started", export=None), "operation": x1, "root": oid})
     rows[-1].pop("ended_at")
+    rows[-1].update({"pod_uid": "transfer-uid", "image_digest": "registry.example/transfer@sha256:4567"})
     got = c.get(f"/v1/operations/{oid}", headers=H).json()
     assert (
         got["status"] == "FINALIZING"
@@ -245,6 +254,8 @@ def test_application_result_is_the_reference_and_an_export_retry_is_followed(
         and got["attempt_id"] == f"{x1}-b"
         and got["attempt_role"] == "export"
     )
+    assert got["pod_uid"] == "transfer-uid"
+    assert got["image_digest"] == "registry.example/transfer@sha256:4567" and got["image_digest_state"] == "observed"
     rows[-1].update(
         {
             "status": "succeeded",
