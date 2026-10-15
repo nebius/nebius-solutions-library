@@ -249,7 +249,6 @@ resource "helm_release" "soperator_fluxcd_cm" {
             )
             gpus = var.node_capacity.worker[0].gpus
           }
-          shared_memory            = var.shared_memory_size_gibibytes
           slurm_node_extra         = local.slurm_node_extra
           sshd_config_map_ref_name = var.worker_sshd_config_map_ref_name
         }

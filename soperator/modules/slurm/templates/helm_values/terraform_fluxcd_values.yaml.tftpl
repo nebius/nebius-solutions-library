@@ -345,8 +345,12 @@ resources:
                 dumpDir: "${nccl_inspector_profiling.dump_dir}/%j/%s"
                 dumpVerbose: ${nccl_inspector_profiling.verbose}
 
-            %{~ if has_nccl_network_vars ~}
             slurmScripts:
+              builtIn:
+                # Clean /dev/shm shared with `docker run --ipc=host` containers around whole-node jobs.
+                drop_posix_shmem.sh:
+                  enabled: ${docker_enabled}
+              %{~ if has_nccl_network_vars ~}
               taskPrologEnv:
                 enabled: true
                 sourceFiles:
@@ -377,7 +381,7 @@ resources:
                       "log": "slurm_scripts/$worker.$name.$context.out",
                       "need_env": []
                     }
-            %{~ endif ~}
+              %{~ endif ~}
 
             partitionConfiguration:
               configType: structured

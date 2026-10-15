@@ -29,8 +29,7 @@ resource "local_file" "flux_release_rendered_nodesets" {
           -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
         )
       )
-      gpus          = res.gpus
-      shared_memory = var.shared_memory_size_gibibytes
+      gpus = res.gpus
     }]
 
     jail_submounts = {

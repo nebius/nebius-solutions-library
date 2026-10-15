@@ -214,8 +214,6 @@ nodesets:
                     type: ""
               %{~ endif ~}
 
-            sharedMemorySize: ${resources[i].shared_memory}Gi
-
           security:
             appArmorProfile: ${jsonencode(apparmor_profile)}
 
