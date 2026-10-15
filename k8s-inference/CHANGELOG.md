@@ -4,6 +4,27 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.120
+
+(API image only; no chart, migration, RBAC or uploader change.)
+
+- Completion projection: a Complete single-worker manager Job (completions 1, backoffLimit 0: main exited 0) whose
+  newest run attempt's record literally says "interrupted" but carries that attempt's own committed `result_ref`
+  (the application's RESULT.json, application I/O) and no failed export is delivered: the attempt reads SUCCEEDED
+  with reason "exit code not observed by the uploader; the Job is Complete and RESULT.json is committed", the operation
+  SUCCEEDED, `export_state` as recorded. Before, such a run stayed FINALIZING and then EXPORT_FAILED "no delivery
+  record", and its stage graph stayed gated (ESMFold op-e0f60cf93b5c9b42, 2026-10-15: the kubelet reported the main
+  container as running for two minutes after its process had exited; jobs 0.1.28's uploader gave up after its 40
+  polls and recorded "interrupted"). Nothing is synthesized from a file: an older attempt's result, a missing one, a
+  later failed attempt, a failed export, a Failed or still-running Job, a cancelled run (annotation) and a gang
+  (JobSet) change nothing; the record is not rewritten.
+- Cancel provenance: a cancelled operation's interrupted attempt reads CANCELLED, reason "cancelled", also after its
+  pod and Job are gone (expired view, successors' chains), from the operation's cancel mark; before, the record-only
+  projection mapped it to PREEMPTED "pod deleted (preempted)" (op-cd2ce536ce2a6f7d, 2026-10-15). One rule,
+  `status.cancel_attempt`, applied at the three projection points. GPU-seconds and ids unchanged.
+- Tests: test_attempts.py (delivered-by-finalization with the negative cases above; cancel provenance at the live and
+  record-only projections).
+
 ## api 0.11.119
 
 (API image only; no chart, migration or RBAC change.)

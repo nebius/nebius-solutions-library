@@ -581,7 +581,9 @@ reporting `export: failed` (an endpoint caller whose own delivery failed keeps i
 API's acknowledgement of the final record (it retries the record four times); without that acknowledgement the
 volume stays, the operation shows FINALIZING/EXPORT_FAILED and `:export` re-delivers without recompute. An
 EXPORT_FAILED operation whose own work volume no longer exists says so instead (`resumable: false`, `:export` 409):
-the promise of a kept volume is never made about a volume that is gone. With
+the promise of a kept volume is never made about a volume that is gone. A Complete single-worker Job whose newest attempt record says "interrupted" yet carries that attempt's committed
+`result_ref` with no failed export is delivered (the uploader missed the exit code the Job proved; api 0.11.120); an
+older attempt's result, a later failed attempt, a cancelled run or a gang settle nothing. With
 application-managed I/O the application writes `/work/RESULT.json` (`{"result_ref": "...", "checkpoint_ref": "..."}`)
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.

@@ -47,6 +47,71 @@ def _record(name, pod, st="succeeded", **kw):
     }
 
 
+def test_a_complete_job_whose_uploader_missed_the_exit_code_is_delivered_by_its_finalization_record():
+    """op-e0f60cf93b5c9b42 (2026-10-15): main exited 0, the kubelet reported the container as running for two more
+    minutes, the uploader gave up after 40 polls and recorded "interrupted" with the committed result_ref. The Job is
+    Complete, RESULT.json is committed: delivered. Without a result_ref an interrupted record stays what it is."""
+    name = "op-esm-1"
+    job = _job(name, {"io_mode": "application"})
+    job["status"]["completionTime"] = "2026-10-15T19:28:25Z"
+    rec = _record(name, f"{name}-a", "interrupted", export="n/a", result_ref="8a64…fe7b", io_mode="application")
+    op = status.normalise(job, None, [rec])
+    assert op["status"] == "SUCCEEDED" and op["error"] is None
+    assert op["attempts"][-1]["status"] == "SUCCEEDED" and "exit code not observed" in op["attempts"][-1]["reason"]
+    assert op["attempts"][-1]["result_ref"] == "8a64…fe7b" and op["attempts"][-1]["export_state"] == "n/a"
+    bare = status.normalise(job, None, [_record(name, f"{name}-a", "interrupted", export="n/a", io_mode="application")])
+    assert bare["status"] in ("FINALIZING", "EXPORT_FAILED") and bare["attempts"][-1]["status"] == "PREEMPTED"
+    # negative cases: the rule is exact-attempt and needs the Job's own success
+    older = _record(name, f"{name}-a", "interrupted", export="n/a", result_ref="old", io_mode="application")
+    newer = _record(
+        name, f"{name}-b", "interrupted", export="n/a", io_mode="application", started_at="2026-10-11T12:00:00Z"
+    )
+    stale = status.normalise(job, None, [older, newer])  # the result belongs to a prior attempt: not delivered
+    assert stale["status"] != "SUCCEEDED" and stale["attempts"][-1]["status"] == "PREEMPTED"
+    failed = _job(name, {"io_mode": "application"})
+    failed["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    f = status.normalise(failed, None, [rec])
+    assert f["status"] == "FAILED" and f["attempts"][-1]["status"] != "SUCCEEDED"  # main failure wins
+    running = _job(name, {"io_mode": "application"}, complete=False)
+    r = status.normalise(running, None, [rec])
+    assert r["status"] != "SUCCEEDED"  # no Complete condition: nothing is settled
+    cancelled = _job(name, {"io_mode": "application"}, complete=False)
+    cancelled["metadata"]["annotations"][f"{LABEL}/cancelled"] = "2026-10-15T19:10:00Z"
+    cancelled["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
+    c = status.normalise(cancelled, None, [rec])
+    assert c["status"] == "CANCELLED" and c["attempts"][-1]["status"] == "CANCELLED"  # a result does not undo a cancel
+    later_failed = _record(
+        name, f"{name}-b", "failed", exit_code=1, io_mode="application", started_at="2026-10-11T12:00:00Z"
+    )
+    lf = status.normalise(job, None, [rec, later_failed])  # a later attempt failed: the earlier result settles nothing
+    assert lf["status"] != "SUCCEEDED" and lf["attempts"][-1]["status"] == "FAILED"
+    exported_failed = _record(
+        name, f"{name}-a", "interrupted", export="failed", result_ref="8a64…fe7b", io_mode="application"
+    )
+    assert status.normalise(job, None, [exported_failed])["attempts"][-1]["status"] != "SUCCEEDED"
+    gang = _job(name, {"io_mode": "application"})
+    gang["kind"] = "JobSet"
+    gang["status"]["completionTime"] = "2026-10-15T19:28:25Z"
+    g = status.normalise(gang, None, [{**rec, "gang_rank": 1}])  # a gang: a peer's record proves nothing
+    assert g["status"] != "SUCCEEDED" and g["attempts"][-1]["status"] != "SUCCEEDED"
+
+
+def test_a_cancelled_operations_interrupted_record_reads_cancelled_not_preempted():
+    """The cancel deleted the pod; its record says "interrupted". While the Job exists the cancelled annotation
+    settles it; once only the record is left (an expired Job, a chain member) the cancel mark must settle it the same
+    way, or the attempt flips from CANCELLED to PREEMPTED after cleanup (op-cd2ce536ce2a6f7d, 2026-10-15)."""
+    name = "op-cancelled-1"
+    rec = _record(name, f"{name}-a", "interrupted")
+    live = _job(name, complete=False)
+    live["metadata"]["annotations"][f"{LABEL}/cancelled"] = "2026-10-15T19:10:00Z"
+    assert status.normalise(live, None, [rec])["attempts"][-1]["status"] == "CANCELLED"
+    only_records = status._attempts([], [rec], name)
+    assert only_records[-1]["status"] == "PREEMPTED"  # the bare projection, before the cancel mark is applied
+    assert status.cancel_attempt(only_records, True)[-1]["status"] == "CANCELLED"
+    assert status.cancel_attempt(only_records, True)[-1]["reason"] == "cancelled"
+    assert status.cancel_attempt(status._attempts([], [rec], name), False)[-1]["status"] == "PREEMPTED"
+
+
 def test_exit_zero_is_not_delivery():
     name = "op-container-run-1"
     ok = status.normalise(_job(name), None, [_record(name, f"{name}-a", export="succeeded")])
