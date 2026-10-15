@@ -45,8 +45,8 @@ resource "nebius_compute_v1_instance" "wireguard" {
 
   network_interfaces = [
     {
-      name      = "eth0"
-      subnet_id = var.subnet_id
+      name       = "eth0"
+      subnet_id  = var.subnet_id
       ip_address = {}
       public_ip_address = {
         allocation_id = nebius_vpc_v1_allocation.wireguard.id

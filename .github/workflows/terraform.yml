@@ -79,7 +79,7 @@ jobs:
 
     # Checks that all Terraform configuration files adhere to a canonical format
     - name: Terraform Format
-      run: terraform fmt -check -recursive . ../modules
+      run: terraform fmt -check -recursive .
 
   approve_terraform:
     needs: terraform-format

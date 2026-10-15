@@ -75,6 +75,7 @@ locals {
     shared_memory_size = "16Gi"
     command            = null
     security_context   = null
+    api_key_env_names  = ["NGC_API_KEY"]
     env                = {}
     labels             = {}
     resources = {
@@ -95,6 +96,66 @@ locals {
   }
 
   default_model_catalog = {
+    alphafold2_multimer = {
+      display_name      = "AlphaFold2-Multimer"
+      deployment_name   = "alphafold2-multimer"
+      app               = "alphafold2-multimer"
+      service_name      = "alphafold2-multimer-svc"
+      container_name    = "alphafold2-multimer"
+      image             = "nvcr.io/nim/deepmind/alphafold2-multimer"
+      version           = "1.0.0"
+      security_context  = local.root_security_context
+      api_key_env_names = ["NGC_API_KEY", "NGC_CLI_API_KEY"]
+      resources = {
+        limits   = merge(local.resources_1gpu_16cpu_128gi.limits, { cpu = "24" })
+        requests = merge(local.resources_1gpu_16cpu_128gi.requests, { cpu = "24" })
+      }
+      shared_memory_size = "64Gi"
+      lb_group           = "protein-apps"
+    }
+
+    maisi = {
+      display_name       = "MAISI"
+      deployment_name    = "maisi"
+      app                = "maisi"
+      service_name       = "maisi-svc"
+      container_name     = "maisi"
+      image              = "nvcr.io/nim/nvidia/maisi"
+      version            = "1.0.1"
+      security_context   = local.root_security_context
+      resources          = local.resources_1gpu_16cpu_128gi
+      shared_memory_size = "64Gi"
+      lb_group           = "protein-apps"
+    }
+
+    vista3d = {
+      display_name       = "VISTA-3D"
+      deployment_name    = "vista3d"
+      app                = "vista3d"
+      service_name       = "vista3d-svc"
+      container_name     = "vista3d"
+      image              = "nvcr.io/nim/nvidia/vista3d"
+      version            = "1.0.0"
+      security_context   = local.root_security_context
+      resources          = local.resources_1gpu_16cpu_128gi
+      shared_memory_size = "64Gi"
+      lb_group           = "protein-apps"
+    }
+
+    nemotron_3_nano = {
+      display_name       = "Nemotron 3 Nano 30B A3B"
+      deployment_name    = "nemotron-3-nano"
+      app                = "nemotron-3-nano"
+      service_name       = "nemotron-3-nano-svc"
+      container_name     = "nemotron-3-nano"
+      image              = "nvcr.io/nim/nvidia/nemotron-3-nano"
+      version            = "1.7.0-variant"
+      security_context   = local.root_security_context
+      resources          = local.resources_1gpu_16cpu_128gi
+      shared_memory_size = "8Gi"
+      lb_group           = "protein-apps"
+    }
+
     openfold3 = {
       display_name       = "OpenFold3"
       deployment_name    = "openfold3"
