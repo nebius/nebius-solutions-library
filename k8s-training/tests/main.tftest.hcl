@@ -36,10 +36,18 @@ run "test_mode_k8s_training_apply" {
 
   variables {
     test_mode = true
+    kueue = {
+      enabled = true
+    }
   }
 
   assert {
     condition     = module.nccl-test[0].helm_release_status == "deployed"
     error_message = "Fail to deploy helm nccl-test release ${module.nccl-test[0].helm_release_status}"
+  }
+
+  assert {
+    condition     = one(module.kueue).status == "deployed"
+    error_message = "Failed to deploy the Kueue Helm release."
   }
 }
