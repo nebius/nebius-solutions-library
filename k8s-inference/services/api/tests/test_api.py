@@ -1439,9 +1439,13 @@ class FakeKeys:
 
 @pytest.fixture
 def fake_keys(monkeypatch):
+    import children
     import db
     import keys
 
+    # every fake-key world runs with db.enabled() but no pool: the endpoint-children boundary a cancel reaches is a
+    # no-op here (test_children.py exercises the real one on the real database)
+    monkeypatch.setattr(children, "cancel_for_root", lambda *a, **k: [])
     fk = FakeKeys()
     for name in (
         "info",
