@@ -53,9 +53,6 @@ def world(client, admin_keys, fake_keys, monkeypatch):
     monkeypatch.setattr(attempts, "synthesize", lambda operation, tenant: None)
     cancelled: list = []
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: cancelled.append(operation))
-    import children
-
-    monkeypatch.setattr(children, "cancel_for_root", lambda *a, **k: [])  # this world has no endpoint children
     import app as appmod
 
     monkeypatch.setattr(appmod.artifacts, "list_outputs", lambda ns, id, region, prefix=None: [])
