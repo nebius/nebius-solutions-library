@@ -4,6 +4,30 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.121
+
+(API image; database migration 29 (DB28 -> DB29: seven nullable columns on operation_marks) applied by the API at start;
+no chart, RBAC or uploader change.)
+
+- Durable observed completion: the 0.11.120 delivered-by-finalization proof is kept past the manager Job's TTL as a
+  mark bound to the exact attempt (pod, pod UID, epoch, result_ref) and the manager Job UID, written once by the live
+  read that proved it (`attempts.mark_completed`); `attempts.synthesize` honours it only when the newest row literally
+  says "interrupted" with that identity, no failed export, no cancel mark, no successor and no gang rank. A mark is
+  never overwritten and the uploader's raw row is never rewritten.
+- Known zero for a never-admitted fallback original: a run that switch_class moved to its next class while still
+  QUEUED measured None and was stored as `unknown` with its bound kept, and the billing pass never revisited it
+  (op-cc97d4399365128b). Settlement now proves zero on authoritative reads only (durable fence agreeing with the
+  annotation and a fallback-annotated successor whose creation is the fence; the Job never resumed: suspended, no
+  startTime, no counters, no condition; Kueue inactive and no pod of it in any phase in any worker on successful
+  reads; exactly one Workload owned by the Job's UID, never admitted, no cluster, explicitly Admitted=False since
+  before the fence; zero attempt records from the database AND the bucket) and settles at 0, correcting a member an
+  earlier pass stored as unknown through the existing `keys.settle_unknown(0)`. Anything unreadable, missing or
+  ambiguous leaves `unknown` untouched. The chain projection shows a billed-unknown member as unknown, not 0 complete.
+- Tests: observed completion across Job expiry with identity, cancel, successor and gang negatives; known zero with the
+  positive case, the single revisit, and sixteen negatives (records, started, counters, missing/stray Workload,
+  admitted, cluster, late Admitted=False, recovery successor, unreadable successor/Workload/database/worker, terminal
+  pod, Kueue active, fence mismatch, bucket-only attempt).
+
 ## api 0.11.120
 
 (API image only; no chart, migration, RBAC or uploader change.)
