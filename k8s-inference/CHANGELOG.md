@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.118
+
+(API image only; no chart, migration or RBAC change.)
+
+- Keys: `POST /v1/keys` and the fleet-operator `POST /v1/fleet/tenants/<tenant>/keys` accept an explicit `"budget": null`
+  for a key without a spending limit (the default stays 10 USD; a negative budget is 422). `PATCH .../keys/<alias>` now
+  tells an explicit `"budget": null` (lift the limit) from a field that was left out (unchanged): before, both read as
+  "unchanged", so a provisioning tool could neither create nor make an unlimited key through the API, and a PATCH that
+  re-sent `models` never touched the budget either way. Spend, the key value and the other fields are untouched; the
+  LiteLLM mirror follows (`max_budget` null). `keys.update` takes an `UNSET` sentinel for "leave as is". Tests in
+  test_fleet_operator.py and test_database.py.
+
 ## api 0.11.117, dispatcher 0.2.13
 
 - Optional `created_by_current_key=true` operation listing filters by the

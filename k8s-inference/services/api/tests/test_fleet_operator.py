@@ -121,6 +121,27 @@ def test_a_fleet_operator_manages_a_tenants_keys_through_the_tenants_own_functio
     )
     assert edited.status_code == 200 and edited.json()["models"] == ["http-example"] and edited.json()["budget"] == 50
     assert c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={}).status_code == 400
+    # explicit null is a request, absence is not: `budget: null` lifts the limit and touches nothing else; a PATCH
+    # without the field keeps the budget (a provisioning tool that re-sends models must not reset a cap)
+    unlimited = c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={"budget": None})
+    assert unlimited.status_code == 200, unlimited.text
+    assert unlimited.json()["budget"] is None and unlimited.json()["models"] == ["http-example"]
+    assert unlimited.json()["status"] == "active" and unlimited.json()["spend"] == 0
+    kept = c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={"models": ["llm-example"]})
+    assert kept.status_code == 200 and kept.json()["budget"] is None and kept.json()["models"] == ["llm-example"]
+    capped = c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={"budget": 0})
+    assert capped.status_code == 200 and capped.json()["budget"] == 0 and capped.json()["status"] == "exhausted"
+    assert c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={"budget": -1}).status_code == 422
+    restored = c.patch("/v1/fleet/tenants/demo/keys/demo-ci", headers=FLEET_KEY, json={"budget": 50})
+    assert restored.status_code == 200 and restored.json()["status"] == "active"
+    # create: the default stays 10 USD; an explicit null creates an unlimited key
+    default = c.post("/v1/fleet/tenants/demo/keys", headers=FLEET_KEY, json={"alias": "ci-default"})
+    assert default.status_code == 201 and default.json()["budget"] == 10.0
+    free = c.post("/v1/fleet/tenants/demo/keys", headers=FLEET_KEY, json={"alias": "ci-free", "budget": None})
+    assert free.status_code == 201, free.text
+    assert free.json()["budget"] is None and free.json()["status"] == "active"
+    for alias in ("demo-ci-default", "demo-ci-free"):
+        assert c.delete(f"/v1/fleet/tenants/demo/keys/{alias}", headers=FLEET_KEY).status_code == 204
     blocked = c.post("/v1/fleet/tenants/demo/keys/demo-ci:block", headers=FLEET_KEY)
     assert blocked.status_code == 200 and blocked.json()["status"] == "blocked" and blocked.json()["blocked"] is True
     unblocked = c.post("/v1/fleet/tenants/demo/keys/demo-ci:block?blocked=false", headers=FLEET_KEY)

@@ -219,16 +219,20 @@ def create(
     return value, i
 
 
+UNSET = object()  # "leave this field as it is" in update(): distinct from None, which is an explicit value
+
+
 def update(
     tenant: str,
     alias: str,
-    budget: float | None = None,
+    budget=UNSET,
     models: list[str] | None = None,
     expires_days: int | None = None,
 ) -> dict | None:
-    """Budget, allowed models, expiry (days from now; 0 = never); fields left None stay. Spend never changes here."""
+    """Budget (a number, or None for unlimited; UNSET keeps it), allowed models, expiry (days from now; 0 = never);
+    fields left out stay. Spend never changes here."""
     sets, args = [], []
-    if budget is not None:
+    if budget is not UNSET:
         sets.append("budget = %s")
         args.append(budget)
     if models is not None:

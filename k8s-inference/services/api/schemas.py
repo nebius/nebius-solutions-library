@@ -225,15 +225,19 @@ class ScalingRequest(BaseModel):
 
 
 class KeyRequest(BaseModel):
+    """A new key: `budget` in USD (default 10; an explicit `null` is unlimited), the model allow-list (empty = every
+    model), `expires_days` (null = never)."""
+
     alias: str
-    budget: float = 10.0
+    budget: float | None = Field(default=10.0, ge=0)
     models: list[str] = Field(default_factory=list)
-    expires_days: int | None = None
+    expires_days: int | None = Field(default=None, ge=0)
 
 
 class KeyUpdate(BaseModel):
     """What an admin may change on an existing key: the spending limit, the model allow-list, the expiry (days from
-    now; 0 = never). Fields left out stay as they are; spend and the key value never change here."""
+    now; 0 = never). Fields left out stay as they are; `budget: null` given explicitly removes the limit (unlimited);
+    spend and the key value never change here."""
 
     budget: float | None = Field(default=None, ge=0)
     models: list[str] | None = None

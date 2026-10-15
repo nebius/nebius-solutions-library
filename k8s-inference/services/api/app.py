@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.117", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.118", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -2815,6 +2815,12 @@ async def operation_logs(
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 
+def _budget_change(req: KeyUpdate):
+    """The budget an update sets: a number, None when the caller wrote `budget: null` explicitly (unlimited), or
+    keys.UNSET when the field was left out (unchanged). JSON null and absence are different requests here."""
+    return req.budget if "budget" in req.model_fields_set else keys.UNSET
+
+
 def _key_public(i: dict, tenant: str) -> dict:
     """The admin's view of a tenant key (`GET /v1/keys`, the create/update answers): the same safe limit and usage
     fields the caller's own view (`GET /v1/keys/me`) carries (auth.limits_view: scopes, concurrency, budgets and
@@ -2945,9 +2951,9 @@ def fleet_update_key(tenant: str, alias: str, req: KeyUpdate, p: Principal = Dep
     """Budget, model allow-list (the grant) or expiry of a tenant's key; spend untouched."""
     _fleet_only()
     tenant = _fleet_tenant(tenant)
-    if req.budget is None and req.models is None and req.expires_days is None:
-        raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
-    i = keys.update(tenant, alias, req.budget, req.models, req.expires_days)
+    if "budget" not in req.model_fields_set and req.models is None and req.expires_days is None:
+        raise HTTPException(400, "nothing to change: pass budget (null = unlimited), models or expires_days")
+    i = keys.update(tenant, alias, _budget_change(req), req.models, req.expires_days)
     if i is None:
         raise HTTPException(404, f"key {alias} not found in tenant {tenant}")
     forget_hash(i["token"])
@@ -3011,9 +3017,9 @@ def import_keys(req: KeyImportRequest, p: Principal = Depends(admin)):
 def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
     """Change a key's budget, allowed models or expiry; the spend ledger is untouched (docs/RELIABILITY.md)."""
     _fleet_only()
-    if req.budget is None and req.models is None and req.expires_days is None:
-        raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
-    i = keys.update(p.tenant, alias, req.budget, req.models, req.expires_days)
+    if "budget" not in req.model_fields_set and req.models is None and req.expires_days is None:
+        raise HTTPException(400, "nothing to change: pass budget (null = unlimited), models or expires_days")
+    i = keys.update(p.tenant, alias, _budget_change(req), req.models, req.expires_days)
     if i is None:
         raise HTTPException(404, f"key {alias} not found")
     forget_hash(i["token"])  # a cached principal would keep the old budget for AUTH_CACHE_S

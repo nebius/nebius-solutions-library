@@ -176,7 +176,9 @@ budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke
 gateway's authorize hook of every endpoint hostname. The first keys of a fleet are the tenants' `keys` of
 `terraform.tfvars` (the platform stage writes them with `python -m keys bootstrap`, `./stack.sh output platform
 control -json tenant_keys` prints them); an admin key then mints user keys of its tenant through
-`POST /v1/keys` (budget, models, `expires_days`), edits them (`PATCH`) and revokes them (`DELETE`), on the
+`POST /v1/keys` (budget in USD, default 10, an explicit `null` for no limit; models; `expires_days`), edits them
+(`PATCH`: a field left out stays as it is, `budget: null` written explicitly lifts the limit, spend never changes) and
+revokes them (`DELETE`), on the
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
 the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key. The admin
 listing `GET /v1/keys` carries the same safe limit and usage fields per key (`scopes`, `max_concurrent`, the request and

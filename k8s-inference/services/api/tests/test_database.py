@@ -142,6 +142,9 @@ def test_keys_create_update_revoke_and_tenant_isolation(database):
     assert [k["key_alias"] for k in keys.list_tenant("demo")] == ["demo-ci"]
     u = keys.update("demo", "demo-ci", budget=50, expires_days=0)
     assert u["max_budget"] == 50 and u["expires"] is None and u["models"] == ["llm-example"]  # models untouched
+    assert keys.update("demo", "demo-ci", models=["http-example"])["max_budget"] == 50  # budget left out: kept
+    assert keys.update("demo", "demo-ci", budget=None)["max_budget"] is None  # explicit None: unlimited
+    assert keys.update("demo", "demo-ci", expires_days=0)["max_budget"] is None  # and it stays unlimited
     assert keys.update("other", "nope", budget=1) is None
     assert keys.block("demo", "demo-ci")["blocked"] and not keys.block("demo", "demo-ci", False)["blocked"]
     assert keys.revoke("demo", "demo-ci") and not keys.revoke("demo", "demo-ci")
