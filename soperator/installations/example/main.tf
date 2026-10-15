@@ -101,6 +101,19 @@ locals {
     })]
   ])
 
+  # Slurm NodeSets for complete GB300 racks have identical configuration. Keep
+  # the expanded list above for Mk8s resources and describe complete rack ranges
+  # separately so the Helm values do not duplicate the same configuration.
+  slurm_nodeset_worker_ranges = [
+    for nodeset in local.slurm_nodeset_workers_with_defaults : {
+      name          = nodeset.name
+      suffix        = "-rack"
+      first_ordinal = 0
+      last_ordinal  = floor(nodeset.size / local.gb300_nodes_per_nodegroup) - 1
+    }
+    if nodeset.resource.platform == local.gb300_platform && floor(nodeset.size / local.gb300_nodes_per_nodegroup) > 0
+  ]
+
   # Generated Slurm NodeSet name -> compute platform. The partition topology validations
   # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
   # worker nodeset it was generated from.
@@ -742,6 +755,8 @@ module "slurm" {
       fabric = nodeset.gpu_cluster != null ? module.k8s.gpu_cluster_id_by_fabric[nodeset.gpu_cluster.infiniband_fabric] : "root"
     }
   }]
+
+  worker_nodeset_ranges = local.slurm_nodeset_worker_ranges
 
   topology = {
     topologies = local.slurm_named_topologies
