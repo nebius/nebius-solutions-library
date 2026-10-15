@@ -116,7 +116,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.114", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.115", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1662,7 +1662,12 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         mine = [a for a in all_attempts if a["operation"] == mid]
         measured = [a["gpu_seconds"] for a in mine if a["gpu_seconds"] is not None]
         unknown = any(a["gpu_seconds"] is None and a["status"] != "QUEUED" for a in mine)
-        ann = m["metadata"].get("annotations") or {}
+        ann = st.accounting_annotations(m)
+        if (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async":
+            # Endpoint work is measured by its native worker, never by the CPU caller's pod duration.
+            value = st.measured(ann.get(f"{cfg.LABEL}/gpu-seconds"))
+            measured = [value] if value is not None else []
+            unknown = st.usage_of(ann) != "measured"
         chain.append(
             {
                 "id": mid,
@@ -1700,9 +1705,11 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
         "chain": chain,
         "successor_created_at": successors[-1]["created_at"] if successors else None,
-        "gpu_seconds": round(total, 1),
+        "gpu_seconds": None if op.get("mode") == "async" and not complete and total == 0 else round(total, 1),
         "gpu_seconds_complete": complete,
-        "cost": round(sum(billed), 6) if billed else None,
+        "cost": round(sum(billed), 6)
+        if billed and (op.get("mode") != "async" or all(c["cost"] is not None for c in chain))
+        else None,
     }
 
 

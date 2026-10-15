@@ -4,6 +4,7 @@ chain view parsed `<LABEL>/gpu-seconds` and `<LABEL>/billed` with float() and a 
 status and result. Unknown stays unknown (null, `usage: unknown`), never zero; malformed values are unknown too."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -72,3 +73,70 @@ def test_owner_status_and_result_answer_200_with_unknown_usage(client, admin_key
     assert body["usage"] == "unknown" and body["gpu_seconds"] is None and body["cost"] is None
     r = c.get(f"/v1/operations/{job['metadata']['name']}/result", headers={"Authorization": "Bearer sk-good"})
     assert r.status_code != 500, r.text
+
+
+@pytest.mark.parametrize("reason", ["no native execution", "no ledger"])
+def test_old_unmetered_endpoint_zero_is_unknown_without_rewriting_the_record(reason):
+    job = _job(**{f"{L}/billed": "0", f"{L}/gpu-seconds": "0.0", f"{L}/native": reason})
+    job["metadata"]["labels"][f"{L}/mode"] = "async"
+    op = status.normalise(job)
+    assert op["gpu_seconds"] is None and op["usage"] == "unknown" and op["cost"] is None
+    assert job["metadata"]["annotations"][f"{L}/gpu-seconds"] == "0.0"  # projection only
+    job["metadata"]["annotations"][f"{L}/export-of"] = "op-original"
+    op = status.normalise(job)
+    assert op["gpu_seconds"] == 0.0 and op["usage"] == "measured" and op["cost"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "value,reason,expected,complete,cost",
+    [
+        ("0.0", "no native execution", None, False, None),
+        ("unknown", "worker usage unmeasured", None, False, None),
+        ("42.5", "released (done)", 42.5, True, 0.0),
+        ("0.0", "released (done)", 0.0, True, 0.0),
+    ],
+)
+def test_endpoint_export_chain_uses_worker_measurement_not_cpu_attempts(
+    monkeypatch, value, reason, expected, complete, cost
+):
+    import app
+    import attempts
+
+    root = _job(
+        **{f"{L}/gpu-seconds": value, f"{L}/native": reason, f"{L}/billed": "unknown" if value == "unknown" else "0"}
+    )
+    root["metadata"]["labels"][f"{L}/mode"] = "async"
+    name = root["metadata"]["name"]
+    transfer = _job(
+        **{
+            f"{L}/gpu-seconds": "0",
+            f"{L}/billed": "0",
+            f"{L}/native": "transfer only",
+            f"{L}/export-of": name,
+            f"{L}/resumed-from": name,
+        }
+    )
+    transfer["metadata"]["name"] = name + "-x1"
+    transfer["metadata"]["labels"][f"{L}/mode"] = "async"
+    records = [
+        {
+            "operation": m["metadata"]["name"],
+            "pod": m["metadata"]["name"] + "-p",
+            "status": "succeeded",
+            "started_at": "2026-10-15T09:00:00Z",
+            "ended_at": "2026-10-15T09:01:00Z",
+            "gpus": 0,
+            "role": role,
+        }
+        for m, role in [(root, "run"), (transfer, "export")]
+    ]
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "for_operation", lambda _: records)
+    monkeypatch.setattr(app.jobs, "list_related", lambda *a, **k: [root, transfer])
+    monkeypatch.setattr(app, "_may_read_operation", lambda *a: True)
+    got = app._chain(SimpleNamespace(namespace="tenant-demo", tenant="demo"), status.normalise(root), root, name)
+    assert got["gpu_seconds"] == expected and got["gpu_seconds_complete"] is complete
+    assert got["cost"] == cost
+    assert got["chain"][0]["gpu_seconds"] == expected
+    assert got["chain"][1]["gpu_seconds"] == 0.0 and got["chain"][1]["gpu_seconds_complete"] is True
+    assert all(a["gpu_seconds"] == 0.0 for a in got["attempts"])  # those really are CPU pods

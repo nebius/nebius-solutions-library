@@ -258,6 +258,20 @@ def usage_of(ann: dict) -> str:
     return "measured" if measured(ann[key]) is not None else "unknown"
 
 
+def accounting_annotations(job: dict) -> dict:
+    """Correct old optional-endpoint zeroes at read time without rewriting historical records. Those annotations
+    described the CPU caller, not measured worker GPU use. Transfer-only retries genuinely run without GPUs."""
+    md = job.get("metadata") or {}
+    ann = md.get("annotations") or {}
+    if (
+        (md.get("labels") or {}).get(f"{LABEL}/mode") == "async"
+        and not ann.get(f"{LABEL}/export-of")
+        and ann.get(f"{LABEL}/native") in {"no native execution", "no ledger"}
+    ):
+        return {**ann, f"{LABEL}/gpu-seconds": "unknown", f"{LABEL}/billed": "unknown"}
+    return ann
+
+
 def _json(text: str | None):
     try:
         return json.loads(text) if text else None
@@ -294,7 +308,7 @@ def _waiting(job: dict, region: str | None) -> tuple[str, str | None]:
 
 def normalise(job: dict, price_per_call: float | None = None, records: list | None = None) -> dict:
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
-    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    labels, ann = md.get("labels", {}), accounting_annotations(job)
     conds = {c.get("type"): c for c in (st.get("conditions") or []) if c.get("status") == "True"}
     attempts = [
         {k: v for k, v in a.items() if not k.startswith("_")}

@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.115
+
+- Optional endpoint workers without native GPU metering now settle unknown, not
+  a measured zero inferred from their CPU caller. Transfer-only export retries
+  still settle at zero. Historical misleading zero annotations are corrected in
+  the read projection without rewriting storage or charging customers.
+- Endpoint chain totals use the native worker's accounting evidence rather than
+  the caller/export pod's zero GPUs. Run-chain metering is unchanged. No jobs
+  image, database migration, customer price or infrastructure change.
+
 ## api 0.11.114
 
 - An active application finalizer or endpoint export retry now projects its own

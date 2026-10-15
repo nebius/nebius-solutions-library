@@ -928,11 +928,12 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     # a never-prepared operation whose caller finished: the join fences it; a later first POST cannot open anything
     opn = "op-native-n"
     keys.admit(h, opn, "demo", run_member=True)
-    assert leases.settle_decision(opn, required=False) == (True, 0.0, "no native execution")
+    assert leases.settle_decision(opn, required=False) == (True, None, "worker usage unmeasured")
     with pytest.raises(HTTPException) as e:
         leases.prepare(opn, f"{opn}-a", "eu-north1", "cosmos")
     assert e.value.status_code == 409
-    keys.release(opn, 0.0)
+    keys.release(opn, None)
+    assert keys.run_member(opn)["state"] == "unknown" and keys.run_member(opn)["gpu_seconds"] is None
     # cancel before attach: refused
     opk = "op-native-k"
     keys.admit(h, opk, "demo", run_member=True)
@@ -941,8 +942,9 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     with pytest.raises(HTTPException) as e:
         leases.attach(opk, f"{opk}-a", me, "r")
     assert e.value.status_code == 409 and "cancelled before" in e.value.detail
-    assert leases.settle_decision(opk, required=False) == (True, 0.0, "no native execution")
-    keys.release(opk, 0.0)
+    assert leases.settle_decision(opk, required=False) == (True, None, "worker usage unmeasured")
+    keys.release(opk, None)
+    assert keys.run_member(opk)["state"] == "unknown" and keys.run_member(opk)["gpu_seconds"] is None
     # a released reservation (settled by other means): attach refused
     opr = "op-native-r"
     keys.admit(h, opr, "demo", run_member=True)
@@ -966,9 +968,9 @@ def test_native_execution_lease_transitions_and_join(database, monkeypatch):
     assert leases.sweep() == [f"{op2}:lost"]
     assert leases.settle_decision(op2, required=False) == (True, None, "worker lost")
     keys.release(op2, None)
-    # required mode, nothing ever prepared: unknown; optional: the caller's own
+    # No worker measurement in either mode: unknown, not a measured CPU-caller zero.
     assert leases.settle_decision("op-never", required=True) == (True, None, "unattached")
-    assert leases.settle_decision("op-never", required=False) == (True, 0.0, "no native execution")
+    assert leases.settle_decision("op-never", required=False) == (True, None, "worker usage unmeasured")
 
 
 def test_admission_records_survive_and_rebuild_the_job(database):

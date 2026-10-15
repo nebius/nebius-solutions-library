@@ -283,13 +283,17 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
             # release is a JOIN with the worker's native execution (docs/API.md "Native execution leases"):
             # while the worker is attached nothing is freed, whatever the caller did
             try:
-                value, how = 0.0, "no ledger"
+                value, how = (0.0, "transfer only") if ann.get(f"{LABEL}/export-of") else (None, "no ledger")
                 if db.enabled():
                     m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
                     settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
                     if not settle_now:
                         log.info("billing %s/%s: deferred, %s", region, name, how)
                         return False
+                    # Only the platform's transfer-only retry is known to execute no inference. An optional
+                    # worker without a lease measurement is unknown, not the CPU caller's zero allocation.
+                    if ann.get(f"{LABEL}/export-of") and how in {"unattached", "worker usage unmeasured"}:
+                        value, how = 0.0, "transfer only"
                     keys.release(name, value)
                     leases.mark_settled(name)
                 seconds = "unknown" if value is None else f"{value}"

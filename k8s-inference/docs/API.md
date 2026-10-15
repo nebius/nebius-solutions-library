@@ -397,10 +397,16 @@ worker's release before the caller finished frees nothing; the caller's end befo
 (the pass defers, `serverless2.nebius/native` on the Job says why). The key's concurrency counts the execution until
 then: no new root of the key takes the slot, a retry of the caller cannot run a second native execution, and the
 original root keeps the billing. `native_lease` on an endpoint model: `optional` (default: a worker that never
-attaches leaves today's behaviour, the caller's end releases) or `required` (a caller that ended without an attached
+attaches releases at the caller's end, but GPU usage is unknown without measurement) or `required` (a caller that ended without an attached
 execution settles unknown and the handle says so; the worker refuses requests it cannot attach). The handle carries
 `native` (`state`, `attempt`, `worker_request_id`, timings, `outcome`, `lane_seconds`, `gpu_seconds`,
 `cancel_requested`, `settled`).
+
+The caller and transfer pods have no GPUs; their zero allocation is not evidence
+of zero endpoint GPU usage. Chain totals use native worker measurements, with
+`gpu_seconds_complete: false` when any member is unmeasured. A verified
+transfer-only export retry contributes zero; it never repeats inference. Old
+optional-call annotations that claimed zero without metering read as unknown.
 
 Once the join decided (the caller is over, every execution ended), the operation is **fenced** durably (ledger
 `native_fences`, written in the join's transaction, kept across the ledger release): a later prepare or attach for any

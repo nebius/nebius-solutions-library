@@ -112,7 +112,7 @@ class FakeLeases:
 
 def _settle(e, required):
     if e is None or e["state"] == "prepared":
-        return (True, None, "unattached") if required else (True, 0.0, "no native execution")
+        return True, None, "unattached" if required else "worker usage unmeasured"
     if e["state"] == "attached":
         return False, None, "native execution attached: the worker has not settled"
     if e["state"] == "released":
@@ -340,7 +340,7 @@ def test_worker_attach_release_watch_and_cancel_request(live, monkeypatch):
 def test_billing_joins_the_caller_end_with_the_worker_end(live, monkeypatch):
     """The caller Job is over: while the worker is attached the pass defers (nothing freed, whatever the caller did);
     once released the member is released with the worker's measurement (or unknown); required mode: a caller that
-    ended unattached settles unknown; optional mode: as before."""
+    ended unattached settles unknown, including an optional worker without a measurement."""
     c, cl, fl, oid, attempt, hdr, A = live
     import catalog
 
@@ -380,6 +380,24 @@ def fake_owner(c, oid):
     import keys
 
     return keys.operation_owner(oid)[1]
+
+
+@pytest.mark.parametrize("transfer_only", [False, True])
+def test_optional_worker_without_measurement_is_unknown_but_transfer_only_is_zero(live, monkeypatch, transfer_only):
+    c, cl, fl, oid, attempt, hdr, A = live
+    job = cl.jobs[(NS, oid)]
+    if transfer_only:
+        job["metadata"]["annotations"][f"{L}/export-of"] = "op-original"
+    else:
+        assert c.post("/internal/authorize/llm-example/openai/v1/chat/completions", headers=hdr).status_code == 200
+    job["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    monkeypatch.setattr(billing.execution, "sweep_copies", lambda *a: None)
+    monkeypatch.setattr(db, "enabled", lambda: True)
+    assert asyncio.run(billing.settle_job("hub", NS, job)) is True
+    ann = job["metadata"]["annotations"]
+    assert ann[f"{L}/gpu-seconds"] == ("0.0" if transfer_only else "unknown")
+    assert ann[f"{L}/billed"] == ("0" if transfer_only else "unknown")
+    assert ann[f"{L}/native"] == ("transfer only" if transfer_only else "worker usage unmeasured")
 
 
 def fake_keys_calls(fl, c):

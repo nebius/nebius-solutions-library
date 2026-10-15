@@ -286,8 +286,8 @@ def settle_decision(operation: str, required: bool) -> tuple[bool, float | None,
     rows: (settle_now, gpu_seconds | None, why). An attached execution -> not yet. A prepared (never attached) live row
     is CLOSED here, in this transaction, so a delayed worker cannot attach after the join. Then the terminal rows'
     evidence is summed: unknown when any attached-then-ended row carries no measurement or the worker was lost;
-    required mode with nothing ever attached -> unknown ('unattached'); optional mode with nothing attached -> the
-    caller's own (zero for an endpoint call)."""
+    no attached measurement -> unknown, including optional workers: a CPU caller's zero GPU allocation is not a
+    measurement of the endpoint it invoked. The caller closes normally, but no worker time is invented."""
     with db.pool().connection() as c, c.transaction():
         _lock(c, operation)
         rows = [
@@ -310,7 +310,7 @@ def settle_decision(operation: str, required: bool) -> tuple[bool, float | None,
         )
         ended = [r for r in rows if r["state"] in ("released", "lost")]
         if not ended:
-            return (True, None, "unattached") if required else (True, 0.0, "no native execution")
+            return True, None, "unattached" if required else "worker usage unmeasured"
         if any(r["state"] == "lost" for r in ended):
             return True, None, "worker lost"
         if any(r["gpu_seconds"] is None for r in ended):

@@ -1483,7 +1483,7 @@ def fake_keys(monkeypatch):
     monkeypatch.setattr(leases, "history", lambda op: [])
     monkeypatch.setattr(leases, "prepare", lambda *a, **k: None)
     monkeypatch.setattr(leases, "request_cancel", lambda *a, **k: None)
-    monkeypatch.setattr(leases, "settle_decision", lambda op, required: (True, 0.0, "no native execution"))
+    monkeypatch.setattr(leases, "settle_decision", lambda op, required: (True, None, "worker usage unmeasured"))
     monkeypatch.setattr(leases, "mark_settled", lambda op: None)
     return fk
 
