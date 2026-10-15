@@ -406,6 +406,19 @@ create table if not exists operation_marks (
     alter table endpoint_children add column if not exists incarnation int not null default 1;
     alter table endpoint_children add column if not exists previous_child text;
     """,
+    # 29: observed completion bound to the exact attempt (api 0.11.121): the API proves a Complete manager Job for a
+    # single-worker run whose newest record says "interrupted" yet carries that attempt's committed result_ref; the
+    # proof names the attempt (pod, pod UID, epoch, result_ref) and the manager Job UID, so a later attempt can never
+    # inherit it; the uploader's raw row is never rewritten (attempts.mark_completed / synthesize)
+    """
+    alter table operation_marks add column if not exists completed_at timestamptz;
+    alter table operation_marks add column if not exists completed_pod text;
+    alter table operation_marks add column if not exists completed_pod_uid text;
+    alter table operation_marks add column if not exists completed_epoch int;
+    alter table operation_marks add column if not exists completed_result_ref text;
+    alter table operation_marks add column if not exists completed_job_uid text;
+    alter table operation_marks add column if not exists completion_reason text;
+    """,
 ]
 
 _pool = None

@@ -1865,6 +1865,31 @@ def _delivered(op: dict, name: str, root: str) -> dict:
     return out
 
 
+def _persist_observed_completion(job: dict, op: dict, records: list) -> None:
+    """When the projection proved a Complete single-worker Job delivered by its newest attempt's own RESULT.json
+    (status.normalise, api 0.11.120), keep that proof past the Job's TTL: the mark names the exact attempt and the
+    manager Job UID (attempts.mark_completed, migration 29). Idempotent; never required for the read."""
+    if not attempts.enabled() or op.get("status") != "SUCCEEDED" or not op.get("attempts"):
+        return
+    newest = op["attempts"][-1]
+    if newest.get("reason") != attempts.OBSERVED_COMPLETION or not newest.get("result_ref"):
+        return
+    row = next((r for r in records or [] if r.get("pod") == newest.get("attempt_id")), None)
+    if row is None or row.get("status") != "interrupted":
+        return
+    try:
+        attempts.mark_completed(
+            job["metadata"]["name"],
+            row["pod"],
+            row.get("pod_uid"),
+            row.get("epoch"),
+            row["result_ref"],
+            job["metadata"].get("uid") or "",
+        )
+    except Exception as e:  # noqa: BLE001 - the live projection stands; the mark is retried on the next read
+        log.warning("observed completion of %s not persisted: %s", job["metadata"].get("name"), e)
+
+
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
         op = dict(job["_synthetic"])
@@ -1875,6 +1900,7 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     name = job["metadata"]["name"]
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
+    _persist_observed_completion(job, op, records)
     op.update(attempts.lifecycle(name, root, records, pods=job.get("_pods")))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
         op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(

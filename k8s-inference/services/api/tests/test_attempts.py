@@ -396,6 +396,130 @@ def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypat
 @pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL is needed for PostgreSQL integration tests"
 )
+def _interrupted_with_result(op, pod, epoch_started="2026-10-15T19:24:54Z", result="8a64…fe7b"):
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        pod,
+        {"operation": op, "status": "started", "gpus": 1, "started_at": epoch_started, "io_mode": "application"},
+    )
+    return attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        pod,
+        {
+            "operation": op,
+            "status": "interrupted",
+            "gpus": 1,
+            "ended_at": "2026-10-15T19:28:17Z",
+            "io_mode": "application",
+            "result_ref": result,
+        },
+    )
+
+
+def test_an_observed_completion_survives_the_jobs_expiry_only_for_the_exact_attempt(database):
+    """api 0.11.121 (migration 29): the projection of a Complete Job delivered by its own RESULT.json is kept as a
+    mark bound to the attempt; synthesize honours it only for that pod/epoch/result; the raw row stays
+    "interrupted"; cancel, successor, gang and a mark for another attempt all win against it."""
+    import db
+
+    db.migrate()
+    row = _interrupted_with_result("op-esm", "op-esm-a")
+    assert row["status"] == "interrupted" and row["result_ref"] == "8a64…fe7b" and row["epoch"] == 1
+    before = attempts.synthesize("op-esm", "demo")
+    assert before["status"] == "PREEMPTED" and before["attempts"][-1]["status"] == "PREEMPTED"  # no mark yet
+    attempts.mark_completed("op-esm", "op-esm-a", row.get("pod_uid"), 1, "8a64…fe7b", "job-uid-1")
+    assert attempts.completion_of("op-esm")["pod"] == "op-esm-a"
+    after = attempts.synthesize("op-esm", "demo")
+    assert after["status"] == "SUCCEEDED" and after["attempts"][-1]["status"] == "SUCCEEDED"
+    assert after["attempts"][-1]["reason"] == attempts.OBSERVED_COMPLETION
+    assert attempts.for_operation("op-esm")[-1]["status"] == "interrupted"  # the uploader's raw row is untouched
+    # the mark is for another attempt (epoch / result / pod differ): nothing is proven
+    other = _interrupted_with_result("op-esm2", "op-esm2-a")
+    attempts.mark_completed("op-esm2", "op-esm2-a", other.get("pod_uid"), 1, "a-different-result", "job-uid-2")
+    assert attempts.synthesize("op-esm2", "demo")["status"] == "PREEMPTED"
+    attempts.mark_completed("op-esm3", "op-esm3-old", None, 1, "8a64…fe7b", "job-uid-3")  # written first, stale
+    _interrupted_with_result("op-esm3", "op-esm3-a")  # the only row is another pod
+    assert attempts.synthesize("op-esm3", "demo")["status"] == "PREEMPTED"
+    assert attempts.completion_of("op-esm3")["pod"] == "op-esm3-old"  # a later mark never overwrites the first
+    attempts.mark_completed("op-esm3", "op-esm3-a", None, 1, "8a64…fe7b", "job-uid-3")
+    assert attempts.completion_of("op-esm3")["pod"] == "op-esm3-old"
+    # cancel wins
+    r4 = _interrupted_with_result("op-esm4", "op-esm4-a")
+    attempts.mark_completed("op-esm4", "op-esm4-a", r4.get("pod_uid"), 1, "8a64…fe7b", "job-uid-4")
+    attempts.mark_cancelled("op-esm4")
+    c = attempts.synthesize("op-esm4", "demo")
+    assert c["status"] == "CANCELLED" and c["attempts"][-1]["status"] == "CANCELLED"
+    # a successor (superseded) wins
+    r5 = _interrupted_with_result("op-esm5", "op-esm5-a")
+    attempts.mark_completed("op-esm5", "op-esm5-a", r5.get("pod_uid"), 1, "8a64…fe7b", "job-uid-5")
+    attempts.mark_successor("op-esm5", "op-esm5-r1")
+    assert attempts.synthesize("op-esm5", "demo")["status"] != "SUCCEEDED"
+    # a failed export is never delivered
+    attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "op-esm6-a",
+        {
+            "operation": "op-esm6",
+            "status": "started",
+            "gpus": 1,
+            "started_at": "2026-10-15T19:24:54Z",
+            "io_mode": "application",
+        },
+    )
+    r6 = attempts.record(
+        "eu-north1",
+        "tenant-demo",
+        "op-esm6-a",
+        {
+            "operation": "op-esm6",
+            "status": "interrupted",
+            "gpus": 1,
+            "io_mode": "application",
+            "result_ref": "x",
+            "export": "failed",
+        },
+    )
+    attempts.mark_completed("op-esm6", "op-esm6-a", r6.get("pod_uid"), 1, "x", "job-uid-6")
+    assert attempts.synthesize("op-esm6", "demo")["status"] != "SUCCEEDED"
+
+
+def test_the_projection_persists_the_observed_completion_once(monkeypatch):
+    """The live read that proved the delivery writes the mark with the attempt's identity and the Job UID."""
+    import app as appmod
+
+    written = []
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "mark_completed", lambda *a: written.append(a))
+    job = {"metadata": {"name": "op-esm", "uid": "job-uid-1", "annotations": {}}}
+    rec = {
+        "operation": "op-esm",
+        "pod": "op-esm-a",
+        "status": "interrupted",
+        "result_ref": "8a64…fe7b",
+        "epoch": 1,
+        "pod_uid": "pod-uid-1",
+    }
+    op = {
+        "status": "SUCCEEDED",
+        "attempts": [
+            {
+                "attempt_id": "op-esm-a",
+                "status": "SUCCEEDED",
+                "reason": attempts.OBSERVED_COMPLETION,
+                "result_ref": "8a64…fe7b",
+            }
+        ],
+    }
+    appmod._persist_observed_completion(job, op, [rec])
+    assert written == [("op-esm", "op-esm-a", "pod-uid-1", 1, "8a64…fe7b", "job-uid-1")]
+    plain = {**op, "attempts": [{**op["attempts"][0], "reason": None}]}  # an ordinary success: no mark
+    appmod._persist_observed_completion(job, plain, [rec])
+    assert len(written) == 1
+
+
 def test_epoch_fencing_in_the_database(database):
     import db
 
