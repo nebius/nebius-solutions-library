@@ -1686,6 +1686,17 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     for a in st._attempts([], [r for r in rows if r.get("operation") not in pods_by_member]):
         a["operation"] = (by_pod.get(a.get("attempt_id")) or {}).get("operation") or name  # an expired member
         all_attempts.append(a)
+    # a cancelled member's interrupted attempt is the cancel, not a preemption: the rule the member's own handle
+    # applies, from the Job's annotation while it exists and from the operation's cancel mark after that
+    cancelled_members = {
+        m["metadata"]["name"] for m in members if (m["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")
+    }
+    for mid in {a["operation"] for a in all_attempts} - cancelled_members:
+        mk = attempts._marks(mid) if attempts.enabled() else None
+        if mk and mk[1]:
+            cancelled_members.add(mid)
+    for mid in cancelled_members:
+        st.cancel_attempt([a for a in all_attempts if a["operation"] == mid], True)
     for a in all_attempts:
         r = by_pod.get(a.get("attempt_id")) or {}
         a["attempt_role"] = r.get("role") or a.get("attempt_role") or "run"

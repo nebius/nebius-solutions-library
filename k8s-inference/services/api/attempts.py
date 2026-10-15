@@ -543,6 +543,11 @@ def synthesize(operation: str, tenant: str) -> dict | None:
         }
         for i, r in enumerate(rows)
     ]
+    import status as st
+
+    st.cancel_attempt(
+        attempts, status == "CANCELLED"
+    )  # the record of the cancelled attempt is the cancel, not a preemption
     return {
         "id": operation,
         "name": None,

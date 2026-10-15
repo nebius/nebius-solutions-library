@@ -306,6 +306,17 @@ def _waiting(job: dict, region: str | None) -> tuple[str, str | None]:
     return "starting", None
 
 
+def cancel_attempt(attempts: list, cancelled: bool) -> list:
+    """A cancel ends the attempt it interrupted: when the operation was cancelled, its newest attempt that the
+    records or pods show as PREEMPTED (the pod the cancel deleted), RUNNING or QUEUED reads CANCELLED, reason
+    "cancelled". The same rule whether the attempt comes from a live pod (the Job's `cancelled` annotation) or, after
+    the pod and Job are gone, from the uploader's record alone (the operation's cancel mark): an "interrupted"
+    record of a cancelled run is the cancel, not an infrastructure preemption. Nothing else on the attempt changes."""
+    if cancelled and attempts and attempts[-1]["status"] in ("PREEMPTED", "RUNNING", "QUEUED"):
+        attempts[-1]["status"], attempts[-1]["reason"] = "CANCELLED", "cancelled"
+    return attempts
+
+
 def normalise(job: dict, price_per_call: float | None = None, records: list | None = None) -> dict:
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
     labels, ann = md.get("labels", {}), accounting_annotations(job)
@@ -389,8 +400,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         status = "RUNNING"  # includes finalization: main ended, the uploader is still exporting
     else:
         status = "QUEUED"  # gated by Kueue, pending for a node, being placed, or between attempts after a preemption
-    if ann.get(f"{LABEL}/cancelled") and attempts and attempts[-1]["status"] in ("PREEMPTED", "RUNNING", "QUEUED"):
-        attempts[-1]["status"], attempts[-1]["reason"] = "CANCELLED", "cancelled"  # the attempt the cancel interrupted
+    cancel_attempt(attempts, bool(ann.get(f"{LABEL}/cancelled")))  # the attempt the cancel interrupted
     c = conds.get("Failed") or conds.get("FailureTarget") or {}
     if status == "FAILED":
         last = next((a for a in reversed(attempts) if a["status"] == "FAILED"), None)
