@@ -19,6 +19,12 @@ nodesets:
           lastOrdinal: ${nodeset.range.last_ordinal}
           suffix: ${jsonencode(nodeset.range.suffix)}
         %{~ endif ~}
+        %{~ if length(nodeset.aggregate_slurm_nodesets) > 0 ~}
+        aggregateSlurmNodeSets:
+          %{~ for aggregate in nodeset.aggregate_slurm_nodesets ~}
+          - ${jsonencode(aggregate)}
+          %{~ endfor ~}
+        %{~ endif ~}
         annotations:
           slurm.nebius.ai/parental-cluster-ref: soperator
 

@@ -944,6 +944,7 @@ variable "active_checks_scope" {
 variable "worker_nodesets" {
   type = list(object({
     name                           = string
+    aggregate_slurm_nodesets       = optional(list(string), [])
     platform                       = string
     replicas                       = number
     max_unavailable                = string

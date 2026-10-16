@@ -84,6 +84,7 @@ locals {
   # becomes [{ name = "worker-rack0", size = 10 }]. Size = 0 keeps a
   # zero-replica rack nodeset so Terraform can downscale the generated node
   # groups while the Slurm NodeSet remains addressable.
+  # terraform_nodeset_name keeps the input name, e.g. "worker" for both racks above.
   slurm_nodeset_workers = flatten([
     for nodeset in local.slurm_nodeset_workers_with_defaults :
     nodeset.resource.platform == local.gb300_platform ? [
@@ -93,11 +94,13 @@ locals {
           nodeset.name,
           rack,
         )
-        size                = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
-        nodes_per_nodegroup = local.gb300_nodes_per_nodegroup
+        terraform_nodeset_name = nodeset.name
+        size                   = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
+        nodes_per_nodegroup    = local.gb300_nodes_per_nodegroup
       })
       ] : [merge(nodeset, {
-        nodes_per_nodegroup = local.default_nodes_per_nodegroup
+        terraform_nodeset_name = nodeset.name
+        nodes_per_nodegroup    = local.default_nodes_per_nodegroup
     })]
   ])
 
@@ -114,12 +117,15 @@ locals {
     if nodeset.resource.platform == local.gb300_platform && floor(nodeset.size / local.gb300_nodes_per_nodegroup) > 0
   ]
 
-  # Generated Slurm NodeSet name -> compute platform. The partition topology validations
+  # Slurm NodeSet name -> compute platform. The partition topology validations
   # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
-  # worker nodeset it was generated from.
-  nodeset_platform = {
-    for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform
-  }
+  # worker nodeset it was generated from. Both generated names ("worker-rack0") and
+  # Terraform worker nodeset names ("worker") are valid refs: GB300 racks join the
+  # aggregate Slurm NodeSet named after their Terraform worker nodeset.
+  nodeset_platform = merge(
+    { for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform },
+    { for nodeset in local.slurm_nodeset_workers_with_defaults : nodeset.name => nodeset.resource.platform },
+  )
 
   # NVMe device capacities are supplied in decimal GB because that is how the
   # hardware is advertised. Convert the per-nodeset total to GiB before using
@@ -181,8 +187,9 @@ locals {
       cluster_default = true
       type            = "block"
       block_sizes     = [coalesce(var.slurm_topology_block_size, local.gb300_nodes_per_nodegroup)]
+      # Aggregate Slurm NodeSet names, so the topology follows racks being added or removed.
       nodeset_refs = [
-        for nodeset in local.slurm_nodeset_workers : nodeset.name
+        for nodeset in local.slurm_nodeset_workers_with_defaults : nodeset.name
         if nodeset.resource.platform == local.gb300_platform
       ]
     }] : [],
@@ -713,11 +720,12 @@ module "slurm" {
     config       = partition.config
   }]
   worker_nodesets = [for nodeset in local.slurm_nodeset_workers : {
-    name                    = nodeset.name
-    platform                = nodeset.resource.platform
-    replicas                = nodeset.size
-    max_unavailable         = "500"
-    rolling_update_strategy = nodeset.rolling_update_strategy
+    name                     = nodeset.name
+    aggregate_slurm_nodesets = nodeset.resource.platform == local.gb300_platform ? [nodeset.terraform_nodeset_name] : []
+    platform                 = nodeset.resource.platform
+    replicas                 = nodeset.size
+    max_unavailable          = "500"
+    rolling_update_strategy  = nodeset.rolling_update_strategy
     features = concat(
       [
         provider::string-functions::snake_case(nodeset.resource.platform),

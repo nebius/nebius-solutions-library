@@ -718,8 +718,10 @@ variable "slurm_operator_stable" {
 variable "slurm_nodesets_partitions" {
   description = <<-EOT
     Partition configuration for generated Slurm NodeSets.
-    slurm_nodeset_refs must reference generated Slurm NodeSet names. A non-GB worker keeps its Terraform worker nodeset name.
-    A GB300 worker nodeset expands into rack-scoped Slurm NodeSets named <name>-rack<rack>.
+    slurm_nodeset_refs must reference Slurm NodeSet names. A non-GB worker keeps its Terraform worker nodeset name.
+    A GB300 worker nodeset expands into rack-scoped Slurm NodeSets named <name>-rack<rack>, and an aggregate
+    Slurm NodeSet named <name> containing all of its racks. Reference <name> to follow racks being added or removed,
+    or <name>-rack<rack> to select specific racks.
     Users must not remove the "hidden" partition.
     Users can modify the "main" partition, but should not remove it (there must be at least one default partition).
     topology is required. Available topologies: flat is always present, tree-ib is present for GPU NodeSets, and block-nvl72 is present for GB300 NodeSets.
@@ -750,9 +752,9 @@ variable "slurm_nodesets_partitions" {
   }
 
   validation {
-    # Validate partition refs against generated Slurm NodeSet names, not raw
-    # Terraform worker nodeset names. Example: gpu-gb300 worker "primtrain" with
-    # size = 36 generates ["primtrain-rack0", "primtrain-rack1"];
+    # Validate partition refs against Slurm NodeSet names. Example: gpu-gb300
+    # worker "primtrain" with size = 36 generates ["primtrain-rack0", "primtrain-rack1"]
+    # and the aggregate "primtrain" containing both racks;
     # non-GB worker "worker" stays "worker".
     condition = length(setsubtract(
       toset(flatten([
@@ -760,17 +762,17 @@ variable "slurm_nodesets_partitions" {
       ])),
       toset(flatten([
         for w in var.slurm_nodeset_workers :
-        w.resource.platform == "gpu-gb300" ? [
+        w.resource.platform == "gpu-gb300" ? concat([w.name], [
           for rack in range(max(1, try(ceil(w.size / 18), 0))) : format(
             "%s-rack%d",
             w.name,
             rack,
           )
-        ] : [w.name]
+        ]) : [w.name]
       ]))
     )) == 0
 
-    error_message = "All slurm_nodesets_partitions[].slurm_nodeset_refs must reference generated Slurm NodeSet names. GB300 worker nodesets generate <name>-rack<rack> names; other worker nodesets use <name>."
+    error_message = "All slurm_nodesets_partitions[].slurm_nodeset_refs must reference Slurm NodeSet names. GB300 worker nodesets generate <name> for all racks and <name>-rack<rack> for each rack; other worker nodesets use <name>."
   }
 
   validation {
@@ -1167,30 +1169,43 @@ variable "slurm_nodeset_workers" {
   }
 
   validation {
-    # Compare the set of generated worker NodeSet names with the full generated
+    # Compare the set of generated Slurm NodeSet names with the full generated
     # name list; a shorter distinct list means two inputs collide after
-    # expansion. Example collision: two non-GB workers named "worker" both
-    # generate "worker".
+    # expansion. Example collisions: two non-GB workers named "worker" both
+    # generate "worker"; a GB300 worker "worker" generates the aggregate
+    # "worker", which a non-GB worker "worker" would shadow.
     condition = length(distinct(flatten([
       for worker in var.slurm_nodeset_workers :
-      worker.resource.platform == "gpu-gb300" ? [
+      worker.resource.platform == "gpu-gb300" ? concat([worker.name], [
         for rack in range(max(1, try(ceil(worker.size / 18), 0))) : format(
           "%s-rack%d",
           worker.name,
           rack,
         )
-      ] : [worker.name]
+      ]) : [worker.name]
       ]))) == length(flatten([
       for worker in var.slurm_nodeset_workers :
-      worker.resource.platform == "gpu-gb300" ? [
+      worker.resource.platform == "gpu-gb300" ? concat([worker.name], [
         for rack in range(max(1, try(ceil(worker.size / 18), 0))) : format(
           "%s-rack%d",
           worker.name,
           rack,
         )
-      ] : [worker.name]
+      ]) : [worker.name]
     ]))
-    error_message = "All effective worker nodeset names must be unique. GB300 worker nodesets are named <name>-rack<rack>; other worker nodesets use <name>."
+    error_message = "All effective worker nodeset names must be unique. GB300 worker nodesets are named <name> (all racks) and <name>-rack<rack>; other worker nodesets use <name>."
+  }
+
+  validation {
+    # The aggregate Slurm NodeSet of a GB300 worker is named after it. Soperator accepts
+    # only lowercase alphanumerics and '-', starting and ending with an alphanumeric,
+    # up to 63 characters (Kubernetes DNS label rules).
+    condition = alltrue([
+      for worker in var.slurm_nodeset_workers :
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", worker.name)) && length(worker.name) <= 63
+      if worker.resource.platform == "gpu-gb300"
+    ])
+    error_message = "GB300 worker nodeset names must consist of lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters long."
   }
 
   validation {
