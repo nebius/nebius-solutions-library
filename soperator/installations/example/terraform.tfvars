@@ -144,7 +144,8 @@ nfs_in_k8s = {
 #                                                ┌───────────┼───────────┐              ┌───────────┼───────────┐
 #                                          [worker-rack0-0] ... [worker-rack0-17] [worker-rack1-0] ... [worker-rack1-17]
 #
-# NOTE: One _Terraform_ NodeSet corresponds to several _Slurm_ NodeSets for GB300 (one per rack).
+# NOTE: One _Terraform_ NodeSet corresponds to several _Slurm_ NodeSets for GB300 (one per rack), plus one aggregate
+# _Slurm_ NodeSet named after the _Terraform_ NodeSet (e.g. "worker") that contains all of its racks.
 #
 # "Slurm NodeSet" is not a runtime entity, it's just a name for referencing in partitions.
 # Users can also pass Slurm NodeSet names to Slurm commands ("sbatch", "scontrol", etc.) instead of full nodelists.
@@ -243,10 +244,12 @@ slurm_nodeset_workers = [
 # Slurm partition configuration.
 #
 # Each partition must have either is_all = true (includes all generated Slurm NodeSets)
-# or slurm_nodeset_refs (list of specific generated Slurm NodeSet names).
+# or slurm_nodeset_refs (list of specific Slurm NodeSet names).
 #
 # For GB300, one Terraform worker nodeset generates one Slurm nodeset per rack: e.g., a Terraform
 # nodeset "worker" with 3 racks will produce 3 Slurm nodesets: "worker-rack0", "worker-rack1", "worker-rack2".
+# It also produces the Slurm nodeset "worker" containing all of these racks. Reference "worker" to keep
+# the partition in sync when racks are added or removed, or "worker-rack<N>" to select specific racks.
 #
 # The setting "topology" is required. You must select one of 3 available topologies:
 # +-------------+--------------------------------------+-----------------+---------------------------
