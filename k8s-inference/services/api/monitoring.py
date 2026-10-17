@@ -92,7 +92,7 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
                 "requests",
                 f"Requests per {per}",
                 "requests",
-                f"round(sum(increase(http_server_request_duration_seconds_count{calls}[{w}])))",
+                f"round(sum(increase(http_server_request_duration_seconds_count{calls}[{w}]))) or vector(0)",
             ),
             (
                 "latency",
@@ -105,7 +105,7 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
                 "errors",
                 f"Server errors per {per}",
                 "requests",
-                f"round(sum(increase(http_server_request_duration_seconds_count{failed}[{w}])))",
+                f"round(sum(increase(http_server_request_duration_seconds_count{failed}[{w}]))) or vector(0)",
             ),
             ("replicas", "Ready replicas", "replicas", f"sum(kn_revision_pods_count{knative})"),
             ("concurrency", "Concurrent requests", "requests", f"sum(kn_revision_concurrency_stable{knative})"),

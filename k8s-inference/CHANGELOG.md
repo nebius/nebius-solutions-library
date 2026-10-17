@@ -4,6 +4,13 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.131
+
+(API image only.)
+
+- Endpoint metrics: a window without any request or without any server error reads 0, not an empty chart (the
+  count queries end in `or vector(0)`).
+
 ## api 0.11.130
 
 (API image only.)
