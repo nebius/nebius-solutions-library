@@ -31,12 +31,13 @@ def _policy(objs):
 
 
 def test_without_the_opt_in_nothing_is_rendered():
-    assert _policy(g.native(g._entry(PLAIN, test_api.FLEET), "hub")) == []
+    assert _policy(g.native(g._definition(PLAIN, test_api.FLEET), "hub")) == []
 
 
 def test_knative_shape_admits_only_the_queue_proxy_data_path():
     objs = g.native(
-        g._entry({**PLAIN, "native_lease": "required", "ingress_isolation": "declared-ports"}, test_api.FLEET), "hub"
+        g._definition({**PLAIN, "native_lease": "required", "ingress_isolation": "declared-ports"}, test_api.FLEET),
+        "hub",
     )
     assert [d["kind"] for d in objs] == ["SecurityPolicy", "InferenceService", "CiliumNetworkPolicy"][
         : len(objs)
@@ -82,14 +83,14 @@ def test_knative_shape_admits_only_the_queue_proxy_data_path():
 def test_multi_node_shape_admits_the_declared_port_and_the_group(monkeypatch):
     monkeypatch.setattr(mn.kube, "fleet", lambda: mn.POOLS)
     monkeypatch.setattr(mn.kube, "cluster_region", lambda c: c)
-    e = models.to_entry({**mn.SPEC, "ingress_isolation": "declared-ports"})
+    e = models.definition({**mn.SPEC, "ingress_isolation": "declared-ports"})
     objs = [
         d
         for v in models.variants(e, "us-central1")
         for d in render_endpoint.render(e, "us-central1", g.DOMAIN, g.IB_CLAIM_TEMPLATE, v, True)
     ]
     (p,) = _policy(objs)
-    port = str(e["runtime"].get("port") or 8080)
+    port = str(e["port"])
     name = p["metadata"]["name"].removesuffix("-ingress")
     spec = p["spec"]
     assert spec["endpointSelector"] == {"matchLabels": {"serverless2.nebius/model": name}}
@@ -107,7 +108,7 @@ def test_multi_node_shape_admits_the_declared_port_and_the_group(monkeypatch):
 
 def test_opt_in_is_validated_and_the_kind_is_known_to_apply_and_delete():
     with pytest.raises(HTTPException, match="ingress_isolation"):
-        g._entry({**PLAIN, "ingress_isolation": "all"}, test_api.FLEET)
+        g._definition({**PLAIN, "ingress_isolation": "all"}, test_api.FLEET)
     assert models.PLURALS["CiliumNetworkPolicy"] == ("cilium.io", "v2", "ciliumnetworkpolicies")
 
 

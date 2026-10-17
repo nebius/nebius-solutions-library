@@ -256,7 +256,7 @@ def test_cpu_only_definition_and_its_endpoint_take_the_customer_pool(client, adm
         "gpu": {"count": 0, "classes": []},
         "regions": ["eu-north1"],
     }
-    entry = models.to_entry(spec)
+    entry = models.definition(spec)
     assert entry["deployments"]["hub"]["pool"] == "cpu-general"
     r = c.post("/v1/models", json=spec, headers=ADMIN)
     assert r.status_code in (200, 201), r.text

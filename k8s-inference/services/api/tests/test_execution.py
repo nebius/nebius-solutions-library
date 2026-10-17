@@ -387,9 +387,9 @@ def test_run_class_retry_policy_is_the_default_and_the_request_overrides_it(monk
         "retry": {"max_attempts": 2},
         "finalize": {"command": "deliver", "on_exit_codes": [75]},
     }
-    entry = models.to_entry(spec)
+    entry = models.definition(spec)
     assert entry["job"]["retry"] == {"maxAttempts": 2, "onExitCodes": [137, 143]}
-    m = catalog.normalise(entry)
+    m = entry
     job = jobs.build_run("op-fold-r", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"})
     rules = job["spec"]["podFailurePolicy"]["rules"]
     assert job["spec"]["backoffLimit"] == 1
@@ -407,4 +407,4 @@ def test_run_class_retry_policy_is_the_default_and_the_request_overrides_it(monk
     ] == [143]
     for bad in ({"max_attempts": 0}, {"max_attempts": 2, "on_exit_codes": []}, {"on_exit_codes": [137]}, "2"):
         with pytest.raises(HTTPException):
-            models.to_entry({**spec, "retry": bad})
+            models.definition({**spec, "retry": bad})

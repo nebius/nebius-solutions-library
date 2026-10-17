@@ -18,39 +18,35 @@ through that API; none is part of the platform.
 
 ## Catalog entry
 
-The entry below is the internal shape: what `services/api/models.py` (`to_entry`) produces from a model
-definition and what the renderers read. A client writes the definition of docs/API.md "Models" (its `scaling`
-vocabulary is docs/API.md "Scaling"); the built-in run classes in this directory are written in this shape by hand.
+The entry below is the shape of the built-in run classes (the `job` block `services/api/jobs.py` renders), written
+by hand in this directory. Endpoints have no entry: a client writes the definition of docs/API.md "Models" (its
+`scaling` vocabulary is docs/API.md "Scaling"), the API stores that spec with the placement it resolves
+(`services/api/models.py` `definition`) and `services/api/render_endpoint.py` renders the objects from the spec
+itself; the endpoint fixtures of `services/api/tests/catalog` are such specs with their placement under `deployments`.
 
 ```yaml
-id: <dns-name>                 # InferenceService name, namespace `models`
+id: <dns-name>
 displayName: ...
-task: speech-to-text | text-generation | molecular-docking | ...
-source: { repository, revision, license }
-mode: sync | async | run       # sync = request/response or stream over the endpoint; async = endpoint-call Job; run = Kubernetes Job + Kueue (job block, docs/JOBS.md)
-protocol: http | websocket | openai | grpc
-port: 8000
-endpoints: { ...: /path }      # what a client calls; documented, not enforced
-gpu: { count: 1, memoryGiB: 8, classes: [h100, rtx-pro-6000] }   # run classes: classes the image runs on, preferred first (profile prefer-<first>)
-concurrency: 1                 # sessions/requests one replica handles at once
-coldStartClass: fast | medium | slow     # informational
-price: { unit: call | audio-minute | 1k-tokens, usd: 0.05 }
-scaleToZero: true
-runtime:                       # runtime settings (services/api/render_endpoint.py DEFAULTS lists every one with its default)
-  image: <registry>/<repo>@sha256:...
-  command: [...]; args: [...]; env: [...]
-  resources: { gpu: 1, cpu: "4", memory: 16Gi }
-  scaling: { minReplicas: 0, maxReplicas: 1, target: 1, containerConcurrency: 1, scaleToZeroRetention: 2m }
-  timeout: 600                 # Knative revision timeout; cluster max 3600
-  shm: { enabled: true, size: 1Gi }
-  volumes: [{ name: cache, mountPath: /cache, sizeLimit: 8Gi }]
-  weights:                     # optional: weights on the region's shared filesystem (PVC models/weights-shared, subPath <path>)
-    sharedFilesystem: { enabled: true, path: <id>, mountPath: /weights }
-    env: { HF_HOME: /weights } # or NIM_CACHE_PATH, whatever the runtime reads; needs the region's weights filesystem
-  readinessProbe: { path: /readyz }
-deployments:                   # one key per cluster directory; values override `runtime`
-  hub:       { pool: h100-spot-1x, priorityClassName: serverless2-interactive }
-  eu-south1: { pool: rtx6000-spot-1x }   # same image everywhere: registry.serverless2.local/<alias>/<path> (docs/IMAGES.md)
+description: ...
+task: batch | smoke-test | ...
+mode: run                      # Kubernetes Job + Kueue (job block, docs/JOBS.md)
+protocol: kubernetes-job
+gpu: { count: 1, classes: [h100, rtx-pro-6000] }   # classes the image runs on, preferred first (profile prefer-<first>)
+price: { unit: gpu-hour | call, usd: 1.60 }        # display; billing uses deployments.<cluster>.price_per_gpu_hour
+job:                           # docs/JOBS.md "Run class"
+  image: <registry>/<repo>@sha256:...              # or `images: { default: ..., <class>: ... }` (docs/SCHEDULING.md)
+  command: [...]               # `{{name}}` placeholders from `parameters`
+  gpu: 1
+  cpu: "12"
+  memory: 32Gi
+  pvcSizeGi: 50
+  graceSeconds: 300
+  scratch: network | local-nvme
+parameters:
+  - { name: nsteps, type: number, label: Steps, default: 1000 }
+deployments:                   # one key per cluster id ("hub" = this API's region); absent = every region of the fleet
+  hub:       { parameters: { threads: "16" }, price_per_gpu_hour: 2.15 }
+  eu-south1: { parameters: { threads: "16" }, price_per_gpu_hour: 1.60, paused: false }
 ```
 
 ## Steps

@@ -3,6 +3,7 @@ caller. LiteLLM holds a best-effort mirror of the keys for its own OpenAI route 
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ import keys
 from config import AUTH_CACHE_S, TENANT_NS_PREFIX
 from resilience import parse_ts
 
+log = logging.getLogger("api")
 _cache: dict[str, tuple[float, dict]] = {}
 # (budget field, spend field, the 402 reason): a key is exhausted when any spend reached its budget
 _BUDGETS = (
@@ -55,23 +57,7 @@ class Principal:
         return keys.key_hash(json.dumps(identity, separators=(",", ":")))
 
     def public(self) -> dict:
-        i = self.info
-        legacy = (i.get("metadata") or {}).get("legacy") or {}
-        return {
-            "id": i.get("token") or i.get("key_name"),
-            "key_preview": i.get("key_name"),
-            "alias": i.get("key_alias"),
-            "tenant": self.tenant,
-            "budget": i.get("max_budget"),
-            "spend": i.get("spend", 0),
-            "models": i.get("models", []),
-            "created_at": i.get("created_at"),
-            "expires_at": i.get("expires"),
-            "status": "exhausted" if exhausted(i) else "active",
-            "role": self.role,
-            **limits_view(i),
-            "legacy": legacy or None,
-        }
+        return key_view(self.info, self.tenant)
 
 
 def _exhausted(i: dict) -> str | None:
@@ -83,6 +69,38 @@ def _exhausted(i: dict) -> str | None:
 
 def exhausted(i: dict) -> bool:
     return _exhausted(i) is not None
+
+
+def key_view(i: dict, tenant: str, admin: bool = False) -> dict:
+    """A key record as a caller may see it (docs/API.md "Keys"): the safe limit and usage fields (limits_view), never
+    the hash, the raw metadata or a secret. The caller's own view (`GET /v1/keys/me`): `id` is the key's token, with
+    its imported `legacy` block. The admin's view (`admin=True`: `GET /v1/keys`, the fleet listing, the create and
+    update answers): `id` is the alias, `blocked` and a `status` that says `blocked` for a retained blocked key (an
+    imported record with unknown scopes, or a blocked one), and the key's run usage from the ledger."""
+    legacy = (i.get("metadata") or {}).get("legacy") or {}
+    blocked = admin and bool(i.get("blocked"))
+    out = {
+        "id": i.get("key_alias") if admin else (i.get("token") or i.get("key_name")),
+        "key_preview": i.get("key_name"),
+        "alias": i.get("key_alias"),
+        "tenant": tenant,
+        "budget": i.get("max_budget"),
+        "spend": i.get("spend", 0),
+        "models": i.get("models", []),
+        "created_at": i.get("created_at"),
+        "expires_at": i.get("expires"),
+        "status": "blocked" if blocked else ("exhausted" if exhausted(i) else "active"),
+        **({"blocked": blocked} if admin else {}),
+        "role": (i.get("metadata") or {}).get("role") or "user",
+        **limits_view(i),
+        **({} if admin else {"legacy": legacy or None}),
+    }
+    if admin and db.enabled() and i.get("token"):
+        try:
+            out["usage"] = keys.run_usage(i["token"])
+        except Exception as e:  # noqa: BLE001 - the listing never fails on the usage figures
+            log.warning("key %s: run usage unavailable: %s", i.get("key_alias"), e)
+    return out
 
 
 def limits_view(i: dict) -> dict:

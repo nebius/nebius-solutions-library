@@ -250,7 +250,6 @@ locals {
     { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
     { name = "IMAGES_SOURCE", value = local.images_source },
     # live sessions (docs/API.md "Sessions"): off unless `sessions.enabled`
-    { name = "ADMITTED_LEGACY", value = local.f.admitted_legacy ? "true" : "false" },
     { name = "SESSIONS_ENABLED", value = local.f.sessions.enabled ? "true" : "false" },
     { name = "SESSION_CLAIM_TTL_S", value = tostring(local.f.sessions.claim_ttl_s) },
     { name = "SESSION_ATTACH_WAIT_S", value = tostring(local.f.sessions.attach_wait_s) },

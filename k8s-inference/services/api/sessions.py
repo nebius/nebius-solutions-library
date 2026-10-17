@@ -46,8 +46,6 @@ import kube
 import leases
 from resilience import iso, retry
 
-_ts = iso  # app.py formats a session's deadline through this name
-
 log = logging.getLogger("api")
 PROTOCOL_PREFIX = "s2-session."  # Sec-WebSocket-Protocol entry carrying the claim token (WebSocket workers)
 CLAIM_HEADER = "x-serverless2-session-claim"  # the claim token on a plain HTTP request (NDJSON POST workers)
@@ -128,12 +126,12 @@ def gpus_per_replica(m: dict) -> int:
 
 def transport_deadline_s(m: dict) -> int | None:
     """The longest connection the endpoint's transport carries (docs/API.md "Sessions"): a single-node (Knative)
-    endpoint ends every request at its revision timeout (`timeout_s` of the model, the catalog's `runtime.timeout`,
-    600 s by default; the fleet's Knative config bounds it), WebSocket or NDJSON alike, with no record on the
+    endpoint ends every request at its revision timeout (`timeout_s` of the model, 600 s by default; the fleet's
+    Knative config bounds it), WebSocket or NDJSON alike, with no record on the
     session; a multi-node endpoint's route carries no request timeout (`request: 0s`). None = no transport bound."""
     if int(m.get("nodes") or 1) > 1:
         return None
-    t = (m.get("runtime") or {}).get("timeout")
+    t = m.get("timeout_s")
     try:
         return int(t) if t is not None else 600
     except (TypeError, ValueError):

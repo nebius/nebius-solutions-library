@@ -3,6 +3,7 @@
 Set TEST_DATABASE_URL to run these tests. CI provides PostgreSQL; each test uses its own schema.
 """
 
+import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -41,14 +42,93 @@ def database(monkeypatch):
 
 
 def entry(mid="test-model", regions=("hub",)):
-    return {"id": mid, "mode": "sync", "runtime": {"image": "example:1"}, "deployments": {r: {} for r in regions}}
+    """A definition as db.upsert_model reads it: the id and the placement it freezes in the row."""
+    return {"id": mid, "spec": {"id": mid, "image": "example:1"}, "deployments": {r: {} for r in regions}}
+
+
+def test_the_entry_projection_migrates_to_rows(database, monkeypatch):
+    """Migration 31: a row keeps its spec and the placement its entry froze (`ibDevices` -> `ib_devices`), the entry
+    columns go, and a pending change holds the row shape (models.load) taken from the old entry's own spec."""
+    real = db.MIGRATIONS
+    monkeypatch.setattr(db, "MIGRATIONS", [])
+    db.migrate()  # the baseline alone: the entry columns are still there
+    spec = {"id": "m", "kind": "endpoint", "image": "i"}
+    old = {
+        "id": "m",
+        "mode": "sync",
+        "spec": spec,
+        "managed_by": "api",
+        "runtime": {"image": "i"},
+        "deployments": {"hub": {"pool": "h100-spot-8x-ib", "ibDevices": 8}, "eu-south1": {}},
+    }
+    with psycopg.connect(database) as c:
+        c.execute(
+            "insert into models (id, kind, spec, entry, version) values ('m', 'endpoint', %s, %s, 2)",
+            (json.dumps(spec), json.dumps(old)),
+        )
+        c.execute(
+            "insert into models_history (id, version, action, spec, entry) values ('m', 2, 'update', %s, %s)",
+            (json.dumps(spec), json.dumps(old)),
+        )
+        c.execute(
+            "insert into model_changes (id, version, entry, previous) values ('m', 2, %s, %s)",
+            (json.dumps(old), json.dumps({**old, "deployments": {"hub": {}}})),
+        )
+        c.execute("insert into model_changes (id, version, entry, previous) values ('gone', 3, null, '{}')")
+    monkeypatch.setattr(db, "MIGRATIONS", real)
+    assert db.migrate() == db.BASELINE_VERSION + len(real)
+    placement = {"hub": {"pool": "h100-spot-8x-ib", "ib_devices": 8}, "eu-south1": {}}
+    row = db.get_model("m")
+    assert row["spec"] == spec and row["deployments"] == placement and "entry" not in row
+    assert [h["spec"] for h in db.history("m")] == [spec]
+    changes = {c["id"]: c for c in db.pending_changes()}
+    assert changes["m"]["entry"] == {"spec": spec, "managed_by": "api", "version": 2, "deployments": placement}
+    assert changes["m"]["previous"] == {"spec": spec, "managed_by": "api", "deployments": {"hub": {}}}
+    assert changes["gone"]["entry"] is None and changes["gone"]["previous"] == {}
+    with psycopg.connect(database) as c, pytest.raises(psycopg.errors.UndefinedColumn):
+        c.execute("select entry from models")
 
 
 def test_two_api_replicas_migrate_concurrently(database):
+    """A fresh database gets the baseline once, recorded as BASELINE_VERSION; a second start finds it and runs nothing."""
+    version = db.BASELINE_VERSION + len(db.MIGRATIONS)
     with ThreadPoolExecutor(2) as ex:
-        assert list(ex.map(lambda _: db.migrate(), range(2))) == [len(db.MIGRATIONS)] * 2
+        assert list(ex.map(lambda _: db.migrate(), range(2))) == [version] * 2
     with psycopg.connect(database) as c:
-        assert c.execute("select count(*) from schema_version").fetchone()[0] == len(db.MIGRATIONS)
+        rows = c.execute("select version from schema_version order by version").fetchall()
+        assert rows[0] == (db.BASELINE_VERSION,) and len(rows) == 1 + len(db.MIGRATIONS)
+    assert db.migrate() == version
+
+
+def test_migrations_above_the_baseline_apply_once_in_order(database, monkeypatch):
+    """A migration appended after the baseline is numbered BASELINE_VERSION + 1 onwards, applied when missing and
+    recorded; a database that already has it runs nothing."""
+    monkeypatch.setattr(db, "MIGRATIONS", ["create table if not exists lean_probe (id int primary key)"])
+    assert db.migrate() == db.BASELINE_VERSION + 1
+    with psycopg.connect(database) as c:
+        assert [r[0] for r in c.execute("select version from schema_version order by version")] == [
+            db.BASELINE_VERSION,
+            db.BASELINE_VERSION + 1,
+        ]
+        c.execute("insert into lean_probe values (1)")
+    assert db.migrate() == db.BASELINE_VERSION + 1
+    with psycopg.connect(database) as c:
+        assert c.execute("select count(*) from lean_probe").fetchone()[0] == 1  # not recreated, not rerun
+
+
+def test_a_database_below_the_baseline_is_refused_with_the_upgrade_path(database):
+    """A database an earlier release left below the baseline (its increments still pending) is not guessed at: the
+    API refuses to start and names the previous release as the way up. Nothing is written."""
+    with psycopg.connect(database) as c:
+        c.execute(
+            "create table schema_version (version int primary key, applied_at timestamptz not null default now())"
+        )
+        c.execute("insert into schema_version (version) values (29)")
+    with pytest.raises(RuntimeError, match="below this release's baseline 30.*previous release"):
+        db.migrate()
+    with psycopg.connect(database) as c:
+        assert c.execute("select max(version) from schema_version").fetchone()[0] == 29
+        assert not c.execute("select to_regclass('attempts')").fetchone()[0]
 
 
 def test_delete_and_recreate_keeps_monotonic_history(database):

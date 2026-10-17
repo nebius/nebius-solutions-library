@@ -218,7 +218,7 @@ PYEOF2
       "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$f" > /dev/null; echo "   ok render_endpoint $(basename "$f" .yaml)"
     done
   done
-  step "example model (stack/platform/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
+  step "example model (stack/platform/llm-example.json): the API's spec -> definition -> rendered objects, for the example's first GPU class"
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
 import json, subprocess, sys
 tmp, root = sys.argv[1], sys.argv[2]
@@ -229,11 +229,11 @@ pools = {f"{r['id']}-{pn}": {"region": r["id"], "pool": pn, "gpu_class": p["gpu_
 classes = sorted({p["gpu_class"] for p in pools.values() if p.get("gpu_class")})
 spec = dict(json.load(open(f"{root}/stack/platform/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
 json.dump(pools, open(f"{tmp}/pools.json", "w"))
-r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "entry", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
+r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "definition", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
 if r.returncode: print(r.stderr); sys.exit(1)
 open(f"{tmp}/llm-example.yaml", "w").write(r.stdout)
 import yaml; e = yaml.safe_load(r.stdout)
-print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
+print(f"   ok definition llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
 json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
 EOF
   for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do

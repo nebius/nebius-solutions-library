@@ -272,10 +272,6 @@ variable "fleet" {
       max_revision_timeout_s = optional(number, 3600)
     }), {})
 
-    # Transitional acceptance of the admission tokens of API releases up to 0.11.53 at the gateway hook (key-only, key+model)
-    # for the endpoint callers they rendered; false once nothing of them is in flight (docs/API.md "Endpoint calls").
-    admitted_legacy = optional(bool, false)
-
     # Live sessions (docs/API.md "Sessions"): admitted streams to endpoints, bound to one connection and one worker pod.
     # Off by default; the workers of a model must implement the attach/release protocol before it is switched on.
     sessions = optional(object({

@@ -13,6 +13,7 @@ import app as appmod
 import auth
 import catalog
 import config
+import db
 import jobs
 import keys
 import kube
@@ -441,7 +442,7 @@ def test_catalog_entries_are_renderable_or_run_classes():
         for f in os.listdir(d):
             doc = yaml.safe_load(open(os.path.join(d, f)))
             assert doc.get("id"), f
-            assert doc.get("runtime") or (
+            assert doc.get("image") or (
                 doc.get("mode") == "run" and doc.get("job", {}).get("image") and doc["job"].get("command")
             ), f
 
@@ -2297,8 +2298,8 @@ class FakeDB:
     def get_model(self, mid):
         return self.rows.get(mid)
 
-    def upsert_model(self, entry, spec, by, managed_by="api", expected=None, create_only=False):
-        mid = entry["id"]
+    def upsert_model(self, definition, spec, by, managed_by="api", expected=None, create_only=False):
+        mid = definition["id"]
         old = self.rows.get(mid)
         if expected is not None and (old or {}).get("version") != expected:
             from fastapi import HTTPException
@@ -2309,21 +2310,24 @@ class FakeDB:
 
             raise HTTPException(409, "model exists")
         version = max((h["version"] for h in self.hist if h["id"] == mid), default=0) + 1
-        self.changes[mid] = {
+        row = {
             "id": mid,
-            "version": version,
-            "entry": copy.deepcopy(entry),
-            "previous": copy.deepcopy((old or {}).get("entry") or self.changes.get(mid, {}).get("previous") or {}),
-        }
-        self.rows[entry["id"]] = {
-            "id": entry["id"],
             "kind": spec.get("kind", "endpoint"),
             "spec": copy.deepcopy(spec),
-            "entry": copy.deepcopy(entry),
+            "deployments": copy.deepcopy(definition["deployments"]),
             "version": version,
             "managed_by": managed_by,
             "updated_by": by,
         }
+        self.changes[mid] = {
+            "id": mid,
+            "version": version,
+            "entry": {k: copy.deepcopy(row[k]) for k in db.ROW},
+            "previous": copy.deepcopy(
+                {k: old[k] for k in db.ROW} if old else self.changes.get(mid, {}).get("previous") or {}
+            ),
+        }
+        self.rows[mid] = row
         self.hist.append(
             {
                 "version": version,
@@ -2331,10 +2335,10 @@ class FakeDB:
                 "by": by,
                 "at": "now",
                 "spec": copy.deepcopy(spec),
-                "id": entry["id"],
+                "id": mid,
             }
         )
-        return self.rows[entry["id"]]
+        return self.rows[mid]
 
     def delete_model(self, mid, by, expected=None):
         if mid not in self.rows:
@@ -2353,7 +2357,7 @@ class FakeDB:
             "id": mid,
             "version": self.rows[mid]["version"] + 1,
             "entry": None,
-            "previous": self.rows[mid]["entry"],
+            "previous": {k: self.rows[mid][k] for k in db.ROW},
         }
         del self.rows[mid]
         return True
@@ -2554,7 +2558,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
         row["version"] == 1
         and row["managed_by"] == "api"
         and row["updated_by"] == "tenant-demo"
-        and row["entry"]["runtime"]["port"] == 8000
+        and row["spec"]["port"] == 8000
     )
     assert (
         "configmaps" not in fake.__dict__ and "configmaps" not in south.__dict__

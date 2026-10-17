@@ -354,32 +354,6 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         execution = _json(ann.get(f"{LABEL}/execution")) or {}
         done_at = _ts(st.get("completionTime"))
         age = (datetime.now(timezone.utc) - done_at).total_seconds() if done_at else None
-        if (
-            last is None
-            and execution.get("io_mode") == "application"
-            and not ann.get(f"{LABEL}/cancelled")
-            and not is_jobset(job)  # single-worker Jobs only: a gang's outcome is its coordinator's, judged above
-        ):
-            # the Job is Complete (completions 1, backoffLimit 0: main exited 0), yet the NEWEST attempt's record says
-            # "interrupted": the uploader never saw the terminated state (a kubelet status lag longer than its polling,
-            # op-e0f60cf93b5c9b42 2026-10-15) and gave up. Exact-attempt contract: only that newest run attempt, only
-            # a record that literally says "interrupted" (never a synthesized PREEMPTED), only with ITS OWN committed
-            # result_ref and no failed export, only on a Complete, uncancelled, single-worker Job. An older attempt's
-            # result, a missing one, a later failed attempt, a Failed or still-running Job, a cancelled run and a gang
-            # change nothing.
-            newest = atts[-1] if atts and atts[-1].get("attempt_role", "run") == "run" else None
-            raw = next((r for r in (records or []) if r.get("pod") == (newest or {}).get("attempt_id")), None)
-            if (
-                newest
-                and newest["status"] == "PREEMPTED"
-                and raw is not None
-                and raw.get("status") == "interrupted"
-                and newest.get("result_ref")
-                and newest.get("export_state") != "failed"
-            ):
-                newest["status"] = "SUCCEEDED"
-                newest["reason"] = attempts.OBSERVED_COMPLETION
-                last = newest
         if last and last.get("export_state") == "failed":
             status, error = (
                 "EXPORT_FAILED",

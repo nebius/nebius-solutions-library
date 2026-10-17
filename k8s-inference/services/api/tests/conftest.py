@@ -37,16 +37,6 @@ def _marks_for_follows_a_stubbed_ledger(monkeypatch):
         return out
 
     monkeypatch.setattr(attempts, "marks_for", bulk)
-    real_completion, real_mark = attempts.completion_of, attempts.mark_completed
-
-    def completion(operation):  # a stubbed ledger holds no observed-completion marks (migration 29)
-        return None if attempts._marks is not real_one else real_completion(operation)
-
-    def mark(*a, **k):
-        return None if attempts._marks is not real_one else real_mark(*a, **k)
-
-    monkeypatch.setattr(attempts, "completion_of", completion)
-    monkeypatch.setattr(attempts, "mark_completed", mark)
 
 
 @pytest.fixture(autouse=True)

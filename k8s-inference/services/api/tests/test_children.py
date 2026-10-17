@@ -58,7 +58,7 @@ BUCKET = "serverless2-demo-eu-north1"
 
 def _entry(spec):
     kube.fleet = lambda: FLEET
-    return catalog.normalise(models_mod.to_entry(spec, managed_by="api"))
+    return models_mod.definition(spec, managed_by="api")
 
 
 @pytest.fixture
@@ -586,14 +586,14 @@ def test_definite_refusals_roll_the_intent_back(rig, monkeypatch):
     # a pending intent whose child model changed its image: not completed against another image (the sweep ends
     # it with the reason; synchronously the replay is refused)
     _pending_row(op, "u1", child)
-    fake.entries["cosmos-nano"]["runtime"]["image"] = "example.org/cosmos:2"
+    fake.entries["cosmos-nano"]["image"] = "example.org/cosmos:2"
     r = _post(c, op, "u1")
     assert r.status_code == 409 and "changed its image" in r.text and children.readback(NS, op, "u1") is None
     _pending_row(op, "u1", child)
     assert children.sweep() == [f"{child}:ended"]
     rb = children.readback(NS, op, "u1")
     assert rb["state"] == "ended" and "changed its image" in rb["reason"] and keys.member_of(child) is None
-    fake.entries["cosmos-nano"]["runtime"]["image"] = "example.org/cosmos:1"
+    fake.entries["cosmos-nano"]["image"] = "example.org/cosmos:1"
     # a pending intent whose parent is over before anything was created: ended with the cause, nothing created
     children._drop(op, "u2")
     child2 = children.child_id(op, "u2")

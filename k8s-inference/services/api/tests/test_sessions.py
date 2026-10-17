@@ -139,9 +139,9 @@ def test_a_session_longer_than_the_transport_deadline_is_refused_with_the_bound(
     real = api._model
     monkeypatch.setattr(api, "_model", lambda name: {**real(name), "nodes": 2})
     assert c.post("/v1/models/llm-example:session", headers=H, json={"timeout_s": 3600}).status_code == 202
-    assert sessions.transport_deadline_s({"nodes": 1, "runtime": {"timeout": 1800}}) == 1800
-    assert sessions.transport_deadline_s({"nodes": 1, "runtime": {}}) == 600
-    assert sessions.transport_deadline_s({"nodes": 2, "runtime": {"timeout": 60}}) is None
+    assert sessions.transport_deadline_s({"nodes": 1, "timeout_s": 1800}) == 1800
+    assert sessions.transport_deadline_s({"nodes": 1}) == 600
+    assert sessions.transport_deadline_s({"nodes": 2, "timeout_s": 60}) is None
 
 
 def test_create_admits_on_the_key_and_the_hook_binds_the_claim_once(live):
@@ -246,7 +246,7 @@ def test_worker_routes_verify_the_pod_and_only_the_attached_worker_watches(live,
 
 
 def test_security_policy_carries_the_session_headers():
-    doc = render_endpoint._securitypolicy({"name": "stt", "namespace": "models", "modelId": "stt"})
+    doc = render_endpoint._securitypolicy({"name": "stt", "namespace": "models", "model_id": "stt", "spec": {}})
     ext = doc["spec"]["extAuth"]
     assert {"x-serverless2-session-claim", "x-serverless2-session", "x-serverless2-connection"} <= set(
         ext["headersToExtAuth"]

@@ -278,7 +278,7 @@ CPU_CLASS = {
 def _model(spec):
     import models
 
-    return catalog.normalise(models.to_entry(spec, managed_by="api"))
+    return models.definition(spec, managed_by="api")
 
 
 def _build(name, m, placement):

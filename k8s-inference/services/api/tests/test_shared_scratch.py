@@ -71,7 +71,7 @@ def shared(client, admin_keys, fake_keys, monkeypatch):
     monkeypatch.setattr(kube, "fleet", lambda: {**fleet, "fit": FIT})
     monkeypatch.setattr(kube, "cluster_id_or_none", lambda region: "hub" if region == "eu-north1" else None)
     m = dict(catalog.get("llm-example"))
-    m["runtime"] = {**(m.get("runtime") or {}), "callScratch": "shared"}
+    m["call_scratch"] = "shared"
     monkeypatch.setattr(catalog, "get", lambda name: m if name == "llm-example" else None)
     cl.pvcs[(NS, SHARED_SCRATCH_PVC)] = dict(BOUND)
     data = {

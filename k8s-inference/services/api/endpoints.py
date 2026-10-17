@@ -73,7 +73,7 @@ def to_public(m: dict, obj: dict, region: str = REGION) -> dict:
     st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
     containers = pred.get("containers") or []
     ann = obj.get("metadata", {}).get("annotations") or {}
-    # the native vocabulary read back from Knative's fields (models.py `to_entry` is the inverse); an API-managed
+    # the scaling vocabulary read back from Knative's fields (render_endpoint renders it); an API-managed
     # definition's saved policy wins, it carries what Knative defaults silently
     rate = pred.get("scaleMetric") == "rps"
     utilization = int(float(ann.get("autoscaling.knative.dev/target-utilization-percentage", 70)))

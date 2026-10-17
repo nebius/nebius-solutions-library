@@ -10,8 +10,8 @@ import logging
 import time
 import urllib.parse
 import uuid
-from contextlib import asynccontextmanager, nullcontext
-from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -34,7 +34,7 @@ import leases
 import models
 import monitoring
 import pause
-import placement as placing
+import placement as placing  # noqa: F401 - tests patch placing.choose_class through this name
 import render
 import schemas
 import sessions
@@ -47,11 +47,10 @@ from auth import (
     allows_model,
     authorize,
     check_model,
-    exhausted,
     fleet_operator,
     forget,
     forget_hash,
-    limits_view,
+    key_view,
     principal,
     scoped,
 )
@@ -80,6 +79,8 @@ from schemas import (
 )
 
 log = logging.getLogger("api")
+_admit, _release = stages.admit, stages.release  # the sync and gateway admissions (tests patch these names)
+_job_deadline, _job_gpus = jobs.deadline_of, jobs.gpus_of  # tests read these names
 PAGE_DEFAULT, PAGE_MAX = 50, 500  # every list route: `limit` default and ceiling (docs/API.md "Pagination")
 _ops_auth_cache: dict = {}  # (listing id, key hash, role, models) -> (listing, until, names, entries): list_operations
 
@@ -145,248 +146,6 @@ async def _warm_loop():
         await asyncio.sleep(cfg.OPS_LIST_WARM_S)
 
 
-def _admit(
-    p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True, run_member: bool = False
-) -> dict:
-    """Reserve the slot, the request and the GPU seconds of `operation` on the caller's key (keys.admit); nothing
-    without the database, nothing for the router key (it carries no budget). `run_member`: the operation is the root
-    of a logical run whose continuations join its reservation (keys.prepare_run_member)."""
-    if not db.enabled() or p.role == keys.ROUTER["role"]:
-        return {"replay": False}
-    try:
-        return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request, run_member)
-    except keys.KeyLimit as e:
-        # An endpoint may itself answer429 AFTER admission. Only this ledger
-        # refusal proves that no execution was admitted by this request.
-        headers = {"X-Serverless2-Admission": "refused"} if e.status == 429 else None
-        raise HTTPException(e.status, e.detail, headers=headers)
-
-
-def _job_deadline(job: dict) -> int | None:
-    """The enforced wall-clock bound of a rendered Job or JobSet (its activeDeadlineSeconds; a JobSet's is on its
-    replicated Jobs)."""
-    spec = job.get("spec") or {}
-    if job.get("kind") == "JobSet":
-        ds = [
-            int(((rj.get("template") or {}).get("spec") or {}).get("activeDeadlineSeconds") or 0)
-            for rj in spec.get("replicatedJobs") or []
-        ]
-        return max(ds) if ds and max(ds) else None
-    d = spec.get("activeDeadlineSeconds")
-    return int(d) if d else None
-
-
-def continuation_admission(
-    root: str, predecessor: str | None, transfer_only: bool = False, stage: str | None = None, kind: str = "stage"
-):
-    """The admission a continuation builder calls with its rendered Job, right before creating it: the member joins
-    the run's reservation on the root's original key (keys.prepare_run_member: key still valid, current head, budget
-    for its GPU bound, the slot reused or re-acquired). The returned callable raises HTTPException with the ledger's
-    status."""
-
-    def admit(job: dict) -> None:
-        try:
-            keys.prepare_run_member(
-                root,
-                job["metadata"]["name"],
-                predecessor,
-                _job_gpus(job),
-                _job_deadline(job),
-                transfer_only,
-                **({"kind": kind, "stage": stage} if stage else {}),
-            )
-        except keys.KeyLimit as e:
-            raise HTTPException(e.status, e.detail)
-
-    return admit
-
-
-def _require_current(p: Principal, source: str, root: str) -> None:
-    """A public continuation renders from `source` (the Job the caller named), while the ledger admits it after the
-    lineage's current head. The two must be the same operation, or the head an export retry / finalizer of the source
-    (`export-of` = source: the compute attempt stays where it was): a resume or export of an older member after a
-    newer compute successor exists is refused with the head named, never a silent reopening of old state."""
-    if not db.enabled():
-        return
-    member = keys.member_of(root)
-    if member is None:
-        return
-    root, _stage, _kind, head = _lineage(member, root)
-    if head in (None, source):
-        return
-    found = _find(p.namespace, head)
-    if found and (found[0]["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == source:
-        return
-    if not found and _pending_admission(p.namespace, root, head):
-        return  # a pending admission: continue_run admits only the same intent (the operation named by the head)
-    raise HTTPException(
-        409,
-        f"operation {source} was continued by {head}; continue {head} (the current member of its lineage), not {source}",
-    )
-
-
-def continue_run(root: str, build, transfer_only: bool = False, ns: str | None = None):
-    """Run a continuation builder (jobs.resume/export_again/switch_class/recover, given as a callable taking the
-    admission callback) under the run's ledger: the new member follows the current head. Nothing is ever retired
-    automatically: a head that was admitted but whose Job exists nowhere and that no attempt reported (an API process
-    that died between its admission and its create, a create whose answer was lost, or a replica paused between the
-    two: indistinguishable from outside) stays PENDING, and the lineage continues only by the same intent — the
-    builder that renders that very operation name (the deterministic `-x<n>` / `-r<n>` of a replayed request) is
-    admitted as a replay of the pending member and creates its Job (AlreadyExists is the same Job); any other
-    continuation is refused (409 naming the pending admission). A builder that fails after admission is never rolled
-    back on an immediate absence either (`_reconcile_continuation`): only a definite refusal (4xx) rolls the member
-    back. `ns` (the tenant namespace) enables the pending-head judgement; without it the head is taken as is."""
-    if not db.enabled():
-        return build(None)
-    root, stage, kind, head = _lineage(keys.member_of(root), root)
-    if head is None:
-        return build(None)
-    pending_head = head if ns is not None and head != root and _pending_admission(ns, root, head) else None
-    predecessor = keys.member_of(head)["predecessor"] if pending_head else head
-    pending: dict = {}
-
-    def admit(job: dict) -> None:
-        name = job["metadata"]["name"]
-        if pending_head and name != pending_head:
-            raise HTTPException(
-                409,
-                f"operation {root}: its lineage has a pending admission {pending_head} (admitted, its Job not created or "
-                "not readable yet); only a replay of the same request continues it, nothing else is admitted meanwhile",
-            )
-        continuation_admission(root, predecessor, transfer_only, stage=stage, kind=kind)(job)
-        pending["name"] = name
-
-    try:
-        return build(admit)
-    except Exception as e:
-        if pending.get("name") and pending["name"] != pending_head:
-            found = _reconcile_continuation(pending["name"], ns, e)
-            if found is not None:
-                return found, True  # created; the answer was lost: the member stays, the Job is the continuation
-        raise
-
-
-def _lineage(member: dict | None, root: str) -> tuple[str, str | None, str, str | None]:
-    """(root, stage, kind, head) of the lineage a continuation of `root` follows on the ledger. A stage of a graph
-    (docs/JOBS.md "Stage composition") follows the stage's own head inside the graph root's run (the root's key, slot
-    and budget), never the root's lineage or a sibling's; an endpoint child (docs/JOBS.md "Endpoint children") its
-    own head (its unit's lineage) inside the parent run's ledger, nothing inferred or counted again; anything else
-    the run's head."""
-    if member and member["kind"] == "stage":
-        return member["root"], member["stage"], "stage", keys.stage_head(member["root"], member["stage"])
-    if member and member["kind"] == "child":
-        return member["root"], member["stage"], "child", keys.child_head(member["root"], member["stage"])
-    return root, None, "stage", keys.run_head(root)
-
-
-def _pending_admission(ns: str, root: str, head: str) -> bool:
-    """Whether the lineage head is an admission without a Job: active member, no Job anywhere (a clean 404 across the
-    regions; an unreachable cluster is not an absence), no attempt record (a Job that ran and expired has records). Such a
-    head is never retired here (another replica may be creating it right now); it is resolved by the same intent."""
-    try:
-        if _find(ns, head) is not None:
-            return False
-    except HTTPException:
-        return False
-    if attempts.enabled() and any(r["operation"] == head for r in attempts.for_operation(root)):
-        return False
-    m = keys.member_of(head)
-    return bool(m) and m["state"] == "active" and (m["predecessor"] is not None or m["kind"] == "child")
-
-
-def _reconcile_continuation(name: str, ns: str | None, e: Exception):
-    """After a builder raised past the admission: the member is NEVER rolled back here. A definite refusal (4xx)
-    proves only that THIS caller's create was refused, not that no other replica created the operation (both may have
-    admitted the same intent: one member, two creates); an ambiguous failure (5xx, transport) may still be accepted by
-    the API server. So the member stays a pending admission in every case: the Job found is returned (the
-    continuation exists, whoever created it); otherwise the same request replays the intent (continue_run admits it as
-    a replay of the member and creates the Job). Returns the Job when it exists, else None."""
-    if ns is not None:
-        try:
-            found = _find(ns, name)
-        except HTTPException as f:
-            log.warning(
-                "continuation %s: create failed (%s), cluster unreadable (%s): member kept", name, str(e)[:80], f.detail
-            )
-            return None
-        if found is not None:
-            log.warning(
-                "continuation %s: its Job exists although this create failed (%s); member kept", name, str(e)[:120]
-            )
-            return found[0]
-    log.warning(
-        "continuation %s: create failed (%s): member kept as a pending admission (the same request replays it)",
-        name,
-        str(e)[:120],
-    )
-    return None
-
-
-def _find(ns: str, name: str, region: str | None = None) -> tuple[dict, str | None] | None:
-    """The operation's Job as (job, region): jobs.find over the regions, or jobs.get in the one named; a clean
-    absence (404) is None, any other failure raises as it is."""
-    try:
-        return (jobs.get(ns, name, region), region) if region is not None else jobs.find(ns, name)
-    except HTTPException as e:
-        if e.status_code != 404:
-            raise
-        return None
-
-
-def settle_deleted(job: dict) -> None:
-    """A run cancelled before it ever started (jobs.cancel deleted it): its member measured nothing and held no GPU
-    (never-started is the evidence, not an absent pod): settled at zero, the run closes when nothing else is active."""
-    if not db.enabled() or (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled") != "deleted":
-        return
-    try:
-        keys.settle_run_member(job["metadata"]["name"], 0.0)
-    except Exception as e:  # noqa: BLE001 - the reconciler's sweep settles what this missed
-        log.warning("settlement of cancelled %s: %s", job["metadata"]["name"], e)
-
-
-def _release(operation: str, gpu_seconds: float | None = None) -> None:
-    if db.enabled():
-        try:
-            keys.release(operation, gpu_seconds)
-        except Exception as e:  # noqa: BLE001 - the reconciler's sweep releases what this missed
-            log.warning("release of %s: %s", operation, e)
-
-
-def _job_gpus(job: dict) -> int:
-    """GPUs a rendered Job (or JobSet) holds while it runs: nvidia.com/gpu over its containers times its parallelism."""
-
-    def pods(spec: dict) -> int:
-        tmpl = (spec.get("template") or {}).get("spec") or {}
-        n = 0
-        for c in (tmpl.get("containers") or []) + (tmpl.get("initContainers") or []):
-            res = c.get("resources") or {}
-            n += int(
-                str(
-                    (res.get("limits") or {}).get("nvidia.com/gpu")
-                    or (res.get("requests") or {}).get("nvidia.com/gpu")
-                    or 0
-                )
-            )
-        return n * int(spec.get("parallelism") or 1)
-
-    if job.get("kind") == "JobSet":
-        return sum(
-            pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1)
-            for rj in (job.get("spec") or {}).get("replicatedJobs") or []
-        )
-    return pods(job.get("spec") or {})
-
-
-def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
-    """GPU seconds a run may take: its GPUs times its enforced timeout, for a key with a finite GPU-second budget
-    (such a key must give timeout_s on a GPU run); unbounded keys and CPU-only runs reserve nothing."""
-    if p.info.get("budget_gpu_seconds") is None or gpus == 0:
-        return 0.0
-    if not req.timeout_s:
-        raise HTTPException(400, "this key has a GPU-second budget: give timeout_s so the run's reservation is bounded")
-    return float(gpus * req.timeout_s)
-
-
 OPERATION_HEADER = "x-serverless2-operation"  # the admitted operation a caller names (with its token)
 ATTEMPT_HEADER = "x-serverless2-attempt"  # the caller's pod (an endpoint call's attempt)
 _admission_cache: dict[tuple, float] = {}  # (operation, attempt, key hash) -> verified until (the readiness loop polls)
@@ -398,7 +157,7 @@ def _admitted_token(key_hash: str, model: str | None = None, operation: str | No
     """HMAC the gateway hook verifies on the API's own admitted calls: one API admission + its gateway authorization
     is one logical request. Bound to the key, the model and the operation the admission was for
     (`<key hash>:<model>:<operation>`: a proxied synchronous call's `sync-…` admission, an endpoint call's operation);
-    the router key is the shared secret of this fleet. The shorter forms are the tokens of releases up to 0.11.53."""
+    the router key is the shared secret of this fleet."""
     msg = ":".join(x for x in (key_hash, model, operation) if x)
     return hmac.new((cfg.ROUTER_KEY or "").encode(), msg.encode(), hashlib.sha256).hexdigest()
 
@@ -431,8 +190,7 @@ def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: 
     this key (admitted, not released: the ledger); for an endpoint call's caller the operation's Job is this key's,
     this model's and not over, and the attempt named is one of its live pods. The reservation and the cancel fence
     are read on every call; only the identity (Job, owner, pod) is remembered for ADMISSION_CACHE_S (the caller's
-    readiness loop), so a release or a cancel closes the gate at once. ADMITTED_LEGACY accepts the key-only and
-    key+model tokens of releases up to 0.11.53 for the callers they rendered."""
+    readiness loop), so a release or a cancel closes the gate at once."""
     if not cfg.ROUTER_KEY or not token:
         return False
     key_hash = p.hash
@@ -477,10 +235,6 @@ def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: 
             return False
         _admission_cache[(operation, attempt, key_hash)] = now + ADMISSION_CACHE_S
         return True
-    if cfg.ADMITTED_LEGACY:
-        return hmac.compare_digest(token, _admitted_token(key_hash, model)) or hmac.compare_digest(
-            token, _admitted_token(key_hash)
-        )
     return False
 
 
@@ -750,25 +504,25 @@ def _writes_here():
 def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None = None) -> dict:
     """Commit desired state and history, then attempt its durable reconciliation."""
     _writes_here()
-    entry = models.to_entry(spec, managed_by="api")
-    if "scaling" in entry["spec"]:
+    d = models.definition(spec, managed_by="api")
+    if "scaling" in d["spec"]:
         spec = {
             **spec,
-            "scaling": entry["spec"]["scaling"],
+            "scaling": d["spec"]["scaling"],
         }  # store the complete policy that was rendered (models.validate)
-    mid = entry["id"]
+    mid = d["id"]
     existing = catalog.get(mid)
     if existing and not replace:
         raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
     if existing:
         _runtime_or_409(mid)
-    result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(entry["deployments"]), "applied": {}}
+    result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(d["deployments"]), "applied": {}}
     row = db.upsert_model(
-        entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace
+        d, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace
     )
     catalog.invalidate()
     result.update(reconcile_models().get(mid, {"pending": True}))
-    result.update({"version": row.get("version"), "model": catalog.to_public(catalog.normalise(entry))})
+    result.update({"version": row.get("version"), "model": catalog.to_public(d)})
     return result
 
 
@@ -1036,7 +790,7 @@ async def invoke(
     if mode == "run" and req.execution and req.execution.stage and not allows_model(p, model):
         # a stage on a model the key is not granted: only as a delegated stage of a root the operator's run class
         # delegates to (docs/JOBS.md "Delegated stages"); the declaration alone confers nothing
-        _require_delegation(p, model, req.execution.stage.root, req.execution.stage.id)
+        stages.require_delegation(p, model, req.execution.stage.root, req.execution.stage.id)
         authorize(p, model, "run:submit", budget=True, model_check=False)
     else:
         authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
@@ -1078,200 +832,36 @@ async def invoke(
             f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)",
         )
     # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
-    return await asyncio.to_thread(_invoke_job, m, model, req, p, region, mode, idempotency_key)
+    return await asyncio.to_thread(_submit, m, model, req, p, region, mode, idempotency_key)
 
 
-def _invoke_job(
+def _submit(
     m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None
-):
-    # Imported principal keys share an idempotency namespace only with the same
-    # principal; a tenant's shared bucket never shares private operation state.
-    timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
-    secret = None
+) -> JSONResponse:
+    """A run or endpoint call: its operation id (an Idempotency-Key's under the owner namespace, or the declared
+    stage's), the rendered Job (jobs.render_submission) and its admission on the caller's key (stages.create_admitted).
+    202 with the new operation, 200 with the current state of a replay or of a stage that already ran."""
     ex = execution.resolve(req.execution, p.namespace, m) if mode in ("run", "async") else None
-    stage, graph = _stage_request(ex, mode, p, idempotency_key)
+    stage, graph = stages.stage_request(ex, mode, p, idempotency_key)
     if stage:
         name = stages.stage_name(stage["root"], stage["id"])
-        done = _settled_stage(p, graph, stage)
-        if done is not None:
+        if (done := _settled_stage(p, graph, stage)) is not None:
             return JSONResponse(done, status_code=200)  # a stage that ran is never run again: its durable state
         if graph.get("closed_at"):
             raise HTTPException(409, f"the graph of {stage['root']} is closed: no new stage attaches")
     else:
         name = render.op_name(p.owner, model, idempotency_key)
-    if mode == "async" and ex:
-        # an endpoint call with private input and application-owned output (docs/API.md "Endpoint calls")
-        if ex.get("placement") or ex.get("recovery"):
-            raise HTTPException(400, "execution.placement and execution.recovery apply to runs, not to endpoint calls")
-        if ex.get("io_mode") == "application" and not ex.get("private_input_ref"):
-            raise HTTPException(
-                400,
-                "an application-I/O endpoint call takes its request and its destination from a binding: give private_input_ref",
-            )
-        if ex.get("private_input_ref") and req.input:
-            raise HTTPException(
-                400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
-            )
-    if ex and ex.get("require_converged") and mode != "async":
-        raise HTTPException(400, "execution.require_converged applies to endpoint calls (mode async)")
-    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
-    if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
-        # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
-        # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
-        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
-    if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
-        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
-    if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
-        rollout = _rollout_fence(m, region, ex)
-        job, secret = jobs.build_async(
-            name,
-            m,
-            req.input,
-            p.tenant,
-            p.key,
-            req.name,
-            idempotency_key,
-            timeout,
-            _output_prefix(p.namespace, region, name, ex),
-            region,
-            ex=ex,
-            key_hash=billing.key_hash(p.key),
-            admitted=_admitted_token(keys.key_hash(p.key), m["name"], name) if cfg.ROUTER_KEY else None,
-        )
-    elif FLEET_MANAGER:
-        _guard_run_input(m, req, p, REGION, ex)
-        job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
-        region = REGION  # created on the manager; the dispatcher picks the worker
-    else:
-        _guard_run_input(m, req, p, region, ex)
-        defaults = catalog.region_params(m, region)
-        defaults.setdefault("output_prefix", _output_prefix(p.namespace, region, name, ex))
-        job = jobs.build_run(
-            name,
-            m,
-            req.input,
-            p.tenant,
-            req.name,
-            idempotency_key,
-            timeout,
-            req.priority,
-            region,
-            defaults,
-            billing.key_hash(p.key),
-            gpu_class=_class_for(m, req, region, p.tenant, ex),
-            ex=ex,
-        )
-    # admission on the caller's key, from the rendered Job (its real GPU count): a slot, a request and, for a key with a
-    # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
-    ann = job["metadata"].setdefault("annotations", {})
-    ann[f"{cfg.LABEL}/owner"] = p.owner
-    instances.annotate_requester(
-        job, req.requester
-    )  # who asked, as the application states it (docs/API.md "Requester")
-    if mode == "async" and rollout:
-        # what the first request could reach at admission (docs/API.md "Models"): evidence of the ready revision and its
-        # image then, not per-request provenance (Knative adds no revision to a response)
-        if rollout.get("latest_ready"):
-            ann[f"{cfg.LABEL}/endpoint-revision"] = str(rollout["latest_ready"])
-        if rollout.get("serving_images"):
-            ann[f"{cfg.LABEL}/endpoint-image"] = str(rollout["serving_images"][0])[:1000]
+    admitted = _admitted_token(keys.key_hash(p.key), m["name"], name) if mode == "async" and cfg.ROUTER_KEY else None
+    job, secret, region = jobs.render_submission(
+        m, req, p, region, mode, idempotency_key, ex, name, admitted, FLEET_MANAGER
+    )
     if stage:
         stages.mark_waiting(job, stage["root"], stage["id"], stages.dependencies(graph, stage["id"]))
-    if db.enabled():
-        try:
-            keys.own_operation(name, p.tenant, p.owner, model)
-        except keys.KeyLimit as e:
-            raise HTTPException(e.status, e.detail)
-    with keys.operation_lock(name) if db.enabled() else nullcontext():
-        created_job, created = _create_admitted(p, name, job, region, secret, req, mode, stage=stage)
+    created_job, created = stages.create_admitted(p, name, job, region, secret, req, mode, model, stage=stage)
     if created:
-        return JSONResponse(
-            _who(instances.enrich_operation(jobs.normalise(created_job, m.get("price_per_call"))), created_job),
-            status_code=202,
-        )
-    return JSONResponse(
-        _operation(p, created_job, created_job["metadata"]["name"], region), status_code=200
-    )  # a replay: its current state
-
-
-def _output_prefix(ns: str, region: str, name: str, ex: dict | None) -> str:
-    """Where a managed-I/O operation's uploader writes: the tenant's bucket of the region; nothing for
-    application-managed I/O (the run moves its own data)."""
-    if ex and ex.get("io_mode") == "application":
-        return ""
-    return f"s3://{artifacts.storage(ns, region)['bucket']}/operations/{name}"
-
-
-def _require_delegation(p: Principal, model: str, root: str, stage: str) -> None:
-    """A stage on a model the caller's key is not granted is allowed only when every one of these holds: the root's graph
-    exists in this tenant and belongs to this owner, is open, and declared this stage bound to exactly this model; the
-    root's run class (operator-owned) lists this model among its `delegates`; the root holds a live reservation on the
-    caller's key (the same key, still admitted). Nothing is granted beyond that graph."""
-    if not db.enabled():
-        raise HTTPException(403, f"model {model} is not granted to this key")
-    g = keys.graph_of(root)
-    if g is None or g["tenant"] != p.tenant or g["owner"] != p.owner:
-        raise HTTPException(403, f"model {model} is not granted to this key (no delegating root {root} of yours)")
-    if g.get("cancelled_at") or g.get("closed_at"):
-        raise HTTPException(403, f"model {model} is not granted to this key (the graph of {root} is over)")
-    if (g.get("models") or {}).get(stage) != model:
-        raise HTTPException(
-            403, f"model {model} is not granted to this key (stage {stage!r} of {root} is not declared on it)"
-        )
-    record = keys.operation_owner(root)
-    root_model = _model(record[2]) if record else None
-    if not root_model or model not in (root_model.get("delegates") or []):
-        raise HTTPException(403, f"model {model} is not granted to this key (the root's class does not delegate to it)")
-    if keys.reservation_key(root) != keys.key_hash(p.key):
-        raise HTTPException(403, f"model {model} is not granted to this key (root {root} is not active on this key)")
-
-
-def _rollout_fence(m: dict, region: str, ex: dict | None) -> dict | None:
-    """The endpoint's revision state at admission of an endpoint call (kube._rollout); with
-    `execution.require_converged` the call is refused (409) while the created, ready and rolled-out revisions differ
-    (a new revision Pending, the previous one serving). A converged endpoint at zero passes: the fence reads the
-    revisions, not the pods. Without the option the state is only recorded."""
-    try:
-        st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m.get("nodes") or 1))
-    except Exception:  # noqa: BLE001
-        st = {}
-    rollout = st.get("rollout")
-    if ex and ex.get("require_converged"):
-        if not rollout or not rollout.get("converged"):
-            why = (rollout or {}).get("reason") or "rollout state unavailable"
-            raise HTTPException(
-                409, f"endpoint {m['name']} rollout not converged in {region}: {why} (execution.require_converged)"
-            )
-    return rollout
-
-
-def _stage_request(
-    ex: dict | None, mode: str, p: Principal, idempotency_key: str | None
-) -> tuple[dict | None, dict | None]:
-    """A submission that is a declared stage of a root's graph (docs/JOBS.md "Stage composition"): the root's graph
-    must exist in this tenant, belong to the same owner, declare the stage, and still be open. Returns (stage, graph)
-    or (None, None) for an ordinary submission."""
-    stage = (ex or {}).get("stage")
-    if not stage:
-        return None, None
-    if mode != "run":
-        raise HTTPException(400, "execution.stage: a stage is a run (not an endpoint call)")
-    if not db.enabled():
-        raise HTTPException(409, "stage composition needs the control API's ledger (no database here)")
-    if idempotency_key:
-        raise HTTPException(400, "a stage's identity is its root and id: no Idempotency-Key")
-    g = keys.graph_of(stage["root"])
-    if g is None or g["tenant"] != p.tenant:
-        raise HTTPException(404, f"operation {stage['root']}: no stage graph (declare execution.graph on the root)")
-    if g["owner"] != p.owner:
-        raise HTTPException(403, f"operation {stage['root']}: the stages of a graph belong to its root's owner")
-    if stage["id"] not in (g["stages"] or {}):
-        raise HTTPException(400, f"stage {stage['id']!r} is not declared by {stage['root']} ({sorted(g['stages'])})")
-    if g.get("cancelled_at"):
-        raise HTTPException(409, f"the graph of {stage['root']} is cancelled: no stage attaches")
-    # a closed graph (every stage settled): a stage that ran answers with its durable head (_settled_stage); one that
-    # never was submitted cannot attach any more (409 below, after the lookup)
-    return stage, g
+        op = jobs.normalise(created_job, m.get("price_per_call"))
+        return JSONResponse(_who(instances.enrich_operation(op), created_job), status_code=202)
+    return JSONResponse(_operation(p, created_job, created_job["metadata"]["name"], region), status_code=200)
 
 
 def _settled_stage(p: Principal, g: dict, stage: dict) -> dict | None:
@@ -1289,151 +879,6 @@ def _settled_stage(p: Principal, g: dict, stage: dict) -> dict | None:
             409, f"stage {stage['id']!r} of {stage['root']} already ran ({head}); nothing durable remains"
         )
     return _operation(p, job, job["metadata"]["name"], region)
-
-
-def _create_admitted(p, name, job, region, secret, req, mode, stage: dict | None = None):
-    """Called under the per-operation database lock; a refund cannot race a replay."""
-    # Existing Jobs already own their admission, including terminal replays.
-    existing = _find(p.namespace, name, region)
-    if existing:
-        _check_operation_owner(p, existing[0])
-        reservation = {"replay": True}
-    elif stage:
-        # a declared stage joins its root's run on the root's key (keys.prepare_run_member kind=stage: the key still
-        # valid, its GPU bound within the budget next to its siblings, the root's slot shared; no head rule)
-        try:
-            reservation = keys.prepare_run_member(
-                stage["root"], name, None, _job_gpus(job), _job_deadline(job), kind="stage", stage=stage["id"]
-            )
-        except keys.KeyLimit as e:
-            raise HTTPException(e.status, e.detail)
-    else:
-        reservation = _admit(
-            p,
-            name,
-            _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0,
-            run_member=mode in ("run", "async"),  # a run or an endpoint call: its continuations join this reservation
-        )
-    ex = json.loads((job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/execution") or "null") or {}
-    if db.enabled() and ex.get("graph") and not reservation.get("replay"):
-        # the root's stages are sealed with its admission (docs/JOBS.md "Stage composition"); the run stays open
-        # (slot, request) until every declared stage settled or the graph is cancelled
-        deadline = datetime.now(timezone.utc) + timedelta(
-            seconds=int(ex["graph"].get("deadline_s") or stages.DEFAULT_DEADLINE_S)
-        )
-        keys.declare_graph(name, p.tenant, p.owner, ex["graph"]["stages"], deadline, ex["graph"].get("models"))
-    try:
-        created_job, created = jobs.create(p.namespace, job, region, secret)
-    except Exception:
-        if db.enabled() and not reservation.get("replay"):
-            # A timeout can mean the create succeeded. Only a confirmed absence
-            # permits a refund; ambiguous failures retain the reservation.
-            try:
-                if _find(p.namespace, name, region) is None:
-                    keys.rollback_run_member(name) if stage else keys.abandon(name, keys.key_hash(p.key))
-            except Exception:
-                pass
-        raise
-    _check_operation_owner(p, created_job)
-    return created_job, created
-
-
-def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex: dict | None = None) -> None:
-    """A caller-supplied output_prefix must stay inside the tenant's own bucket of that region (never another
-    tenant's), and an `image` parameter (container-run) must match the tenant's image allow-list when one is set.
-    Application-managed I/O names no bucket at all."""
-    out = req.input.get("output_prefix")
-    if ex and ex.get("io_mode") == "application":
-        if out or req.input.get("input_prefix"):
-            raise HTTPException(
-                400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data"
-            )
-        out = None
-    if out:
-        bucket = artifacts.storage(p.namespace, region)["bucket"]
-        if not str(out).startswith(f"s3://{bucket}/"):
-            raise HTTPException(400, f"output_prefix must be inside the tenant's bucket s3://{bucket}/")
-    if req.input.get("image"):
-        jobs.check_image_allowed(p.namespace, str(req.input["image"]), region)
-
-
-def _fleet_run(
-    m: dict,
-    req: InvokeRequest,
-    p: Principal,
-    name: str,
-    timeout: int | None,
-    idempotency_key: str | None,
-    ex: dict | None = None,
-) -> dict:
-    """Fleet placement (control cluster, docs/JOBS.md): the Job is created on the manager and MultiKueue +
-    the dispatcher pick the worker among the model's regions and GPU classes. Inputs and outputs live in the
-    tenant's hub-region bucket (the one this cluster's tenant-storage names). Per-region parameter defaults
-    apply when every deployment agrees on them, or when the caller pins a region. Image references are
-    fleet-wide (the logical registry host, docs/IMAGES.md), so an unpinned run is placed at queue time: the
-    dispatcher nominates the cheapest free cluster and re-nominates while the run waits."""
-    application = bool(ex and ex.get("io_mode") == "application")
-    bucket = None if application else artifacts.storage(p.namespace, REGION)["bucket"]
-    inp = req.input.get("input_prefix")
-    if inp and not str(inp).startswith(f"s3://{bucket}/"):
-        raise HTTPException(
-            400,
-            f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)",
-        )
-    placement = execution.narrow_placement(
-        {"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}, ex
-    )
-    region = req.region
-    defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
-    defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
-    return jobs.build_run(
-        name,
-        m,
-        req.input,
-        p.tenant,
-        req.name,
-        idempotency_key,
-        timeout,
-        req.priority,
-        region,
-        defaults,
-        billing.key_hash(p.key),
-        placement=placement,
-        gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")),
-        ex=ex,
-    )
-
-
-def _class_for(
-    m: dict,
-    req: InvokeRequest,
-    region: str | None,
-    tenant: str | None = None,
-    ex: dict | None = None,
-    regions: list[str] | None = None,
-) -> str | None:
-    """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
-    runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
-    given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
-    if not jobs.class_images(m):
-        return None
-    gpus = (m.get("job") or {}).get("gpu", 1)
-    try:
-        gpus = int(gpus)
-    except (TypeError, ValueError):  # a parameter placeholder: one GPU for the ranking
-        gpus = (
-            int(req.input.get("gpus", 1) or 1)
-            if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit()
-            else 1
-        )
-    available = (
-        (ex.get("placement") or {}).get("gpu_preference") if ex else None
-    )  # the caller's order narrows the model's
-    cls, how = placing.choose_class(
-        m, region, gpus, available, tenant, regions
-    )  # `regions`: the run's allowed clusters
-    log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
-    return cls
 
 
 DISCONNECT_POLL_S = 1.0  # how often a proxied synchronous call looks for its caller (docs/API.md "Synchronous calls")
@@ -1756,48 +1201,40 @@ def _synthetic_job(name: str, tenant: str, mode: str, model: str | None, root: s
     return {"metadata": {"name": name, "labels": labels, "annotations": {f"{cfg.LABEL}/resumed-from": root}}}
 
 
-def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
+def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str | None]:
     """The operation's Job. A handle that a continuation superseded (capacity fallback, recovery, a manual resume)
-    resolves to its current successor: the successor annotation on the Job, the durable mark once the Job is gone,
-    and the run ledger's lineage head as the authority behind both (the original stays readable through its rows);
-    an operation whose Job expired is served from its durable rows. The owner check applies to every operation on the
-    way, the named one and the head."""
-    current, previous = id, None
-    for _ in range(16):
-        try:
-            job, region = jobs.find(p.namespace, current)
-        except HTTPException as e:
-            if e.status_code != 404 or not attempts.enabled():
-                raise
-            rows = [r for r in attempts.for_operation(current) if r["operation"] == current and r["tenant"] == p.tenant]
-            if not rows and previous is not None:
-                return previous  # a verified owner's successor is not created yet
-            last = rows[-1] if rows else {}
-            synthetic_job = _synthetic_job(
-                current, p.tenant, last.get("mode") or "run", last.get("model"), last.get("root") or current
-            )
-            _check_operation_owner(p, synthetic_job)
-            synthetic = attempts.synthesize(current, p.tenant)
-            nxt = attempts.successor_of(current) or (stages.ledger_head(p.namespace, current) if follow else None)
-            if follow and nxt and nxt != current:
-                if synthetic is not None:  # the named operation's durable view stands in when its head is gone too
-                    previous = ({**synthetic_job, "_synthetic": synthetic}, synthetic.get("region"))
-                current = nxt
-                continue
-            if synthetic is None:
-                if previous is not None:  # a successor that is marked but not created yet: the original stands
-                    return previous
-                raise
-            return {**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")
-        _check_operation_owner(p, job)
-        nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor") or (
-            stages.ledger_head(p.namespace, current) if follow else None
+    resolves to its current successor (stages.head_of: the successor annotation on the Job, the durable mark once the
+    Job is gone, and the run ledger's lineage head as the authority behind both); an operation whose Job expired is
+    served from its durable rows. The owner check applies to every operation on the way, the named one and the head;
+    a head that is marked but not created yet stands on the member before it."""
+    seen: list[
+        tuple[dict, str | None]
+    ] = []  # the members on the way that exist: a Job, or the durable view of a gone one
+
+    def visit(name: str, job: dict | None, region: str | None) -> None:
+        if job is not None:
+            _check_operation_owner(p, job)
+            seen.append((job, region))
+            return
+        if not attempts.enabled():
+            return
+        rows = [r for r in attempts.for_operation(name) if r["operation"] == name and r["tenant"] == p.tenant]
+        if not rows and seen:
+            return  # a verified owner's successor is not created yet
+        last = rows[-1] if rows else {}
+        synthetic_job = _synthetic_job(
+            name, p.tenant, last.get("mode") or "run", last.get("model"), last.get("root") or name
         )
-        if follow and nxt and nxt != current:
-            current, previous = nxt, (job, region)
-            continue
-        return job, region
-    raise HTTPException(502, f"operation {id}: successor chain too long")
+        _check_operation_owner(p, synthetic_job)
+        if (synthetic := attempts.synthesize(name, p.tenant)) is not None:
+            seen.append(({**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")))
+
+    head, job = stages.head_of(p.namespace, id, follow=follow, visit=visit)
+    if job is False:
+        raise HTTPException(502, f"operation {id}: successor chain too long")
+    if job is None and (not seen or not attempts.enabled()):
+        raise HTTPException(404, f"operation {head}: not found")
+    return seen[-1]
 
 
 def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list, str]:
@@ -1992,79 +1429,15 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
     return out
 
 
-def _delivered(op: dict, name: str, root: str) -> dict:
-    """What a transfer-only retry or an application finalizer (`<name>-x<n>`) that delivered means for `name`
-    (docs/JOBS.md "Attempts and finalization", "Finalization by the application"): a run or an endpoint call whose
-    inference succeeded is SUCCEEDED with the delivering attempt's result; a delivered capture of an endpoint error
-    (the retry's exit code 2 or 5, the captured status class) stays FAILED and reports the delivery next to it, so
-    delivery never turns a failed inference into a success."""
-    done = [
-        r
-        for r in attempts.for_operation(root)
-        if r["operation"].startswith(f"{name}-x")
-        and (
-            (r.get("export_state") or r.get("export")) == "succeeded"
-            or (r.get("result_ref") and r["status"] == "succeeded")
-        )
-    ]
-    if not done:
-        return {}
-    last = done[-1]
-    out = {
-        "export_state": last.get("export_state") or "succeeded",
-        "exported_by": last["operation"],
-        # the delivering attempt: what a consumer of the result (a dependent stage, DEPENDENCY_RESULTS) must name
-        "exported_by_attempt_id": last.get("pod"),
-        "exported_by_epoch": last.get("epoch"),
-        "result_ref": last.get("result_ref") or op.get("result_ref"),
-    }
-    if last.get("exit_code") in (2, 5) or (last["status"] != "succeeded" and last.get("exit_code")):
-        out.update(
-            {
-                "status": "FAILED",
-                "error": "the endpoint answered an error; its response was delivered (see result_ref), inference did not succeed",
-            }
-        )
-    else:
-        out.update({"status": "SUCCEEDED", "error": None})
-    return out
-
-
-def _persist_observed_completion(job: dict, op: dict, records: list) -> None:
-    """When the projection proved a Complete single-worker Job delivered by its newest attempt's own RESULT.json
-    (status.normalise, api 0.11.120), keep that proof past the Job's TTL: the mark names the exact attempt and the
-    manager Job UID (attempts.mark_completed, migration 29). Idempotent; never required for the read."""
-    if not attempts.enabled() or op.get("status") != "SUCCEEDED" or not op.get("attempts"):
-        return
-    newest = op["attempts"][-1]
-    if newest.get("reason") != attempts.OBSERVED_COMPLETION or not newest.get("result_ref"):
-        return
-    row = next((r for r in records or [] if r.get("pod") == newest.get("attempt_id")), None)
-    if row is None or row.get("status") != "interrupted":
-        return
-    try:
-        attempts.mark_completed(
-            job["metadata"]["name"],
-            row["pod"],
-            row.get("pod_uid"),
-            row.get("epoch"),
-            row["result_ref"],
-            job["metadata"].get("uid") or "",
-        )
-    except Exception as e:  # noqa: BLE001 - the live projection stands; the mark is retried on the next read
-        log.warning("observed completion of %s not persisted: %s", job["metadata"].get("name"), e)
-
-
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
         op = dict(job["_synthetic"])
         if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
-            op.update(_delivered(op, op["id"], _root(job)))  # a retry that delivered after the Job was gone
+            op.update(attempts.delivered(op, op["id"], _root(job)))  # a retry that delivered after the Job was gone
         return op
     name = job["metadata"]["name"]
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
-    _persist_observed_completion(job, op, records)
     op.update(attempts.lifecycle(name, root, records, pods=job.get("_pods")))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
         op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(
@@ -2085,8 +1458,8 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         # shows FINALIZING and the active attempt (the identity a refresh broker verifies against the pod's token)
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
-        op.update(_delivered(op, name, root))  # a retry or finalizer that delivered closes the original
-    if op["status"] == "EXPORT_FAILED" and jobs.work_volume_present(job, _home(job)) is False:
+        op.update(attempts.delivered(op, name, root))  # a retry or finalizer that delivered closes the original
+    if op["status"] == "EXPORT_FAILED" and jobs.work_volume_present(job, jobs.home_of(job)) is False:
         # the text above promises a kept volume and a transfer retry; neither holds once the claim is gone (an older
         # uploader released it): say so, and offer no resume or export on it (`:export` answers 409 the same way)
         op["error"] = (
@@ -2162,10 +1535,10 @@ def _settle_on_read(p: Principal, job: dict, region: str | None) -> bool:
     `pending` until the next pass (every 2 minutes). Nothing changes for an unfinished operation, an unmeasured one
     (`unknown`, the reservation kept) or a native call whose worker is still attached (deferred). Never fails the
     read: an error is logged and the pass settles later."""
-    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job, p.namespace, _home(job)):
+    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job, p.namespace, jobs.home_of(job)):
         return False
     try:
-        return asyncio.run(billing.settle_job(_home(job), p.namespace, dict(job)))
+        return asyncio.run(billing.settle_job(jobs.home_of(job), p.namespace, dict(job)))
     except Exception as e:  # noqa: BLE001 - the CronJob remains the settler of record
         log.warning("settle on read of %s failed: %s", job["metadata"].get("name"), e)
         return False
@@ -2241,7 +1614,7 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
         orig, region = _owned(p, exported, follow=False)
     name, root = orig["metadata"]["name"], _root(orig)
     op = _operation(p, orig, name, region)
-    _require_current(p, name, root)
+    stages.require_current(p, name, root)
     if op.get("finalizing_by"):
         # one active finalizer per root: the call is idempotent while it runs
         active, _ = _owned(p, op["finalizing_by"], follow=False)
@@ -2262,7 +1635,7 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
                 + (" with no complete capture (inference outcome unknown)" if last_exit == 4 else "")
                 + "; only an endpoint call whose capture is complete and undelivered is delivered again",
             )
-        build = lambda admit: jobs.export_async(p.namespace, name, _home(orig), m, admit=admit)  # noqa: E731
+        build = lambda admit: jobs.export_async(p.namespace, name, jobs.home_of(orig), m, admit=admit)  # noqa: E731
     else:
         finalize = None
         fz = (m.get("job") or {}).get("finalize")
@@ -2295,13 +1668,13 @@ def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:con
         build = lambda admit: jobs.export_again(  # noqa: E731
             p.namespace,
             name,
-            _home(orig),
+            jobs.home_of(orig),
             m,
             catalog.region_params(m, region) if region else {},
             finalize=finalize,
             admit=admit,
         )
-    job, created = continue_run(root, build, transfer_only=True, ns=p.namespace)
+    job, created = stages.continue_run(root, build, transfer_only=True, ns=p.namespace)
     return _continued(p, job, created, region)
 
 
@@ -2428,11 +1801,6 @@ def _cluster_of(region: str) -> str:
         return kube.cluster_id(region)
     except LookupError as e:
         raise HTTPException(409, f"attempt record not stamped: {e}")
-
-
-def _home(job: dict) -> str:
-    """The cluster the operation's Job object lives in: the manager for fleet-placed runs."""
-    return REGION if jobs.is_manager_job(job) else (job.get("_region") or REGION)
 
 
 # ---- live sessions (docs/API.md "Sessions") -----------------------------------------------------------------------
@@ -2574,7 +1942,7 @@ async def watch_session(id: str, authorization: str = Header(default="")):
         "status": s["state"],
         "cancel_requested": s["cancel_requested_at"] is not None,
         "cancel_reason": s["cancel_reason"],
-        "deadline_at": sessions._ts(s["deadline_at"]),
+        "deadline_at": iso(s["deadline_at"]),
         "owner": _session_owner_context(s),
     }
 
@@ -2646,67 +2014,14 @@ def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
         # the Job is gone (TTL). A graph root is still the handle its owner cancels the graph by (docs/JOBS.md "Stage
         # composition"): every stage member and the root lineage's head go, nothing attaches any more; any other
         # expired operation has nothing left to cancel
-        return _cancel_graph_of(p, id, job)
+        return stages.cancel_expired_root(p.namespace, id, job)
     current = job["metadata"]["name"]
     op = _operation(p, job, id, region)
     if op.get("finalizing_by"):  # the root's handle: a cancel stops its active finalizer, the root stays as it is
         job, _ = _owned(p, op["finalizing_by"], follow=False)
         current = job["metadata"]["name"]
-    attempts.mark_cancelled(current)  # a late "succeeded" from the cancelled attempt is refused from now on
-    cancelled = jobs.cancel(p.namespace, current, _home(job))
     root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
-    try:  # endpoint children of the root go with it (docs/JOBS.md "Endpoint children"); the sweep repeats it durably
-        import children
-
-        children.cancel_for_root(p.namespace, root)
-    except Exception as e:  # noqa: BLE001 - the sweep cancels what this missed
-        log.warning("child cascade of %s: %s", id, e)
-    settle_deleted(cancelled)
-    op = jobs.normalise(cancelled)
-    if op["status"] in ("QUEUED", "RUNNING"):
-        op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
-    if db.enabled() and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async":
-        leases.request_cancel(current, "cancelled by the owner")  # a request to the attached worker, never a release
-    if db.enabled() and (g := keys.graph_of(root)) and not g.get("cancelled_at"):
-        # the root of a graph: every stage goes with it, and so does the root lineage's current head (a resumed root
-        # that is still queued or running); nothing attaches any more (docs/JOBS.md "Stage composition")
-        names = _cancel_graph_members(p, root, current)
-        op["graph"] = stages.graph_view(p.namespace, keys.graph_of(root))
-        op["status"] = "CANCELLED"
-        log.info("cancel %s: stages cancelled: %s", root, names)
-    return op
-
-
-def _cancel_graph_members(p: Principal, root: str, current: str) -> list[str]:
-    """The graph's cancellation: its stage members, and the root lineage's head when that is another, still active
-    operation (a manual continuation of the root): marked, stopped, settled like any cancel. The graph is closed."""
-    why = f"cancelled by the caller with root {root}"
-    names = stages.cancel_members(p.namespace, root, why)
-    head = keys.run_head(root)
-    if head and head != current:
-        found = _find(p.namespace, head)
-        if found is not None and not status.finished(found[0]):
-            attempts.mark_cancelled(head)
-            settle_deleted(jobs.cancel(p.namespace, head, _home(found[0])))
-            names.append(head)
-    keys.cancel_graph(root, why)
-    return names
-
-
-def _cancel_graph_of(p: Principal, id: str, synthetic: dict) -> dict:
-    """`:cancel` on an operation whose Job expired: a graph root still cancels its graph (the stages and the root
-    lineage's head); anything else is over."""
-    root = _root(synthetic)
-    if not (db.enabled() and (g := keys.graph_of(root))):
-        raise HTTPException(409, f"operation {id} is over; nothing to cancel")
-    op = dict(synthetic["_synthetic"])
-    if not g.get("cancelled_at"):
-        attempts.mark_cancelled(id)
-        names = _cancel_graph_members(p, root, id)
-        log.info("cancel %s (expired root): graph cancelled: %s", root, names)
-    op["graph"] = stages.graph_view(p.namespace, keys.graph_of(root))
-    op["status"] = "CANCELLED"
-    return op
+    return stages.cancel_run(p.namespace, job, current, root)
 
 
 @app.post(
@@ -2730,7 +2045,7 @@ def resume(
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
         raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
     root = _root(orig)
-    _require_current(p, orig["metadata"]["name"], root)
+    stages.require_current(p, orig["metadata"]["name"], root)
     pointer = (
         (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
         if attempts.enabled() and not req.checkpoint_ref
@@ -2748,12 +2063,12 @@ def resume(
     )
     if req.gpu_class and placement:
         placement["classes"] = [req.gpu_class]
-    job, created = continue_run(
+    job, created = stages.continue_run(
         root,
         lambda admit: jobs.resume(
             p.namespace,
             orig["metadata"]["name"],
-            _home(orig),
+            jobs.home_of(orig),
             m,
             catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
             placement,
@@ -3054,7 +2369,7 @@ def _key_changed(i: dict | None, tenant: str, alias: str, where: str = "") -> di
     if i is None:
         raise HTTPException(404, f"key {alias} not found{where}")
     forget_hash(i["token"])
-    return _key_public(i, tenant)
+    return key_view(i, tenant, admin=True)
 
 
 def _key_minted(tenant: str, req: KeyRequest, metadata: dict, by: str | None) -> dict:
@@ -3062,37 +2377,7 @@ def _key_minted(tenant: str, req: KeyRequest, metadata: dict, by: str | None) ->
     value, i = keys.create(
         tenant, f"{tenant}-{req.alias}", req.budget, req.models, req.expires_days, metadata=metadata, by=by
     )
-    return {**_key_public(i, tenant), "key": value}
-
-
-def _key_public(i: dict, tenant: str) -> dict:
-    """The admin's view of a tenant key (`GET /v1/keys`, the create/update answers): the same safe limit and usage
-    fields the caller's own view (`GET /v1/keys/me`) carries (auth.limits_view: scopes, concurrency, budgets and
-    spend, rate limit, principal id), `blocked` and a `status` that says `blocked` for a retained blocked key (an
-    imported record with unknown scopes, or a blocked one) instead of `active`, and the key's run usage; never the
-    hash, the raw metadata or a secret (`id` is the alias)."""
-    blocked = bool(i.get("blocked"))
-    out = {
-        "id": i.get("key_alias"),
-        "key_preview": i.get("key_name"),
-        "alias": i.get("key_alias"),
-        "tenant": tenant,
-        "budget": i.get("max_budget"),
-        "spend": i.get("spend", 0),
-        "models": i.get("models", []),
-        "created_at": i.get("created_at"),
-        "expires_at": i.get("expires"),
-        "status": "blocked" if blocked else ("exhausted" if exhausted(i) else "active"),
-        "blocked": blocked,
-        "role": (i.get("metadata") or {}).get("role", "user"),
-        **limits_view(i),
-    }
-    if db.enabled() and i.get("token"):
-        try:
-            out["usage"] = keys.run_usage(i["token"])
-        except Exception as e:  # noqa: BLE001 - the listing never fails on the usage figures
-            log.warning("key %s: run usage unavailable: %s", i.get("key_alias"), e)
-    return out
+    return {**key_view(i, tenant, admin=True), "key": value}
 
 
 def _fleet_only() -> None:
@@ -3272,7 +2557,7 @@ def fleet_list_keys(
     _fleet_only()
     tenant = _fleet_tenant(tenant)
     rows = _page(response, keys.list_tenant(tenant), lambda k: k["key_alias"] or "", cursor, limit)
-    return [_key_public(k, tenant) for k in rows]
+    return [key_view(k, tenant, admin=True) for k in rows]
 
 
 @app.post("/v1/fleet/tenants/{tenant}/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})
@@ -3329,7 +2614,7 @@ def list_keys(
     """The tenant's keys by alias, one page at a time (docs/API.md "Pagination")."""
     _fleet_only()
     rows = _page(response, keys.list_tenant(p.tenant), lambda k: k["key_alias"] or "", cursor, limit)
-    return [_key_public(k, p.tenant) for k in rows]
+    return [key_view(k, p.tenant, admin=True) for k in rows]
 
 
 @app.post("/v1/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})

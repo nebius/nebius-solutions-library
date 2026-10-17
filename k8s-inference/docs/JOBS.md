@@ -581,10 +581,7 @@ reporting `export: failed` (an endpoint caller whose own delivery failed keeps i
 API's acknowledgement of the final record (it retries the record four times); without that acknowledgement the
 volume stays, the operation shows FINALIZING/EXPORT_FAILED and `:export` re-delivers without recompute. An
 EXPORT_FAILED operation whose own work volume no longer exists says so instead (`resumable: false`, `:export` 409):
-the promise of a kept volume is never made about a volume that is gone. A Complete single-worker Job whose newest attempt record says "interrupted" yet carries that attempt's committed
-`result_ref` with no failed export is delivered (the uploader missed the exit code the Job proved; api 0.11.120; kept past the Job's TTL as an attempt-bound observed
-completion, api 0.11.121); an
-older attempt's result, a later failed attempt, a cancelled run or a gang settle nothing. With
+the promise of a kept volume is never made about a volume that is gone. With
 application-managed I/O the application writes `/work/RESULT.json` (`{"result_ref": "...", "checkpoint_ref": "..."}`)
 after it committed and validated its outputs; the uploader's final record carries it and an attempt without it is
 `EXPORT_FAILED` ("no finalization record"). Billing, volume release and cleanup key off the same state.
@@ -679,7 +676,7 @@ copy on the worker carries the pods. What differs from the regional path:
   active, attempts and logs use the worker's pods (the API finds the worker through the Workload's
   `status.clusterName`, `region` is null until then). After it finishes the worker's copy is gone
   and the attempts are the uploader's records in the bucket (`attempts/<pod>.json`), which is why
-  the uploader waits for the kubelet to report `main`'s exit code (up to 2 min)
+  the uploader waits for the kubelet to report `main`'s exit code, for as long as that takes,
   before it writes the record. The worker's copy is never listed as an operation of its own
   (label `kueue.x-k8s.io/multikueue-origin`).
 - **Cancel / resume.** Cancel of a running run patches the deadline onto the worker's copy and the

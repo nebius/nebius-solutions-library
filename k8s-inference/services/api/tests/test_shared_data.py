@@ -78,7 +78,7 @@ def test_job_definitions_carry_data_and_endpoints_skip_dedicated_pools(monkeypat
         },
     )
     monkeypatch.setattr(kube, "cluster_region", lambda c: "eu-north1")
-    e = models.to_entry(
+    e = models.definition(
         {
             "id": "fold",
             "kind": "job",
@@ -90,9 +90,9 @@ def test_job_definitions_carry_data_and_endpoints_skip_dedicated_pools(monkeypat
     )
     assert e["job"]["data"] == "refdb/pdb" and e["job"]["dataMountPath"] == "/db" and e["job"]["dataReadOnly"] is True
     with pytest.raises(HTTPException):
-        models.to_entry({"id": "bad", "kind": "job", "image": "img", "command": "x", "data": {"path": "../x"}})
+        models.definition({"id": "bad", "kind": "job", "image": "img", "command": "x", "data": {"path": "../x"}})
     with pytest.raises(HTTPException):
-        models.to_entry({"id": "bad", "kind": "endpoint", "image": "img", "data": {"path": "x"}})
+        models.definition({"id": "bad", "kind": "endpoint", "image": "img", "data": {"path": "x"}})
     # the reserved pool is dedicated to tenant `lab`: an endpoint of the fleet never goes there
     assert models.pool_for("hub", ["h100"], 1) == "h100-spot-1x"
 
@@ -114,7 +114,7 @@ def test_weights_mount_read_only_and_images_through_the_cache():
     assert not any(v["name"] == "weights" for v in _run({})["spec"]["template"]["spec"]["volumes"])
     with pytest.raises(HTTPException):
         _run({"weights": "../x"})
-    e = models.to_entry(
+    e = models.definition(
         {
             "id": "wjob",
             "kind": "job",
@@ -148,7 +148,7 @@ def test_run_class_limits_and_ephemeral_storage_are_separate_from_requests(monke
         "ephemeral_storage": "200Gi",
         "ephemeral_storage_limit": "400Gi",
     }
-    job_block = models.to_entry(spec)["job"]
+    job_block = models.definition(spec)["job"]
     assert (job_block["cpu"], job_block["memory"], job_block["cpuLimit"], job_block["memoryLimit"]) == (
         "32",
         "96Gi",
@@ -156,17 +156,17 @@ def test_run_class_limits_and_ephemeral_storage_are_separate_from_requests(monke
         "256Gi",
     )
     assert (job_block["ephemeralStorage"], job_block["ephemeralStorageLimit"]) == ("200Gi", "400Gi")
-    m = catalog.normalise(models.to_entry(spec))
+    m = models.definition(spec)
     job = jobs.build_run("op-fold-1", m, {}, "demo", None, None, None, None, "eu-north1", {"output_prefix": "s3://b/o"})
     res = next(c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "main")["resources"]
     assert res["requests"] == {"cpu": "32", "memory": "96Gi", "ephemeral-storage": "200Gi", "nvidia.com/gpu": "8"}
     assert res["limits"] == {"cpu": "64", "memory": "256Gi", "ephemeral-storage": "400Gi", "nvidia.com/gpu": "8"}
-    plain = models.to_entry(
+    plain = models.definition(
         {**spec, "memory": "16Gi"}
         | {k: None for k in ("memory_limit", "cpu_limit", "ephemeral_storage", "ephemeral_storage_limit")}
     )
     assert not {"cpuLimit", "memoryLimit", "ephemeralStorage", "ephemeralStorageLimit"} & set(plain["job"])
-    m = catalog.normalise(plain)
+    m = plain
     res = next(
         c
         for c in jobs.build_run(
@@ -175,12 +175,12 @@ def test_run_class_limits_and_ephemeral_storage_are_separate_from_requests(monke
         if c["name"] == "main"
     )["resources"]
     assert res["limits"] == {"memory": "16Gi", "nvidia.com/gpu": "8"} and "ephemeral-storage" not in res["requests"]
-    one = models.to_entry({**spec} | {"ephemeral_storage_limit": None})
+    one = models.definition({**spec} | {"ephemeral_storage_limit": None})
     res = next(
         c
         for c in jobs.build_run(
             "op-fold-3",
-            catalog.normalise(one),
+            one,
             {},
             "demo",
             None,

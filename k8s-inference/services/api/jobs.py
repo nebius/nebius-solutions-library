@@ -33,6 +33,7 @@ from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 
 import admissions
+import artifacts
 import attempts
 import catalog
 import db
@@ -41,6 +42,7 @@ import fit
 import instances
 import keys
 import kube
+import placement
 from config import (
     ENDPOINT_CONNECT_TO,
     EXECUTOR_SA,
@@ -1094,9 +1096,7 @@ def build_async(
     # model says `call_scratch: shared` and the region and namespace can carry it, else the per-call claim; a transfer-
     # only retry keeps whatever the original had (`pvc` or `scratch_leaf_of`)
     leaf, fallback = None, ""
-    want_shared = bool(ex) and (
-        bool(scratch_leaf_of) or (not pvc and (model.get("runtime") or {}).get("callScratch") == "shared")
-    )
+    want_shared = bool(ex) and (bool(scratch_leaf_of) or (not pvc and model.get("call_scratch") == "shared"))
     if model.get("litellm_route"):
         url, auth = LITELLM_URL + model["litellm_route"], f"Bearer {key}"
     else:
@@ -2810,7 +2810,7 @@ def resume(
                 if m["name"] == "checkpoints":
                     m["subPath"] = f"checkpoints/{root}"
     if admit:
-        admit(job)  # the run's ledger admits the member before its Job exists (app.continuation_admission)
+        admit(job)  # the run's ledger admits the member before its Job exists (stages.continuation_admission)
     created, was_created = create(ns, job, region)
     _link_successor(ns, name, new, region, jobset=is_jobset(orig))
     return created, was_created
@@ -2837,3 +2837,280 @@ def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = Fa
     except ApiException as e:
         if e.status != 404:  # the original expired (TTL): the durable mark is the link
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+
+
+# ---- submission: what a request becomes before it is admitted -------------------------------------------------
+def deadline_of(job: dict) -> int | None:
+    """The enforced wall-clock bound of a rendered Job or JobSet (its activeDeadlineSeconds; a JobSet's is on its
+    replicated Jobs)."""
+    spec = job.get("spec") or {}
+    if job.get("kind") == "JobSet":
+        ds = [
+            int(((rj.get("template") or {}).get("spec") or {}).get("activeDeadlineSeconds") or 0)
+            for rj in spec.get("replicatedJobs") or []
+        ]
+        return max(ds) if ds and max(ds) else None
+    d = spec.get("activeDeadlineSeconds")
+    return int(d) if d else None
+
+
+def gpus_of(job: dict) -> int:
+    """GPUs a rendered Job (or JobSet) holds while it runs: nvidia.com/gpu over its containers times its parallelism."""
+
+    def pods(spec: dict) -> int:
+        tmpl = (spec.get("template") or {}).get("spec") or {}
+        n = 0
+        for c in (tmpl.get("containers") or []) + (tmpl.get("initContainers") or []):
+            res = c.get("resources") or {}
+            n += int(
+                str(
+                    (res.get("limits") or {}).get("nvidia.com/gpu")
+                    or (res.get("requests") or {}).get("nvidia.com/gpu")
+                    or 0
+                )
+            )
+        return n * int(spec.get("parallelism") or 1)
+
+    if job.get("kind") == "JobSet":
+        return sum(
+            pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1)
+            for rj in (job.get("spec") or {}).get("replicatedJobs") or []
+        )
+    return pods(job.get("spec") or {})
+
+
+def find_or_none(ns: str, name: str, region: str | None = None) -> tuple[dict, str | None] | None:
+    """The operation's Job as (job, region): find over the regions, or get in the one named; a clean
+    absence (404) is None, any other failure raises as it is."""
+    try:
+        return (get(ns, name, region), region) if region is not None else find(ns, name)
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        return None
+
+
+def home_of(job: dict) -> str:
+    """The cluster the operation's Job object lives in: the manager for fleet-placed runs."""
+    return REGION if is_manager_job(job) else (job.get("_region") or REGION)
+
+
+def _output_prefix(ns: str, region: str, name: str, ex: dict | None) -> str:
+    """Where a managed-I/O operation's uploader writes: the tenant's bucket of the region; nothing for
+    application-managed I/O (the run moves its own data)."""
+    if ex and ex.get("io_mode") == "application":
+        return ""
+    return f"s3://{artifacts.storage(ns, region)['bucket']}/operations/{name}"
+
+
+def _rollout_fence(m: dict, region: str, ex: dict | None) -> dict | None:
+    """The endpoint's revision state at admission of an endpoint call (kube._rollout); with
+    `execution.require_converged` the call is refused (409) while the created, ready and rolled-out revisions differ
+    (a new revision Pending, the previous one serving). A converged endpoint at zero passes: the fence reads the
+    revisions, not the pods. Without the option the state is only recorded."""
+    try:
+        st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m.get("nodes") or 1))
+    except Exception:  # noqa: BLE001
+        st = {}
+    rollout = st.get("rollout")
+    if ex and ex.get("require_converged"):
+        if not rollout or not rollout.get("converged"):
+            why = (rollout or {}).get("reason") or "rollout state unavailable"
+            raise HTTPException(
+                409, f"endpoint {m['name']} rollout not converged in {region}: {why} (execution.require_converged)"
+            )
+    return rollout
+
+
+def _guard_run_input(m: dict, req, p, region: str, ex: dict | None = None) -> None:
+    """A caller-supplied output_prefix must stay inside the tenant's own bucket of that region (never another
+    tenant's), and an `image` parameter (container-run) must match the tenant's image allow-list when one is set.
+    Application-managed I/O names no bucket at all."""
+    out = req.input.get("output_prefix")
+    if ex and ex.get("io_mode") == "application":
+        if out or req.input.get("input_prefix"):
+            raise HTTPException(
+                400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data"
+            )
+        out = None
+    if out:
+        bucket = artifacts.storage(p.namespace, region)["bucket"]
+        if not str(out).startswith(f"s3://{bucket}/"):
+            raise HTTPException(400, f"output_prefix must be inside the tenant's bucket s3://{bucket}/")
+    if req.input.get("image"):
+        check_image_allowed(p.namespace, str(req.input["image"]), region)
+
+
+def _fleet_run(
+    m: dict,
+    req,
+    p,
+    name: str,
+    timeout: int | None,
+    idempotency_key: str | None,
+    ex: dict | None = None,
+) -> dict:
+    """Fleet placement (control cluster, docs/JOBS.md): the Job is created on the manager and MultiKueue +
+    the dispatcher pick the worker among the model's regions and GPU classes. Inputs and outputs live in the
+    tenant's hub-region bucket (the one this cluster's tenant-storage names). Per-region parameter defaults
+    apply when every deployment agrees on them, or when the caller pins a region. Image references are
+    fleet-wide (the logical registry host, docs/IMAGES.md), so an unpinned run is placed at queue time: the
+    dispatcher nominates the cheapest free cluster and re-nominates while the run waits."""
+    application = bool(ex and ex.get("io_mode") == "application")
+    bucket = None if application else artifacts.storage(p.namespace, REGION)["bucket"]
+    inp = req.input.get("input_prefix")
+    if inp and not str(inp).startswith(f"s3://{bucket}/"):
+        raise HTTPException(
+            400,
+            f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)",
+        )
+    placement = execution.narrow_placement(
+        {"manager": True, "profile": profile_of(m), "classes": gpu_classes(m), "regions": m["regions"]}, ex
+    )
+    region = req.region
+    defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
+    defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
+    return build_run(
+        name,
+        m,
+        req.input,
+        p.tenant,
+        req.name,
+        idempotency_key,
+        timeout,
+        req.priority,
+        region,
+        defaults,
+        keys.key_hash(p.key),
+        placement=placement,
+        gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")),
+        ex=ex,
+    )
+
+
+def _class_for(
+    m: dict,
+    req,
+    region: str | None,
+    tenant: str | None = None,
+    ex: dict | None = None,
+    regions: list[str] | None = None,
+) -> str | None:
+    """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
+    runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
+    given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
+    if not class_images(m):
+        return None
+    gpus = (m.get("job") or {}).get("gpu", 1)
+    try:
+        gpus = int(gpus)
+    except (TypeError, ValueError):  # a parameter placeholder: one GPU for the ranking
+        gpus = (
+            int(req.input.get("gpus", 1) or 1)
+            if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit()
+            else 1
+        )
+    available = (
+        (ex.get("placement") or {}).get("gpu_preference") if ex else None
+    )  # the caller's order narrows the model's
+    cls, how = placement.choose_class(
+        m, region, gpus, available, tenant, regions
+    )  # `regions`: the run's allowed clusters
+    log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
+    return cls
+
+
+def render_submission(
+    m: dict,
+    req,
+    p,
+    region: str,
+    mode: str,
+    idempotency_key: str | None,
+    ex: dict | None,
+    name: str,
+    admitted: str | None,
+    manager: bool,
+) -> tuple[dict, dict | None, str]:
+    """The Job (or JobSet) a submission becomes, before its admission (docs/API.md "Runs", "Endpoint calls"): an
+    endpoint call's caller Job in the endpoint's region (its bound private input, the admitted token), a fleet-placed
+    run on the manager (the dispatcher picks the worker), or a run in the one region; the owner, the requester and,
+    for an endpoint call, the revision it could reach are stamped on it. Returns (job, secret, region): the region
+    the Job is created in; `manager`: this API is the fleet manager (FLEET_MANAGER, the route's)."""
+    if mode == "async" and ex:
+        # an endpoint call with private input and application-owned output (docs/API.md "Endpoint calls")
+        if ex.get("placement") or ex.get("recovery"):
+            raise HTTPException(400, "execution.placement and execution.recovery apply to runs, not to endpoint calls")
+        if ex.get("io_mode") == "application" and not ex.get("private_input_ref"):
+            raise HTTPException(
+                400,
+                "an application-I/O endpoint call takes its request and its destination from a binding: give private_input_ref",
+            )
+        if ex.get("private_input_ref") and req.input:
+            raise HTTPException(
+                400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
+            )
+    if ex and ex.get("require_converged") and mode != "async":
+        raise HTTPException(400, "execution.require_converged applies to endpoint calls (mode async)")
+    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
+    if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
+        # an explicit region that contradicts the caller's own cluster list; an implicit one (the default) is no
+        # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
+        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
+    if allowed and not manager and mode == "run" and region not in allowed:
+        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
+    timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
+    secret, rollout = None, None
+    if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
+        rollout = _rollout_fence(m, region, ex)
+        job, secret = build_async(
+            name,
+            m,
+            req.input,
+            p.tenant,
+            p.key,
+            req.name,
+            idempotency_key,
+            timeout,
+            _output_prefix(p.namespace, region, name, ex),
+            region,
+            ex=ex,
+            key_hash=keys.key_hash(p.key),
+            admitted=admitted,
+        )
+    elif manager:
+        _guard_run_input(m, req, p, REGION, ex)
+        job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
+        region = REGION  # created on the manager; the dispatcher picks the worker
+    else:
+        _guard_run_input(m, req, p, region, ex)
+        defaults = catalog.region_params(m, region)
+        defaults.setdefault("output_prefix", _output_prefix(p.namespace, region, name, ex))
+        job = build_run(
+            name,
+            m,
+            req.input,
+            p.tenant,
+            req.name,
+            idempotency_key,
+            timeout,
+            req.priority,
+            region,
+            defaults,
+            keys.key_hash(p.key),
+            gpu_class=_class_for(m, req, region, p.tenant, ex),
+            ex=ex,
+        )
+    ann = job["metadata"].setdefault("annotations", {})
+    ann[f"{LABEL}/owner"] = p.owner
+    instances.annotate_requester(
+        job, req.requester
+    )  # who asked, as the application states it (docs/API.md "Requester")
+    if rollout:
+        # what the first request could reach at admission (docs/API.md "Models"): evidence of the ready revision and its
+        # image then, not per-request provenance (Knative adds no revision to a response)
+        if rollout.get("latest_ready"):
+            ann[f"{LABEL}/endpoint-revision"] = str(rollout["latest_ready"])
+        if rollout.get("serving_images"):
+            ann[f"{LABEL}/endpoint-image"] = str(rollout["serving_images"][0])[:1000]
+    return job, secret, region

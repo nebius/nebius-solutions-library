@@ -74,8 +74,7 @@ def _fresh_catalog():
 def _fold_model():
     import models
 
-    e = models.to_entry(PER_CLASS, managed_by="api")
-    return catalog.normalise({**e, "version": 3})
+    return models.definition(PER_CLASS, managed_by="api", version=3)
 
 
 def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
@@ -269,20 +268,16 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     monkeypatch.setattr(
         execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}}
     )
-    ided = catalog.normalise(
+    ided = models_mod.definition(
         {
-            **models_mod.to_entry(
-                {
-                    "id": "byid",
-                    "kind": "job",
-                    "image": "img",
-                    "command": "x",
-                    "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
-                },
-                managed_by="api",
-            ),
-            "version": 1,
-        }
+            "id": "byid",
+            "kind": "job",
+            "image": "img",
+            "command": "x",
+            "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
+        },
+        managed_by="api",
+        version=1,
     )
     ided["regions"] = ["south", "north"]
     monkeypatch.setattr(catalog, "get", lambda name: ided if name == "byid" else None)
@@ -445,20 +440,16 @@ def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, m
     ) == {"us-central1", "eu-north1"}
     # a class without per-class images: the preference alone must pick the queue and the class list (every probe used
     # to land on the model's first class)
-    plain = catalog.normalise(
+    plain = models_mod.definition(
         {
-            **models_mod.to_entry(
-                {
-                    "id": "probe",
-                    "kind": "job",
-                    "image": "img:cuda",
-                    "command": "nvidia-smi",
-                    "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
-                },
-                managed_by="api",
-            ),
-            "version": 1,
-        }
+            "id": "probe",
+            "kind": "job",
+            "image": "img:cuda",
+            "command": "nvidia-smi",
+            "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
+        },
+        managed_by="api",
+        version=1,
     )
     monkeypatch.setattr(catalog, "get", lambda name: plain if name == "probe" else (m if name == "fold" else None))
     for pref, queue in (
@@ -595,9 +586,7 @@ def test_resume_renders_the_pinned_revision(monkeypatch):
     import models
 
     old_spec = {**PER_CLASS, "command": "fold --v3"}
-    current = catalog.normalise(
-        {**models.to_entry({**PER_CLASS, "command": "fold --v4"}, managed_by="api"), "version": 4}
-    )
+    current = models.definition({**PER_CLASS, "command": "fold --v4"}, managed_by="api", version=4)
     monkeypatch.setattr(db, "enabled", lambda: True)
     monkeypatch.setattr(
         db,

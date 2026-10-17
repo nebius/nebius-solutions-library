@@ -166,7 +166,7 @@ def test_keys_and_bindings_are_paged(client, admin_keys, monkeypatch):
         for i in range(4)
     ]
     monkeypatch.setattr(keys, "list_tenant", lambda tenant: list(fake_keys))
-    monkeypatch.setattr(appmod, "_key_public", lambda k, tenant: {"alias": k["key_alias"]})
+    monkeypatch.setattr(appmod, "key_view", lambda k, tenant, admin=False: {"alias": k["key_alias"]})
     r = c.get("/v1/keys?limit=3", headers=ADMIN)
     assert r.status_code == 200, r.text
     assert [k["alias"] for k in r.json()] == ["demo-k0", "demo-k1", "demo-k2"] and r.headers["X-Total-Count"] == "4"

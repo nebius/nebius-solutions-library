@@ -35,7 +35,7 @@
   {
    "kind": "InferenceService",
    "name": "http-example",
-   "sha256": "2b45243ed91c2acd7520f13cad09773112ae74869e57c905263effc9e10d35ec"
+   "sha256": "363d790581d89ddf39ea42bbc5d123a3a8b9adb2f79b6faf1125ea66c895a384"
   },
   {
    "kind": "SecurityPolicy",
@@ -91,7 +91,7 @@
   {
    "kind": "InferenceService",
    "name": "llm-example",
-   "sha256": "06713794d4f20bb43a176d576ce48319797a26df2d95b1369de3fef367646090"
+   "sha256": "e03f965d7a2f988a98ddca71729bba97f5f63b340656dc19128184bce2b1d499"
   },
   {
    "kind": "SecurityPolicy",
@@ -103,7 +103,7 @@
   {
    "kind": "InferenceService",
    "name": "llm-example",
-   "sha256": "834a01b4a834c96efc49803b372c8f45e67c3bf01953e8e81639b27a6dff36c7"
+   "sha256": "4aa5e0ec745b8522a65bedbd2994f651dd0553c63f65d7c843edc1d8f3612a3e"
   },
   {
    "kind": "SecurityPolicy",
@@ -151,7 +151,7 @@
   {
    "kind": "InferenceService",
    "name": "storage-example",
-   "sha256": "2fe81f7ac3469c823e4449b3eaf03660d1d3a32e593a0e637446b0ec3cb8bb61"
+   "sha256": "186cd9b8f4acdb11536b70ceac793cd593fe762658caa95536a6d43d264e79c5"
   },
   {
    "kind": "SecurityPolicy",
@@ -163,7 +163,7 @@
   {
    "kind": "InferenceService",
    "name": "ws-example",
-   "sha256": "fb0b3d1282f5511fab443d7fa190e5c4a04023ca13f828f5ae1ec28be35ebfc2"
+   "sha256": "2787a8e269270eef178d25d89faffb57b9020269bd49dc38e48dd68936249417"
   },
   {
    "kind": "SecurityPolicy",

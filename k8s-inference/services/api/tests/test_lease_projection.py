@@ -42,8 +42,8 @@ def test_lease_projection_on_both_shapes(monkeypatch):
     monkeypatch.setattr(render_endpoint, "PUBLIC_API_URL", "https://api.example.test")
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: None)
     spec = {**PLAIN, "native_lease": "required"}
-    objs = g.native(g._entry(spec, test_api.FLEET), "hub")
-    assert [d["kind"] for d in objs] == [d["kind"] for d in g.native(g._entry(PLAIN, test_api.FLEET), "hub")]
+    objs = g.native(g._definition(spec, test_api.FLEET), "hub")
+    assert [d["kind"] for d in objs] == [d["kind"] for d in g.native(g._definition(PLAIN, test_api.FLEET), "hub")]
     seen = 0
     for _d, c, vols in _containers(objs):
         seen += 1
@@ -60,7 +60,7 @@ def test_lease_projection_on_both_shapes(monkeypatch):
     # multi-node: leader and worker alike
     monkeypatch.setattr(mn.kube, "fleet", lambda: mn.POOLS)
     monkeypatch.setattr(mn.kube, "cluster_region", lambda c: c)
-    e = models.to_entry({**mn.SPEC, "native_lease": "optional"})
+    e = models.definition({**mn.SPEC, "native_lease": "optional"})
     objs = [
         d
         for v in models.variants(e, "us-central1")
@@ -76,7 +76,7 @@ def test_lease_projection_on_both_shapes(monkeypatch):
 
 def test_without_native_lease_nothing_is_projected(monkeypatch):
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: None)
-    for _d, c, vols in _containers(g.native(g._entry(PLAIN, test_api.FLEET), "hub")):
+    for _d, c, vols in _containers(g.native(g._definition(PLAIN, test_api.FLEET), "hub")):
         assert not [k for k in _env(c) if k.startswith("S2_")]
         assert not [x for x in vols if x["name"] == "s2-lease"]
         assert not [m for m in c.get("volumeMounts") or [] if m["name"] == "s2-lease"]
@@ -98,7 +98,7 @@ def test_ca_bundle_is_projected_as_a_file_never_as_an_environment_value(monkeypa
     assert len(pem) > 467_369  # the live bundle that broke API77's native endpoints
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: pem)
     spec = {**PLAIN, "native_lease": "optional"}
-    objs = g.native(g._entry(spec, test_api.FLEET), "hub")
+    objs = g.native(g._definition(spec, test_api.FLEET), "hub")
     # one more object, first in the apply order (the pod's mount exists before the pod), the bundle whole
     assert objs[0]["kind"] == "ConfigMap"
     (cm,) = [d for d in objs if d["kind"] == "ConfigMap"]
@@ -122,13 +122,13 @@ def test_ca_bundle_is_projected_as_a_file_never_as_an_environment_value(monkeypa
         assert {"name": "s2-lease", "mountPath": "/var/run/secrets/serverless2", "readOnly": True} in c["volumeMounts"]
     assert seen == 1
     # without native_lease the fleet's bundle is nobody's business: no ConfigMap, no variables
-    for d in g.native(g._entry(PLAIN, test_api.FLEET), "hub"):
+    for d in g.native(g._definition(PLAIN, test_api.FLEET), "hub"):
         assert d["kind"] != "ConfigMap"
-    for _d, c, _v in _containers(g.native(g._entry(PLAIN, test_api.FLEET), "hub")):
+    for _d, c, _v in _containers(g.native(g._definition(PLAIN, test_api.FLEET), "hub")):
         assert "SSL_CERT_FILE" not in _env(c) and "S2_CA_FILE" not in _env(c)
     # on a public fleet (no bundle): the token only, no file variables, no ConfigMap (API76 shape)
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: None)
-    objs = g.native(g._entry(spec, test_api.FLEET), "hub")
+    objs = g.native(g._definition(spec, test_api.FLEET), "hub")
     assert [d["kind"] for d in objs if d["kind"] == "ConfigMap"] == []
     for _d, c, vols in _containers(objs):
         assert not {"SSL_CERT_FILE", "S2_CA_FILE", "S2_CA_PEM"} & set(_env(c))
@@ -138,7 +138,7 @@ def test_ca_bundle_is_projected_as_a_file_never_as_an_environment_value(monkeypa
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: pem)
     monkeypatch.setattr(mn.kube, "fleet", lambda: mn.POOLS)
     monkeypatch.setattr(mn.kube, "cluster_region", lambda c: c)
-    e = models.to_entry({**mn.SPEC, "native_lease": "required"})
+    e = models.definition({**mn.SPEC, "native_lease": "required"})
     objs = [
         d
         for v in models.variants(e, "us-central1")
@@ -153,13 +153,13 @@ def test_ca_bundle_is_projected_as_a_file_never_as_an_environment_value(monkeypa
         assert vol["projected"]["sources"][1]["configMap"]["name"].endswith("-trust")
     assert seen == 2
     with pytest.raises(Exception, match="native_lease"):
-        g._entry({**PLAIN, "native_lease": "always"}, test_api.FLEET)
+        g._definition({**PLAIN, "native_lease": "always"}, test_api.FLEET)
 
 
 def test_an_oversized_bundle_is_refused_whole_never_cut(monkeypatch):
     monkeypatch.setattr(render_endpoint, "trust_bundle", lambda: _bundle(1_100_000))
     with pytest.raises(Exception, match="trust bundle"):
-        g.native(g._entry({**PLAIN, "native_lease": "optional"}, test_api.FLEET), "hub")
+        g.native(g._definition({**PLAIN, "native_lease": "optional"}, test_api.FLEET), "hub")
 
 
 def test_apply_and_delete_carry_the_trust_configmap(monkeypatch):
@@ -174,7 +174,7 @@ def test_apply_and_delete_carry_the_trust_configmap(monkeypatch):
     monkeypatch.setattr(kube, "api", lambda region="eu-north1": fake)
     monkeypatch.setattr(models, "endpoint_domain", lambda region: g.DOMAIN)
     with g._fleet(test_api.FLEET):
-        entry = models.to_entry({**PLAIN, "native_lease": "required"})
+        entry = models.definition({**PLAIN, "native_lease": "required"})
         applied = models.apply(entry, "hub")
         assert applied[0] == "ConfigMap/models/lease-example-trust"
         assert fake.configmaps[("models", "lease-example-trust")]["data"] == {"ca-bundle.pem": pem}

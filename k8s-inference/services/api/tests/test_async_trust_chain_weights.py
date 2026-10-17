@@ -79,20 +79,15 @@ SPEC = {
 
 
 def test_readiness_path_survives_normalisation_and_reaches_the_caller(client, monkeypatch):
-    entry = models.to_entry(SPEC)
-    assert entry["endpoints"]["ready"] == "/v1/health/ready"
-    m = catalog.normalise(entry)
+    m = models.definition(SPEC)
     assert m["health_path"] == "/v1/health/ready" and "ready" not in m["endpoints"]  # kept, not a callable endpoint
-    assert catalog.normalise({"id": "x", "mode": "sync"}).get("health_path") is None
     # model -> catalog -> build_async: the caller probes the readiness path, not the root
     c, cl = client
     _tenant(monkeypatch)
     _bind(c)
     monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
     base = catalog.get("llm-example")
-    raw = {k: v for k, v in base.items() if k != "health_path"}
-    raw["endpoints"] = {**base["endpoints"], "ready": "/v1/health/ready"}
-    probed = catalog.normalise(raw)
+    probed = {**base, "health_path": "/v1/health/ready"}
     monkeypatch.setattr(catalog, "get", lambda mid: probed if mid == "llm-example" else base)
     monkeypatch.setattr(catalog, "require", lambda mid: probed if mid == "llm-example" else base)
     monkeypatch.setattr(api, "_model", lambda mid: probed if mid == "llm-example" else base)
@@ -162,26 +157,22 @@ def test_cancelled_parent_shows_its_running_resumed_child_as_running(client, adm
 
 
 def test_read_only_weights_mount_read_only_without_a_prepare_step(client):  # the fixture pins the fleet (gpu classes)
-    fs = models.to_entry({**SPEC, "weights": {"path": "p", "read_only": True}})["runtime"]["weights"][
-        "sharedFilesystem"
-    ]
-    assert fs["readOnly"] is True and fs["prepare"] is False
-    fs = models.to_entry({**SPEC, "weights": {"path": "p"}})["runtime"]["weights"]["sharedFilesystem"]
-    assert fs["readOnly"] is False and fs["prepare"] is True  # unchanged default: writable, directory prepared
-    fs = models.to_entry({**SPEC, "weights": {"path": "p", "read_only": True, "prepare": True}})["runtime"]["weights"][
-        "sharedFilesystem"
-    ]
-    assert fs["readOnly"] is True and fs["prepare"] is True  # explicit
-    v = {
-        "name": "w",
-        "weights": {"sharedFilesystem": {"enabled": True, "prepare": False, "readOnly": True, "path": "p"}},
-    }
-    assert render_endpoint._weights_prepare(v) == []
-    mount = next(m for m in render_endpoint._volume_mounts(v) if m["name"] == "weights")
-    assert mount["readOnly"] is True and mount["subPath"] == "p"
-    v["weights"]["sharedFilesystem"].update({"prepare": True, "readOnly": False, "prepareImage": "busybox"})
-    assert render_endpoint._weights_prepare(v)[0]["name"] == "weights-prepare"
-    assert next(m for m in render_endpoint._volume_mounts(v) if m["name"] == "weights")["readOnly"] is False
+    def rendered(weights):
+        """(the weights mount is read-only, the prepare init container exists) of the rendered InferenceService."""
+        d = models.definition({**SPEC, "weights": weights})
+        pred = next(
+            x
+            for v in models.variants(d, "hub")
+            for x in render_endpoint.render(d, "hub", "d", "ib", v)
+            if x["kind"] == "InferenceService"
+        )["spec"]["predictor"]
+        mount = next(m for m in pred["containers"][0]["volumeMounts"] if m["name"] == "weights")
+        assert mount["subPath"] == "p"
+        return mount["readOnly"], any(i["name"] == "weights-prepare" for i in pred.get("initContainers") or [])
+
+    assert rendered({"path": "p", "read_only": True}) == (True, False)
+    assert rendered({"path": "p"}) == (False, True)  # unchanged default: writable, directory prepared
+    assert rendered({"path": "p", "read_only": True, "prepare": True}) == (True, True)  # explicit
 
 
 def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client, admin_keys, fake_keys, monkeypatch):
@@ -190,12 +181,11 @@ def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client
     bounded proof: the token is the HMAC for the key, the model and the operation; the operation holds a live
     reservation on that key; its Job is that key's and that model's and not over; the attempt is one of its live pods.
     Without it, or for another operation, model or key, or a terminal operation, or a pod that is not the Job's, the
-    key needs invoke:sync as before (API51 ADMET: readiness GET 403, zero inference POST). The key-only and key+model
-    tokens of earlier releases pass only with ADMITTED_LEGACY."""
+    key needs invoke:sync as before (API51 ADMET: readiness GET 403, zero inference POST); a key-only or key+model
+    token is no proof."""
     c, cl = client
     _tenant(monkeypatch)
     monkeypatch.setattr(api.cfg, "ROUTER_KEY", "synthetic-router")
-    monkeypatch.setattr(api.cfg, "ADMITTED_LEGACY", False)
     monkeypatch.setattr(api.kube, "stamp_last_request", lambda *a, **k: None)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)  # no cancel mark (the fake fleet database)
     api._admission_cache.clear()
@@ -256,8 +246,8 @@ def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client
     assert denied(
         **{"x-serverless2-admitted": api._admitted_token(keys.key_hash("sk-good"), "llm-example", oid)}
     )  # another key's
-    assert denied(**{"x-serverless2-admitted": api._admitted_token(h, "llm-example")})  # key+model (0.11.53 form)
-    assert denied(**{"x-serverless2-admitted": api._admitted_token(h)})  # key-only (up to 0.11.52)
+    assert denied(**{"x-serverless2-admitted": api._admitted_token(h, "llm-example")})  # a key+model token
+    assert denied(**{"x-serverless2-admitted": api._admitted_token(h)})  # a key-only token
     # live state fails closed after a previously successful hook call, with the identity still cached: a cancel mark,
     # then a released reservation (terminal, billed) each close the gate at once
     assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 200  # cached identity
@@ -273,16 +263,3 @@ def test_async_only_key_reaches_its_own_endpoint_call_through_the_gateway(client
     api._admission_cache.clear()
     cl.jobs[(NS, oid)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=ok).status_code == 403
-    cl.jobs[(NS, oid)]["status"] = {}
-    fake_keys.release(oid, 0.0)
-    # the transitional switch: the earlier forms pass while the API51-rendered callers drain
-    monkeypatch.setattr(api.cfg, "ADMITTED_LEGACY", True)
-    legacy = {**A, "x-serverless2-admitted": api._admitted_token(h)}
-    assert c.get("/internal/authorize/llm-example/v1/health/ready", headers=legacy).status_code == 200
-    assert (
-        c.get(
-            "/internal/authorize/llm-example/v1/health/ready",
-            headers={**A, "x-serverless2-admitted": api._admitted_token(h, "llm-example")},
-        ).status_code
-        == 200
-    )

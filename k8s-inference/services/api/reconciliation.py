@@ -80,9 +80,10 @@ def reconcile_models() -> dict:
         if not acquired:
             return results
         for change in db.pending_changes():
-            mid, entry, before = change["id"], change["entry"], change["previous"]
-            result = {"applied": {}, "version": change["version"]}
+            mid, result = change["id"], {"applied": {}, "version": change["version"]}
             try:
+                entry = models.load(change["entry"]) if change["entry"] else None
+                before = models.load(change["previous"]) if change["previous"] else {}
                 after = models.list_runtime()
                 if entry:
                     _deploy(entry, after, result)
@@ -138,11 +139,11 @@ def idle_shutdown() -> list[str]:
             if busy:
                 continue
             new_spec = {**spec, "scaling": {**sc, "min": 0}}
-            entry = models.to_entry(new_spec, managed_by="api")
+            d = models.definition(new_spec, managed_by="api")
             row = db.get_model(m["name"])
             try:  # an admin's write in between wins: this round skips, the next one re-reads
                 db.upsert_model(
-                    entry, new_spec, by="idle-shutdown", expected=row.get("version") if row else None, create_only=False
+                    d, new_spec, by="idle-shutdown", expected=row.get("version") if row else None, create_only=False
                 )
             except HTTPException as e:
                 if e.status_code != 409:
@@ -157,13 +158,13 @@ def idle_shutdown() -> list[str]:
 
 
 def continue_run(root: str, build, transfer_only: bool = False, ns: str | None = None):
-    from app import continue_run as _continue_run  # app imports this module; resolved at call time
+    from stages import continue_run as _continue_run  # stages imports this module; resolved at call time
 
     return _continue_run(root, build, transfer_only, ns=ns)
 
 
 def settle_deleted(job: dict) -> None:
-    from app import settle_deleted as _settle_deleted
+    from stages import settle_deleted as _settle_deleted
 
     _settle_deleted(job)
 

@@ -41,7 +41,7 @@ def _fresh_catalog():
 
 
 def _model(spec=SPEC):
-    return catalog.normalise({**models_mod.to_entry(spec, managed_by="api"), "version": 2})
+    return models_mod.definition(spec, managed_by="api", version=2)
 
 
 @pytest.fixture

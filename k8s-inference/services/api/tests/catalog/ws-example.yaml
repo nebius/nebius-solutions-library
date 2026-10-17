@@ -1,37 +1,26 @@
-# Test fixture: a WebSocket endpoint (one live session per replica, a warm floor in one region).
+# Test fixture: a WebSocket endpoint (one live session per replica, a warm floor in one region), written as the
+# spec of docs/API.md "Models" plus its placement (`deployments`) and the catalog's display fields.
 id: ws-example
-displayName: WebSocket example (streaming)
+kind: endpoint
+display_name: WebSocket example (streaming)
 task: streaming
-mode: sync                       # sync | async | run
-protocol: websocket              # live: WebSocket /v1/stream; file: POST /generate
+protocol: websocket              # live: WebSocket /v1/stream
 port: 8000
-endpoints:
-  stream: /v1/stream
-  file: /generate
-  ready: /readyz
-  metrics: /metrics
-gpu: { count: 1, memoryGiB: 8, classes: [h100, rtx-pro-6000] }
-concurrency: 1                   # one live session per replica
-coldStartClass: medium           # weights baked into the image
+path: /v1/stream
+health_path: /readyz
+gpu: { count: 1, classes: [h100, rtx-pro-6000] }
+image: registry.serverless2.local/nebius/ws-example@sha256:0000000000000000000000000000000000000000000000000000000000000001
+command: [python, -m, ws_example.server]
+env: { OMP_NUM_THREADS: "2", TMPDIR: /cache }
+resources: { cpu: "4", memory: 32Gi }
+scaling: { min: 0, max: 1, container_concurrency: 1 }   # one live session per replica
+timeout_s: 3600                  # live sessions up to 1 h (Knative max)
+shm_gib: 1
+empty_dirs:
+  - { name: cache, mount_path: /cache, size_limit: 8Gi }
+  - { name: tmp, mount_path: /tmp, size_limit: 2Gi }
 price: { unit: minute, usd: 0.006 }
-scaleToZero: true
-
-runtime:
-  image: registry.serverless2.local/nebius/ws-example@sha256:0000000000000000000000000000000000000000000000000000000000000001
-  command: [python, -m, ws_example.server]
-  port: 8000
-  protocol: websocket
-  env:
-    - { name: OMP_NUM_THREADS, value: "2" }
-    - { name: TMPDIR, value: /cache }
-  resources: { gpu: 1, cpu: "4", memory: 32Gi }
-  scaling: { minReplicas: 0, maxReplicas: 1, metric: concurrency, target: 1, containerConcurrency: 1, scaleToZeroRetention: 2m }
-  timeout: 3600                  # live sessions up to 1 h (Knative max)
-  shm: { enabled: true, size: 1Gi }
-  volumes:
-    - { name: cache, mountPath: /cache, sizeLimit: 8Gi }
-    - { name: tmp, mountPath: /tmp, sizeLimit: 2Gi }
-  readinessProbe: { path: /readyz }
+cold_start_class: medium         # weights baked into the image
 
 deployments:
   hub:
@@ -39,4 +28,4 @@ deployments:
   eu-south1:
     pool: rtx6000-spot-1x
     # one warm replica in the cheaper region; the hub stays scale-to-zero
-    scaling: { minReplicas: 1 }
+    min: 1

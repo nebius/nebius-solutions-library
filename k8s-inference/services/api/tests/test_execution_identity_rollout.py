@@ -42,18 +42,16 @@ def test_run_class_projects_its_execution_identity_without_the_spec(client, admi
         "retry": {"max_attempts": 2},
         "finalize": {"command": "deliver", "on_exit_codes": [75]},
     }
-    entry = catalog.normalise(models.to_entry(spec))
-    collect = catalog.normalise(
-        models.to_entry(
-            {
-                **spec,
-                "id": "esmfold2-collect",
-                "delegates": None,
-                "retry": None,
-                "finalize": None,
-                "image": "cr.example/collect:1",
-            }
-        )
+    entry = models.definition(spec)
+    collect = models.definition(
+        {
+            **spec,
+            "id": "esmfold2-collect",
+            "delegates": None,
+            "retry": None,
+            "finalize": None,
+            "image": "cr.example/collect:1",
+        }
     )
     endpoint_before = catalog.get("llm-example")
     monkeypatch.setattr(catalog, "all_models", lambda: {"esmfold2-fast": entry, "esmfold2-collect": collect})
@@ -87,9 +85,7 @@ def test_run_class_projects_its_execution_identity_without_the_spec(client, admi
     assert one["execution"] == m["execution"] and one["spec"] is None
     assert c.get("/v1/models/esmfold2-collect", headers=H).status_code in (403, 404)
     # the per-class images are projected without `default`
-    multi = catalog.normalise(
-        models.to_entry({**spec, "id": "multi", "image": None, "images": {"default": "img:d", "h100": "img:h"}})
-    )
+    multi = models.definition({**spec, "id": "multi", "image": None, "images": {"default": "img:d", "h100": "img:h"}})
     assert catalog.to_public(multi)["execution"]["images"] == {"h100": multi["job"]["images"]["h100"]}  # no `default`
     assert multi["job"]["images"]["h100"].endswith("/img:h")
 

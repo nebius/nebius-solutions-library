@@ -12,7 +12,10 @@
 # the sandbox's pause (the kubelet does not refresh the status of a terminating pod, so after a
 # SIGTERM the API alone would leave us waiting until the grace period's SIGKILL). On SIGTERM
 # (preemption, cancel) it uploads what exists at once, then waits for main to finish its own
-# SIGTERM handling (checkpoint) and uploads again.
+# SIGTERM handling (checkpoint) and uploads again. Outside a termination, once main's processes
+# are gone the exit code is waited for without bound (a log line every minute): the kubelet may
+# post the terminated state minutes after the process ended, and the pod cannot end before this
+# container does, so giving up would only record a completed attempt as interrupted.
 set -uo pipefail
 : "${POD_NAME:?POD_NAME must be set}"
 # UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
@@ -145,10 +148,10 @@ upload() {   # $1 = status
   echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
 # shellcheck disable=SC2317,SC2329 # invoked by the TERM trap (diagnostic varies by ShellCheck version)
-on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; EXIT=""; upload interrupted; }
+on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; TERMINATING=1; EXIT=""; upload interrupted; }
 trap on_term TERM
 
-gone=0
+gone=0; TERMINATING=""
 while true; do
   pod
   EXIT=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.exitCode // empty')
@@ -175,11 +178,16 @@ while true; do
     fi
   elif [ "$SEEN" = 1 ]; then
     gone=$((gone + 1))                        # main's processes are gone; the kubelet can take a while to post the exit code
-    if [ "$gone" -ge "${EXIT_CODE_POLLS:-40}" ]; then
-      echo "$MAIN ended, exit code not reported by the API after $gone polls; last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
+    if [ -n "$TERMINATING" ] && [ "$gone" -ge 5 ]; then
+      # a terminating pod gets no fresh container status from the kubelet: a short look for an exit code posted
+      # before the SIGTERM, then the interrupted record (the grace period's SIGKILL must not take the upload)
+      echo "$MAIN ended during the termination, exit code not reported by the API; last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
       EXIT=""; break
     fi
-    sleep 3 & wait $!; continue
+    if [ -z "$TERMINATING" ] && [ $((gone % 20)) = 0 ]; then
+      echo "$MAIN ended, waiting for the API to report its exit code ($gone polls); last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
+    fi
+    sleep "$(( ${POLL_SECONDS:-10} < 3 ? ${POLL_SECONDS:-10} : 3 ))" & wait $!; continue
   fi
   sleep "${POLL_SECONDS:-10}" & wait $!      # interruptible by the trap
 done

@@ -492,10 +492,6 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     m = _marks(operation)
     if m and m[1]:
         state = "CANCELLED"
-    completion = completion_of(operation) if state == "PREEMPTED" else None
-    proven = observed_complete(rows, m, completion)
-    if proven:
-        state = "SUCCEEDED"  # the Job proved exit 0 and the attempt's own RESULT.json was committed (migration 29)
     attempts = [
         {
             "index": i + 1,
@@ -522,8 +518,6 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     status.cancel_attempt(
         attempts, state == "CANCELLED"
     )  # the cancelled attempt's record is the cancel, not a preemption
-    if proven:
-        attempts[-1]["status"], attempts[-1]["reason"] = "SUCCEEDED", completion["reason"] or OBSERVED_COMPLETION
     return {
         "id": operation,
         "name": None,
@@ -553,69 +547,42 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     }
 
 
-OBSERVED_COMPLETION = "exit code not observed by the uploader; the Job is Complete and RESULT.json is committed"
-
-
-def mark_completed(
-    operation: str, pod: str, pod_uid: str | None, epoch: int | None, result_ref: str, job_uid: str
-) -> None:
-    """The API's observed completion (migration 29), written once when the projection proved a Complete single-worker
-    manager Job whose newest attempt record says "interrupted" yet carries that attempt's committed result_ref. Bound
-    to the exact attempt (pod, pod UID, epoch, result_ref) and the manager Job's UID: a mark for another attempt is
-    never overwritten, so a later interrupted attempt cannot inherit it. The uploader's raw row stays as written."""
-    if not enabled():
-        return
-    with db.pool().connection() as c, c.transaction():
-        c.execute(
-            """insert into operation_marks (operation, completed_at, completed_pod, completed_pod_uid, completed_epoch,
-                                            completed_result_ref, completed_job_uid, completion_reason)
-               values (%s, now(), %s, %s, %s, %s, %s, %s)
-               on conflict (operation) do update set
-                 completed_at = coalesce(operation_marks.completed_at, excluded.completed_at),
-                 completed_pod = coalesce(operation_marks.completed_pod, excluded.completed_pod),
-                 completed_pod_uid = coalesce(operation_marks.completed_pod_uid, excluded.completed_pod_uid),
-                 completed_epoch = coalesce(operation_marks.completed_epoch, excluded.completed_epoch),
-                 completed_result_ref = coalesce(operation_marks.completed_result_ref, excluded.completed_result_ref),
-                 completed_job_uid = coalesce(operation_marks.completed_job_uid, excluded.completed_job_uid),
-                 completion_reason = coalesce(operation_marks.completion_reason, excluded.completion_reason)""",
-            (operation, pod, pod_uid, epoch, result_ref, job_uid, OBSERVED_COMPLETION),
+def delivered(op: dict, name: str, root: str) -> dict:
+    """What a transfer-only retry or an application finalizer (`<name>-x<n>`) that delivered means for `name`
+    (docs/JOBS.md "Attempts and finalization", "Finalization by the application"): a run or an endpoint call whose
+    inference succeeded is SUCCEEDED with the delivering attempt's result; a delivered capture of an endpoint error
+    (the retry's exit code 2 or 5, the captured status class) stays FAILED and reports the delivery next to it, so
+    delivery never turns a failed inference into a success."""
+    done = [
+        r
+        for r in for_operation(root)
+        if r["operation"].startswith(f"{name}-x")
+        and (
+            (r.get("export_state") or r.get("export")) == "succeeded"
+            or (r.get("result_ref") and r["status"] == "succeeded")
         )
-
-
-def completion_of(operation: str) -> dict | None:
-    """The observed completion mark, or None."""
-    if not enabled():
-        return None
-    with db.pool().connection() as c:
-        r = c.execute(
-            """select completed_at, completed_pod, completed_pod_uid, completed_epoch, completed_result_ref,
-                      completed_job_uid, completion_reason
-               from operation_marks where operation = %s and completed_at is not null""",
-            (operation,),
-        ).fetchone()
-    if r is None:
-        return None
-    return dict(zip(("at", "pod", "pod_uid", "epoch", "result_ref", "job_uid", "reason"), r))
-
-
-def observed_complete(rows: list[dict], marks, completion: dict | None) -> bool:
-    """Whether the observed completion mark proves the newest attempt: the mark exists, no cancel and no successor
-    mark, a single-worker run (no gang rank on any row), the newest row literally "interrupted" with no failed
-    export, and its pod, pod UID (when the row has one), epoch and result_ref all equal to the mark's."""
-    if not completion or not rows or (marks and (marks[1] or marks[2])):
-        return False
-    if any(r.get("gang_rank") is not None for r in rows):
-        return False
-    r = rows[-1]
-    return (
-        r.get("status") == "interrupted"
-        and r.get("export_state") != "failed"
-        and bool(r.get("result_ref"))
-        and r.get("pod") == completion["pod"]
-        and (r.get("pod_uid") is None or completion["pod_uid"] is None or r.get("pod_uid") == completion["pod_uid"])
-        and r.get("epoch") == completion["epoch"]
-        and r.get("result_ref") == completion["result_ref"]
-    )
+    ]
+    if not done:
+        return {}
+    last = done[-1]
+    out = {
+        "export_state": last.get("export_state") or "succeeded",
+        "exported_by": last["operation"],
+        # the delivering attempt: what a consumer of the result (a dependent stage, DEPENDENCY_RESULTS) must name
+        "exported_by_attempt_id": last.get("pod"),
+        "exported_by_epoch": last.get("epoch"),
+        "result_ref": last.get("result_ref") or op.get("result_ref"),
+    }
+    if last.get("exit_code") in (2, 5) or (last["status"] != "succeeded" and last.get("exit_code")):
+        out.update(
+            {
+                "status": "FAILED",
+                "error": "the endpoint answered an error; its response was delivered (see result_ref), inference did not succeed",
+            }
+        )
+    else:
+        out.update({"status": "SUCCEEDED", "error": None})
+    return out
 
 
 def mark_cancelled(operation: str) -> None:

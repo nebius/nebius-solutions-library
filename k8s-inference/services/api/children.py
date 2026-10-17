@@ -65,6 +65,7 @@ import jobs
 import keys
 import kube
 import leases
+import stages
 import status
 from config import LABEL, PUBLIC_API_URL, REGION, TENANT_NS_PREFIX
 from resilience import iso, parse_ts
@@ -473,7 +474,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     _cluster, child_region = api._deployment_of(cm, req["region"])  # definite (400/404) before anything is recorded
     if delivery == "platform":
         result_ref(ns, child_region, child)  # the tenant's storage in that region exists (404/503 before any record)
-    image = str((cm.get("runtime") or {}).get("image") or "")
+    image = str(cm.get("image") or "")
     # the durable intent first, under the one-open-child and per-unit identities (compare-and-swap on the primary key)
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 3))", (root,))
@@ -534,7 +535,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
             remaining = _remaining_s(job)
             if remaining is not None and remaining < MIN_REMAINING_S:
                 raise HTTPException(409, f"run {parent}: {remaining} s of its deadline left; no child attaches")
-            timeout = int(req_timeout or int((cm.get("runtime") or {}).get("timeout") or 600))
+            timeout = int(req_timeout or int(cm.get("timeout_s") or 600))
             if remaining is not None:
                 timeout = min(timeout, remaining)
             if timeout < MIN_REMAINING_S:
@@ -648,7 +649,7 @@ def complete(
     cm = catalog.get(row["model"])
     if cm is None:
         return _refuse(row, f"child model {row['model']} is gone from the catalog", 400, synchronous)
-    image = str((cm.get("runtime") or {}).get("image") or "")
+    image = str(cm.get("image") or "")
     if row["model_image"] and image != row["model_image"]:
         return _refuse(
             row,
@@ -964,7 +965,6 @@ def sweep() -> list[str]:
 def _cancel(row: dict, cjob: dict, cregion: str, why: str) -> None:
     """Issue the child's cancel once and record it; the row stays open until the settlement (a never-started child,
     deleted by the cancel, settles at zero right here: nothing of it ever ran or attached)."""
-    import app as api
 
     cancelled = jobs.cancel(row["namespace"], row["child"], cregion)
     if db.enabled():
@@ -972,7 +972,7 @@ def _cancel(row: dict, cjob: dict, cregion: str, why: str) -> None:
             leases.request_cancel(row["child"], why)  # a request to the attached worker, never a release
         except Exception as e:  # noqa: BLE001
             log.warning("child %s: cancel request to the worker: %s", row["child"], e)
-    api.settle_deleted(cancelled)
+    stages.settle_deleted(cancelled)
     with db.pool().connection() as c, c.transaction():
         c.execute(
             "update endpoint_children set cancel_requested_at = now(), reason = coalesce(reason, %s) where root = %s and unit_id = %s and state in ('pending', 'active')",

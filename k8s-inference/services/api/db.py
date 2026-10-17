@@ -3,7 +3,7 @@ API keys and the GPU charge ledger (services/api/keys.py).
 
 Only the control API has `DATABASE_URL` (the platform stage puts it in Secret api/database); it is the single
 writer. Regional APIs have no database: they serve the read-only copies the control API writes into their
-cluster (services/api/models.py). Schema changes are versioned below and applied at startup (`migrate`).
+cluster (services/api/models.py). The schema is the baseline below plus the versioned migrations after it, applied at startup (`migrate`).
 """
 
 import json
@@ -16,42 +16,36 @@ from psycopg_pool import ConnectionPool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-MIGRATIONS = [
-    # 1: model definitions and their history
-    """
-    create table if not exists schema_version (version int primary key, applied_at timestamptz not null default now());
-    create table if not exists models (
-        id          text primary key,
-        kind        text not null,
-        spec        jsonb not null,
-        entry       jsonb not null,
-        version     int not null default 1,
-        managed_by  text not null default 'api',
-        created_by  text,
-        created_at  timestamptz not null default now(),
-        updated_by  text,
-        updated_at  timestamptz not null default now()
-    );
-    create table if not exists models_history (
-        id          text not null,
-        version     int not null,
-        action      text not null,
-        spec        jsonb,
-        entry       jsonb,
-        by          text,
-        at          timestamptz not null default now(),
-        primary key (id, version, action)
-    );
-    """,
-    # 2: a durable desired-state queue. New writes retain all deployments needing cleanup.
-    """
-    create table if not exists model_changes (
-        id text primary key, version int not null, entry jsonb, previous jsonb not null,
-        error text, updated_at timestamptz not null default now()
-    );
-    """,
-    # 3: the attempt lifecycle of runs (services/api/attempts.py)
-    """
+BASELINE_VERSION = 30  # the schema below, as the thirty incremental migrations of releases up to 0.11.131 left it
+BASELINE = """
+create table if not exists models (
+    id          text primary key,
+    kind        text not null,
+    spec        jsonb not null,
+    entry       jsonb not null,
+    version     int not null default 1,
+    managed_by  text not null default 'api',
+    created_by  text,
+    created_at  timestamptz not null default now(),
+    updated_by  text,
+    updated_at  timestamptz not null default now()
+);
+create table if not exists models_history (
+    id          text not null,
+    version     int not null,
+    action      text not null,
+    spec        jsonb,
+    entry       jsonb,
+    by          text,
+    at          timestamptz not null default now(),
+    primary key (id, version, action)
+);
+-- the durable desired-state queue of the model reconciler (reconciliation.py)
+create table if not exists model_changes (
+    id text primary key, version int not null, entry jsonb, previous jsonb not null,
+    error text, updated_at timestamptz not null default now()
+);
+-- the attempt lifecycle of runs (attempts.py): one row per pod of an operation
 create table if not exists attempts (
     operation   text not null,
     pod         text not null,
@@ -75,360 +69,269 @@ create table if not exists attempts (
     checkpoint_ref text,
     revision    bigserial,
     updated_at  timestamptz not null default now(),
+    checkpoint_generation int,
+    role        text not null default 'run',
+    cluster     text,
+    mode        text,
+    model       text,
+    io_mode     text,
+    gang_rank   int,
+    gang_restart int,
+    pod_uid     text,
+    capture     jsonb,
+    resume_checkpoint_ref text,
+    resume_source_epoch int,
+    resume_source text,
     primary key (operation, pod)
 );
 create index if not exists attempts_root on attempts (root);
+create index if not exists attempts_gang on attempts (operation, gang_restart);
+-- the cancel and successor marks of an operation (the completed_* columns are unused: retained from an earlier schema)
 create table if not exists operation_marks (
     operation   text primary key,
     cancelled_at timestamptz,
-    revision    bigserial
+    revision    bigserial,
+    successor   text,
+    completed_at timestamptz,
+    completed_pod text,
+    completed_pod_uid text,
+    completed_epoch int,
+    completed_result_ref text,
+    completed_job_uid text,
+    completion_reason text
 );
-""",
-    # 4: live checkpoint pointers and successor operations (capacity fallback keeps the original handle)
+-- API keys and the GPU charge ledger (keys.py): only the sha256 of a key value is stored
+create table if not exists keys (
+    hash        text primary key,
+    alias       text not null,
+    tenant      text not null,
+    role        text not null default 'user',
+    models      jsonb not null default '[]',
+    budget      numeric,
+    spend       numeric not null default 0,
+    expires     timestamptz,
+    blocked     boolean not null default false,
+    preview     text,
+    metadata    jsonb not null default '{}',
+    created_at  timestamptz not null default now(),
+    created_by  text,
+    updated_at  timestamptz not null default now(),
+    scopes      jsonb not null default '[]',
+    max_concurrent integer,
+    budget_requests numeric,
+    budget_gpu_seconds numeric,
+    spent_requests numeric not null default 0,
+    spent_gpu_seconds numeric not null default 0,
+    rate_limit  jsonb,
+    unique (tenant, alias)
+);
+create table if not exists charges (
+    operation   text primary key,
+    key_hash    text not null,
+    gpu_seconds double precision not null,
+    usd         numeric not null,
+    at          timestamptz not null default now()
+);
+-- a key's reservations (slot, request, GPU seconds) until the attempt is accounted; key_calls counts the rate window
+create table if not exists key_reservations (
+    operation   text primary key,
+    key_hash    text not null,
+    tenant      text not null,
+    gpu_seconds numeric not null default 0,
+    requests    integer not null default 1,
+    created_at  timestamptz not null default now()
+);
+create index if not exists key_reservations_key on key_reservations (key_hash);
+create table if not exists key_calls (
+    key_hash text not null,
+    at       timestamptz not null default now()
+);
+create index if not exists key_calls_key_at on key_calls (key_hash, at);
+-- private operation ownership outlives Jobs, reservations and key revocation
+create table if not exists operation_owners (
+    operation text primary key,
+    tenant text not null,
+    owner text not null,
+    model text not null,
+    created_at timestamptz not null default now()
+);
+create index if not exists operation_owners_tenant_owner on operation_owners (tenant, owner);
+-- LiteLLM records of revoked or replaced key values whose deletion is still owed (keys.retire_mirrors)
+create table if not exists retired_mirrors (
+    hash       text primary key,
+    retired_at timestamptz not null default now()
+);
+-- the members of a logical run under the root's one reservation (keys.prepare_run_member / settle_run_member);
+-- retire_marked_at is unused: retained from an earlier schema
+create table if not exists key_run_members (
+    operation   text primary key,
+    root        text not null,
+    predecessor text,
+    key_hash    text not null,
+    tenant      text not null,
+    gpu_bound   numeric not null default 0,
+    gpu_seconds numeric,
+    state       text not null default 'active',
+    created_at  timestamptz not null default now(),
+    settled_at  timestamptz,
+    kind        text not null default 'continuation',
+    stage       text,
+    note        text,
+    retire_marked_at timestamptz
+);
+create index if not exists key_run_members_root on key_run_members (root, created_at);
+create index if not exists key_run_members_key_state on key_run_members (key_hash, state);
+-- stage graphs (docs/JOBS.md "Stage composition"): what a root declared at submission, and the stage -> model binding
+create table if not exists run_graphs (
+    root         text primary key,
+    tenant       text not null,
+    owner        text not null,
+    stages       jsonb not null,
+    deadline_at  timestamptz,
+    sealed_at    timestamptz not null default now(),
+    cancelled_at timestamptz,
+    closed_at    timestamptz,
+    reason       text,
+    models       jsonb not null default '{}'::jsonb
+);
+-- live sessions (docs/API.md "Sessions"): one admitted stream = one claim, one connection, one worker pod
+create table if not exists sessions (
+    id                  text primary key,
+    tenant              text not null,
+    owner               text not null,
+    key_hash            text not null,
+    model               text not null,
+    cluster             text,
+    region              text not null,
+    state               text not null default 'claimed',
+    claim_hash          text not null,
+    connection          text,
+    pod                 text,
+    pod_namespace       text,
+    pod_uid             text,
+    worker_session_id   text,
+    gpu_bound           numeric not null default 0,
+    created_at          timestamptz not null default now(),
+    expires_at          timestamptz not null,
+    deadline_at         timestamptz not null,
+    bound_at            timestamptz,
+    attached_at         timestamptz,
+    cancel_requested_at timestamptz,
+    cancel_reason       text,
+    ended_at            timestamptz,
+    outcome             text,
+    gpu_seconds         numeric,
+    usage               text,
+    settled_at          timestamptz,
+    ready_seen_at       timestamptz,
+    attach_deadline_at  timestamptz,
+    idempotency_key     text,
+    request_hash        text
+);
+create index if not exists sessions_open on sessions (state) where state <> 'ended';
+create index if not exists sessions_owner on sessions (tenant, owner, created_at desc);
+create unique index if not exists sessions_idempotency on sessions (tenant, owner, idempotency_key)
+    where idempotency_key is not null;
+-- native execution leases (docs/API.md "Native execution leases") and their durable terminal fence
+create table if not exists native_executions (
+    operation           text not null,
+    attempt             text not null,
+    state               text not null default 'prepared',
+    pod                 text,
+    pod_namespace       text,
+    pod_uid             text,
+    worker_request_id   text,
+    region              text not null,
+    model               text not null,
+    prepared_at         timestamptz not null default now(),
+    attached_at         timestamptz,
+    released_at         timestamptz,
+    outcome             text,
+    gpu_seconds         numeric,
+    lane_seconds        numeric,
+    cancel_requested_at timestamptz,
+    cancel_reason       text,
+    settled_at          timestamptz,
+    restart_count       integer,
+    lost_reason         text,
+    primary key (operation, attempt)
+);
+create index if not exists native_executions_attached on native_executions (state) where state = 'attached';
+create table if not exists native_fences (
+    operation text primary key,
+    closed_at timestamptz not null default now(),
+    reason    text
+);
+-- the admission record of a run (docs/JOBS.md "Resume"): what a resume needs past the Job's TTL
+create table if not exists run_admissions (
+    operation     text primary key,
+    tenant        text not null,
+    region        text,
+    labels        jsonb not null default '{}'::jsonb,
+    annotations   jsonb not null default '{}'::jsonb,
+    timeout_s     integer,
+    output_prefix text,
+    managed_by    text,
+    created_at    timestamptz not null default now()
+);
+-- endpoint children of a run (docs/JOBS.md "Endpoint children"): durable intents, one open child per root
+create table if not exists endpoint_children (
+    root             text not null,
+    unit_id          text not null,
+    child            text not null unique,
+    parent           text not null,
+    parent_pod       text not null,
+    parent_pod_uid   text not null,
+    model            text not null,
+    request_sha256   text not null,
+    state            text not null default 'active',
+    created_at       timestamptz not null default now(),
+    ended_at         timestamptz,
+    namespace        text,
+    region           text,
+    timeout_s        integer,
+    request          jsonb,
+    cancel_requested_at timestamptz,
+    reason           text,
+    transport        jsonb,
+    model_image      text,
+    binding_ref      text,
+    delivery         text not null default 'platform',
+    incarnation      int not null default 1,
+    previous_child   text,
+    primary key (root, unit_id)
+);
+create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
+-- fleet-wide settings the fleet operator writes and every API replica reads (pause.py)
+create table if not exists fleet_settings (
+    key        text primary key,
+    value      jsonb not null,
+    updated_at timestamptz not null default now()
+);
+"""
+# Migrations above the baseline, numbered from BASELINE_VERSION + 1 in list order: one SQL block each, applied once
+# and recorded in schema_version. A new one is appended here; the baseline is never edited.
+MIGRATIONS: list[str] = [
+    # 31: one shape of a model definition (services/api/models.py `definition`): a row is its spec and the placement
+    # frozen at its write (`deployments`); the chart-era `entry` projection goes. A pending change holds the row shape.
     """
-    alter table attempts add column if not exists checkpoint_generation int;
-    alter table operation_marks add column if not exists successor text;
-    """,
-    # 5: API keys and the GPU charge ledger (services/api/keys.py): the fleet database is the source of truth for a
-    # key's tenant, role, budget, spend, models, expiry and block flag; only the sha256 of a key value is stored
-    """
-    create table if not exists keys (
-        hash        text primary key,
-        alias       text not null,
-        tenant      text not null,
-        role        text not null default 'user',
-        models      jsonb not null default '[]',
-        budget      numeric,
-        spend       numeric not null default 0,
-        expires     timestamptz,
-        blocked     boolean not null default false,
-        preview     text,
-        metadata    jsonb not null default '{}',
-        created_at  timestamptz not null default now(),
-        created_by  text,
-        updated_at  timestamptz not null default now(),
-        unique (tenant, alias)
-    );
-    create table if not exists charges (
-        operation   text primary key,
-        key_hash    text not null,
-        gpu_seconds double precision not null,
-        usd         numeric not null,
-        at          timestamptz not null default now()
-    );
-    """,
-    # 6: the attempt's role (run, export, finalize): the platform's statement from the Job it rendered
-    """
-    alter table attempts add column if not exists role text not null default 'run';
-    """,
-    # 7: the canonical cluster id of an attempt (the fleet's configured id, as placement and identities key it);
-    # `region` stays the Nebius region (two ids may share one region)
-    """
-    alter table attempts add column if not exists cluster text;
-    """,
-    # 8: per-key scopes and limits beyond the USD budget (docs/API.md "Keys"): a request-count budget, a GPU-second
-    # budget, a concurrency limit and a rate limit in the key's own units; reservations hold a slot and the GPU seconds
-    # a run may take until its attempt is accounted; key_calls counts requests per key for the rate window.
-    """
-    alter table keys add column if not exists scopes jsonb not null default '[]';
-    alter table keys add column if not exists max_concurrent integer;
-    alter table keys add column if not exists budget_requests numeric;
-    alter table keys add column if not exists budget_gpu_seconds numeric;
-    alter table keys add column if not exists spent_requests numeric not null default 0;
-    alter table keys add column if not exists spent_gpu_seconds numeric not null default 0;
-    alter table keys add column if not exists rate_limit jsonb;
-    create table if not exists key_reservations (
-        operation   text primary key,
-        key_hash    text not null,
-        tenant      text not null,
-        gpu_seconds numeric not null default 0,
-        requests    integer not null default 1,
-        created_at  timestamptz not null default now()
-    );
-    create index if not exists key_reservations_key on key_reservations (key_hash);
-    create table if not exists key_calls (
-        key_hash text not null,
-        at       timestamptz not null default now()
-    );
-    create index if not exists key_calls_key_at on key_calls (key_hash, at);
-    """,
-    # 9: private operation ownership outlives Jobs, reservations, and key revocation.
-    # Namespace/storage sharing does not grant access to another principal's operations.
-    """
-    create table if not exists operation_owners (
-        operation text primary key,
-        tenant text not null,
-        owner text not null,
-        model text not null,
-        created_at timestamptz not null default now()
-    );
-    create index if not exists operation_owners_tenant_owner on operation_owners (tenant, owner);
-    """,
-    # 10: LiteLLM records of revoked or replaced key values whose deletion is still owed (keys.retire_mirrors)
-    """
-    create table if not exists retired_mirrors (
-        hash       text primary key,
-        retired_at timestamptz not null default now()
-    );
-    """,
-    # 11: the members of a logical run (the root and every continuation: resume, export retry, finalizer, fallback,
-    # recovery) under the root's one reservation (keys.prepare_run_member / settle_run_member); a member's GPU bound
-    # stays reserved while it is active, becomes spend when measured, and stays on record as `unknown` when nothing
-    # trustworthy was measured (never zero by assumption)
-    """
-    create table if not exists key_run_members (
-        operation   text primary key,
-        root        text not null,
-        predecessor text,
-        key_hash    text not null,
-        tenant      text not null,
-        gpu_bound   numeric not null default 0,
-        gpu_seconds numeric,
-        state       text not null default 'active',
-        created_at  timestamptz not null default now(),
-        settled_at  timestamptz
-    );
-    create index if not exists key_run_members_root on key_run_members (root, created_at);
-    create index if not exists key_run_members_key_state on key_run_members (key_hash, state);
-    """,
-    # 12: the provenance an operation keeps after its Job is gone (attempts.synthesize): its mode (run | async), its
-    # model and its I/O mode, so the durable result path stays the operation's (application-owned output is never
-    # read from the platform bucket) and the key's model allow-list still applies
-    """
-    alter table attempts add column if not exists mode text;
-    alter table attempts add column if not exists model text;
-    alter table attempts add column if not exists io_mode text;
-    """,
-    # 13: stage graphs (docs/JOBS.md "Stage composition"): the stages a root declared at submission (sealed: nothing
-    # attaches later), and members of kind `stage` (a declared stage's operation, outside the continuation head rule)
-    """
-    create table if not exists run_graphs (
-        root         text primary key,
-        tenant       text not null,
-        owner        text not null,
-        stages       jsonb not null,
-        deadline_at  timestamptz,
-        sealed_at    timestamptz not null default now(),
-        cancelled_at timestamptz,
-        closed_at    timestamptz,
-        reason       text
-    );
-    alter table key_run_members add column if not exists kind text not null default 'continuation';
-    alter table key_run_members add column if not exists stage text;
-    alter table key_run_members add column if not exists note text;
-    """,
-    # 14: live sessions (docs/API.md "Sessions"): one admitted stream = one claim, one connection, one worker pod
-    """
-    create table if not exists sessions (
-        id                  text primary key,
-        tenant              text not null,
-        owner               text not null,
-        key_hash            text not null,
-        model               text not null,
-        cluster             text,
-        region              text not null,
-        state               text not null default 'claimed',
-        claim_hash          text not null,
-        connection          text,
-        pod                 text,
-        pod_namespace       text,
-        pod_uid             text,
-        worker_session_id   text,
-        gpu_bound           numeric not null default 0,
-        created_at          timestamptz not null default now(),
-        expires_at          timestamptz not null,
-        deadline_at         timestamptz not null,
-        bound_at            timestamptz,
-        attached_at         timestamptz,
-        cancel_requested_at timestamptz,
-        cancel_reason       text,
-        ended_at            timestamptz,
-        outcome             text,
-        gpu_seconds         numeric,
-        usage               text,
-        settled_at          timestamptz
-    );
-    create index if not exists sessions_open on sessions (state) where state <> 'ended';
-    create index if not exists sessions_owner on sessions (tenant, owner, created_at desc);
-    """,
-    # 15: the model each declared stage is bound to (docs/JOBS.md "Delegated stages"): the operator's delegate list on
-    # the root's run class, intersected with this, lets the root's owner submit a stage on a model its key is not granted
-    """
-    alter table run_graphs add column if not exists models jsonb not null default '{}'::jsonb;
-    """,
-    # 16: native execution leases (docs/API.md "Native execution leases"): the worker side of one admitted endpoint
-    # call, so the operation's reservation outlives the CPU caller until the worker settled or its loss is confirmed
-    """
-    create table if not exists native_executions (
-        operation           text not null,
-        attempt             text not null,
-        state               text not null default 'prepared',
-        pod                 text,
-        pod_namespace       text,
-        pod_uid             text,
-        worker_request_id   text,
-        region              text not null,
-        model               text not null,
-        prepared_at         timestamptz not null default now(),
-        attached_at         timestamptz,
-        released_at         timestamptz,
-        outcome             text,
-        gpu_seconds         numeric,
-        lane_seconds        numeric,
-        cancel_requested_at timestamptz,
-        cancel_reason       text,
-        settled_at          timestamptz,
-        primary key (operation, attempt)
-    );
-    create index if not exists native_executions_attached on native_executions (state) where state = 'attached';
-    """,
-    # 17: the durable terminal fence of an operation's native executions: written by the join in the transaction that
-    # decides the settlement, before the ledger releases; prepare and attach refuse everything after it
-    """
-    create table if not exists native_fences (
-        operation text primary key,
-        closed_at timestamptz not null default now(),
-        reason    text
-    );
-    """,
-    # 18: the worker container's restart count at attach (a restart within the same pod loses the worker's state: a
-    # confirmed loss, like a gone pod) and why an execution was lost
-    """
-    alter table native_executions add column if not exists restart_count integer;
-    alter table native_executions add column if not exists lost_reason text;
-    """,
-    # 19: the admission record of a run (docs/JOBS.md "Resume", "restart from inputs"): what a resume needs that lived only
-    # on the Job until api 0.11.74 (its labels, annotations: input, class binding, execution block, owner, key; region,
-    # timeout, output prefix), kept past the Job's TTL. Only runs admitted from this version on have one.
-    """
-    create table if not exists run_admissions (
-        operation     text primary key,
-        tenant        text not null,
-        region        text,
-        labels        jsonb not null default '{}'::jsonb,
-        annotations   jsonb not null default '{}'::jsonb,
-        timeout_s     integer,
-        output_prefix text,
-        managed_by    text,
-        created_at    timestamptz not null default now()
-    );
-    """,
-    # 20: cold attachment of a live session (docs/API.md "Sessions"): the attach wait starts at the first observed Ready
-    # replica of the session's endpoint, recorded once (never reset on a readiness flap), bounded by the admitted
-    # deadline; until then the session is `starting`, no GPU was allocated and nothing is advertised as GPU time.
-    """
-    alter table sessions add column if not exists ready_seen_at timestamptz;
-    alter table sessions add column if not exists attach_deadline_at timestamptz;
-    """,
-    # 21: endpoint children of a run (docs/JOBS.md "Endpoint children"): one row per (root, unit): the deterministic child
-    # operation, the parent attempt that admitted it, the immutable request hash, and whether it is still active; one
-    # active child per root (partial unique index), read back by unit by any live attempt of the root
-    """
-    create table if not exists endpoint_children (
-        root             text not null,
-        unit_id          text not null,
-        child            text not null unique,
-        parent           text not null,
-        parent_pod       text not null,
-        parent_pod_uid   text not null,
-        model            text not null,
-        request_sha256   text not null,
-        state            text not null default 'active',
-        created_at       timestamptz not null default now(),
-        ended_at         timestamptz,
-        primary key (root, unit_id)
-    );
-    create unique index if not exists endpoint_children_one_active on endpoint_children (root) where state = 'active';
-    """,
-    # 22: endpoint children as durable intents (docs/JOBS.md "Endpoint children"): the row is written BEFORE the ledger
-    # member and the caller Job and carries everything a later API process needs to finish it deterministically (the
-    # namespace, the resolved region, the effective timeout, the bound request); `pending` until the Job is proven to
-    # exist, `active` until the child's terminal settlement, `ended` with its reason; one open (pending or active) child
-    # per root; a cancel is recorded when issued and the row stays open until settlement
-    """
-    alter table endpoint_children add column if not exists namespace text;
-    alter table endpoint_children add column if not exists region text;
-    alter table endpoint_children add column if not exists timeout_s integer;
-    alter table endpoint_children add column if not exists request jsonb;
-    alter table endpoint_children add column if not exists cancel_requested_at timestamptz;
-    alter table endpoint_children add column if not exists reason text;
-    alter table endpoint_children add column if not exists transport jsonb;
-    alter table endpoint_children add column if not exists model_image text;
-    alter table endpoint_children add column if not exists binding_ref text;
-    drop index if exists endpoint_children_one_active;
-    create unique index if not exists endpoint_children_one_open on endpoint_children (root) where state in ('pending', 'active');
-    """,
-    # 23: reserved. Added by the unreleased 0.11.91 candidate for an automatic retirement of run members that 0.11.92
-    # withdrew (an admission whose Job exists nowhere stays pending and is resolved only by a replay of the same
-    # intent, app.continue_run); the column is unused and kept so the migration sequence stays stable.
-    """
-    alter table key_run_members add column if not exists retire_marked_at timestamptz;
-    """,
-    # 24: gang attempts (docs/JOBS.md "Multi-node runs", "Gang attempts"): a JobSet's pods record their rank and the
-    # JobSet incarnation they belong to (observed on the pod by the API: the JobSet controller's restart-attempt and the
-    # indexed Job's completion index, never caller-declared) and the pod's UID; the pods of one incarnation share one
-    # epoch, so siblings never fence each other, while a prior incarnation stays fenced as before
-    """
-    alter table attempts add column if not exists gang_rank int;
-    alter table attempts add column if not exists gang_restart int;
-    alter table attempts add column if not exists pod_uid text;
-    create index if not exists attempts_gang on attempts (operation, gang_restart);
-    """,
-    # 25: application delivery of endpoint children (docs/JOBS.md "Endpoint children"): the row records which delivery
-    # the child was admitted with; the attempt record carries the capture manifest the platform's uploader posted
-    # (sha256, media type, size, status, the ORIGINAL producing attempt, timings) so a child's capture is durable and
-    # authoritative on a tenant whose storage the platform does not own
-    """
-    alter table endpoint_children add column if not exists delivery text not null default 'platform';
-    alter table attempts add column if not exists capture jsonb;
-    """,
-    # 26: the incarnation-frozen resume pointer of a gang (docs/JOBS.md "Gang attempts"): chosen once when an incarnation
-    # opens (the newest COMMITTED coordinator pointer of an EARLIER epoch of the same root, else the explicit continuation
-    # reference the run was rendered with), stored on its first row and copied to every sibling of that incarnation, so
-    # all ranks restore the same state and a late rank never sees a newer same-epoch pointer; returned in the start ACK
-    """
-    alter table attempts add column if not exists resume_checkpoint_ref text;
-    alter table attempts add column if not exists resume_source_epoch int;
-    alter table attempts add column if not exists resume_source text;
-    """,
-    # 27: idempotent session creation (docs/API.md "Sessions"): an owner-scoped Idempotency-Key names at most one session
-    # (the unique index is the race arbiter across replicas); the semantic hash of the effective request (model,
-    # deployment, timeout_s, GPUs) tells a replay from a reuse of the key with another request (409)
-    """
-    alter table sessions add column if not exists idempotency_key text;
-    alter table sessions add column if not exists request_hash text;
-    create unique index if not exists sessions_idempotency on sessions (tenant, owner, idempotency_key)
-        where idempotency_key is not null;
-    """,
-    # 28: unit retry of endpoint children (docs/JOBS.md "Endpoint children"): a unit whose child ended WITHOUT a delivered
-    # capture (the cascade of a parent that finished without a successor, a failed caller) is reopened by a live attempt
-    # of a later parent of the same root as a new incarnation (`<root>-c-<sha>-r<n>`: a new Job, binding and ledger
-    # member); the row keeps the unit's identity and names its previous child
-    """
-    alter table endpoint_children add column if not exists incarnation int not null default 1;
-    alter table endpoint_children add column if not exists previous_child text;
-    """,
-    # 29: observed completion bound to the exact attempt (api 0.11.121): the API proves a Complete manager Job for a
-    # single-worker run whose newest record says "interrupted" yet carries that attempt's committed result_ref; the
-    # proof names the attempt (pod, pod UID, epoch, result_ref) and the manager Job UID, so a later attempt can never
-    # inherit it; the uploader's raw row is never rewritten (attempts.mark_completed / synthesize)
-    """
-    alter table operation_marks add column if not exists completed_at timestamptz;
-    alter table operation_marks add column if not exists completed_pod text;
-    alter table operation_marks add column if not exists completed_pod_uid text;
-    alter table operation_marks add column if not exists completed_epoch int;
-    alter table operation_marks add column if not exists completed_result_ref text;
-    alter table operation_marks add column if not exists completed_job_uid text;
-    alter table operation_marks add column if not exists completion_reason text;
-    """,
-    # 30: fleet-wide settings the fleet operator writes and every API replica reads (api 0.11.124): the submission
-    # pause (services/api/pause.py). One row per key; the value is the whole setting.
-    """
-    create table if not exists fleet_settings (
-        key        text primary key,
-        value      jsonb not null,
-        updated_at timestamptz not null default now()
-    );
+    create function pg_temp.s2_placement(d jsonb) returns jsonb language sql immutable as $$
+        select coalesce((select jsonb_object_agg(e.key, case when e.value ? 'ibDevices'
+            then (e.value - 'ibDevices') || jsonb_build_object('ib_devices', e.value -> 'ibDevices') else e.value end)
+            from jsonb_each(case when jsonb_typeof(d) = 'object' then d else '{}'::jsonb end) as e), '{}'::jsonb)
+    $$;
+    alter table models add column if not exists deployments jsonb not null default '{}'::jsonb;
+    update models set deployments = pg_temp.s2_placement(entry -> 'deployments');
+    alter table models drop column if exists entry;
+    alter table models_history drop column if exists entry;
+    update model_changes set
+        entry = case when entry is null then null else jsonb_build_object(
+            'spec', entry -> 'spec', 'managed_by', coalesce(entry -> 'managed_by', '"api"'::jsonb),
+            'version', to_jsonb(version), 'deployments', pg_temp.s2_placement(entry -> 'deployments')) end,
+        previous = case when previous ? 'spec' then jsonb_build_object(
+            'spec', previous -> 'spec', 'managed_by', coalesce(previous -> 'managed_by', '"api"'::jsonb),
+            'deployments', pg_temp.s2_placement(previous -> 'deployments')) else '{}'::jsonb end;
+    drop function pg_temp.s2_placement(jsonb);
     """,
 ]
 
@@ -451,7 +354,10 @@ def pool():
 
 
 def migrate() -> int:
-    """Apply the migrations that are not applied yet; returns the schema version."""
+    """Bring the database to this release's schema, under an advisory lock (API replicas start together); returns
+    the schema version. A fresh database gets the baseline and is recorded at BASELINE_VERSION; a database at the
+    baseline or above gets the migrations it misses; a database below the baseline (an earlier release's increments
+    still pending) is refused: it is upgraded through the previous release first."""
     with pool().connection() as c:
         with c.transaction():
             c.execute("select pg_advisory_xact_lock(1229001)")
@@ -459,15 +365,24 @@ def migrate() -> int:
                 "create table if not exists schema_version (version int primary key, applied_at timestamptz not null default now())"
             )
             done = {r[0] for r in c.execute("select version from schema_version").fetchall()}
-            for i, sql in enumerate(MIGRATIONS, start=1):
+            if not done:
+                c.execute(BASELINE)
+                c.execute("insert into schema_version (version) values (%s)", (BASELINE_VERSION,))
+            elif max(done) < BASELINE_VERSION:
+                raise RuntimeError(
+                    f"database schema version {max(done)} is below this release's baseline {BASELINE_VERSION}: "
+                    "run the previous release once (it applies the remaining increments), then this one"
+                )
+            for i, sql in enumerate(MIGRATIONS, start=BASELINE_VERSION + 1):
                 if i in done:
                     continue
                 c.execute(sql)
                 c.execute("insert into schema_version (version) values (%s)", (i,))
-        return len(MIGRATIONS)
+        return BASELINE_VERSION + len(MIGRATIONS)
 
 
-COLS = "id, kind, spec, entry, version, managed_by, created_by, created_at, updated_by, updated_at"
+COLS = "id, kind, spec, deployments, version, managed_by, created_by, created_at, updated_by, updated_at"
+ROW = ("spec", "deployments", "managed_by", "version")  # what a pending change keeps of a row (models.load)
 
 
 def _row(r) -> dict:
@@ -500,63 +415,65 @@ def _generation(c, mid: str, expected: int | None = None) -> tuple[int, dict]:
     previous = dict(pending[0]) if pending else {}
     if old:
         previous = {
-            **old["entry"],
-            "deployments": {**previous.get("deployments", {}), **old["entry"].get("deployments", {})},
+            **{k: old[k] for k in ROW},
+            "deployments": {**previous.get("deployments", {}), **(old["deployments"] or {})},
         }
         # A job class has no endpoint resources; retain the last endpoint spec for cleanup.
-        if old["entry"].get("mode") == "run" and pending:
+        if old["kind"] == "job" and pending:
             previous = pending[0]
     return version, previous
 
 
-def _change(c, mid: str, version: int, entry: dict | None, previous: dict):
+def _change(c, mid: str, version: int, row: dict | None, previous: dict):
     c.execute(
         """insert into model_changes (id, version, entry, previous) values (%s, %s, %s, %s)
         on conflict (id) do update set version = excluded.version, entry = excluded.entry,
         previous = excluded.previous, error = null, updated_at = now()""",
-        (mid, version, json.dumps(entry) if entry is not None else None, json.dumps(previous)),
+        (mid, version, json.dumps(row) if row is not None else None, json.dumps(previous)),
     )
 
 
 def upsert_model(
-    entry: dict,
+    definition: dict,
     spec: dict,
     by: str | None,
     managed_by: str = "api",
     expected: int | None = None,
     create_only: bool = False,
 ) -> dict:
-    """Insert or replace a model; every write lands in models_history as well."""
-    mid, kind = entry["id"], spec.get("kind", "endpoint")
+    """Insert or replace a model (`definition`: models.definition of `spec`, whose placement the row freezes); every
+    write lands in models_history as well."""
+    mid, kind = definition["id"], spec.get("kind", "endpoint")
     with pool().connection() as c, c.transaction():
         version, previous = _generation(c, mid, expected)
         exists = _get(c, mid) is not None
         if create_only and exists:
             raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
         c.execute(
-            """insert into models (id, kind, spec, entry, version, managed_by, created_by, updated_by, updated_at)
+            """insert into models (id, kind, spec, deployments, version, managed_by, created_by, updated_by, updated_at)
                values (%s, %s, %s, %s, %s, %s, %s, %s, now())
-               on conflict (id) do update set kind = excluded.kind, spec = excluded.spec, entry = excluded.entry,
+               on conflict (id) do update set kind = excluded.kind, spec = excluded.spec, deployments = excluded.deployments,
                  version = excluded.version, managed_by = excluded.managed_by, updated_by = excluded.updated_by, updated_at = now()""",
-            (mid, kind, json.dumps(spec), json.dumps(entry), version, managed_by, by, by),
+            (mid, kind, json.dumps(spec), json.dumps(definition["deployments"]), version, managed_by, by, by),
         )
         c.execute(
-            "insert into models_history (id, version, action, spec, entry, by) values (%s, %s, %s, %s, %s, %s)",
-            (mid, version, "update" if exists else "create", json.dumps(spec), json.dumps(entry), by),
+            "insert into models_history (id, version, action, spec, by) values (%s, %s, %s, %s, %s)",
+            (mid, version, "update" if exists else "create", json.dumps(spec), by),
         )
-        _change(c, mid, version, entry, previous)
-        return _get(c, mid)  # the same connection: the row is not committed yet
+        row = _get(c, mid)  # the same connection: the row is not committed yet
+        _change(c, mid, version, {k: row[k] for k in ROW}, previous)
+        return row
 
 
 def delete_model(mid: str, by: str | None, expected: int | None = None) -> bool:
     with pool().connection() as c, c.transaction():
         version, previous = _generation(c, mid, expected)
-        r = c.execute("select version, spec, entry from models where id = %s for update", (mid,)).fetchone()
+        r = c.execute("select version, spec from models where id = %s for update", (mid,)).fetchone()
         if not r:
             return False
         c.execute(
-            "insert into models_history (id, version, action, spec, entry, by) values (%s, %s, 'delete', %s, %s, %s)",
-            (mid, version, json.dumps(r[1]), json.dumps(r[2]), by),
+            "insert into models_history (id, version, action, spec, by) values (%s, %s, 'delete', %s, %s)",
+            (mid, version, json.dumps(r[1]), by),
         )
         c.execute("delete from models where id = %s", (mid,))
         _change(c, mid, version, None, previous)

@@ -1,8 +1,7 @@
 """An endpoint's `resources` keep an optional ephemeral-storage request and limit next to cpu/memory through the
-catalog projection (models.to_entry) and the native renderer (render_endpoint): request = limit unless both are given;
+definition (models.definition) and the native renderer (render_endpoint): request = limit unless both are given;
 the defaults (4 CPU, 16Gi, no ephemeral storage) are unchanged and nothing is rendered without them."""
 
-import catalog
 import kube
 import models
 import render_endpoint
@@ -19,7 +18,7 @@ SPEC = {
 
 def _entry(spec):
     kube.fleet = lambda: FLEET
-    return catalog.normalise(models.to_entry(spec, managed_by="api"))
+    return models.definition(spec, managed_by="api")
 
 
 def _container_resources(entry):
@@ -33,7 +32,7 @@ def _container_resources(entry):
 
 def test_defaults_are_unchanged_and_nothing_ephemeral_is_rendered_without_the_fields():
     e = _entry(SPEC)
-    assert e["runtime"]["resources"] == {"gpu": 1, "cpu": "4", "memory": "16Gi"}
+    assert "resources" not in e["spec"]
     res = _container_resources(e)
     assert "ephemeral-storage" not in res["requests"] and "ephemeral-storage" not in res["limits"]
     assert res["requests"]["cpu"] == "4" and res["limits"]["memory"] == "16Gi"
@@ -53,13 +52,6 @@ def test_the_aggregate_shape_keeps_its_ephemeral_request_and_limit():
             },
         }
     )
-    assert e["runtime"]["resources"] == {
-        "gpu": 1,
-        "cpu": "22",
-        "memory": "162Gi",
-        "ephemeralStorage": "8704Mi",
-        "ephemeralStorageLimit": "13Gi",
-    }
     res = _container_resources(e)
     assert res["requests"]["ephemeral-storage"] == "8704Mi" and res["limits"]["ephemeral-storage"] == "13Gi"
     assert res["requests"]["cpu"] == "22" and res["limits"]["cpu"] == "22" and res["limits"]["memory"] == "162Gi"
@@ -89,15 +81,6 @@ def test_requests_below_limits_project_and_render_as_declared():
             },
         }
     )
-    assert e["runtime"]["resources"] == {
-        "gpu": 1,
-        "cpu": "8",
-        "memory": "64Gi",
-        "cpuLimit": "24",
-        "memoryLimit": "128Gi",
-        "ephemeralStorage": "4Gi",
-        "ephemeralStorageLimit": "16Gi",
-    }
     res = _container_resources(e)
     assert res["requests"] == {"nvidia.com/gpu": "1", "cpu": "8", "memory": "64Gi", "ephemeral-storage": "4Gi"}
     assert res["limits"] == {"nvidia.com/gpu": "1", "cpu": "24", "memory": "128Gi", "ephemeral-storage": "16Gi"}

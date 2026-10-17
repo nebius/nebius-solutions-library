@@ -33,7 +33,7 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 echo "$method $url" >> "$CALLS"
 case "$method $url" in
-  "GET "*/pods/*) printf '%s' "$POD_JSON";;
+  "GET "*/pods/*) if [ -n "${POD_JSON_RUNNING:-}" ] && [ "$(grep -c '^GET' "$CALLS")" -le "${RUNNING_POLLS:-0}" ]; then printf '%s' "$POD_JSON_RUNNING"; else printf '%s' "$POD_JSON"; fi;;
   "POST "*/internal/attempts) code=${ACK_CODE:-200}; [ -n "$out" ] && printf '{"epoch":1}' > "$out";;
   "DELETE "*/persistentvolumeclaims/*) code=${PVC_DELETE_CODE:-200};;
   *) code=404;;
@@ -45,7 +45,7 @@ exit 0
 AWS = '#!/bin/bash\n# every s3 call succeeds unless AWS_FAIL=1 (sync mode export failure); prints nothing\n[ "${AWS_FAIL:-0}" = 1 ] && exit 1\nexit 0\n'
 
 
-def _run(tmp_path, *, mode, result=None, env=None):
+def _run(tmp_path, *, mode, result=None, env=None, alive_polls=None):
     work = tmp_path / "work"
     (work / "attempts").mkdir(parents=True)
     if result is not None:
@@ -59,7 +59,13 @@ def _run(tmp_path, *, mode, result=None, env=None):
     script = (
         tmp_path / "upload.sh"
     )  # /work rebased; the service-account token and CA paths may not exist (read errors are tolerated)
-    script.write_text(UPLOAD.read_text().replace("/work", str(work)))
+    text = UPLOAD.read_text().replace("/work", str(work))
+    if alive_polls is not None:
+        # the PID-namespace scan cannot be driven on a developer host: main counts as alive for the first GETs
+        text = text.replace(
+            "record() {", f'main_alive() {{ [ "$(grep -c \'^GET\' "$CALLS")" -lt {alive_polls} ]; }}\nrecord() {{', 1
+        )
+    script.write_text(text)
     pod = {
         "spec": {"nodeName": "n1", "containers": [{"name": "main", "image": "img:1"}]},
         "status": {
@@ -92,6 +98,20 @@ def _run(tmp_path, *, mode, result=None, env=None):
         "API_URL": "https://api.internal",
         "PVC_NAME": "op-1-work",
         "POD_JSON": json.dumps(pod),
+        "POD_JSON_RUNNING": json.dumps(
+            {
+                **pod,
+                "status": {
+                    "containerStatuses": [
+                        {
+                            "name": "main",
+                            "imageID": "img@sha256:abc",
+                            "state": {"running": {"startedAt": "2026-10-15T00:00:00Z"}},
+                        }
+                    ]
+                },
+            }
+        ),
         "CALLS": str(calls),
         **(env or {}),
     }
@@ -149,3 +169,21 @@ def test_managed_io_releases_the_volume_only_after_a_verified_export(tmp_path, f
     out, calls = _run(tmp_path, mode="sync", env={"AWS_FAIL": str(fail)})
     assert any(c.startswith("DELETE ") for c in calls) is deleted
     assert ("export=succeeded" in out) is deleted and ("UPLOAD FAILED" in out) is not deleted
+
+
+def test_the_exit_code_is_waited_for_without_bound_once_main_is_gone(tmp_path):
+    """op-e0f60cf93b5c9b42 (2026-10-15): main exited 0 and the kubelet reported the container as running for two more
+    minutes; the uploader gave up after 40 polls and recorded the completed attempt as interrupted. Now, outside a
+    termination, it keeps polling (a log line every 20 polls) until the API reports the exit code, and records what
+    main did: the pod cannot end before this container does."""
+    out, calls = _run(
+        tmp_path,
+        mode="record",
+        result={"result_ref": "app://run/1"},
+        env={"RUNNING_POLLS": "25", "POLL_SECONDS": "0"},
+        alive_polls=3,  # the start record, then main's processes are gone while the API still says running
+    )
+    assert "attempt record started -> API 200" in out
+    assert "main ended, waiting for the API to report its exit code (20 polls)" in out
+    assert "attempt record succeeded -> API 200" in out and "interrupted" not in out
+    assert sum(c.startswith("GET ") for c in calls) > 25 and any(c.startswith("DELETE ") for c in calls)

@@ -4,7 +4,6 @@ Serving reserves; run classes keep their env; the ceiling raised by the operator
 
 import pytest
 
-import catalog
 import kube
 import models
 import render_endpoint
@@ -38,8 +37,8 @@ def test_a_timeout_above_the_fleet_ceiling_is_refused_and_admitted_once_the_ceil
     )
     # the stored definition renders the retained 7500 as the revision timeout
     kube.fleet = lambda: FLEET
-    e = catalog.normalise(models.to_entry({**ENDPOINT, "timeout_s": 7500}, managed_by="api"))
-    assert e["runtime"]["timeout"] == 7500
+    e = models.definition({**ENDPOINT, "timeout_s": 7500}, managed_by="api")
+    assert e["timeout_s"] == 7500
     cluster_id = e["regions"][0]
     isvc = next(
         d
