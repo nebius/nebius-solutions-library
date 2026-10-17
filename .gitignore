@@ -2,7 +2,10 @@
 **/.terraform/*
 
 # Terraform lockfile
-.terraform.lock.hcl
+**/.terraform.lock.hcl
+# ...except the runai solution, whose lockfile is committed for supply-chain
+# pinning (see docs/security/2026-10-17-runai-adversarial-review.md, ADV-06).
+!runai/.terraform.lock.hcl
 
 # .tfstate files
 *.tfstate

@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'k8s-training/**'
+      - 'runai/**'
       - 'wireguard/**'
       - 'dsvm/**'
       - 'bastion/**'
@@ -12,12 +13,14 @@ on:
 #    - cron: '30 * * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TF_VAR_parent_id: project-e02s5a0dpr00nk11bgb0p9
   TF_VAR_tenant_id: tenant-e00tem0x4n0edc3hv2
   TF_VAR_region: eu-north2
+  # Requires the NGC_API_KEY repository secret (NVIDIA NGC API key) for runai helm chart access.
+  TF_VAR_ngc_api_key: ${{ secrets.NGC_API_KEY }}
 
 jobs:
   detect-changes:
@@ -42,13 +45,13 @@ jobs:
         env:
           ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          pattern='^(k8s-training|wireguard|bastion|dsvm)$'
+          pattern='^(k8s-training|runai|wireguard|bastion|dsvm)$'
           matched=()
 
           for file in $ALL_CHANGED_FILES; do
             solution="${file%%/*}"
             if [[ "$solution" == "modules" ]]; then
-              matched=("k8s-training" "wireguard" "bastion" "dsvm")
+              matched=("k8s-training" "runai" "wireguard" "bastion" "dsvm")
               break
             elif [[ "$solution" =~ $pattern ]]; then
               matched+=("$solution")
@@ -62,6 +65,31 @@ jobs:
           fi
 
           echo "solutions=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Secret scan (runai changes)
+        # runai/terraform.tfvars is git-tracked with commented secret slots;
+        # fail if a PR un-comments/fills any of them or adds other key material.
+        if: ${{ contains(steps.parse-changed-files.outputs.solutions, 'runai') }}
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        run: |
+          patterns='(A(K|S)IA[0-9A-Z]{16}|NGC[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|^\s*password\s*=\s*"[^"]+")'
+          found=0
+          for file in $ALL_CHANGED_FILES; do
+            case "$file" in
+              runai/*) ;;
+              *) continue ;;
+            esac
+            [ -f "$file" ] || continue
+            # grep -n prefixes "lineno:"; drop matches on commented-out lines
+            matches=$(grep -nE "$patterns" "$file" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+            if [ -n "$matches" ]; then
+              echo "::error::Potential secret in $file:" >&2
+              echo "$matches" >&2
+              found=1
+            fi
+          done
+          exit "$found"
     
   terraform-format:
     needs: detect-changes
@@ -100,8 +128,17 @@ jobs:
     name: 'Terraform ${{ matrix.solution }}'
     environment:
       name: project-e02s5a0dpr00nk11bgb0p9
+    # Serialize runs per solution against the same shared project; never
+    # cancel mid-provision — these jobs create billable GPU resources.
+    concurrency:
+      group: terraform-${{ matrix.solution }}
+      cancel-in-progress: false
+    # The gh-pages report publishing in this job needs contents: write;
+    # keep it scoped to this job rather than the whole workflow.
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: ${{ matrix.solution != 'runai' }}
     strategy:
       max-parallel: 4
       matrix:
@@ -175,12 +212,44 @@ jobs:
     - name: Terraform Validate
       run: terraform validate
 
+    # The runai leg needs NGC_API_KEY for the helm chart fetch during plan/test.
+    # In repositories without that secret (e.g. forks, fresh clones of upstream),
+    # skip plan/test gracefully instead of failing — fmt/validate above still run.
+    - name: Check NGC secret (runai)
+      id: ngc
+      if: matrix.solution == 'runai'
+      env:
+        NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+      run: |
+        if [ -n "${NGC_API_KEY}" ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::NGC_API_KEY secret is not configured - skipping terraform plan and test for the runai leg. Add the NGC_API_KEY repository secret to enable full runai CI."
+        fi
+
+    - name: Generate Run:ai admin password
+      if: matrix.solution == 'runai'
+      run: RUNAI_PW="Aa1!$(openssl rand -hex 16)" && echo "::add-mask::$RUNAI_PW" && echo "TF_VAR_runai_admin_password=$RUNAI_PW" >> "$GITHUB_ENV"
+
     # Generates an execution plan for Terraform
     - name: Terraform Plan
+      if: matrix.solution != 'runai' || steps.ngc.outputs.present == 'true'
       run: terraform plan -input=false
+
+    # Stub report so the report pipeline below works when the runai leg is skipped
+    - name: Stub test report (runai without NGC secret)
+      if: matrix.solution == 'runai' && steps.ngc.outputs.present == 'false'
+      run: |
+        mkdir -p tests/reports
+        cat > "tests/reports/TEST-result-${{ github.run_id }}.xml" <<'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <testsuites><testsuite name="runai-skipped" tests="1" failures="0" errors="0" skipped="1"><testcase name="skipped_no_ngc_secret"><skipped message="NGC_API_KEY secret not configured"/></testcase></testsuite></testsuites>
+        EOF
 
     # Run Terraform Tests
     - name: Terraform Test
+      if: matrix.solution != 'runai' || steps.ngc.outputs.present == 'true'
       timeout-minutes: 150
       run: |
         report_path="tests/reports/TEST-result-${{ github.run_id }}.xml"
@@ -301,6 +370,11 @@ jobs:
 
   cleanup-infra:
     name: 'Cleanup Infra'
+    # NOTE: `if: always()` covers terraform-job failure/skip within a run, but
+    # a CANCELLED run never reaches this job and leaks resources until the next
+    # PR's cleanup or a manual delete. The scheduled sweeper cron (commented out
+    # above) was the backstop for that gap; re-enabling it is tracked separately
+    # (ADV-23) — deliberately not redesigned here.
     environment:
       name: project-e02s5a0dpr00nk11bgb0p9
     concurrency:
