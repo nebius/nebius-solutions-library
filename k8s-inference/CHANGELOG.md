@@ -4,6 +4,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.123, charts/fleet 0.1.14
+
+(API image and the fleet chart; found while rolling 0.11.122 out: no other change.)
+
+- GPU-free pools are ordered by size, not by name: smallest preset first, then the warm ones (`min_nodes > 0`), then
+  by name, both in the queues the fleet chart renders and in the pool the API pins a GPU-free definition to
+  (`kube.cpu_pool_order`). With `cpu-batch-32` (32 vCPU, from zero) and `cpu-general` (8 vCPU, one warm node) in one
+  region the name order put the batch pool first: a one-CPU caller would have woken a 32-vCPU node.
+
 ## api 0.11.122, charts/fleet 0.1.13
 
 (API image and the fleet chart; no database migration, no jobs image change. The fleet chart adds three keys to the

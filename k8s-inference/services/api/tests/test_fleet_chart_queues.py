@@ -143,16 +143,36 @@ def test_tenant_queues_drop_the_system_flavor_when_the_policy_keeps_tenants_off_
     fleet = copy.deepcopy(FLEET)
     fleet["tenant_system_flavor"] = False
     fleet["regions"]["eu-north1"]["cpu_pools"] = {
-        "cpu-general": {"platform": "cpu-d3", "preset": "8vcpu-32gb", "min_nodes": 1, "max_nodes": 2}
+        "cpu-general": {"platform": "cpu-d3", "preset": "8vcpu-32gb", "min_nodes": 1, "max_nodes": 2},
+        # by name before cpu-general, by size after it: the flavor order is by size (charts/fleet 0.1.14)
+        "cpu-batch-32": {"platform": "cpu-d3", "preset": "32vcpu-128gb", "min_nodes": 0, "max_nodes": 1},
     }
     fleet["regions"]["eu-north1"]["system_pool"] = {"platform": "cpu-d3", "preset": "8vcpu-32gb", "node_count": 2}
     monkeypatch.setitem(globals(), "FLEET", fleet)
     worker = _render("hub")
-    assert list(_flavors(worker[("ClusterQueue", "default")])) == ["system", "cpu-general", "h100-spot-1x"]
-    assert list(_flavors(worker[("ClusterQueue", "demo-prefer-h100")])) == ["cpu-general", "h100-spot-1x"]
-    assert list(_flavors(worker[("ClusterQueue", "lab-default")])) == ["cpu-general", "h100-lab-8x", "h100-spot-1x"]
+    assert list(_flavors(worker[("ClusterQueue", "default")])) == [
+        "system",
+        "cpu-general",
+        "cpu-batch-32",
+        "h100-spot-1x",
+    ]
+    assert list(_flavors(worker[("ClusterQueue", "demo-prefer-h100")])) == [
+        "cpu-general",
+        "cpu-batch-32",
+        "h100-spot-1x",
+    ]
+    assert list(_flavors(worker[("ClusterQueue", "lab-default")])) == [
+        "cpu-general",
+        "cpu-batch-32",
+        "h100-lab-8x",
+        "h100-spot-1x",
+    ]
     manager = _render("control")
-    assert list(_flavors(manager[("ClusterQueue", "demo-prefer-h100")])) == ["hub-cpu-general", "hub-h100-spot-1x"]
+    assert list(_flavors(manager[("ClusterQueue", "demo-prefer-h100")])) == [
+        "hub-cpu-general",
+        "hub-cpu-batch-32",
+        "hub-h100-spot-1x",
+    ]
     assert list(_flavors(manager[("ClusterQueue", "default")]))[0] == "hub-system"
     prices = manager[("ConfigMap", "fleet-prices")]["data"]
     assert yaml.safe_load(prices["policy.yaml"]) == {"tenant_system_flavor": False}

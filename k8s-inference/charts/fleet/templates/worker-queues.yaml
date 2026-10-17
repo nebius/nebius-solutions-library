@@ -20,7 +20,7 @@ manager too (manager-queues.yaml).
 {{- $f := .Values.fleet }}
 {{- $systems := dict "system" (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $region.r.system_pool) | fromYaml) }}
 {{- $order := list "system" }}
-{{- range $cp, $p := (default dict $region.r.cpu_pools) }}{{ $_ := set $systems $cp (include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" $p) | fromYaml) }}{{ $order = append $order $cp }}{{ end }}
+{{- range $cp := include "fleet.cpuPoolOrder" $region.r.cpu_pools | fromJsonArray }}{{ $p := index $region.r.cpu_pools $cp }}{{ $_ := set $systems $cp (include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" $p) | fromYaml) }}{{ $order = append $order $cp }}{{ end }}
 {{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $pools "bare" $bare "systems" $systems "order" $order) }}
 {{- range $tn, $tc := default dict $f.tenants }}
 {{- range $prefer := prepend (include "fleet.classes" (include "fleet.allPools" $f | fromYaml) | fromYamlArray) "" }}

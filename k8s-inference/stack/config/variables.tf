@@ -205,7 +205,7 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.122")
+        api        = optional(string, "0.11.123")
         dispatcher = optional(string, "0.2.13")
         jobs       = optional(string, "0.1.28")
         ops        = optional(string, "0.1.12")
@@ -335,7 +335,7 @@ variable "fleet" {
     fleet_operator_keys = optional(set(string), [])
     # tenant work on the platform's CPU system nodes (docs/FLEET.md "Customer CPU pools"): false removes the `system`
     # flavor from every tenant queue and pins GPU-free tenant work (CPU classes, async callers, export retries) to the
-    # region's customer CPU pool (`regions.<r>.cpu_pools`, the first in name order); every region then needs one
+    # region's customer CPU pool (`regions.<r>.cpu_pools`, the smallest preset first, then a warm one); every region then needs one
     tenant_system_flavor = optional(bool, true)
     tenants = optional(map(object({
       regions           = optional(list(string)) # default: all regions

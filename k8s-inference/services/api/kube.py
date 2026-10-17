@@ -3,6 +3,7 @@ and the KServe read helpers the catalog uses."""
 
 import logging
 import os
+import re
 import time
 
 from fastapi import HTTPException
@@ -110,11 +111,26 @@ def tenant_system_allowed() -> bool:
     return v not in (False, "false", "False", 0)
 
 
+def preset_vcpus(preset: str | None) -> int:
+    """The vCPU count of a `<n>vcpu-<n>gb` preset (0 when unparsable): the size GPU-free pools are ordered by."""
+    m = re.match(r"^(\d+)vcpu", str(preset or ""))
+    return int(m.group(1)) if m else 0
+
+
+def cpu_pool_order(pools: dict) -> list[str]:
+    """GPU-free pools smallest first (preset vCPUs), then the warm ones (min_nodes > 0) before the ones that boot from
+    zero, then by name: the order the chart lists the flavors in and the pool a GPU-free definition is pinned to. A
+    one-CPU caller must never wake a 32-vCPU batch node while an 8-vCPU pool is there."""
+    return sorted(
+        (n for n, p in (pools or {}).items() if (p or {}).get("kind") == "cpu"),
+        key=lambda n: (preset_vcpus(pools[n].get("preset")), -int(pools[n].get("min_nodes") or 0), n),
+    )
+
+
 def cpu_pool_of(cluster: str | None) -> str | None:
-    """The customer CPU pool of a cluster id (`regions.<r>.cpu_pools`, the first in name order; the fleet document's
+    """The customer CPU pool of a cluster id (`regions.<r>.cpu_pools`, the first in cpu_pool_order; the fleet document's
     cpu_pools.yaml), None when the cluster has none."""
-    pools = (fleet().get("cpu_pools") or {}).get(cluster or "") or {}
-    names = sorted(n for n, p in pools.items() if (p or {}).get("kind") == "cpu")
+    names = cpu_pool_order((fleet().get("cpu_pools") or {}).get(cluster or "") or {})
     return names[0] if names else None
 
 

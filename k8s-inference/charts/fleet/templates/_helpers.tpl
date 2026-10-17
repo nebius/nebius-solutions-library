@@ -88,8 +88,8 @@
 {{- end -}}
 
 {{/* The GPU-free flavor entries of a queue, first in its flavor list: `system` (the cluster's system nodes), then the
-     CPU pools in name order (a workload that fits the system nodes stays there; a bigger one takes a CPU pool, which
-     scales from zero); nominal 0 GPUs, so a GPU request moves on to the pool flavors. args: dict "systems" (flavor name
+     CPU pools in fleet.cpuPoolOrder (smallest preset first, then the warm ones; a workload that fits the system nodes
+     stays there, a bigger one takes a CPU pool); nominal 0 GPUs, so a GPU request moves on to the pool flavors. args: dict "systems" (flavor name
      -> quota) "order" (list of flavor names in order) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
 {{- define "fleet.systemFlavors" -}}
 {{- $systems := .systems }}{{ $order := default (keys $systems | sortAlpha) .order }}
@@ -118,6 +118,21 @@
     {{- end }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/* The names of a region's CPU pools in flavor order (docs/FLEET.md "Customer CPU pools"): smallest preset first
+     (its vCPU count), then the warm ones (min_nodes > 0) before the ones that boot from zero, then by name; the API's
+     kube.cpu_pool_order is the same rule. arg: the region's cpu_pools map (may be empty) */}}
+{{- define "fleet.cpuPoolOrder" -}}
+{{- $keyed := list }}
+{{- range $cp, $p := (default dict .) }}
+{{- $v := regexFind "^[0-9]+" (toString $p.preset) | default "0" | int }}
+{{- $warm := ternary 0 1 (gt (default 0 $p.min_nodes | int) 0) }}
+{{- $keyed = append $keyed (printf "%08d|%d|%s" $v $warm $cp) }}
+{{- end }}
+{{- $out := list }}
+{{- range $k := sortAlpha $keyed }}{{ $out = append $out (regexReplaceAll "^[0-9]+\\|[01]\\|" $k "") }}{{ end }}
+{{- $out | toJson -}}
 {{- end -}}
 
 {{/* Index of a pool's capacity type in fleet.capacity_order (unknown types last). args: dict "fleet" "pool" */}}

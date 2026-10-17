@@ -42,6 +42,8 @@ CPU_POOLS = {
             "max_nodes": 2,
             "node_group_id": "mk8snodegroup-e00cpu",
         },
+        # sorts before cpu-general by name, after it by size: never the pin of a small caller (api 0.11.123)
+        "cpu-batch-32": {"kind": "cpu", "platform": "cpu-d3", "preset": "32vcpu-128gb", "min_nodes": 0, "max_nodes": 1},
     },
     "eu-south1": {"system": {"kind": "system", "platform": "cpu-d3", "preset": "8vcpu-32gb"}},
 }
@@ -250,6 +252,20 @@ def test_tenant_pool_follows_the_policy(monkeypatch):
     _fleet(monkeypatch, tenant_system_flavor=False)
     assert not kube.tenant_system_allowed()
     assert kube.tenant_pool("hub", "system") == "cpu-general" and kube.cpu_pool_of("hub") == "cpu-general"
+    assert kube.cpu_pool_order(CPU_POOLS["hub"]) == ["cpu-general", "cpu-batch-32"]  # size before name
+    assert kube.cpu_pool_order(
+        {
+            "b": {"kind": "cpu", "preset": "8vcpu-32gb", "min_nodes": 0},
+            "a": {"kind": "cpu", "preset": "8vcpu-32gb", "min_nodes": 1},
+        }
+    ) == ["a", "b"]  # the warm one first among equals
+    assert kube.cpu_pool_order(
+        {
+            "z": {"kind": "cpu", "preset": "4vcpu-16gb", "min_nodes": 0},
+            "a": {"kind": "cpu", "preset": "8vcpu-32gb", "min_nodes": 1},
+        }
+    ) == ["z", "a"]
+    assert kube.preset_vcpus("16vcpu-64gb") == 16 and kube.preset_vcpus(None) == 0
     assert kube.tenant_pool("hub", "h100-spot-1x") == "h100-spot-1x"  # only `system` is redirected
     assert kube.tenant_pool("eu-south1", "system") == "system"  # no CPU pool there: kept, logged
     assert kube.is_cpu_pool("hub", "cpu-general") and not kube.is_cpu_pool("hub", "system")

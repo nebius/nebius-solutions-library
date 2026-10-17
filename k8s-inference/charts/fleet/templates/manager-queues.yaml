@@ -46,7 +46,7 @@ metadata:
     serverless2.nebius/capacity: "system"
 spec: {}
 {{- end }}
-{{- range $rn, $r := $f.regions }}{{ range $cp, $p := (default dict $r.cpu_pools) }}
+{{- range $rn, $r := $f.regions }}{{ range $cp := include "fleet.cpuPoolOrder" $r.cpu_pools | fromJsonArray }}{{ $p := index $r.cpu_pools $cp }}
 {{- $_ := set $systems (printf "%s-%s" $r.id $cp) (include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" $p) | fromYaml) }}{{ $order = append $order (printf "%s-%s" $r.id $cp) }}
 ---
 # a region's CPU pool on the manager (docs/FLEET.md "CPU pools"): the mirror of the worker's flavor, after the system ones

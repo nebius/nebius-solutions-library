@@ -345,10 +345,11 @@ takes the `system` flavor first: the platform's own CPU nodes. `tenant_system_fl
 
 - `charts/fleet` renders the tenant queues (`<tenant>-<profile>`, worker and manager mirror) **without** the `system`
   flavor; the lender queue (`default`, the platform's own GPU-free pods) keeps it. A GPU-free tenant workload takes the
-  region's customer CPU pool (the `cpu_pools` flavors, in name order, scaled between `min_nodes` and `max_nodes`) or
+  region's customer CPU pool (the `cpu_pools` flavors, smallest preset first, then the warm ones, then by name; scaled
+  between `min_nodes` and `max_nodes`) or
   waits QUEUED; it never lands on a system node.
 - the API (`kube.tenant_pool`) pins a definition that names `system` (a GPU-free endpoint, its async callers, a saved
-  definition with `system` baked in) to the region's first CPU pool at render time, with the pool's taint tolerated;
+  definition with `system` baked in) to the region's first CPU pool in that order at render time, with the pool's taint tolerated;
   nothing has to be re-saved. A region without a `cpu_pools` entry keeps `system` and the API logs it: give every
   region a customer CPU pool before flipping the switch (`cpu_pools.<name> = { platform = "cpu-d3", preset =
   "8vcpu-32gb", min_nodes = 1, max_nodes = 2 }`; `min_nodes = 1` keeps one node warm so finalizers and export retries
