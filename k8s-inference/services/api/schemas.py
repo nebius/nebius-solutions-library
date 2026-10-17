@@ -1079,6 +1079,49 @@ class RateLimit(BaseModel):
     window_s: int | None = None
 
 
+class SubmissionPauseRequest(BaseModel):
+    """`POST /v1/fleet/submissions:pause` (docs/API.md "Submission pause")."""
+
+    model_config = ConfigDict(extra="forbid")
+    tenants: list[str] | None = None  # None: every tenant
+    reason: str = Field(max_length=300)
+    retry_after_s: int | None = Field(default=None, ge=1, le=3600)  # the Retry-After paused callers get (30)
+    max_s: int | None = Field(default=None, ge=1, le=6 * 3600)  # the pause lifts itself after this (6 h)
+    exports: bool = False  # also refuse :export (transfer-only retries); default: exports keep working
+
+
+class SubmissionPause(BaseModel):
+    paused: bool
+    tenants: list[str] | None = None
+    exports: bool | None = None
+    reason: str | None = None
+    retry_after_s: int | None = None
+    since: str | None = None
+    until: str | None = None
+    by: str | None = None
+    resumed_at: str | None = None
+    expired: dict[str, Any] | None = None
+
+
+class FleetOperation(BaseModel):
+    """One in-flight operation of the fleet as the fleet operator sees it (GET /v1/fleet/operations): identity and
+    state only, never an input, a result or a key value."""
+
+    id: str
+    tenant: str | None = None
+    model: str | None = None
+    mode: str | None = None
+    status: Literal["RUNNING", "QUEUED", "SUPERSEDED", "CANCELLED"]
+    created_at: str | None = None
+    started_at: str | None = None
+    cluster: str | None = None
+    region: str | None = None
+    successor: str | None = None
+    key_alias: str | None = None
+    owner: str | None = None  # the opaque owner hash (the tenant's own API resolves it to a principal)
+    requester: dict[str, str] | None = None
+
+
 class FleetTenantRecord(BaseModel):
     """A tenant as the fleet operator sees it (docs/API.md "Fleet operators"): the fleet document's grants, the keys on
     record and what they hold. No key value, no hash."""

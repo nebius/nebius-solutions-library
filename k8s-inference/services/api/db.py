@@ -419,6 +419,15 @@ create table if not exists operation_marks (
     alter table operation_marks add column if not exists completed_job_uid text;
     alter table operation_marks add column if not exists completion_reason text;
     """,
+    # 30: fleet-wide settings the fleet operator writes and every API replica reads (api 0.11.124): the submission
+    # pause (services/api/pause.py). One row per key; the value is the whole setting.
+    """
+    create table if not exists fleet_settings (
+        key        text primary key,
+        value      jsonb not null,
+        updated_at timestamptz not null default now()
+    );
+    """,
 ]
 
 _pool = None

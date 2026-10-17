@@ -156,34 +156,50 @@ def is_cpu_pool(cluster: str | None, pool: str | None) -> bool:
     return entry.get("kind") == "cpu"
 
 
-_node_cache: dict = {}  # f"{region}/{node}" -> (until, placement) : node labels change at most with a reboot
+_node_cache: dict = {}  # region -> (built_at, {node name: placement}): one node listing per region, not one read per node
 NODE_CACHE_S = 600
+NODE_MISS_REFRESH_S = (
+    60  # a node absent from an index older than this is looked up again once (a node that just joined)
+)
 
 
-def node_placement(region: str | None, node: str | None) -> dict | None:
-    """What the node's labels say about the instance: {instance_type, preset, node_group, pool} (Nebius labels
-    `node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`), None when the node
-    is gone or unreadable (a reclaimed spot node). Cached ten minutes per node."""
-    if not region or not node:
-        return None
-    key = f"{region}/{node}"
-    hit = _node_cache.get(key)
-    if hit and hit[0] > time.time():
-        return hit[1]
-    try:
-        labels = retry(core(region).read_node, node).metadata.labels or {}
-    except Exception:  # noqa: BLE001 - a gone node is a normal state of a spot attempt, never a failed read
-        _node_cache[key] = (time.time() + 60, None)  # a short negative cache: a node may appear a moment later
-        return None
-    out = {
+def _placement_of(labels: dict) -> dict:
+    return {
         "instance_type": labels.get("node.kubernetes.io/instance-type")
         or labels.get("beta.kubernetes.io/instance-type"),
         "preset": labels.get("nebius.com/resource-preset"),
         "node_group": labels.get("nebius.com/node-group-id"),
         "pool": labels.get(f"{LABEL}/pool"),
     }
-    _node_cache[key] = (time.time() + NODE_CACHE_S, out)
-    return out
+
+
+def _node_index(region: str, max_age: float) -> dict | None:
+    hit = _node_cache.get(region)
+    if hit and hit[0] + max_age > time.time():
+        return hit[1]
+    try:
+        items = retry(core(region).list_node).items
+    except Exception:  # noqa: BLE001 - an unreadable region: the old index if any, else nothing
+        return hit[1] if hit else None
+    index = {n.metadata.name: _placement_of(n.metadata.labels or {}) for n in items}
+    _node_cache[region] = (time.time(), index)
+    return index
+
+
+def node_placement(region: str | None, node: str | None) -> dict | None:
+    """What the node's labels say about the instance: {instance_type, preset, node_group, pool} (Nebius labels
+    `node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`), None when the node
+    is gone (a reclaimed spot node) or the region unreadable. From one node listing per region cached ten minutes (a
+    page of 100 attempts used to be 19 node reads, api 0.11.124); a node missing from an index older than a minute
+    is looked for once more (it may have joined since)."""
+    if not region or not node:
+        return None
+    index = _node_index(region, NODE_CACHE_S)
+    if index is None:
+        return None
+    if node not in index:
+        index = _node_index(region, NODE_MISS_REFRESH_S) or index
+    return index.get(node)
 
 
 def pool_entry(cluster: str | None, pool: str | None) -> dict:
@@ -789,25 +805,59 @@ def pool_usage(cluster: str, pool: str) -> dict:
     the running pods on them (every namespace this identity may list; a tenant's pods are its runs, `models` the
     endpoints and the warm-spare placeholders). Unreachable: {"nodes_ready": None}."""
     region = cluster_region(cluster)
-    try:
-        nodes = retry(core(region).list_node, label_selector=f"{LABEL}/pool={pool}").items
-    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as unknown, never fails the page
+    # one node listing and one running-pod listing per region, shared by every pool of the fleet page (eight pools
+    # used to mean eight listings of every pod in the cluster: 12 s for GET /v1/fleet?live=true, api 0.11.124)
+    all_nodes = nodes_of(region)
+    if all_nodes is None:
         return {"nodes_ready": None, "gpus_total": None, "gpus_used": None}
+    nodes = [n for n in all_nodes if (n.metadata.labels or {}).get(f"{LABEL}/pool") == pool]
     names = {n.metadata.name for n in nodes}
     ready = sum(1 for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or [])))
     total = sum(int((n.status.allocatable or {}).get("nvidia.com/gpu", 0)) for n in nodes)
-    used = 0
-    try:
-        for pod in retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items:
+    pods = running_pods_of(region)
+    if pods is None:
+        used = None  # without cluster-wide pod read the use stays unknown
+    else:
+        used = 0
+        for pod in pods:
             if pod.spec.node_name in names:
                 used += sum(
                     int((c.resources.requests or {}).get("nvidia.com/gpu", 0))
                     for c in pod.spec.containers
                     if c.resources
                 )
-    except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
-        used = None
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
+
+
+LIVE_CACHE_S = 10  # the fleet page's node and pod listings per region: one read serves every pool and poll in it
+_live_cache: dict = {}  # f"{kind}/{region}" -> (until, items | None)
+
+
+def _live_list(kind: str, region: str, call) -> list | None:
+    key = f"{kind}/{region}"
+    hit = _live_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        items = call()
+    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as unknown, never fails the page
+        items = None
+    _live_cache[key] = (time.time() + (LIVE_CACHE_S if items is not None else 2), items)
+    return items
+
+
+def nodes_of(region: str) -> list | None:
+    """Every node of a region (client objects), cached LIVE_CACHE_S; None when the region cannot be read."""
+    return _live_list("nodes", region, lambda: retry(core(region).list_node).items)
+
+
+def running_pods_of(region: str) -> list | None:
+    """Every running pod of a region (client objects), cached LIVE_CACHE_S; None when the pods cannot be listed."""
+    return _live_list(
+        "pods",
+        region,
+        lambda: retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items,
+    )
 
 
 def tenant_usage(tenant: str, region: str = REGION) -> dict:
@@ -837,9 +887,8 @@ def tenant_usage(tenant: str, region: str = REGION) -> dict:
 
 def cluster_summary(region: str) -> dict:
     """One cluster of the fleet for the fleet page: Kubernetes version, ready nodes (system and GPU), reachability."""
-    try:
-        nodes = retry(core(region).list_node).items
-    except Exception:  # noqa: BLE001 - an unreachable cluster shows as such
+    nodes = nodes_of(region)
+    if nodes is None:  # an unreachable cluster shows as such
         return {"reachable": False, "nodes_ready": None, "gpu_nodes_ready": None, "kubernetes_version": None}
     ready = [n for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))]
     gpu = [

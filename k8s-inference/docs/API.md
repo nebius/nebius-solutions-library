@@ -323,6 +323,54 @@ admission check and no side effect: no reservation, no Job, no record. A stage s
 named by its root and stage id, never by an `Idempotency-Key`; a submission without the header gets a random id; a
 synchronous call has no durable id: all three are refused (400).
 
+## Pagination: every list that grows (api 0.11.124)
+
+Every list route pages: `limit` (default 50, at most 500) and `cursor` (opaque; the `X-Next-Cursor` header of the
+previous page, absent on the last page), with `X-Total-Count` (everything the caller may see, before the cut) on
+every page. The order is stable and the expensive per-item work (an endpoint's live state and pods, a definition's
+regional state, a tenant's usage, an operation's records and placement) is done for the page only:
+
+| route | order | note |
+|---|---|---|
+| `GET /v1/operations` | newest first (`created_at` desc, id asc) | as before; the tenant-wide Job/pod listing behind it is reused for `OPS_LIST_CACHE_S` (5 s) by every page and poll and dropped at once by any mutation this API makes (a submission, a cancellation, a resume shows on the next list); a listing with an unreachable region is never reused |
+| `GET /v1/endpoints` | model id, then cluster id | one entry per deployment |
+| `GET /v1/models` | model id | |
+| `GET /v1/keys`, `GET /v1/fleet/tenants/{t}/keys` | alias | |
+| `GET /v1/fleet/tenants` | tenant name | the usage reads are for the page only |
+| `GET /v1/fleet/operations` | newest first | the fleet operator's in-flight view (below) |
+| `GET /v1/bindings` | ref | |
+| `GET /v1/sessions` | newest first | `limit` only (the owner's recent sessions) |
+
+The placement fields read one node listing per region (cached ten minutes) instead of one node per attempt, and the
+fleet page (`GET /v1/fleet?live=true`) reads one node listing and one running-pod listing per region for all its
+pools (12 s before, cached ten seconds).
+
+## Submission pause: a bounded, retryable stop of new admissions (api 0.11.124)
+
+The fleet operator can pause NEW admissions of some tenants or all (`POST /v1/fleet/submissions:pause` with
+`{"tenants": ["system", "rene"] | null, "reason": "...", "retry_after_s": 30, "max_s": 21600, "exports": false}`;
+`POST /v1/fleet/submissions:resume`; `GET /v1/fleet/submissions` shows the state: who, why, since, until). While a
+tenant is paused its `:invoke` (every mode, stages and async callers included) and `:resume` answer
+`503 {"detail": "ADMISSION_PAUSED: submissions paused: <reason> (until <time>); nothing was created, retry after the
+pause"}` with `Retry-After: <retry_after_s>`, `X-Serverless2-Admission: refused` (the header the 429 key-limit refusal
+carries: a definitive non-acceptance, nothing was created) and `X-Serverless2-Admission-Reason: paused` (absent on a
+429: the two are told apart without guessing). `:export` (a transfer-only retry of a finished run) keeps working unless
+the pause says `exports: true`, so an application draining old work keeps its deliveries. Untouched by a pause:
+`:operation-id`, every read, `:cancel`, every Job in flight, finalizers, callbacks, results, storage grants, keys,
+budgets. The pause is bounded (`max_s`, six hours at most) and lifts itself; it lives in the database (migration 30:
+`fleet_settings`), read by every replica with a two-second cache, so it survives restarts and a rolling rollout;
+without the database nothing is ever paused.
+
+## Fleet operations: what is in flight across tenants (api 0.11.124)
+
+`GET /v1/fleet/operations` (the fleet role, docs/API.md "Fleet operators"; `tenant=` narrows; `active=true` is the
+only mode: terminal operations are each tenant's own listing) answers every non-terminal operation Job of every
+tenant on every reachable cluster, newest first, paged: `id`, `tenant`, `model`, `mode`, `status` (`RUNNING`: a pod
+is active; `QUEUED`: admitted or waiting; `SUPERSEDED`: a continuation took over; `CANCELLED`: cancellation
+requested, the Job ending), `created_at`, `started_at`, `cluster`, `region`, `successor`, `key_alias`, `owner` (the
+opaque owner hash) and `requester`. Identity and state only: never an input, a result or a key value. From one Job
+listing per cluster cached ten seconds; `X-Regions-Skipped` names clusters that could not be read.
+
 ## Weights of an endpoint
 
 `weights: {path, mount_path, env, read_only, prepare}` on an API-managed model (`POST /v1/models`): the region's

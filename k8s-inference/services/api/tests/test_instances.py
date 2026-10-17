@@ -159,38 +159,7 @@ def test_enrich_attempts_adds_placement_only_where_a_node_or_pool_is_known(monke
     assert attempts[2]["instance_type"] == "cpu-d3/8vcpu-32gb"  # the member's own cluster, not the operation's
 
 
-def test_node_placement_reads_the_labels_once_and_caches_a_gone_node_briefly(monkeypatch):
-    calls = []
-
-    class Core:
-        def read_node(self, name, **kw):
-            calls.append(name)
-            if name == "gone":
-                raise RuntimeError("404")
-            return SimpleNamespace(
-                metadata=SimpleNamespace(
-                    labels={
-                        "node.kubernetes.io/instance-type": "cpu-d3",
-                        "nebius.com/resource-preset": "8vcpu-32gb",
-                        "nebius.com/node-group-id": "mk8snodegroup-e00f7",
-                        "serverless2.nebius/pool": "system",
-                    }
-                )
-            )
-
-    monkeypatch.setattr(kube, "core", lambda region="eu-north1": Core())
-    monkeypatch.setattr(kube, "_node_cache", {})
-    p = kube.node_placement("eu-north1", "computeinstance-e00x")
-    assert p == {
-        "instance_type": "cpu-d3",
-        "preset": "8vcpu-32gb",
-        "node_group": "mk8snodegroup-e00f7",
-        "pool": "system",
-    }
-    assert kube.node_placement("eu-north1", "computeinstance-e00x") == p and calls == ["computeinstance-e00x"]
-    assert kube.node_placement("eu-north1", "gone") is None and kube.node_placement("eu-north1", "gone") is None
-    assert calls == ["computeinstance-e00x", "gone"]
-    assert kube.node_placement(None, "x") is None and kube.node_placement("eu-north1", None) is None
+# node_placement reads one node listing per region since api 0.11.124: tests/test_pagination.py
 
 
 def test_endpoint_replicas_carry_the_instance(client, monkeypatch):

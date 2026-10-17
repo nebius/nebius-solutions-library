@@ -32,6 +32,7 @@ import kube
 import leases
 import models
 import monitoring
+import pause
 import placement as placing
 import render
 import schemas
@@ -75,6 +76,7 @@ from schemas import (
 )
 
 log = logging.getLogger("api")
+PAGE_DEFAULT, PAGE_MAX = 50, 500  # every list route: `limit` default and ceiling (docs/API.md "Pagination")
 
 
 def check_placeholders() -> None:
@@ -117,7 +119,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.123", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.124", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -707,8 +709,16 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
 
 
 @app.get("/v1/models", responses={200: {"model": list[schemas.Model]}})
-def list_models(p: Principal = Depends(scoped("read:catalog"))):
-    return [_public(m, p) for m in catalog.all_models().values() if allows_model(p, m["name"])]
+def list_models(
+    response: Response,
+    p: Principal = Depends(scoped("read:catalog")),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The definitions the key may see, by id, one page at a time (docs/API.md "Pagination": `limit`, `cursor`,
+    `X-Next-Cursor`, `X-Total-Count`); the live endpoint state is read for the page's definitions only."""
+    mine = [m for m in catalog.all_models().values() if allows_model(p, m["name"])]
+    return [_public(m, p) for m in _page(response, mine, lambda m: m["name"], cursor, limit)]
 
 
 def _runtime_or_409(mid: str) -> dict:
@@ -1008,6 +1018,9 @@ async def invoke(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     m = _model(model)
+    pause.check(
+        p.tenant
+    )  # a paused tenant's submission: 503 + Retry-After, nothing created (docs/API.md "Submission pause")
     mode = req.mode or m["mode"]
     if mode == "run" and req.execution and req.execution.stage and not allows_model(p, model):
         # a stage on a model the key is not granted: only as a delegated stage of a root the operator's run class
@@ -1580,6 +1593,7 @@ def list_operations(
         response.headers["X-Created-By-Current-Key"] = "true"
     entries.sort(key=lambda x: x[1])
     entries.sort(key=lambda x: x[0], reverse=True)
+    response.headers["X-Total-Count"] = str(len(entries))  # every operation the caller may see, before the cut
     if cursor:
         c_at, c_id = _decode_cursor(cursor)
         entries = [x for x in entries if x[0] < c_at or (x[0] == c_at and x[1] > c_id)]
@@ -1637,6 +1651,39 @@ def _created_by_current_key(entries: list[tuple], p: Principal) -> list[tuple]:
 
 def _encode_cursor(created_at: str, id: str) -> str:
     return base64.urlsafe_b64encode(f"{created_at}|{id}".encode()).decode().rstrip("=")
+
+
+def _page(response: Response, items: list, key, cursor: str | None, limit: int | None) -> list:
+    """Cursor pagination of a list that is sorted by `key` (a string per item, unique: the cursor is the last key of
+    the page). Headers: `X-Next-Cursor` (absent on the last page) and `X-Total-Count` (every item the caller may
+    see, before the cut). The caller does the expensive per-item work on the returned page only (docs/API.md
+    "Pagination"). Without `limit` the whole list is answered as before 0.11.124 (a client that never paged keeps
+    its answer; the console always pages)."""
+    items = sorted(items, key=key)
+    response.headers["X-Total-Count"] = str(len(items))
+    if cursor:
+        after = _decode_key_cursor(cursor)
+        items = [x for x in items if key(x) > after]
+    if limit is None:
+        return items
+    page = items[:limit]
+    if len(items) > limit:
+        response.headers["X-Next-Cursor"] = _encode_key_cursor(key(page[-1]))
+    return page
+
+
+def _encode_key_cursor(k: str) -> str:
+    return base64.urlsafe_b64encode(("k|" + k).encode()).decode().rstrip("=")
+
+
+def _decode_key_cursor(cursor: str) -> str:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "cursor: not one this API issued (X-Next-Cursor of a previous page)")
+    if not raw.startswith("k|") or len(raw) < 3:
+        raise HTTPException(400, "cursor: not one this API issued (X-Next-Cursor of a previous page)")
+    return raw[2:]
 
 
 def _decode_cursor(cursor: str) -> tuple[str, str]:
@@ -2149,6 +2196,7 @@ def get_result(id: str, p: Principal = Depends(scoped("read:results"))):
 def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:control"))):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
+    pause.check(p.tenant, kind="export")  # exports keep working during a pause unless it says `exports: true`
     orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
@@ -2655,6 +2703,7 @@ def resume(
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
+    pause.check(p.tenant)  # a paused tenant resumes nothing (docs/API.md "Submission pause")
     orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
@@ -2723,8 +2772,15 @@ def put_binding(
 
 
 @app.get("/v1/bindings", responses={200: {"model": list[schemas.Binding]}})
-def list_bindings(p: Principal = Depends(principal)):
-    return execution.list_bindings(p.namespace, p.owner, p.role == "admin")
+def list_bindings(
+    response: Response,
+    p: Principal = Depends(principal),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The caller's bindings by ref, one page at a time (docs/API.md "Pagination")."""
+    rows = execution.list_bindings(p.namespace, p.owner, p.role == "admin")
+    return _page(response, rows, lambda b: str(b.get("ref") or ""), cursor, limit)
 
 
 @app.delete("/v1/bindings/{ref}", status_code=204)
@@ -2812,17 +2868,23 @@ def _variants_public(m: dict, region: str) -> list[dict]:
 
 
 @app.get("/v1/endpoints", responses={200: {"model": list[schemas.Endpoint]}})
-def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("read:catalog"))):
+def list_endpoints(
+    response: Response,
+    region: str | None = None,
+    p: Principal = Depends(scoped("read:catalog")),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
     """Every deployment of every endpoint the key may see: one entry per deployment cluster (`cluster` is the id the
-    catalog keys it by, `region` the Nebius region the API reaches it in). `region` selects a cluster id or a region."""
+    catalog keys it by, `region` the Nebius region the API reaches it in), by model id then cluster, one page at a
+    time (docs/API.md "Pagination"): the live state (replicas, pods, rollout) is read for the page only. `region`
+    selects a cluster id or a region."""
     served_regions = kube.regions()
     if region and region not in served_regions and kube.cluster_region(region) not in served_regions:
         raise HTTPException(400, f"region {region} is not served by this API (available: {served_regions})")
-    out = []
+    pairs = []  # (model, cluster id) of every deployment the key may see, before any live read
     for m in catalog.all_models().values():
-        if not allows_model(p, m["name"]):
-            continue
-        if m["mode"] == "run":
+        if not allows_model(p, m["name"]) or m["mode"] == "run":
             continue
         for cid in m["regions"]:
             cluster_region = kube.cluster_region(cid)
@@ -2830,36 +2892,40 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("rea
                 continue
             if cluster_region not in served_regions:
                 continue
-            try:
-                _deployment_of(m, cid)  # 400 for a cluster this API cannot tell apart from another in its region
-                i = _deployed(m, cluster_region)
-                if i:
-                    out.append(
-                        {
-                            **ep.to_public(m, i, cluster_region),
-                            "cluster": cid,
-                            **(
-                                {"variants": vs, "routing": m.get("routing")}
-                                if (vs := _variants_public(m, cluster_region))
-                                else {}
-                            ),
-                        }
-                    )
-            except (HTTPException, ApiException):
+            pairs.append((m, cid))
+    out = []
+    for m, cid in _page(response, pairs, lambda x: f"{x[0]['name']}|{x[1]}", cursor, limit):
+        cluster_region = kube.cluster_region(cid)
+        try:
+            _deployment_of(m, cid)  # 400 for a cluster this API cannot tell apart from another in its region
+            i = _deployed(m, cluster_region)
+            if i:
                 out.append(
                     {
-                        "id": m["k8s_name"],
-                        "name": m["display_name"],
-                        "model": m["name"],
-                        "region": cluster_region,
+                        **ep.to_public(m, i, cluster_region),
                         "cluster": cid,
-                        "status": "unavailable",
-                        "replicas_ready": None,
-                        "gpu": m.get("gpu"),
-                        "managed_by": m.get("managed_by"),
-                        "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke",
+                        **(
+                            {"variants": vs, "routing": m.get("routing")}
+                            if (vs := _variants_public(m, cluster_region))
+                            else {}
+                        ),
                     }
                 )
+        except (HTTPException, ApiException):
+            out.append(
+                {
+                    "id": m["k8s_name"],
+                    "name": m["display_name"],
+                    "model": m["name"],
+                    "region": cluster_region,
+                    "cluster": cid,
+                    "status": "unavailable",
+                    "replicas_ready": None,
+                    "gpu": m.get("gpu"),
+                    "managed_by": m.get("managed_by"),
+                    "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke",
+                }
+            )
     return out
 
 
@@ -3040,17 +3106,21 @@ def _fleet_tenant_view(tenant: str, doc: dict | None, record: dict | None, usage
 
 
 @app.get("/v1/fleet/tenants", responses={200: {"model": list[schemas.FleetTenantRecord]}})
-def fleet_tenants(p: Principal = Depends(fleet_operator)):
+def fleet_tenants(
+    response: Response,
+    p: Principal = Depends(fleet_operator),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
     """Every tenant of the fleet: the fleet document's tenants (charts/fleet tenants.yaml: quota, fair share,
-    dedicated pools, assets) and every tenant with keys on record, with key counts, spend and what the keys hold.
-    The platform's own keys (router, fleet operators) are not a tenant."""
+    dedicated pools, assets) and every tenant with keys on record, with key counts, spend and what the keys hold,
+    by name, one page at a time (docs/API.md "Pagination"; the usage reads are for the page only). The platform's
+    own keys (router, fleet operators) are not a tenant."""
     _fleet_only()
     doc = kube.fleet().get("tenants") or {}
     record = keys.tenants_on_record()
-    out = []
-    for tenant in sorted(set(doc) | set(record)):
-        out.append(_fleet_tenant_view(tenant, doc.get(tenant), record.get(tenant), keys.tenant_usage(tenant)))
-    return out
+    names = _page(response, sorted(set(doc) | set(record)), lambda t: t, cursor, limit)
+    return [_fleet_tenant_view(t, doc.get(t), record.get(t), keys.tenant_usage(t)) for t in names]
 
 
 @app.get("/v1/fleet/tenants/{tenant}", responses={200: {"model": schemas.FleetTenantRecord}})
@@ -3064,12 +3134,107 @@ def fleet_tenant(tenant: str, p: Principal = Depends(fleet_operator)):
     return _fleet_tenant_view(tenant, doc, record, keys.tenant_usage(tenant))
 
 
+@app.get("/v1/fleet/submissions", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions(p: Principal = Depends(fleet_operator)):
+    """The submission pause as it stands (docs/API.md "Submission pause")."""
+    _fleet_only()
+    return pause.state()
+
+
+@app.post("/v1/fleet/submissions:pause", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions_pause(req: schemas.SubmissionPauseRequest, p: Principal = Depends(fleet_operator)):
+    """Pause NEW admissions of some tenants (or all): while paused, their :invoke, :resume and :export answer 503 with
+    Retry-After and create nothing; everything in flight, every read, :cancel, callbacks, results, grants, keys and
+    budgets are untouched. Bounded (`max_s`, 6 h at most): it lifts itself. Explicit: GET /v1/fleet/submissions."""
+    _fleet_only()
+    return pause.pause(
+        req.tenants, req.reason, req.retry_after_s, req.max_s, p.info.get("key_alias") or "fleet", exports=req.exports
+    )
+
+
+@app.post("/v1/fleet/submissions:resume", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions_resume(p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    return pause.resume(p.info.get("key_alias") or "fleet")
+
+
+@app.get("/v1/fleet/operations", responses={200: {"model": list[schemas.FleetOperation]}})
+def fleet_operations(
+    response: Response,
+    p: Principal = Depends(fleet_operator),
+    active: bool = True,
+    tenant: str | None = None,
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The fleet operator's read-only view of the operations in flight across every tenant and cluster (docs/API.md
+    "Fleet operators"): every non-terminal operation Job (`active=true`, the only mode today), newest first, one page
+    at a time (docs/API.md "Pagination"). Identity only: id, tenant, model, mode, status (RUNNING: a pod is active;
+    QUEUED: admitted or waiting; SUPERSEDED: a continuation took over; CANCELLED: cancellation requested),
+    timestamps, cluster, the submitting key's alias and the owner hash; never an input, a result or a key. Header
+    `X-Regions-Skipped` names clusters that could not be read."""
+    _fleet_only()
+    if not active:
+        raise HTTPException(400, "active=false is not served: terminal operations are each tenant's own listing")
+    items, skipped = jobs.list_fleet_active()
+    if tenant:
+        items = [j for j in items if (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/tenant") == tenant]
+    if skipped:
+        response.headers["X-Regions-Skipped"] = ",".join(skipped)
+    key = lambda j: f"{j['metadata'].get('creationTimestamp') or ''}|{j['metadata']['name']}"  # noqa: E731
+    # newest first: the page helper sorts ascending, so the key is inverted through a sortable complement
+    page = _page(response, items, lambda j: _desc_key(key(j)), cursor, limit)
+    return [_fleet_operation_view(j) for j in page]
+
+
+def _desc_key(k: str) -> str:
+    """A key whose ascending order is the descending order of `k` (every character complemented)."""
+    return "".join(chr(0x10FFFF - ord(c)) for c in k)
+
+
+def _fleet_operation_view(j: dict) -> dict:
+    md, st = j["metadata"], j.get("status") or {}
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
+    worker = j.get("_worker_status") or {}
+    if ann.get(f"{cfg.LABEL}/successor"):
+        status = "SUPERSEDED"
+    elif ann.get(f"{cfg.LABEL}/cancelled"):
+        status = "CANCELLED"  # requested; the Job ends on its own (as GET /v1/operations/{id} reports it)
+    elif int(worker.get("active") or st.get("active") or 0) > 0 and (worker.get("startTime") or st.get("startTime")):
+        status = "RUNNING"
+    else:
+        status = "QUEUED"
+    return {
+        "id": md["name"],
+        "tenant": labels.get(f"{cfg.LABEL}/tenant"),
+        "model": labels.get(f"{cfg.LABEL}/model"),
+        "mode": labels.get(f"{cfg.LABEL}/mode"),
+        "status": status,
+        "created_at": md.get("creationTimestamp"),
+        "started_at": worker.get("startTime") or st.get("startTime"),
+        "cluster": j.get("_cluster") or kube.cluster_id_or_none(j.get("_region")),
+        "region": j.get("_region"),
+        "successor": ann.get(f"{cfg.LABEL}/successor"),
+        "key_alias": _key_alias(ann.get(f"{cfg.LABEL}/key")),
+        "owner": ann.get(f"{cfg.LABEL}/owner"),
+        "requester": instances.requester_of(ann),
+    }
+
+
 @app.get("/v1/fleet/tenants/{tenant}/keys", responses={200: {"model": list[schemas.ApiKey]}})
-def fleet_list_keys(tenant: str, p: Principal = Depends(fleet_operator)):
-    """The tenant's keys exactly as its own admin lists them (the same safe projection: never a hash or value)."""
+def fleet_list_keys(
+    response: Response,
+    tenant: str,
+    p: Principal = Depends(fleet_operator),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The tenant's keys exactly as its own admin lists them (the same safe projection: never a hash or value), by
+    alias, one page at a time (docs/API.md "Pagination")."""
     _fleet_only()
     tenant = _fleet_tenant(tenant)
-    return [_key_public(k, tenant) for k in keys.list_tenant(tenant)]
+    rows = _page(response, keys.list_tenant(tenant), lambda k: k["key_alias"] or "", cursor, limit)
+    return [_key_public(k, tenant) for k in rows]
 
 
 @app.post("/v1/fleet/tenants/{tenant}/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})
@@ -3136,9 +3301,16 @@ def fleet_revoke_key(tenant: str, alias: str, p: Principal = Depends(fleet_opera
 
 
 @app.get("/v1/keys", responses={200: {"model": list[schemas.ApiKey]}})
-def list_keys(p: Principal = Depends(admin)):
+def list_keys(
+    response: Response,
+    p: Principal = Depends(admin),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The tenant's keys by alias, one page at a time (docs/API.md "Pagination")."""
     _fleet_only()
-    return [_key_public(k, p.tenant) for k in keys.list_tenant(p.tenant)]
+    rows = _page(response, keys.list_tenant(p.tenant), lambda k: k["key_alias"] or "", cursor, limit)
+    return [_key_public(k, p.tenant) for k in rows]
 
 
 @app.post("/v1/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})

@@ -4,6 +4,30 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.124
+
+(API image; database migration 30 (DB29 -> DB30: the `fleet_settings` table) applied by the API at start; no chart,
+RBAC or uploader change.)
+
+- Pagination on every list that grows (docs/API.md "Pagination"): `GET /v1/endpoints`, `/v1/models`, `/v1/keys`,
+  `/v1/fleet/tenants`, `/v1/fleet/tenants/{t}/keys` and `/v1/bindings` take `limit` (default 50, max 500) and `cursor`
+  and answer `X-Next-Cursor` and `X-Total-Count`; `GET /v1/operations` adds `X-Total-Count`. The expensive per-item
+  work (live endpoint state and pods, regional definition state, tenant usage) is done for the page only.
+- The tenant-wide Job/pod listing behind `GET /v1/operations` reads the API server's JSON directly (no client model
+  round trip: half the time of listing 600 Jobs) and is reused for `OPS_LIST_CACHE_S` (5 s) by every page and poll;
+  every Job mutation this API makes drops it, a listing with an unreachable region is never reused.
+- `GET /v1/fleet/operations` (fleet role): every non-terminal operation across tenants and clusters, identity and
+  state only, newest first, paged (docs/API.md "Fleet operations").
+- Submission pause (docs/API.md "Submission pause"; migration 30, `fleet_settings`): the fleet operator pauses new
+  admissions of some or all tenants for a bounded time; paused `:invoke`/`:resume` (and `:export` only when asked)
+  answer 503 `ADMISSION_PAUSED` with `Retry-After`, `X-Serverless2-Admission: refused` and
+  `X-Serverless2-Admission-Reason: paused`, creating nothing; everything in flight, reads, cancels, results, grants,
+  keys and budgets are untouched.
+- Pagination is opt-in for the clients that never paged: without `limit` the whole list is answered as before.
+- Placement reads one node listing per region (ten minutes) instead of one read per attempt (a page of 100 attempts
+  was 19 node reads); `GET /v1/fleet?live=true` reads one node and one running-pod listing per region for all its
+  pools (was one pod listing per pool: 12 s).
+
 ## api 0.11.123, charts/fleet 0.1.14
 
 (API image and the fleet chart; found while rolling 0.11.122 out: no other change.)

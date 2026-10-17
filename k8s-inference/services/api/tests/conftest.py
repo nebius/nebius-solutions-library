@@ -47,3 +47,21 @@ def _marks_for_follows_a_stubbed_ledger(monkeypatch):
 
     monkeypatch.setattr(attempts, "completion_of", completion)
     monkeypatch.setattr(attempts, "mark_completed", mark)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_listing_caches():
+    """The listing caches (api 0.11.124: the tenant-wide Job listing, the fleet's in-flight Jobs, the fleet page's node
+    and pod listings, the node index) never leak from one test's fake cluster into the next."""
+    import jobs
+    import kube
+
+    jobs._ops_list_cache.clear()
+    jobs._fleet_ops_cache.update({"until": 0.0, "items": [], "skipped": []})
+    kube._live_cache.clear()
+    kube._node_cache.clear()
+    yield
+    jobs._ops_list_cache.clear()
+    jobs._fleet_ops_cache.update({"until": 0.0, "items": [], "skipped": []})
+    kube._live_cache.clear()
+    kube._node_cache.clear()

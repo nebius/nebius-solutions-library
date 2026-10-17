@@ -17,6 +17,7 @@ dispatcher creates the work volume where the run is admitted, and the manager Jo
 back; pods, logs and billing come from the worker. Image references are fleet-wide (the logical registry
 host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the region it lands in."""
 
+import copy
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from config import (
     LITELLM_URL,
     MULTIKUEUE_MANAGED_BY,
     MULTINODE_MAX_NODES,
+    OPS_LIST_CACHE_S,
     PUBLIC_API_URL,
     REGION,
     RUNNER_IMAGE,
@@ -1587,6 +1589,7 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     """Returns (job, created). AlreadyExists -> the existing one (idempotent replay). The per-operation
     PVC and Secret are owned by the Job (garbage-collected with it). A manager Job gets no PVC here: the
     dispatcher creates it on the worker it picks (docs/JOBS.md)."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     name = job["metadata"]["name"]
     import hashlib
 
@@ -1754,22 +1757,61 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int | None) -> list
     return items[:limit] if limit else items
 
 
+_ops_list_cache: dict = {}  # (ns, tenant, model) -> (until, items, skipped)
+
+
+def _json_items(fn, *args, **kw) -> list[dict]:
+    """A Kubernetes list as the API server's JSON items (dicts), skipping the client's model objects and the
+    sanitize pass back to dicts (half the time of listing 600 Jobs, api 0.11.124). `_preload_content=False` hands
+    the raw response over; the shape is exactly what sanitize_for_serialization produced."""
+    import json as _json
+
+    try:
+        resp = retry(fn, *args, _preload_content=False, **kw)
+    except TypeError:  # a client without the raw option (a fake in the tests): the preloaded items
+        resp = retry(fn, *args, **kw)
+    data = getattr(resp, "data", None)
+    if isinstance(data, (bytes, str)):
+        return _json.loads(data).get("items") or []
+    # a client that preloaded anyway (a fake in the tests, a wrapped client): the items as dicts
+    items = getattr(resp, "items", None) or []
+    return [i if isinstance(i, dict) else fn.__self__.api_client.sanitize_for_serialization(i) for i in items]
+
+
 def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], list[str]]:
     """Every live operation of the tenant, newest first, and the regions that could not be read (unreachable: their
-    operations are absent from the list, which says so instead of failing every other region's)."""
+    operations are absent from the list, which says so instead of failing every other region's). The listing is
+    reused for OPS_LIST_CACHE_S (a console polling every few seconds and its page flips share one read of the
+    tenant's Jobs and pods in every region: docs/API.md "Pagination"); a mutation never waits on it, it reads its
+    own Job."""
+    key = (ns, tenant, model)
+    hit = _ops_list_cache.get(key)
+    if hit and hit[0] > time.time():
+        return copy.deepcopy(hit[1]), list(hit[2])
+    items, skipped = _list_ops_all(ns, tenant, model)
+    if (
+        OPS_LIST_CACHE_S > 0 and not skipped
+    ):  # a listing with a region missing is never reused: its return shows at once
+        _ops_list_cache[key] = (time.time() + OPS_LIST_CACHE_S, items, skipped)
+        return copy.deepcopy(items), list(skipped)
+    return items, skipped
+
+
+def ops_cache_invalidate(ns: str | None = None) -> None:
+    """Forget the cached listing of a namespace (every namespace: None): called by every Job creation, patch and
+    deletion this API makes, so a submission, a cancellation or a resume shows on the next list at once."""
+    for key in list(_ops_list_cache):
+        if ns is None or key[0] == ns:
+            _ops_list_cache.pop(key, None)
+
+
+def _list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], list[str]]:
     sel = f"{LABEL}/tenant={tenant}" + (f",{LABEL}/model={model}" if model else "")
     items, by_job, managers, skipped = [], {}, [], []
     for r in kube.regions():
         try:
-            b = kube.batch(r)
-            jobs = [
-                b.api_client.sanitize_for_serialization(j)
-                for j in retry(b.list_namespaced_job, ns, label_selector=sel).items
-            ]
-            pods = [
-                b.api_client.sanitize_for_serialization(p)
-                for p in retry(kube.core(r).list_namespaced_pod, ns, label_selector=f"{LABEL}/tenant={tenant}").items
-            ]
+            jobs = _json_items(kube.batch(r).list_namespaced_job, ns, label_selector=sel)
+            pods = _json_items(kube.core(r).list_namespaced_pod, ns, label_selector=f"{LABEL}/tenant={tenant}")
             jobs += list_jobsets(ns, r, sel)
         except ApiException as e:
             if e.status in (403, 404):  # tenant not onboarded in that region
@@ -1805,6 +1847,49 @@ def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], l
     items.sort(key=lambda j: j["metadata"]["name"])
     items.sort(key=lambda j: j["metadata"].get("creationTimestamp", ""), reverse=True)  # newest first, then id
     return items, skipped
+
+
+_fleet_ops_cache: dict = {"until": 0.0, "items": [], "skipped": []}
+FLEET_OPS_CACHE_S = 10
+
+
+def list_fleet_active() -> tuple[list[dict], list[str]]:
+    """Every non-terminal operation Job of every tenant on every reachable cluster (the fleet operator's read,
+    GET /v1/fleet/operations): Jobs with the tenant label in all namespaces, without pods (the status is read from
+    the Job's conditions and annotations), cached FLEET_OPS_CACHE_S. Mirrors (a worker's copy of a manager Job) are
+    folded into the manager's entry as its cluster."""
+    if _fleet_ops_cache["until"] > time.time():
+        return list(_fleet_ops_cache["items"]), list(_fleet_ops_cache["skipped"])
+    out, skipped, mirrors = {}, [], {}
+    for r in kube.regions():
+        try:
+            jobs = _json_items(kube.batch(r).list_job_for_all_namespaces, label_selector=f"{LABEL}/tenant")
+        except ApiException as e:
+            raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
+        except (urllib3.exceptions.HTTPError, OSError) as e:
+            log.warning("fleet operations: region %s unreachable, skipped: %s", r, str(e)[:160])
+            skipped.append(r)
+            continue
+        for j in jobs:
+            st = j.get("status") or {}
+            if any(
+                c.get("type") in ("Complete", "Failed") and c.get("status") == "True"
+                for c in st.get("conditions") or []
+            ):
+                continue
+            name = j["metadata"]["name"]
+            if is_mirror(j):
+                mirrors[name] = (r, st)
+                continue
+            j["_region"] = r
+            out[name] = j
+    for name, (r, st) in mirrors.items():
+        if name in out:
+            out[name]["_cluster"] = kube.cluster_id_or_none(r)
+            out[name]["_worker_status"] = st
+    items = sorted(out.values(), key=lambda j: j["metadata"].get("creationTimestamp", ""), reverse=True)
+    _fleet_ops_cache.update({"until": time.time() + FLEET_OPS_CACHE_S, "items": items, "skipped": skipped})
+    return list(items), list(skipped)
 
 
 def list_related(ns: str, tenant: str, keep, complete: bool = True) -> list[dict]:
@@ -1887,6 +1972,7 @@ def cancel(ns: str, name: str, region: str = REGION) -> dict:
     (status CANCELLED through the annotation), pods terminate within the grace period. For a manager
     Job the deadline goes onto the worker's copy (MultiKueue mirrors spec only at creation) and the
     annotation onto the manager's; deleting the manager Job removes the worker's copy."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     job = get(ns, name, region)
     op = normalise(job)
     if op["status"] not in ("QUEUED", "RUNNING"):
@@ -2230,6 +2316,7 @@ def switch_class(
     """Fallback placement (docs/SCHEDULING.md "Fallback to the next class"): a QUEUED fleet run that waited longer than
     its `fallback_wait_s` for its class is deleted on the manager (nothing ran) and created again as `<root>-rN` for
     `next_class` (that class's image), keeping only the remaining preference; the new Job says why."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     orig = get(ns, name, region)
     op = normalise(orig)
     md = orig["metadata"]
@@ -2370,6 +2457,7 @@ def switch_unschedulable(
     Workload deactivated so the worker's copy and its pod go and Kueue never admits it again), then the successor is
     admitted on the run's ledger and created; a failed admission or create restores the original. The owner, the root
     operation id and the durable handle stay the run's (lineage: resumed-from, recovered-from, the successor mark)."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     orig = get(ns, name, region)
     op = normalise(orig)
     md = orig["metadata"]
@@ -2547,6 +2635,7 @@ def recover(
     `<root>-r-<sha8>` is created from the acknowledged checkpoint pointer on `next_class` with that class's image and a
     fresh volume. The name is a function of (original, lost epoch): competing API replicas and repeated ticks
     converge on one Job (create is ignore-exists). Returns (successor, created)."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     import hashlib
 
     import attempts
@@ -2810,6 +2899,7 @@ def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = Fa
     0.11.63 only fallback and recovery linked their successor: a manual `:resume` left the original handle on its own
     terminal state (FAILED, epoch 1) for ever once its Job expired, and a graph child waiting on that root kept seeing
     the FAILED original. Idempotent: a replayed resume marks the same successor again."""
+    ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     import attempts
 
     try:
