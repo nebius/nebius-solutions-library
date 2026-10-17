@@ -24,6 +24,10 @@ For those who prefer containerized environments, our Kubernetes solution include
 
 Our SLURM solutions offer a streamlined approach for users who prefer traditional HPC environments. These solutions include ready-to-use images pre-configured with NVIDIA drivers and are ideal for those looking to take advantage of SLURM’s robust job scheduling capabilities.  Similar to our Kubernetes offerings, the SLURM solutions are optimized for InfiniBand connectivity, ensuring peak performance and efficiency in data transfer and communication between nodes.
 
+[Run:ai](./runai/README.md)
+
+Run:ai self-hosted control plane on managed Kubernetes.
+
 ### Inference
 
 [Kubernetes inference fleet](./k8s-inference/README.md)
