@@ -1552,26 +1552,53 @@ async def _proxy_until_answer_or_disconnect(
     url: str, body: dict, headers: dict, timeout_s: float, request
 ) -> httpx.Response:
     """POST the request and wait for the answer, the timeout, or the caller's disconnect, whichever comes first.
-    A disconnect cancels the downstream request (the client is closed with it) and answers 499 (nobody reads it;
-    the caller's `finally` releases the admission); the timeout answers 504 as before."""
+    The caller is watched by AWAITING `request.receive()` once the body is consumed: the next message the server
+    hands over is `http.disconnect`, and it arrives through Starlette's BaseHTTPMiddleware wrapper too (the API's
+    `no_store` middleware) — `Request.is_disconnected()` cannot see it there (a cancelled non-blocking receive;
+    starlette discussion 2094; found by the application's acceptance, 2026-10-17). The watcher and the downstream
+    call race; whichever finishes first ends the other (cancelled and joined). A disconnect answers 499 (nobody
+    reads it; the caller's `finally` releases the admission); the timeout answers 504 as before."""
     client = httpx.AsyncClient(timeout=timeout_s)
-    task = asyncio.ensure_future(client.post(url, json=body, headers=headers))
+    downstream = asyncio.ensure_future(client.post(url, json=body, headers=headers))
+    watcher = asyncio.ensure_future(_wait_for_disconnect(request)) if request is not None else None
     try:
+        pending = {downstream} | ({watcher} if watcher else set())
         while True:
-            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_S)
-            if done:
-                return task.result()
-            if request is not None and await request.is_disconnected():
-                task.cancel()
-                raise HTTPException(499, "caller disconnected: the synchronous call was cancelled downstream")
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if downstream in done:
+                return downstream.result()
+            if watcher is not None and watcher in done:
+                if watcher.exception() is None:  # the server reported the caller gone
+                    downstream.cancel()
+                    raise HTTPException(499, "caller disconnected: the synchronous call was cancelled downstream")
+                # a watcher that failed (a server without a receive channel) proves nothing: wait for the answer
+                log.warning("sync disconnect watcher ended: %s", str(watcher.exception())[:120])
+                watcher = None
+                pending = {downstream}
     except httpx.TimeoutException:
         raise HTTPException(504, f"endpoint did not answer within {timeout_s}s")
     except httpx.HTTPError as e:
         raise HTTPException(502, f"endpoint unreachable: {e}")
     finally:
-        if not task.done():
-            task.cancel()
+        for task in (downstream, watcher):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (downstream, watcher):
+            if task is not None:
+                try:
+                    await task  # joined: no task outlives the request
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - the outcome was decided above
+                    pass
         await client.aclose()
+
+
+async def _wait_for_disconnect(request) -> bool:
+    """Block until the server reports the caller gone (`http.disconnect`); the body is already consumed, so nothing
+    else can arrive. Through BaseHTTPMiddleware the wrapped receive forwards exactly that message."""
+    while True:
+        message = await request.receive()
+        if message.get("type") == "http.disconnect":
+            return True
 
 
 def _price(job: dict) -> float | None:

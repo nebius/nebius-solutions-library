@@ -8,6 +8,10 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 
 (API image only.)
 
+- The synchronous call's caller is watched by an awaited `receive()` (the next message after the consumed body is
+  `http.disconnect`) raced against the downstream request, not by `Request.is_disconnected()`: that poll never sees
+  a disconnect through the `no_store` BaseHTTPMiddleware (Starlette discussion 2094), so 0.11.127 did not actually
+  cancel downstream on a real disconnect; found by the application's acceptance. Tested through the ASGI app itself.
 - The operation listings stay warm: a background pass every `OPS_LIST_WARM_S` (4 s) re-reads every tenant listing a
   caller asked for within `OPS_LIST_WARM_WINDOW_S` (90 s), so a console that polls and flips pages is served from
   memory (a page of 50 paid the whole listing, 6-8 s, when the 5 s cache had expired); `OPS_LIST_CACHE_S` is 10 s;

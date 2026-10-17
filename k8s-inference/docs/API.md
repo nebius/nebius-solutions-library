@@ -381,8 +381,10 @@ seconds; `X-Regions-Skipped` names clusters that could not be read.
 link of the chain must allow the call: the public API route (chart value `api.syncRequestTimeoutSeconds`, 2400 s on
 a fleet that serves 2100 s calls), the API pod's termination grace and graceful shutdown (2460 s: a rollout drains a
 long call), the regional model route (no limit) and the endpoint's own `timeout_s` (its Knative revision timeout,
-at most the fleet's max-revision-timeout-seconds). While the endpoint works the API looks for its caller every
-second: a caller that disconnected ends the downstream request at once (499, nobody reads it) and the admission
+at most the fleet's max-revision-timeout-seconds). While the endpoint works the API waits for the
+server's `http.disconnect` on the request (an awaited receive after the consumed body: the one signal that passes
+BaseHTTPMiddleware; a polled `is_disconnected()` does not): a caller that disconnected ends the downstream request
+at once (499, nobody reads it) and the admission
 (slot, request count) is released immediately; a timeout answers 504; both release the admission.
 
 ## Weights of an endpoint
