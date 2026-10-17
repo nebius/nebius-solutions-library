@@ -35,6 +35,8 @@ check_lint() {
   shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh "$ROOT"/charts/platform/files/*.sh
   step "terraform fmt"
   terraform fmt -check -recursive "$ROOT/stack"
+  step "size budget: services/api code lines against services/api/LOC_BUDGET (docs/ENGINEERING.md)"
+  "$PYTHON" "$ROOT/tools/loc.py"
 }
 
 check_terraform() {

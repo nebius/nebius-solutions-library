@@ -66,7 +66,7 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
 - **Region clusters** (one per Nebius region, one project each): GPU pools, Knative/KServe endpoints, an
   Envoy gateway with key checks against the control cluster's API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
 
-`docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
+`docs/ENGINEERING.md` has the rules every change follows (size budget, what may not be added); `docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
 and their limits.
 
 ## Prerequisites
