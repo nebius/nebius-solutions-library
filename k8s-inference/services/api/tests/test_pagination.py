@@ -362,3 +362,42 @@ def test_node_placement_uses_one_node_listing_per_region(monkeypatch):
     kube._node_cache["eu-north1"] = (time.time() - 120, kube._node_cache["eu-north1"][1])  # the index aged a bit
     assert kube.node_placement("eu-north1", "b")["pool"] == "cpu-general" and len(calls) == 2  # looked for once more
     kube._node_cache.clear()
+
+
+def test_the_listing_warmer_keeps_wanted_listings_fresh_and_forgets_the_rest(client, monkeypatch):
+    c, fake = client
+    body = {"input": {"nsteps": "1000", "input_prefix": "s3://serverless2-demo-eu-north1/inputs/x"}}
+    c.post("/v1/models/batch-example:invoke", json=body, headers={**H, "Idempotency-Key": "warm-1"})
+    calls = []
+    real = jobs._list_ops_all
+    monkeypatch.setattr(jobs, "_list_ops_all", lambda ns, t, m: calls.append((ns, t, m)) or real(ns, t, m))
+    monkeypatch.setattr(jobs, "OPS_LIST_CACHE_S", 10.0)
+    monkeypatch.setattr(jobs, "OPS_LIST_WARM_WINDOW_S", 90.0)
+    jobs._ops_list_cache.clear()
+    jobs._ops_list_wanted.clear()
+    assert c.get("/v1/operations?limit=5", headers=H).status_code == 200
+    assert len(calls) == 1 and ("tenant-demo", "demo", None) in jobs._ops_list_wanted
+    # a fresh copy is not re-read; one older than half its life is; an unwanted listing is dropped
+    assert jobs.warm_ops_listings() == []
+    key = ("tenant-demo", "demo", None)
+    until, items, skipped = jobs._ops_list_cache[key]
+    jobs._ops_list_cache[key] = (until - 6, items, skipped)
+    assert jobs.warm_ops_listings() == [key] and len(calls) == 2
+    jobs._ops_list_wanted[key] = time.time() - 1000
+    assert jobs.warm_ops_listings() == [] and key not in jobs._ops_list_cache and key not in jobs._ops_list_wanted
+    # a request after a mutation never sees the stale copy (invalidation unchanged), and the warmer survives a failure
+    c.get("/v1/operations?limit=5", headers=H)
+    c.post("/v1/models/batch-example:invoke", json=body, headers={**H, "Idempotency-Key": "warm-2"})
+    assert key not in jobs._ops_list_cache
+    before = len(calls)
+    r = c.get("/v1/operations?limit=5", headers=H)
+    assert r.status_code == 200 and len(calls) == before + 1 and r.headers["X-Total-Count"] == "2"
+
+    def boom(ns, t, m):
+        raise RuntimeError("region down")
+
+    monkeypatch.setattr(jobs, "_list_ops_all", boom)
+    jobs._ops_list_cache.clear()
+    assert jobs.warm_ops_listings() == []  # logged, not raised
+    jobs._ops_list_cache.clear()
+    jobs._ops_list_wanted.clear()

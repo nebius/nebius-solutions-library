@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.128
+
+(API image only.)
+
+- The operation listings stay warm: a background pass every `OPS_LIST_WARM_S` (4 s) re-reads every tenant listing a
+  caller asked for within `OPS_LIST_WARM_WINDOW_S` (90 s), so a console that polls and flips pages is served from
+  memory (a page of 50 paid the whole listing, 6-8 s, when the 5 s cache had expired); `OPS_LIST_CACHE_S` is 10 s;
+  a Job mutation still drops the listing at once. The Job and pod lists are read from the API server's watch cache
+  (`resourceVersion=0`), markedly faster on large lists.
+
 ## api 0.11.127, charts/platform 0.1.15
 
 (API image and the platform chart; no database, RBAC or uploader change.)

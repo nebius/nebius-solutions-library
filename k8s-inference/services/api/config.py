@@ -109,7 +109,11 @@ KUEUE_PRIORITY = os.environ.get("KUEUE_PRIORITY", "customer-batch")
 JOB_TTL_S = int(os.environ.get("JOB_TTL_S", str(90 * 86400)))  # finished Jobs stay this long (operation history)
 # the tenant-wide Job/pod listing behind GET /v1/operations is reused this long (a console polling every 8 s and
 # its page flips share one listing; 0 = none): docs/API.md "Pagination"
-OPS_LIST_CACHE_S = float(os.environ.get("OPS_LIST_CACHE_S", "5"))
+OPS_LIST_CACHE_S = float(os.environ.get("OPS_LIST_CACHE_S", "10"))
+# the warmer re-reads the listings asked for within OPS_LIST_WARM_WINDOW_S every OPS_LIST_WARM_S, so a console that
+# polls is served from memory (api 0.11.128); 0 = no warmer
+OPS_LIST_WARM_S = float(os.environ.get("OPS_LIST_WARM_S", "4"))
+OPS_LIST_WARM_WINDOW_S = float(os.environ.get("OPS_LIST_WARM_WINDOW_S", "90"))
 JOB_BACKOFF_LIMIT = int(
     os.environ.get("JOB_BACKOFF_LIMIT", "3")
 )  # application failures before a Job is FAILED (disruptions do not count)

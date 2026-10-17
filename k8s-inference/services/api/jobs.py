@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 import urllib3
@@ -47,6 +48,7 @@ from config import (
     MULTIKUEUE_MANAGED_BY,
     MULTINODE_MAX_NODES,
     OPS_LIST_CACHE_S,
+    OPS_LIST_WARM_WINDOW_S,
     PUBLIC_API_URL,
     REGION,
     RUNNER_IMAGE,
@@ -1758,6 +1760,8 @@ def list_ops(ns: str, tenant: str, model: str | None, limit: int | None) -> list
 
 
 _ops_list_cache: dict = {}  # (ns, tenant, model) -> (until, items, skipped)
+_ops_list_wanted: dict = {}  # (ns, tenant, model) -> when a caller last asked: what the warmer keeps fresh
+_ops_list_lock = threading.Lock()  # one refresh of a listing at a time (the warmer and a cold request never both read)
 
 
 def _json_items(fn, *args, **kw) -> list[dict]:
@@ -1768,7 +1772,10 @@ def _json_items(fn, *args, **kw) -> list[dict]:
 
     try:
         resp = retry(fn, *args, _preload_content=False, **kw)
-    except TypeError:  # a client without the raw option (a fake in the tests): the preloaded items
+    except (
+        TypeError
+    ):  # a client without the raw option or the watch-cache hint (a fake in the tests): the preloaded items
+        kw.pop("resource_version", None)
         resp = retry(fn, *args, **kw)
     data = getattr(resp, "data", None)
     if isinstance(data, (bytes, str)):
@@ -1785,16 +1792,50 @@ def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], l
     tenant's Jobs and pods in every region: docs/API.md "Pagination"); a mutation never waits on it, it reads its
     own Job."""
     key = (ns, tenant, model)
+    _ops_list_wanted[key] = time.time()
     hit = _ops_list_cache.get(key)
     if hit and hit[0] > time.time():
         return copy.deepcopy(hit[1]), list(hit[2])
+    with _ops_list_lock:
+        hit = _ops_list_cache.get(key)  # a refresh that finished while this caller waited for the lock
+        if hit and hit[0] > time.time():
+            return copy.deepcopy(hit[1]), list(hit[2])
+        items, skipped = _refresh_ops_listing(key)
+    return (copy.deepcopy(items), list(skipped)) if key in _ops_list_cache else (items, skipped)
+
+
+def _refresh_ops_listing(key: tuple) -> tuple[list[dict], list[str]]:
+    """Read the listing and cache it (OPS_LIST_CACHE_S); a listing with a region missing is never reused, so its
+    return shows at once."""
+    ns, tenant, model = key
     items, skipped = _list_ops_all(ns, tenant, model)
-    if (
-        OPS_LIST_CACHE_S > 0 and not skipped
-    ):  # a listing with a region missing is never reused: its return shows at once
+    if OPS_LIST_CACHE_S > 0 and not skipped:
         _ops_list_cache[key] = (time.time() + OPS_LIST_CACHE_S, items, skipped)
-        return copy.deepcopy(items), list(skipped)
     return items, skipped
+
+
+def warm_ops_listings(now: float | None = None) -> list[tuple]:
+    """The warmer's one pass (app._warm_loop every OPS_LIST_WARM_S): every listing a caller asked for within
+    OPS_LIST_WARM_WINDOW_S whose cached copy is older than half its life is read again, so a polling console and
+    its page flips are served from memory, cold or not (a page of 50 took 6-8 s when it paid the listing itself,
+    api 0.11.128). Returns the keys refreshed. Listings nobody asked for lately are forgotten."""
+    now = now or time.time()
+    refreshed = []
+    for key, asked in list(_ops_list_wanted.items()):
+        if asked + OPS_LIST_WARM_WINDOW_S < now:
+            _ops_list_wanted.pop(key, None)
+            _ops_list_cache.pop(key, None)
+            continue
+        hit = _ops_list_cache.get(key)
+        if hit and hit[0] - OPS_LIST_CACHE_S / 2 > now:
+            continue  # young enough
+        with _ops_list_lock:
+            try:
+                _refresh_ops_listing(key)
+                refreshed.append(key)
+            except Exception as e:  # noqa: BLE001 - the next request reads for itself; the warmer never dies
+                log.warning("listing warmer: %s not refreshed: %s", key, str(e)[:160])
+    return refreshed
 
 
 def ops_cache_invalidate(ns: str | None = None) -> None:
@@ -1810,8 +1851,12 @@ def _list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], 
     items, by_job, managers, skipped = [], {}, [], []
     for r in kube.regions():
         try:
-            jobs = _json_items(kube.batch(r).list_namespaced_job, ns, label_selector=sel)
-            pods = _json_items(kube.core(r).list_namespaced_pod, ns, label_selector=f"{LABEL}/tenant={tenant}")
+            # resource_version="0": the API server answers from its watch cache (no etcd quorum read): the listing
+            # is at most milliseconds behind, which a 10 s cache tolerates, and a large list comes back much faster
+            jobs = _json_items(kube.batch(r).list_namespaced_job, ns, label_selector=sel, resource_version="0")
+            pods = _json_items(
+                kube.core(r).list_namespaced_pod, ns, label_selector=f"{LABEL}/tenant={tenant}", resource_version="0"
+            )
             jobs += list_jobsets(ns, r, sel)
         except ApiException as e:
             if e.status in (403, 404):  # tenant not onboarded in that region
@@ -1900,7 +1945,9 @@ def list_fleet_operations() -> tuple[list[dict], list[str]]:
             # cluster-wide (a cluster-wide listing answered Forbidden on the fleet, api 0.11.125)
             for ns in namespaces:
                 try:
-                    jobs += _json_items(kube.batch(r).list_namespaced_job, ns, label_selector=f"{LABEL}/tenant")
+                    jobs += _json_items(
+                        kube.batch(r).list_namespaced_job, ns, label_selector=f"{LABEL}/tenant", resource_version="0"
+                    )
                 except ApiException as e:
                     if e.status in (403, 404):  # a tenant not onboarded in that region
                         continue

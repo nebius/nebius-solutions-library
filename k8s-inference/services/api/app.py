@@ -108,6 +108,8 @@ async def _lifespan(_app: FastAPI):
         else:
             log.warning("ROUTER_KEY is not set: LiteLLM model groups are not registered")
         tasks = [asyncio.create_task(_reconcile_loop())]
+    if cfg.OPS_LIST_WARM_S > 0:
+        tasks.append(asyncio.create_task(_warm_loop()))  # the listing warmer (docs/API.md "Pagination")
     try:
         yield
     finally:
@@ -119,13 +121,23 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.127", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.128", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
 
 
 ADMITTED_HEADER = "x-serverless2-admitted"  # the API's own proxied call to a gateway: the hook must not count it again
+
+
+async def _warm_loop():
+    """Every OPS_LIST_WARM_S: re-read the operation listings callers asked for lately (jobs.warm_ops_listings)."""
+    while True:
+        try:
+            await asyncio.to_thread(jobs.warm_ops_listings)
+        except Exception as e:  # noqa: BLE001 - never ends the loop
+            log.warning("listing warmer pass failed: %s", str(e)[:160])
+        await asyncio.sleep(cfg.OPS_LIST_WARM_S)
 
 
 def _admit(

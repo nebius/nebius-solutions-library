@@ -332,7 +332,7 @@ regional state, a tenant's usage, an operation's records and placement) is done 
 
 | route | order | note |
 |---|---|---|
-| `GET /v1/operations` | newest first (`created_at` desc, id asc) | as before; the tenant-wide Job/pod listing behind it is reused for `OPS_LIST_CACHE_S` (5 s) by every page and poll and dropped at once by any mutation this API makes (a submission, a cancellation, a resume shows on the next list); a listing with an unreachable region is never reused |
+| `GET /v1/operations` | newest first (`created_at` desc, id asc) | as before; the tenant-wide Job/pod listing behind it is reused for `OPS_LIST_CACHE_S` (10 s) by every page and poll, kept warm by a background pass every `OPS_LIST_WARM_S` (4 s) for listings asked for within `OPS_LIST_WARM_WINDOW_S` (90 s), read from the API server's watch cache, and dropped at once by any mutation this API makes (a submission, a cancellation, a resume shows on the next list); a listing with an unreachable region is never reused |
 | `GET /v1/endpoints` | model id, then cluster id | one entry per deployment |
 | `GET /v1/models` | model id | |
 | `GET /v1/keys`, `GET /v1/fleet/tenants/{t}/keys` | alias | |
