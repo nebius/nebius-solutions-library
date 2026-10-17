@@ -20,12 +20,16 @@ edge:
   caConfigMap: ""                       # internal mode: ConfigMap (namespace api, key ca.crt) that validates that hostname; empty = system roots
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.126
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.127
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.12
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.12
 api:                           # the control cluster only (clusters/common/apps/api.yaml)
   rateLimitPerMinute: 600      # edge.api_rate_limit_per_minute, per API key
-  terminationGracePeriodSeconds: 660   # a stopping pod finishes its proxied synchronous calls: SYNC_TIMEOUT_S (600) plus a margin
+  # a proxied synchronous call may run this long (docs/API.md "Synchronous calls": the public route's request and
+  # backend timeouts); a stopping pod finishes its calls: terminationGracePeriodSeconds and the image's graceful
+  # shutdown stay above it (services/api/Dockerfile: 2460)
+  syncRequestTimeoutSeconds: 2400
+  terminationGracePeriodSeconds: 2460
   env:                         # the API container's environment, complete (services/api/config.py)
     - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
     - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }

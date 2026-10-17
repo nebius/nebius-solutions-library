@@ -234,6 +234,9 @@ def test_sync_requests_pick_a_variant_by_field_then_by_readiness(client, monkeyp
         async def __aexit__(self, *a):
             return False
 
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
+
         async def post(self, url, json=None, headers=None):
             hit["url"] = url
             return Resp()

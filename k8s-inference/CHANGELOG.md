@@ -4,6 +4,18 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.127, charts/platform 0.1.15
+
+(API image and the platform chart; no database, RBAC or uploader change.)
+
+- A proxied synchronous call (`:invoke` with `mode: sync`) looks for its caller every second: a caller that
+  disconnected ends the downstream request at once and its admission (slot, request) is released; before, the API
+  waited for the endpoint or `timeout_s` while holding both.
+- Long synchronous calls pass the chain: the public API route's request/backend timeouts are the chart value
+  `api.syncRequestTimeoutSeconds` (2400, was a fixed 630), the pod's termination grace and the image's graceful
+  shutdown are 2460 (were 660/640), so a 2100 s call survives a rollout. The endpoint's own `timeout_s` (its Knative
+  revision timeout) must cover the call as before.
+
 ## api 0.11.126
 
 (API image only.)

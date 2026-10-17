@@ -983,6 +983,9 @@ def test_sync_proxies_to_the_predictor(client, monkeypatch):
         async def __aexit__(self, *a):
             pass
 
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
+
         async def post(self, url, json=None, headers=None):
             calls.append((url, headers))
             return R()
@@ -1027,6 +1030,9 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
 
         async def __aexit__(self, *a):
             pass
+
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
 
         async def post(self, url, json=None, headers=None):
             calls.append((url, json, headers))
@@ -1079,6 +1085,9 @@ def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
 
         async def __aexit__(self, *a):
             pass
+
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
 
         async def post(self, *a, **kw):
             return response

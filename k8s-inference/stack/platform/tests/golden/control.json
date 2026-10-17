@@ -69,7 +69,7 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "5d7d6c977ef9641c8fab8ae1040ea2615211fa0121643dddd0807e8ac014ea4b"
+  "sha256": "5bd0b75f4380ae38c6852bedf1a2549128de402839cc8abc3e83d7009ca3dc60"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -153,7 +153,7 @@
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api": {
   "component": "api",
-  "sha256": "fa2bd3c6fe660fd06d90013c6204d336b81772199982cbc93a2608f4a01d4c38"
+  "sha256": "9616c5c3359bbd7f2c7a362a725912f09681d876e7ec46e4e0bfeb7de36f261b"
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api-authorize": {
   "component": "api",

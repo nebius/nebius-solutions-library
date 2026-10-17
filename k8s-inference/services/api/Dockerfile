@@ -14,4 +14,4 @@ USER 10001
 EXPOSE 8080
 # on SIGTERM uvicorn stops accepting and finishes the requests it holds (a proxied synchronous call runs up to
 # SYNC_TIMEOUT_S): the graceful timeout stays under the Deployment's terminationGracePeriodSeconds (charts/platform)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--timeout-graceful-shutdown", "640"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--timeout-graceful-shutdown", "2460"]

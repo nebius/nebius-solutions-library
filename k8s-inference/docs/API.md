@@ -375,6 +375,16 @@ set in both modes: never an input, a result, a reference, a log or a key value; 
 listing per tenant namespace and cluster (the fleet document's tenants and the tenants on record), cached ten
 seconds; `X-Regions-Skipped` names clusters that could not be read.
 
+## Synchronous calls: timeouts and the caller's disconnect (api 0.11.127)
+
+`:invoke` with `mode: sync` proxies the request and waits up to `timeout_s` (default SYNC_TIMEOUT_S, 600 s). Every
+link of the chain must allow the call: the public API route (chart value `api.syncRequestTimeoutSeconds`, 2400 s on
+a fleet that serves 2100 s calls), the API pod's termination grace and graceful shutdown (2460 s: a rollout drains a
+long call), the regional model route (no limit) and the endpoint's own `timeout_s` (its Knative revision timeout,
+at most the fleet's max-revision-timeout-seconds). While the endpoint works the API looks for its caller every
+second: a caller that disconnected ends the downstream request at once (499, nobody reads it) and the admission
+(slot, request count) is released immediately; a timeout answers 504; both release the admission.
+
 ## Weights of an endpoint
 
 `weights: {path, mount_path, env, read_only, prepare}` on an API-managed model (`POST /v1/models`): the region's

@@ -119,7 +119,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.126", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.127", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1014,6 +1014,7 @@ def operation_identity(
 async def invoke(
     model: str,
     req: InvokeRequest,
+    request: Request,
     p: Principal = Depends(principal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
@@ -1058,7 +1059,7 @@ async def invoke(
         sid = f"sync-{uuid.uuid4().hex[:12]}"
         await asyncio.to_thread(_admit, p, sid)  # a slot and a request for the duration of the call
         try:
-            return await _sync(m, req, p, region, sid)
+            return await _sync(m, req, p, region, sid, request)
         finally:
             await asyncio.to_thread(_release, sid, None)  # no per-request GPU measurement exists for shared endpoints
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
@@ -1436,11 +1437,19 @@ def _class_for(
     return cls
 
 
-async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str, admission: str = ""):
+DISCONNECT_POLL_S = 1.0  # how often a proxied synchronous call looks for its caller (docs/API.md "Synchronous calls")
+
+
+async def _sync(
+    m: dict, req: InvokeRequest, p: Principal, region: str, admission: str = "", request: Request | None = None
+):
     """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget, spend and the
     per-call price are enforced there); else straight to the predictor Service when the endpoint runs on this
     cluster, and through the region's gateway hostname (the one LiteLLM uses, TLS on the fleet CA) with the caller's
-    key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API."""
+    key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API.
+    While the endpoint works, the caller is looked for every DISCONNECT_POLL_S: a caller that went away ends the
+    downstream call at once (the connection is closed: Knative's queue-proxy sees the client gone; what the worker
+    process does with that is the application's) and the admission is released by the caller (api 0.11.127)."""
     if int(m.get("nodes") or 1) > 1:
         st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
         kube.stamp_last_request(
@@ -1478,13 +1487,9 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str, admissio
         )
     t0 = time.time()
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        async with httpx.AsyncClient(timeout=req.timeout_s or SYNC_TIMEOUT_S) as c:
-            r = await c.post(url, json=with_served_model(m, req.input), headers=headers)
-    except httpx.TimeoutException:
-        raise HTTPException(504, f"endpoint did not answer within {req.timeout_s or SYNC_TIMEOUT_S}s")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"endpoint unreachable: {e}")
+    r = await _proxy_until_answer_or_disconnect(
+        url, with_served_model(m, req.input), headers, req.timeout_s or SYNC_TIMEOUT_S, request
+    )
     forget(p.key)
     ok = 200 <= r.status_code < 300
     try:
@@ -1529,6 +1534,32 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str, admissio
         if ok
         else (r.status_code if r.status_code in (400, 401, 402, 403, 404, 409, 413, 415, 422, 429) else 502),
     )
+
+
+async def _proxy_until_answer_or_disconnect(
+    url: str, body: dict, headers: dict, timeout_s: float, request
+) -> httpx.Response:
+    """POST the request and wait for the answer, the timeout, or the caller's disconnect, whichever comes first.
+    A disconnect cancels the downstream request (the client is closed with it) and answers 499 (nobody reads it;
+    the caller's `finally` releases the admission); the timeout answers 504 as before."""
+    client = httpx.AsyncClient(timeout=timeout_s)
+    task = asyncio.ensure_future(client.post(url, json=body, headers=headers))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_S)
+            if done:
+                return task.result()
+            if request is not None and await request.is_disconnected():
+                task.cancel()
+                raise HTTPException(499, "caller disconnected: the synchronous call was cancelled downstream")
+    except httpx.TimeoutException:
+        raise HTTPException(504, f"endpoint did not answer within {timeout_s}s")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"endpoint unreachable: {e}")
+    finally:
+        if not task.done():
+            task.cancel()
+        await client.aclose()
 
 
 def _price(job: dict) -> float | None:

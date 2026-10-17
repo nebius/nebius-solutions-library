@@ -191,7 +191,7 @@ spec:
     - matches: [{ path: { type: PathPrefix, value: /internal } }]   # everything else under /internal is this cluster's own gateway's (the Service directly)
       filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]
-      timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+      timeouts: { request: {{ .Values.api.syncRequestTimeoutSeconds }}s, backendRequest: {{ .Values.api.syncRequestTimeoutSeconds }}s }   # a sync call up to api.syncRequestTimeoutSeconds (cold start and a long inference included)
 ---
 # Port 80 of the API hostname only redirects to HTTPS: a bearer key never travels in clear. cert-manager's ACME
 # challenge route on the same listener matches a longer path (/.well-known/acme-challenge/<token>) and takes
