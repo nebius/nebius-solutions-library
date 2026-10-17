@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -77,6 +78,7 @@ from schemas import (
 
 log = logging.getLogger("api")
 PAGE_DEFAULT, PAGE_MAX = 50, 500  # every list route: `limit` default and ceiling (docs/API.md "Pagination")
+_ops_auth_cache: dict = {}  # (listing id, key hash, role, models) -> (listing, until, names, entries): list_operations
 
 
 def check_placeholders() -> None:
@@ -121,7 +123,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.128", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.129", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -1626,10 +1628,20 @@ def list_operations(
     live, skipped = jobs.list_ops_all(p.namespace, p.tenant, model)
     entries: list[tuple[str, str, dict | None, dict | None]] = []  # (created_at, id, live job, durable index entry)
     live_names = set()
-    for j in live:
-        if _may_read_operation(p, j):
-            live_names.add(j["metadata"]["name"])
-            entries.append((j["metadata"].get("creationTimestamp") or "", j["metadata"]["name"], j, None))
+    # the owner check reads the run ledger per Job (0.4 s over 600 Jobs): remembered per listing instance and key,
+    # as long as the listing itself is reused (api 0.11.129)
+    auth_key = (id(live), p.hash, p.role, tuple(p.info.get("models") or []))
+    hit = _ops_auth_cache.get(auth_key)
+    if hit and hit[0] is live and hit[1] > time.time():
+        live_names, entries = set(hit[2]), list(hit[3])
+    else:
+        for j in live:
+            if _may_read_operation(p, j):
+                live_names.add(j["metadata"]["name"])
+                entries.append((j["metadata"].get("creationTimestamp") or "", j["metadata"]["name"], j, None))
+        if len(_ops_auth_cache) > 256:
+            _ops_auth_cache.clear()
+        _ops_auth_cache[auth_key] = (live, time.time() + cfg.OPS_LIST_CACHE_S, set(live_names), list(entries))
     durable: list[dict] = []
     if attempts.enabled():
         try:
@@ -1672,6 +1684,7 @@ def list_operations(
         response.headers["X-Next-Cursor"] = _encode_cursor(page[-1][0], page[-1][1])
     if skipped:
         response.headers["X-Regions-Skipped"] = ",".join(skipped)
+    page = [(c, n, copy.deepcopy(j) if j is not None else None, e) for c, n, j, e in page]  # the shared listing stays
     mine = [x[2] for x in page if x[2] is not None]
     # the durable attempt records of every listed live operation in one query (a pod the worker cluster removed after
     # delivery leaves no live evidence of it; the records are what GET /v1/operations/{id} reports from)

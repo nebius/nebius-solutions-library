@@ -57,11 +57,13 @@ def _fresh_listing_caches():
     import kube
 
     jobs._ops_list_cache.clear()
+    jobs._ops_list_wanted.clear()
     jobs._fleet_ops_cache.update({"until": 0.0, "items": [], "skipped": []})
     kube._live_cache.clear()
     kube._node_cache.clear()
     yield
     jobs._ops_list_cache.clear()
+    jobs._ops_list_wanted.clear()
     jobs._fleet_ops_cache.update({"until": 0.0, "items": [], "skipped": []})
     kube._live_cache.clear()
     kube._node_cache.clear()

@@ -4,6 +4,15 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.129
+
+(API image only.)
+
+- `GET /v1/operations` serves the cached tenant listing without copying it (the copy of 600 Jobs was 1.4 s of every
+  request), serves an expired copy while the warmer refreshes it (a request never waits behind a refresh), remembers
+  the per-Job owner check per listing instance and key (0.4 s over 600 Jobs), and copies only the page it answers.
+  Measured on the fleet: a page of 50 took 1.5-5 s on 0.11.128, well under a second now.
+
 ## api 0.11.128
 
 (API image only.)

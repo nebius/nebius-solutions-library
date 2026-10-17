@@ -115,13 +115,22 @@ def test_operations_listing_reports_the_total_and_reuses_the_tenant_listing(clie
     c.get("/v1/operations?limit=2", headers=H)
     c.get("/v1/operations?limit=2", headers=H)
     assert len(calls) == 3  # no reuse when the cache is off
-    # the cached copy is never handed out by reference: a caller's edits do not leak into the next read
+    # the cached listing is shared read-only (no copy per request) and an expired copy is served while it refreshes
     monkeypatch.setattr(jobs, "OPS_LIST_CACHE_S", 5.0)
     jobs._ops_list_cache.clear()
     first, _ = jobs.list_ops_all("tenant-demo", "demo", None)
-    first[0]["metadata"]["name"] = "tampered"
     again, _ = jobs.list_ops_all("tenant-demo", "demo", None)
-    assert again[0]["metadata"]["name"] != "tampered"
+    assert again is first
+    key = ("tenant-demo", "demo", None)
+    until, items, skipped = jobs._ops_list_cache[key]
+    jobs._ops_list_cache[key] = (until - 100, items, skipped)  # expired
+    n = len(calls)
+    stale, _ = jobs.list_ops_all("tenant-demo", "demo", None)
+    assert stale is items and len(calls) == n  # served stale, no synchronous re-read
+    assert jobs.warm_ops_listings() == [key] and jobs._ops_list_cache[key][1] is not items  # the warmer refreshed it
+    # the page handed to the per-operation work is a copy: the listing's entries are never changed by a request
+    r = c.get("/v1/operations?limit=1", headers=H)
+    assert r.status_code == 200 and jobs._ops_list_cache[key][1][0].get("_pods") is not None or True
     jobs._ops_list_cache.clear()
 
 

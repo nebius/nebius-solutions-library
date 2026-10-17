@@ -17,7 +17,6 @@ dispatcher creates the work volume where the run is admitted, and the manager Jo
 back; pods, logs and billing come from the worker. Image references are fleet-wide (the logical registry
 host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the region it lands in."""
 
-import copy
 import json
 import logging
 import os
@@ -1794,14 +1793,16 @@ def list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], l
     key = (ns, tenant, model)
     _ops_list_wanted[key] = time.time()
     hit = _ops_list_cache.get(key)
-    if hit and hit[0] > time.time():
-        return copy.deepcopy(hit[1]), list(hit[2])
+    if hit:
+        # the cached list itself, READ-ONLY by contract (a copy of 600 Jobs cost 1.4 s per request, api 0.11.129):
+        # a caller copies the entries it changes (app.list_operations copies its page). An expired copy is served
+        # too while the warmer refreshes it (stale-while-revalidate): a request never waits behind a refresh
+        return hit[1], list(hit[2])
     with _ops_list_lock:
         hit = _ops_list_cache.get(key)  # a refresh that finished while this caller waited for the lock
-        if hit and hit[0] > time.time():
-            return copy.deepcopy(hit[1]), list(hit[2])
-        items, skipped = _refresh_ops_listing(key)
-    return (copy.deepcopy(items), list(skipped)) if key in _ops_list_cache else (items, skipped)
+        if hit:
+            return hit[1], list(hit[2])
+        return _refresh_ops_listing(key)
 
 
 def _refresh_ops_listing(key: tuple) -> tuple[list[dict], list[str]]:
@@ -1829,6 +1830,8 @@ def warm_ops_listings(now: float | None = None) -> list[tuple]:
         hit = _ops_list_cache.get(key)
         if hit and hit[0] - OPS_LIST_CACHE_S / 2 > now:
             continue  # young enough
+        if _ops_list_lock.locked():
+            continue  # a request is reading it cold right now; the next pass sees the fresh copy
         with _ops_list_lock:
             try:
                 _refresh_ops_listing(key)
