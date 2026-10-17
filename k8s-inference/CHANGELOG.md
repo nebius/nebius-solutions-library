@@ -4,6 +4,14 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.125
+
+(API image only.)
+
+- `GET /v1/fleet/operations` lists the tenant namespaces one by one (the fleet document's tenants and the tenants on
+  record) instead of a cluster-wide Job listing the API's identity is not granted (Forbidden on the fleet at the
+  0.11.124 readback); a tenant absent from a cluster is skipped.
+
 ## api 0.11.124
 
 (API image; database migration 30 (DB29 -> DB30: the `fleet_settings` table) applied by the API at start; no chart,

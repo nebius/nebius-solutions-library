@@ -1853,6 +1853,23 @@ _fleet_ops_cache: dict = {"until": 0.0, "items": [], "skipped": []}
 FLEET_OPS_CACHE_S = 10
 
 
+def tenant_namespaces() -> list[str]:
+    """The namespaces of every tenant the fleet knows: the fleet document's tenants (charts/fleet tenants.yaml) and
+    the tenants with keys on record (the database), as `tenant-<name>`, sorted."""
+    names = set((kube.fleet().get("tenants") or {}).keys())
+    try:
+        import db
+        import keys
+
+        if db.enabled():
+            names |= set(keys.tenants_on_record().keys())
+    except Exception as e:  # noqa: BLE001 - the fleet document's tenants still count
+        log.warning("fleet operations: tenants on record unavailable: %s", str(e)[:120])
+    from config import TENANT_NS_PREFIX
+
+    return sorted(f"{TENANT_NS_PREFIX}{n}" for n in names if n)
+
+
 def list_fleet_active() -> tuple[list[dict], list[str]]:
     """Every non-terminal operation Job of every tenant on every reachable cluster (the fleet operator's read,
     GET /v1/fleet/operations): Jobs with the tenant label in all namespaces, without pods (the status is read from
@@ -1861,9 +1878,19 @@ def list_fleet_active() -> tuple[list[dict], list[str]]:
     if _fleet_ops_cache["until"] > time.time():
         return list(_fleet_ops_cache["items"]), list(_fleet_ops_cache["skipped"])
     out, skipped, mirrors = {}, [], {}
+    namespaces = tenant_namespaces()
     for r in kube.regions():
+        jobs = []
         try:
-            jobs = _json_items(kube.batch(r).list_job_for_all_namespaces, label_selector=f"{LABEL}/tenant")
+            # one listing per tenant namespace: the API's identity is granted in the tenant namespaces, never
+            # cluster-wide (a cluster-wide listing answered Forbidden on the fleet, api 0.11.125)
+            for ns in namespaces:
+                try:
+                    jobs += _json_items(kube.batch(r).list_namespaced_job, ns, label_selector=f"{LABEL}/tenant")
+                except ApiException as e:
+                    if e.status in (403, 404):  # a tenant not onboarded in that region
+                        continue
+                    raise
         except ApiException as e:
             raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
         except (urllib3.exceptions.HTTPError, OSError) as e:

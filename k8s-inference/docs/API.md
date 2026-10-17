@@ -369,7 +369,8 @@ tenant on every reachable cluster, newest first, paged: `id`, `tenant`, `model`,
 is active; `QUEUED`: admitted or waiting; `SUPERSEDED`: a continuation took over; `CANCELLED`: cancellation
 requested, the Job ending), `created_at`, `started_at`, `cluster`, `region`, `successor`, `key_alias`, `owner` (the
 opaque owner hash) and `requester`. Identity and state only: never an input, a result or a key value. From one Job
-listing per cluster cached ten seconds; `X-Regions-Skipped` names clusters that could not be read.
+listing per tenant namespace and cluster (the fleet document's tenants and the tenants on record), cached ten
+seconds; `X-Regions-Skipped` names clusters that could not be read.
 
 ## Weights of an endpoint
 

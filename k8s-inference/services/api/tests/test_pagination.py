@@ -212,10 +212,17 @@ def test_fleet_operations_lists_every_tenants_in_flight_work_for_the_fleet_opera
     monkeypatch.setattr(
         jobs, "is_mirror", lambda j: "kueue.x-k8s.io/prebuilt-workload-name" in (j["metadata"].get("annotations") or {})
     )
-    from types import SimpleNamespace
 
-    fake.list_job_for_all_namespaces = lambda **kw: SimpleNamespace(items=copy.deepcopy(listed))
+    doc = dict(kube.fleet())
+    doc["tenants"] = {"rene": {}, "lynx": {}, "system": {}, "empty": {}}
+    monkeypatch.setattr(kube, "fleet", lambda: doc)
+    monkeypatch.setattr(
+        jobs,
+        "_json_items",
+        lambda fn, ns, **kw: [copy.deepcopy(j) for j in listed if j["metadata"]["namespace"] == ns],
+    )
     monkeypatch.setattr(kube, "regions", lambda: ["eu-north1"])
+    assert jobs.tenant_namespaces() == ["tenant-empty", "tenant-lynx", "tenant-rene", "tenant-system"]
     jobs._fleet_ops_cache["until"] = 0.0
     assert c.get("/v1/fleet/operations", headers=H).status_code == 403  # a tenant key is no fleet operator
     r = c.get("/v1/fleet/operations?limit=3", headers={"Authorization": "Bearer sk-fleet"})
