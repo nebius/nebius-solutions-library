@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.130
+
+(API image only.)
+
+- Endpoint metrics (`GET /v1/endpoints/{id}/metrics`, the console's Metrics tab) make sense for sparse and long
+  calls: requests and server errors are counts per window (`Requests per 2 min`, from `increase()`, rounded), not a
+  per-second rate (one call every two minutes read "0.01 req/s"); the latency panel is the MEAN from the histogram's
+  sum and count, exact for any duration (the queue-proxy histogram's buckets end at 10 s, so the p95 of a 40 s
+  inference read a constant 10 000 ms); readiness and health probes (GET) no longer count as traffic (POST only).
+
 ## api 0.11.129
 
 (API image only.)
