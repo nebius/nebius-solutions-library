@@ -94,6 +94,28 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### GPU capacity reservation
+
+`gpu_nodes_reservation_policy` controls capacity reservation placement for **generic GPU node groups only**. It does not apply to CPU or GB300 node groups. The same policy and ordered reservation IDs apply to every generic GPU node group.
+
+Leave this variable unset or `null` to inherit the provider default. To require reserved capacity without selecting specific capacity block groups:
+
+```hcl
+gpu_nodes_reservation_policy = {
+  policy = "STRICT"
+}
+```
+
+| `policy` | Behavior | `reservation_ids` |
+|---|---|---|
+| `STRICT` | Use the specified capacity block groups, or suitable available blocks when no IDs are supplied. Fail if capacity is unavailable; do not fall back to PAYG. | Optional. |
+| `AUTO` | Try specified reservations, then available capacity blocks, then fall back to pay-as-you-go (PAYG). | Optional. |
+| `FORBID` | Use PAYG capacity only; do not use reservations. | Omit or leave empty. |
+
+`reservation_ids` is an ordered list of capacity block group IDs. When the list is non-empty, explicitly set `policy` to `AUTO` or `STRICT`. Omit the list, set it to `null`, or use `[]` when you do not want to select specific groups. Individual entries must not be null, empty, or whitespace-only strings. An empty list does not force PAYG; use `policy = "FORBID"` for that.
+
+This policy is part of the GPU node template, so changing it can trigger node recreation. Review the Terraform plan and the existing [`node_group_strategy` configuration](./variables.tf) before applying it, especially when reserved capacity leaves no room for surge nodes.
+
 ### GB300 production racks
 
 GB300 uses a separate rack-aware deployment path. Setting `gb300.rack_count` to

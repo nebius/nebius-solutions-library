@@ -481,9 +481,6 @@ use_preinstalled_gpu_drivers = true
 #---
 #platform_driver_presets = {}
 
-# Shared memory size for worker nodes.
-slurm_shared_memory_size_gibibytes = 1024
-
 # Which NodeGroups should be excluded from Soperator maintenance event handling.
 # Mk8s will handle them instead of Soperator.
 maintenance_ignore_node_groups = ["controller", "nfs", "system", "accounting"]

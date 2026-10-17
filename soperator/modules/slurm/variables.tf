@@ -248,6 +248,14 @@ resource "terraform_data" "check_worker_nodesets" {
     }
 
     precondition {
+      condition = length(setsubtract(
+        local.worker_nodeset_names_in_ranges,
+        toset(var.worker_nodesets[*].name),
+      )) == 0
+      error_message = "Every worker NodeSet covered by worker_nodeset_ranges must exist in worker_nodesets."
+    }
+
+    precondition {
       condition = alltrue([
         for i, nodeset in var.worker_nodesets :
         !try(nodeset.local_nvme.enabled, false) ||
@@ -517,12 +525,6 @@ variable "wait_for_nvidia_persistenced" {
   type        = bool
   default     = true
   nullable    = false
-}
-
-variable "shared_memory_size_gibibytes" {
-  description = "Shared memory size for Slurm controller and worker nodes in GiB."
-  type        = number
-  default     = 64
 }
 
 # endregion Config
@@ -1013,6 +1015,28 @@ variable "worker_nodesets" {
       contains([for topology in var.topology.topologies : topology.name], worker.partition_topology)
     ])
     error_message = "Each worker partition_topology must reference a topology created by Terraform."
+  }
+}
+
+variable "worker_nodeset_ranges" {
+  description = "Ranges of identically configured worker NodeSets to render as compact Helm values."
+  type = list(object({
+    name          = string
+    suffix        = string
+    first_ordinal = number
+    last_ordinal  = number
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for nodeset_range in var.worker_nodeset_ranges :
+      floor(nodeset_range.first_ordinal) == nodeset_range.first_ordinal &&
+      floor(nodeset_range.last_ordinal) == nodeset_range.last_ordinal &&
+      nodeset_range.first_ordinal >= 0 &&
+      nodeset_range.last_ordinal >= nodeset_range.first_ordinal
+    ])
+    error_message = "worker_nodeset_ranges ordinals must be integers satisfying 0 <= first_ordinal <= last_ordinal."
   }
 }
 

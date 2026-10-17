@@ -1675,17 +1675,6 @@ variable "slurm_wait_for_nvidia_persistenced" {
   nullable    = false
 }
 
-variable "slurm_shared_memory_size_gibibytes" {
-  description = "Shared memory size for Slurm controller and worker nodes in GiB."
-  type        = number
-  default     = 1024
-
-  validation {
-    condition     = var.slurm_shared_memory_size_gibibytes > 0
-    error_message = "slurm_shared_memory_size_gibibytes must be greater than 0."
-  }
-}
-
 variable "slurm_topology_block_size" {
   description = <<EOL
     Base block size for Slurm topology/block topology plugin in number of nodes.

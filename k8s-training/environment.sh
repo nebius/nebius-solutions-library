@@ -49,23 +49,36 @@ fi
 
 # Nebius service account
 NEBIUS_SA_NAME="k8s-training-sa"
-NEBIUS_SA_ID=$(nebius iam service-account get-by-name \
-  --parent-id "${NEBIUS_PROJECT_ID}" \
-  --name "${NEBIUS_SA_NAME}" \
-  --format json \
-  | jq -r '.metadata.id')
 
+if NEBIUS_SA_ID=$(nebius iam service-account get-by-name \
+  --parent-id "$NEBIUS_PROJECT_ID" \
+  --name "$NEBIUS_SA_NAME" \
+  --format 'jsonpath=.metadata.id'); then
+  NEBIUS_SA_ACTION="Using existing"
+else
+  NEBIUS_SA_LOOKUP_EXIT_CODE=$?
+
+  # Nebius CLI exit code 13 means Not Found. Stop on any other lookup error.
+  if [ "$NEBIUS_SA_LOOKUP_EXIT_CODE" -ne 13 ]; then
+    return "$NEBIUS_SA_LOOKUP_EXIT_CODE"
+  fi
+
+  if NEBIUS_SA_ID=$(nebius iam service-account create \
+    --parent-id "$NEBIUS_PROJECT_ID" \
+    --name "$NEBIUS_SA_NAME" \
+    --format 'jsonpath=.metadata.id'); then
+    NEBIUS_SA_ACTION="Created"
+  else
+    return $?
+  fi
+fi
 
 if [ -z "$NEBIUS_SA_ID" ]; then
-  NEBIUS_SA_ID=$(nebius iam service-account create \
-    --parent-id "${NEBIUS_PROJECT_ID}" \
-    --name "${NEBIUS_SA_NAME}" \
-    --format json \
-    | jq -r '.metadata.id')
-  echo "Created new service account: $NEBIUS_SA_ID"
-else
-  echo "Using existing service account: $NEBIUS_SA_ID"
+  echo "Error: service-account command returned an empty ID." >&2
+  return 1
 fi
+
+echo "$NEBIUS_SA_ACTION service account: $NEBIUS_SA_ID"
 
 # Ensure service account is member of editors group
 NEBIUS_GROUP_EDITORS_ID=$(nebius iam group get-by-name \

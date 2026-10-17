@@ -12,6 +12,13 @@ nodesets:
     nodesets:
       %{~ for i, nodeset in nodesets ~}
       - name: ${nodeset.name}
+        nameNodeSelector: "slurm.nebius.ai/nodeset-name"
+        %{~ if nodeset.range != null ~}
+        range:
+          firstOrdinal: ${nodeset.range.first_ordinal}
+          lastOrdinal: ${nodeset.range.last_ordinal}
+          suffix: ${jsonencode(nodeset.range.suffix)}
+        %{~ endif ~}
         annotations:
           slurm.nebius.ai/parental-cluster-ref: soperator
 
@@ -24,7 +31,7 @@ nodesets:
         %{~ endif ~}
 
         gpu:
-          enabled: ${resources[i].gpus > 0}
+          enabled: ${nodeset.resources.gpus > 0}
           nvidia:
             gdrCopyEnabled: true
 
@@ -51,7 +58,7 @@ nodesets:
             format("SocketsPerBoard=%d", nodeset.cpu_topology.sockets_per_board),
             format("CoresPerSocket=%d", nodeset.cpu_topology.cores_per_socket),
             format("ThreadsPerCore=%d", nodeset.cpu_topology.threads_per_core),
-            resources[i].gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, resources[i].gpus) : "",
+            nodeset.resources.gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, nodeset.resources.gpus) : "",
           ]))}"
           dynamic: ${jsonencode(slurm_node_extra)}
           %{~ if nodeset.gres_config != null && length(nodeset.gres_config) > 0 ~}
@@ -62,17 +69,17 @@ nodesets:
           %{~ endif ~}
 
         slurmd:
-          %{~ if resources[i].gpus > 0 ~}
+          %{~ if nodeset.resources.gpus > 0 ~}
           customEnv:
             - name: "NVIDIA_DRIVER_CAPABILITIES"
               value: "compute,graphics,utility,video"
           %{~ endif ~}
           resources:
-            cpu: ${floor(resources[i].cpu_cores * 1000)}m
-            memory: ${floor(resources[i].memory_gibibytes)}Gi
-            ephemeralStorage: ${resources[i].ephemeral_storage_gibibytes}Gi
-            %{~ if resources[i].gpus > 0 ~}
-            gpu: ${resources[i].gpus}
+            cpu: ${floor(nodeset.resources.cpu_cores * 1000)}m
+            memory: ${floor(nodeset.resources.memory_gibibytes)}Gi
+            ephemeralStorage: ${nodeset.resources.ephemeral_storage_gibibytes}Gi
+            %{~ if nodeset.resources.gpus > 0 ~}
+            gpu: ${nodeset.resources.gpus}
             %{~ endif ~}
 
           volumes:
@@ -129,7 +136,7 @@ nodesets:
                 mountPath: ${try(nodeset.local_nvme.mount_path, "/mnt/local-nvme")}
                 volumeSource:
                   emptyDir:
-                    sizeLimit: ${resources[i].ephemeral_storage_gibibytes}Gi
+                    sizeLimit: ${nodeset.resources.ephemeral_storage_gibibytes}Gi
               %{~ endif ~}
 
               %{~ if nodeset.node_local_image_storage.enabled ~}
@@ -214,8 +221,6 @@ nodesets:
                     type: ""
               %{~ endif ~}
 
-            sharedMemorySize: ${resources[i].shared_memory}Gi
-
           security:
             appArmorProfile: ${jsonencode(apparmor_profile)}
 
@@ -243,9 +248,7 @@ nodesets:
         enableHostUserNamespace: true
 
         priorityClass: soperator-worker-high-priority
-        nodeSelector:
-          slurm.nebius.ai/nodeset-name: ${nodeset.name}
-        %{~ if resources[i].gpus > 0 ~}
+        %{~ if nodeset.resources.gpus > 0 ~}
         tolerations:
           - key: nvidia.com/gpu
             operator: Exists
@@ -253,7 +256,7 @@ nodesets:
         %{~ endif ~}
 
         customInitContainers:
-          %{~ if gpu.wait_for_persistenced && gpu.use_preinstalled_drivers && resources[i].gpus > 0 ~}
+          %{~ if gpu.wait_for_persistenced && gpu.use_preinstalled_drivers && nodeset.resources.gpus > 0 ~}
           # SCHED-1418: wait before worker-init/slurmd creation so the NVIDIA runtime can inject the host socket.
           # The driver volume is mounted whole, without subPath: a subPath makes kubelet keep a host-side bind
           # of /run that collects mounts of pods started later and then cannot be unmounted on worker deletion.

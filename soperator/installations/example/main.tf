@@ -101,6 +101,19 @@ locals {
     })]
   ])
 
+  # Slurm NodeSets for complete GB300 racks have identical configuration. Keep
+  # the expanded list above for Mk8s resources and describe complete rack ranges
+  # separately so the Helm values do not duplicate the same configuration.
+  slurm_nodeset_worker_ranges = [
+    for nodeset in local.slurm_nodeset_workers_with_defaults : {
+      name          = nodeset.name
+      suffix        = "-rack"
+      first_ordinal = 0
+      last_ordinal  = floor(nodeset.size / local.gb300_nodes_per_nodegroup) - 1
+    }
+    if nodeset.resource.platform == local.gb300_platform && floor(nodeset.size / local.gb300_nodes_per_nodegroup) > 0
+  ]
+
   # Generated Slurm NodeSet name -> compute platform. The partition topology validations
   # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
   # worker nodeset it was generated from.
@@ -140,24 +153,32 @@ locals {
 
   # Terraform creates at most one topology of each supported type. Additional
   # custom topologies can only be supplied through Helm values overrides.
+  #
+  # The cluster-default topology drives Slurm node ranking (TopologyParam=BlockAsNodeRank,SwitchAsNodeRank)
+  # and serves partitions without an explicit topology.
+  # Pick the most specific topology the configured NodeSets support:
+  # - block-nvl72 when any GB300 NodeSet exists,
+  # - tree-ib for other GPU NodeSets,
+  # - flat for CPU-only clusters.
+  # gb300_enabled implies gpu_enabled, so exactly one topology is the default.
   slurm_named_topologies = concat(
     [{
       name            = "flat"
-      cluster_default = true
+      cluster_default = !local.gpu_enabled
       type            = "flat"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }],
     local.gpu_enabled ? [{
       name            = "tree-ib"
-      cluster_default = false
+      cluster_default = !local.gb300_enabled
       type            = "tree"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }] : [],
     local.gb300_enabled ? [{
       name            = "block-nvl72"
-      cluster_default = false
+      cluster_default = true
       type            = "block"
       block_sizes     = [coalesce(var.slurm_topology_block_size, local.gb300_nodes_per_nodegroup)]
       nodeset_refs = [
@@ -676,7 +697,6 @@ module "slurm" {
   use_default_apparmor_profile    = var.use_default_apparmor_profile
   worker_sshd_config_map_ref_name = var.slurm_worker_sshd_config_map_ref_name
   login_on_worker_nodes           = local.gb300_enabled
-  shared_memory_size_gibibytes    = var.slurm_shared_memory_size_gibibytes
   wait_for_nvidia_persistenced    = var.slurm_wait_for_nvidia_persistenced
   slurm_custom_config_override    = var.slurm_custom_config_override
   slurm_partition_config_type     = var.slurm_partition_config_type
@@ -735,6 +755,8 @@ module "slurm" {
       fabric = nodeset.gpu_cluster != null ? module.k8s.gpu_cluster_id_by_fabric[nodeset.gpu_cluster.infiniband_fabric] : "root"
     }
   }]
+
+  worker_nodeset_ranges = local.slurm_nodeset_worker_ranges
 
   topology = {
     topologies = local.slurm_named_topologies

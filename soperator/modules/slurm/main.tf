@@ -36,17 +36,12 @@ resource "terraform_data" "wait_for_slurm_cluster_available" {
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
-    command = join(
-      " ",
-      [
-        "kubectl", "wait",
-        "--for=jsonpath='{.status.phase}'=Available",
-        "--timeout", "1h",
-        "--context", var.k8s_cluster_context,
-        "-n", var.name,
-        "slurmcluster.slurm.nebius.ai/${var.name}"
-      ]
-    )
+    environment = {
+      K8S_CLUSTER_CONTEXT     = var.k8s_cluster_context
+      SLURM_CLUSTER_NAME      = var.name
+      SLURM_CLUSTER_NAMESPACE = var.name
+    }
+    command = "/bin/bash ${path.module}/scripts/wait_for_slurm_cluster_available.sh"
   }
 }
 
@@ -254,7 +249,6 @@ resource "helm_release" "soperator_fluxcd_cm" {
             )
             gpus = var.node_capacity.worker[0].gpus
           }
-          shared_memory            = var.shared_memory_size_gibibytes
           slurm_node_extra         = local.slurm_node_extra
           sshd_config_map_ref_name = var.worker_sshd_config_map_ref_name
         }
