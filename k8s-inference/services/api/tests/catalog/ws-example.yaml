@@ -24,7 +24,7 @@ runtime:
   env:
     - { name: OMP_NUM_THREADS, value: "2" }
     - { name: TMPDIR, value: /cache }
-  resources: { gpu: 1, cpu: "4", memory: 32Gi, cpuRequest: "2", memoryRequest: 16Gi }
+  resources: { gpu: 1, cpu: "4", memory: 32Gi }
   scaling: { minReplicas: 0, maxReplicas: 1, metric: concurrency, target: 1, containerConcurrency: 1, scaleToZeroRetention: 2m }
   timeout: 3600                  # live sessions up to 1 h (Knative max)
   shm: { enabled: true, size: 1Gi }
@@ -32,15 +32,11 @@ runtime:
     - { name: cache, mountPath: /cache, sizeLimit: 8Gi }
     - { name: tmp, mountPath: /tmp, sizeLimit: 2Gi }
   readinessProbe: { path: /readyz }
-  securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001 }
-  containerSecurityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 
 deployments:
   hub:
     pool: h100-spot-1x
-    priorityClassName: serverless2-interactive
   eu-south1:
     pool: rtx6000-spot-1x
-    priorityClassName: serverless2-interactive
     # one warm replica in the cheaper region; the hub stays scale-to-zero
     scaling: { minReplicas: 1 }

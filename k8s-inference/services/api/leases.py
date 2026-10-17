@@ -44,7 +44,7 @@ from kubernetes.client.rest import ApiException
 import db
 import keys
 import kube
-from resilience import retry
+from resilience import iso, retry
 
 log = logging.getLogger("api")
 STATES = ("prepared", "attached", "released", "lost", "closed")
@@ -63,12 +63,6 @@ def enabled() -> bool:
 
 def _row(r) -> dict:
     return dict(zip([c.strip() for c in COLUMNS.split(",")], r))
-
-
-def _ts(t) -> str | None:
-    if not t:
-        return None
-    return t.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(t, "strftime") else str(t)
 
 
 def _lock(c, operation: str) -> None:
@@ -91,9 +85,9 @@ def public(e: dict | None, history: list[dict] | None = None) -> dict | None:
             "state": x["state"],
             "attempt": x["attempt"],
             "worker_request_id": x["worker_request_id"],
-            "prepared_at": _ts(x["prepared_at"]),
-            "attached_at": _ts(x["attached_at"]),
-            "released_at": _ts(x["released_at"]),
+            "prepared_at": iso(x["prepared_at"]),
+            "attached_at": iso(x["attached_at"]),
+            "released_at": iso(x["released_at"]),
             "outcome": x["outcome"],
             "lane_seconds": float(x["lane_seconds"]) if x["lane_seconds"] is not None else None,
             "gpu_seconds": float(x["gpu_seconds"]) if x["gpu_seconds"] is not None else None,

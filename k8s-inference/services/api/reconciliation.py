@@ -6,7 +6,6 @@ Authorization policies stay until the corresponding predictor routes have disapp
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -15,15 +14,19 @@ from fastapi import HTTPException
 
 import attempts
 import catalog
+import children
 import config as cfg
 import db
 import execution
 import jobs
 import keys
 import kube
+import leases
 import models
+import sessions
 import status
 from config import FLEET_MANAGER, REGION
+from resilience import iso, parse_ts
 
 log = logging.getLogger("api")
 RESERVATION_STALE_S = 3600
@@ -119,8 +122,6 @@ def idle_shutdown() -> list[str]:
         ):
             continue
         try:
-            import sessions
-
             busy = sessions.open_on(m["name"]) > 0  # a live session stamps nothing: it is activity nonetheless
             for cid in m.get("deployments") or {}:
                 if busy:
@@ -131,7 +132,7 @@ def idle_shutdown() -> list[str]:
                 if st["status"] != "ready" or not marks:
                     busy = True  # starting, or no Ready pod yet: nothing to measure
                     continue
-                last = max(datetime.fromisoformat(x.replace("Z", "+00:00")) for x in marks)
+                last = max(parse_ts(x) for x in marks)
                 if (now - last).total_seconds() < int(sc["idle_s"]):
                     busy = True
             if busy:
@@ -167,17 +168,13 @@ def settle_deleted(job: dict) -> None:
     _settle_deleted(job)
 
 
-def fallback_switch() -> list[str]:
-    """Fleet runs that asked for `placement.fallback_wait_s` and are still unplaced after it: moved to the next class of
-    their preference (jobs.switch_class). Returns the new operation ids. Control API only."""
-    if not FLEET_MANAGER:
-        return []
-    moved = []
-    now = datetime.now(timezone.utc)
+def _tenant_run_jobs():
+    """(namespace, its run Jobs as dicts) for every tenant namespace of this cluster, one namespace at a time; a
+    namespace that cannot be listed is skipped, and nothing is yielded when the namespaces cannot be listed."""
     try:
         namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
     except Exception:  # noqa: BLE001
-        return []
+        return
     for ns in namespaces:
         try:
             b = kube.batch()
@@ -187,19 +184,29 @@ def fallback_switch() -> list[str]:
             ]
         except Exception:  # noqa: BLE001
             continue
+        yield ns, items
+
+
+def _live_manager(item: dict, ann: dict) -> bool:
+    """A fleet-placed run that is still the live handle of its lineage: a manager Job, not finished, no successor."""
+    return jobs.is_manager_job(item) and not status.finished(item) and not ann.get(f"{cfg.LABEL}/successor")
+
+
+def fallback_switch() -> list[str]:
+    """Fleet runs that asked for `placement.fallback_wait_s` and are still unplaced after it: moved to the next class of
+    their preference (jobs.switch_class). Returns the new operation ids. Control API only."""
+    if not FLEET_MANAGER:
+        return []
+    moved = []
+    now = datetime.now(timezone.utc)
+    for ns, items in _tenant_run_jobs():
         clusters = None
         for job in items:
             ann = job["metadata"].get("annotations") or {}
             wait = ann.get(f"{cfg.LABEL}/fallback-wait-s")
-            if (
-                wait is None
-                or not jobs.is_manager_job(job)
-                or status.finished(job)
-                or ann.get(f"{cfg.LABEL}/successor")
-            ):
+            if wait is None or not _live_manager(job, ann):
                 continue
-            created = datetime.fromisoformat(str(job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
-            if (now - created).total_seconds() < int(wait):
+            if (now - parse_ts(job["metadata"]["creationTimestamp"])).total_seconds() < int(wait):
                 continue
             if clusters is None:
                 clusters = kube.workload_clusters(ns)
@@ -246,8 +253,7 @@ def _unschedulable_since(pod: dict) -> datetime | None:
     """When the scheduler last said the pod cannot be placed (PodScheduled=False, reason Unschedulable), None otherwise."""
     for c in (pod.get("status") or {}).get("conditions") or []:
         if c.get("type") == "PodScheduled" and c.get("status") == "False" and c.get("reason") == UNSCHEDULABLE_REASON:
-            t = c.get("lastTransitionTime")
-            return datetime.fromisoformat(str(t).replace("Z", "+00:00")) if t else None
+            return parse_ts(c.get("lastTransitionTime"))
     return None
 
 
@@ -265,28 +271,14 @@ def unschedulable_switch() -> list[str]:
         return []
     moved = []
     now = datetime.now(timezone.utc)
-    try:
-        namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
-    except Exception:  # noqa: BLE001
-        return []
-    for ns in namespaces:
-        try:
-            b = kube.batch()
-            items = [
-                b.api_client.sanitize_for_serialization(j)
-                for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items
-            ]
-        except Exception:  # noqa: BLE001
-            continue
+    for ns, items in _tenant_run_jobs():
         clusters = None
         for item in items:
             md = item["metadata"]
             ann = md.get("annotations") or {}
             name = md["name"]
             if (
-                not jobs.is_manager_job(item)
-                or status.finished(item)
-                or ann.get(f"{cfg.LABEL}/successor")
+                not _live_manager(item, ann)
                 or ann.get(f"{cfg.LABEL}/cancelled")
                 or ann.get(f"{cfg.LABEL}/unschedulable")
                 or (item.get("spec") or {}).get("suspend")
@@ -391,33 +383,16 @@ def recovery_switch() -> list[str]:
         return []
     moved = []
     now = datetime.now(timezone.utc)
-    try:
-        namespaces = [x.metadata.name for x in kube.core().list_namespace(label_selector=f"{cfg.LABEL}/tenant").items]
-    except Exception:  # noqa: BLE001
-        return []
-    for ns in namespaces:
-        try:
-            b = kube.batch()
-            items = [
-                b.api_client.sanitize_for_serialization(j)
-                for j in b.list_namespaced_job(ns, label_selector=f"{cfg.LABEL}/mode=run").items
-            ]
-        except Exception:  # noqa: BLE001
-            continue
+    for ns, items in _tenant_run_jobs():
         for item in items:
             md = item["metadata"]
             ann = md.get("annotations") or {}
             name = md["name"]
-            try:
-                ex = json.loads(ann.get(f"{cfg.LABEL}/execution") or "null") or {}
-            except ValueError:
-                ex = {}
+            ex = jobs.execution_of(ann) or {}
             rec = ex.get("recovery") or {}
             if (
                 rec.get("on_infrastructure_loss") != "recover"
-                or not jobs.is_manager_job(item)
-                or status.finished(item)
-                or ann.get(f"{cfg.LABEL}/successor")
+                or not _live_manager(item, ann)
                 or ann.get(f"{cfg.LABEL}/cancelled")
             ):
                 continue
@@ -432,11 +407,9 @@ def recovery_switch() -> list[str]:
                     continue
                 lost_at = ann.get(f"{cfg.LABEL}/lost-at")
                 if not lost_at:
-                    _annotate(ns, name, {f"{cfg.LABEL}/lost-at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
-                    lost_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if (now - datetime.fromisoformat(lost_at.replace("Z", "+00:00"))).total_seconds() < int(
-                    rec.get("wait_s") or 0
-                ):
+                    lost_at = iso(now)
+                    _annotate(ns, name, {f"{cfg.LABEL}/lost-at": lost_at})
+                if (now - parse_ts(lost_at)).total_seconds() < int(rec.get("wait_s") or 0):
                     continue
                 tenant = md["labels"][f"{cfg.LABEL}/tenant"]
                 marks = attempts._marks(name)
@@ -452,7 +425,7 @@ def recovery_switch() -> list[str]:
                 remaining_s = None
                 if rec.get("deadline_s"):
                     root_job = job if root == name else jobs.get(ns, root, REGION)
-                    born = datetime.fromisoformat(str(root_job["metadata"]["creationTimestamp"]).replace("Z", "+00:00"))
+                    born = parse_ts(root_job["metadata"]["creationTimestamp"])
                     remaining_s = int(born.timestamp() + int(rec["deadline_s"]) - now.timestamp())
                     if not stop and remaining_s <= 0:
                         stop = f"recovery deadline passed: {rec['deadline_s']} s after the root operation was created"
@@ -531,9 +504,9 @@ async def _reconcile_loop():
             await asyncio.to_thread(reconcile_models)
             await asyncio.to_thread(release_stale_reservations)
             await asyncio.to_thread(gate_stages)
-            await asyncio.to_thread(sweep_sessions)
-            await asyncio.to_thread(sweep_children)
-            await asyncio.to_thread(sweep_executions)
+            await asyncio.to_thread(sessions.sweep)
+            await asyncio.to_thread(children.sweep)
+            await asyncio.to_thread(leases.sweep)
             await asyncio.to_thread(keys.retire_mirrors)
         except Exception:
             log.exception("model reconciliation unavailable")
@@ -548,32 +521,6 @@ def gate_stages() -> list[str]:
     import stages
 
     return stages.gate()
-
-
-def sweep_children() -> list[str]:
-    """Endpoint children (docs/JOBS.md "Endpoint children"): ended children recorded, the cancel cascade of a cancelled
-    or finished root repeated durably (children.sweep). Nothing without the database."""
-    import children
-
-    return children.sweep()
-
-
-def sweep_sessions() -> list[str]:
-    """Live sessions (docs/API.md "Sessions"): expired claims, unattached bindings, deadlines, lost workers, unsettled
-    ends (sessions.sweep). Nothing without the feature or the database."""
-    import sessions
-
-    return sessions.sweep()
-
-
-def sweep_executions() -> list[str]:
-    """Native execution leases (docs/API.md): an attached worker whose pod (exact UID) is gone or terminated is lost;
-    nothing else moves an attached execution."""
-    if not db.enabled():
-        return []
-    import leases
-
-    return leases.sweep()
 
 
 def release_stale_reservations() -> list[str]:

@@ -88,24 +88,21 @@ def fields(cluster: str | None, node: str | None, pool: str | None) -> dict:
     return out
 
 
-def enrich_attempts(attempts: list | None, cluster: str | None) -> None:
-    """Adds the placement fields to every attempt that names a node (or a pool), in place. `cluster` is the
-    operation's cluster id; an attempt may carry its own (a chain member on another cluster)."""
+def enrich_attempts(attempts: list | None, cluster: str | None) -> list | None:
+    """Adds the placement fields to every attempt that names a node (or a pool), in place (and returns the same list).
+    `cluster` is the operation's cluster id; an attempt may carry its own (a chain member on another cluster)."""
     for a in attempts or []:
-        if not isinstance(a, dict) or not (a.get("node") or a.get("pool")):
-            continue
-        a.update(fields(a.get("cluster") or cluster, a.get("node"), a.get("pool")))
+        if isinstance(a, dict) and (a.get("node") or a.get("pool")):
+            a.update(fields(a.get("cluster") or cluster, a.get("node"), a.get("pool")))
+    return attempts
+
+
+placed = enrich_attempts  # as an expression
 
 
 def enrich_operation(op: dict) -> dict:
     enrich_attempts(op.get("attempts"), op.get("cluster"))
     return op
-
-
-def placed(attempts: list, cluster: str | None) -> list:
-    """`enrich_attempts` as an expression: the same list, enriched."""
-    enrich_attempts(attempts, cluster)
-    return attempts
 
 
 def replicas(pods: list, cluster: str | None) -> list[dict]:
@@ -114,14 +111,15 @@ def replicas(pods: list, cluster: str | None) -> list[dict]:
     out = []
     for p in pods:
         # attribute access with defaults: a fake or a partial object (tests, a list from a cache) has no spec
-        md, st, spec = getattr(p, "metadata", None), getattr(p, "status", None), getattr(p, "spec", None)
-        phase = getattr(st, "phase", None)
-        ready = bool(phase == "Running" and all(c.ready for c in (getattr(st, "container_statuses", None) or [])))
-        node = getattr(spec, "node_name", None)
-        start = getattr(st, "start_time", None)
+        st, spec = getattr(p, "status", None), getattr(p, "spec", None)
+        phase, node, start = (
+            getattr(st, "phase", None),
+            getattr(spec, "node_name", None),
+            getattr(st, "start_time", None),
+        )
         entry = {
-            "pod": getattr(md, "name", None),
-            "ready": ready,
+            "pod": getattr(getattr(p, "metadata", None), "name", None),
+            "ready": bool(phase == "Running" and all(c.ready for c in (getattr(st, "container_statuses", None) or []))),
             "phase": phase,
             "node": node,
             "started_at": start.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(start, "strftime") else None,

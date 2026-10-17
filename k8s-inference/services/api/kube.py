@@ -12,7 +12,7 @@ from kubernetes import config as kconfig
 from kubernetes.client.rest import ApiException
 
 from config import FLEET_CONFIGMAP, HUB_REGION, KUEUE_JOB_UID_LABEL, KUEUE_NAMESPACE, LABEL, REGION, REGION_KUBECONFIGS
-from resilience import retry
+from resilience import cached, retry
 
 log = logging.getLogger("api.kube")
 
@@ -65,41 +65,29 @@ def batch(region: str = REGION) -> client.BatchV1Api:
     return client.BatchV1Api(_client(region))
 
 
-_fleet_cache: dict = {
-    "until": 0.0,
-    "pools": {},
-    "clusters": {},
-    "tenants": {},
-    "assets": {},
-    "fit": {},
-    "cpu_pools": {},
-    "policy": {},
-}
+# the fleet document's files (charts/fleet): pools, tenants, clusters, restricted assets (docs/JOBS.md), per-node fit
+# (docs/SCHEDULING.md), the GPU-free pools per cluster id and the fleet policy (docs/FLEET.md "Customer CPU pools")
+_FLEET_FILES = ("pools", "tenants", "clusters", "assets", "fit", "cpu_pools", "policy")
+_fleet: dict = {k: {} for k in _FLEET_FILES}
+_fleet_cache: dict = {}
 
 
 def fleet() -> dict:
     """The fleet's pools from the fleet-prices ConfigMap charts/fleet renders in kueue-system (every region on
     the control cluster, this region's on a worker): {"pools": {<name>: {region, pool, gpu_class, ...}}}.
-    Empty when unreadable (then no class affinity)."""
-    if _fleet_cache["until"] > time.time():
-        return _fleet_cache
-    try:
-        import yaml
+    Empty when unreadable (then no class affinity); read once a minute."""
 
-        data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
-        _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
-        _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
-        _fleet_cache["clusters"] = yaml.safe_load(data.get("clusters.yaml") or "") or {}
-        _fleet_cache["assets"] = yaml.safe_load(data.get("assets.yaml") or "") or {}  # docs/JOBS.md "Restricted assets"
-        _fleet_cache["fit"] = yaml.safe_load(data.get("fit.yaml") or "") or {}  # docs/SCHEDULING.md "Per-node fit"
-        # the GPU-free pools per cluster id (system + cpu_pools, with platform/preset/node group) and the fleet policy
-        # (`tenant_system_flavor`): docs/FLEET.md "Customer CPU pools"
-        _fleet_cache["cpu_pools"] = yaml.safe_load(data.get("cpu_pools.yaml") or "") or {}
-        _fleet_cache["policy"] = yaml.safe_load(data.get("policy.yaml") or "") or {}
-    except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
-        pass
-    _fleet_cache["until"] = time.time() + 60
-    return _fleet_cache
+    def load() -> dict:
+        try:
+            import yaml
+
+            data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
+            _fleet.update({k: yaml.safe_load(data.get(f"{k}.yaml") or "") or {} for k in _FLEET_FILES})
+        except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
+            pass
+        return _fleet
+
+    return cached(_fleet_cache, "fleet", 60, load)
 
 
 def tenant_system_allowed() -> bool:
@@ -298,6 +286,18 @@ def cluster_id_or_none(region: str | None) -> str | None:
         return None
 
 
+def _workloads_of(ns: str, job_uid: str, region: str = REGION) -> list:
+    """The Kueue Workloads of a Job (label kueue.x-k8s.io/job-uid) in a namespace, on one cluster."""
+    return retry(
+        api(region).list_namespaced_custom_object,
+        "kueue.x-k8s.io",
+        "v1beta2",
+        ns,
+        "workloads",
+        label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+    ).get("items", [])
+
+
 def workload_admission(ns: str, job_uid: str, region: str = REGION) -> dict | None:
     """The authoritative admission state of a Job's own Workload, for a proof that a run never ran: None unless
     exactly one Workload carries the job-uid label AND an ownerReference with that UID (an absence, a stray or a
@@ -306,14 +306,7 @@ def workload_admission(ns: str, job_uid: str, region: str = REGION) -> dict | No
     annotation, not_admitted_since the lastTransitionTime of an explicit Admitted=False condition (None without
     one). Read errors raise: an unreadable answer is never evidence (contrast workload_clusters, which answers
     empty on failure)."""
-    items = retry(
-        api(region).list_namespaced_custom_object,
-        "kueue.x-k8s.io",
-        "v1beta2",
-        ns,
-        "workloads",
-        label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
-    ).get("items", [])
+    items = _workloads_of(ns, job_uid, region)
     owned = [
         w
         for w in items
@@ -346,14 +339,7 @@ def workload_inactive(ns: str, job_uid: str, region: str = REGION) -> bool:
     deactivated (`spec.active = false`, deactivate_workload) or finished (condition Finished=True). An unreadable
     answer is not an absence (False)."""
     try:
-        items = retry(
-            api(region).list_namespaced_custom_object,
-            "kueue.x-k8s.io",
-            "v1beta2",
-            ns,
-            "workloads",
-            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
-        ).get("items", [])
+        items = _workloads_of(ns, job_uid, region)
     except ApiException:
         return False
     if not items:
@@ -378,42 +364,18 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     `region` is the cluster that holds the Workload: the manager for a dispatched run, the worker for a run pinned
     to a region (its Kueue admits the JobSet directly and would undo a suspend the same way).
     Returns the number of Workloads patched (0: none found, the run never reached the queue)."""
-    try:
-        items = retry(
-            api(region).list_namespaced_custom_object,
-            "kueue.x-k8s.io",
-            "v1beta2",
-            ns,
-            "workloads",
-            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
-        ).get("items", [])
-    except ApiException:
-        return 0
-    for w in items:
-        retry(
-            api(region).patch_namespaced_custom_object,
-            "kueue.x-k8s.io",
-            "v1beta2",
-            ns,
-            "workloads",
-            w["metadata"]["name"],
-            {"spec": {"active": False}},
-        )
-    return len(items)
+    return _set_workloads_active(ns, job_uid, region, False)
 
 
 def activate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Undo deactivate_workload: Kueue `spec.active = true` on the run's manager Workload (a fallback whose successor could
     not be created lets the original queue on). Returns the number of Workloads patched."""
+    return _set_workloads_active(ns, job_uid, region, True)
+
+
+def _set_workloads_active(ns: str, job_uid: str, region: str, active: bool) -> int:
     try:
-        items = retry(
-            api(region).list_namespaced_custom_object,
-            "kueue.x-k8s.io",
-            "v1beta2",
-            ns,
-            "workloads",
-            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
-        ).get("items", [])
+        items = _workloads_of(ns, job_uid, region)
     except ApiException:
         return 0
     for w in items:
@@ -424,7 +386,7 @@ def activate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
             ns,
             "workloads",
             w["metadata"]["name"],
-            {"spec": {"active": True}},
+            {"spec": {"active": active}},
         )
     return len(items)
 
@@ -439,14 +401,14 @@ _workloads_cache: dict[str, tuple[float, list]] = {}
 
 
 def _workloads(ns: str) -> list:
-    hit = _workloads_cache.get(ns) if WORKLOADS_CACHE_S > 0 else None
-    now = time.time()
-    if hit and hit[0] > now:
-        return hit[1]
-    items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get("items", [])
-    if WORKLOADS_CACHE_S > 0:
-        _workloads_cache[ns] = (now + WORKLOADS_CACHE_S, items)
-    return items
+    return cached(
+        _workloads_cache,
+        ns,
+        WORKLOADS_CACHE_S,
+        lambda: retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
+            "items", []
+        ),
+    )
 
 
 def workload_reasons(ns: str) -> dict[str, str]:
@@ -493,15 +455,24 @@ def workload_clusters(ns: str) -> dict[str, str]:
 _isvc_cache: dict[str, tuple[float, dict]] = {}
 
 
-def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
+def _isvc_get(region: str, ns: str, name: str) -> dict:
+    return retry(
+        api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
+    )
+
+
+def _or_none(read, what: str) -> dict | None:
+    """`read()`; None when the object is absent (404), 502 naming `what` for any other API error."""
     try:
-        return retry(
-            api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
-        )
+        return read()
     except ApiException as e:
         if e.status == 404:
             return None
-        raise HTTPException(502, f"kserve: {e.reason}")
+        raise HTTPException(502, f"{what}: {e.reason}")
+
+
+def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
+    return _or_none(lambda: _isvc_get(region, ns, name), "kserve")
 
 
 LWS = ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets")
@@ -515,12 +486,13 @@ def _lws_get(region: str, ns: str, name: str) -> dict:
 
 def lws(name: str, ns: str, region: str = REGION) -> dict | None:
     """The LeaderWorkerSet of a multi-node endpoint (services/api/models.py `nodes`), None when absent."""
-    try:
-        return _lws_get(region, ns, name)
-    except ApiException as e:
-        if e.status == 404:
-            return None
-        raise HTTPException(502, f"leaderworkerset: {e.reason}")
+    return _or_none(lambda: _lws_get(region, ns, name), "leaderworkerset")
+
+
+def _pod_ready(p) -> bool:
+    """A Running pod whose every container is ready."""
+    st = getattr(p, "status", None)
+    return bool(st) and st.phase == "Running" and all(c.ready for c in (st.container_statuses or []))
 
 
 def _startup(pods: list) -> dict:
@@ -570,9 +542,7 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
     service_error = None
     if svc_name and not raw_deployment:
         try:
-            ksvc = retry(
-                api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, "services", svc_name
-            )
+            ksvc = _knative(region, ns, "services", svc_name)
             service_seen = True
             service_generation = (ksvc.get("metadata") or {}).get("generation")
             service_observed = (ksvc.get("status") or {}).get("observedGeneration")
@@ -583,9 +553,7 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
     revision_image, revision_digest = None, None
     if ready_rev:
         try:
-            rev = retry(
-                api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, "revisions", ready_rev
-            )
+            rev = _knative(region, ns, "revisions", ready_rev)
             containers = (rev.get("spec") or {}).get("containers") or [{}]
             revision_image = containers[0].get("image")
             statuses = (rev.get("status") or {}).get("containerStatuses") or [{}]
@@ -594,9 +562,9 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
             pass
     images: list[str] = []
     for p in pods:
-        pst = getattr(p, "status", None)
-        if not pst or pst.phase != "Running" or not all(c.ready for c in (pst.container_statuses or [])):
+        if not _pod_ready(p):
             continue
+        pst = p.status
         for c in pst.container_statuses or []:
             if getattr(c, "name", None) in ("kserve-container", "main") or len(pst.container_statuses) == 1:
                 ref = getattr(c, "image_id", None) or getattr(c, "image", None)
@@ -657,6 +625,11 @@ def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", n
     }
 
 
+def _knative(region: str, ns: str, plural: str, name: str) -> dict:
+    """One Knative Serving object (a predictor Service, a Revision) by name."""
+    return retry(api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, plural, name)
+
+
 def _desired_image(isvc: dict) -> str | None:
     """The image the InferenceService's spec asks for: the predictor's first container (as the API renders it)."""
     pred = (isvc.get("spec") or {}).get("predictor") or {}
@@ -685,51 +658,38 @@ def _same_image(ref: str, image: str | None, digest: str | None) -> bool:
 def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) -> dict:
     """Live state for the catalog: ready / scaled-to-zero / deploying / unavailable, the ready replicas and the
     start-up timing of the newest pod. KServe InferenceService (one pod per replica) or, for `nodes` > 1, the
-    LeaderWorkerSet whose leader pods serve (a replica is ready when its leader is)."""
-    hit = _isvc_cache.get(f"{region}/{ns}/{name}")
-    if hit and hit[0] > time.time():
-        return hit[1]
+    LeaderWorkerSet whose leader pods serve (a replica is ready when its leader is). Cached ten seconds."""
+    return cached(_isvc_cache, f"{region}/{ns}/{name}", 10, lambda: _endpoint_status(name, ns, region, nodes))
+
+
+def _pod_selector(name: str, nodes: int) -> str:
+    return f"leaderworkerset.sigs.k8s.io/name={name}" if nodes > 1 else f"serving.kserve.io/inferenceservice={name}"
+
+
+def _endpoint_status(name: str, ns: str, region: str, nodes: int) -> dict:
     out = {"status": "unavailable", "replicas_ready": None}
     try:
         if nodes > 1:
             i = _lws_get(region, ns, name)
-            pods = retry(
-                core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}"
-            ).items
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
             leaders = [p for p in pods if p.metadata.labels.get("leaderworkerset.sigs.k8s.io/worker-index") == "0"]
-            n = sum(
-                1
-                for p in leaders
-                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-            )
+            n = sum(1 for p in leaders if _pod_ready(p))
             stopped = int(i.get("spec", {}).get("replicas", 0)) == 0
             out = {
                 "status": "ready" if n else ("scaled-to-zero" if stopped and not pods else "deploying"),
                 "replicas_ready": n,
                 "nodes": nodes,
-                "pods_ready": sum(
-                    1
-                    for p in pods
-                    if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-                ),
+                "pods_ready": sum(1 for p in pods if _pod_ready(p)),
                 **_startup(leaders),
             }
             if last := (i.get("metadata", {}).get("annotations") or {}).get(LAST_REQUEST_ANNOTATION):
                 out["last_request_at"] = last
         else:
-            i = retry(
-                api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
-            )
+            i = _isvc_get(region, ns, name)
             conds = i.get("status", {}).get("conditions", [])
             ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds)
-            pods = retry(
-                core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}"
-            ).items
-            n = sum(
-                1
-                for p in pods
-                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-            )
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
+            n = sum(1 for p in pods if _pod_ready(p))
             # Knative gave up on the newest revision (ProgressDeadlineExceeded -> RevisionFailed): nothing is starting any
             # more, so this is an error with Knative's message, not "deploying" (a Boltz-2 NIM whose Secret was gone sat in
             # "deploying" for two days with no pod, no logs and no metrics)
@@ -757,7 +717,6 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:
         pass
-    _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out
 
 
@@ -768,36 +727,33 @@ def endpoint_pods(name: str, ns: str, region: str = REGION, nodes: int = 1) -> l
     """The pods of an endpoint (every replica of a KServe InferenceService; every pod of a LeaderWorkerSet), as the
     client objects, for the replicas' placement (instances.replicas). Cached ten seconds like endpoint_status; []
     when the region cannot be read."""
-    key = f"{region}/{ns}/{name}"
-    hit = _pods_cache.get(key)
-    if hit and hit[0] > time.time():
-        return hit[1]
-    selector = f"leaderworkerset.sigs.k8s.io/name={name}" if nodes > 1 else f"serving.kserve.io/inferenceservice={name}"
-    try:
-        pods = retry(core(region).list_namespaced_pod, ns, label_selector=selector).items
-    except Exception:  # noqa: BLE001 - an unreadable region shows no replicas, never fails the page
-        pods = []
-    _pods_cache[key] = (time.time() + 10, pods)
-    return pods
+
+    def load() -> list:
+        try:
+            return retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
+        except Exception:  # noqa: BLE001 - an unreadable region shows no replicas, never fails the page
+            return []
+
+    return cached(_pods_cache, f"{region}/{ns}/{name}", 10, load)
 
 
-_last_stamp: dict[str, float] = {}
+_last_stamp: dict = {}  # f"{region}/{name}" -> (until, None): the next stamp of an endpoint is due after `until`
 
 
 def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_interval_s: int = 60) -> None:
     """Record on a multi-node endpoint's LeaderWorkerSet that it was called now (annotation, at most once a minute):
     the control API's idle shutdown reads it (services/api/app.py idle_shutdown). Cheap and best-effort."""
-    now = time.time()
-    if _last_stamp.get(f"{region}/{name}", 0) + min_interval_s > now:
-        return
-    _last_stamp[f"{region}/{name}"] = now
-    body = {
-        "metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}
-    }
-    try:
-        api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
-    except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
-        pass
+
+    def stamp() -> None:
+        body = {
+            "metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}
+        }
+        try:
+            api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
+        except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
+            pass
+
+    cached(_last_stamp, f"{region}/{name}", min_interval_s, stamp)
 
 
 def pool_usage(cluster: str, pool: str) -> dict:
@@ -812,7 +768,7 @@ def pool_usage(cluster: str, pool: str) -> dict:
         return {"nodes_ready": None, "gpus_total": None, "gpus_used": None}
     nodes = [n for n in all_nodes if (n.metadata.labels or {}).get(f"{LABEL}/pool") == pool]
     names = {n.metadata.name for n in nodes}
-    ready = sum(1 for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or [])))
+    ready = sum(1 for n in nodes if _node_ready(n))
     total = sum(int((n.status.allocatable or {}).get("nvidia.com/gpu", 0)) for n in nodes)
     pods = running_pods_of(region)
     if pods is None:
@@ -827,6 +783,10 @@ def pool_usage(cluster: str, pool: str) -> dict:
                     if c.resources
                 )
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
+
+
+def _node_ready(n) -> bool:
+    return any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))
 
 
 LIVE_CACHE_S = 10  # the fleet page's node and pod listings per region: one read serves every pool and poll in it
@@ -890,11 +850,7 @@ def cluster_summary(region: str) -> dict:
     nodes = nodes_of(region)
     if nodes is None:  # an unreachable cluster shows as such
         return {"reachable": False, "nodes_ready": None, "gpu_nodes_ready": None, "kubernetes_version": None}
-    ready = [n for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))]
-    gpu = [
-        n
-        for n in ready
-        if (n.metadata.labels or {}).get(f"{LABEL}/pool") and (n.metadata.labels or {}).get(f"{LABEL}/pool") != "system"
-    ]
+    ready = [n for n in nodes if _node_ready(n)]
+    gpu = [n for n in ready if (n.metadata.labels or {}).get(f"{LABEL}/pool") not in (None, "", "system")]
     version = next((n.status.node_info.kubelet_version for n in nodes if n.status and n.status.node_info), None)
     return {"reachable": True, "nodes_ready": len(ready), "gpu_nodes_ready": len(gpu), "kubernetes_version": version}

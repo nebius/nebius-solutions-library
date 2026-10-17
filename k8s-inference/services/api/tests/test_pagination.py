@@ -32,7 +32,7 @@ def test_page_helper_orders_cuts_and_issues_cursors():
         appmod._page(Response(), items, lambda x: x["k"], "not-a-cursor", 3)
     assert e.value.status_code == 400
     with pytest.raises(HTTPException):
-        appmod._decode_key_cursor(appmod._encode_cursor("2026-01-01T00:00:00Z", "op-x"))  # the other cursor kind
+        appmod._decode_cursor(appmod._encode_cursor("o", "2026-01-01T00:00:00Z", "op-x"), "k", 1)  # the other kind
     # the descending complement orders newest first with the same ascending helper
     keys = ["2026-10-17T10:00:00Z|op-b", "2026-10-17T09:00:00Z|op-a", "2026-10-17T10:00:00Z|op-a"]
     assert sorted(keys, key=appmod._desc_key) == [

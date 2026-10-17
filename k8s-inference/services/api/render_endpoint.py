@@ -5,11 +5,11 @@ one variant in, the objects out:
     InferenceService (one pod per replica, KServe on Knative)        nodes <= 1
     LeaderWorkerSet + Service + HTTPRoute (N whole nodes per replica)  nodes > 1
     SecurityPolicy (the gateway's authorization of the endpoint's routes)
-    PersistentVolumeClaim per `persistentVolumes`, LocalModelCache when enabled
+    ConfigMap (the fleet's trust bundle, `nativeLease`), CiliumNetworkPolicy (`ingressIsolation`)
 
-services/api/tests/test_render_endpoint_golden.py holds the objects rendered for every fixture. Value semantics:
-the defaults under the entry (DEFAULTS, every setting with its default), the entry's `runtime` merged over them and
-`deployments.<cluster>` over that (maps deep-merged, lists and scalars replaced).
+services/api/tests/test_render_endpoint_golden.py holds the objects rendered for every case. Value semantics: the
+entry's `runtime` over DEFAULTS, `deployments.<cluster>` (the variant's pool, image and replica bounds) over that;
+maps deep-merge, lists and scalars replace.
 
 Pure functions, no I/O: `render(entry, cluster, domain, ib_claim_template, variant, api_backend)`; `models.render`
 calls it once per variant. `api_backend`: the gateway's ext-auth target is the Envoy Gateway `Backend` api/api
@@ -40,110 +40,25 @@ TRUST_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "AWS_CA_BU
 TRUST_MAX_BYTES = 1_000_000  # a ConfigMap holds 1 MiB; the bundle is projected whole or the render refuses, never cut
 
 POOL_LABEL = f"{LABEL}/pool"
-MODELS_NAMESPACE_DEFAULT = "models"
-
-# Every setting with its default. The entry's top level, then `runtime`, then
-# `deployments.<cluster>` override these (see `values`).
+PRIORITY_CLASS = "customer-batch"  # the Kueue priority class of every endpoint object and pod
+PREPARE_IMAGE = f"{IMAGES_HOST}/docker/library/busybox:1.36" if IMAGES_HOST else "docker.io/library/busybox:1.36"
+# what `runtime` may leave out (models.to_entry sets everything else explicitly): the GPU toleration (replaced by the
+# CPU pool's in `values`), Knative's scale-to-zero retention, the weights directory prepared unless said otherwise
 DEFAULTS: dict = {
-    "name": "",
-    "namespace": MODELS_NAMESPACE_DEFAULT,
-    "labels": {},
-    "annotations": {},
-    "podMetadata": {},
-    "automountServiceAccountToken": None,
-    "image": "",
-    "imagePullSecrets": [],
-    "command": [],
-    "args": [],
-    "env": [],
-    "envFrom": [],
-    "port": 8080,
-    "protocol": "http",
-    "workingDir": "",
-    "resources": {
-        "gpu": 1,
-        "cpu": "4",
-        "memory": "16Gi",
-        "cpuRequest": "",
-        "memoryRequest": "",
-        "ephemeralStorage": "",
-    },
-    "pool": "",
-    "nodeSelector": {},
     "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
-    "scaling": {
-        "minReplicas": 0,
-        "maxReplicas": 1,
-        "metric": "concurrency",
-        "target": 1,
-        "containerConcurrency": 0,
-        "scaleToZeroRetention": "2m",
-    },
-    "timeout": 600,
-    "priorityClassName": "",
-    "queue": {"priorityClass": "customer-batch", "name": ""},
-    "images": {},
-    "shm": {"enabled": True, "size": "1Gi"},
-    "volumes": [],
-    "persistentVolumes": [],
-    "nativeLease": "",  # optional | required: the pod gets the lease client's token and env (docs/API.md)
-    "ingressIsolation": "",  # declared-ports: a CiliumNetworkPolicy admits only the data path into the pod (docs/API.md)
-    "readinessProbe": {},
-    "livenessProbe": {},
-    "securityContext": {},
-    "containerSecurityContext": {},
-    "localModelCache": {"enabled": False, "storageUri": "", "nodeGroups": [], "size": "50Gi"},
-    "weights": {
-        "sharedFilesystem": {
-            "enabled": False,
-            "claimName": "weights-shared",
-            "path": "",
-            "mountPath": "/weights",
-            "readOnly": False,
-            "prepare": True,
-            "prepareImage": f"{IMAGES_HOST}/docker/library/busybox:1.36"
-            if IMAGES_HOST
-            else "docker.io/library/busybox:1.36",
-        },
-        "env": {},
-    },
-    "nodes": 1,
-    "workerCommand": [],
-    "interconnect": "none",
-    "ibDevices": 0,
-    "ibClaimTemplate": "ib",
-    "idleSeconds": 0,
-    "domain": "",
-    "gatewayName": "serverless2-external",
-    "gatewayNamespace": "envoy-gateway-system",
+    "scaling": {"scaleToZeroRetention": "2m"},
+    "weights": {"sharedFilesystem": {"prepare": True}},
 }
-# entry fields that are not settings (the chart's `endpoint.values` omits them before merging `runtime`)
-OMIT = (
-    "runtime",
-    "deployments",
-    "cluster",
-    "id",
-    "task",
-    "mode",
-    "displayName",
-    "description",
-    "source",
-    "protocol",
-    "port",
-    "endpoints",
-    "gpu",
-    "concurrency",
-    "coldStartClass",
-    "price",
-    "scaleToZero",
-    "parameters",
-    "workflow_template",
+# the apply order (the pod's mounts and its Service exist before the pod, the route before the policy on it)
+KINDS = (
+    "ConfigMap",
+    "Service",
+    "CiliumNetworkPolicy",
+    "HTTPRoute",
+    "InferenceService",
+    "LeaderWorkerSet",
+    "SecurityPolicy",
 )
-# entry fields of `deployments.<cluster>` that are not settings either
-NOT_SETTINGS = ("paused", "price_per_gpu_hour", "parameters")
-# the order `helm template` printed the objects in (its install order: claims, then Services, then the custom
-# kinds by name); `apply` follows it, so the Service exists before the route that references it
-KIND_ORDER = {"ConfigMap": 0, "PersistentVolumeClaim": 1, "Service": 2}  # the pod's mounts before the pod
 
 
 def _fail(what: str, obj: str) -> HTTPException:
@@ -157,31 +72,14 @@ def _required(value, what: str, obj: str):
 
 
 def _text(value) -> str | None:
-    """A value rendered as a string the way the chart quoted it; None stays None (an absent value)."""
-    if value is None:
-        return None
+    """A value as the string Kubernetes expects; None stays None (an absent value)."""
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value)
-
-
-def _coalesce(user: dict, defaults: dict) -> dict:
-    """Values file over values.yaml, the way Helm reads them: the user's value wins, maps merge recursively, a
-    user value of null removes the setting."""
-    out = dict(user)
-    for key, default in defaults.items():
-        if key not in out:
-            out[key] = copy.deepcopy(default)
-        elif out[key] is None:
-            del out[key]
-        elif isinstance(default, dict) and isinstance(out[key], dict):
-            out[key] = _coalesce(out[key], default)
-    return out
+    return None if value is None else str(value)
 
 
 def _merge_overwrite(dst: dict, src: dict) -> dict:
-    """`runtime` over the base and `deployments.<cluster>` over that: maps deep-merge, everything else (scalars,
-    lists, also empty and null ones) replaces."""
+    """Maps deep-merge, everything else (scalars, lists, also empty and null ones) replaces."""
     for key, value in src.items():
         if isinstance(value, dict) and isinstance(dst.get(key), dict):
             _merge_overwrite(dst[key], value)
@@ -190,67 +88,54 @@ def _merge_overwrite(dst: dict, src: dict) -> dict:
     return dst
 
 
-def variant_entry(entry: dict, cluster: str, variant: dict) -> dict:
-    """The entry for one variant: the cluster's deployment carries the variant's pool, image and replica bounds
-    (they override `runtime` in `values`)."""
-    e = dict(entry)
-    over = dict((entry.get("deployments") or {}).get(cluster) or {})
-    over.pop("variants", None)
-    over["pool"] = variant.get("pool") or over.get("pool")
-    if variant.get("image"):
-        over["image"] = variant["image"]
-    scaling = {}
-    if variant.get("min") is not None:
-        scaling["minReplicas"] = int(variant["min"])
-    if variant.get("max") is not None:
-        scaling["maxReplicas"] = int(variant["max"])
-    if scaling:
-        over["scaling"] = scaling
-    e["deployments"] = {**(entry.get("deployments") or {}), cluster: over}
-    return e
-
-
 def values(entry: dict, cluster: str, domain: str, ib_claim_template: str, variant: dict | None = None) -> dict:
-    """The effective settings of one variant of an endpoint on a cluster: DEFAULTS under the entry's top level
-    (minus OMIT), `runtime` over that, `deployments.<cluster>` over that; the object name (the model id, or
+    """The effective settings of one variant of an endpoint on a cluster: `runtime` over DEFAULTS, the cluster's
+    deployment with the variant's pool, image and replica bounds over that; the object name (the model id, or
     `<id>-<variant>` for every variant but the first), the model id, the namespace and the labels
     serverless2.nebius/task|mode|cluster."""
     v = variant or {"name": "primary", "object": entry.get("id"), "pool": None, "min": None, "max": None, "image": None}
     obj = v.get("object") or entry.get("id") or "?"
-    e = variant_entry(entry, cluster, v)
-    runtime = e.get("runtime")
+    runtime = entry.get("runtime")
     if not isinstance(runtime, dict) or not runtime:
         raise _fail("the entry has no runtime (a run class has no endpoint)", obj)
-    top = _coalesce(e, DEFAULTS)
-    top.update({"cluster": cluster, "domain": domain, "ibClaimTemplate": ib_claim_template})
-    over = copy.deepcopy((top.get("deployments") or {}).get(cluster) or {})
-    for key in NOT_SETTINGS:
-        over.pop(key, None)
-    base = {k: copy.deepcopy(x) for k, x in top.items() if k not in OMIT}
-    vals = _merge_overwrite(_merge_overwrite(base, copy.deepcopy(runtime)), over)
+    over = dict((entry.get("deployments") or {}).get(cluster) or {})
+    over["pool"] = v.get("pool") or over.get("pool")
+    if v.get("image"):
+        over["image"] = v["image"]
+    if scaling := {k: int(v[s]) for s, k in (("min", "minReplicas"), ("max", "maxReplicas")) if v.get(s) is not None}:
+        over["scaling"] = scaling
+    base = {
+        **DEFAULTS,
+        "podMetadata": entry.get("podMetadata") or {},
+        "domain": domain,
+        "ibClaimTemplate": ib_claim_template,
+    }
+    vals = _merge_overwrite(_merge_overwrite(copy.deepcopy(base), copy.deepcopy(runtime)), copy.deepcopy(over))
     if vals.get("pool"):
         # a deployment pinned to `system` (a GPU-free endpoint) serves from the cluster's customer CPU pool instead
         # when the fleet keeps tenants off the system nodes (kube.tenant_pool, docs/FLEET.md "Customer CPU pools");
         # that pool is tainted, so its toleration replaces the GPU one
         import kube
 
-        pool = kube.tenant_pool(cluster, vals["pool"])
-        if pool != vals["pool"]:
-            vals["pool"] = pool
+        vals["pool"] = pool = kube.tenant_pool(cluster, vals["pool"])
         if kube.is_cpu_pool(cluster, pool):
             vals["tolerations"] = [t for t in (vals.get("tolerations") or []) if t.get("key") != "nvidia.com/gpu"] + [
                 dict(kube.CPU_POOL_TOLERATION)
             ]
-    mid = _required(top.get("id"), "catalog entry needs id", obj)
-    vals["name"] = obj if obj != mid else mid
-    vals["modelId"] = mid
-    vals["variant"] = v.get("name") if obj != mid else ""
-    vals["namespace"] = top.get("namespace") or MODELS_NAMESPACE_DEFAULT
-    labels = dict(vals.get("labels") or {})
-    labels.update(
-        {f"{LABEL}/task": top.get("task") or "", f"{LABEL}/mode": top.get("mode") or "", f"{LABEL}/cluster": cluster}
+    mid = _required(entry.get("id"), "catalog entry needs id", obj)
+    vals.update(
+        {
+            "name": obj,
+            "modelId": mid,
+            "variant": v.get("name") if obj != mid else "",
+            "namespace": entry.get("namespace") or "models",
+            "labels": {
+                f"{LABEL}/task": entry.get("task") or "",
+                f"{LABEL}/mode": entry.get("mode") or "",
+                f"{LABEL}/cluster": cluster,
+            },
+        }
     )
-    vals["labels"] = labels
     return vals
 
 
@@ -259,7 +144,7 @@ def values(entry: dict, cluster: str, domain: str, ib_claim_template: str, varia
 
 def _labels(v: dict) -> dict:
     """Metadata labels of every object: the standard Helm set plus the serverless2 labels the API and the
-    dispatcher select on, the Kueue priority class, and the entry's own labels (which win)."""
+    dispatcher select on, and the Kueue priority class."""
     out = {
         "app.kubernetes.io/name": v["name"],
         "app.kubernetes.io/instance": v["name"],
@@ -269,8 +154,7 @@ def _labels(v: dict) -> dict:
     if v.get("variant"):
         out[f"{LABEL}/variant"] = v["variant"]
     out[f"{LABEL}/protocol"] = v.get("protocol")
-    if (v.get("queue") or {}).get("priorityClass"):
-        out["kueue.x-k8s.io/priority-class"] = v["queue"]["priorityClass"]
+    out["kueue.x-k8s.io/priority-class"] = PRIORITY_CLASS
     out.update(v.get("labels") or {})
     return out
 
@@ -280,46 +164,25 @@ def _shared_fs(v: dict) -> dict:
 
 
 def _resources(v: dict) -> dict:
+    """`cpu`/`memory` are the requests, `cpuLimit`/`memoryLimit` the limits above them (docs/API.md); requests = limits
+    unless both are given, the same for the kubelet's node-local scratch (`ephemeralStorage[Limit]`, as a run class's)."""
     r = v.get("resources") or {}
-    # two spellings, one meaning: `cpu`/`memory` with `cpuRequest`/`memoryRequest` below them (the chart's), or
-    # `cpu`/`memory` as the requests with `cpuLimit`/`memoryLimit` above them (the API's projection of an endpoint
-    # spec, docs/API.md); either way requests = limits unless both are given
+    gpu = _text(r.get("gpu"))
     limits = {
-        "nvidia.com/gpu": _text(r.get("gpu")),
+        "nvidia.com/gpu": gpu,
         "cpu": _text(r.get("cpuLimit") or r.get("cpu")),
         "memory": r.get("memoryLimit") or r.get("memory"),
     }
-    requests = {
-        "nvidia.com/gpu": _text(r.get("gpu")),
-        "cpu": _text(r.get("cpuRequest") or r.get("cpu")),
-        "memory": r.get("memoryRequest") or r.get("memory"),
-    }
-    if r.get("ephemeralStorage") or r.get("ephemeralStorageLimit"):
-        # the kubelet's node-local scratch: request = limit unless both are given (as a run class's, jobs.build_run)
-        req = r.get("ephemeralStorage") or r.get("ephemeralStorageLimit")
-        requests["ephemeral-storage"] = req
-        limits["ephemeral-storage"] = r.get("ephemeralStorageLimit") or req
+    requests = {"nvidia.com/gpu": gpu, "cpu": _text(r.get("cpu")), "memory": r.get("memory")}
+    if scratch := r.get("ephemeralStorage") or r.get("ephemeralStorageLimit"):
+        requests["ephemeral-storage"] = scratch
+        limits["ephemeral-storage"] = r.get("ephemeralStorageLimit") or scratch
     return {"limits": limits, "requests": requests}
 
 
 def _probes(v: dict) -> dict:
-    out = {}
-    if p := v.get("readinessProbe"):
-        probe = {"httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")}}
-        for key in ("periodSeconds", "failureThreshold"):
-            if p.get(key):
-                probe[key] = p[key]
-        out["readinessProbe"] = probe
-    if p := v.get("livenessProbe"):
-        probe = {
-            "httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")},
-            "periodSeconds": p.get("periodSeconds") or 15,
-            "failureThreshold": p.get("failureThreshold") or 4,
-        }
-        if p.get("initialDelaySeconds"):
-            probe["initialDelaySeconds"] = p["initialDelaySeconds"]
-        out["livenessProbe"] = probe
-    return out
+    p = v.get("readinessProbe")
+    return {"readinessProbe": {"httpGet": {"path": p.get("path"), "port": p.get("port") or v.get("port")}}} if p else {}
 
 
 def _volume_mounts(v: dict) -> list[dict]:
@@ -336,54 +199,34 @@ def _volume_mounts(v: dict) -> list[dict]:
                 "readOnly": bool(w.get("readOnly")),
             }
         )
-    for x in (v.get("volumes") or []) + (v.get("persistentVolumes") or []):
-        out.append({"name": x.get("name"), "mountPath": x.get("mountPath")})
+    out += [{"name": x.get("name"), "mountPath": x.get("mountPath")} for x in v.get("volumes") or []]
     if v.get("nativeLease"):
         out.append({"name": "s2-lease", "mountPath": LEASE_DIR, "readOnly": True})
     return out
 
 
 def _volumes(v: dict) -> list[dict]:
-    w = _shared_fs(v)
     out = []
     if (v.get("shm") or {}).get("enabled"):
         out.append({"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": v["shm"].get("size")}})
-    if w.get("enabled"):
+    if _shared_fs(v).get("enabled"):
         # the region's shared filesystem (Terraform weights_filesystem) through the cluster's RWX claim; subPath <path>
-        out.append(
-            {"name": "weights", "persistentVolumeClaim": {"claimName": _text(w.get("claimName") or "weights-shared")}}
-        )
+        out.append({"name": "weights", "persistentVolumeClaim": {"claimName": "weights-shared"}})
     for x in v.get("volumes") or []:
         empty = {"sizeLimit": x.get("sizeLimit")}
         if x.get("medium"):
             empty["medium"] = x["medium"]
         out.append({"name": x.get("name"), "emptyDir": empty})
-    for x in v.get("persistentVolumes") or []:
-        out.append({"name": x.get("name"), "persistentVolumeClaim": {"claimName": f"{v['name']}-{x.get('name')}"}})
     if v.get("nativeLease"):
         # the lease client's identity: a token bound to this pod (TokenReview reports the pod's name and UID), audience
         # LEASE_AUDIENCE, renewed by the kubelet; readable by the container as a file, never in the environment
-        out.append(
-            {
-                "name": "s2-lease",
-                "projected": {
-                    "sources": [
-                        {
-                            "serviceAccountToken": {
-                                "path": "token",
-                                "audience": LEASE_AUDIENCE,
-                                "expirationSeconds": 3600,
-                            }
-                        }
-                    ]
-                },
-            }
-        )
+        token = {"serviceAccountToken": {"path": "token", "audience": LEASE_AUDIENCE, "expirationSeconds": 3600}}
+        out.append({"name": "s2-lease", "projected": {"sources": [token]}})
         if _trust(v):
             # the fleet's trust bundle as a file beside the token (TRUST_FILE), from the endpoint's own ConfigMap
             # (_trust_configmap, applied before the pod's object); required: a pod without its trust must not start
             out[-1]["projected"]["sources"].append(
-                {"configMap": {"name": _trust_name(v), "items": [{"key": TRUST_KEY, "path": TRUST_KEY}]}}
+                {"configMap": {"name": f"{v['name']}-trust", "items": [{"key": TRUST_KEY, "path": TRUST_KEY}]}}
             )
     return out
 
@@ -421,17 +264,13 @@ def _trust(v: dict) -> str | None:
     return pem or None
 
 
-def _trust_name(v: dict) -> str:
-    return f"{v['name']}-trust"
-
-
 def _trust_configmap(v: dict) -> dict:
     """The endpoint's trust bundle object: public CA material only (jobs.trust_bundle), the whole file under
     TRUST_KEY; applied and deleted with the endpoint's other objects (models.apply / models._delete)."""
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
-        "metadata": {"name": _trust_name(v), "namespace": v["namespace"], "labels": _labels(v)},
+        "metadata": {"name": f"{v['name']}-trust", "namespace": v["namespace"], "labels": _labels(v)},
         "data": {TRUST_KEY: _trust(v)},
     }
 
@@ -452,7 +291,7 @@ def _weights_prepare(v: dict) -> list[dict]:
     return [
         {
             "name": "weights-prepare",
-            "image": w.get("prepareImage"),
+            "image": PREPARE_IMAGE,
             "command": ["sh", "-c", f"mkdir -p /weights-root/{path} && chmod 1777 /weights-root/{path}"],
             "securityContext": {"runAsUser": 0},
             "volumeMounts": [{"name": "weights", "mountPath": "/weights-root"}],
@@ -462,16 +301,50 @@ def _weights_prepare(v: dict) -> list[dict]:
 
 
 def _weights_env(v: dict) -> list[dict]:
-    """`weights.env` as EnvVars, by name (the chart ranged over the map, which sorts its keys)."""
-    env = (v.get("weights") or {}).get("env") or {}
-    return [{"name": _text(k), "value": _text(val)} for k, val in sorted(env.items())]
+    """`weights.env` as EnvVars, by name."""
+    return [
+        {"name": _text(k), "value": _text(x)} for k, x in sorted(((v.get("weights") or {}).get("env") or {}).items())
+    ]
 
 
-def _pod_labels_annotations(v: dict, extra: dict | None = None) -> tuple[dict, dict]:
-    pm = v.get("podMetadata") or {}
-    labels = dict(pm.get("labels") or {})
-    labels.update(extra or {})
-    return labels, dict(pm.get("annotations") or {})
+def _container(v: dict, name: str, command, env: list[dict]) -> dict:
+    c: dict = {"name": name, "image": _required(v.get("image"), "image is required", v["name"])}
+    if command:
+        c["command"] = list(command)
+    if v.get("args"):
+        c["args"] = list(v["args"])
+    if env:
+        c["env"] = env
+    if v.get("envFrom"):
+        c["envFrom"] = list(v["envFrom"])
+    c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]
+    c["resources"] = _resources(v)
+    if mounts := _volume_mounts(v):
+        c["volumeMounts"] = mounts
+    return c
+
+
+def _pod(v: dict, ib: int = 0) -> dict:
+    """The pod spec without its containers: pinned to the pool, the GPU (or CPU pool) toleration, the weights init
+    container, the volumes; `ib` > 0 claims every fabric NIC of the node (ResourceClaimTemplate <prefix>-<n>, docs/JOBS.md)."""
+    spec: dict = {}
+    if v.get("automountServiceAccountToken") is not None:
+        spec["automountServiceAccountToken"] = v["automountServiceAccountToken"]
+    if v.get("imagePullSecrets"):
+        spec["imagePullSecrets"] = [{"name": s} for s in v["imagePullSecrets"]]
+    spec["nodeSelector"] = {
+        POOL_LABEL: _required(v.get("pool"), "pool is required (or queue.name for Kueue placement)", v["name"])
+    }
+    spec["tolerations"] = list(v["tolerations"])
+    if ib > 0:
+        spec["resourceClaims"] = [
+            {"name": "ib", "resourceClaimTemplateName": f"{v.get('ibClaimTemplate') or 'ib'}-{ib}"}
+        ]
+    if init := _weights_prepare(v):
+        spec["initContainers"] = init
+    if vols := _volumes(v):
+        spec["volumes"] = vols
+    return spec
 
 
 # ---- the objects -------------------------------------------------------------------------------------------
@@ -479,7 +352,6 @@ def _pod_labels_annotations(v: dict, extra: dict | None = None) -> tuple[dict, d
 
 def _inferenceservice(v: dict) -> dict:
     sc = v.get("scaling") or {}
-    queue = v.get("queue") or {}
     pm = v.get("podMetadata") or {}
     pred: dict = {
         "minReplicas": sc.get("minReplicas"),
@@ -490,66 +362,15 @@ def _inferenceservice(v: dict) -> dict:
     if sc.get("containerConcurrency"):
         pred["containerConcurrency"] = sc["containerConcurrency"]
     pred["timeout"] = v.get("timeout")
-    # pod labels (KServe copies them to the Knative revision and its pods): the administrator's pod metadata,
-    # the Kueue queue and priority class
-    if queue.get("name") or queue.get("priorityClass") or pm.get("labels"):
-        labels = dict(pm.get("labels") or {})
-        if queue.get("name"):
-            labels["kueue.x-k8s.io/queue-name"] = queue["name"]
-        if queue.get("priorityClass"):
-            labels["kueue.x-k8s.io/priority-class"] = queue["priorityClass"]
-        pred["labels"] = labels
+    # pod labels (KServe copies them to the Knative revision and its pods): the administrator's pod metadata and
+    # the Kueue priority class
+    pred["labels"] = {**(pm.get("labels") or {}), "kueue.x-k8s.io/priority-class": PRIORITY_CLASS}
     if pm.get("annotations"):
         pred["annotations"] = dict(pm["annotations"])
-    if v.get("automountServiceAccountToken") is not None:
-        pred["automountServiceAccountToken"] = v["automountServiceAccountToken"]
-    if v.get("priorityClassName"):
-        pred["priorityClassName"] = v["priorityClassName"]
-    if v.get("imagePullSecrets"):
-        pred["imagePullSecrets"] = [{"name": s} for s in v["imagePullSecrets"]]
-    # Kueue placement (queue.name) injects the pool's nodeSelector after admission; a pinned endpoint names its pool
-    if not queue.get("name") or v.get("nodeSelector"):
-        selector = {}
-        if not queue.get("name"):
-            selector[POOL_LABEL] = _required(
-                v.get("pool"), "pool is required (or queue.name for Kueue placement)", v["name"]
-            )
-        selector.update(v.get("nodeSelector") or {})
-        pred["nodeSelector"] = selector
-    if v.get("tolerations"):
-        pred["tolerations"] = list(v["tolerations"])
-    if v.get("securityContext"):
-        pred["securityContext"] = dict(v["securityContext"])
-    if init := _weights_prepare(v):
-        pred["initContainers"] = init
-    # per-pool image: when the endpoint is pinned to a pool, `images.<pool>` overrides `image` (docs/SCHEDULING.md)
-    images = v.get("images") or {}
-    if not queue.get("name") and v.get("pool") and v["pool"] in images:
-        image = images[v["pool"]]
-    else:
-        image = _required(v.get("image"), "image is required", v["name"])
-    c: dict = {"name": "kserve-container", "image": image}
-    if v.get("command"):
-        c["command"] = list(v["command"])
-    if v.get("args"):
-        c["args"] = list(v["args"])
-    if v.get("workingDir"):
-        c["workingDir"] = v["workingDir"]
-    wenv, lenv = _weights_env(v), _lease_env(v)
-    if v.get("env") or wenv or lenv:
-        c["env"] = list(v.get("env") or []) + wenv + lenv
-    if v.get("envFrom"):
-        c["envFrom"] = list(v["envFrom"])
-    c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]
-    c["resources"] = _resources(v)
+    pred.update(_pod(v))
+    c = _container(v, "kserve-container", v.get("command"), list(v.get("env") or []) + _weights_env(v) + _lease_env(v))
     c.update(_probes(v))
-    if v.get("containerSecurityContext"):
-        c["securityContext"] = dict(v["containerSecurityContext"])
-    if mounts := _volume_mounts(v):
-        c["volumeMounts"] = mounts
     pred["containers"] = [c]
-    if vols := _volumes(v):
-        pred["volumes"] = vols
     return {
         "apiVersion": "serving.kserve.io/v1beta1",
         "kind": "InferenceService",
@@ -569,13 +390,6 @@ def _inferenceservice(v: dict) -> dict:
 
 def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
     r = v.get("resources") or {}
-    c: dict = {"name": "endpoint", "image": _required(v.get("image"), "image is required", v["name"])}
-    if command:
-        c["command"] = list(command)
-    if v.get("args"):
-        c["args"] = list(v["args"])
-    if v.get("workingDir"):
-        c["workingDir"] = v["workingDir"]
     env = [
         {
             "name": "NODE_RANK",
@@ -601,49 +415,12 @@ def _lws_container(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
     # the model's own entries win over the platform defaults (one entry per name: server-side apply refuses duplicates)
     own = list(v.get("env") or []) + _weights_env(v)
     taken = {e.get("name") for e in own}
-    c["env"] = [e for e in env if e.get("name") not in taken] + own + _lease_env(v)
-    if v.get("envFrom"):
-        c["envFrom"] = list(v["envFrom"])
-    c["ports"] = [{"containerPort": v.get("port"), "protocol": "TCP"}]
-    c["resources"] = _resources(v)
+    c = _container(v, "endpoint", command, [e for e in env if e.get("name") not in taken] + own + _lease_env(v))
     if ib > 0:
         c["resources"]["claims"] = [{"name": "ib"}]
     if leader:
         c.update(_probes(v))  # a hung leader is restarted; RecreateGroupOnPodRestart recreates the group
-    if v.get("containerSecurityContext"):
-        c["securityContext"] = dict(v["containerSecurityContext"])
-    if mounts := _volume_mounts(v):
-        c["volumeMounts"] = mounts
     return c
-
-
-def _lws_podspec(v: dict, nodes: int, ib: int, leader: bool, command) -> dict:
-    spec: dict = {}
-    if v.get("automountServiceAccountToken") is not None:
-        spec["automountServiceAccountToken"] = v["automountServiceAccountToken"]
-    if v.get("priorityClassName"):
-        spec["priorityClassName"] = v["priorityClassName"]
-    if v.get("imagePullSecrets"):
-        spec["imagePullSecrets"] = [{"name": s} for s in v["imagePullSecrets"]]
-    spec["nodeSelector"] = {
-        POOL_LABEL: _required(v.get("pool"), "pool is required", v["name"]),
-        **(v.get("nodeSelector") or {}),
-    }
-    if v.get("tolerations"):
-        spec["tolerations"] = list(v["tolerations"])
-    if v.get("securityContext"):
-        spec["securityContext"] = dict(v["securityContext"])
-    if ib > 0:
-        # DRA claim of every fabric NIC of the node (ResourceClaimTemplate <prefix>-<n>, docs/JOBS.md)
-        spec["resourceClaims"] = [
-            {"name": "ib", "resourceClaimTemplateName": f"{v.get('ibClaimTemplate') or 'ib'}-{ib}"}
-        ]
-    if init := _weights_prepare(v):
-        spec["initContainers"] = init
-    spec["containers"] = [_lws_container(v, nodes, ib, leader, command)]
-    if vols := _volumes(v):
-        spec["volumes"] = vols
-    return spec
 
 
 def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
@@ -652,22 +429,22 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
     ib = int(v.get("ibDevices") or 0)
     sc = v.get("scaling") or {}
     name, ns = _required(v.get("name"), "name is required", v.get("name") or "?"), v["namespace"]
+    _required(v.get("pool"), "pool is required", name)
     labels = _labels(v)
-    pod_labels, pod_annotations = _pod_labels_annotations(
-        v,
-        {
-            "app.kubernetes.io/name": name,
-            "app.kubernetes.io/part-of": "serverless2",
-            f"{LABEL}/model": name,
-            f"{LABEL}/protocol": v.get("protocol") or "http",
-        },
-    )
+    pm = v.get("podMetadata") or {}
+    pod_labels = {
+        **(pm.get("labels") or {}),
+        "app.kubernetes.io/name": name,
+        "app.kubernetes.io/part-of": "serverless2",
+        f"{LABEL}/model": name,
+        f"{LABEL}/protocol": v.get("protocol") or "http",
+    }
 
     def template(role: str, leader: bool, command) -> dict:
         md = {"labels": {**pod_labels, f"{LABEL}/role": role}}
-        if pod_annotations:
-            md["annotations"] = pod_annotations
-        return {"metadata": md, "spec": _lws_podspec(v, nodes, ib, leader, command)}
+        if pm.get("annotations"):
+            md["annotations"] = dict(pm["annotations"])
+        return {"metadata": md, "spec": {**_pod(v, ib), "containers": [_lws_container(v, nodes, ib, leader, command)]}}
 
     lws = {
         "apiVersion": "leaderworkerset.x-k8s.io/v1",
@@ -718,8 +495,8 @@ def _leaderworkerset(v: dict, nodes: int) -> list[dict]:
                 {
                     "group": "gateway.networking.k8s.io",
                     "kind": "Gateway",
-                    "name": v.get("gatewayName"),
-                    "namespace": v.get("gatewayNamespace"),
+                    "name": "serverless2-external",
+                    "namespace": "envoy-gateway-system",
                 }
             ],
             "hostnames": [f"{name}-predictor.{ns}.{domain}"],
@@ -861,42 +638,6 @@ def _securitypolicy(v: dict, api_backend: bool = False) -> dict:
     }
 
 
-def _localmodelcache(v: dict) -> list[dict]:
-    lmc = v.get("localModelCache") or {}
-    if not lmc.get("enabled"):
-        return []
-    return [
-        {
-            "apiVersion": "serving.kserve.io/v1alpha1",
-            "kind": "LocalModelCache",
-            "metadata": {"name": v["name"], "labels": _labels(v)},  # cluster-scoped: no namespace
-            "spec": {
-                "sourceModelUri": _required(lmc.get("storageUri"), "localModelCache.storageUri", v["name"]),
-                "modelSize": lmc.get("size"),
-                "nodeGroups": lmc.get("nodeGroups"),
-            },
-        }
-    ]
-
-
-def _pvcs(v: dict) -> list[dict]:
-    out = []
-    for p in v.get("persistentVolumes") or []:
-        spec: dict = {"accessModes": ["ReadWriteOnce"]}
-        if p.get("storageClass"):
-            spec["storageClassName"] = p["storageClass"]
-        spec["resources"] = {"requests": {"storage": p.get("size")}}
-        out.append(
-            {
-                "apiVersion": "v1",
-                "kind": "PersistentVolumeClaim",
-                "metadata": {"name": f"{v['name']}-{p.get('name')}", "namespace": v["namespace"], "labels": _labels(v)},
-                "spec": spec,
-            }
-        )
-    return out
-
-
 def render(
     entry: dict,
     cluster: str,
@@ -909,16 +650,11 @@ def render(
     variant keeps the model's id as the object name; `api_backend`: the cluster is a GPU region, not the API's own)."""
     v = values(entry, cluster, domain, ib_claim_template, variant)
     nodes = int(v.get("nodes") or 1)
-    docs = [_securitypolicy(v, api_backend)]
-    docs += [_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes)
-    docs += _localmodelcache(v) + _pvcs(v)
+    docs = [_securitypolicy(v, api_backend)] + ([_inferenceservice(v)] if nodes <= 1 else _leaderworkerset(v, nodes))
     if _trust(v):
         docs.append(_trust_configmap(v))
     if v.get("ingressIsolation"):
         if str(v["ingressIsolation"]) != "declared-ports":
             raise _fail("ingress_isolation: declared-ports is the only mode", v["name"])
         docs.append(_ingress_policy(v, nodes))
-    return sorted(
-        docs,
-        key=lambda d: (KIND_ORDER.get(d["kind"], len(KIND_ORDER)), d["kind"] if d["kind"] not in KIND_ORDER else ""),
-    )
+    return sorted(docs, key=lambda d: KINDS.index(d["kind"]))

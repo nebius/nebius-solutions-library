@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 import kube
+from config import LABEL
 
 _UNITS = {
     "": 1,
@@ -160,8 +161,6 @@ def assigned_pool_holds(pod: dict, cluster: str | None) -> bool | None:
     label) ON THE CLUSTER THAT ADMITTED IT has a node that holds its requests; None when the cluster, the table or
     that cluster's pool is unknown (no judgement). The same pool label can name a bigger preset in another cluster:
     only the observed worker's entry counts."""
-    from config import LABEL
-
     spec = pod.get("spec") or {}
     pool = (spec.get("nodeSelector") or {}).get(f"{LABEL}/pool")
     if not pool or not cluster or not table():

@@ -13,7 +13,7 @@ export and finalization state that decides whether "exit 0" became a delivered r
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import timezone
 
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
@@ -21,8 +21,9 @@ from psycopg.types.json import Json
 
 import db
 import kube
-from config import REGION, TENANT_NS_PREFIX
-from resilience import retry
+import status
+from config import JOBSET_NAME_LABEL, REGION, TENANT_NS_PREFIX
+from resilience import iso, parse_ts, retry
 
 log = logging.getLogger("api.attempts")
 
@@ -34,27 +35,37 @@ def enabled() -> bool:
     return db.enabled()
 
 
-def verify_runner_token(token: str) -> tuple[str, str, str]:
-    """TokenReview of an uploader's projected token against the clusters this API reaches, the GPU regions first (a
-    run's pod lives on one of them; the control cluster of a dedicated fleet issues no run tokens and answers
-    "unauthenticated" at once): (region, namespace, pod). 401 when no cluster issued it or it is not a bound pod
-    token of a tenant namespace. The record itself names no cluster: the uploader only knows its pod."""
+def token_review(token: str, region: str, audience: str | None = None):
+    """The TokenReview status of a bound ServiceAccount token on `region`'s cluster (raises ApiException/OSError)."""
     from kubernetes import client
 
+    spec = client.V1TokenReviewSpec(token=token, **({"audiences": [audience]} if audience else {}))
+    return retry(client.AuthenticationV1Api(kube._client(region)).create_token_review, client.V1TokenReview(spec=spec))
+
+
+def pod_claims(st) -> tuple[list[str], str, str]:
+    """(the username's `system:serviceaccount:<ns>:<sa>` parts, pod name, pod UID) of an authenticated TokenReview."""
+    extra = st.user.extra or {}
+    pod = (extra.get("authentication.kubernetes.io/pod-name") or [""])[0]
+    uid = (extra.get("authentication.kubernetes.io/pod-uid") or [""])[0]
+    return (st.user.username or "").split(":"), pod, uid
+
+
+def verify_pod_token(token: str) -> dict:
+    """TokenReview of a run pod's projected token against the clusters this API reaches, the GPU regions first (a
+    run's pod lives on one of them; the control cluster of a dedicated fleet issues no run tokens and answers
+    "unauthenticated" at once): {region, namespace, pod, uid}. 401 when no cluster issued it or it is not a bound pod
+    token of a tenant namespace. The record itself names no cluster: the uploader only knows its pod."""
     for region in sorted(kube.regions(), key=lambda r: r == REGION):
         try:
-            review = retry(
-                client.AuthenticationV1Api(kube._client(region)).create_token_review,
-                client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)),
-            )
+            review = token_review(token, region)
         except (ApiException, OSError) as e:
             log.warning("token review in %s: %s", region, str(e)[:120])
             continue
         st = review.status
         if not st or not st.authenticated:
             continue
-        user = st.user.username or ""
-        parts = user.split(":")
+        parts, pod, uid = pod_claims(st)
         if (
             len(parts) != 4
             or parts[0] != "system"
@@ -62,20 +73,16 @@ def verify_runner_token(token: str) -> tuple[str, str, str]:
             or not parts[2].startswith(TENANT_NS_PREFIX)
         ):
             raise HTTPException(401, "not a tenant run identity")
-        pod = ((st.user.extra or {}).get("authentication.kubernetes.io/pod-name") or [""])[0]
         if not pod:
             raise HTTPException(401, "token is not bound to a pod")
-        return region, parts[2], pod
+        return {"region": region, "namespace": parts[2], "pod": pod, "uid": uid}
     raise HTTPException(401, "token not recognised by any cluster of this fleet")
 
 
-def _ts(s):
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except ValueError:
-        return None
+def verify_runner_token(token: str) -> tuple[str, str, str]:
+    """`verify_pod_token` of an uploader's token as (region, namespace, pod)."""
+    d = verify_pod_token(token)
+    return d["region"], d["namespace"], d["pod"]
 
 
 def record(region: str, ns: str, pod: str, body: dict) -> dict:
@@ -122,26 +129,18 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
             epoch = _gang_epoch(c, operation, gang, top)
         else:
             epoch = top + 1
-        if gang and gang.get("rank") not in (None, 0):
-            # coordinator authority: rank 0 alone publishes the gang's checkpoint pointer and result reference; a
-            # peer's record keeps its own timings, exit and GPUs (accounting for every rank), promotes nothing
-            body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
-        if epoch < top:
-            # a replaced attempt: its own end (interruption or failure, with its measured time) may still close the
-            # accounting of an attempt already on record; it promotes nothing (no pointer, generation or result) and
-            # changes no operation status; a late start, progress or success of a replaced attempt is refused
-            if not cur or status not in ("interrupted", "failed"):
-                raise HTTPException(
-                    409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused"
-                )
-            body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
-        if marks and marks[1]:
-            # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
-            # publish progress (a start or pointer record) or a final success; its own interruption or failure may
-            # still close its attempt, but promotes nothing: no pointer, generation or result from a superseded pod
-            # ever reaches the durable row (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
-            if status not in ("interrupted", "failed"):
-                raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
+        # a replaced attempt (epoch < top): its own end (interruption or failure, with its measured time) may still close
+        # the accounting of an attempt already on record; a late start, progress or success of it is refused
+        if epoch < top and (not cur or status not in ("interrupted", "failed")):
+            raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
+        # fenced before its successor exists: a worker that comes back after the platform moved the run cannot publish
+        # progress (a start or pointer record) or a final success; its own interruption or failure may still close its
+        # attempt (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
+        if marks and marks[1] and status not in ("interrupted", "failed"):
+            raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
+        if (gang and gang.get("rank") not in (None, 0)) or epoch < top or (marks and marks[1]):
+            # a peer (rank 0 alone publishes the gang's pointer and result), a replaced attempt or a superseded pod
+            # promotes nothing: no pointer, generation or result reaches the durable row; timings, exit and GPUs do
             body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
         if cur and cur[1] in TERMINAL and status == "started":
             return _row(c, operation, pod)  # a late duplicate of the current attempt's start record
@@ -199,8 +198,8 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                 body.get("image_digest") or None,
                 status,
                 body.get("exit_code"),
-                _ts(body.get("started_at")),
-                _ts(body.get("ended_at")),
+                parse_ts(body.get("started_at")),
+                parse_ts(body.get("ended_at")),
                 export,
                 body.get("result_ref") or None,
                 body.get("checkpoint_ref") or None,
@@ -293,9 +292,6 @@ def _capture_of(raw, operation: str, root: str, c) -> dict | None:
     return cap
 
 
-JOBSET_NAME_LABEL = "jobset.sigs.k8s.io/jobset-name"
-JOBSET_RESTART_LABEL = "jobset.sigs.k8s.io/restart-attempt"
-JOB_INDEX_LABEL = "batch.kubernetes.io/job-completion-index"
 GANG_POD = re.compile(r"^(?P<op>.+)-workers-\d+-(?P<rank>\d+)-[a-z0-9]{5}$")
 
 
@@ -316,25 +312,14 @@ def _pod_facts(region: str | None, namespace: str, pod: str, operation: str) -> 
         if m and m.group("op") == operation:
             out["gang"] = {"uid": None, "rank": int(m.group("rank")), "restart": None}
         return out
-    md = obj.metadata
-    out["read"], out["uid"] = True, md.uid
-    for cs in (obj.status.container_statuses if obj.status else None) or []:
-        if cs.name == MAIN_CONTAINER and cs.image_id:
-            out["digest"] = cs.image_id
-    labels, ann = dict(md.labels or {}), dict(md.annotations or {})
+    p = kube.core(region or kube.REGION).api_client.sanitize_for_serialization(obj)
+    md = p.get("metadata") or {}
+    out["read"], out["uid"], out["digest"] = True, md.get("uid"), status._pod_digest(p)
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
     if (labels.get(JOBSET_NAME_LABEL) or ann.get(JOBSET_NAME_LABEL)) == operation:
-        rank = labels.get(JOB_INDEX_LABEL) or ann.get(JOB_INDEX_LABEL)
-        restart = labels.get(JOBSET_RESTART_LABEL) or ann.get(JOBSET_RESTART_LABEL) or "0"
-        try:
-            out["gang"] = {"uid": md.uid, "rank": int(rank) if rank is not None else None, "restart": int(restart)}
-        except ValueError:
-            out["gang"] = {"uid": md.uid, "rank": None, "restart": None}
+        g = status._pod_gang_fields(p)
+        out["gang"] = {"uid": md.get("uid"), "rank": g["gang_rank"], "restart": g["gang_restart"]}
     return out
-
-
-def _pod_gang(region: str | None, namespace: str, pod: str, operation: str) -> dict | None:
-    """The gang membership alone (see `_pod_facts`)."""
-    return _pod_facts(region, namespace, pod, operation)["gang"]
 
 
 def _gang_epoch(c, operation: str, gang: dict, top: int) -> int:
@@ -390,7 +375,7 @@ def _dict(r) -> dict:
     keys = [k.strip() for k in COLS.split(",")]
     d = dict(zip(keys, r))
     for k in ("started_at", "ended_at", "updated_at"):
-        d[k] = d[k].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if d.get(k) else None
+        d[k] = iso(d[k].astimezone(timezone.utc)) if d.get(k) else None
     return d
 
 
@@ -403,13 +388,7 @@ def _row(c, operation: str, pod: str) -> dict:
 def for_operation(root: str) -> list[dict]:
     """Every attempt of the root operation and its resumes, oldest first (the uploader's record shape plus the
     lifecycle fields), for status and billing."""
-    if not enabled():
-        return []
-    with db.pool().connection() as c:
-        rows = c.execute(
-            f"select {COLS} from attempts where root = %s or operation = %s order by epoch, started_at", (root, root)
-        ).fetchall()
-    return [_dict(r) for r in rows]
+    return for_operations({root}).get(root, [])
 
 
 def for_operations(roots: set[str]) -> dict[str, list[dict]]:
@@ -466,7 +445,7 @@ def durable_index(tenant: str, owner: str | None, model: str | None) -> list[dic
     `operation_owners`: the owner's roots and their continuations), None for an admin's whole tenant; `model` narrows
     by the provenance the records carry (migration 12). Nothing here is a new ledger: it reads the records that
     GET /v1/operations/{id} already reports an expired operation from."""
-    if not enabled() or not db.enabled():
+    if not enabled():
         return []
     where, params = ["a.tenant = %s"], [tenant]
     if owner is not None:
@@ -491,7 +470,7 @@ def durable_index(tenant: str, owner: str | None, model: str | None) -> list[dic
             "model": r[2],
             "mode": r[3] or "run",
             "region": r[4],
-            "created_at": r[5].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if r[5] else "",
+            "created_at": iso(r[5].astimezone(timezone.utc)) if r[5] else "",
         }
         for r in rows
     ]
@@ -504,31 +483,24 @@ def synthesize(operation: str, tenant: str) -> dict | None:
     if not rows:
         return None
     last = authority(rows)  # a gang: the coordinator of the newest incarnation; its outcome counts every rank
-    status = {"succeeded": "SUCCEEDED", "failed": "FAILED", "interrupted": "PREEMPTED", "started": "PREEMPTED"}.get(
-        gang_status(rows) or last["status"], "FAILED"
-    )
+    state = status.RECORD_STATUS.get(gang_status(rows) or last["status"], "FAILED")
     export = last.get("export_state")
-    if status == "SUCCEEDED" and (
+    if state == "SUCCEEDED" and (
         export == "failed" or export is None or (export == "n/a" and not last.get("result_ref"))
     ):
-        status = "EXPORT_FAILED"
+        state = "EXPORT_FAILED"
     m = _marks(operation)
     if m and m[1]:
-        status = "CANCELLED"
-    completion = completion_of(operation) if status == "PREEMPTED" else None
+        state = "CANCELLED"
+    completion = completion_of(operation) if state == "PREEMPTED" else None
     proven = observed_complete(rows, m, completion)
     if proven:
-        status = "SUCCEEDED"  # the Job proved exit 0 and the attempt's own RESULT.json was committed (migration 29)
+        state = "SUCCEEDED"  # the Job proved exit 0 and the attempt's own RESULT.json was committed (migration 29)
     attempts = [
         {
             "index": i + 1,
             "attempt_id": r["pod"],
-            "status": {
-                "succeeded": "SUCCEEDED",
-                "failed": "FAILED",
-                "interrupted": "PREEMPTED",
-                "started": "PREEMPTED",
-            }.get(r["status"], "FAILED"),
+            "status": status.RECORD_STATUS.get(r["status"], "FAILED"),
             "started_at": r.get("started_at"),
             "ended_at": r.get("ended_at"),
             "node": r.get("node"),
@@ -547,11 +519,9 @@ def synthesize(operation: str, tenant: str) -> dict | None:
         }
         for i, r in enumerate(rows)
     ]
-    import status as st
-
-    st.cancel_attempt(
-        attempts, status == "CANCELLED"
-    )  # the record of the cancelled attempt is the cancel, not a preemption
+    status.cancel_attempt(
+        attempts, state == "CANCELLED"
+    )  # the cancelled attempt's record is the cancel, not a preemption
     if proven:
         attempts[-1]["status"], attempts[-1]["reason"] = "SUCCEEDED", completion["reason"] or OBSERVED_COMPLETION
     return {
@@ -560,7 +530,7 @@ def synthesize(operation: str, tenant: str) -> dict | None:
         # provenance that outlives the Job (migration 12): the operation's mode, model and I/O mode
         "model": last.get("model"),
         "mode": last.get("mode") or "run",
-        "status": status,
+        "status": state,
         "region": last.get("region"),
         "tenant": tenant,
         "phase": None,
@@ -658,19 +628,9 @@ def mark_cancelled(operation: str) -> None:
         )
 
 
-def _marks(operation: str):
-    if not enabled():
-        return None
-    with db.pool().connection() as c:
-        return c.execute(
-            "select revision, cancelled_at, successor from operation_marks where operation = %s", (operation,)
-        ).fetchone()
-
-
-def _pod_digest(region: str | None, namespace: str, pod: str) -> str | None:
-    """The main container's imageID as the API reads it on the pod right now (see `_pod_facts`); None when not
-    reported yet or unreadable (the record then stays `pending` and the live read at GET time converges it)."""
-    return _pod_facts(region, namespace, pod, "")["digest"]
+def _marks(operation: str) -> tuple | None:
+    """The operation's mark row (revision, cancelled_at, successor), or None."""
+    return marks_for({operation}).get(operation)
 
 
 def marks_for(operations: set[str]) -> dict[str, tuple]:
@@ -685,19 +645,13 @@ def marks_for(operations: set[str]) -> dict[str, tuple]:
     return {r[0]: tuple(r[1:]) for r in rows}
 
 
-MAIN_CONTAINER = "main"
-
-
 def observed_digest(pods: list | None, pod_name: str | None) -> str | None:
     """The runtime image digest of the attempt's main container as the API observes it on the live pod
     (`containerStatuses[main].imageID`): what actually runs, never the expected image. None until the kubelet reports it."""
-    for p in pods or []:
-        if ((p.get("metadata") or {}).get("name")) != pod_name:
-            continue
-        for cs in (p.get("status") or {}).get("containerStatuses") or []:
-            if cs.get("name") == MAIN_CONTAINER and cs.get("imageID"):
-                return cs["imageID"]
-    return None
+    return next(
+        (d for p in pods or [] if (p.get("metadata") or {}).get("name") == pod_name and (d := status._pod_digest(p))),
+        None,
+    )
 
 
 def digest_state(latest: dict | None, digest: str | None) -> str | None:
@@ -734,29 +688,30 @@ def lifecycle(
     its record does not carry it yet (the uploader's start record can precede the kubelet's imageID)."""
     mine = [r for r in rows if r["operation"] == operation]
     latest = authority(mine)  # the newest epoch's record; a gang's coordinator (rank 0)
-    digest = (latest.get("image_digest") or observed_digest(pods, latest.get("pod"))) if latest else None
+    at = latest or {}
+    digest = (at.get("image_digest") or observed_digest(pods, at.get("pod"))) if latest else None
     revision = max([r.get("revision") or 0 for r in rows] + [0])
     m = _marks(operation) if marks is False else marks
     if m:
         revision = max(revision, m[0] or 0)
     return {
         "root_operation_id": root,
-        "attempt_id": latest.get("pod") if latest else None,
-        "epoch": latest.get("epoch") if latest else None,
+        "attempt_id": at.get("pod"),
+        "epoch": at.get("epoch"),
         "revision": revision,
-        "export_state": (latest.get("export_state") or latest.get("export")) if latest else None,
-        "result_ref": latest.get("result_ref") if latest else None,
-        "checkpoint_ref": latest.get("checkpoint_ref") if latest else None,
+        "export_state": at.get("export_state") or at.get("export"),
+        "result_ref": at.get("result_ref"),
+        "checkpoint_ref": at.get("checkpoint_ref"),
         "image_digest": digest,
         "image_digest_state": digest_state(latest, digest),
         # the canonical cluster id (configured name); the Nebius region is the operation's `region`
-        "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region"))) if latest else None,
-        "checkpoint_generation": latest.get("checkpoint_generation") if latest else None,
-        "attempt_role": (latest.get("role") or "run") if latest else None,
+        "cluster": (at.get("cluster") or kube.cluster_id_or_none(at.get("region"))) if latest else None,
+        "checkpoint_generation": at.get("checkpoint_generation"),
+        "attempt_role": (at.get("role") or "run") if latest else None,
         # observed on the pod by the API when it recorded (docs/JOBS.md "Gang attempts"): never the record's claim
-        "pod_uid": latest.get("pod_uid") if latest else None,
-        "gang_rank": latest.get("gang_rank") if latest else None,
-        "gang_restart": latest.get("gang_restart") if latest else None,
+        "pod_uid": at.get("pod_uid"),
+        "gang_rank": at.get("gang_rank"),
+        "gang_restart": at.get("gang_restart"),
         # the incarnation-frozen resume pointer the gang was told to restore (the start ACK's), never "the latest":
         # the three keys are present only when the ACK decided them (`resume_source` on record: committed, explicit or
         # fresh); an undecided row (unACKed, legacy) carries no triple, never a manufactured null

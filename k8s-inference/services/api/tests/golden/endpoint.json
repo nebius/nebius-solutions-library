@@ -35,7 +35,7 @@
   {
    "kind": "InferenceService",
    "name": "http-example",
-   "sha256": "0d55526e2bd1a79cfce655cf5c00d0e7351aec9b622901ec6ea6c9ea632e8eef"
+   "sha256": "2b45243ed91c2acd7520f13cad09773112ae74869e57c905263effc9e10d35ec"
   },
   {
    "kind": "SecurityPolicy",
@@ -87,23 +87,11 @@
    "sha256": "a196e6917437d82b0e49ecc35f4d7f9e635c2c8e01c88cc1308767ed583e3b33"
   }
  ],
- "kueue-example-hub": [
-  {
-   "kind": "InferenceService",
-   "name": "kueue-example",
-   "sha256": "f9ef050c06d70c1b842a5f2d3f54f428c62ba49020657254a709bb7db3a431d3"
-  },
-  {
-   "kind": "SecurityPolicy",
-   "name": "kueue-example-authorization",
-   "sha256": "f12deb10c40b7b6ce4000d4f81ea91cf86b8eebc7f9112136c7af770452a69a4"
-  }
- ],
  "llm-example-eu-south1": [
   {
    "kind": "InferenceService",
    "name": "llm-example",
-   "sha256": "db6a544d24aaa6175ae2949c92912935124a523b8f4e6cdffd923bebd104c747"
+   "sha256": "06713794d4f20bb43a176d576ce48319797a26df2d95b1369de3fef367646090"
   },
   {
    "kind": "SecurityPolicy",
@@ -115,7 +103,7 @@
   {
    "kind": "InferenceService",
    "name": "llm-example",
-   "sha256": "eb3ee098ce5a20747c0691b2d4cfcbd94f9d4fab9dc01f8fc37550502a45895c"
+   "sha256": "834a01b4a834c96efc49803b372c8f45e67c3bf01953e8e81639b27a6dff36c7"
   },
   {
    "kind": "SecurityPolicy",
@@ -161,36 +149,21 @@
  ],
  "storage-example-hub": [
   {
-   "kind": "PersistentVolumeClaim",
-   "name": "storage-example-index",
-   "sha256": "7f25fa60dcc7dae8b2644592664106d5dde92994ebd0bf95340b3c882bf63887"
-  },
-  {
-   "kind": "PersistentVolumeClaim",
-   "name": "storage-example-state",
-   "sha256": "8ccdcfa4883bf4dbf0f2c901c249d312a38b9c6381250bc24f13bce75565dcd0"
-  },
-  {
    "kind": "InferenceService",
    "name": "storage-example",
-   "sha256": "7e99db6d3843126875f7c1681096e91881f71d2c1d8fed31bbfaf60972c42db5"
-  },
-  {
-   "kind": "LocalModelCache",
-   "name": "storage-example",
-   "sha256": "8809f852442a9fcaeade5ca435c7b6469e17b961d77ab838027e6d5946adcf9f"
+   "sha256": "2fe81f7ac3469c823e4449b3eaf03660d1d3a32e593a0e637446b0ec3cb8bb61"
   },
   {
    "kind": "SecurityPolicy",
    "name": "storage-example-authorization",
-   "sha256": "de5f1f4ce2f624fd9fdc9241b2c10dda564138d15bff8ea93b258a6ddd837c73"
+   "sha256": "c273f108efa5c5ca794c62f332b1e7e49b2c31f46355a2d8f8f467b9f70e8871"
   }
  ],
  "ws-example-eu-south1": [
   {
    "kind": "InferenceService",
    "name": "ws-example",
-   "sha256": "fe0012378f683e3b7d01f1483aaf94e03a3f8ee4dc4cb295199e19368a3f7e58"
+   "sha256": "fb0b3d1282f5511fab443d7fa190e5c4a04023ca13f828f5ae1ec28be35ebfc2"
   },
   {
    "kind": "SecurityPolicy",

@@ -67,13 +67,11 @@ class RecoverySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     on_infrastructure_loss: Literal["retry", "fail", "recover"] = "retry"
     checkpoint_ref: str | None = Field(default=None, max_length=1024)
-    max_recoveries: int | None = Field(
-        default=None, ge=1, le=RECOVERY_MAX
-    )  # `recover` only: automatic continuations per root
+    # `recover` only: automatic continuations per root
+    max_recoveries: int | None = Field(default=None, ge=1, le=RECOVERY_MAX)
     wait_s: int | None = Field(default=None, ge=0, le=86400)  # `recover` only: time to come back on its own class first
-    deadline_s: int | None = Field(
-        default=None, ge=60, le=14 * 86400
-    )  # `recover` only: no recovery past root.created_at + deadline_s (a 14-day run may recover until its end)
+    # `recover` only: no recovery past root.created_at + deadline_s (a 14-day run may recover until its end)
+    deadline_s: int | None = Field(default=None, ge=60, le=14 * 86400)
 
 
 MAX_STAGES = 256
@@ -85,9 +83,8 @@ class GraphSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     stages: dict[str, "list[str] | StageDecl"]
-    deadline_s: int | None = Field(
-        default=None, ge=60, le=30 * 86400
-    )  # stages still waiting after it are cancelled (default 14 days)
+    # stages still waiting after it are cancelled (default 14 days)
+    deadline_s: int | None = Field(default=None, ge=60, le=30 * 86400)
 
 
 class StageDecl(BaseModel):
@@ -178,10 +175,9 @@ class SessionRequest(BaseModel):
     """`POST /v1/models/{model}:session` (docs/API.md "Sessions")."""
 
     model_config = ConfigDict(extra="forbid")
-    timeout_s: int | None = Field(
-        default=None, ge=60, le=86400
-    )  # the session's deadline from its creation; default: the
-    # endpoint's transport deadline (a single-node endpoint's timeout_s), 3600 without one (multi-node)
+    # the session's deadline from its creation; default: the endpoint's transport deadline (a single-node endpoint's
+    # timeout_s), 3600 without one (multi-node)
+    timeout_s: int | None = Field(default=None, ge=60, le=86400)
     region: str | None = None  # a cluster id or region of the model's deployments (docs/API.md)
 
 
@@ -224,13 +220,11 @@ class SessionRelease(BaseModel):
 
 
 class ResumeRequest(BaseModel):
-    checkpoint_ref: str | None = Field(
-        default=None, max_length=1024
-    )  # a portable checkpoint: no volume, any permitted cluster/class
+    # a portable checkpoint: no volume, any permitted cluster/class
+    checkpoint_ref: str | None = Field(default=None, max_length=1024)
     gpu_class: str | None = None
-    restart_from_inputs: bool = (
-        False  # a FAILED root whose Job and volume expired: render again from its admission record (docs/JOBS.md)
-    )
+    # a FAILED root whose Job and volume expired: render again from its admission record (docs/JOBS.md)
+    restart_from_inputs: bool = False
 
 
 class UploadRequest(BaseModel):
@@ -380,6 +374,9 @@ class RoutingSpec(BaseModel):
     default: str | None = None
 
 
+_FieldRef = Literal["metadata.uid", "metadata.name", "metadata.namespace"]
+
+
 class FinalizeSpec(BaseModel):
     command: str | list[str] | None = None
     on_exit_codes: list[int] | None = None
@@ -424,9 +421,7 @@ class ModelSpec(BaseModel):
     timeout_s: SkipValidation[int | None] = None
     shm_gib: SkipValidation[int | None] = None
     empty_dirs: SkipValidation[list[EphemeralVolumeSpec] | None] = None
-    env_field_refs: SkipValidation[dict[str, Literal["metadata.uid", "metadata.name", "metadata.namespace"]] | None] = (
-        None
-    )
+    env_field_refs: SkipValidation[dict[str, _FieldRef] | None] = None
     pull_secret: SkipValidation[str | None] = None
     weights: SkipValidation[WeightsSpec | None] = None
     data: SkipValidation[DataSpec | None] = None
@@ -442,36 +437,29 @@ class ModelSpec(BaseModel):
     memory_limit: SkipValidation[str | None] = None  # a limit above the request is not guaranteed memory
     ephemeral_storage: SkipValidation[str | None] = None  # node-local scratch request (the kubelet's ephemeral storage)
     ephemeral_storage_limit: SkipValidation[str | None] = None  # = the request unless given
-    delegates: SkipValidation[list[str] | None] = (
-        None  # run classes a graph of this root may bind stages to (operator-owned)
-    )
-    native_lease: SkipValidation[Literal["optional", "required"] | None] = (
-        None  # endpoints: whether the worker must attach to each call's native execution (docs/API.md)
-    )
-    ingress_isolation: SkipValidation[Literal["declared-ports"] | None] = (
-        None  # endpoints: a CiliumNetworkPolicy admits only the platform's data path into the pods (docs/API.md)
-    )
-    retry: SkipValidation[dict[str, Any] | None] = (
-        None  # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
-    )
+    # run classes a graph of this root may bind stages to (operator-owned)
+    delegates: SkipValidation[list[str] | None] = None
+    # endpoints: whether the worker must attach to each call's native execution (docs/API.md)
+    native_lease: SkipValidation[Literal["optional", "required"] | None] = None
+    # endpoints: a CiliumNetworkPolicy admits only the platform's data path into the pods (docs/API.md)
+    ingress_isolation: SkipValidation[Literal["declared-ports"] | None] = None
+    # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
+    retry: SkipValidation[dict[str, Any] | None] = None
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
     scratch: SkipValidation[Literal["network", "local-nvme"] | None] = None
-    work_mount_aliases: SkipValidation[list[dict[str, str]] | None] = (
-        None  # [{path: /abs/canonical, scope: attempt | run}]: the work volume at a canonical path (docs/JOBS.md "Work mount aliases")
-    )
-    assets: SkipValidation[list[dict[str, str]] | None] = (
-        None  # [{alias, mount_path}]: restricted assets of the fleet registry, granted to the tenant, main-only read-only (docs/JOBS.md)
-    )
+    # [{path: /abs/canonical, scope: attempt | run}]: the work volume at a canonical path (docs/JOBS.md "Work mount aliases")
+    work_mount_aliases: SkipValidation[list[dict[str, str]] | None] = None
+    # [{alias, mount_path}]: restricted assets of the fleet registry, granted to the tenant, main-only read-only (docs/JOBS.md)
+    assets: SkipValidation[list[dict[str, str]] | None] = None
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
     # endpoint children (docs/JOBS.md "Endpoint children"): the endpoint models a live attempt of this run class may
     # ask the platform to call as bounded async children, and the explicit bound on their number per root
     child_endpoints: SkipValidation[list[str] | None] = None
     child_max_units: SkipValidation[int | None] = None
-    child_delivery: SkipValidation[str | None] = (
-        None  # platform (default: the tenant bucket) | application (the parent's broker)
-    )
+    # platform (default: the tenant bucket) | application (the parent's broker)
+    child_delivery: SkipValidation[str | None] = None
 
 
 class Error(BaseModel):
@@ -535,9 +523,8 @@ class ModelRollout(BaseModel):
     latest_rolled_out: str | None = None
     generation: int | None = None  # the InferenceService's spec generation and what the controller reconciled
     observed_generation: int | None = None
-    desired_image: str | None = (
-        None  # the spec's image; `revision_image` the ready Revision's (stored template evidence)
-    )
+    # the spec's image; `revision_image` the ready Revision's (stored template evidence)
+    desired_image: str | None = None
     revision_image: str | None = None
     revision_image_digest: str | None = None
     serving_images: list[str] | None = None
@@ -636,9 +623,8 @@ class NativeExecution(BaseModel):
     cancel_requested: bool | None = None
     settled: bool | None = None
     attempts: list[dict[str, Any]] | None = None  # every attempt's evidence, oldest first
-    lost_reason: str | None = (
-        None  # why the reconciler marked it lost: pod gone | pod replaced | pod finished | worker container restarted (...)
-    )
+    # why the reconciler marked it lost: pod gone | pod replaced | pod finished | worker container restarted (...)
+    lost_reason: str | None = None
 
 
 class NativeAttach(BaseModel):
@@ -685,9 +671,8 @@ class GraphStatus(BaseModel):
     stages: list[GraphStage] | None = None
     deadline_at: str | None = None
     cancelled: bool | None = None
-    action_required: bool | None = (
-        None  # open graph, nothing active, a FAILED stage: the owner resumes it or cancels the root
-    )
+    # open graph, nothing active, a FAILED stage: the owner resumes it or cancels the root
+    action_required: bool | None = None
     blocked_on: list[BlockedStage] | None = None
     waiting: list[str] | None = None  # the dependency-gated stages
 
@@ -783,9 +768,8 @@ class Operation(BaseModel):
     checkpoint_ref: str | None = None
     checkpoint_generation: int | None = None
     image_digest: str | None = None
-    image_digest_state: Literal["observed", "pending", "unknown"] | None = (
-        None  # observed = exact runtime digest; pending = the attempt runs, the kubelet has not reported it yet (transient); unknown = ended without one
-    )
+    # observed = exact runtime digest; pending = the attempt runs, the kubelet has not reported it yet (transient); unknown = ended without one
+    image_digest_state: Literal["observed", "pending", "unknown"] | None = None
     finalize_attempts: int | None = None
     finalizing_by: str | None = None
 
@@ -859,9 +843,8 @@ class Endpoint(BaseModel):
     name: str
     model: str
     region: str
-    cluster: str | None = (
-        None  # the deployment's cluster id as the catalog keys it (`north`); `region` is where the API reaches it
-    )
+    # the deployment's cluster id as the catalog keys it (`north`); `region` is where the API reaches it
+    cluster: str | None = None
     url: str
     status: Literal["ready", "scaled-to-zero", "deploying", "error", "unavailable"]
     replicas_ready: int | None

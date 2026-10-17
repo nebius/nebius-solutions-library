@@ -1,11 +1,9 @@
-"""The native endpoint renderer (services/api/render_endpoint.py) against the objects `helm template charts/endpoint`
-produced: one golden file per case under tests/golden/endpoint/<name>.yaml, written from the chart. The renderer
-must reproduce every file exactly (parsed YAML: key order is free, no key or value may differ, the document
-order is the chart's), and the chart must still produce the files (skipped without helm), so neither can drift
-while both exist. Cases: the endpoint fixtures of tests/catalog, the multi-node and variant specs of the other
-tests, and entries that exercise the remaining settings (claims, caches, probes, Kueue placement, pod metadata).
+"""The native endpoint renderer (services/api/render_endpoint.py) against its record: one hash per rendered object
+and case in tests/golden/endpoint.json (key order is free, no key or value may differ, the object order is the apply
+order). Cases: the endpoint fixtures of tests/catalog, the multi-node and variant specs of the other tests, and an
+entry that exercises the remaining settings (pull secrets, Secret env, read-only seeded weights, scratch volumes).
 
-Regenerate after a deliberate change of the chart:  .venv-api/bin/python services/api/tests/test_render_endpoint_golden.py --write
+Regenerate after a deliberate change of the renderer:  .venv-api/bin/python services/api/tests/test_render_endpoint_golden.py --write
 """
 
 import contextlib
@@ -16,11 +14,13 @@ import pytest
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if __name__ == "__main__":
+    import conftest  # noqa: F401  (`--write`: the pytest environment, before config is read)
 import config  # noqa: E402
 import kube
 import models
 import render_endpoint
-import test_api  # noqa: E402  (sets the test environment: REGION, CATALOG_DIRS, ...)
+import test_api  # noqa: E402
 import test_multinode_endpoints as multinode  # noqa: E402
 import test_variants as variants  # noqa: E402
 
@@ -58,8 +58,8 @@ EXTRA_METADATA = {
     "annotations": {"example.org/qualification": "evidence/model-immutable.json"},
 }
 
-# every setting the chart reads, in one entry: claims kept across scale-to-zero, a node-local model cache, both
-# probes, a per-pool image, extra selectors and tolerations, pull secrets, Secret env, read-only seeded weights
+# every setting the renderer reads, in one entry: pull secrets, Secret env, read-only seeded weights, a scratch volume
+# in memory, an rps-scaled replica floor
 STORAGE_EXAMPLE = {
     "id": "storage-example",
     "displayName": "Storage example",
@@ -68,21 +68,16 @@ STORAGE_EXAMPLE = {
     "protocol": "http",
     "port": 9000,
     "gpu": {"count": 2, "classes": ["h100"]},
-    "labels": {"example.org/team": "science"},
-    "annotations": {"example.org/owner": "ops"},
     "runtime": {
         "image": "registry.serverless2.local/nvcr/example/storage:1.0",
         "imagePullSecrets": ["ngc"],
         "command": ["serve"],
         "args": ["--port", "9000"],
-        "workingDir": "/srv",
         "port": 9000,
         "protocol": "http",
         "env": [{"name": "LOG_LEVEL", "value": "info"}],
         "envFrom": [{"secretRef": {"name": "storage-keys"}}],
         "resources": {"gpu": 2, "cpu": "16", "memory": "64Gi", "ephemeralStorage": "100Gi"},
-        "nodeSelector": {"example.org/zone": "a"},
-        "tolerations": [{"key": "example.org/dedicated", "operator": "Exists", "effect": "NoSchedule"}],
         "scaling": {
             "minReplicas": 1,
             "maxReplicas": 3,
@@ -92,57 +87,16 @@ STORAGE_EXAMPLE = {
             "scaleToZeroRetention": "5m",
         },
         "timeout": 120,
-        "priorityClassName": "serverless2-interactive",
-        "queue": {"priorityClass": "science"},
-        "images": {"h100-spot-2x": "registry.serverless2.local/nvcr/example/storage:1.0-h100"},
         "shm": {"enabled": True, "size": "8Gi"},
         "volumes": [{"name": "scratch", "mountPath": "/scratch", "sizeLimit": "20Gi", "medium": "Memory"}],
-        "persistentVolumes": [
-            {"name": "index", "mountPath": "/index", "size": "200Gi", "storageClass": "shared-rwx"},
-            {"name": "state", "mountPath": "/state", "size": "10Gi"},
-        ],
-        "readinessProbe": {"path": "/ready", "port": 9001, "periodSeconds": 5, "failureThreshold": 3},
-        "livenessProbe": {"path": "/live", "initialDelaySeconds": 60},
-        "securityContext": {"runAsUser": 1000},
-        "containerSecurityContext": {"readOnlyRootFilesystem": True},
-        "localModelCache": {
-            "enabled": True,
-            "storageUri": "s3://weights/storage-example",
-            "nodeGroups": ["h100"],
-            "size": "120Gi",
-        },
+        "readinessProbe": {"path": "/ready", "port": 9001},
         "weights": {
-            "sharedFilesystem": {
-                "enabled": True,
-                "path": "seeded/storage",
-                "mountPath": "/models",
-                "readOnly": True,
-                "claimName": "weights-ro",
-            },
+            "sharedFilesystem": {"enabled": True, "path": "seeded/storage", "mountPath": "/models", "readOnly": True},
             "env": {"MODEL_DIR": "/models", "CACHE": "/scratch"},
         },
         "annotations": {"autoscaling.knative.dev/window": "60s"},
     },
     "deployments": {"hub": {"pool": "h100-spot-2x", "price_per_gpu_hour": 2.5, "paused": False, "parameters": {}}},
-}
-
-# Kueue places the pods (queue.name): no pool selector, the per-pool image is not used, the extra selector stays
-KUEUE_EXAMPLE = {
-    "id": "kueue-example",
-    "task": "inference",
-    "mode": "sync",
-    "runtime": {
-        "image": "registry.serverless2.local/docker/library/nginx:1.27",
-        "port": 80,
-        "protocol": "http",
-        "resources": {"gpu": 1, "cpu": "2", "memory": "4Gi"},
-        "queue": {"name": "prefer-h100"},
-        "nodeSelector": {"example.org/zone": "b"},
-        "images": {"h100-spot-1x": "registry.serverless2.local/docker/library/nginx:1.27-h100"},
-        "shm": {"enabled": False},
-        "weights": {"sharedFilesystem": {"enabled": True, "prepare": False}},
-    },
-    "deployments": {"hub": {"pool": "h100-spot-1x"}},
 }
 
 
@@ -204,7 +158,6 @@ def cases() -> dict[str, tuple[dict, str]]:
         "ws-example-eu-south1": (_fixture("ws-example"), "eu-south1"),
         "http-example-hub": (_fixture("http-example"), "hub"),
         "storage-example-hub": (STORAGE_EXAMPLE, "hub"),
-        "kueue-example-hub": (KUEUE_EXAMPLE, "hub"),
         "my-llm-hub": (_entry(my_llm, test_api.FLEET), "hub"),
         "scaling-demo-hub": (_entry(scaling_demo, test_api.FLEET), "hub"),
         "metadata-endpoint-hub": (_entry(metadata_endpoint, test_api.FLEET), "hub"),
@@ -291,10 +244,10 @@ def test_a_models_own_env_entry_replaces_the_platform_default():
 def test_rendering_errors_name_the_object():
     from fastapi import HTTPException
 
-    entry = {**KUEUE_EXAMPLE, "runtime": {**KUEUE_EXAMPLE["runtime"], "image": ""}}
+    entry = {**STORAGE_EXAMPLE, "runtime": {**STORAGE_EXAMPLE["runtime"], "image": ""}}
     with pytest.raises(HTTPException) as e:
         native(entry, "hub")
-    assert e.value.status_code == 400 and "kueue-example" in e.value.detail and "image is required" in e.value.detail
+    assert e.value.status_code == 400 and "storage-example" in e.value.detail and "image is required" in e.value.detail
     with pytest.raises(HTTPException):
         native({"id": "run-class", "mode": "run", "job": {}}, "hub")
 

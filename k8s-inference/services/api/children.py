@@ -46,22 +46,28 @@ while the old caller or worker may still be draining. Accounting on the root's l
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import urllib3
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 
+import artifacts
+import attempts
 import catalog
 import db
+import execution
 import jobs
 import keys
 import kube
+import leases
 import status
 from config import LABEL, PUBLIC_API_URL, REGION, TENANT_NS_PREFIX
-from resilience import retry
+from resilience import iso, parse_ts
 
 log = logging.getLogger("api")
 
@@ -84,12 +90,10 @@ def child_id(root: str, unit_id: str, incarnation: int = 1) -> str:
     return base if incarnation <= 1 else f"{base}-r{incarnation}"
 
 
-def _delivered(row: dict) -> bool:
+def _delivered(row: dict, recs: list) -> bool:
     """Whether the unit's current child delivered its capture (the one inference per unit happened): an ended unit
-    with a capture is final and replays; one without may be retried by a later parent of the same root."""
-    import attempts
-
-    recs = attempts.for_operation(row["child"]) if attempts.enabled() else []
+    with a capture is final and replays; one without may be retried by a later parent of the same root. `recs`: the
+    child's attempt records."""
     if (row.get("delivery") or "platform") == "application":
         return any(r.get("capture") for r in recs)
     try:
@@ -100,8 +104,6 @@ def _delivered(row: dict) -> bool:
 
 def binding_ref(child: str) -> str:
     """The child's private binding (execution.REF: a DNS label): the child id when it is one, else a digest of it."""
-    import execution
-
     return child if execution.REF.match(child) else f"c-{hashlib.sha256(child.encode()).hexdigest()[:40]}"
 
 
@@ -131,37 +133,12 @@ def request_hash(req: dict) -> str:
 
 
 def verify_parent_token(token: str) -> dict:
-    """TokenReview of the parent attempt's projected token against the clusters this API reaches: {region, namespace,
-    pod, uid}; 401 unless a bound pod token of a tenant namespace."""
-    from kubernetes import client
-
-    for region in sorted(kube.regions(), key=lambda r: r == REGION):
-        try:
-            review = retry(
-                client.AuthenticationV1Api(kube._client(region)).create_token_review,
-                client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token)),
-            )
-        except (ApiException, OSError) as e:
-            log.warning("token review in %s: %s", region, str(e)[:120])
-            continue
-        st = review.status
-        if not st or not st.authenticated:
-            continue
-        parts = (st.user.username or "").split(":")
-        if (
-            len(parts) != 4
-            or parts[0] != "system"
-            or parts[1] != "serviceaccount"
-            or not parts[2].startswith(TENANT_NS_PREFIX)
-        ):
-            raise HTTPException(401, "not a tenant run identity")
-        extra = st.user.extra or {}
-        pod = (extra.get("authentication.kubernetes.io/pod-name") or [""])[0]
-        uid = (extra.get("authentication.kubernetes.io/pod-uid") or [""])[0]
-        if not pod or not uid:
-            raise HTTPException(401, "token is not bound to a pod")
-        return {"region": region, "namespace": parts[2], "pod": pod, "uid": uid}
-    raise HTTPException(401, "token not recognised by any cluster of this fleet")
+    """TokenReview of the parent attempt's projected token against the clusters this API reaches
+    (attempts.verify_pod_token): {region, namespace, pod, uid}; 401 unless a bound pod token of a tenant namespace."""
+    identity = attempts.verify_pod_token(token)
+    if not identity["uid"]:
+        raise HTTPException(401, "token is not bound to a pod")
+    return identity
 
 
 def _live_parent(identity: dict, parent: str) -> tuple[dict, str, str, dict]:
@@ -175,8 +152,6 @@ def _live_parent(identity: dict, parent: str) -> tuple[dict, str, str, dict]:
         raise HTTPException(409, f"operation {parent} is not a run")
     if status.finished(job) or ann.get(f"{LABEL}/cancelled") or ann.get(f"{LABEL}/successor"):
         raise HTTPException(409, f"operation {parent} is over or superseded; no child attaches to it")
-    import attempts
-
     marks = attempts._marks(parent) if attempts.enabled() else None
     if marks and marks[1]:
         raise HTTPException(409, f"operation {parent} is cancelled; no child attaches to it")
@@ -215,8 +190,6 @@ def preflight_parent(ns: str, m: dict) -> None:
     `child_delivery: platform` every allowlisted child endpoint's region must hold the tenant's capture backend (the
     tenant bucket: children run where the endpoint is, not where the parent lands), else 400 naming region, model and
     the fix; with `application` nothing is probed or created (external storage: the parent's broker delivers)."""
-    import artifacts
-
     jb = m.get("job") or {}
     if not jb.get("childEndpoints"):
         return
@@ -248,8 +221,7 @@ def _remaining_s(job: dict) -> int | None:
     start = (job.get("status") or {}).get("startTime") or job["metadata"].get("creationTimestamp")
     if not start:
         return int(dl)
-    t0 = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
-    return int(int(dl) - (datetime.now(timezone.utc) - t0).total_seconds())
+    return int(int(dl) - (datetime.now(timezone.utc) - parse_ts(start)).total_seconds())
 
 
 _ROW = (
@@ -277,21 +249,13 @@ def by_child(child: str) -> dict | None:
     return _row(r) if r else None
 
 
-def _ts(t) -> str | None:
-    return t.strftime("%Y-%m-%dT%H:%M:%SZ") if t else None
-
-
 def result_ref(ns: str, region: str, child: str) -> str:
-    import artifacts
-
     return f"s3://{artifacts.storage(ns, region)['bucket']}/operations/{child}/response.bin"
 
 
 def capture_of(row: dict) -> dict | None:
     """The authoritative capture of a child: the manifest the caller delivered next to the bytes (call.json is PUT only
     after response.bin was), read from the platform-owned destination; None until delivered. Survives the Job."""
-    import artifacts
-
     ns, child = row["namespace"], row["child"]
     try:
         ref = result_ref(ns, row["region"], child)
@@ -322,8 +286,6 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
     row = _get(root, unit_id)
     if row is None:
         return None
-    import attempts
-
     out = {
         "root": root,
         "unit_id": unit_id,
@@ -337,10 +299,10 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
         "state": row["state"],
         "timeout_s": row["timeout_s"],
         "region": row["region"],
-        "cancel_requested_at": _ts(row["cancel_requested_at"]),
+        "cancel_requested_at": iso(row["cancel_requested_at"]),
         "reason": row["reason"],
-        "created_at": _ts(row["created_at"]),
-        "ended_at": _ts(row["ended_at"]),
+        "created_at": iso(row["created_at"]),
+        "ended_at": iso(row["ended_at"]),
         "incarnation": int(row.get("incarnation") or 1),
         "previous_child": row.get("previous_child"),
         "result_ref": None,
@@ -421,8 +383,6 @@ def _input_of(body: dict) -> tuple[dict | None, dict | None, dict]:
                 400, f"inline input above {MAX_INLINE_INPUT_BYTES} bytes: give input_ref + transport.input_url instead"
             )
         return inp, None, tr
-    import re
-
     if not isinstance(ref, dict) or not re.fullmatch(SHA_RE, str(ref.get("sha256") or "")):
         raise HTTPException(400, "input_ref needs sha256 (64 hex digits) of the exact request body the endpoint gets")
     size = ref.get("size_bytes")
@@ -431,17 +391,6 @@ def _input_of(body: dict) -> tuple[dict | None, dict | None, dict]:
     if not str(tr.get("input_url") or "").startswith("https://"):
         raise HTTPException(400, "input_ref needs transport.input_url (https) the caller fetches the request from")
     return None, {"sha256": ref["sha256"], "size_bytes": size}, tr
-
-
-def _not_inferred(row: dict) -> bool:
-    """Whether the unit's current child definitely never ran its one inference: no attempt at all (never started, or
-    cancelled before its pod ran), or its last attempt ended before the inference POST (call.sh exit 2: refused
-    before/at readiness, a definite 4xx with no capture; exit 3: nothing captured, transfer-only) with no capture on
-    record. Never an outcome-unknown attempt (exit 4: the POST went out, the answer was lost) and never a capture."""
-    import attempts
-
-    recs = attempts.for_operation(row["child"]) if attempts.enabled() else []
-    return _never_inferred(recs)
 
 
 def _never_inferred(recs: list) -> bool:
@@ -458,8 +407,6 @@ def _never_inferred(recs: list) -> bool:
 def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     """Admit one child (see the module docstring). Returns (readback, created)."""
     unit_id = str(body.get("unit_id") or "")
-    import re
-
     if not re.fullmatch(UNIT_RE, unit_id):
         raise HTTPException(400, "unit_id: 1..128 of [A-Za-z0-9._:-], starting alphanumeric")
     model = str(body.get("model") or "")
@@ -555,7 +502,8 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                 # outcome-unknown attempt): the unit reopens as the next incarnation (a new Job, binding and ledger
                 # member; the earlier child's Job and records stay as history). Without `retry` the ended row replays.
                 row_now = _get(root, unit_id)
-                if _delivered(row_now):
+                recs = attempts.for_operation(row_now["child"]) if attempts.enabled() else []
+                if _delivered(row_now, recs):
                     raise HTTPException(
                         409, f"unit {unit_id} of {root} delivered its capture ({existing[0]}); a unit infers once"
                     )
@@ -565,7 +513,7 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
                         f"unit {unit_id} of {root}: only a later continuation of the root (an owner's resume) retries a "
                         f"unit; {parent} is the parent that owned {existing[0]}",
                     )
-                if not _not_inferred(row_now):
+                if not _never_inferred(recs):
                     raise HTTPException(
                         409,
                         f"unit {unit_id} of {root}: the outcome of {existing[0]} is unknown (its inference was posted); "
@@ -695,7 +643,6 @@ def complete(
     finishes it."""
     root, unit_id, child, ns = row["root"], row["unit_id"], row["child"], row["namespace"]
     import app as api
-    import execution
     import sessions
 
     cm = catalog.get(row["model"])
@@ -774,10 +721,7 @@ def complete(
             # the parent's FROZEN execution (its Job's annotation, never the current tenant config): the child's caller
             # runs under the same workload identity (call.sh sends its own projected token to the broker) and the
             # same execution profile; the parent's placement/recovery/graph options do not apply to a call
-            try:
-                pex = json.loads(parent_ann.get(f"{LABEL}/execution") or "null") or {}
-            except ValueError:
-                pex = {}
+            pex = jobs.execution_of(parent_ann) or {}
             ex = {"io_mode": "application", "private_input_ref": row["binding_ref"]}
             for k in ("identity", "profile"):
                 if pex.get(k):
@@ -869,11 +813,7 @@ def refresh(child: str, token: str, body: dict) -> dict:
     destination for the output phase. The operation named must hold a live reservation on the root's key (the child
     while it is open; a retry while it runs) and the attempt named must be one of its live pods: a stale pod, a settled
     operation or another model's token gets nothing (401/403/409) and delivers nothing."""
-    import hmac
-    import re
-
     import app as api
-    import artifacts
 
     row = by_child(child)
     if row is None or not token:
@@ -885,7 +825,7 @@ def refresh(child: str, token: str, body: dict) -> dict:
     op_id = str(body.get("operation_id") or child)
     if op_id != child and not re.fullmatch(re.escape(child) + r"-x[0-9]+", op_id):
         raise HTTPException(400, f"operation_id must be the child {child} or one of its export retries")
-    h = api._reservation_key_of(op_id)
+    h = keys.reservation_key_of(op_id)
     if not h or not hmac.compare_digest(token, api._admitted_token(h, row["model"], child)):
         raise HTTPException(401, "refresh refused (not the child's token, or no live reservation)")
     if op_id == child and row["state"] not in OPEN:
@@ -925,8 +865,6 @@ def _parent_over(ns: str, root: str, parent: str) -> str | None:
     """Why the child's parent lineage is over (the cascade's cause), None while a live attempt of the root may still
     read the child: cancelled (annotation or the attempt record), finished with no successor, gone (no Job, no attempt
     record); a finished parent with a successor is judged by the successor (the resumed attempt reads the child back)."""
-    import attempts
-
     if attempts.enabled() and (marks := attempts._marks(root)) and marks[1]:
         return "root cancelled"
     name = parent
@@ -1030,8 +968,6 @@ def _cancel(row: dict, cjob: dict, cregion: str, why: str) -> None:
 
     cancelled = jobs.cancel(row["namespace"], row["child"], cregion)
     if db.enabled():
-        import leases
-
         try:
             leases.request_cancel(row["child"], why)  # a request to the attached worker, never a release
         except Exception as e:  # noqa: BLE001

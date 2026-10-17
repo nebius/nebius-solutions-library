@@ -101,7 +101,3 @@ def test_requests_below_limits_project_and_render_as_declared():
     res = _container_resources(e)
     assert res["requests"] == {"nvidia.com/gpu": "1", "cpu": "8", "memory": "64Gi", "ephemeral-storage": "4Gi"}
     assert res["limits"] == {"nvidia.com/gpu": "1", "cpu": "24", "memory": "128Gi", "ephemeral-storage": "16Gi"}
-    # the chart's own spelling (cpuRequest/memoryRequest below cpu/memory) renders as before
-    v = {"resources": {"gpu": 1, "cpu": "24", "memory": "128Gi", "cpuRequest": "8", "memoryRequest": "64Gi"}}
-    res = render_endpoint._resources(v)
-    assert res["requests"]["cpu"] == "8" and res["limits"]["cpu"] == "24" and res["limits"]["memory"] == "128Gi"

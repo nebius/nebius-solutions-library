@@ -35,7 +35,7 @@ from kubernetes.client.rest import ApiException
 
 import kube
 from config import LABEL, REGION
-from resilience import retry
+from resilience import cached, retry
 from schemas import RECOVERY_MAX as RECOVERY_MAX
 from schemas import BindingRequest as BindingRequest
 from schemas import ExecutionSpec as ExecutionSpec
@@ -61,22 +61,23 @@ _cache: dict[str, tuple[float, dict]] = {}
 
 
 def tenant_config(ns: str, region: str = REGION) -> dict:
-    """The identities and execution profiles the operator rendered for the tenant (namespace annotations, charts/tenant)."""
-    hit = _cache.get(f"{region}/{ns}")
-    if hit and hit[0] > time.time():
-        return hit[1]
-    try:
-        ann = retry(kube.core(region).read_namespace, ns).metadata.annotations or {}
-    except ApiException as e:
-        raise HTTPException(503 if e.status != 404 else 404, f"tenant namespace {ns}: {e.reason}")
-    out = {}
-    for key, name in ((IDENTITIES_ANNOTATION, "identities"), (PROFILES_ANNOTATION, "execution_profiles")):
+    """The identities and execution profiles the operator rendered for the tenant (namespace annotations, charts/tenant),
+    remembered for a minute."""
+
+    def load() -> dict:
         try:
-            out[name] = json.loads(ann.get(key) or "{}")
-        except ValueError:
-            out[name] = {}
-    _cache[f"{region}/{ns}"] = (time.time() + 60, out)
-    return out
+            ann = retry(kube.core(region).read_namespace, ns).metadata.annotations or {}
+        except ApiException as e:
+            raise HTTPException(503 if e.status != 404 else 404, f"tenant namespace {ns}: {e.reason}")
+        out = {}
+        for key, name in ((IDENTITIES_ANNOTATION, "identities"), (PROFILES_ANNOTATION, "execution_profiles")):
+            try:
+                out[name] = json.loads(ann.get(key) or "{}")
+            except ValueError:
+                out[name] = {}
+        return out
+
+    return cached(_cache, f"{region}/{ns}", 60, load)
 
 
 def capabilities(ns: str, region: str = REGION) -> dict:
@@ -343,6 +344,38 @@ def scope_runner_token(pod: dict) -> None:
             )
 
 
+def _record_mode(uploader: dict) -> None:
+    """The uploader only records the attempt (application I/O): no bucket credentials, no output prefix."""
+    uploader.pop("envFrom", None)
+    uploader["env"] = [e for e in uploader["env"] if e["name"] != "OUTPUT_PREFIX"] + [
+        {"name": "UPLOAD_MODE", "value": "record"}
+    ]
+
+
+def _project_identity(pod: dict, main: dict, identity: dict) -> None:
+    """The pod runs as the identity's ServiceAccount; main gets its projected token (the identity's audience) under
+    IDENTITY_DIR."""
+    pod["serviceAccountName"] = identity["service_account"]
+    token = {"path": "token", "expirationSeconds": 3600}
+    if identity.get("audience"):
+        token["audience"] = identity["audience"]
+    pod.setdefault("volumes", []).append(
+        {"name": "workload-identity", "projected": {"sources": [{"serviceAccountToken": token}]}}
+    )
+    main.setdefault("volumeMounts", []).append(
+        {"name": "workload-identity", "mountPath": IDENTITY_DIR, "readOnly": True}
+    )
+
+
+def _mount_private(pod: dict, main: dict, name: str) -> None:
+    """The operation's private binding copy (`<name>-private`) as files under PRIVATE_DIR, main only."""
+    pod.setdefault("volumes", []).append(
+        {"name": "private-input", "secret": {"secretName": f"{name}-private", "defaultMode": 0o440}}
+    )
+    main.setdefault("volumeMounts", []).append({"name": "private-input", "mountPath": PRIVATE_DIR, "readOnly": True})
+    main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
+
+
 def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
     """Shape a run pod after its execution block (build_run calls this before the Job shell is built)."""
     main = next(c for c in pod["containers"] if c["name"] == "main")
@@ -353,10 +386,7 @@ def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
         if not main["envFrom"]:
             del main["envFrom"]
         if uploader:
-            uploader.pop("envFrom", None)
-            uploader["env"] = [e for e in uploader["env"] if e["name"] != "OUTPUT_PREFIX"] + [
-                {"name": "UPLOAD_MODE", "value": "record"}
-            ]
+            _record_mode(uploader)
     profile = ex.get("profile")
     if (
         profile
@@ -369,29 +399,14 @@ def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
         )
     identity = ex.get("identity")
     if identity:
-        pod["serviceAccountName"] = identity["service_account"]
-        token = {"path": "token", "expirationSeconds": 3600}
-        if identity.get("audience"):
-            token["audience"] = identity["audience"]
-        pod.setdefault("volumes", []).append(
-            {"name": "workload-identity", "projected": {"sources": [{"serviceAccountToken": token}]}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "workload-identity", "mountPath": IDENTITY_DIR, "readOnly": True}
-        )
+        _project_identity(pod, main, identity)
         env = {e["name"]: e for e in main.get("env", [])}
         env["AWS_WEB_IDENTITY_TOKEN_FILE"] = {"name": "AWS_WEB_IDENTITY_TOKEN_FILE", "value": f"{IDENTITY_DIR}/token"}
         for k, v in identity.get("env", {}).items():
             env[k] = {"name": k, "value": v}  # the identity's values win over the caller's
         main["env"] = list(env.values())
     if ex.get("private_input_ref"):
-        pod.setdefault("volumes", []).append(
-            {"name": "private-input", "secret": {"secretName": f"{name}-private", "defaultMode": 0o440}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "private-input", "mountPath": PRIVATE_DIR, "readOnly": True}
-        )
-        main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
+        _mount_private(pod, main, name)
     ckpt = (ex.get("recovery") or {}).get("checkpoint_ref")
     if ckpt:
         main.setdefault("env", []).append({"name": "CHECKPOINT_REF", "value": ckpt})
@@ -404,34 +419,16 @@ def apply_async(pod: dict, ex: dict, name: str) -> None:
     main = next(c for c in pod["containers"] if c["name"] == "main")
     uploader = next((c for c in pod["containers"] if c["name"] == "uploader"), None)
     if ex.get("io_mode") == "application" and uploader:
-        uploader.pop("envFrom", None)
-        uploader["env"] = [e for e in uploader["env"] if e["name"] != "OUTPUT_PREFIX"] + [
-            {"name": "UPLOAD_MODE", "value": "record"}
-        ]
+        _record_mode(uploader)
         main.setdefault("env", []).append({"name": "IO_MODE", "value": "application"})
     identity = ex.get("identity")
     if identity:
-        pod["serviceAccountName"] = identity["service_account"]
-        token = {"path": "token", "expirationSeconds": 3600}
-        if identity.get("audience"):
-            token["audience"] = identity["audience"]
-        pod.setdefault("volumes", []).append(
-            {"name": "workload-identity", "projected": {"sources": [{"serviceAccountToken": token}]}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "workload-identity", "mountPath": IDENTITY_DIR, "readOnly": True}
-        )
+        _project_identity(pod, main, identity)
         main.setdefault("env", []).append({"name": "IDENTITY_TOKEN_FILE", "value": f"{IDENTITY_DIR}/token"})
         for k, v in identity.get("env", {}).items():
             main["env"].append({"name": k, "value": v})
     if ex.get("private_input_ref"):
-        pod.setdefault("volumes", []).append(
-            {"name": "private-input", "secret": {"secretName": f"{name}-private", "defaultMode": 0o440}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "private-input", "mountPath": PRIVATE_DIR, "readOnly": True}
-        )
-        main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
+        _mount_private(pod, main, name)
 
 
 def apply_job(job: dict, ex: dict) -> None:

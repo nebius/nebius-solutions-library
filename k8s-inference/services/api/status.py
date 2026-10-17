@@ -8,8 +8,13 @@ import json
 import urllib.parse
 from datetime import datetime, timezone
 
+import attempts
 import kube
 from config import GRAFANA_URLS, KUEUE_QUEUE, LABEL, MULTIKUEUE_MANAGED_BY, MULTIKUEUE_ORIGIN_LABEL, REGION
+
+# isort: split
+from config import JOBSET_NAME_LABEL
+from resilience import parse_ts
 
 
 def is_jobset(job: dict) -> bool:
@@ -72,7 +77,6 @@ def _pod_digest(p: dict) -> str | None:
     return None
 
 
-JOBSET_NAME_LABEL = "jobset.sigs.k8s.io/jobset-name"
 JOBSET_RESTART_LABEL = "jobset.sigs.k8s.io/restart-attempt"
 JOB_INDEX_LABEL = "batch.kubernetes.io/job-completion-index"
 
@@ -87,8 +91,7 @@ def _pod_gang_fields(p: dict) -> dict:
         rank = labels.get(JOB_INDEX_LABEL) or ann.get(JOB_INDEX_LABEL)
         restart = labels.get(JOBSET_RESTART_LABEL) or ann.get(JOBSET_RESTART_LABEL) or "0"
         try:
-            out["gang_rank"] = int(rank) if rank is not None else None
-            out["gang_restart"] = int(restart)
+            out["gang_rank"], out["gang_restart"] = (int(rank) if rank is not None else None), int(restart)
         except ValueError:
             pass
     return out
@@ -111,8 +114,6 @@ def _lifecycle_fields(r: dict) -> dict:
     }
     # the incarnation-frozen restore triple (docs/JOBS.md "Restoring a gang"): present exactly on a gang's
     # authenticated records (the start ACK froze it there; an explicit null triple = nothing to restore), absent else
-    import attempts
-
     out.update(attempts.restore_fields(r))
     export = r.get("export_state") or r.get("export")
     if export is not None:
@@ -211,14 +212,10 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
 
 
 def _ts(s) -> datetime | None:
-    """Timestamps come as RFC 3339 `...Z` (raw API objects) or `...+00:00` (the client's sanitized datetimes)."""
-    if not s:
-        return None
-    try:
-        d = s if isinstance(s, datetime) else datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    """Timestamps come as RFC 3339 `...Z` (raw API objects) or `...+00:00` (the client's sanitized datetimes); a
+    naive one is UTC."""
+    d = parse_ts(s)
+    return d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
 def _secs(a, b) -> float | None:
@@ -323,7 +320,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
     labels, ann = md.get("labels", {}), accounting_annotations(job)
     conds = {c.get("type"): c for c in (st.get("conditions") or []) if c.get("status") == "True"}
-    attempts = [
+    atts = [
         {k: v for k, v in a.items() if not k.startswith("_")}
         for a in _attempts(job.get("_pods", []), records, md.get("name"))
     ]
@@ -338,14 +335,12 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         # (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization") must be on record
         # the delivering attempt: the newest successful one that carries a delivery record (a multi-node run's rank 0
         # exports for every rank), else the newest successful one
-        if any(a.get("gang_rank") is not None for a in attempts):
+        if any(a.get("gang_rank") is not None for a in atts):
             # Peers record export_state='n/a': that is not a delivery failure or
             # acknowledgement. Reuse lifecycle's newest-incarnation authority;
             # never borrow a previous coordinator's result when only a peer has
             # recorded in the new incarnation.
-            from attempts import authority
-
-            coordinator = authority(attempts)
+            coordinator = attempts.authority(atts)
             last = (
                 coordinator
                 if coordinator and coordinator.get("gang_rank") == 0 and coordinator["status"] == "SUCCEEDED"
@@ -353,9 +348,9 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             )
         else:
             last = next(
-                (a for a in reversed(attempts) if a["status"] == "SUCCEEDED" and a.get("export_state") is not None),
+                (a for a in reversed(atts) if a["status"] == "SUCCEEDED" and a.get("export_state") is not None),
                 None,
-            ) or next((a for a in reversed(attempts) if a["status"] == "SUCCEEDED"), None)
+            ) or next((a for a in reversed(atts) if a["status"] == "SUCCEEDED"), None)
         execution = _json(ann.get(f"{LABEL}/execution")) or {}
         done_at = _ts(st.get("completionTime"))
         age = (datetime.now(timezone.utc) - done_at).total_seconds() if done_at else None
@@ -372,7 +367,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
             # result_ref and no failed export, only on a Complete, uncancelled, single-worker Job. An older attempt's
             # result, a missing one, a later failed attempt, a Failed or still-running Job, a cancelled run and a gang
             # change nothing.
-            newest = attempts[-1] if attempts and attempts[-1].get("attempt_role", "run") == "run" else None
+            newest = atts[-1] if atts and atts[-1].get("attempt_role", "run") == "run" else None
             raw = next((r for r in (records or []) if r.get("pod") == (newest or {}).get("attempt_id")), None)
             if (
                 newest
@@ -383,9 +378,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
                 and newest.get("export_state") != "failed"
             ):
                 newest["status"] = "SUCCEEDED"
-                newest["reason"] = (
-                    "exit code not observed by the uploader; the Job is Complete and RESULT.json is committed"
-                )
+                newest["reason"] = attempts.OBSERVED_COMPLETION
                 last = newest
         if last and last.get("export_state") == "failed":
             status, error = (
@@ -419,21 +412,23 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
     elif ann.get(f"{LABEL}/cancelled"):
         status = "CANCELLED"
-    elif attempts and attempts[-1]["status"] == "FAILED" and _fails_job(job, attempts[-1].get("exit_code")):
+    elif atts and atts[-1]["status"] == "FAILED" and _fails_job(job, atts[-1].get("exit_code")):
         # the main container ended with an exit code the Job's failure policy turns into FailJob: the Job fails as soon
         # as the pod ends (the uploader may still be posting the record); the operation is over now, not RUNNING
         status = "FAILED"
-        error = f"main exited {attempts[-1].get('exit_code')}: {attempts[-1].get('reason') or 'the Job fails on this exit code'}"
-    elif any(a["status"] == "RUNNING" for a in attempts) or any(
+        error = (
+            f"main exited {atts[-1].get('exit_code')}: {atts[-1].get('reason') or 'the Job fails on this exit code'}"
+        )
+    elif any(a["status"] == "RUNNING" for a in atts) or any(
         (p.get("status") or {}).get("phase") == "Running" for p in job.get("_pods", [])
     ):
         status = "RUNNING"  # includes finalization: main ended, the uploader is still exporting
     else:
         status = "QUEUED"  # gated by Kueue, pending for a node, being placed, or between attempts after a preemption
-    cancel_attempt(attempts, bool(ann.get(f"{LABEL}/cancelled")))  # the attempt the cancel interrupted
+    cancel_attempt(atts, bool(ann.get(f"{LABEL}/cancelled")))  # the attempt the cancel interrupted
     c = conds.get("Failed") or conds.get("FailureTarget") or {}
     if status == "FAILED":
-        last = next((a for a in reversed(attempts) if a["status"] == "FAILED"), None)
+        last = next((a for a in reversed(atts) if a["status"] == "FAILED"), None)
         error = (last or {}).get("reason") or c.get("message") or c.get("reason")
     try:
         inp = json.loads(ann.get(f"{LABEL}/input", "{}"))
@@ -449,11 +444,11 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
     phase, waiting = _waiting(job, region) if status == "QUEUED" else (None, None)
     if is_jobset(job):  # a JobSet reports no start/completion time of its own: the pods' are the run's
         st = dict(st)
-        st["startTime"] = min((a["started_at"] for a in attempts if a["started_at"]), default=None)
+        st["startTime"] = min((a["started_at"] for a in atts if a["started_at"]), default=None)
         if status in ("SUCCEEDED", "FAILED", "CANCELLED"):
-            st["completionTime"] = max((a["ended_at"] or "" for a in attempts), default=None) or None
+            st["completionTime"] = max((a["ended_at"] or "" for a in atts), default=None) or None
     ended = st.get("completionTime") or (
-        max((a["ended_at"] or "" for a in attempts), default=None) if status in ("FAILED", "CANCELLED") else None
+        max((a["ended_at"] or "" for a in atts), default=None) if status in ("FAILED", "CANCELLED") else None
     )
     return {
         "id": md["name"],
@@ -470,7 +465,7 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         "ended_at": ended or None,
         "duration_s": _secs(st.get("startTime"), ended),
         "timeout_s": sp.get("activeDeadlineSeconds") if sp.get("activeDeadlineSeconds") != 1 else None,
-        "attempts": attempts,
+        "attempts": atts,
         "logs_url": logs_url(md.get("namespace", ""), md["name"], region),
         "error": error,
         "input": inp,

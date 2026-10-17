@@ -10,7 +10,9 @@ import json
 import os
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+
+from fastapi import HTTPException
+from psycopg_pool import ConnectionPool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -444,8 +446,6 @@ def pool():
     if _pool is None:
         with _lock:
             if _pool is None:
-                from psycopg_pool import ConnectionPool
-
                 _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=4, kwargs={"autocommit": True}, open=True)
     return _pool
 
@@ -467,22 +467,12 @@ def migrate() -> int:
         return len(MIGRATIONS)
 
 
-def _row(r) -> dict:
-    return {
-        "id": r[0],
-        "kind": r[1],
-        "spec": r[2],
-        "entry": r[3],
-        "version": r[4],
-        "managed_by": r[5],
-        "created_by": r[6],
-        "created_at": r[7].isoformat() if r[7] else None,
-        "updated_by": r[8],
-        "updated_at": r[9].isoformat() if r[9] else None,
-    }
-
-
 COLS = "id, kind, spec, entry, version, managed_by, created_by, created_at, updated_by, updated_at"
+
+
+def _row(r) -> dict:
+    d = dict(zip(COLS.split(", "), r))
+    return {**d, **{k: d[k].isoformat() if d[k] else None for k in ("created_at", "updated_at")}}
 
 
 def list_models() -> dict[str, dict]:
@@ -504,8 +494,6 @@ def _generation(c, mid: str, expected: int | None = None) -> tuple[int, dict]:
     c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (mid,))
     old = _get(c, mid)
     if expected is not None and (old or {}).get("version") != expected:
-        from fastapi import HTTPException
-
         raise HTTPException(409, "model version changed; reload before saving")
     version = c.execute("select coalesce(max(version), 0) + 1 from models_history where id = %s", (mid,)).fetchone()[0]
     pending = c.execute("select previous from model_changes where id = %s", (mid,)).fetchone()
@@ -544,8 +532,6 @@ def upsert_model(
         version, previous = _generation(c, mid, expected)
         exists = _get(c, mid) is not None
         if create_only and exists:
-            from fastapi import HTTPException
-
             raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
         c.execute(
             """insert into models (id, kind, spec, entry, version, managed_by, created_by, updated_by, updated_at)
@@ -614,7 +600,3 @@ def history(mid: str, limit: int = 50) -> list[dict]:
             (mid, limit),
         ).fetchall()
         return [{"version": r[0], "action": r[1], "by": r[2], "at": r[3].isoformat(), "spec": r[4]} for r in rows]
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat()

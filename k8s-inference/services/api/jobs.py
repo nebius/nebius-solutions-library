@@ -17,8 +17,12 @@ dispatcher creates the work volume where the run is admitted, and the manager Jo
 back; pods, logs and billing come from the worker. Image references are fleet-wide (the logical registry
 host of fleet.yaml `images`, docs/IMAGES.md): nothing in a Job depends on the region it lands in."""
 
+import base64
+import glob
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -28,7 +32,14 @@ import urllib3
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 
+import admissions
+import attempts
+import catalog
+import db
 import execution
+import fit
+import instances
+import keys
 import kube
 from config import (
     ENDPOINT_CONNECT_TO,
@@ -56,6 +67,7 @@ from config import (
     TENANT_NS_PREFIX,
     WEIGHTS_SHARED_PVC,
 )
+from models import normalise_image
 from pod_metadata import normalise as normalise_pod_metadata
 from render import (
     CONTAINER_HARDENING,
@@ -71,8 +83,8 @@ from render import (
     image_for_class,
     profile_of,
 )
-from resilience import retry
-from status import is_jobset, is_manager_job, is_mirror, normalise
+from resilience import cached, retry
+from status import finished, is_jobset, is_manager_job, is_mirror, normalise
 
 log = logging.getLogger("api.jobs")
 
@@ -125,6 +137,13 @@ def _private_guard(path: str, what: str) -> None:
             )
 
 
+def _mount_shared(pod: dict, containers: list, name: str, claim: str, mount_path: str, sub_path: str, ro: bool) -> None:
+    """A directory of a shared-filesystem claim on `containers`, by subPath."""
+    pod["volumes"].append({"name": name, "persistentVolumeClaim": {"claimName": claim, "readOnly": ro}})
+    for c in containers:
+        c["volumeMounts"].append({"name": name, "mountPath": mount_path, "subPath": sub_path, "readOnly": ro})
+
+
 def _mount_data(r: dict, pod: dict, containers: list) -> None:
     """`job.data` (docs/JOBS.md "Shared data"): a directory of the tenant's area on the region's shared filesystem
     (the tenant's RWX claim, the one `checkpoints: shared` uses), mounted read-only at `dataMountPath` (default /data)
@@ -137,16 +156,9 @@ def _mount_data(r: dict, pod: dict, containers: list) -> None:
         raise HTTPException(400, "data: a relative directory, no parent references")
     ro = str(r.get("dataReadOnly", True)).lower() not in ("false", "0", "no")
     _private_guard(f"tenants/{(pod.get('_tenant') or '*')}/data/{path}", "data")
-    pod["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC, "readOnly": ro}})
-    for c in containers:
-        c["volumeMounts"].append(
-            {
-                "name": "data",
-                "mountPath": str(r.get("dataMountPath") or "/data"),
-                "subPath": f"data/{path}",
-                "readOnly": ro,
-            }
-        )
+    _mount_shared(
+        pod, containers, "data", SHARED_SCRATCH_PVC, str(r.get("dataMountPath") or "/data"), f"data/{path}", ro
+    )
 
 
 def placement_regions(job: dict) -> list[str]:
@@ -168,18 +180,9 @@ def _mount_weights(r: dict, pod: dict, containers: list) -> None:
     if ".." in path.split("/"):
         raise HTTPException(400, "weights: a relative directory, no parent references")
     _private_guard(path, "weights")
-    pod["volumes"].append(
-        {"name": "weights", "persistentVolumeClaim": {"claimName": WEIGHTS_SHARED_PVC, "readOnly": True}}
+    _mount_shared(
+        pod, containers, "weights", WEIGHTS_SHARED_PVC, str(r.get("weightsMountPath") or "/weights"), path, True
     )
-    for c in containers:
-        c["volumeMounts"].append(
-            {
-                "name": "weights",
-                "mountPath": str(r.get("weightsMountPath") or "/weights"),
-                "subPath": path,
-                "readOnly": True,
-            }
-        )
 
 
 ALIAS_ROOT = "aliases"  # under /work: aliases/<slug>[/<pod>] is what an alias path shows (delivered with /work)
@@ -348,14 +351,21 @@ def _mount_aliases(r: dict, containers: list[dict], fetch: dict) -> None:
     ]
 
 
+def _required_affinity(terms: list[dict]) -> dict:
+    """A required node affinity of one term: the expressions ANDed."""
+    return {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
+        }
+    }
+
+
 def _fit_terms(pod: dict, r: dict, terms: list, placement: dict | None, region: str | None, name: str):
     """Per-node fit (docs/SCHEDULING.md "Per-node fit", services/api/fit.py): the pools whose ONE node holds the pod's
     effective requests, conjunctive with everything already decided (an explicit `pool:`, the GPU class pools, the
     shared-fs and local-NVMe terms stay as they are; this only narrows the pool set and the candidate clusters). No
     pool at all: 400 `impossible shape` (nothing is enlarged or reduced on the caller's behalf). Without fit.yaml
     (an older fleet chart) nothing changes. Returns the (possibly narrowed) placement."""
-    import fit
-
     if not fit.table():
         return placement
     req = fit.pod_requests(pod)
@@ -396,8 +406,6 @@ def _fit_terms(pod: dict, r: dict, terms: list, placement: dict | None, region: 
 
 
 def _is_number(v) -> bool:
-    import math
-
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
@@ -489,8 +497,6 @@ def build_run(
         gpu_class = None
     if not job.get("image") or not job.get("command"):
         raise HTTPException(500, f"model {model['name']} has no job.image/job.command")
-    from models import normalise_image  # a caller-supplied image (container-run) goes through the region's cache too
-
     job["image"] = normalise_image(str(job["image"]))
     declared = {p["name"]: p.get("default") for p in model.get("parameters", [])}
     declared.update({k: None for k in (defaults or {})})
@@ -517,8 +523,6 @@ def build_run(
             raise HTTPException(400, "args must be a list of at most 100 strings")
         r["args"] = arguments
     if environment_parameter := job.get("envParameter"):
-        import re
-
         environment = values.get(environment_parameter, {})
         if (
             not isinstance(environment, dict)
@@ -705,11 +709,7 @@ def build_run(
     # the fetch init container, a profile may add one), then the affinity: every term above plus the fitting pools
     placement = _fit_terms(pod, r, terms, placement, region, name)
     if terms:
-        pod["affinity"] = {
-            "nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
-            }
-        }
+        pod["affinity"] = _required_affinity(terms)
     if nodes > 1:
         if (ex or {}).get("retry") or _class_retry(r):
             raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
@@ -772,15 +772,16 @@ def _class_retry(r: dict) -> dict | None:
 INTERCONNECT = ("none", "preferred", "required")
 
 
-def _checkpoint_provision(root: str) -> dict:
-    """The init container that makes a gang's shared checkpoint leaf (`checkpoints/<root>` on the tenant's shared
-    claim, docs/JOBS.md "Multi-node runs") the runner's: scratch.sh `provision` on exactly that mount point."""
+def _provision_init(name: str, path: str, mounts: list[dict]) -> dict:
+    """The trusted init container that makes one directory of a shared claim the runner's (services/jobs/bin/scratch.sh
+    `provision`: the kubelet creates a missing subPath directory root-owned 0755; this chowns 10001:10001 and chmods
+    2770 exactly that mount point, as root with CHOWN/FOWNER/DAC_OVERRIDE only, PSA baseline-allowed; idempotent)."""
     return {
-        "name": "checkpoint-provision",
+        "name": name,
         "image": RUNNER_IMAGE,
-        "command": ["/usr/local/bin/scratch.sh", "provision", "/work/checkpoint"],
+        "command": ["/usr/local/bin/scratch.sh", "provision", path],
         "resources": {"requests": dict(SCRATCH_PROVISION_REQUESTS), "limits": {"cpu": "200m", "memory": "64Mi"}},
-        "volumeMounts": [{"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}],
+        "volumeMounts": mounts,
         "securityContext": {
             **CONTAINER_HARDENING,
             "runAsNonRoot": False,
@@ -789,6 +790,16 @@ def _checkpoint_provision(root: str) -> dict:
             "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]},
         },
     }
+
+
+def _checkpoint_provision(root: str) -> dict:
+    """The init container that makes a gang's shared checkpoint leaf (`checkpoints/<root>` on the tenant's shared
+    claim, docs/JOBS.md "Multi-node runs") the runner's."""
+    return _provision_init(
+        "checkpoint-provision",
+        "/work/checkpoint",
+        [{"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}],
+    )
 
 
 def _multinode(
@@ -848,33 +859,18 @@ def _multinode(
                 + " (fleet.yaml pools, docs/FLEET.md)",
             )
     terms = kept + ([{"key": f"{LABEL}/pool", "operator": "In", "values": pools}] if pools else [])
+    fabric = {"key": f"{LABEL}/interconnect", "operator": "In", "values": ["infiniband"]}
+    if ib:
+        terms.append(fabric)
     if terms:
-        pod["affinity"] = {
-            "nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": terms}]}
-            }
-        }
+        pod["affinity"] = _required_affinity(terms)
     elif "affinity" in pod:
         del pod["affinity"]
-    ib_count = int(r.get("ibDevicesPerNode") or kube.ib_devices_per_node(pools))
-    if ib:
-        pod.setdefault("affinity", {}).setdefault("nodeAffinity", {}).setdefault(
-            "requiredDuringSchedulingIgnoredDuringExecution", {"nodeSelectorTerms": [{"matchExpressions": []}]}
-        )
-        pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0][
-            "matchExpressions"
-        ].append({"key": f"{LABEL}/interconnect", "operator": "In", "values": ["infiniband"]})
-    elif interconnect == "preferred":
+    if interconnect == "preferred":  # soft: useless without the fabric (docs/JOBS.md), kept for the explicit opt-in
         pod.setdefault("affinity", {}).setdefault("nodeAffinity", {})[
             "preferredDuringSchedulingIgnoredDuringExecution"
-        ] = [
-            {
-                "weight": 100,
-                "preference": {
-                    "matchExpressions": [{"key": f"{LABEL}/interconnect", "operator": "In", "values": ["infiniband"]}]
-                },
-            }
-        ]
+        ] = [{"weight": 100, "preference": {"matchExpressions": [fabric]}}]
+    ib_count = int(r.get("ibDevicesPerNode") or kube.ib_devices_per_node(pools))
     # /work per pod: node-local scratch (the kubelet's ephemeral storage: local NVMe on pools that have it), not a
     # per-run RWO volume (N pods on N nodes). Checkpoints: `shared` = the tenant's RWX claim on the cluster's
     # shared filesystem (survives a restart and a :resume), `local` = under /work, gone with the pod.
@@ -1038,44 +1034,26 @@ def _jobset_as_job(js: dict) -> dict:
     }
 
 
-def _jobset_api(region: str):
-    return kube.api(region)
+def _jobset(method: str, region: str, ns: str, *args, **kw):
+    """`<method>_namespaced_custom_object` of the JobSet API on `region` (get, list, create, patch, delete)."""
+    fn = getattr(kube.api(region), f"{method}_namespaced_custom_object")
+    return retry(fn, JOBSET_GROUP, JOBSET_VERSION, ns, JOBSET_PLURAL, *args, **kw)
 
 
 def read_jobset(ns: str, name: str, region: str) -> dict:
-    return _jobset_as_job(
-        retry(_jobset_api(region).get_namespaced_custom_object, JOBSET_GROUP, JOBSET_VERSION, ns, JOBSET_PLURAL, name)
-    )
+    return _jobset_as_job(_jobset("get", region, ns, name))
 
 
 def list_jobsets(ns: str, region: str, selector: str) -> list[dict]:
-    items = retry(
-        _jobset_api(region).list_namespaced_custom_object,
-        JOBSET_GROUP,
-        JOBSET_VERSION,
-        ns,
-        JOBSET_PLURAL,
-        label_selector=selector,
-    ).get("items", [])
-    return [_jobset_as_job(j) for j in items]
+    return [_jobset_as_job(j) for j in _jobset("list", region, ns, label_selector=selector).get("items", [])]
 
 
 def patch_jobset(ns: str, name: str, region: str, body: dict) -> dict:
-    return _jobset_as_job(
-        retry(
-            _jobset_api(region).patch_namespaced_custom_object,
-            JOBSET_GROUP,
-            JOBSET_VERSION,
-            ns,
-            JOBSET_PLURAL,
-            name,
-            body,
-        )
-    )
+    return _jobset_as_job(_jobset("patch", region, ns, name, body))
 
 
 def delete_jobset(ns: str, name: str, region: str) -> None:
-    retry(_jobset_api(region).delete_namespaced_custom_object, JOBSET_GROUP, JOBSET_VERSION, ns, JOBSET_PLURAL, name)
+    _jobset("delete", region, ns, name)
 
 
 def pods_selector(job: dict) -> str:
@@ -1295,20 +1273,7 @@ def _mount_scratch_leaf(pod: dict, leaf: str, pools: list[str]) -> None:
                 {"name": "SCRATCH_LEAF", "value": leaf},
             ]
     pod["initContainers"] = [
-        {
-            "name": "scratch-provision",
-            "image": RUNNER_IMAGE,
-            "command": ["/usr/local/bin/scratch.sh", "provision", "/work"],
-            "resources": {"requests": dict(SCRATCH_PROVISION_REQUESTS), "limits": {"cpu": "200m", "memory": "64Mi"}},
-            "volumeMounts": [{"name": "work", "mountPath": "/work", "subPath": leaf}],
-            "securityContext": {
-                **CONTAINER_HARDENING,
-                "runAsNonRoot": False,
-                "runAsUser": 0,
-                "runAsGroup": 0,
-                "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]},
-            },
-        }
+        _provision_init("scratch-provision", "/work", [{"name": "work", "mountPath": "/work", "subPath": leaf}])
     ] + list(pod.get("initContainers") or [])
     _and_required(pod, {"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
     # the eligible GPU-free pools only (shared_scratch_available): with the shared-fs label alone, a CPU pool at its
@@ -1367,8 +1332,6 @@ def trust_bundle() -> str | None:
     """The bundle the API itself trusts (config._trust_file: the system roots plus every CA under /etc/ssl/msp), for a
     caller pod that must reach a fleet-CA-signed gateway; None on a fleet without extra CAs (public certificates
     everywhere: the runner's own roots suffice). Public CA material only, never a key."""
-    import glob
-
     path = os.environ.get("SSL_CERT_FILE")
     if not path or not glob.glob("/etc/ssl/msp/*.pem"):
         return None
@@ -1406,8 +1369,6 @@ def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str
     [those]` into the pod's required affinity (next to shared-fs): under CPU-quota saturation Kueue would otherwise
     take the next flavor whose nodeLabels satisfy `shared-fs In [true]`, a GPU flavor; with the pool list the caller
     waits QUEUED for its CPU pool, never a GPU node. (False, why, []) otherwise: the per-call claim, the Job says why."""
-    import fit
-
     cid = kube.cluster_id_or_none(region)
     table = kube.fleet().get("fit") or {}
     if not cid or cid not in table:
@@ -1433,33 +1394,43 @@ def shared_scratch_available(ns: str, region: str, pod: dict) -> tuple[bool, str
                 [],
             )
         return False, f"no GPU-free pool of {cid} mounts the shared filesystem", []
-    key = (ns, region)
-    hit = _shared_scratch_cache.get(key)
-    if hit and hit[0] > time.time():
-        ok, why = hit[1]
-        return ok, why, eligible if ok else []
+    ok, why = cached(_shared_scratch_cache, (ns, region), 60, lambda: _shared_scratch_bound(ns, region))
+    return ok, why, eligible if ok else []
+
+
+def _shared_scratch_bound(ns: str, region: str) -> tuple[bool, str]:
+    """(the tenant's shared-scratch claim is Bound on `region`, why not)."""
     try:
         core = kube.core(region)
         claim = core.api_client.sanitize_for_serialization(
             retry(core.read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
         )
         phase = ((claim or {}).get("status") or {}).get("phase")
-        out = (
-            (True, "")
-            if phase == "Bound"
-            else (False, f"claim {SHARED_SCRATCH_PVC} in {ns} on {region} is not Bound ({phase or 'no status'})")
-        )
+        if phase == "Bound":
+            return True, ""
+        return False, f"claim {SHARED_SCRATCH_PVC} in {ns} on {region} is not Bound ({phase or 'no status'})"
     except ApiException as e:
-        out = (
-            False,
-            f"claim {SHARED_SCRATCH_PVC} not found in {ns} on {region}"
-            if e.status == 404
-            else f"claim lookup: {e.reason}",
-        )
+        if e.status == 404:
+            return False, f"claim {SHARED_SCRATCH_PVC} not found in {ns} on {region}"
+        return False, f"claim lookup: {e.reason}"
     except Exception as e:  # noqa: BLE001 - unknown is not available
-        out = (False, f"claim lookup: {e}")
-    _shared_scratch_cache[key] = (time.time() + 60, out)
-    return out[0], out[1], eligible if out[0] else []
+        return False, f"claim lookup: {e}"
+
+
+def _require_claim(region: str, ns: str, claim: str, gone: str) -> None:
+    """The claim exists on `region` (one read), else 409 `gone` (404) or 502."""
+    try:
+        retry(kube.core(region).read_namespaced_persistent_volume_claim, claim, ns)
+    except ApiException as e:
+        raise HTTPException(409 if e.status == 404 else 502, gone)
+
+
+def execution_of(ann: dict) -> dict | None:
+    """The execution block an operation was rendered with (its Job's annotation, names only); None without one."""
+    try:
+        return json.loads(ann.get(f"{LABEL}/execution") or "null")
+    except ValueError:
+        return None
 
 
 def export_async(ns: str, name: str, region: str, model: dict, admit=None) -> tuple[dict, bool]:
@@ -1471,24 +1442,13 @@ def export_async(ns: str, name: str, region: str, model: dict, admit=None) -> tu
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     pvc = ann.get(f"{LABEL}/pvc")
     leaf = ann.get(f"{LABEL}/scratch-leaf") if ann.get(f"{LABEL}/scratch") == "shared" else None
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
-    except ValueError:
-        ex = None
+    ex = execution_of(ann)
     if not (pvc or leaf) or not ex or ex.get("io_mode") != "application":
         raise HTTPException(409, f"operation {name} kept no capture to export (not an application-I/O endpoint call)")
     if pvc:
-        try:
-            retry(kube.core(region).read_namespaced_persistent_volume_claim, pvc, ns)
-        except ApiException as e:
-            raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
+        _require_claim(region, ns, pvc, f"work volume {pvc} is gone; nothing to export")
     else:  # the shared-scratch leaf: the same claim, the same leaf; the transfer-only caller proves the capture itself
-        try:
-            retry(kube.core(region).read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
-        except ApiException as e:
-            raise HTTPException(
-                409 if e.status == 404 else 502, f"shared scratch claim is gone from {ns}; nothing to export"
-            )
+        _require_claim(region, ns, SHARED_SCRATCH_PVC, f"shared scratch claim is gone from {ns}; nothing to export")
     root = ann.get(f"{LABEL}/resumed-from", name)
     n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
     if n > EXPORT_RETRIES_MAX:
@@ -1528,8 +1488,6 @@ def _secret_copy(ns: str, name: str, region: str) -> dict:
         raise HTTPException(
             409 if e.status == 404 else 502, f"the call's credentials Secret {name} is gone; submit a new call"
         )
-    import base64
-
     raw = s if isinstance(s, dict) else kube.core(region).api_client.sanitize_for_serialization(s)
     if raw.get("stringData"):
         return dict(raw["stringData"])
@@ -1563,7 +1521,6 @@ def _inherit_owner(job: dict, ann: dict) -> None:
     owner = ann.get(f"{LABEL}/owner")
     if owner:
         job["metadata"]["annotations"][f"{LABEL}/owner"] = owner
-    import instances
     import stages
 
     instances.inherit_requester(job, ann)  # who asked for the original asked for its continuation
@@ -1576,9 +1533,6 @@ def operation_owner(ann: dict, root: str) -> str | None:
     owner = ann.get(f"{LABEL}/owner")
     if owner:
         return owner
-    import db
-    import keys
-
     if db.enabled():
         rec = keys.operation_owner(root)
         if rec:
@@ -1592,8 +1546,6 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     dispatcher creates it on the worker it picks (docs/JOBS.md)."""
     ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     name = job["metadata"]["name"]
-    import hashlib
-
     request_hash = hashlib.sha256(json.dumps(job["spec"], sort_keys=True).encode()).hexdigest()
     job["metadata"].setdefault("annotations", {})[f"{LABEL}/request-hash"] = request_hash
     # Every admission path (initial, resume, fallback, export retry) must deliver private inputs before Kueue
@@ -1617,18 +1569,9 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     was_created = True
     try:
         if is_jobset(job):
-            retry(
-                _jobset_api(region).create_namespaced_custom_object,
-                JOBSET_GROUP,
-                JOBSET_VERSION,
-                ns,
-                JOBSET_PLURAL,
-                job,
-            )
+            _jobset("create", region, ns, job)
         else:
             retry(kube.batch(region).create_namespaced_job, ns, job)
-        import admissions
-
         admissions.record(job, region, output_prefix(job))  # docs/JOBS.md "Resume": kept past the Job's TTL
     except ApiException as e:
         if e.status == 409:
@@ -1767,8 +1710,6 @@ def _json_items(fn, *args, **kw) -> list[dict]:
     """A Kubernetes list as the API server's JSON items (dicts), skipping the client's model objects and the
     sanitize pass back to dicts (half the time of listing 600 Jobs, api 0.11.124). `_preload_content=False` hands
     the raw response over; the shape is exactly what sanitize_for_serialization produced."""
-    import json as _json
-
     try:
         resp = retry(fn, *args, _preload_content=False, **kw)
     except (
@@ -1778,7 +1719,7 @@ def _json_items(fn, *args, **kw) -> list[dict]:
         resp = retry(fn, *args, **kw)
     data = getattr(resp, "data", None)
     if isinstance(data, (bytes, str)):
-        return _json.loads(data).get("items") or []
+        return json.loads(data).get("items") or []
     # a client that preloaded anyway (a fake in the tests, a wrapped client): the items as dicts
     items = getattr(resp, "items", None) or []
     return [i if isinstance(i, dict) else fn.__self__.api_client.sanitize_for_serialization(i) for i in items]
@@ -1899,14 +1840,11 @@ def _list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], 
 
 _fleet_ops_cache: dict = {"until": 0.0, "items": [], "skipped": []}
 FLEET_OPS_CACHE_S = 10
-TERMINAL_CONDITIONS = ("Complete", "Failed")
 
 
 def job_terminal(j: dict) -> bool:
-    return any(
-        c.get("type") in TERMINAL_CONDITIONS and c.get("status") == "True"
-        for c in (j.get("status") or {}).get("conditions") or []
-    )
+    """`status.finished` of a raw listed Job (app.py; a Job whose status is null counts as not terminal)."""
+    return finished({"status": j.get("status") or {}})
 
 
 def tenant_namespaces() -> list[str]:
@@ -1914,22 +1852,11 @@ def tenant_namespaces() -> list[str]:
     the tenants with keys on record (the database), as `tenant-<name>`, sorted."""
     names = set((kube.fleet().get("tenants") or {}).keys())
     try:
-        import db
-        import keys
-
         if db.enabled():
             names |= set(keys.tenants_on_record().keys())
     except Exception as e:  # noqa: BLE001 - the fleet document's tenants still count
         log.warning("fleet operations: tenants on record unavailable: %s", str(e)[:120])
-    from config import TENANT_NS_PREFIX
-
     return sorted(f"{TENANT_NS_PREFIX}{n}" for n in names if n)
-
-
-def list_fleet_active() -> tuple[list[dict], list[str]]:
-    """The non-terminal subset of list_fleet_operations (kept for callers of 0.11.124/125)."""
-    items, skipped = list_fleet_operations()
-    return [j for j in items if not job_terminal(j)], skipped
 
 
 def list_fleet_operations() -> tuple[list[dict], list[str]]:
@@ -2196,17 +2123,11 @@ def export_again(
             )
     elif not pvc or not worker:
         raise HTTPException(409, f"operation {name} has no kept work volume to export")
-    import catalog
-
     model = catalog.pinned(model, ann)
     if gang:
-        try:
-            retry(kube.core(worker).read_namespaced_persistent_volume_claim, SHARED_SCRATCH_PVC, ns)
-        except ApiException as e:
-            raise HTTPException(
-                409 if e.status == 404 else 502,
-                f"shared checkpoint claim {SHARED_SCRATCH_PVC} is gone; nothing to finalize",
-            )
+        _require_claim(
+            worker, ns, SHARED_SCRATCH_PVC, f"shared checkpoint claim {SHARED_SCRATCH_PVC} is gone; nothing to finalize"
+        )
         # the finalizer is ONE CPU pod, never the gang again: a single-node render of the model (no nodes, no GPU, no
         # fabric), its own small /work claim, the gang's shared checkpoint subPath mounted where the gang had it
         jb = dict(model.get("job") or {})
@@ -2221,10 +2142,7 @@ def export_again(
         model = {**model, "job": jb, "gpu_classes": []}
         pvc = None
     else:
-        try:
-            retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
-        except ApiException as e:
-            raise HTTPException(409 if e.status == 404 else 502, f"work volume {pvc} is gone; nothing to export")
+        _require_claim(worker, ns, pvc, f"work volume {pvc} is gone; nothing to export")
     root = ann.get(f"{LABEL}/resumed-from", name)
     n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
     if n > EXPORT_RETRIES_MAX:
@@ -2235,10 +2153,7 @@ def export_again(
     d = dict(defaults)
     out = output_prefix(orig) or ""
     d["output_prefix"] = out  # the same prefix: the retry completes the original export
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
-    except ValueError:
-        ex = None
+    ex = execution_of(ann)
     fz = (finalize or {}).get("spec") or {}
     job = build_run(
         new,
@@ -2372,15 +2287,7 @@ def export_again(
         # the delivery still mounts the shared filesystem (weights, data, shared checkpoints: what the export or the
         # finalizer reads from); the one placement need that survives, recomputed from the RETAINED volumes, never from
         # the stripped assets (docs/FLEET.md "Filesystem-aware placement")
-        spec["affinity"] = {
-            "nodeAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": {
-                    "nodeSelectorTerms": [
-                        {"matchExpressions": [{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}]}
-                    ]
-                }
-            }
-        }
+        spec["affinity"] = _required_affinity([{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}])
     job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
     _pin_to_worker(job, orig)
     job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
@@ -2394,6 +2301,64 @@ def export_again(
     if admit:
         admit(job)
     return create(ns, job, region)
+
+
+def _continuation_of(ns: str, orig: dict, defaults: dict) -> tuple[str, str, dict]:
+    """The next continuation `<root>-r<n>` of a read Job: (root, its name, the defaults with its output prefix next to
+    the original's)."""
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    root = ann.get(f"{LABEL}/resumed-from", md["name"])
+    new = f"{root}-r{1 + continuations(ns, labels[f'{LABEL}/tenant'], root)}"
+    d = dict(defaults)
+    out = output_prefix(orig) or ""
+    d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
+    return root, new, d
+
+
+def _fence(ns: str, name: str, region: str, uid: str, annotations: dict, what: str) -> None:
+    """Fence an original BEFORE its successor exists: suspended and annotated (its successor: a readable handle, status
+    SUPERSEDED), its Workload deactivated so Kueue never admits it again (the worker's copy and its pods go)."""
+    try:
+        retry(
+            kube.batch(region).patch_namespaced_job,
+            name,
+            ns,
+            {"metadata": {"annotations": annotations}, "spec": {"suspend": True}},
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    try:
+        kube.deactivate_workload(ns, uid, region)
+    except Exception as e:  # noqa: BLE001 - the Job is suspended either way
+        log.warning("%s: deactivate workload of %s/%s: %s", what, ns, name, e)
+
+
+def _create_successor(
+    ns: str, job: dict, region: str, name: str, uid: str, clear: dict, what: str, admit=None
+) -> tuple[dict, bool]:
+    """Admit (the run's ledger) and create the successor of a fenced original, then mark it durably. A failed admission
+    or create restores the original (the fence's annotations cleared, unsuspended, its Workload active again) and
+    raises: nothing was created, the original goes on as before."""
+    try:
+        if admit:
+            admit(job)
+        created, was_created = create(ns, job, region)
+    except Exception:
+        try:
+            retry(
+                kube.batch(region).patch_namespaced_job,
+                name,
+                ns,
+                {"metadata": {"annotations": clear}, "spec": {"suspend": False}},
+            )
+            kube.activate_workload(ns, uid, region)
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: restoring %s/%s after a failed successor: %s", what, ns, name, e)
+        raise
+    attempts.mark_successor(name, job["metadata"]["name"])
+    return created, was_created
 
 
 def switch_class(
@@ -2411,20 +2376,10 @@ def switch_class(
         raise HTTPException(
             409, f"operation {name} is {op['status']} (placed: {bool(orig.get('_cluster'))}); no fallback"
         )
-    import catalog
-
     model = catalog.pinned(model, ann)
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
-    except ValueError:
-        ex = {}
+    ex = execution_of(ann) or {}
     ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
-    root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
-    new = f"{root}-r{n}"
-    d = dict(defaults)
-    out = output_prefix(orig) or ""
-    d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
+    root, new, d = _continuation_of(ns, orig, defaults)
     placement = {
         "manager": True,
         "profile": f"prefer-{next_class}",
@@ -2467,43 +2422,10 @@ def switch_class(
     execution.deliver(
         ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
     )
-    # the original is fenced BEFORE its successor exists: suspended and named after its successor (a readable handle,
-    # status SUPERSEDED), its Workload deactivated so Kueue never admits it; only then is the successor admitted on the
-    # run's ledger and created, so the two can never run together. A failed admission or create restores the original.
-    try:
-        retry(
-            kube.batch(region).patch_namespaced_job,
-            name,
-            ns,
-            {"metadata": {"annotations": {f"{LABEL}/successor": new}}, "spec": {"suspend": True}},
-        )
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    try:
-        kube.deactivate_workload(ns, md.get("uid", ""), region)
-    except Exception as e:  # noqa: BLE001 - the Job is suspended either way
-        log.warning("fallback: deactivate workload of %s/%s: %s", ns, name, e)
-    try:
-        if admit:
-            admit(job)
-        created, was_created = create(ns, job, region)
-    except Exception:
-        try:  # nothing was created: the original queues on as before
-            retry(
-                kube.batch(region).patch_namespaced_job,
-                name,
-                ns,
-                {"metadata": {"annotations": {f"{LABEL}/successor": None}}, "spec": {"suspend": False}},
-            )
-            kube.activate_workload(ns, md.get("uid", ""), region)
-        except Exception as e:  # noqa: BLE001
-            log.warning("fallback: restoring %s/%s after a failed successor: %s", ns, name, e)
-        raise
-    import attempts
-
-    attempts.mark_successor(name, new)
-    return created, was_created
+    # the original is fenced BEFORE its successor exists; only then is the successor admitted on the run's ledger and
+    # created, so the two can never run together (_fence, _create_successor)
+    _fence(ns, name, region, md.get("uid", ""), {f"{LABEL}/successor": new}, "fallback")
+    return _create_successor(ns, job, region, name, md.get("uid", ""), {f"{LABEL}/successor": None}, "fallback", admit)
 
 
 def _started_pods(pods: list) -> list[dict]:
@@ -2559,19 +2481,9 @@ def switch_unschedulable(
             409, f"operation {name} is {op['status']} with {len(started)} started attempt(s); no unschedulable switch"
         )
     snapshot_uids = {p["metadata"].get("uid") for p in orig.get("_pods") or []}
-    import catalog
-
     model = catalog.pinned(model, ann)
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
-    except ValueError:
-        ex = {}
-    root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
-    new = f"{root}-r{n}"
-    d = dict(defaults)
-    out = output_prefix(orig) or ""
-    d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
+    ex = execution_of(ann) or {}
+    root, new, d = _continuation_of(ns, orig, defaults)
     gpu_class = labels.get(f"{LABEL}/gpu-class") or None
     pl = ex.get("placement") or {}
     tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
@@ -2626,23 +2538,14 @@ def switch_unschedulable(
             f"operation {name}: attempt {fresh[0]['pod']} bound to {fresh[0]['node'] or 'a node'} before the fence; no "
             "unschedulable switch (the run is proceeding)",
         )
-    try:
-        retry(
-            kube.batch(region).patch_namespaced_job,
-            name,
-            ns,
-            {
-                "metadata": {"annotations": {f"{LABEL}/successor": new, f"{LABEL}/recovery": why}},
-                "spec": {"suspend": True},
-            },
-        )
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    try:
-        kube.deactivate_workload(ns, md.get("uid", ""), region)  # the worker's copy and its Pending pod go
-    except Exception as e:  # noqa: BLE001 - the Job is suspended either way
-        log.warning("unschedulable switch: deactivate workload of %s/%s: %s", ns, name, e)
+    _fence(
+        ns,
+        name,
+        region,
+        md.get("uid", ""),
+        {f"{LABEL}/successor": new, f"{LABEL}/recovery": why},
+        "unschedulable switch",
+    )
     try:
         late = _started_pods(
             [p for p in (get(ns, name, region).get("_pods") or []) if p["metadata"].get("uid") in snapshot_uids]
@@ -2671,29 +2574,17 @@ def switch_unschedulable(
         except ApiException as e:
             if e.status != 404:
                 raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    try:
-        if admit:
-            admit(job)
-        created, was_created = create(ns, job, region)
-    except Exception:
-        try:  # nothing was created: the original stays as it was (a recorded late start stays recorded)
-            retry(
-                kube.batch(region).patch_namespaced_job,
-                name,
-                ns,
-                {
-                    "metadata": {"annotations": {f"{LABEL}/successor": None, f"{LABEL}/recovery": None}},
-                    "spec": {"suspend": False},
-                },
-            )
-            kube.activate_workload(ns, md.get("uid", ""), region)
-        except Exception as e:  # noqa: BLE001
-            log.warning("unschedulable switch: restoring %s/%s after a failed successor: %s", ns, name, e)
-        raise
-    import attempts
-
-    attempts.mark_successor(name, new)
-    return created, was_created
+    # a failed successor restores the original as it was (a recorded late start stays recorded)
+    return _create_successor(
+        ns,
+        job,
+        region,
+        name,
+        md.get("uid", ""),
+        {f"{LABEL}/successor": None, f"{LABEL}/recovery": None},
+        "unschedulable switch",
+        admit,
+    )
 
 
 def recoveries(ns: str, tenant: str, root: str) -> int:
@@ -2722,40 +2613,38 @@ def recover(
     fresh volume. The name is a function of (original, lost epoch): competing API replicas and repeated ticks
     converge on one Job (create is ignore-exists). Returns (successor, created)."""
     ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
-    import hashlib
-
-    import attempts
-
     orig = get(ns, name, region)
     md = orig["metadata"]
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     root = ann.get(f"{LABEL}/resumed-from", name)
     idem = f"recover:{lost_epoch}"
     new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "{}") or {}
-    except ValueError:
-        ex = {}
+    ex = execution_of(ann) or {}
     ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
     # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
     regions = [r for r in placement.get("regions") or [] if r] or [region]
     execution.deliver(ex, new, root, ns, labels[f"{LABEL}/tenant"], regions, owner=operation_owner(ann, root))
     attempts.mark_successor(name, new)  # fence 1: no record of the original from now on
-    try:
-        kube.deactivate_workload(ns, md.get("uid", ""), region)  # fence 2: the worker's copy and its pods go
-    except Exception as e:  # noqa: BLE001 - the Job is suspended below either way
-        log.warning("recovery: deactivate workload of %s/%s: %s", ns, name, e)
-    try:
-        retry(kube.batch(region).patch_namespaced_job, name, ns, {"spec": {"suspend": True}})
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    _fence(ns, name, region, md.get("uid", ""), {}, "recovery")  # fence 2: suspended, the worker's copy and pods go
     reason = f"recovered from {name} ({loss}): {labels.get(f'{LABEL}/gpu-class') or 'its class'} -> {next_class}"
-    # a modified execution block for the successor: the same block minus what the pinned original already carries
-    job_ann = {f"{LABEL}/recovered-from": name, f"{LABEL}/recovery": reason}
+    # the successor's execution block (the narrowed preference); `timeout_s` is the root's remaining deadline when the
+    # request set `recovery.deadline_s` (the successor never gets a fresh full budget)
     orig["metadata"]["annotations"] = {**ann, f"{LABEL}/execution": json.dumps(ex, sort_keys=True)}
-    created, was_created = _resume_from(
-        orig, ns, name, region, model, placement, pointer, next_class, idem, job_ann, timeout_s, admit
+    created, was_created = resume(
+        ns,
+        name,
+        region,
+        model,
+        {},
+        placement,
+        checkpoint_ref=pointer,
+        gpu_class=next_class,
+        idem=idem,
+        pointer=pointer,
+        superseding={f"{LABEL}/recovered-from": name, f"{LABEL}/recovery": reason},
+        _orig=orig,
+        timeout_s=timeout_s,
+        admit=admit,
     )
     try:
         retry(
@@ -2768,40 +2657,6 @@ def recover(
         if e.status != 404:
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
     return created, was_created
-
-
-def _resume_from(
-    orig: dict,
-    ns: str,
-    name: str,
-    region: str,
-    model: dict,
-    placement: dict,
-    pointer: str,
-    next_class: str,
-    idem: str,
-    job_ann: dict,
-    timeout_s: int | None,
-    admit=None,
-) -> tuple[dict, bool]:
-    """resume() on an already-read original (its execution annotation adjusted by the caller); `timeout_s` is the
-    root's remaining deadline when the request set `recovery.deadline_s` (the successor never gets a fresh full budget)."""
-    return resume(
-        ns,
-        name,
-        region,
-        model,
-        {},
-        placement,
-        checkpoint_ref=pointer,
-        gpu_class=next_class,
-        idem=idem,
-        pointer=pointer,
-        superseding=job_ann,
-        _orig=orig,
-        timeout_s=timeout_s,
-        admit=admit,
-    )
 
 
 def resume(
@@ -2836,16 +2691,12 @@ def resume(
             raise
         # the Job expired (TTL): the admission record (api 0.11.74+) is what remains of its inputs; without one the
         # resume is refused as before, never reconstructed from thin air (docs/JOBS.md "Resume")
-        import admissions
-
         rec = admissions.get(name)
         if rec is None:
             raise HTTPException(
                 404,
                 f"operation {name}: its Job expired and it has no admission record (admitted before api 0.11.74); submit a new run",
             )
-        import attempts
-
         durable = attempts.synthesize(name, rec["tenant"]) if attempts.enabled() else None
         orig = admissions.as_job(rec, (durable or {}).get("status"))
         if (durable or {}).get("status") == "SUCCEEDED":
@@ -2858,15 +2709,10 @@ def resume(
         raise HTTPException(409, f"operation {name} is {op['status']}; cancel it first")
     if op["mode"] != "run":
         raise HTTPException(400, "only run operations can be resumed")
-    import catalog
-
     model = catalog.pinned(model, ann)
     pvc = ann.get(f"{LABEL}/pvc")
     worker = orig["_region"] if is_manager_job(orig) else region
-    try:
-        ex = json.loads(ann.get(f"{LABEL}/execution") or "null")
-    except ValueError:
-        ex = None
+    ex = execution_of(ann)
     if not checkpoint_ref and pointer and not is_jobset(orig):
         # no explicit checkpoint: the newest acknowledged pointer of the chain stands in when the volume is gone or the
         # caller wants another class (docs/JOBS.md "Attempts and finalization")
@@ -2897,10 +2743,8 @@ def resume(
         pvc, worker = None, (None if is_manager_job(orig) else worker)
     elif not worker:
         raise HTTPException(409, f"operation {name} never reached a worker; submit a new run")
-    if checkpoint_ref:
-        pass
-    elif expired:
-        pass  # decided above: fresh volume, fleet placement for a manager run
+    if checkpoint_ref or expired:
+        pass  # decided above: a portable checkpoint, or a fresh volume (fleet placement for a manager run)
     elif is_jobset(orig):
         if ann.get(f"{LABEL}/checkpoints") != "shared":
             raise HTTPException(
@@ -2909,19 +2753,13 @@ def resume(
             )
         pvc = None  # the shared claim is mounted by name, under checkpoints/<root>
     else:
-        try:
-            retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
-        except ApiException as e:
-            raise HTTPException(
-                409 if e.status == 404 else 502,
-                f"checkpoint volume {pvc} is gone (successful runs release it); submit a new run",
-            )
+        _require_claim(
+            worker, ns, pvc, f"checkpoint volume {pvc} is gone (successful runs release it); submit a new run"
+        )
     root = ann.get(f"{LABEL}/resumed-from", name)
     if idem:
         # one continuation per (tenant, source operation, intent): the same key replays the same operation (`create`
         # returns it; a different input under the same key is 409), concurrent replays collide on the Job name
-        import hashlib
-
         new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
     else:
         n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
@@ -2986,8 +2824,6 @@ def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = Fa
     terminal state (FAILED, epoch 1) for ever once its Job expired, and a graph child waiting on that root kept seeing
     the FAILED original. Idempotent: a replayed resume marks the same successor again."""
     ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
-    import attempts
-
     try:
         attempts.mark_successor(name, new)
     except Exception as e:  # noqa: BLE001 - the annotation below still links while the Job exists; the mark is retried on replay

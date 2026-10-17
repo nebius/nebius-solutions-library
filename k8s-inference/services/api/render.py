@@ -215,21 +215,6 @@ RUNNER_SECURITY_CONTEXT = {**CONTAINER_HARDENING, "runAsNonRoot": True, "runAsUs
 POD_SECURITY_CONTEXT = {"seccompProfile": {"type": "RuntimeDefault"}}
 
 
-def _pod_failure_policy() -> dict:
-    return {
-        "rules": [
-            {
-                "action": "Ignore",
-                "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}],
-            },  # node drain / preemption
-            {
-                "action": "Ignore",
-                "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]},
-            },  # SIGKILL / SIGTERM
-        ]
-    }
-
-
 def _job_shell(
     name: str,
     meta: dict,
@@ -262,7 +247,12 @@ def _job_shell(
         "completions": 1,
         "backoffLimit": JOB_BACKOFF_LIMIT,
         "ttlSecondsAfterFinished": JOB_TTL_S,
-        "podFailurePolicy": _pod_failure_policy(),
+        "podFailurePolicy": {  # a node drain or preemption, and SIGKILL / SIGTERM, never count as a failure
+            "rules": [
+                {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},
+                {"action": "Ignore", "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]}},
+            ]
+        },
         "template": {"metadata": tmpl_meta, "spec": pod_spec},
     }
     if timeout_s:

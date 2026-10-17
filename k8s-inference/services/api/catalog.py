@@ -11,6 +11,7 @@ import os
 
 import yaml
 
+import db
 from config import CATALOG_DIRS, HUB_REGION, LABEL, MODELS_NAMESPACE
 
 _cache: dict = {"mtime": None, "models": {}}
@@ -141,13 +142,10 @@ def pinned(model: dict, ann: dict) -> dict:
     """The model as the operation was rendered from it: a resume or an export retry re-renders from the revision the
     Job pinned (`serverless2.nebius/model-version`, models_history), never silently from a newer definition."""
     want = ann.get(f"{LABEL}/model-version")
-    if not want or str(model.get("version")) == str(want) or model.get("managed_by") != "api":
+    if not want or str(model.get("version")) == str(want) or model.get("managed_by") != "api" or not db.enabled():
         return model
-    import db
     import models as runtime_store
 
-    if not db.enabled():
-        return model
     for h in db.history(model["name"], 500):
         if str(h["version"]) == str(want) and h.get("spec"):
             entry = runtime_store.to_entry(h["spec"], managed_by="api")
@@ -198,13 +196,6 @@ def to_public(m: dict, region_status: list | None = None) -> dict:
     }
 
 
-def _int_or_none(v) -> int | None:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return None
-
-
 def execution_identity(m: dict) -> dict:
     """The sanitized execution identity of a run class (docs/API.md "Models"): the image reference as registered,
     whether it is digest-pinned, the per-class images, the classes, the node count, the operator-approved delegate
@@ -213,12 +204,16 @@ def execution_identity(m: dict) -> dict:
     image = job.get("image")
     images = job.get("images") if isinstance(job.get("images"), dict) else None
     retry = job.get("retry") if isinstance(job.get("retry"), dict) else None
+    try:
+        nodes = int(job.get("nodes", 1))  # a template token (`{{nodes}}`): decided per run
+    except (TypeError, ValueError):
+        nodes = None
     return {
         "image": image,
         "immutable": bool(image and "@sha256:" in image),
         "images": {k: v for k, v in images.items() if k != "default"} if images else None,
         "gpu_classes": list(m.get("gpu_classes") or []),
-        "nodes": _int_or_none(job.get("nodes", 1)),  # a template token (`{{nodes}}`): decided per run
+        "nodes": nodes,
         "delegates": list(m.get("delegates") or []),
         "retry": (
             {"max_attempts": int(retry["maxAttempts"]), "on_exit_codes": list(retry.get("onExitCodes") or [137, 143])}

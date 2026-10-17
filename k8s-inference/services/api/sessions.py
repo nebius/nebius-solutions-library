@@ -38,11 +38,15 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 
+import attempts
 import config as cfg
 import db
 import keys
 import kube
-from resilience import retry
+import leases
+from resilience import iso, retry
+
+_ts = iso  # app.py formats a session's deadline through this name
 
 log = logging.getLogger("api")
 PROTOCOL_PREFIX = "s2-session."  # Sec-WebSocket-Protocol entry carrying the claim token (WebSocket workers)
@@ -77,10 +81,6 @@ def _row(r) -> dict:
     return dict(zip([c.strip() for c in COLUMNS.split(",")], r))
 
 
-def _ts(t) -> str | None:
-    return t.strftime("%Y-%m-%dT%H:%M:%SZ") if t else None
-
-
 def phase_of(s: dict) -> str:
     """The truthful place of a session: `claimed` (no connection yet), `starting` (bound; the endpoint has shown no
     Ready replica since: a pod may be cold-starting, no GPU is allocated to this session), `waiting_for_worker`
@@ -99,19 +99,19 @@ def public(s: dict) -> dict:
         "region": s["region"],
         "status": s["state"],
         "phase": phase_of(s),
-        "ready_seen_at": _ts(s.get("ready_seen_at")),
-        "attach_deadline_at": _ts(s.get("attach_deadline_at")),
+        "ready_seen_at": iso(s.get("ready_seen_at")),
+        "attach_deadline_at": iso(s.get("attach_deadline_at")),
         "outcome": s["outcome"],
         "cancel_requested": s["cancel_requested_at"] is not None,
         "cancel_reason": s["cancel_reason"],
         "attached": s["attached_at"] is not None,
         "worker_session_id": s["worker_session_id"],
-        "created_at": _ts(s["created_at"]),
-        "expires_at": _ts(s["expires_at"]),
-        "deadline_at": _ts(s["deadline_at"]),
-        "bound_at": _ts(s["bound_at"]),
-        "attached_at": _ts(s["attached_at"]),
-        "ended_at": _ts(s["ended_at"]),
+        "created_at": iso(s["created_at"]),
+        "expires_at": iso(s["expires_at"]),
+        "deadline_at": iso(s["deadline_at"]),
+        "bound_at": iso(s["bound_at"]),
+        "attached_at": iso(s["attached_at"]),
+        "ended_at": iso(s["ended_at"]),
         "gpu_seconds": float(s["gpu_seconds"]) if s["gpu_seconds"] is not None else None,
         "usage": s["usage"],
     }
@@ -353,11 +353,7 @@ def cancel(sid: str, reason: str) -> dict:
             "where id = %s and state <> 'ended'",
             (reason, sid),
         )
-        c.execute(
-            "update sessions set state = 'ended', ended_at = now(), outcome = 'cancelled', gpu_seconds = 0, usage = 'none' "
-            "where id = %s and state = 'claimed'",
-            (sid,),
-        )
+        _end(c, sid, "claimed", "cancelled", 0, "none")
     return settle(sid)
 
 
@@ -397,27 +393,17 @@ def verify_worker(token: str, s: dict, endpoint_model) -> dict:
     audience or the cluster's), the pod's namespace, name and UID from the token's claims, the pod object itself
     (same UID; the endpoint's own pods: the InferenceService or LeaderWorkerSet of the session's model). Nothing of it
     comes from request headers. `endpoint_model(label)` maps a predictor label to its catalog model."""
-    from kubernetes import client
-
     region = s["region"]
-    spec = client.V1TokenReviewSpec(token=token)
-    if cfg.SESSION_TOKEN_AUDIENCE:
-        spec.audiences = [cfg.SESSION_TOKEN_AUDIENCE]
     try:
-        review = retry(
-            client.AuthenticationV1Api(kube._client(region)).create_token_review, client.V1TokenReview(spec=spec)
-        )
+        review = attempts.token_review(token, region, cfg.SESSION_TOKEN_AUDIENCE or None)
     except (ApiException, OSError) as e:
         raise HTTPException(502, f"token review on {region}: {str(e)[:120]}")
     st = review.status
     if not st or not st.authenticated:
         raise HTTPException(401, "worker token not accepted by the session's cluster")
-    parts = (st.user.username or "").split(":")
+    parts, pod, uid = attempts.pod_claims(st)
     if len(parts) != 4 or parts[0] != "system" or parts[1] != "serviceaccount":
         raise HTTPException(401, "not a pod identity")
-    extra = st.user.extra or {}
-    pod = (extra.get("authentication.kubernetes.io/pod-name") or [""])[0]
-    uid = (extra.get("authentication.kubernetes.io/pod-uid") or [""])[0]
     if not pod or not uid:
         raise HTTPException(401, "token is not bound to a pod")
     ns = parts[2]
@@ -440,8 +426,6 @@ def verify_worker(token: str, s: dict, endpoint_model) -> dict:
         raise HTTPException(403, "the pod belongs to no endpoint of this fleet")
     if m["name"] != s["model"] or ns != m["namespace"]:
         raise HTTPException(403, f"the pod serves {m['name']}, the session is for {s['model']}")
-    import leases
-
     return {"pod": pod, "namespace": ns, "uid": uid, "region": region, "restart_count": leases.worker_restarts(obj)}
 
 
@@ -539,13 +523,6 @@ def sweep() -> list[str]:
 
 
 def _worker_gone(s: dict) -> bool:
-    """The attached pod, by exact UID, no longer exists or finished: confirmed worker loss."""
-    try:
-        obj = retry(kube.core(s["region"]).read_namespaced_pod, s["pod"], s["pod_namespace"])
-    except ApiException as e:
-        if e.status == 404:
-            return True
-        raise
-    if obj.metadata.uid != s["pod_uid"]:
-        return True
-    return (obj.status.phase if obj.status else None) in ("Succeeded", "Failed")
+    """The attached pod, by exact UID, no longer exists or finished: confirmed worker loss (leases._worker_gone; a
+    session row carries no restart count, so a restarted container never counts here)."""
+    return bool(leases._worker_gone(s))

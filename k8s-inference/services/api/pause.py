@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 import db
+from resilience import iso
 
 KEY = "submissions"
 CACHE_S = 2.0
@@ -21,10 +22,6 @@ RETRY_AFTER_DEFAULT_S = 30
 RETRY_AFTER_MAX_S = 3600
 MAX_S = 6 * 3600  # a pause is bounded: at most six hours, then it lifts itself (an operator who forgot it)
 _cache: dict = {"until": 0.0, "value": None}
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _read() -> dict | None:
@@ -61,7 +58,7 @@ def state() -> dict:
         _cache.update({"until": time.time() + CACHE_S, "value": value})
     if not value or not value.get("paused"):
         return {"paused": False}
-    if value.get("until") and value["until"] <= _now():
+    if value.get("until") and value["until"] <= iso(datetime.now(timezone.utc)):
         return {"paused": False, "expired": value}
     return dict(value)
 
@@ -123,8 +120,8 @@ def pause(
         "reason": (reason or "")[:300],
         "retry_after_s": retry_after,
         "exports": bool(exports),
-        "since": _now(),
-        "until": datetime.fromtimestamp(now + bound, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "since": iso(datetime.now(timezone.utc)),
+        "until": iso(datetime.fromtimestamp(now + bound, timezone.utc)),
         "by": by,
     }
     _write(value)
@@ -135,4 +132,4 @@ def resume(by: str) -> dict:
     if not db.enabled():
         raise HTTPException(503, "the submission pause needs the database")
     _write(None)
-    return {"paused": False, "resumed_at": _now(), "by": by}
+    return {"paused": False, "resumed_at": iso(datetime.now(timezone.utc)), "by": by}

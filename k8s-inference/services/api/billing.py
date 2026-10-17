@@ -9,7 +9,9 @@ import asyncio
 import json
 import logging
 import sys
+from contextlib import suppress
 
+import psycopg
 from kubernetes.client import V1DeleteOptions, V1Preconditions
 from kubernetes.client.rest import ApiException
 
@@ -155,29 +157,17 @@ def cleanup_released_pods(region: str, ns: str) -> int:
         records: dict = {}
         for pvc in claims:
             try:
-                targets = _released_pod_targets(pvc, pods, batch, ns, records)
-                for md in targets:
+                for md in _released_pod_targets(pvc, pods, batch, ns, records):
+                    exact = V1Preconditions(uid=md["uid"], resource_version=md["resourceVersion"])
                     try:
-                        retry(
-                            core.delete_namespaced_pod,
-                            md["name"],
-                            ns,
-                            body=V1DeleteOptions(
-                                preconditions=V1Preconditions(uid=md["uid"], resource_version=md["resourceVersion"])
-                            ),
-                        )
+                        retry(core.delete_namespaced_pod, md["name"], ns, body=V1DeleteOptions(preconditions=exact))
                         deleted += 1
                     except ApiException as e:
                         if e.status not in (404, 409):  # gone or changed: reconsider on the next pass, never force
                             raise
             except Exception as e:  # noqa: BLE001 - incomplete evidence leaves this volume protected
-                log.warning(
-                    "released volume cleanup %s/%s/%s deferred (%s)",
-                    region,
-                    ns,
-                    pvc["metadata"]["name"],
-                    type(e).__name__,
-                )
+                name = pvc["metadata"]["name"]
+                log.warning("released volume cleanup %s/%s/%s deferred (%s)", region, ns, name, type(e).__name__)
     except Exception as e:  # noqa: BLE001 - cleanup must not prevent accounting or imply absence on an API failure
         log.warning("released volume cleanup %s/%s deferred (%s)", region, ns, type(e).__name__)
     return deleted
@@ -286,22 +276,28 @@ async def bill_once() -> int:
 KNOWN_ZERO = f"{LABEL}/billed-correction"
 
 
+def _worker_pods(job: dict, ns: str, region: str):
+    """The Job's pods (sanitized) in the manager's region and every worker, worker by worker; an absent namespace
+    (404) holds nothing of the run, any other failure raises: an unreadable worker is never evidence."""
+    for worker in dict.fromkeys([region, *kube.regions()]):
+        core = kube.core(worker)
+        try:
+            pods = retry(core.list_namespaced_pod, ns, label_selector=jobs.pods_selector(job)).items
+        except ApiException as error:
+            if error.status == 404:
+                continue
+            raise
+        yield from (core.api_client.sanitize_for_serialization(p) for p in pods)
+
+
 def no_pods_anywhere(job: dict, ns: str, region: str) -> bool:
     """Strict: every worker (the manager's region and all workers) answered the pod list for this Job and none holds
     a pod of it in ANY phase (a terminal, unrecorded pod is a run). An unreadable worker (anything but an absent
     namespace) is not an absence. Contrast superseded_over, which only refuses non-terminal pods."""
-    for worker in dict.fromkeys([region, *kube.regions()]):
-        try:
-            pods = retry(kube.core(worker).list_namespaced_pod, ns, label_selector=jobs.pods_selector(job)).items
-        except ApiException as error:
-            if error.status == 404:
-                continue  # the namespace is absent there: nothing of the run can exist in it
-            return False
-        except Exception:  # noqa: BLE001 - unreadable is never evidence
-            return False
-        if pods:
-            return False
-    return True
+    try:
+        return next(_worker_pods(job, ns, region), None) is None
+    except Exception:  # noqa: BLE001 - unreadable is never evidence
+        return False
 
 
 def known_zero(job: dict, records: list | None, ns: str | None, region: str | None) -> bool:
@@ -408,21 +404,8 @@ def superseded_over(job: dict, ns: str | None, region: str | None) -> bool:
             return False  # the durable fence, not just an annotation, refuses any future predecessor publication
         if not kube.workload_inactive(ns, md["uid"], region):
             return False
-        for worker in dict.fromkeys([region, *kube.regions()]):
-            core = kube.core(worker)
-            try:
-                pods = retry(core.list_namespaced_pod, ns, label_selector=jobs.pods_selector(job)).items
-            except ApiException as error:
-                if error.status == 404:  # namespace absent, not an unreadable worker
-                    continue
-                raise
-            if any(
-                core.api_client.sanitize_for_serialization(p).get("status", {}).get("phase")
-                not in {"Succeeded", "Failed"}
-                for p in pods
-            ):
-                return False
-        return True
+        live = (p.get("status", {}).get("phase") not in {"Succeeded", "Failed"} for p in _worker_pods(job, ns, region))
+        return not any(live)
     except Exception as error:  # noqa: BLE001 - unavailable worker is not a confirmed stop
         log.warning("billing %s: predecessor stop unknown: %s", md.get("name"), error)
         return False
@@ -466,8 +449,6 @@ class _SettlementLock:
         if not db.enabled():
             return self
         try:
-            import psycopg
-
             self._conn = psycopg.connect(db.DATABASE_URL, autocommit=False, connect_timeout=5)
             self.held = bool(
                 self._conn.execute(
@@ -484,14 +465,10 @@ class _SettlementLock:
     def _release(self):
         conn, self._conn = self._conn, None
         if conn is not None:
-            try:
+            with suppress(Exception):
                 conn.rollback()  # ends the transaction: the advisory lock goes with it
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with suppress(Exception):
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     def __exit__(self, *exc):
         self._release()
@@ -511,7 +488,7 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
     it): a run's measured GPU seconds from its attempt records (nothing trustworthy -> `unknown`, the reservation
     kept), an endpoint call's join with its native execution (deferred while a worker is attached)."""
     cache = cache if cache is not None else {}
-    ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
+    name = job["metadata"]["name"]
     if not unsettled(job, ns, region):
         return False
     with _SettlementLock(name) as lock:
@@ -528,107 +505,109 @@ async def settle_job(region: str, ns: str, job: dict, cache: dict | None = None)
                 return False
             fresh.pop("_pods", None)
             job = {**job, "metadata": fresh["metadata"], "status": fresh["status"]}
-            ann = job["metadata"].get("annotations") or {}
         if job["metadata"].get("labels", {}).get(f"{LABEL}/mode") == "async":
-            # an endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md
-            # "Keys"); the endpoint's GPU time is not metered per call, so nothing is charged here. The
-            # release is a JOIN with the worker's native execution (docs/API.md "Native execution leases"):
-            # while the worker is attached nothing is freed, whatever the caller did
-            try:
-                value, how = (0.0, "transfer only") if ann.get(f"{LABEL}/export-of") else (None, "no ledger")
-                if db.enabled():
-                    m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
-                    settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
-                    if not settle_now:
-                        log.info("billing %s/%s: deferred, %s", region, name, how)
-                        return False
-                    # Only the platform's transfer-only retry is known to execute no inference. An optional
-                    # worker without a lease measurement is unknown, not the CPU caller's zero allocation.
-                    if ann.get(f"{LABEL}/export-of") and how in {"unattached", "worker usage unmeasured"}:
-                        value, how = 0.0, "transfer only"
-                    keys.release(name, value)
-                    leases.mark_settled(name)
-                seconds = "unknown" if value is None else f"{value}"
-                _annotate(
-                    region,
-                    ns,
-                    name,
-                    {
-                        BILLED: "0" if value is not None else "unknown",
-                        f"{LABEL}/gpu-seconds": seconds,
-                        f"{LABEL}/native": how,
-                    },
-                    job,
-                )
-                if f"{LABEL}/execution" in ann:
-                    execution.sweep_copies(ns, name)
-                return True
-            except Exception as e:  # noqa: BLE001 - retried on the next run
-                log.warning("settlement of endpoint call %s failed: %s", name, e)
+            return _settle_call(region, ns, job)
+        return await _settle_run(region, ns, job, cache)
+
+
+def _settle_call(region: str, ns: str, job: dict) -> bool:
+    """An endpoint call's Job: the key's slot and request were reserved at admission (docs/API.md "Keys"); the
+    endpoint's GPU time is not metered per call, so nothing is charged here. The release is a JOIN with the worker's
+    native execution (docs/API.md "Native execution leases"): while the worker is attached nothing is freed, whatever
+    the caller did."""
+    ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
+    try:
+        value, how = (0.0, "transfer only") if ann.get(f"{LABEL}/export-of") else (None, "no ledger")
+        if db.enabled():
+            m = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")) or {}
+            settle_now, value, how = leases.settle_decision(name, leases.mode_of(m) == "required")
+            if not settle_now:
+                log.info("billing %s/%s: deferred, %s", region, name, how)
                 return False
-        price_region = region
-        if jobs.is_manager_job(job):
-            if cache.get("clusters") is None:
-                cache["clusters"] = kube.workload_clusters(ns)
-            cluster = cache["clusters"].get(job["metadata"].get("uid", ""))
-            price_region = kube.cluster_region(cluster) if cluster else None
-            job["_pods"] = []  # the worker's pods are gone with its copy: the uploader's records are the attempts
-        else:
-            if cache.get("pods") is None:
-                raw = retry(kube.core(region).list_namespaced_pod, ns, label_selector=f"{LABEL}/mode=run").items
-                cache["pods"] = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
-            job["_pods"] = [
-                p
-                for p in cache["pods"]
-                if (
-                    p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name")
-                    or p["metadata"].get("labels", {}).get("job-name")
-                )
-                == name
-            ]
-        root = ann.get(f"{LABEL}/resumed-from") or name
-        records = attempts.for_operation(root) if attempts.enabled() else []
-        records = [r for r in records if r["operation"] == name] or artifacts.attempt_records(
-            ns, name, region, jobs.output_prefix(job)
-        )
-        if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
-            release_volume(job, ns, region)  # delivered: the volume may go (an EXPORT_FAILED run keeps it)
-        try:
-            identity = job["metadata"].get("uid")
-            if not identity:
-                raise ValueError("job UID is required for accounting")
-            measured = measured_usage(job, records)
-            zero = known_zero(job, records, ns, region)
-            if zero:
-                measured = 0.0  # nothing ever ran (known_zero): a known zero, written next to the bill
-            if measured is None:
-                # nothing trustworthy to charge: the key's reservation stays on record as unknown GPU time
-                # (keys.settle_run_member None); an operator settles it later (keys.settle_unknown)
-                if db.enabled():
-                    keys.release(name, None)
-                done = {BILLED: "unknown", f"{LABEL}/gpu-seconds": "unknown"}
-                _annotate(region, ns, name, done, job)
-                log.warning("billing %s/%s: GPU time not measured; reservation kept as unknown", region, name)
-                return True
-            gpu_s, usd = cost_of(
-                job, catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", "")), records, price_region
+            # Only the platform's transfer-only retry is known to execute no inference. An optional
+            # worker without a lease measurement is unknown, not the CPU caller's zero allocation.
+            if ann.get(f"{LABEL}/export-of") and how in {"unattached", "worker usage unmeasured"}:
+                value, how = 0.0, "transfer only"
+            keys.release(name, value)
+            leases.mark_settled(name)
+        seconds = "unknown" if value is None else f"{value}"
+        done = {
+            BILLED: "0" if value is not None else "unknown",
+            f"{LABEL}/gpu-seconds": seconds,
+            f"{LABEL}/native": how,
+        }
+        _annotate(region, ns, name, done, job)
+        if f"{LABEL}/execution" in ann:
+            execution.sweep_copies(ns, name)
+        return True
+    except Exception as e:  # noqa: BLE001 - retried on the next run
+        log.warning("settlement of endpoint call %s failed: %s", name, e)
+        return False
+
+
+async def _settle_run(region: str, ns: str, job: dict, cache: dict) -> bool:
+    """A run's measured GPU seconds from its attempt records: charged to the key, the reservation released; nothing
+    trustworthy measured -> `unknown`, the reservation kept (keys.settle_run_member None) for keys.settle_unknown."""
+    ann, name = job["metadata"].get("annotations") or {}, job["metadata"]["name"]
+    price_region = region
+    if jobs.is_manager_job(job):
+        if cache.get("clusters") is None:
+            cache["clusters"] = kube.workload_clusters(ns)
+        cluster = cache["clusters"].get(job["metadata"].get("uid", ""))
+        price_region = kube.cluster_region(cluster) if cluster else None
+        job["_pods"] = []  # the worker's pods are gone with its copy: the uploader's records are the attempts
+    else:
+        if cache.get("pods") is None:
+            raw = retry(kube.core(region).list_namespaced_pod, ns, label_selector=f"{LABEL}/mode=run").items
+            cache["pods"] = [kube.core(region).api_client.sanitize_for_serialization(p) for p in raw]
+        job["_pods"] = [
+            p
+            for p in cache["pods"]
+            if (
+                p["metadata"].get("labels", {}).get("jobset.sigs.k8s.io/jobset-name")
+                or p["metadata"].get("labels", {}).get("job-name")
             )
-            total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
+            == name
+        ]
+    root = ann.get(f"{LABEL}/resumed-from") or name
+    records = attempts.for_operation(root) if attempts.enabled() else []
+    records = [r for r in records if r["operation"] == name] or artifacts.attempt_records(
+        ns, name, region, jobs.output_prefix(job)
+    )
+    if not jobs.is_manager_job(job) and jobs.normalise(job, None, records)["status"] == "SUCCEEDED":
+        release_volume(job, ns, region)  # delivered: the volume may go (an EXPORT_FAILED run keeps it)
+    try:
+        identity = job["metadata"].get("uid")
+        if not identity:
+            raise ValueError("job UID is required for accounting")
+        measured = measured_usage(job, records)
+        zero = known_zero(job, records, ns, region)
+        if zero:
+            measured = 0.0  # nothing ever ran (known_zero): a known zero, written next to the bill
+        if measured is None:
             if db.enabled():
-                released = keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
-                if zero and not released:
-                    keys.settle_unknown(name, 0.0)  # a member an earlier pass stored as unknown: settled at 0
-            done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
-            if zero:
-                done[KNOWN_ZERO] = "known zero: fenced before admission, never admitted, no attempt record"
-            _annotate(region, ns, name, done, job)
-            if f"{LABEL}/execution" in ann:
-                execution.sweep_copies(ns, name)  # this attempt only: its successor may still be running
-            log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)
+                keys.release(name, None)
+            _annotate(region, ns, name, {BILLED: "unknown", f"{LABEL}/gpu-seconds": "unknown"}, job)
+            log.warning("billing %s/%s: GPU time not measured; reservation kept as unknown", region, name)
             return True
-        except Exception as e:  # noqa: BLE001 - unbilled, retried on the next run
-            log.warning("billing %s failed: %s", name, e)
-            return False
+        model = catalog.get(job["metadata"]["labels"].get(f"{LABEL}/model", ""))
+        gpu_s, usd = cost_of(job, model, records, price_region)
+        total = await add_spend(ann[KEY], usd, f"{region}/{identity}", gpu_s)
+        if db.enabled():
+            released = keys.release(name, gpu_s)  # the key's slot and its GPU-second reservation (keys.admit)
+            if zero and not released:
+                keys.settle_unknown(name, 0.0)  # a member an earlier pass stored as unknown: settled at 0
+        done = {BILLED: f"{usd}", f"{LABEL}/gpu-seconds": f"{gpu_s}"}
+        if zero:
+            done[KNOWN_ZERO] = "known zero: fenced before admission, never admitted, no attempt record"
+        _annotate(region, ns, name, done, job)
+        if f"{LABEL}/execution" in ann:
+            execution.sweep_copies(ns, name)  # this attempt only: its successor may still be running
+        log.info("billed %s/%s: %.0f GPU-s -> $%s (key spend now %s)", region, name, gpu_s, usd, total)
+        return True
+    except Exception as e:  # noqa: BLE001 - unbilled, retried on the next run
+        log.warning("billing %s failed: %s", name, e)
+        return False
 
 
 if __name__ == "__main__":

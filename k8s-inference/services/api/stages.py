@@ -27,7 +27,7 @@ import keys
 import kube
 import status
 from config import REGION
-from resilience import retry
+from resilience import iso, parse_ts, retry
 
 log = logging.getLogger("api")
 LABEL = cfg.LABEL
@@ -191,14 +191,12 @@ def ledger_head(ns: str, operation: str) -> str | None:
     return head
 
 
-def state_of(ns: str, operation: str, memo: dict | None = None) -> dict:
-    """{"status", "result_ref", "attempt_id", "operation"} of an operation, as the gate sees it: the live Job
-    (following fallback/recovery successors) with its durable attempt records, else the durable rows of an expired
-    Job, else status None (nothing exists: not submitted yet). An export retry or finalizer that delivered after the
-    Job failed counts (app._delivered)."""
-    from app import _delivered  # app imports this module; resolved at call time
-
-    tenant = ns[len(cfg.TENANT_NS_PREFIX) :] if ns.startswith(cfg.TENANT_NS_PREFIX) else ns
+def head_of(ns: str, operation: str, memo: dict | None = None) -> tuple[str, dict | None | bool]:
+    """The head of an operation's successor chain (a capacity fallback, a recovery, a manual resume), as the gate and
+    the public handle follow it: the successor annotation of a live Job, else (the Job gone, TTL) the durable successor
+    mark, with the run ledger's lineage head as the authority behind both (`ledger_head`). (head, its Job): the Job is
+    None when it is gone (the durable rows are what remains, or nothing: not submitted yet; without the database a gone
+    Job is followed nowhere), False when the chain is longer than 16 (never followed)."""
     current = operation
     for _ in range(16):
         try:
@@ -207,38 +205,50 @@ def state_of(ns: str, operation: str, memo: dict | None = None) -> dict:
             if e.status_code != 404:
                 raise
             if not attempts.enabled():
-                return {"operation": current, "status": None}
+                return current, None
             nxt = attempts.successor_of(current) or ledger_head(ns, current)
             if nxt and nxt != current:
                 current = nxt
                 continue
-            syn = attempts.synthesize(current, tenant)
-            if syn is None:
-                # no Job, no attempt row: either never submitted, or cancelled before it started (its Job deleted; the
-                # cancel mark and the settled ledger member are what remains)
-                marks = attempts._marks(current)
-                member = keys.member_of(current)
-                if (marks and marks[1]) or (member and member["state"] != "active"):
-                    return {"operation": current, "status": "CANCELLED"}
-                return {"operation": current, "status": None}
-            op = dict(syn)
-            if op.get("status") in ("EXPORT_FAILED", "FINALIZING", "FAILED"):
-                root = op.get("resumed_from") or current
-                op.update(_delivered(op, current, root))
-            return _state(current, op)
+            return current, None
         nxt = (job["metadata"].get("annotations") or {}).get(f"{LABEL}/successor") or ledger_head(ns, current)
         if nxt and nxt != current:
             current = nxt
             continue
+        return current, job
+    return current, False
+
+
+def state_of(ns: str, operation: str, memo: dict | None = None) -> dict:
+    """{"status", "result_ref", "attempt_id", "operation"} of an operation, as the gate sees it: the live Job
+    (following fallback/recovery successors) with its durable attempt records, else the durable rows of an expired
+    Job, else status None (nothing exists: not submitted yet). An export retry or finalizer that delivered after the
+    Job failed counts (app._delivered)."""
+    from app import _delivered  # app imports this module; resolved at call time
+
+    current, job = head_of(ns, operation, memo)
+    if job is False or (job is None and not attempts.enabled()):
+        return {"operation": current, "status": None}
+    if job is None:
+        tenant = ns[len(cfg.TENANT_NS_PREFIX) :] if ns.startswith(cfg.TENANT_NS_PREFIX) else ns
+        op = attempts.synthesize(current, tenant)
+        if op is None:
+            # no Job, no attempt row: either never submitted, or cancelled before it started (its Job deleted; the
+            # cancel mark and the settled ledger member are what remains)
+            marks = attempts._marks(current)
+            member = keys.member_of(current)
+            if (marks and marks[1]) or (member and member["state"] != "active"):
+                return {"operation": current, "status": "CANCELLED"}
+            return {"operation": current, "status": None}
+    else:
         root = (job["metadata"].get("annotations") or {}).get(f"{LABEL}/resumed-from") or current
         rows = [r for r in attempts.for_operation(root) if r["operation"] == current] if attempts.enabled() else []
         op = jobs.normalise(job, None, rows)
         if attempts.enabled():
             op.update(attempts.lifecycle(current, root, rows))
-            if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED"):
-                op.update(_delivered(op, current, root))
-        return _state(current, op)
-    return {"operation": current, "status": None}
+    if attempts.enabled() and op.get("status") in ("EXPORT_FAILED", "FINALIZING", "FAILED"):
+        op.update(_delivered(op, current, op.get("resumed_from") or current))
+    return _state(current, op)
 
 
 def _state(current: str, op: dict) -> dict:
@@ -345,10 +355,7 @@ def _admit_stage(ns: str, job: dict, results: dict) -> None:
     body = {
         "metadata": {
             "labels": {QUEUE_LABEL: profile, WAITING: None},
-            "annotations": {
-                ADMITTED_AT: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                WAIT_REASON: None,
-            },
+            "annotations": {ADMITTED_AT: iso(datetime.now(timezone.utc)), WAIT_REASON: None},
         },
         "spec": {"template": {"metadata": {"annotations": {RESULTS: json.dumps(results, sort_keys=True)}}}},
     }
@@ -409,6 +416,13 @@ def cancel_members(ns: str, root: str, why: str) -> list[str]:
     return out
 
 
+def _close(ns: str, root: str, why: str) -> list[str]:
+    """Cancel what still waits or runs of the graph and close it: `<stage>:cancelled`..., `<root>:closed`."""
+    out = [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
+    keys.cancel_graph(root, why)
+    return out + [f"{root}:closed"]
+
+
 def gate() -> list[str]:
     """One pass over the open graphs (the reconcile loop, every 15 s, each API replica; every step is idempotent):
     a waiting stage whose dependencies all delivered is admitted; one with a failed dependency is cancelled; a
@@ -434,17 +448,13 @@ def _gate_graph(ns: str, g: dict, now: datetime) -> list[str]:
     root, out, memo = g["root"], [], {}
     root_state = state_of(ns, keys.run_head(root) or root, memo)
     if root_state["status"] == "CANCELLED":
-        why = "root CANCELLED"
-        out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
-        keys.cancel_graph(root, why)
-        return out + [f"{root}:closed"]
+        return _close(ns, root, "root CANCELLED")
     if g.get("deadline_at") and g["deadline_at"] <= now:
         members = {m["stage"] for m in keys.run_members(root) if m.get("kind") == "stage"}
         missing = sorted(s for s in g["stages"] if s not in members)
-        why = "graph deadline passed" + (f"; never submitted: {', '.join(missing)}" if missing else "")
-        out += [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
-        keys.cancel_graph(root, why)
-        return out + [f"{root}:closed"]
+        return _close(
+            ns, root, "graph deadline passed" + (f"; never submitted: {', '.join(missing)}" if missing else "")
+        )
     failed_dep = False
     for job in _stage_jobs(ns, root):
         if not is_waiting(job):
@@ -490,16 +500,15 @@ def _settle_failure(ns: str, g: dict, root_state: dict, now: datetime, memo: dic
     failed_at = [b["failed_at"] for b in view["blocked_on"] if b.get("failed_at")]
     if len(failed_at) < len(view["blocked_on"]):
         return []
-    newest = max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in failed_at)
+    newest = max(parse_ts(t) for t in failed_at)
     if newest.tzinfo is None:
         newest = newest.replace(tzinfo=timezone.utc)
     if newest + timedelta(seconds=cfg.GRAPH_FAILURE_GRACE_S) > now:
         return []
     heads = ", ".join(f"{b['stage']} FAILED ({b['operation']})" for b in view["blocked_on"])
-    why = f"{heads}; not resumed within {cfg.GRAPH_FAILURE_GRACE_S} s of the failure: graph closed"[:300]
-    out = [f"{n}:cancelled" for n in cancel_members(ns, root, why)]
-    keys.cancel_graph(root, why)
-    return out + [f"{root}:closed"]
+    return _close(
+        ns, root, f"{heads}; not resumed within {cfg.GRAPH_FAILURE_GRACE_S} s of the failure: graph closed"[:300]
+    )
 
 
 # ---- the root's view ------------------------------------------------------------------------------------------
@@ -556,7 +565,7 @@ def graph_view(ns: str, g: dict, root_state: dict | None = None, memo: dict | No
     out = {
         "status": overall,
         "stages": stages,
-        "deadline_at": g["deadline_at"].strftime("%Y-%m-%dT%H:%M:%SZ") if g.get("deadline_at") else None,
+        "deadline_at": iso(g.get("deadline_at")),
         "cancelled": bool(g.get("cancelled_at")),
         **({"reason": g["reason"]} if g.get("reason") else {}),
     }

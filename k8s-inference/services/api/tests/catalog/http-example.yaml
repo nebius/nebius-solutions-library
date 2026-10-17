@@ -22,7 +22,7 @@ runtime:
     - name: EXAMPLE_API_KEY
       valueFrom: { secretKeyRef: { name: example-api-key, key: EXAMPLE_API_KEY } }
     - { name: EXAMPLE_CACHE_PATH, value: /opt/example/.cache }
-  resources: { gpu: 1, cpu: "8", memory: 32Gi, cpuRequest: "4", memoryRequest: 16Gi }
+  resources: { gpu: 1, cpu: "8", memory: 32Gi }
   scaling: { minReplicas: 0, maxReplicas: 1, metric: concurrency, target: 1, containerConcurrency: 1, scaleToZeroRetention: 2m }
   timeout: 600                      # also the pod's termination grace period in Knative
   shm: { enabled: true, size: 4Gi }
@@ -33,4 +33,3 @@ runtime:
 deployments:
   hub:
     pool: h100-spot-1x
-    priorityClassName: serverless2-interactive

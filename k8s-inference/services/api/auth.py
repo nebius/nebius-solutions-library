@@ -2,6 +2,7 @@
 caller. LiteLLM holds a best-effort mirror of the keys for its own OpenAI route (keys.py) and is never consulted here."""
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,12 +10,20 @@ from datetime import datetime, timezone
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+import catalog
 import config as cfg
 import db
 import keys
 from config import AUTH_CACHE_S, TENANT_NS_PREFIX
+from resilience import parse_ts
 
 _cache: dict[str, tuple[float, dict]] = {}
+# (budget field, spend field, the 402 reason): a key is exhausted when any spend reached its budget
+_BUDGETS = (
+    ("max_budget", "spend", "key budget exhausted"),
+    ("budget_requests", "spent_requests", "key request budget exhausted"),
+    ("budget_gpu_seconds", "spent_gpu_seconds", "key GPU-second budget exhausted"),
+)
 
 
 @dataclass
@@ -43,8 +52,6 @@ class Principal:
         identity = (
             [self.tenant, "principal", principal_id] if principal_id else [self.tenant, "key", keys.key_hash(self.key)]
         )
-        import json
-
         return keys.key_hash(json.dumps(identity, separators=(",", ":")))
 
     def public(self) -> dict:
@@ -67,13 +74,15 @@ class Principal:
         }
 
 
-def exhausted(i: dict) -> bool:
-    """Whether a key record has used up any of its budgets (money, requests, GPU seconds)."""
-    return (
-        (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"])
-        or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"])
-        or (i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"])
+def _exhausted(i: dict) -> str | None:
+    """The reason a key record has used up one of its budgets (money, requests, GPU seconds); None while it has not."""
+    return next(
+        (why for budget, spent, why in _BUDGETS if i.get(budget) is not None and (i.get(spent) or 0) >= i[budget]), None
     )
+
+
+def exhausted(i: dict) -> bool:
+    return _exhausted(i) is not None
 
 
 def limits_view(i: dict) -> dict:
@@ -121,10 +130,8 @@ async def _principal(authorization: str, allow_router: bool = False) -> Principa
     info = await key_info(key)
     if info.get("blocked"):
         raise HTTPException(403, "key is blocked")
-    if info.get("expires"):
-        expiry = datetime.fromisoformat(info["expires"].replace("Z", "+00:00"))
-        if (expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)) <= datetime.now(timezone.utc):
-            raise HTTPException(403, "key expired")
+    if info.get("expires") and parse_ts(info["expires"]) <= datetime.now(timezone.utc):
+        raise HTTPException(403, "key expired")
     meta = info.get("metadata") or {}
     if not meta.get("tenant"):
         raise HTTPException(403, "key is not bound to a tenant")
@@ -143,13 +150,8 @@ async def principal(credentials: HTTPAuthorizationCredentials | None = Depends(b
 
 def check_budget(p: Principal) -> None:
     """The cached view (a fast refusal); `keys.admit` holds the exact, transactional check at admission."""
-    i = p.info
-    if i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]:
-        raise HTTPException(402, "key budget exhausted")
-    if i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"]:
-        raise HTTPException(402, "key request budget exhausted")
-    if i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]:
-        raise HTTPException(402, "key GPU-second budget exhausted")
+    if why := _exhausted(p.info):
+        raise HTTPException(402, why)
 
 
 def check_scope(p: Principal, scope: str | tuple[str, ...]) -> None:
@@ -232,8 +234,6 @@ def _delegated_stage(labels: dict, ann: dict, model: str) -> bool:
     record = keys.operation_owner(root)
     if not record:
         return False
-    import catalog
-
     root_model = catalog.get(record[2])
     return bool(root_model and model in (root_model.get("delegates") or []))
 

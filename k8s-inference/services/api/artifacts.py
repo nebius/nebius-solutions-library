@@ -69,15 +69,18 @@ def storage_for(ns: str, uri: str | None, region: str = REGION) -> dict:
     raise HTTPException(403, f"bucket {bucket} is not one of the tenant's buckets")
 
 
+def _presign(s: dict, op: str, key: str, expires_s: int, **params) -> str:
+    return s["client"].generate_presigned_url(
+        op, Params={"Bucket": s["bucket"], "Key": key, **params}, ExpiresIn=expires_s
+    )
+
+
 def presign_upload(ns: str, filename: str, content_type: str, expires_s: int, region: str = REGION) -> dict:
     s = storage(ns, region)
     key = f"uploads/{uuid.uuid4().hex[:12]}/{filename.strip('/').replace('..', '')}"
-    url = s["client"].generate_presigned_url(
-        "put_object", Params={"Bucket": s["bucket"], "Key": key, "ContentType": content_type}, ExpiresIn=expires_s
-    )
     return {
         "uri": f"s3://{s['bucket']}/{key}",
-        "url": url,
+        "url": _presign(s, "put_object", key, expires_s, ContentType=content_type),
         "method": "PUT",
         "headers": {"Content-Type": content_type},
         "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=expires_s)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -90,10 +93,7 @@ def presign_put(ns: str, uri: str, expires_s: int, region: str = REGION) -> dict
     s = storage(ns, region)
     if not uri.startswith(f"s3://{s['bucket']}/"):
         raise HTTPException(403, "object is not in the tenant's bucket of that region")
-    key = uri[len(f"s3://{s['bucket']}/") :]
-    url = s["client"].generate_presigned_url(
-        "put_object", Params={"Bucket": s["bucket"], "Key": key}, ExpiresIn=expires_s
-    )
+    url = _presign(s, "put_object", uri[len(f"s3://{s['bucket']}/") :], expires_s)
     return {"uri": uri, "url": url, "method": "PUT", "expires_in_s": expires_s}
 
 
@@ -105,21 +105,14 @@ def operation_of(uri: str) -> str | None:
 
 
 def presign_download(ns: str, uri: str, expires_s: int = 3600, region: str | None = None) -> dict:
-    s = next(
-        (
-            st
-            for r in ([region] if region else kube.regions())
-            if uri.startswith(f"s3://{(st := storage(ns, r))['bucket']}/")
-        ),
-        None,
-    )
-    if not s:
+    for r in [region] if region else kube.regions():
+        s = storage(ns, r)
+        if uri.startswith(f"s3://{s['bucket']}/"):
+            break
+    else:
         raise HTTPException(403, "artifact is not in one of the tenant's buckets")
     key = uri[len(f"s3://{s['bucket']}/") :]
-    url = s["client"].generate_presigned_url(
-        "get_object", Params={"Bucket": s["bucket"], "Key": key}, ExpiresIn=expires_s
-    )
-    return {"name": key.rsplit("/", 1)[-1], "uri": uri, "url": url}
+    return {"name": key.rsplit("/", 1)[-1], "uri": uri, "url": _presign(s, "get_object", key, expires_s)}
 
 
 def read_json(ns: str, key: str, region: str = REGION, max_bytes: int = 4 << 20, prefix: str | None = None):

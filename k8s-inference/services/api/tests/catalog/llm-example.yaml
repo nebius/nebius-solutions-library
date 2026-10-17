@@ -31,7 +31,5 @@ runtime:
 deployments:
   hub:
     pool: h100-spot-1x
-    priorityClassName: serverless2-interactive
   eu-south1:
     pool: rtx6000-spot-1x
-    priorityClassName: serverless2-interactive

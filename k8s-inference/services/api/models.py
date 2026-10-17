@@ -96,6 +96,15 @@ MAX_VARIANTS = 8
 DATA_PATH_RE = re.compile(
     r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$"
 )  # a relative directory, no parent references
+# optional limits above the requests (cpu/memory are the requests, = the limits unless these are given) and the
+# kubelet's node-local scratch (request; limit = request unless given): kept through the projection, nothing rendered
+# without them (an endpoint's `resources`, a run class's top level; docs/API.md, docs/JOBS.md "Run class")
+LIMITS = (
+    ("cpu_limit", "cpuLimit"),
+    ("memory_limit", "memoryLimit"),
+    ("ephemeral_storage", "ephemeralStorage"),
+    ("ephemeral_storage_limit", "ephemeralStorageLimit"),
+)
 
 
 def _endpoint_bindings(s: dict) -> None:
@@ -332,11 +341,12 @@ def validate(spec: dict) -> dict:
             raise HTTPException(
                 400, "weights (jobs): {path (a directory of the region's shared weights, no '..'), mount_path}"
             )
-    if "automount_service_account_token" in s:
-        if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
-            raise HTTPException(
-                400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token"
-            )
+    if "automount_service_account_token" in s and (
+        kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool)
+    ):
+        raise HTTPException(
+            400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token"
+        )
     if not s.get("image") and not (s.get("images") or {}).get("default"):
         raise HTTPException(400, "image is required (or images.default)")
     gpu = s.get("gpu") or {}
@@ -531,9 +541,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         entry["podMetadata"] = s["pod_metadata"]
     if isinstance(s.get("example"), dict):
         entry["example"] = s["example"]
-    for k in RESERVED:
-        if k in s:
-            entry[k] = s[k]
+    entry.update({k: s[k] for k in RESERVED if k in s})
     if kind == "endpoint":
         protocol = s.get("protocol", "http")
         path = s.get("path") or PROTOCOL_PATH[protocol]
@@ -552,17 +560,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                 "gpu": count,
                 "cpu": str(res.get("cpu", "4")),
                 "memory": str(res.get("memory", "16Gi")),
-                # optional, as a run class's: limits above the requests (cpu/memory are the requests, = the limits
-                # unless these are given) and the kubelet's node-local scratch (request; limit = request unless given);
-                # kept through the projection, nothing rendered without them
-                **({"cpuLimit": str(res["cpu_limit"])} if res.get("cpu_limit") else {}),
-                **({"memoryLimit": str(res["memory_limit"])} if res.get("memory_limit") else {}),
-                **({"ephemeralStorage": str(res["ephemeral_storage"])} if res.get("ephemeral_storage") else {}),
-                **(
-                    {"ephemeralStorageLimit": str(res["ephemeral_storage_limit"])}
-                    if res.get("ephemeral_storage_limit")
-                    else {}
-                ),
+                **{key: str(res[k]) for k, key in LIMITS if res.get(k)},
             },
             "scaling": {
                 "minReplicas": int(scaling.get("min", 0)),
@@ -645,18 +643,10 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             regions = [regions_for([], [r])[0] for r in explicit]
         # a GPU-free definition is pinned to the system nodes, or to the region's customer CPU pool when the fleet
         # policy keeps tenants off the system nodes (kube.tenant_pool, docs/FLEET.md "Customer CPU pools")
-        deployments = {
-            r: (
-                {"pool": p}
-                if (
-                    p := (
-                        pool_for(r, classes, count, nodes, interconnect) if classes else kube.tenant_pool(r, "system")
-                    )
-                )
-                else {}
-            )
-            for r in regions
-        }
+        deployments = {}
+        for r in regions:
+            p = pool_for(r, classes, count, nodes, interconnect) if classes else kube.tenant_pool(r, "system")
+            deployments[r] = {"pool": p} if p else {}
         pool_class = {p["pool"]: p.get("gpu_class") for p in kube.fleet()["pools"].values()}
         images = s.get("images") or {}
         for r, d in deployments.items():
@@ -712,7 +702,7 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                     **({"ready": s["health_path"]} if s.get("health_path") else {}),
                 },
                 "gpu": {"count": count, "classes": classes} if classes else "none",
-                "servedModel": s.get("served_model"),
+                **({"servedModel": s["served_model"]} if s.get("served_model") else {}),
                 "runtime": runtime,
                 **({"routing": s["routing"]} if s.get("routing") else {}),
                 **({"nodes": nodes} if nodes > 1 else {}),
@@ -720,8 +710,6 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
                 "deployments": deployments,
             }
         )
-        if not entry["servedModel"]:
-            entry.pop("servedModel")
     else:
         job: dict = {
             "image": image,
@@ -729,9 +717,8 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
             "gpu": count,
             "cpu": str(s.get("cpu", "4")),
             "memory": str(s.get("memory", "16Gi")),
-            # separate limits and node-local scratch (docs/JOBS.md "Run class"): a request is what the scheduler
-            # guarantees, a limit what the container may grow to; absent limits keep the chart's rules (memory limit =
-            # request, no CPU quota)
+            # separate limits and node-local scratch (docs/JOBS.md "Run class"), read by name here: the contract test
+            # (tests/test_openapi_schemas.py) walks this module for the spec keys it reads
             **({"cpuLimit": str(s["cpu_limit"])} if s.get("cpu_limit") else {}),
             **({"memoryLimit": str(s["memory_limit"])} if s.get("memory_limit") else {}),
             **({"ephemeralStorage": str(s["ephemeral_storage"])} if s.get("ephemeral_storage") else {}),
@@ -853,13 +840,14 @@ def list_runtime() -> dict[str, dict]:
 PLURALS = {
     "InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservices"),
     "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
-    "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches"),
     # multi-node endpoints (runtime.nodes > 1): the replica group, its leader Service's route to the gateway
     "LeaderWorkerSet": kube.LWS,
     "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes"),
     # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
     "CiliumNetworkPolicy": ("cilium.io", "v2", "ciliumnetworkpolicies"),
 }
+# the core objects (the multi-node leader Service, the trust bundle ConfigMap): the CoreV1Api methods that apply and delete them
+CORE = {"Service": "namespaced_service", "ConfigMap": "namespaced_config_map"}
 
 
 def variants(entry: dict, cluster: str) -> list[dict]:
@@ -900,50 +888,10 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
         ns, name = md.get("namespace", "models"), md["name"]
         if kind in PLURALS:
             g, v, plural = PLURALS[kind]
-            retry(
-                kube.api(region).patch_namespaced_custom_object,
-                g,
-                v,
-                ns,
-                plural,
-                name,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
-        elif kind == "PersistentVolumeClaim":
-            retry(
-                kube.core(region).patch_namespaced_persistent_volume_claim,
-                name,
-                ns,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
-        elif kind == "Service":
-            retry(
-                kube.core(region).patch_namespaced_service,
-                name,
-                ns,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
-        elif kind == "ConfigMap":  # the endpoint's trust bundle file (render_endpoint._trust_configmap)
-            retry(
-                kube.core(region).patch_namespaced_config_map,
-                name,
-                ns,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
+            target = (kube.api(region).patch_namespaced_custom_object, g, v, ns, plural, name, doc)
         else:
-            raise HTTPException(500, f"endpoint renderer produced an unexpected kind {kind}")
+            target = (getattr(kube.core(region), f"patch_{CORE[kind]}"), name, ns, doc)
+        retry(*target, field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
         applied.append(f"{kind}/{ns}/{name}")
     return applied
 
@@ -997,12 +945,8 @@ def _delete(docs: list[dict], region: str) -> list[str]:
             if kind in PLURALS:
                 g, v, plural = PLURALS[kind]
                 retry(kube.api(region).delete_namespaced_custom_object, g, v, ns, plural, name)
-            elif kind == "PersistentVolumeClaim":
-                retry(kube.core(region).delete_namespaced_persistent_volume_claim, name, ns)
-            elif kind == "Service":
-                retry(kube.core(region).delete_namespaced_service, name, ns)
-            elif kind == "ConfigMap":
-                retry(kube.core(region).delete_namespaced_config_map, name, ns)
+            else:
+                retry(getattr(kube.core(region), f"delete_{CORE[kind]}"), name, ns)
         except ApiException as e:
             if e.status != 404:
                 raise HTTPException(502, f"{kind} {name}: {e.reason}")
@@ -1086,8 +1030,6 @@ def endpoint_domain(region: str) -> str:
     ids answered 503 on every real endpoint call before."""
     if region in ENDPOINT_DOMAINS:
         return ENDPOINT_DOMAINS[region]
-    import kube
-
     mapped = kube.cluster_region(region) if region else region
     return ENDPOINT_DOMAINS.get(mapped) or (ENDPOINT_DOMAIN if REGION in (region, mapped) else "")
 

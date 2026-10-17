@@ -69,7 +69,8 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
         {"namespace": namespace, "pod": re.escape(name) + ("-predictor.*" if kind == "endpoint" else "-.*")}, {"pod"}
     )
     containers = pods[:-1] + ',container!="",container!="POD"}'
-    w = f"{max(120, 2 * step)}s"  # the rate window follows the step: a coarse window still catches a short-lived pod
+    seconds = max(120, 2 * step)  # the rate window follows the step: a coarse window still catches a short-lived pod
+    w = f"{seconds}s"
     q = [
         ("cpu", "CPU usage", "cores", f"sum(rate(container_cpu_usage_seconds_total{containers}[{w}]))"),
         ("memory", "Memory usage", "bytes", f"sum(container_memory_working_set_bytes{containers})"),
@@ -85,7 +86,6 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
         calls = selectors({"namespace": namespace, "inferenceservice": name, "http_request_method": "POST"})
         failed = calls[:-1] + ',http_response_status_code=~"5.."}'
         knative = selectors({"k8s_namespace_name": namespace, "kn_service_name": name + "-predictor"})
-        seconds = max(120, 2 * step)
         per = f"{seconds // 60} min" if seconds % 60 == 0 else f"{seconds} s"
         q = [
             (
@@ -196,18 +196,12 @@ async def logs(
             },
             headers,
         )
-    lines = []
-    for stream in data.get("result", []):
-        labels = stream.get("stream") or {}
-        for timestamp, line in stream.get("values", []):
-            lines.append(
-                {
-                    "timestamp": str(timestamp),
-                    "line": line,
-                    "pod": labels.get("pod", ""),
-                    "container": labels.get("container", ""),
-                }
-            )
+    lines = [
+        {"timestamp": str(ts), "line": line, "pod": lb.get("pod", ""), "container": lb.get("container", "")}
+        for stream in data.get("result", [])
+        for lb in [stream.get("stream") or {}]
+        for ts, line in stream.get("values", [])
+    ]
     lines.sort(key=lambda line: int(line["timestamp"]), reverse=True)
     lines = lines[:limit]
     return {"region": region, "start": start, "end": stop, "lines": lines, "truncated": len(lines) == limit}
