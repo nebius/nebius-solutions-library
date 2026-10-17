@@ -1111,7 +1111,7 @@ class FleetOperation(BaseModel):
     tenant: str | None = None
     model: str | None = None
     mode: str | None = None
-    status: Literal["RUNNING", "QUEUED", "SUPERSEDED", "CANCELLED"]
+    status: Literal["RUNNING", "QUEUED", "SUPERSEDED", "SUCCEEDED", "FAILED", "CANCELLED"]
     created_at: str | None = None
     started_at: str | None = None
     cluster: str | None = None

@@ -119,7 +119,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.125", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.126", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -3164,27 +3164,37 @@ def fleet_operations(
     p: Principal = Depends(fleet_operator),
     active: bool = True,
     tenant: str | None = None,
+    status: str | None = None,
     limit: int | None = Query(None, ge=1, le=PAGE_MAX),
     cursor: str | None = None,
 ):
-    """The fleet operator's read-only view of the operations in flight across every tenant and cluster (docs/API.md
-    "Fleet operators"): every non-terminal operation Job (`active=true`, the only mode today), newest first, one page
-    at a time (docs/API.md "Pagination"). Identity only: id, tenant, model, mode, status (RUNNING: a pod is active;
-    QUEUED: admitted or waiting; SUPERSEDED: a continuation took over; CANCELLED: cancellation requested),
-    timestamps, cluster, the submitting key's alias and the owner hash; never an input, a result or a key. Header
-    `X-Regions-Skipped` names clusters that could not be read."""
+    """The fleet operator's read-only view of the operations across every tenant and cluster (docs/API.md "Fleet
+    operations"): with `active=true` (default) the work in flight (RUNNING: a pod is active; QUEUED: admitted or
+    waiting; CANCELLED: cancellation requested, the Job still ending), with `active=false` every operation Job the
+    clusters still hold, terminal ones included (SUCCEEDED, FAILED, CANCELLED, and SUPERSEDED: an original a
+    continuation took over). `status=` (comma-separated) narrows either. Newest first, one page at a time
+    (docs/API.md "Pagination"). Identity and state only: id, tenant, model, mode, status, timestamps, cluster,
+    successor, the submitting key's alias, the owner hash and the requester block; never an input, a result, a
+    reference or a key: an operation's detail stays its owner's. Header `X-Regions-Skipped` names clusters that
+    could not be read."""
     _fleet_only()
-    if not active:
-        raise HTTPException(400, "active=false is not served: terminal operations are each tenant's own listing")
-    items, skipped = jobs.list_fleet_active()
+    items, skipped = jobs.list_fleet_operations()
     if tenant:
         items = [j for j in items if (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/tenant") == tenant]
+    views = {j["metadata"]["name"]: _fleet_operation_view(j) for j in items}
+    if active:  # in flight only: never a terminal Job, never an original a continuation superseded
+        items = [
+            j for j in items if not jobs.job_terminal(j) and views[j["metadata"]["name"]]["status"] != "SUPERSEDED"
+        ]
+    if status:
+        wanted = {s.strip().upper() for s in status.split(",") if s.strip()}
+        items = [j for j in items if views[j["metadata"]["name"]]["status"] in wanted]
     if skipped:
         response.headers["X-Regions-Skipped"] = ",".join(skipped)
     key = lambda j: f"{j['metadata'].get('creationTimestamp') or ''}|{j['metadata']['name']}"  # noqa: E731
     # newest first: the page helper sorts ascending, so the key is inverted through a sortable complement
     page = _page(response, items, lambda j: _desc_key(key(j)), cursor, limit)
-    return [_fleet_operation_view(j) for j in page]
+    return [views[j["metadata"]["name"]] for j in page]
 
 
 def _desc_key(k: str) -> str:
@@ -3196,10 +3206,16 @@ def _fleet_operation_view(j: dict) -> dict:
     md, st = j["metadata"], j.get("status") or {}
     labels, ann = md.get("labels") or {}, md.get("annotations") or {}
     worker = j.get("_worker_status") or {}
-    if ann.get(f"{cfg.LABEL}/successor"):
+    conds = {c.get("type") for c in st.get("conditions") or [] if c.get("status") == "True"}
+    cancelled = bool(ann.get(f"{cfg.LABEL}/cancelled"))
+    if "Complete" in conds:
+        status = "SUCCEEDED"
+    elif "Failed" in conds:
+        status = "CANCELLED" if cancelled else "FAILED"
+    elif ann.get(f"{cfg.LABEL}/successor"):
         status = "SUPERSEDED"
-    elif ann.get(f"{cfg.LABEL}/cancelled"):
-        status = "CANCELLED"  # requested; the Job ends on its own (as GET /v1/operations/{id} reports it)
+    elif cancelled:
+        status = "CANCELLED"  # requested, the Job still ending (as GET /v1/operations/{id} reports it)
     elif int(worker.get("active") or st.get("active") or 0) > 0 and (worker.get("startTime") or st.get("startTime")):
         status = "RUNNING"
     else:

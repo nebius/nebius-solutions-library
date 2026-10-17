@@ -4,6 +4,16 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.126
+
+(API image only.)
+
+- `GET /v1/fleet/operations`: `active=false` lists every operation Job the clusters still hold, terminal ones
+  included (SUCCEEDED, FAILED, CANCELLED, SUPERSEDED), with the same metadata-only projection (never an input, a
+  result, a reference or a key; details stay owner-only); `active=true` (default) is the work in flight only and no
+  longer lists SUPERSEDED originals; `status=` narrows either. The operator console's Jobs page uses it for a fleet
+  key (the tenant-scoped list stays for tenant keys).
+
 ## api 0.11.125
 
 (API image only.)

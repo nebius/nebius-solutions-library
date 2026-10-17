@@ -363,12 +363,15 @@ without the database nothing is ever paused.
 
 ## Fleet operations: what is in flight across tenants (api 0.11.124)
 
-`GET /v1/fleet/operations` (the fleet role, docs/API.md "Fleet operators"; `tenant=` narrows; `active=true` is the
-only mode: terminal operations are each tenant's own listing) answers every non-terminal operation Job of every
-tenant on every reachable cluster, newest first, paged: `id`, `tenant`, `model`, `mode`, `status` (`RUNNING`: a pod
-is active; `QUEUED`: admitted or waiting; `SUPERSEDED`: a continuation took over; `CANCELLED`: cancellation
-requested, the Job ending), `created_at`, `started_at`, `cluster`, `region`, `successor`, `key_alias`, `owner` (the
-opaque owner hash) and `requester`. Identity and state only: never an input, a result or a key value. From one Job
+`GET /v1/fleet/operations` (the fleet role, docs/API.md "Fleet operators"; `tenant=` and `status=` (comma-separated)
+narrow) answers, newest first and paged, with `active=true` (default) the operation Jobs in flight across every
+tenant and reachable cluster (`RUNNING`: a pod is active; `QUEUED`: admitted or waiting; `CANCELLED`: cancellation
+requested, the Job still ending, as the tenant view reports it) and with `active=false` (api 0.11.126) every operation Job the clusters still hold,
+terminal ones included (`SUCCEEDED`, `FAILED`, `CANCELLED`, `SUPERSEDED`: an original a continuation took over, 90
+days by the Job TTL): `id`, `tenant`, `model`, `mode`, `status`, `created_at`, `started_at`, `cluster`, `region`,
+`successor`, `key_alias`, `owner` (the opaque owner hash) and `requester`. Identity and state only, the same field
+set in both modes: never an input, a result, a reference, a log or a key value; an operation's detail
+(`GET /v1/operations/{id}`) stays its owner's and answers 404 to the fleet role. From one Job
 listing per tenant namespace and cluster (the fleet document's tenants and the tenants on record), cached ten
 seconds; `X-Regions-Skipped` names clusters that could not be read.
 

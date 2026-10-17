@@ -1851,6 +1851,14 @@ def _list_ops_all(ns: str, tenant: str, model: str | None) -> tuple[list[dict], 
 
 _fleet_ops_cache: dict = {"until": 0.0, "items": [], "skipped": []}
 FLEET_OPS_CACHE_S = 10
+TERMINAL_CONDITIONS = ("Complete", "Failed")
+
+
+def job_terminal(j: dict) -> bool:
+    return any(
+        c.get("type") in TERMINAL_CONDITIONS and c.get("status") == "True"
+        for c in (j.get("status") or {}).get("conditions") or []
+    )
 
 
 def tenant_namespaces() -> list[str]:
@@ -1871,10 +1879,16 @@ def tenant_namespaces() -> list[str]:
 
 
 def list_fleet_active() -> tuple[list[dict], list[str]]:
-    """Every non-terminal operation Job of every tenant on every reachable cluster (the fleet operator's read,
-    GET /v1/fleet/operations): Jobs with the tenant label in all namespaces, without pods (the status is read from
-    the Job's conditions and annotations), cached FLEET_OPS_CACHE_S. Mirrors (a worker's copy of a manager Job) are
-    folded into the manager's entry as its cluster."""
+    """The non-terminal subset of list_fleet_operations (kept for callers of 0.11.124/125)."""
+    items, skipped = list_fleet_operations()
+    return [j for j in items if not job_terminal(j)], skipped
+
+
+def list_fleet_operations() -> tuple[list[dict], list[str]]:
+    """Every operation Job of every tenant on every reachable cluster, terminal ones included (the fleet operator's
+    read, GET /v1/fleet/operations): Jobs with the tenant label in every tenant namespace, without pods (the status
+    is read from the Job's conditions and annotations), cached FLEET_OPS_CACHE_S. Mirrors (a worker's copy of a
+    manager Job) are folded into the manager's entry as its cluster and worker status."""
     if _fleet_ops_cache["until"] > time.time():
         return list(_fleet_ops_cache["items"]), list(_fleet_ops_cache["skipped"])
     out, skipped, mirrors = {}, [], {}
@@ -1899,11 +1913,6 @@ def list_fleet_active() -> tuple[list[dict], list[str]]:
             continue
         for j in jobs:
             st = j.get("status") or {}
-            if any(
-                c.get("type") in ("Complete", "Failed") and c.get("status") == "True"
-                for c in st.get("conditions") or []
-            ):
-                continue
             name = j["metadata"]["name"]
             if is_mirror(j):
                 mirrors[name] = (r, st)

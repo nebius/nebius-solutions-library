@@ -208,11 +208,18 @@ def test_fleet_operations_lists_every_tenants_in_flight_work_for_the_fleet_opera
         job("op-old", "system", "2026-10-16T00:00:00Z", active=0, successor="op-old-r1"),
         job("op-cancel", "system", "2026-10-17T06:30:00Z", active=1, cancelled=True),
         job("op-done", "system", "2026-10-17T07:00:00Z", done=True),
+        {
+            **job("op-failed", "lynx", "2026-10-17T07:10:00Z"),
+            "status": {"conditions": [{"type": "Failed", "status": "True"}]},
+        },
+        {
+            **job("op-cancelled", "rene", "2026-10-17T07:20:00Z", cancelled=True),
+            "status": {"conditions": [{"type": "Failed", "status": "True"}]},
+        },
     ]
     monkeypatch.setattr(
         jobs, "is_mirror", lambda j: "kueue.x-k8s.io/prebuilt-workload-name" in (j["metadata"].get("annotations") or {})
     )
-
     doc = dict(kube.fleet())
     doc["tenants"] = {"rene": {}, "lynx": {}, "system": {}, "empty": {}}
     monkeypatch.setattr(kube, "fleet", lambda: doc)
@@ -225,25 +232,67 @@ def test_fleet_operations_lists_every_tenants_in_flight_work_for_the_fleet_opera
     assert jobs.tenant_namespaces() == ["tenant-empty", "tenant-lynx", "tenant-rene", "tenant-system"]
     jobs._fleet_ops_cache["until"] = 0.0
     assert c.get("/v1/fleet/operations", headers=H).status_code == 403  # a tenant key is no fleet operator
-    r = c.get("/v1/fleet/operations?limit=3", headers={"Authorization": "Bearer sk-fleet"})
+    # active (default): the work in flight only, newest first; terminal Jobs and superseded originals absent
+    r = c.get("/v1/fleet/operations?limit=2", headers={"Authorization": "Bearer sk-fleet"})
     assert r.status_code == 200, r.text
     rows = r.json()
-    assert [x["id"] for x in rows] == ["op-cancel", "op-queued", "op-run"]  # newest first; op-done is terminal
-    assert r.headers["X-Total-Count"] == "4" and r.headers.get("X-Next-Cursor")
-    by = {x["id"]: x for x in rows}
+    assert [x["id"] for x in rows] == ["op-cancel", "op-queued"]
+    assert r.headers["X-Total-Count"] == "3" and r.headers.get("X-Next-Cursor")
+    r2 = c.get(
+        f"/v1/fleet/operations?limit=2&cursor={r.headers['X-Next-Cursor']}",
+        headers={"Authorization": "Bearer sk-fleet"},
+    )
+    assert [x["id"] for x in r2.json()] == ["op-run"] and "X-Next-Cursor" not in r2.headers
+    by = {x["id"]: x for x in rows + r2.json()}
     assert (
         by["op-run"]["status"] == "RUNNING" and by["op-run"]["tenant"] == "rene" and by["op-run"]["model"] == "gromacs"
     )
     assert by["op-queued"]["status"] == "QUEUED" and by["op-cancel"]["status"] == "CANCELLED"
-    assert by["op-run"]["owner"] == "owner-1" and "input" not in by["op-run"]
-    r2 = c.get(
-        f"/v1/fleet/operations?limit=3&cursor={r.headers['X-Next-Cursor']}",
-        headers={"Authorization": "Bearer sk-fleet"},
+    assert by["op-run"]["owner"] == "owner-1" and "input" not in by["op-run"] and "result_ref" not in by["op-run"]
+    # every operation Job, terminal ones included, the same field set; newest first
+    all_ = c.get("/v1/fleet/operations?active=false", headers={"Authorization": "Bearer sk-fleet"})
+    assert all_.status_code == 200 and all_.headers["X-Total-Count"] == "7"
+    by_all = {x["id"]: x for x in all_.json()}
+    assert [x["id"] for x in all_.json()] == [
+        "op-cancelled",
+        "op-failed",
+        "op-done",
+        "op-cancel",
+        "op-queued",
+        "op-run",
+        "op-old",
+    ]
+    assert by_all["op-done"]["status"] == "SUCCEEDED" and by_all["op-failed"]["status"] == "FAILED"
+    assert by_all["op-cancelled"]["status"] == "CANCELLED" and by_all["op-old"]["status"] == "SUPERSEDED"
+    assert set(by_all["op-done"]) == set(by["op-run"])  # identical projection: no extra field for a finished run
+    for forbidden in ("input", "result_ref", "logs_url", "attempts", "execution", "checkpoint_ref", "key"):
+        assert forbidden not in by_all["op-done"]
+    # filters: tenant, status (comma-separated), both
+    only = c.get("/v1/fleet/operations?active=false&tenant=lynx", headers={"Authorization": "Bearer sk-fleet"}).json()
+    assert [x["id"] for x in only] == ["op-failed", "op-queued"]
+    done = c.get(
+        "/v1/fleet/operations?active=false&status=succeeded,FAILED", headers={"Authorization": "Bearer sk-fleet"}
     )
-    assert [x["id"] for x in r2.json()] == ["op-old"] and r2.json()[0]["status"] == "SUPERSEDED"
-    only = c.get("/v1/fleet/operations?tenant=lynx", headers={"Authorization": "Bearer sk-fleet"}).json()
-    assert [x["id"] for x in only] == ["op-queued"]
-    assert c.get("/v1/fleet/operations?active=false", headers={"Authorization": "Bearer sk-fleet"}).status_code == 400
+    assert [x["id"] for x in done.json()] == ["op-failed", "op-done"] and done.headers["X-Total-Count"] == "2"
+    assert c.get("/v1/fleet/operations?status=SUCCEEDED", headers={"Authorization": "Bearer sk-fleet"}).json() == []
+    # an owner-only detail stays denied to the fleet role
+    assert c.get("/v1/operations/op-done", headers={"Authorization": "Bearer sk-fleet"}).status_code == 404
+    # a region that cannot be read is named, the others answer
+    import urllib3
+
+    monkeypatch.setattr(kube, "regions", lambda: ["eu-north1", "eu-south1"])
+
+    def batch(region="eu-north1"):
+        if region == "eu-south1":
+            raise urllib3.exceptions.HTTPError("down")
+        return fake
+
+    monkeypatch.setattr(kube, "batch", batch)
+    jobs._fleet_ops_cache["until"] = 0.0
+    r = c.get("/v1/fleet/operations?active=false", headers={"Authorization": "Bearer sk-fleet"})
+    assert (
+        r.status_code == 200 and r.headers.get("X-Regions-Skipped") == "eu-south1" and r.headers["X-Total-Count"] == "7"
+    )
     jobs._fleet_ops_cache["until"] = 0.0
 
 
