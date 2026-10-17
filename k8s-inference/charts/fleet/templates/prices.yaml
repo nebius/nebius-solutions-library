@@ -61,13 +61,34 @@ data:
     {{- end }}
   clusters.yaml: |
     {{- /* cluster id (MultiKueueCluster name, pools' `region`, catalog deployments) -> the Nebius region and project:
-           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region) */}}
+           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region);
+           `cluster_id` (the mk8s cluster, from the cloud state through the platform stage) is what the console links
+           need (docs/API.md "Placement") */}}
     {{- range $rn, $r := $f.regions }}
-    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }} }
+    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }}{{ with $r.cluster_id }}, cluster_id: {{ . }}{{ end }} }
     {{- end }}
     {{- if ne $f.control.id "none" }}
-    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true }
+    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true{{ with $f.control.cluster_id }}, cluster_id: {{ . }}{{ end }} }
     {{- end }}
+  cpu_pools.yaml: |
+    {{- /* the GPU-free pools per cluster id (docs/FLEET.md "Customer CPU pools"): the system nodes and every cpu_pools
+           entry with platform/preset (the instance type the API reports for an attempt whose node is gone) and, for a CPU
+           pool, its node group (from the cloud state): what kube.tenant_pool pins a tenant's GPU-free work to */}}
+    {{- range $rn, $r := $f.regions }}
+    {{- if or (include "fleet.isControl" $) (eq $r.id $.Values.cluster) }}
+    {{- $sp := default dict $r.system_pool }}
+    {{ $r.id }}:
+      system: { kind: system, platform: {{ default "" $sp.platform | quote }}, preset: {{ default "" $sp.preset | quote }}, min_nodes: {{ default 0 $sp.node_count }}, max_nodes: {{ default 0 $sp.node_count }} }
+      {{- range $pn, $p := (default dict $r.cpu_pools) }}
+      {{ $pn }}: { kind: cpu, platform: {{ $p.platform | quote }}, preset: {{ $p.preset | quote }}, min_nodes: {{ default 0 $p.min_nodes }}, max_nodes: {{ $p.max_nodes }}{{ with $p.node_group_id }}, node_group_id: {{ . }}{{ end }} }
+      {{- end }}
+    {{- end }}
+    {{- end }}
+  policy.yaml: |
+    {{- /* fleet-wide scheduling policy the API reads (services/api/kube.py): `tenant_system_flavor` false keeps every
+           tenant off the system nodes (the tenant queues list no system flavor, kube.tenant_pool pins GPU-free work to
+           the customer CPU pool) */}}
+    tenant_system_flavor: {{ if hasKey $f "tenant_system_flavor" }}{{ $f.tenant_system_flavor }}{{ else }}true{{ end }}
   tenants.yaml: |
     {{- range $tn, $t := (default dict $f.tenants) }}
     {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }}, assets: {{ default list $t.assets | toJson }} }

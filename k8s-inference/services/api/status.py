@@ -166,6 +166,7 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
                 "node": p["spec"].get("nodeName"),
                 "gpu_class": (p["metadata"].get("labels") or {}).get(f"{LABEL}/gpu-class") or None,
                 "_pool": p["spec"].get("nodeSelector", {}).get(f"{LABEL}/pool"),
+                "pool": p["spec"].get("nodeSelector", {}).get(f"{LABEL}/pool"),  # published (docs/API.md "Placement")
                 "reason": reason if s != "SUCCEEDED" else None,
                 "exit_code": term.get("exitCode"),
                 "_gpus": _gpus(p),
@@ -192,6 +193,7 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
                 "node": r.get("node") or None,
                 "gpu_class": r.get("gpu_class") or None,
                 "_pool": r.get("pool"),
+                "pool": r.get("pool") or None,
                 "attempt_id": r.get("pod"),
                 "reason": {
                     "interrupted": "pod deleted (preempted)",

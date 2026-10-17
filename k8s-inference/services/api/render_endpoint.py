@@ -228,6 +228,19 @@ def values(entry: dict, cluster: str, domain: str, ib_claim_template: str, varia
         over.pop(key, None)
     base = {k: copy.deepcopy(x) for k, x in top.items() if k not in OMIT}
     vals = _merge_overwrite(_merge_overwrite(base, copy.deepcopy(runtime)), over)
+    if vals.get("pool"):
+        # a deployment pinned to `system` (a GPU-free endpoint) serves from the cluster's customer CPU pool instead
+        # when the fleet keeps tenants off the system nodes (kube.tenant_pool, docs/FLEET.md "Customer CPU pools");
+        # that pool is tainted, so its toleration replaces the GPU one
+        import kube
+
+        pool = kube.tenant_pool(cluster, vals["pool"])
+        if pool != vals["pool"]:
+            vals["pool"] = pool
+        if kube.is_cpu_pool(cluster, pool):
+            vals["tolerations"] = [t for t in (vals.get("tolerations") or []) if t.get("key") != "nvidia.com/gpu"] + [
+                dict(kube.CPU_POOL_TOLERATION)
+            ]
     mid = _required(top.get("id"), "catalog entry needs id", obj)
     vals["name"] = obj if obj != mid else mid
     vals["modelId"] = mid

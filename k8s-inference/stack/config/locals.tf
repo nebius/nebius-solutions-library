@@ -92,8 +92,9 @@ locals {
     prices = local.chart_prices
     # Kueue queues per tenant (charts/fleet): the fair-share weight, the per-pool GPU cap and the pools only this tenant
     # may use (docs/FLEET.md "Tenants")
-    tenants = { for tn, t in local.f.tenants : tn => { gpu_quota = t.gpu_quota, fair_share_weight = t.fair_share_weight, dedicated_pools = t.dedicated_pools, assets = t.assets } }
-    assets  = local.f.assets
+    tenants              = { for tn, t in local.f.tenants : tn => { gpu_quota = t.gpu_quota, fair_share_weight = t.fair_share_weight, dedicated_pools = t.dedicated_pools, assets = t.assets } }
+    assets               = local.f.assets
+    tenant_system_flavor = local.f.tenant_system_flavor # docs/FLEET.md "Customer CPU pools"
   }
 
   # GPU classes of the fleet -> scheduling profiles prefer-<class> (plus default).

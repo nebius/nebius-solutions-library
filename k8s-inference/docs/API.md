@@ -278,6 +278,51 @@ terminal only with its stages; a stage carries `stage` (`root`, `id`, `depends_o
 `phase: waiting_for_dependencies`. The rules (sealed graph, one operation per stage, same owner and key, the gate,
 failure, cancel, deadline) are in docs/JOBS.md "Stage composition".
 
+## Placement: where an attempt or a replica ran (api 0.11.122)
+
+Serverless 2 publishes placement to its own API and console; the Scientific AI platform above it is the abstraction its
+customers see and forwards none of it. Every attempt of an operation (`attempts[]`, also the chain's) carries, when a
+node or a pool is known:
+
+| field | meaning |
+|---|---|
+| `pool` | the fleet pool the pod was pinned to or admitted on (`serverless2.nebius/pool`) |
+| `instance_type` | `<platform>/<preset>` (`gpu-h100-sxm/1gpu-16vcpu-200gb`, `cpu-d3/8vcpu-32gb`) |
+| `node_group` | the mk8s node group id (`mk8snodegroup-...`) |
+| `console_url` | the Nebius console page of the node: `https://console.nebius.com/<project>/mk8s/<cluster>/node-groups/<node group>/nodes/<compute instance>` |
+| `instance_exact` | true: read from the node's labels; false: the node is gone (a reclaimed spot node, an expired Job's record) and the type and node group are the pool's, the link still names the instance |
+
+The node's labels (`node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`) are
+read once and cached ten minutes; the fleet document (charts/fleet `fleet-prices`: `pools.yaml`, `cpu_pools.yaml`,
+`clusters.yaml` with the mk8s `cluster_id` the platform stage takes from the cloud state) supplies the rest. An
+endpoint (`GET /v1/endpoints`, `GET /v1/endpoints/{id}`) lists its pods as `replicas[]` (`pod`, `ready`, `phase`,
+`node`, `started_at` and the same placement fields); `GET /v1/fleet` adds `node_group_id` and `console_url` per pool,
+`cluster_id` and `console_url` per cluster, `cpu_pools[]` (the system nodes and the customer CPU pools per cluster,
+docs/FLEET.md "Customer CPU pools") and `tenant_system_flavor`. An endpoint call (`mode: async`) records the node of
+its caller Job; the endpoint pod that served the request is not recorded per call (Knative adds no pod identity to a
+response): the endpoint's `replicas[]` at the time is the evidence.
+
+## Requester: who asked (api 0.11.122)
+
+`:invoke` accepts an optional `requester` block: at most 8 `snake_case` keys with string values of at most 128
+characters (`{"team": "oncology", "user": "ada", "customer_id": "cust-1"}`; never a secret). It is stored on the Job
+(`serverless2.nebius/requester`), follows every continuation (a fallback, a recovery, an export retry, a finalizer)
+and is returned on every read of the operation (`requester`), next to `key_alias`, the alias of the submitting key
+(never its value; from the keys table, an expired operation keeps the key the run ledger reserved under). The
+Scientific AI platform fills the block from its own directory (customer, team, user); Serverless stores and shows it
+and interprets nothing.
+
+## Operation identity before submission (api 0.11.122)
+
+`POST /v1/models/{model}:operation-id` with the `Idempotency-Key` header (required) and an optional body
+`{"mode": "run"|"async"}` (the model's own mode by default) answers `{"id", "model", "mode", "owner_scope"}`: the id a
+later `:invoke` with the same key, model and `Idempotency-Key` creates (`render.op_name(owner, model, key)`, the very
+call `:invoke` makes, in the same owner namespace: an imported key's explicit principal (`owner_scope: principal`),
+else the key itself (`key`)). Authorized like `:invoke` (the model allow-list, the mode's scope) but with no budget or
+admission check and no side effect: no reservation, no Job, no record. A stage submission (`execution.stage`) is
+named by its root and stage id, never by an `Idempotency-Key`; a submission without the header gets a random id; a
+synchronous call has no durable id: all three are refused (400).
+
 ## Weights of an endpoint
 
 `weights: {path, mount_path, env, read_only, prepare}` on an API-managed model (`POST /v1/models`): the region's

@@ -2,6 +2,7 @@
 "Tenants"): shared pools borrowed under the fair-share weight and the gpu_quota cap, a dedicated pool as its tenant's own
 nominal quota that nobody else lists, the manager's queues carrying the MultiKueue admission check."""
 
+import copy
 import os
 import subprocess
 
@@ -132,3 +133,42 @@ def test_manager_queues_carry_the_admission_check():
         "hub-h100-spot-1x",
     }
     assert docs[("ResourceFlavor", "hub-h100-lab-8x")]["metadata"]["labels"]["serverless2.nebius/tenant"] == "lab"
+
+
+def test_tenant_queues_drop_the_system_flavor_when_the_policy_keeps_tenants_off_the_system_nodes(monkeypatch):
+    """docs/FLEET.md "Customer CPU pools": with `tenant_system_flavor: false` no tenant queue lists a system flavor
+    (worker `system`, manager `<region>-system`); the lender keeps it for the platform's own GPU-free pods; a region's
+    customer CPU pool is the first flavor of every tenant queue; the fleet document carries the policy and the pools."""
+    original = FLEET
+    fleet = copy.deepcopy(FLEET)
+    fleet["tenant_system_flavor"] = False
+    fleet["regions"]["eu-north1"]["cpu_pools"] = {
+        "cpu-general": {"platform": "cpu-d3", "preset": "8vcpu-32gb", "min_nodes": 1, "max_nodes": 2}
+    }
+    fleet["regions"]["eu-north1"]["system_pool"] = {"platform": "cpu-d3", "preset": "8vcpu-32gb", "node_count": 2}
+    monkeypatch.setitem(globals(), "FLEET", fleet)
+    worker = _render("hub")
+    assert list(_flavors(worker[("ClusterQueue", "default")])) == ["system", "cpu-general", "h100-spot-1x"]
+    assert list(_flavors(worker[("ClusterQueue", "demo-prefer-h100")])) == ["cpu-general", "h100-spot-1x"]
+    assert list(_flavors(worker[("ClusterQueue", "lab-default")])) == ["cpu-general", "h100-lab-8x", "h100-spot-1x"]
+    manager = _render("control")
+    assert list(_flavors(manager[("ClusterQueue", "demo-prefer-h100")])) == ["hub-cpu-general", "hub-h100-spot-1x"]
+    assert list(_flavors(manager[("ClusterQueue", "default")]))[0] == "hub-system"
+    prices = manager[("ConfigMap", "fleet-prices")]["data"]
+    assert yaml.safe_load(prices["policy.yaml"]) == {"tenant_system_flavor": False}
+    pools = yaml.safe_load(prices["cpu_pools.yaml"])
+    assert pools["hub"]["system"]["kind"] == "system" and pools["hub"]["system"]["platform"] == "cpu-d3"
+    assert pools["hub"]["cpu-general"] == {
+        "kind": "cpu",
+        "platform": "cpu-d3",
+        "preset": "8vcpu-32gb",
+        "min_nodes": 1,
+        "max_nodes": 2,
+    }
+    assert "cluster_id" not in yaml.safe_load(prices["clusters.yaml"])["hub"]  # not applied by the cloud stage yet
+    # the default (the key absent, or true): every queue keeps the system flavor first, as before
+    monkeypatch.setitem(globals(), "FLEET", original)
+    assert list(_flavors(_render("hub")[("ClusterQueue", "demo-prefer-h100")]))[0] == "system"
+    assert yaml.safe_load(_render("hub")[("ConfigMap", "fleet-prices")]["data"]["policy.yaml"]) == {
+        "tenant_system_flavor": True
+    }

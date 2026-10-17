@@ -93,7 +93,14 @@
      -> quota) "order" (list of flavor names in order) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
 {{- define "fleet.systemFlavors" -}}
 {{- $systems := .systems }}{{ $order := default (keys $systems | sortAlpha) .order }}
+{{- /* a tenant queue (`tenant` true) lists no `system` flavor when the fleet policy `tenant_system_flavor` is false
+       (docs/FLEET.md "Customer CPU pools"): customer work never lands on the platform's system nodes, a GPU-free
+       workload takes the region's customer CPU pool (the flavors after `system`) or waits. `default` would turn
+       false into true, so the key is tested explicitly. */}}
+{{- $allow := true }}{{ if and .fleet (hasKey (default dict .fleet) "tenant_system_flavor") }}{{ $allow = .fleet.tenant_system_flavor }}{{ end }}
+{{- $skipSystem := and .tenant (not $allow) }}
 {{- range $name := $order }}{{ $q := index $systems $name }}
+{{- if not (and $skipSystem (or (eq $name "system") (hasSuffix "-system" $name))) }}
 - name: {{ $name }}
   resources:
     {{- if $.lender }}
@@ -109,6 +116,7 @@
     - { name: ephemeral-storage, nominalQuota: 0, borrowingLimit: {{ $q.ephemeralGi }}Gi }
     - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: 0 }
     {{- end }}
+{{- end }}
 {{- end }}
 {{- end -}}
 
@@ -245,7 +253,7 @@ spec:
   resourceGroups:
     - coveredResources: [nvidia.com/gpu, cpu, memory, ephemeral-storage, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
       flavors:
-        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" false) | nindent 8 }}
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" false "tenant" true "fleet" $f) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" $prefer) | fromYamlArray }}
         {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name)) }}
         {{- if or (not $owner) (eq $owner $tn) }}

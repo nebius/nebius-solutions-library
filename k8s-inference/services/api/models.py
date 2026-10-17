@@ -643,10 +643,16 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
         explicit = s.get("deployments") or {}
         if explicit and not s.get("regions"):  # variants name their regions
             regions = [regions_for([], [r])[0] for r in explicit]
+        # a GPU-free definition is pinned to the system nodes, or to the region's customer CPU pool when the fleet
+        # policy keeps tenants off the system nodes (kube.tenant_pool, docs/FLEET.md "Customer CPU pools")
         deployments = {
             r: (
                 {"pool": p}
-                if (p := (pool_for(r, classes, count, nodes, interconnect) if classes else "system"))
+                if (
+                    p := (
+                        pool_for(r, classes, count, nodes, interconnect) if classes else kube.tenant_pool(r, "system")
+                    )
+                )
                 else {}
             )
             for r in regions

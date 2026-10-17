@@ -201,6 +201,13 @@
                 "integer",
                 "null"
               ]
+            },
+            "cluster_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "the mk8s cluster id (platform stage, from the cloud state): console links"
             }
           }
         },
@@ -316,6 +323,10 @@
               }
             }
           }
+        },
+        "tenant_system_flavor": {
+          "type": "boolean",
+          "description": "false keeps every tenant off the system nodes (docs/FLEET.md \"Customer CPU pools\"): no system flavor in the tenant queues, GPU-free tenant work on the region's customer CPU pool"
         }
       }
     },
@@ -383,6 +394,13 @@
             }
           },
           "description": "the region's CPU nodes (tfvars regions.<r>.system_pool): what the `system` flavor budgets"
+        },
+        "cluster_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the mk8s cluster id (platform stage, from the cloud state): console links"
         }
       }
     },

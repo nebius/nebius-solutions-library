@@ -25,6 +25,7 @@ import config as cfg
 import db
 import endpoints as ep
 import execution
+import instances
 import jobs
 import keys
 import kube
@@ -116,7 +117,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.121", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.122", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -637,9 +638,31 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                 "max_nodes": pool.get("max_nodes"),
                 "interconnect": pool.get("interconnect"),
                 "local_nvme": bool(pool.get("local_nvme")),
+                # the node group behind the pool and its console page (docs/API.md "Placement")
+                "node_group_id": pool.get("node_group_id"),
+                "console_url": kube.console_node_url(pool.get("region"), pool.get("node_group_id"), None),
             }
             for pool in pools
         ],
+        # the GPU-free pools per cluster: the system nodes and the customer CPU pools (docs/FLEET.md "Customer CPU
+        # pools"), and whether tenant work may take the system nodes at all
+        "cpu_pools": [
+            {
+                "region": kube.cluster_region(cid),
+                "cluster": cid,
+                "pool": name,
+                "kind": entry.get("kind"),
+                "platform": entry.get("platform"),
+                "preset": entry.get("preset"),
+                "min_nodes": entry.get("min_nodes"),
+                "max_nodes": entry.get("max_nodes"),
+                "node_group_id": entry.get("node_group_id"),
+                "console_url": kube.console_node_url(cid, entry.get("node_group_id"), None),
+            }
+            for cid, by_name in sorted((kube.fleet().get("cpu_pools") or {}).items())
+            for name, entry in sorted((by_name or {}).items())
+        ],
+        "tenant_system_flavor": kube.tenant_system_allowed(),
     }
     # the caller's tenant: its quotas as terraform.tfvars shaped them (charts/fleet tenants.yaml) and, live, what its
     # queues hold per region (docs/FLEET.md "Tenants")
@@ -673,6 +696,9 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                     "roles": ["control", "manager"] if control else ["worker"],
                     "api_url": PUBLIC_API_URL if region == REGION else None,  # the fleet's one API
                     "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
+                    # the mk8s cluster behind the id and its console page (docs/API.md "Placement")
+                    "cluster_id": kube.cluster_entry("control" if control else cid).get("cluster_id"),
+                    "console_url": _console_cluster_url("control" if control else cid),
                     **kube.cluster_summary(region),
                 }
             )
@@ -932,6 +958,45 @@ def key_me(p: Principal = Depends(principal)):
     return out
 
 
+def _console_cluster_url(cluster: str | None) -> str | None:
+    c = kube.cluster_entry(cluster)
+    if not (c.get("project") and c.get("cluster_id")):
+        return None
+    return f"{kube.CONSOLE_URL}/{c['project']}/mk8s/{c['cluster_id']}"
+
+
+@app.post("/v1/models/{model}:operation-id", responses={200: {"model": schemas.OperationIdentity}})
+def operation_identity(
+    model: str,
+    req: schemas.OperationIdentityRequest | None = None,
+    p: Principal = Depends(principal),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """The operation id a later `:invoke` with the same key, model and `Idempotency-Key` creates (docs/API.md
+    "Operation identity"): `render.op_name(p.owner, model, key)`, the very call :invoke makes, under the same owner
+    namespace (an imported key's explicit principal, else the key itself). Authorized like :invoke's prelude (the model
+    allow-list, the mode's scope) but with no budget or admission check and no side effect at all: no reservation, no
+    Job, no record. A stage (`execution.stage`) is named by its root and id, never by an Idempotency-Key, and a
+    submission without the header gets a random id: both are refused here."""
+    m = _model(model)
+    mode = (req.mode if req else None) or m["mode"]
+    if mode not in m["modes"]:
+        raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
+    if mode == "sync":
+        raise HTTPException(400, "a synchronous call has no durable operation id")
+    authorize(p, model, {"async": "invoke:async"}.get(mode, "run:submit"), budget=False)
+    if not idempotency_key:
+        raise HTTPException(400, "Idempotency-Key is required: without it :invoke names the operation at random")
+    # the header exactly as :invoke hashes it (no trimming, no bound): the same bytes give the same id
+    legacy = (p.info.get("metadata") or {}).get("legacy") or {}
+    return {
+        "id": render.op_name(p.owner, model, idempotency_key),
+        "model": model,
+        "mode": mode,
+        "owner_scope": "principal" if legacy.get("principal_id") else "key",
+    }
+
+
 @app.post(
     "/v1/models/{model}:invoke",
     responses={200: {"model": schemas.SyncResponse | schemas.Operation}, 202: {"model": schemas.Operation}},
@@ -1085,6 +1150,9 @@ def _invoke_job(
     # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
     ann = job["metadata"].setdefault("annotations", {})
     ann[f"{cfg.LABEL}/owner"] = p.owner
+    instances.annotate_requester(
+        job, req.requester
+    )  # who asked, as the application states it (docs/API.md "Requester")
     if mode == "async" and rollout:
         # what the first request could reach at admission (docs/API.md "Models"): evidence of the ready revision and its
         # image then, not per-request provenance (Knative adds no revision to a response)
@@ -1102,7 +1170,10 @@ def _invoke_job(
     with keys.operation_lock(name) if db.enabled() else nullcontext():
         created_job, created = _create_admitted(p, name, job, region, secret, req, mode, stage=stage)
     if created:
-        return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202)
+        return JSONResponse(
+            _who(instances.enrich_operation(jobs.normalise(created_job, m.get("price_per_call"))), created_job),
+            status_code=202,
+        )
     return JSONResponse(
         _operation(p, created_job, created_job["metadata"]["name"], region), status_code=200
     )  # a replay: its current state
@@ -1436,6 +1507,8 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str, admissio
         "input": req.input,
         "cost": m.get("price_per_call") if ok else None,
         "error": None if ok else str(body)[:500],
+        "requester": req.requester,
+        "key_alias": _key_alias(keys.key_hash(p.key)),
     }
     return JSONResponse(
         {"result": body, "operation": op},
@@ -1527,11 +1600,11 @@ def list_operations(
             op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
             if attempts.enabled():
                 op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name), pods=j.get("_pods")))
-            out.append(op)
+            out.append(_who(instances.enrich_operation(op), j))
         else:
             op = attempts.synthesize(name, p.tenant)  # the durable record of an expired operation
             if op is not None:
-                out.append(op)
+                out.append(_who(instances.enrich_operation(op), None))
     return out
 
 
@@ -1758,7 +1831,9 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         "created_at": (root_member or {}).get("created_at")
         or min((a["started_at"] for a in all_attempts if a.get("started_at")), default=op.get("created_at")),
         "started_at": min((a["started_at"] for a in all_attempts if a.get("started_at")), default=None),
-        "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
+        "attempts": instances.placed(
+            [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts], op.get("cluster")
+        ),
         "chain": chain,
         "successor_created_at": successors[-1]["created_at"] if successors else None,
         "gpu_seconds": None if op.get("mode") == "async" and not complete and total == 0 else round(total, 1),
@@ -1939,6 +2014,43 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         op["endpoint_image"] = ann.get(f"{cfg.LABEL}/endpoint-image")
     if op.get("mode") == "async" and db.enabled():
         op["native"] = leases.public(leases.get(name), leases.history(name))  # the worker's side (docs/API.md)
+    return _who(instances.enrich_operation(op), job)
+
+
+_alias_cache: dict = {}  # key hash -> (until, alias): the alias of a key changes rarely, reads are per operation
+
+
+def _key_alias(key_hash: str | None) -> str | None:
+    """The alias of the submitting key (never its value): what the operator reads as "who" on the Serverless side
+    (docs/API.md "Requester"). From the keys table; None without the database or for an unknown hash."""
+    if not key_hash or not db.enabled():
+        return None
+    hit = _alias_cache.get(key_hash)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    alias = None
+    try:
+        info = keys.info(key_hash)
+        alias = (info or {}).get("key_alias")
+    except Exception as e:  # noqa: BLE001 - a key read never fails an operation read
+        log.warning("key alias of %s unavailable: %s", key_hash[:12], e)
+    _alias_cache[key_hash] = (time.time() + 60, alias)
+    return alias
+
+
+def _who(op: dict, job: dict | None) -> dict:
+    """`requester` (the application's block on the Job) and `key_alias` (the submitting key) on an operation read.
+    An expired operation (no Job) keeps the key the run ledger reserved under."""
+    ann = ((job or {}).get("metadata") or {}).get("annotations") or {}
+    if job is not None:
+        op["requester"] = instances.requester_of(ann)
+    h = ann.get(f"{cfg.LABEL}/key")
+    if not h and db.enabled() and op.get("id"):
+        try:
+            h = keys.reservation_key_of(op["id"])
+        except Exception:  # noqa: BLE001 - the alias is a convenience on the read
+            h = None
+    op["key_alias"] = _key_alias(h)
     return op
 
 
@@ -2592,7 +2704,7 @@ def _continued(p: Principal, job: dict, created: bool, region: str | None) -> JS
     """The response of a continuation: 202 with the new Job, or 200 with the existing one's current state (the
     replay of an idempotent call reports what GET /v1/operations/{id} reports, records included)."""
     if created:
-        return JSONResponse(jobs.normalise(job, _price(job)), status_code=202)
+        return JSONResponse(_who(instances.enrich_operation(jobs.normalise(job, _price(job))), job), status_code=202)
     return JSONResponse(_operation(p, job, job["metadata"]["name"], region), status_code=200)
 
 

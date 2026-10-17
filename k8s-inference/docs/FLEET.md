@@ -337,6 +337,32 @@ order alone is an aggregate decision: a GPU-free run that does not fit the CPU p
 on to a GPU pool whose aggregate CPU covers it while no single node does; the API's per-node fit
 (docs/SCHEDULING.md "Per-node fit", `fit.yaml` of the fleet document) keeps such a run on the pools whose node holds it.
 
+## Customer CPU pools: tenants off the system nodes (`tenant_system_flavor`, charts/fleet 0.1.13, api 0.11.122)
+
+By default a GPU-free tenant workload (a CPU-only class, an endpoint call's caller Job, an export retry, a finalizer)
+takes the `system` flavor first: the platform's own CPU nodes. `tenant_system_flavor = false` (fleet level,
+`terraform.tfvars`) keeps every tenant off them:
+
+- `charts/fleet` renders the tenant queues (`<tenant>-<profile>`, worker and manager mirror) **without** the `system`
+  flavor; the lender queue (`default`, the platform's own GPU-free pods) keeps it. A GPU-free tenant workload takes the
+  region's customer CPU pool (the `cpu_pools` flavors, in name order, scaled between `min_nodes` and `max_nodes`) or
+  waits QUEUED; it never lands on a system node.
+- the API (`kube.tenant_pool`) pins a definition that names `system` (a GPU-free endpoint, its async callers, a saved
+  definition with `system` baked in) to the region's first CPU pool at render time, with the pool's taint tolerated;
+  nothing has to be re-saved. A region without a `cpu_pools` entry keeps `system` and the API logs it: give every
+  region a customer CPU pool before flipping the switch (`cpu_pools.<name> = { platform = "cpu-d3", preset =
+  "8vcpu-32gb", min_nodes = 1, max_nodes = 2 }`; `min_nodes = 1` keeps one node warm so finalizers and export retries
+  do not wait for a boot).
+- the fleet document carries the policy (`policy.yaml`) and the GPU-free pools per cluster (`cpu_pools.yaml`: the
+  system nodes and every CPU pool with platform/preset and, for a CPU pool, its node group from the cloud state;
+  `clusters.yaml` gains the mk8s `cluster_id`): what `GET /v1/fleet` lists and what the console links go through
+  (docs/API.md "Placement").
+
+Flip it in one apply order: cloud stage (the node groups), then platform stage on every worker and the control
+cluster. Running workloads keep their admission; a Workload admitted on a system flavor before the change finishes
+there. `tools/check.sh` keeps asserting the lender's system flavor; `services/api/tests/test_fleet_chart_queues.py`
+asserts the tenant queues without it.
+
 ## Filesystem-aware placement
 
 The shared weights filesystem is a hostPath on the nodes that mount it (every GPU pool of a region that has it, CPU

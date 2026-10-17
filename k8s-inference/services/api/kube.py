@@ -1,6 +1,7 @@
 """Kubernetes clients per region (in-cluster for this region, rotated kubeconfigs for the others)
 and the KServe read helpers the catalog uses."""
 
+import logging
 import os
 import time
 
@@ -11,6 +12,8 @@ from kubernetes.client.rest import ApiException
 
 from config import FLEET_CONFIGMAP, HUB_REGION, KUEUE_JOB_UID_LABEL, KUEUE_NAMESPACE, LABEL, REGION, REGION_KUBECONFIGS
 from resilience import retry
+
+log = logging.getLogger("api.kube")
 
 _clients: dict[str, client.ApiClient] = {}
 _kubeconfig_mtime: dict[str, float] = {}  # region -> mtime of the kubeconfig the client was built from
@@ -61,7 +64,16 @@ def batch(region: str = REGION) -> client.BatchV1Api:
     return client.BatchV1Api(_client(region))
 
 
-_fleet_cache: dict = {"until": 0.0, "pools": {}, "clusters": {}, "tenants": {}, "assets": {}, "fit": {}}
+_fleet_cache: dict = {
+    "until": 0.0,
+    "pools": {},
+    "clusters": {},
+    "tenants": {},
+    "assets": {},
+    "fit": {},
+    "cpu_pools": {},
+    "policy": {},
+}
 
 
 def fleet() -> dict:
@@ -79,10 +91,113 @@ def fleet() -> dict:
         _fleet_cache["clusters"] = yaml.safe_load(data.get("clusters.yaml") or "") or {}
         _fleet_cache["assets"] = yaml.safe_load(data.get("assets.yaml") or "") or {}  # docs/JOBS.md "Restricted assets"
         _fleet_cache["fit"] = yaml.safe_load(data.get("fit.yaml") or "") or {}  # docs/SCHEDULING.md "Per-node fit"
+        # the GPU-free pools per cluster id (system + cpu_pools, with platform/preset/node group) and the fleet policy
+        # (`tenant_system_flavor`): docs/FLEET.md "Customer CPU pools"
+        _fleet_cache["cpu_pools"] = yaml.safe_load(data.get("cpu_pools.yaml") or "") or {}
+        _fleet_cache["policy"] = yaml.safe_load(data.get("policy.yaml") or "") or {}
     except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
         pass
     _fleet_cache["until"] = time.time() + 60
     return _fleet_cache
+
+
+def tenant_system_allowed() -> bool:
+    """Whether tenant work may take the `system` flavor (the region's platform CPU nodes). The fleet policy
+    `tenant_system_flavor` (charts/fleet policy.yaml, terraform.tfvars; default true); false = customer work never
+    lands on a system node: a GPU-free workload takes the region's customer CPU pool (docs/FLEET.md "Customer CPU
+    pools")."""
+    v = (fleet().get("policy") or {}).get("tenant_system_flavor", True)
+    return v not in (False, "false", "False", 0)
+
+
+def cpu_pool_of(cluster: str | None) -> str | None:
+    """The customer CPU pool of a cluster id (`regions.<r>.cpu_pools`, the first in name order; the fleet document's
+    cpu_pools.yaml), None when the cluster has none."""
+    pools = (fleet().get("cpu_pools") or {}).get(cluster or "") or {}
+    names = sorted(n for n, p in pools.items() if (p or {}).get("kind") == "cpu")
+    return names[0] if names else None
+
+
+def tenant_pool(cluster: str | None, pool: str | None) -> str | None:
+    """The pool a tenant's GPU-free workload is pinned to: `system` becomes the cluster's customer CPU pool when the
+    policy keeps tenants off the system nodes (a cluster without a CPU pool keeps `system` and logs it: the policy is
+    the operator's, the fleet must give it a pool). Any other pool is returned as it is."""
+    if pool != "system" or tenant_system_allowed():
+        return pool
+    cpu = cpu_pool_of(cluster)
+    if not cpu:
+        log.warning("tenant_system_flavor is off but %s has no cpu_pools: keeping the system pool", cluster)
+        return pool
+    return cpu
+
+
+CPU_POOL_TOLERATION = {"key": f"{LABEL}/cpu-pool", "operator": "Exists", "effect": "NoSchedule"}
+
+
+def is_cpu_pool(cluster: str | None, pool: str | None) -> bool:
+    """A pool the cloud stage tainted `serverless2.nebius/cpu-pool` (a cpu_pools entry; never `system`)."""
+    entry = ((fleet().get("cpu_pools") or {}).get(cluster or "") or {}).get(pool or "") or {}
+    return entry.get("kind") == "cpu"
+
+
+_node_cache: dict = {}  # f"{region}/{node}" -> (until, placement) : node labels change at most with a reboot
+NODE_CACHE_S = 600
+
+
+def node_placement(region: str | None, node: str | None) -> dict | None:
+    """What the node's labels say about the instance: {instance_type, preset, node_group, pool} (Nebius labels
+    `node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`), None when the node
+    is gone or unreadable (a reclaimed spot node). Cached ten minutes per node."""
+    if not region or not node:
+        return None
+    key = f"{region}/{node}"
+    hit = _node_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        labels = retry(core(region).read_node, node).metadata.labels or {}
+    except Exception:  # noqa: BLE001 - a gone node is a normal state of a spot attempt, never a failed read
+        _node_cache[key] = (time.time() + 60, None)  # a short negative cache: a node may appear a moment later
+        return None
+    out = {
+        "instance_type": labels.get("node.kubernetes.io/instance-type")
+        or labels.get("beta.kubernetes.io/instance-type"),
+        "preset": labels.get("nebius.com/resource-preset"),
+        "node_group": labels.get("nebius.com/node-group-id"),
+        "pool": labels.get(f"{LABEL}/pool"),
+    }
+    _node_cache[key] = (time.time() + NODE_CACHE_S, out)
+    return out
+
+
+def pool_entry(cluster: str | None, pool: str | None) -> dict:
+    """The fleet document's record of a pool on a cluster: a GPU pool (pools.yaml: platform, preset, node_group_id,
+    project) or a GPU-free one (cpu_pools.yaml); {} when unknown."""
+    if not pool:
+        return {}
+    for p in (fleet().get("pools") or {}).values():
+        if p.get("pool") == pool and (p.get("region") == cluster or cluster is None):
+            return p
+    return ((fleet().get("cpu_pools") or {}).get(cluster or "") or {}).get(pool) or {}
+
+
+def cluster_entry(cluster: str | None) -> dict:
+    """clusters.yaml: {region, project, cluster_id?, control?} for a cluster id ({} when unknown)."""
+    return (fleet().get("clusters") or {}).get(cluster or "") or {}
+
+
+CONSOLE_URL = "https://console.nebius.com"
+
+
+def console_node_url(cluster: str | None, node_group: str | None, node: str | None) -> str | None:
+    """The Nebius console page of a node (project / mk8s cluster / node group / compute instance), None unless every
+    id is known. The node group alone (no node) links the node group's page."""
+    c = cluster_entry(cluster)
+    project, cid = c.get("project"), c.get("cluster_id")
+    if not (project and cid and node_group):
+        return None
+    url = f"{CONSOLE_URL}/{project}/mk8s/{cid}/node-groups/{node_group}"
+    return f"{url}/nodes/{node}" if node else url
 
 
 def class_pools(classes: list[str], gpus_per_node: int | None = None, interconnect: str | None = None) -> list[str]:
@@ -612,6 +727,26 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
         pass
     _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out
+
+
+_pods_cache: dict = {}  # f"{region}/{ns}/{name}" -> (until, pods): the endpoint page reads this per endpoint
+
+
+def endpoint_pods(name: str, ns: str, region: str = REGION, nodes: int = 1) -> list:
+    """The pods of an endpoint (every replica of a KServe InferenceService; every pod of a LeaderWorkerSet), as the
+    client objects, for the replicas' placement (instances.replicas). Cached ten seconds like endpoint_status; []
+    when the region cannot be read."""
+    key = f"{region}/{ns}/{name}"
+    hit = _pods_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    selector = f"leaderworkerset.sigs.k8s.io/name={name}" if nodes > 1 else f"serving.kserve.io/inferenceservice={name}"
+    try:
+        pods = retry(core(region).list_namespaced_pod, ns, label_selector=selector).items
+    except Exception:  # noqa: BLE001 - an unreadable region shows no replicas, never fails the page
+        pods = []
+    _pods_cache[key] = (time.time() + 10, pods)
+    return pods
 
 
 _last_stamp: dict[str, float] = {}

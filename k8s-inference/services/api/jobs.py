@@ -619,7 +619,13 @@ def build_run(
         pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
     terms = []
     if r.get("pool"):
-        pod["nodeSelector"] = {f"{LABEL}/pool": r["pool"]}
+        # a definition pinned to `system` (a GPU-free class, an async caller) goes to the region's customer CPU pool
+        # instead when the fleet keeps tenants off the system nodes (kube.tenant_pool); a CPU pool is tainted
+        cid = kube.cluster_id_or_none(region) if region else None
+        pool = kube.tenant_pool(cid, r["pool"])
+        pod["nodeSelector"] = {f"{LABEL}/pool": pool}
+        if not gpus and kube.is_cpu_pool(cid, pool):
+            pod["tolerations"] = [dict(kube.CPU_POOL_TOLERATION)]
     elif gpus and gpu_classes(model):
         # the preference queue may fall back to another GPU class; keep it to the classes the image runs on
         # (Kueue assigns only flavors whose node labels satisfy the affinity, docs/SCHEDULING.md). With per-class
@@ -1554,8 +1560,10 @@ def _inherit_owner(job: dict, ann: dict) -> None:
     owner = ann.get(f"{LABEL}/owner")
     if owner:
         job["metadata"]["annotations"][f"{LABEL}/owner"] = owner
+    import instances
     import stages
 
+    instances.inherit_requester(job, ann)  # who asked for the original asked for its continuation
     stages.inherit(job, ann)  # a stage's continuation stays that stage (lineage, dependency results)
 
 

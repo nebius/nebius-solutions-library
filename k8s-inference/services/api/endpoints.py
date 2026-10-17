@@ -3,6 +3,7 @@ fleet-managed objects are read-only through the customer API."""
 
 import re
 
+import instances
 import kube
 from config import PUBLIC_API_URL, REGION
 
@@ -63,6 +64,9 @@ def to_public(m: dict, obj: dict, region: str = REGION) -> dict:
     return {
         **_base(m, md, st),
         "region": region,
+        "replicas": instances.replicas(
+            kube.endpoint_pods(m["k8s_name"], m["namespace"], region), kube.cluster_id_or_none(region)
+        ),
         "nodes": 1,
         "min_replicas": pred.get("minReplicas", 0),
         "max_replicas": pred.get("maxReplicas", 1),
@@ -104,6 +108,9 @@ def _lws_public(m: dict, obj: dict, region: str) -> dict:
     return {
         **_base(m, md, st),
         "region": region,
+        "replicas": instances.replicas(
+            kube.endpoint_pods(m["k8s_name"], m["namespace"], region, nodes=nodes), kube.cluster_id_or_none(region)
+        ),
         "nodes": nodes,
         "interconnect": (md.get("annotations") or {}).get("serverless2.nebius/interconnect", "none"),
         "pods_ready": st.get("pods_ready"),

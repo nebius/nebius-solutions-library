@@ -147,6 +147,31 @@ class InvokeRequest(BaseModel):
     priority: str | None = None
     timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
     execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs; endpoint calls: docs/API.md)
+    # who asked, as the submitting application states it (docs/API.md "Requester"): at most 8 snake_case keys with
+    # string values of at most 128 characters (team, user, customer id; never a secret), stored on the Job and
+    # returned on every read of the operation and its continuations
+    requester: dict[str, str] | None = None
+
+    @field_validator("requester")
+    @classmethod
+    def _requester(cls, v):
+        import instances
+
+        return instances.validate_requester(v)
+
+
+class OperationIdentityRequest(BaseModel):
+    mode: Literal["run", "async"] | None = None  # the model's own mode by default
+
+
+class OperationIdentity(BaseModel):
+    """`POST /v1/models/{model}:operation-id` (docs/API.md "Operation identity"): the id a later :invoke with the same
+    key, model and Idempotency-Key creates; no side effect."""
+
+    id: str
+    model: str
+    mode: Literal["run", "async"]
+    owner_scope: Literal["key", "principal"]  # the owner namespace the id is derived in (an imported key's principal)
 
 
 class SessionRequest(BaseModel):
@@ -559,6 +584,15 @@ class Attempt(BaseModel):
     status: AttemptStatus | None = None
     node: str | None = None
     gpu_class: str | None = None
+    # placement (docs/API.md "Placement"): the pool the pod was pinned to or admitted on, the instance type as
+    # `<platform>/<preset>`, the mk8s node group and the Nebius console page of the node; `instance_exact` false =
+    # the node is gone (a reclaimed spot node) and the type is the pool's, not the node's
+    pool: str | None = None
+    instance_type: str | None = None
+    node_group: str | None = None
+    console_url: str | None = None
+    instance_exact: bool | None = None
+    cluster: str | None = None
     reason: str | None = None
     exit_code: int | None = None
     epoch: int | None = None
@@ -741,6 +775,8 @@ class Operation(BaseModel):
     exported_by_attempt_id: str | None = None  # the delivering attempt (an export retry or finalizer that delivered)
     endpoint_revision: str | None = None  # an endpoint call: the ready revision at admission (not per-request proof)
     endpoint_image: str | None = None
+    requester: dict[str, str] | None = None  # the submitting application's block (docs/API.md "Requester")
+    key_alias: str | None = None  # the alias of the submitting key (never its value)
     native: NativeExecution | None = None  # an endpoint call's native execution lease (docs/API.md)
     exported_by_epoch: int | None = None
     result_ref: str | None = None
@@ -803,6 +839,21 @@ class EndpointVariant(BaseModel):
     replicas_ready: int | None = None
 
 
+class EndpointReplica(BaseModel):
+    """One pod of an endpoint and where it runs (docs/API.md "Placement")."""
+
+    pod: str | None = None
+    ready: bool | None = None
+    phase: str | None = None
+    node: str | None = None
+    started_at: str | None = None
+    pool: str | None = None
+    instance_type: str | None = None
+    node_group: str | None = None
+    console_url: str | None = None
+    instance_exact: bool | None = None
+
+
 class Endpoint(BaseModel):
     id: str
     name: str
@@ -817,6 +868,7 @@ class Endpoint(BaseModel):
     nodes: int | None = None
     interconnect: str | None = None
     pods_ready: int | None = None
+    replicas: list[EndpointReplica] | None = None  # the pods and their instances (docs/API.md "Placement")
     last_request_at: str | None = None
     startup_s: int | None = None
     started_at: str | None = None
@@ -855,6 +907,24 @@ class FleetPool(BaseModel):
     nodes_ready: int | None = None
     gpus_total: int | None = None
     gpus_used: int | None = None
+    node_group_id: str | None = None  # the mk8s node group behind the pool (docs/API.md "Placement")
+    console_url: str | None = None  # its Nebius console page
+
+
+class FleetCpuPool(BaseModel):
+    """A GPU-free pool of a cluster: the system nodes (`kind: system`) or a customer CPU pool (`kind: cpu`, docs/FLEET.md
+    "Customer CPU pools")."""
+
+    region: str | None = None
+    cluster: str | None = None
+    pool: str | None = None
+    kind: Literal["system", "cpu"] | None = None
+    platform: str | None = None
+    preset: str | None = None
+    min_nodes: int | None = None
+    max_nodes: int | None = None
+    node_group_id: str | None = None
+    console_url: str | None = None
 
 
 class FleetCluster(BaseModel):
@@ -868,6 +938,8 @@ class FleetCluster(BaseModel):
     nodes_ready: int | None = None
     gpu_nodes_ready: int | None = None
     kubernetes_version: str | None = None
+    cluster_id: str | None = None  # the mk8s cluster id (docs/API.md "Placement")
+    console_url: str | None = None
 
 
 class TenantUsage(BaseModel):
@@ -953,6 +1025,8 @@ class FleetInfo(BaseModel):
     pools: list[FleetPool] | None = None
     tenant: FleetTenant | None = None
     clusters: list[FleetCluster] | None = None
+    cpu_pools: list[FleetCpuPool] | None = None  # the GPU-free pools per cluster (docs/FLEET.md "Customer CPU pools")
+    tenant_system_flavor: bool | None = None  # whether tenant work may take the system nodes (fleet policy)
 
 
 class Binding(BaseModel):

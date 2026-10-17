@@ -4,6 +4,29 @@ The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `se
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
 
+## api 0.11.122, charts/fleet 0.1.13
+
+(API image and the fleet chart; no database migration, no jobs image change. The fleet chart adds three keys to the
+`fleet-prices` ConfigMap (`policy.yaml`, `cpu_pools.yaml`, `cluster_id` in `clusters.yaml`) and a fleet-level switch;
+the platform stage passes the mk8s cluster ids and the CPU pools' node groups from the cloud state, and the cloud stage
+outputs `cpu_node_group_ids`.)
+
+- Placement for the operator (docs/API.md "Placement"): every attempt carries `pool`, `instance_type`
+  (`<platform>/<preset>`), `node_group`, `console_url` (the Nebius console page of the node) and `instance_exact`;
+  an endpoint lists its pods as `replicas[]` with the same fields; `GET /v1/fleet` links every pool and cluster and
+  lists the GPU-free pools (`cpu_pools[]`) and the policy. The node's labels are read once and cached ten minutes;
+  a gone node falls back to the pool's kind of instance, marked inexact. Serverless publishes this to its own API
+  and console only; the application above it forwards none of it to its customers.
+- Requester (docs/API.md "Requester"): `:invoke` takes an opaque `requester` block (at most 8 snake_case keys,
+  string values up to 128 characters), stored on the Job, inherited by every continuation, returned on every read
+  next to `key_alias` (the submitting key's alias, never its value).
+- Operation identity (docs/API.md "Operation identity"): `POST /v1/models/{model}:operation-id` with
+  `Idempotency-Key` answers the id a later `:invoke` creates, under the same owner namespace, with no side effect.
+- Customer CPU pools (docs/FLEET.md "Customer CPU pools"): `tenant_system_flavor = false` renders the tenant queues
+  without the `system` flavor and pins GPU-free tenant work (CPU-only endpoints, async callers, saved definitions
+  that name `system`) to the region's customer CPU pool at render time, with the pool's taint tolerated. Default
+  unchanged (true).
+
 ## api 0.11.121
 
 (API image; database migration 29 (DB28 -> DB29: seven nullable columns on operation_marks) applied by the API at start;
