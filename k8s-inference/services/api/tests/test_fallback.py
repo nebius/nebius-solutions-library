@@ -74,8 +74,7 @@ def _fresh_catalog():
 def _fold_model():
     import models
 
-    e = models.to_entry(PER_CLASS, managed_by="api")
-    return catalog.normalise({**e, "version": 3})
+    return models.definition(PER_CLASS, managed_by="api", version=3)
 
 
 def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
@@ -136,6 +135,86 @@ def test_fallback_moves_a_queued_run_to_the_next_class(client, monkeypatch):
     assert appmod.fallback_switch() == []
 
 
+FIT_SPLIT = {  # one node of each pool; the RTX pool lives on us-central1 only, the L40S pool on eu-north1 only
+    "us-central1": {
+        "rtx6000-spot-1x": {
+            "kind": "gpu",
+            "gpus": 1,
+            "cpu": 14,
+            "memory_gib": 180,
+            "ephemeral_gib": 100,
+            "shared_fs": False,
+        }
+    },
+    "eu-north1": {
+        "l40s-spot-1x": {
+            "kind": "gpu",
+            "gpus": 1,
+            "cpu": 14,
+            "memory_gib": 44,
+            "ephemeral_gib": 100,
+            "shared_fs": False,
+        }
+    },
+}
+
+
+def _queued_split_run(c, fake, monkeypatch, allowed, pin=None):
+    monkeypatch.setattr(kube, "fleet", lambda: {**TWO_CLASS_FLEET, "fit": FIT_SPLIT})
+    m = _fold_model()
+    monkeypatch.setattr(catalog, "get", lambda name: m if name == "fold" else None)
+    monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
+    placement = {"gpu_preference": ["rtx-pro-6000", "l40s"], "fallback_wait_s": 60, "allowed_clusters": allowed}
+    r = c.post("/v1/models/fold:invoke", json={"input": {}, "execution": {"placement": placement}}, headers=H)
+    assert r.status_code == 202, r.text
+    op = r.json()["id"]
+    job = fake.jobs[("tenant-demo", op)]
+    assert job["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "us-central1"  # fit-narrowed
+    if pin:
+        job["metadata"]["labels"][f"{LABEL}/region"] = pin
+    job["metadata"]["creationTimestamp"] = "2026-10-05T20:00:00Z"
+    return op, job
+
+
+def test_fallback_is_not_confined_to_the_clusters_of_the_first_class(client, monkeypatch):
+    """op-479839daf5470638 (2026-10-15): the per-node fit had narrowed the original to the one cluster with an RTX pool;
+    switch_class copied that narrowed list onto the L40S successor, which that cluster cannot hold ("impossible
+    shape ... no candidate pool"), so the reconciler failed every 15 s and the run never moved. The successor is
+    placed among the caller's allowed clusters, narrowed again for ITS class."""
+    c, fake = client
+    op, _ = _queued_split_run(c, fake, monkeypatch, ["us-central1", "eu-north1"])
+    assert appmod.fallback_switch() == [f"{op}-r1"]
+    new = fake.jobs[("tenant-demo", f"{op}-r1")]
+    assert new["metadata"]["labels"][f"{LABEL}/gpu-class"] == "l40s"
+    assert new["spec"]["template"]["metadata"]["annotations"][f"{LABEL}/regions"] == "eu-north1"  # narrowed for l40s
+    assert json.loads(new["metadata"]["annotations"][f"{LABEL}/execution"])["placement"]["allowed_clusters"] == [
+        "us-central1",
+        "eu-north1",
+    ]
+    assert fake.jobs[("tenant-demo", op)]["metadata"]["annotations"][f"{LABEL}/successor"] == f"{op}-r1"
+
+
+def test_fallback_never_widens_an_explicit_cluster_restriction(client, monkeypatch):
+    """The caller allowed one cluster only; the next class has no pool there: nothing moves, nothing widens, the
+    original stays queued and readable (no successor, not suspended)."""
+    c, fake = client
+    op, job = _queued_split_run(c, fake, monkeypatch, ["us-central1"])
+    assert appmod.fallback_switch() == []
+    assert f"{LABEL}/successor" not in job["metadata"]["annotations"] and not job["spec"].get("suspend")
+    assert ("tenant-demo", f"{op}-r1") not in fake.jobs
+    assert jobs.normalise(job)["status"] == "QUEUED"
+
+
+def test_fallback_keeps_a_run_pinned_to_one_cluster_pinned(client, monkeypatch):
+    """A run pinned to a cluster from the start (the `region` label) keeps its pin on a class switch: the pinned
+    cluster has no pool of the next class, so nothing moves and nothing widens."""
+    c, fake = client
+    op, job = _queued_split_run(c, fake, monkeypatch, ["us-central1", "eu-north1"], pin="us-central1")
+    assert appmod.fallback_switch() == []
+    assert f"{LABEL}/successor" not in job["metadata"]["annotations"]
+    assert ("tenant-demo", f"{op}-r1") not in fake.jobs
+
+
 def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypatch):
     """Custom cluster ids (tfvars `regions.<r>.id`, e.g. north/south) resolve to their Nebius region through the
     fleet document's clusters.yaml: kubeconfig choice, logs/metrics clients and admitted cancellation of a run that a
@@ -189,20 +268,16 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     monkeypatch.setattr(
         execution, "tenant_config", lambda ns, region="eu-north1": {"identities": {}, "execution_profiles": {}}
     )
-    ided = catalog.normalise(
+    ided = models_mod.definition(
         {
-            **models_mod.to_entry(
-                {
-                    "id": "byid",
-                    "kind": "job",
-                    "image": "img",
-                    "command": "x",
-                    "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
-                },
-                managed_by="api",
-            ),
-            "version": 1,
-        }
+            "id": "byid",
+            "kind": "job",
+            "image": "img",
+            "command": "x",
+            "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
+        },
+        managed_by="api",
+        version=1,
     )
     ided["regions"] = ["south", "north"]
     monkeypatch.setattr(catalog, "get", lambda name: ided if name == "byid" else None)
@@ -236,6 +311,7 @@ def test_cluster_ids_map_to_regions_through_the_fleet_document(client, monkeypat
     acked = {}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(attempts, "verify_runner_token", lambda token: ("eu-south1", "tenant-demo", f"{op}-pq52n"))
     monkeypatch.setattr(
@@ -364,20 +440,16 @@ def test_allowed_clusters_place_a_fleet_run_without_a_top_level_region(client, m
     ) == {"us-central1", "eu-north1"}
     # a class without per-class images: the preference alone must pick the queue and the class list (every probe used
     # to land on the model's first class)
-    plain = catalog.normalise(
+    plain = models_mod.definition(
         {
-            **models_mod.to_entry(
-                {
-                    "id": "probe",
-                    "kind": "job",
-                    "image": "img:cuda",
-                    "command": "nvidia-smi",
-                    "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
-                },
-                managed_by="api",
-            ),
-            "version": 1,
-        }
+            "id": "probe",
+            "kind": "job",
+            "image": "img:cuda",
+            "command": "nvidia-smi",
+            "gpu": {"count": 1, "classes": ["rtx-pro-6000", "l40s"]},
+        },
+        managed_by="api",
+        version=1,
     )
     monkeypatch.setattr(catalog, "get", lambda name: plain if name == "probe" else (m if name == "fold" else None))
     for pref, queue in (
@@ -514,9 +586,7 @@ def test_resume_renders_the_pinned_revision(monkeypatch):
     import models
 
     old_spec = {**PER_CLASS, "command": "fold --v3"}
-    current = catalog.normalise(
-        {**models.to_entry({**PER_CLASS, "command": "fold --v4"}, managed_by="api"), "version": 4}
-    )
+    current = models.definition({**PER_CLASS, "command": "fold --v4"}, managed_by="api", version=4)
     monkeypatch.setattr(db, "enabled", lambda: True)
     monkeypatch.setattr(
         db,
@@ -543,6 +613,7 @@ def test_admitted_queued_run_names_its_cluster_phase_and_wait(client, monkeypatc
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(kube, "workload_clusters", lambda ns: {})
     monkeypatch.setattr(kube, "workload_reasons", lambda ns: {})
     r = c.post(
@@ -686,6 +757,7 @@ def test_resume_uses_the_acknowledged_checkpoint_pointer(client, monkeypatch):
     fake.pvcs.pop(("tenant-demo", f"{op}-work"), None)  # abrupt loss: the volume is gone with the node
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(
         attempts,
         "for_operation",
@@ -754,6 +826,7 @@ def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow
     ]
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == "op-gone" else [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     got = c.get("/v1/operations/op-gone", headers=H)
     assert (
         got.status_code == 200
@@ -764,5 +837,6 @@ def test_expired_operation_is_served_from_its_rows_and_superseded_handles_follow
     assert c.get("/v1/operations/op-unknown", headers=H).status_code == 404
     # a superseded handle whose Job expired resolves through the database link
     monkeypatch.setattr(attempts, "_marks", lambda operation: (3, None, "op-gone") if operation == "op-old" else None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     assert c.get("/v1/operations/op-old", headers=H).json()["id"] == "op-gone"
     assert c.post("/v1/operations/op-gone:cancel", headers=H).status_code == 409

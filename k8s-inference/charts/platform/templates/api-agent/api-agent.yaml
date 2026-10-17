@@ -43,6 +43,12 @@ rules:
   - apiGroups: [gateway.envoyproxy.io]
     resources: [securitypolicies]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [cilium.io]   # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
+    resources: [ciliumnetworkpolicies]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]          # the trust bundle file of a lease-enabled endpoint (docs/API.md "Lease clients"): one ConfigMap
+    resources: [configmaps]  # per endpoint object, public CA material only, applied and removed with the endpoint
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, create, patch, delete]
@@ -61,6 +67,12 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]           # ready replicas of an endpoint (services/api/kube.py endpoint_status)
+  - apiGroups: [serving.knative.dev]
+    resources: [revisions, services]
+    verbs: [get, list]           # the endpoint's rollout state (kube.py _rollout): the ready Revision's stored image and,
+                                 # since api 0.11.109, the predictor Service's generation/observedGeneration/template image
+                                 # (unreadable = not converged: a require_converged call was refused 409 on every Knative-mode
+                                 # endpoint while this Role lacked services, Cosmos3 Nano 2026-10-14)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

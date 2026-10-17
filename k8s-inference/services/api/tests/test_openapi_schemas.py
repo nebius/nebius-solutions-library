@@ -19,8 +19,10 @@ import auth
 import catalog
 import db
 import endpoints as ep
+import jobs
 import kube
 import models as models_mod
+import render_endpoint
 import schemas
 import status
 from test_api import ADMIN_INFO, FLEET, H, L, admin_keys, client, cluster, fake_keys, pod  # noqa: F401
@@ -70,52 +72,58 @@ def covered(obj: dict, component: str, where: str = "") -> None:
 # ---- requests ----------------------------------------------------------------------------------------------------
 
 
-def _spec_keys_read_by_models_py() -> set:
-    """Every spec key services/api/models.py reads in validate, _validate_variants and to_entry (`s.get("x")`,
-    `s["x"]`, `"x" in s`), plus the reserved keys it carries through as given."""
-    tree = ast.parse(inspect.getsource(models_mod))
-    found = set(models_mod.RESERVED)
-    for fn in (
-        n
-        for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name in ("validate", "_validate_variants", "to_entry")
-    ):
-        for node in ast.walk(fn):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("get", "setdefault", "pop")
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in ("s", "spec")
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-            ):
-                found.add(node.args[0].value)
-            elif (
-                isinstance(node, ast.Subscript)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in ("s", "spec")
-                and isinstance(node.slice, ast.Constant)
-            ):
-                found.add(node.slice.value)
-            elif (
-                isinstance(node, ast.Compare)
-                and isinstance(node.left, ast.Constant)
-                and any(isinstance(c, ast.Name) and c.id in ("s", "spec") for c in node.comparators)
-            ):
-                found.add(node.left.value)
+# the functions that read a model spec by its keys and the names they bind it to: the definition's checks and
+# projection in models.py, every function of the renderer (it reads the spec of a definition)
+SPEC_READERS = {
+    models_mod: (("validate", "_validate_variants", "definition", "_placement", "_run_class"), ("s", "spec")),
+    render_endpoint: (None, ("s",)),
+}
+READ_ELSEWHERE = {"call_scratch": jobs}  # a key of the definition read by another module (an async call's scratch leaf)
+
+
+def _spec_keys_read() -> set:
+    """Every spec key the readers above take (`s.get("x")`, `s["x"]`, `"x" in s`)."""
+    found = set()
+    for mod, (names, binds) in SPEC_READERS.items():
+        tree = ast.parse(inspect.getsource(mod))
+        for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and (names is None or n.name in names)):
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("get", "setdefault", "pop")
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in binds
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                ):
+                    found.add(node.args[0].value)
+                elif (
+                    isinstance(node, ast.Subscript)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in binds
+                    and isinstance(node.slice, ast.Constant)
+                ):
+                    found.add(node.slice.value)
+                elif (
+                    isinstance(node, ast.Compare)
+                    and isinstance(node.left, ast.Constant)
+                    and any(isinstance(c, ast.Name) and c.id in binds for c in node.comparators)
+                ):
+                    found.add(node.left.value)
+    found |= {key for key, mod in READ_ELSEWHERE.items() if f'"{key}"' in inspect.getsource(mod)}
     return {k for k in found if isinstance(k, str)}
 
 
-def test_model_spec_component_names_every_key_models_py_reads():
-    read = _spec_keys_read_by_models_py()
+def test_model_spec_component_names_every_key_the_definition_reads():
+    read = _spec_keys_read()
     assert read, "the extraction found nothing: models.py changed shape, adjust the walker"
     missing = read - props("ModelSpec")
     assert (
         not missing
-    ), f"models.py reads {sorted(missing)} from a model spec; generated contract ModelSpec does not declare them"
+    ), f"the definition reads {sorted(missing)} from a model spec; generated contract ModelSpec does not declare them"
     stale = props("ModelSpec") - read
-    assert not stale, f"generated contract ModelSpec declares {sorted(stale)}, which models.py never reads"
+    assert not stale, f"generated contract ModelSpec declares {sorted(stale)}, which nothing reads"
     assert set(SCHEMAS["ScalingSpec"]["properties"]) == set(models_mod.ScalingSpec.model_json_schema()["properties"])
 
 
@@ -369,6 +377,7 @@ def test_lifecycle_chain_and_finalizer_views_are_declared(client, admin_keys, fa
         covered(a, "Attempt", "Attempt synthesized from its record")
     assert syn["status"] in enum("OperationStatus")
     monkeypatch.setattr(attempts, "successor_of", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     del fake.jobs[("tenant-demo", op)]
     gone = c.get(f"/v1/operations/{op}", headers=H)
     assert gone.status_code == 200 and gone.json()["reason"]

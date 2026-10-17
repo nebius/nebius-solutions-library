@@ -3,6 +3,11 @@
 {{- if not (include "fleet.isControl" .) }}
 {{- $region := include "fleet.region" . | fromYaml }}
 {{- if not $region.r }}{{ fail (printf "cluster %q is not a region id in fleet.yaml" .Values.cluster) }}{{ end }}
+{{- /* docs/FLEET.md "Filesystem-aware placement": the flavor's nodeLabels say whether its nodes mount /mnt/weights; a run
+       that mounts weights/data/assets/shared checkpoints requires shared-fs=true, so Kueue never assigns it a flavor
+       whose nodes lack the mount (the system flavor unless weights_filesystem.mount_on_system) */}}
+{{- $fs := default dict $region.r.weights_filesystem }}
+{{- $fsOn := and (default false $fs.enabled) true }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
@@ -15,6 +20,32 @@ metadata:
 spec:
   nodeLabels:
     serverless2.nebius/pool: system
+    serverless2.nebius/shared-fs: {{ if and $fsOn (default false $fs.mount_on_system) }}"true"{{ else }}"false"{{ end }}
+{{- range $pool, $p := (default dict $region.r.cpu_pools) }}
+---
+# a CPU pool (docs/FLEET.md "CPU pools"): its nodes by pool label, the pool's own taint tolerated (Kueue injects both
+# into the admitted pod), no GPU toleration; quota = max_nodes x preset minus the per-node reserve, after `system`
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $pool }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/gpu-class: "none"
+    serverless2.nebius/capacity: "cpu"
+  annotations:
+    serverless2.nebius/platform: {{ $p.platform }}/{{ $p.preset }}
+spec:
+  nodeLabels:
+    serverless2.nebius/pool: {{ $pool }}
+    {{- /* an explicit false is false (hasKey, never `default`); absent means the tfvars default, true */}}
+    serverless2.nebius/shared-fs: {{ if and $fsOn (or (not (hasKey $p "shared_filesystem")) (eq (toString $p.shared_filesystem) "true")) }}"true"{{ else }}"false"{{ end }}
+  tolerations:
+    - key: serverless2.nebius/cpu-pool
+      operator: Equal
+      value: present
+      effect: NoSchedule
+{{- end }}
 {{- range $pool, $p := $region.r.pools }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
@@ -32,6 +63,7 @@ metadata:
 spec:
   nodeLabels:
     serverless2.nebius/pool: {{ $pool }}
+    serverless2.nebius/shared-fs: {{ if $fsOn }}"true"{{ else }}"false"{{ end }}
     {{- if eq (default "none" $p.interconnect) "infiniband" }}
     serverless2.nebius/interconnect: infiniband
     {{- end }}

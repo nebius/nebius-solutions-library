@@ -13,7 +13,7 @@ POST   /v1/models                    define a model (admin key, fleet API only):
 PUT    /v1/models/{model}            replace a definition (new version); DELETE /v1/models/{model} removes it (built-in classes: 409)
 GET    /v1/models/{model}/history    every version of a definition: who changed what, when (admin key)
 POST   /v1/models/{model}:invoke     body {mode, input, region, priority, timeout_s} -> operation (sync returns the result inline)
-GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost
+GET    /v1/operations[/{id}]         status, attempts, timings, region, gpu_class (per-class images), cost; the list: `limit` (≤ 500), `model`, `cursor` (from the `X-Next-Cursor` header), newest first, expired operations from their durable records, authorized before any cut
 GET    /v1/operations/{id}/result    result (async) or presigned artifact links (run)
 POST   /v1/operations/{id}:cancel
 POST   /v1/operations/{id}:resume    FAILED/CANCELLED run -> new operation on the same checkpoint volume, same region
@@ -23,6 +23,14 @@ GET    /v1/endpoints[/{id}]          the endpoints of the catalog models per reg
 GET/POST /v1/keys, PATCH/DELETE /v1/keys/{alias}, GET /v1/keys/me   API keys of the tenant (fleet API; admin key for writes; PATCH changes budget, allowed models, expiry)
 Idempotency-Key header on every mutating call
 ```
+
+The list optionally accepts `created_by_current_key=true`. After the usual
+owner/model checks it selects the original admitting key, before pagination,
+and returns `X-Created-By-Current-Key: true`. Continuations inherit their root's
+admission. Unknown/conflicting attribution or an incomplete regional inventory
+returns503, never a misleading empty page. Omit it for the unchanged
+principal-scoped inventory; it does not redefine the authorization of individual
+operation reads or controls.
 
 One entry point: `https://api.<control cluster host>` (the fleet's API on the control cluster: models, runs,
 operations, keys, sync and async calls for every region; `docs/ARCHITECTURE.md` "One API"). Streaming and
@@ -42,7 +50,7 @@ runs (the fleet's profile queues), the key's budget bounds every call ("Keys" be
 `max_budget` on its OpenAI route), and an
 Envoy Gateway global rate limit caps each key (distinct `Authorization` header, counted in Redis
 across replicas): 600 requests per minute on the API route, 3000 per minute on the predictor hosts. Two bounds
-are the API's own: a call's `timeout_s` is 1 s to 7 days (a sync call waits, a run has a deadline, no longer), and
+are the API's own: a call's `timeout_s` is 1 s to 14 days (a run has a deadline, no longer: the long-run contract, a 14-day MD run with a GPU-second budget needs its explicit timeout; a sync call waits, bounded by the API's own proxy timeout), and
 the `input` of a run or an async call is at most 60 KB (413 above it: pass large inputs by reference, an artifact
 upload or a binding).
 
@@ -60,11 +68,45 @@ shape of a model definition: a container plus a few knobs.
 ```
 
 `protocol` is `openai | http | websocket | grpc`; `gpu.classes` lists the classes the image runs on,
-preferred first; `regions` defaults to every region with a pool of one of the classes; `kind: job`
-defines a run class instead (`cpu`, `memory`, `disk_gi`, `scratch`, `parameters`). The full field list is
+preferred first; `resources` is the endpoint container's `cpu` and `memory` requests (defaults 4 / 16Gi; = the limits)
+and, optionally, `cpu_limit` / `memory_limit` above them and `ephemeral_storage` with `ephemeral_storage_limit` (the
+kubelet's node-local scratch: request = limit unless both are given; nothing is rendered without them), the same names
+a run class uses; an endpoint's `timeout_s` (its Knative revision timeout) may not exceed the fleet's
+`fleet.knative.max_revision_timeout_s` (default 3600; the platform chart sets Knative's max-revision-timeout-seconds
+and the API's ceiling from that one value; 400 above it, naming the knob) and its `env`, `env_field_refs` and
+`weights.env` may not set the names Knative reserves (`PORT`, `K_SERVICE`, `K_CONFIGURATION`, `K_REVISION`: 400;
+Knative injects the serving port into `PORT`), so no definition is accepted that would never reconcile;
+`regions` defaults to every region with a pool of one of the classes; `kind: job`
+defines a run class instead (`cpu`, `memory`, `cpu_limit`, `memory_limit`, `ephemeral_storage`, `ephemeral_storage_limit`, `disk_gi`, `scratch`, `parameters`, `delegates`, `retry`; requests are what the scheduler guarantees, limits what a container may grow to; `delegates` names the run classes a graph rooted on this class may bind stages to, docs/JOBS.md "Delegated stages"). The full field list is
 the module docstring of `services/api/models.py`; the response schema is `Model` in `services/api/schemas.py`.
 
-### Scaling
+#### Execution identity and rollout state
+
+A run class carries `execution` on `GET /v1/models` and `GET /v1/models/<id>`, for every key granted the class
+(`spec`, the container configuration, stays fleet administrators'): `image` (the reference as registered, normalised
+to the fleet's logical registry host; the top-level `image` is the same), `immutable` (true when the reference is
+digest-pinned), `images` (per-GPU-class references, without `default`), `gpu_classes`, `nodes`, `delegates` (the
+operator-approved child class ids, docs/JOBS.md "Delegated stages": no grant is implied, submission is authorised as
+ever), `retry` (docs/JOBS.md "Retries") and `finalize` (whether an application finalizer exists). Never the command,
+args, env, secrets, volumes or profiles. Endpoints carry `execution: null`.
+
+An endpoint's `regions[].rollout` is its revision state: `latest_created`, `latest_ready`, `latest_rolled_out`,
+`generation`/`observed_generation`, `desired_image` (the spec's), `revision_image` and `revision_image_digest` (the
+latest ready Revision object's: stored template evidence, valid at zero), `serving_images` (what the ready pods run),
+`converged` and `reason`. `converged` holds only when all of these are observed, never from revision names alone: the
+controller reconciled the current spec (the predictor Knative Service's `service_generation` = `service_observed_generation`
+and its `service_image` = the desired image: KServe writes the Service's observed generation onto the InferenceService, so
+the ISVC's own `generation`/`observed_generation` are informational there; without a predictor Service they decide; the
+pre-reconcile window after a catalog change still shows the old revisions as one), the created, ready and rolled-out revisions are one, the ready
+Revision's image equals the desired image, and every ready pod runs it (by digest or reference). Knative routes to the latest *ready* revision, so after a spec change the
+previous revision serves until the new one is ready: the model's `image` is the spec, the rollout state is what
+serves. An endpoint call may set `execution.require_converged: true`: it is refused (409, the revisions named) while
+the rollout is not converged. Every endpoint call records the ready revision and its serving image at admission
+(`endpoint_revision`, `endpoint_image` on the handle): admission-time evidence of what the first request could
+reach, not per-request provenance (no response names its revision), and subject to a concurrent update after
+admission.
+
+## Scaling
 
 `scaling` is one vocabulary (`ScalingSpec` in `services/api/schemas.py`), the same on a model definition, on
 `GET /v1/endpoints` and on `PATCH /v1/endpoints/{id}`: `min` and `max` replicas per region;
@@ -127,16 +169,21 @@ the torch.compile cache survives a restart (the first start of a trillion-parame
 ## Keys
 
 A key is `sk-` + 40 characters, shown once at creation; the fleet database (`keys` table, `services/api/keys.py`)
-holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`),
+holds its sha256, alias (unique per tenant, `<tenant>-<name>`), tenant, role (`user`, `admin`, `router`, `fleet`),
 model allow-list (empty = every model), budget in USD (null = unlimited), spend, expiry and block flag. Every
 API checks the key on every request (hash lookup, cached `AUTH_CACHE_S` = 30 s): blocked, expired and
 budget-exhausted keys and the allow-list are enforced on the catalogue, `:invoke`, the operations and the
 gateway's authorize hook of every endpoint hostname. The first keys of a fleet are the tenants' `keys` of
 `terraform.tfvars` (the platform stage writes them with `python -m keys bootstrap`, `./stack.sh output platform
 control -json tenant_keys` prints them); an admin key then mints user keys of its tenant through
-`POST /v1/keys` (budget, models, `expires_days`), edits them (`PATCH`) and revokes them (`DELETE`), on the
+`POST /v1/keys` (budget in USD, default 10, an explicit `null` for no limit; models; `expires_days`), edits them
+(`PATCH`: a field left out stays as it is, `budget: null` written explicitly lifts the limit, spend never changes) and
+revokes them (`DELETE`), on the
 fleet API. Every tenant key is mirrored into LiteLLM with the same value (best effort; the fleet database is
-the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key.
+the source of truth) so it also works on LiteLLM's OpenAI route. `GET /v1/keys/me` shows the calling key. The admin
+listing `GET /v1/keys` carries the same safe limit and usage fields per key (`scopes`, `max_concurrent`, the request and
+GPU-second budgets with their spend, `rate_limit`, `principal_id`, `usage`) plus `blocked`; a retained blocked key says
+`status: blocked`; never the hash, the raw metadata or a secret (`id` is the alias).
 
 **Scopes and limits beyond the USD budget.** A key may carry `scopes` (what it may do; empty = everything of its
 role): `invoke:sync`, `invoke:async`, `run:submit`, `run:control` (cancel, resume, export), `read:catalog`,
@@ -150,18 +197,33 @@ reserves its GPUs times its `timeout_s` (such a key must give `timeout_s` on a G
 measured GPU seconds replace the reservation when the attempt is billed; a sync call holds its slot for the
 call. One `:invoke` and the gateway authorization of its own proxied call count once; a call that reaches an
 endpoint hostname directly counts once at the hook; a replay with the same `Idempotency-Key` counts once.
-Exhausted budgets answer 402, a full concurrency slot or rate window 429. `GET /v1/keys/me` shows the limits,
+Exhausted budgets answer 402, a full concurrency slot or rate window 429. A429 from
+the invocation admission ledger carries `X-Serverless2-Admission: refused`:
+that invocation was not admitted. An endpoint's own429 does not carry the marker
+and must not be interpreted as proof of no execution. Preserve the same
+idempotency key when an invocation outcome is unknown.
+`GET /v1/keys/me` shows the limits,
 what was spent against them, and for imported keys the legacy `principal_id` and metadata.
 
-**Ownership and the paths a bounded key cannot take yet.** Every operation records its owner (the key's principal,
-migration 9), so a key never reads, cancels, resumes or exports another principal's operations even inside the same
-tenant namespace; an idempotency key is scoped to its owner; a reservation is refunded when the Job's creation fails
-after admission. A key with any finite limit (`max_concurrent`, `budget_requests`, `budget_gpu_seconds`,
-`rate_limit`) is admitted on the synchronous and run paths only: a shared endpoint cannot measure a key's GPU time, so a
-finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint call cannot hold a concurrency slot
-(501 unless the call is the API's own admitted proxy); bounded asynchronous calls and continuations (resume, export,
-fallback, recovery) answer 501 until the reservation transfers to the successor. Unbounded keys and keys created
-through `POST /v1/keys` are not affected.
+**Ownership and continuations.** Every operation records its owner (the key's principal, migration 9), so a key
+never reads, cancels, resumes or exports another principal's operations even inside the same tenant namespace; an
+idempotency key is scoped to its owner (the same request under the same key from another key of the same principal
+is a replay of the existing operation, on its original billing key); a reservation is refunded when the Job's
+creation fails after admission. A run is one logical operation for the key's limits (migration 11, the run ledger):
+the root takes the slot and the request once; every continuation (resume, export retry, application finalizer,
+fallback, automatic recovery) joins the root's reservation as a member after the run's current head (a continuation
+of anything but the head is 409), on the root's original key, which is checked again (blocked 403, expired 401); a
+computing member with a GPU-second budget reserves its GPUs x timeout (402 when it does not fit next to what is
+reserved and unknown), a transfer-only member nothing. Billing settles each member with its measured GPU seconds; a
+GPU attempt that ended without a trustworthy measurement (a lost worker) stays `unknown`: its bound keeps counting
+against the budget until an operator settles it (`keys.settle_unknown`), it is never charged as zero. A run cancelled
+before it started settles at zero. The slot closes when no member is active; a later manual continuation re-acquires
+it (concurrency re-checked, no second request). `GET /v1/keys/me` reports `usage`: operations in flight, reserved and
+unknown GPU seconds. A key with any finite limit is admitted on the synchronous and run paths: a shared endpoint
+cannot measure a key's GPU time, so a finite GPU-second budget answers 501 at the endpoint hook; a direct endpoint
+call cannot hold a concurrency slot (501 unless the call is the API's own admitted call: `x-serverless2-admitted`, the HMAC of the key, the model and the operation, next to `x-serverless2-operation` and `x-serverless2-attempt`; the hook verifies on every call that the operation holds a live reservation on the key and is not cancelled, and that the caller's Job is the key's and the model's and the attempt one of its live pods, which lets an `invoke:async`-only key's endpoint call probe readiness and post its one inference through the gateway and nothing else; a release or cancel closes it at once); bounded asynchronous calls
+answer 501 until the durable async call exists. Unbounded keys and keys created through `POST /v1/keys` are not
+affected.
 
 **Importing keys.** `POST /v1/keys:import` (an admin key; the keys of its own tenant only) and
 `python -m keys import <file.json>` (an operator with database access) take pre-hashed records
@@ -204,6 +266,134 @@ is guessed); `chain` one entry per member (`id`, `created_at`, `status`, `gpu_cl
 (`gpu_seconds_complete: false` while an attempt has no end record); `successor_created_at` when the newest successor
 was created (its own first attempt may wait for capacity). An operation outside a chain carries none of these fields.
 
+For asynchronous endpoint chains, `usage` describes the cumulative native worker
+measurement too: querying a measured-zero export member does not turn unmeasured
+inference into measured usage. CPU caller/export Pod time is not endpoint GPU time.
+
+## Stages
+
+A root that declared `execution.graph` carries `graph` on its handle (`status`, `stages[]` with `id`,
+`depends_on`, `operation`, `status`, `attempt_id`, `result_ref`, `reason`, `deadline_at`, `cancelled`) and is
+terminal only with its stages; a stage carries `stage` (`root`, `id`, `depends_on`, `reason`) and waits with
+`phase: waiting_for_dependencies`. The rules (sealed graph, one operation per stage, same owner and key, the gate,
+failure, cancel, deadline) are in docs/JOBS.md "Stage composition".
+
+## Placement: where an attempt or a replica ran (api 0.11.122)
+
+Serverless 2 publishes placement to its own API and console; the Scientific AI platform above it is the abstraction its
+customers see and forwards none of it. Every attempt of an operation (`attempts[]`, also the chain's) carries, when a
+node or a pool is known:
+
+| field | meaning |
+|---|---|
+| `pool` | the fleet pool the pod was pinned to or admitted on (`serverless2.nebius/pool`) |
+| `instance_type` | `<platform>/<preset>` (`gpu-h100-sxm/1gpu-16vcpu-200gb`, `cpu-d3/8vcpu-32gb`) |
+| `node_group` | the mk8s node group id (`mk8snodegroup-...`) |
+| `console_url` | the Nebius console page of the node: `https://console.nebius.com/<project>/mk8s/<cluster>/node-groups/<node group>/nodes/<compute instance>` |
+| `instance_exact` | true: read from the node's labels; false: the node is gone (a reclaimed spot node, an expired Job's record) and the type and node group are the pool's, the link still names the instance |
+
+The node's labels (`node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`) are
+read once and cached ten minutes; the fleet document (charts/fleet `fleet-prices`: `pools.yaml`, `cpu_pools.yaml`,
+`clusters.yaml` with the mk8s `cluster_id` the platform stage takes from the cloud state) supplies the rest. An
+endpoint (`GET /v1/endpoints`, `GET /v1/endpoints/{id}`) lists its pods as `replicas[]` (`pod`, `ready`, `phase`,
+`node`, `started_at` and the same placement fields); `GET /v1/fleet` adds `node_group_id` and `console_url` per pool,
+`cluster_id` and `console_url` per cluster, `cpu_pools[]` (the system nodes and the customer CPU pools per cluster,
+docs/FLEET.md "Customer CPU pools") and `tenant_system_flavor`. An endpoint call (`mode: async`) records the node of
+its caller Job; the endpoint pod that served the request is not recorded per call (Knative adds no pod identity to a
+response): the endpoint's `replicas[]` at the time is the evidence.
+
+## Requester: who asked (api 0.11.122)
+
+`:invoke` accepts an optional `requester` block: at most 8 `snake_case` keys with string values of at most 128
+characters (`{"team": "oncology", "user": "ada", "customer_id": "cust-1"}`; never a secret). It is stored on the Job
+(`serverless2.nebius/requester`), follows every continuation (a fallback, a recovery, an export retry, a finalizer)
+and is returned on every read of the operation (`requester`), next to `key_alias`, the alias of the submitting key
+(never its value; from the keys table, an expired operation keeps the key the run ledger reserved under). The
+Scientific AI platform fills the block from its own directory (customer, team, user); Serverless stores and shows it
+and interprets nothing.
+
+## Operation identity before submission (api 0.11.122)
+
+`POST /v1/models/{model}:operation-id` with the `Idempotency-Key` header (required) and an optional body
+`{"mode": "run"|"async"}` (the model's own mode by default) answers `{"id", "model", "mode", "owner_scope"}`: the id a
+later `:invoke` with the same key, model and `Idempotency-Key` creates (`render.op_name(owner, model, key)`, the very
+call `:invoke` makes, in the same owner namespace: an imported key's explicit principal (`owner_scope: principal`),
+else the key itself (`key`)). Authorized like `:invoke` (the model allow-list, the mode's scope) but with no budget or
+admission check and no side effect: no reservation, no Job, no record. A stage submission (`execution.stage`) is
+named by its root and stage id, never by an `Idempotency-Key`; a submission without the header gets a random id; a
+synchronous call has no durable id: all three are refused (400).
+
+## Pagination: every list that grows (api 0.11.124)
+
+Every list route pages: `limit` (default 50, at most 500) and `cursor` (opaque; the `X-Next-Cursor` header of the
+previous page, absent on the last page), with `X-Total-Count` (everything the caller may see, before the cut) on
+every page. The order is stable and the expensive per-item work (an endpoint's live state and pods, a definition's
+regional state, a tenant's usage, an operation's records and placement) is done for the page only:
+
+| route | order | note |
+|---|---|---|
+| `GET /v1/operations` | newest first (`created_at` desc, id asc) | as before; the tenant-wide Job/pod listing behind it is reused for `OPS_LIST_CACHE_S` (10 s) by every page and poll, kept warm by a background pass every `OPS_LIST_WARM_S` (4 s) for listings asked for within `OPS_LIST_WARM_WINDOW_S` (90 s), read from the API server's watch cache, and dropped at once by any mutation this API makes (a submission, a cancellation, a resume shows on the next list); a listing with an unreachable region is never reused |
+| `GET /v1/endpoints` | model id, then cluster id | one entry per deployment |
+| `GET /v1/models` | model id | |
+| `GET /v1/keys`, `GET /v1/fleet/tenants/{t}/keys` | alias | |
+| `GET /v1/fleet/tenants` | tenant name | the usage reads are for the page only |
+| `GET /v1/fleet/operations` | newest first | the fleet operator's in-flight view (below) |
+| `GET /v1/bindings` | ref | |
+| `GET /v1/sessions` | newest first | `limit` only (the owner's recent sessions) |
+
+The placement fields read one node listing per region (cached ten minutes) instead of one node per attempt, and the
+fleet page (`GET /v1/fleet?live=true`) reads one node listing and one running-pod listing per region for all its
+pools (12 s before, cached ten seconds).
+
+## Submission pause: a bounded, retryable stop of new admissions (api 0.11.124)
+
+The fleet operator can pause NEW admissions of some tenants or all (`POST /v1/fleet/submissions:pause` with
+`{"tenants": ["system", "rene"] | null, "reason": "...", "retry_after_s": 30, "max_s": 21600, "exports": false}`;
+`POST /v1/fleet/submissions:resume`; `GET /v1/fleet/submissions` shows the state: who, why, since, until). While a
+tenant is paused its `:invoke` (every mode, stages and async callers included) and `:resume` answer
+`503 {"detail": "ADMISSION_PAUSED: submissions paused: <reason> (until <time>); nothing was created, retry after the
+pause"}` with `Retry-After: <retry_after_s>`, `X-Serverless2-Admission: refused` (the header the 429 key-limit refusal
+carries: a definitive non-acceptance, nothing was created) and `X-Serverless2-Admission-Reason: paused` (absent on a
+429: the two are told apart without guessing). `:export` (a transfer-only retry of a finished run) keeps working unless
+the pause says `exports: true`, so an application draining old work keeps its deliveries. Untouched by a pause:
+`:operation-id`, every read, `:cancel`, every Job in flight, finalizers, callbacks, results, storage grants, keys,
+budgets. The pause is bounded (`max_s`, six hours at most) and lifts itself; it lives in the database (migration 30:
+`fleet_settings`), read by every replica with a two-second cache, so it survives restarts and a rolling rollout;
+without the database nothing is ever paused.
+
+## Fleet operations: what is in flight across tenants (api 0.11.124)
+
+`GET /v1/fleet/operations` (the fleet role, docs/API.md "Fleet operators"; `tenant=` and `status=` (comma-separated)
+narrow) answers, newest first and paged, with `active=true` (default) the operation Jobs in flight across every
+tenant and reachable cluster (`RUNNING`: a pod is active; `QUEUED`: admitted or waiting; `CANCELLED`: cancellation
+requested, the Job still ending, as the tenant view reports it) and with `active=false` (api 0.11.126) every operation Job the clusters still hold,
+terminal ones included (`SUCCEEDED`, `FAILED`, `CANCELLED`, `SUPERSEDED`: an original a continuation took over, 90
+days by the Job TTL): `id`, `tenant`, `model`, `mode`, `status`, `created_at`, `started_at`, `cluster`, `region`,
+`successor`, `key_alias`, `owner` (the opaque owner hash) and `requester`. Identity and state only, the same field
+set in both modes: never an input, a result, a reference, a log or a key value; an operation's detail
+(`GET /v1/operations/{id}`) stays its owner's and answers 404 to the fleet role. From one Job
+listing per tenant namespace and cluster (the fleet document's tenants and the tenants on record), cached ten
+seconds; `X-Regions-Skipped` names clusters that could not be read.
+
+## Synchronous calls: timeouts and the caller's disconnect (api 0.11.127)
+
+`:invoke` with `mode: sync` proxies the request and waits up to `timeout_s` (default SYNC_TIMEOUT_S, 600 s). Every
+link of the chain must allow the call: the public API route (chart value `api.syncRequestTimeoutSeconds`, 2400 s on
+a fleet that serves 2100 s calls), the API pod's termination grace and graceful shutdown (2460 s: a rollout drains a
+long call), the regional model route (no limit) and the endpoint's own `timeout_s` (its Knative revision timeout,
+at most the fleet's max-revision-timeout-seconds). While the endpoint works the API waits for the
+server's `http.disconnect` on the request (an awaited receive after the consumed body: the one signal that passes
+BaseHTTPMiddleware; a polled `is_disconnected()` does not): a caller that disconnected ends the downstream request
+at once (499, nobody reads it) and the admission
+(slot, request count) is released immediately; a timeout answers 504; both release the admission.
+
+## Weights of an endpoint
+
+`weights: {path, mount_path, env, read_only, prepare}` on an API-managed model (`POST /v1/models`): the region's
+shared weights filesystem under `path` (the model id by default) at `mount_path` (`/weights`). `read_only: true` mounts
+a verified, immutable payload readOnly and skips the prepare step that would create and open the directory;
+`prepare` overrides that step explicitly. Defaults: writable, prepared.
+
 ## Variants
 
 One endpoint may run as several deployments in a region behind its one name, in priority order: a warm floor on
@@ -233,16 +423,189 @@ runs; a region without variants keeps the automatic pool choice. A redefinition 
 removes its service, its LiteLLM deployment and, once Knative has torn its routes down, its authorizer; a dropped
 warm variant holds no GPUs beyond that.
 
-## Bindings and execution options (runs)
+## Fleet operators
+
+A fleet operator is a key with `metadata.role=fleet` in the platform's own tenant (`platform`, next to the router
+key), minted only by the fleet's bootstrap (`python -m keys bootstrap` with `KEY_SPEC` role `fleet`; a tenant admin
+cannot mint one and an import refuses the role). It has the explicit cross-tenant surface and nothing else:
+
+Set `fleet.fleet_operator_keys = ["rene"]` in `terraform.tfvars`, apply the control
+platform stage, then retrieve the sensitive login value with
+`./stack.sh output platform control -json fleet_operator_keys`. The default is an
+empty set. This reuses the existing key bootstrap and does not change tenant keys,
+create a customer bucket, add an expiry, or select an operator key for inference probes.
+
+| Route | What |
+|---|---|
+| `GET /v1/fleet/tenants`, `GET /v1/fleet/tenants/<tenant>` | every tenant of the fleet: the fleet document's (`charts/fleet` tenants.yaml: `gpu_quota`, `fair_share_weight`, `dedicated_pools`, `assets`, `in_fleet_document`) and every tenant with keys on record, with `keys`, `admins`, `blocked` counts, `spend` (USD over its keys) and `usage` (operations in flight, reserved and unknown GPU seconds over its keys). The platform's own keys are not a tenant |
+| `GET /v1/fleet/tenants/<tenant>/keys` | the tenant's keys exactly as its admin lists them (the same safe projection: never a hash or a value) |
+| `POST /v1/fleet/tenants/<tenant>/keys`, `POST …/keys:import`, `PATCH …/keys/<alias>`, `POST …/keys/<alias>:block[?blocked=false]`, `DELETE …/keys/<alias>` | the tenant's own key functions with an explicit tenant: a user key (no pass-through routes), an import under the tenant's rules, budget / model allow-list (the grant) / expiry, block or unblock (the record stays), revoke; the audit names the fleet operator (`fleet:<alias>`) |
+
+A tenant admin is refused on this surface (403): its authority is tenant-scoped and unchanged. The fleet operator
+is refused on the tenant surface (`/v1/keys`) and, with a `read:catalog`-only key, on every model and operation
+route: it manages, it does not run.
+
+## Sessions (live streams to an endpoint)
+
+Off unless the fleet enables it (terraform.tfvars `sessions.enabled`; `GET /v1/sessions` is 404 while off). A session is
+an admitted stream for workers that hold GPU state across one long connection (speech): one claim, one connection, one
+worker pod, released once; `services/api/sessions.py`.
+
+| Step | Who | What |
+|---|---|---|
+| `POST /v1/models/<id>:session` `{timeout_s, region}` | the caller (`invoke:sync`) | admission on the key as a run's root: one concurrency slot, one request, and for a key with a GPU-second budget the endpoint's GPUs x `timeout_s` as the bound. `timeout_s` defaults to the endpoint's transport deadline (a single-node endpoint's `timeout_s`; 3600 for a multi-node endpoint) and may not exceed it (400 naming the bound). Answers 202 with a one-time `claim_token`, `expires_at` (the claim must be presented within `sessions.claim_ttl_s`, 120 s by default), `deadline_at` (`timeout_s` after creation) and `replay: false`. With an `Idempotency-Key` header (owner-scoped, 1..200 chars) the same request again answers the same session, see "Idempotent creation" below |
+| the connection | the caller | presents the claim once: `Sec-WebSocket-Protocol: s2-session.<token>` on an upgrade, or the header `x-serverless2-session-claim: <token>` on a plain HTTP request (NDJSON streaming). The gateway's authorization hook binds it with a compare-and-swap (`claimed -> bound`, a server-generated connection id): exactly one connection ever binds a session, across API replicas; a second presentation, an expired, cancelled or foreign claim is 401. The hook injects `x-serverless2-session` and `x-serverless2-connection` towards the worker and refuses (403) any client that supplies those headers itself; the claim token is never logged |
+| `POST /internal/sessions/<id>:attach` `{connection, worker_session_id}` | the worker pod, with its own ServiceAccount token | before any decoder, reset, feed or GPU work: `bound -> attached` for the injected connection id only. The pod is verified server-side (TokenReview on the session's cluster with `sessions.token_audience` or the cluster's, the pod's namespace/name/UID from the token's claims, the pod object with the same UID, the endpoint it belongs to = the session's model); nothing is taken from headers. Idempotent for the same connection and pod UID; 409 for another connection, a second worker, or after the attach wait, a cancel or the deadline (fenced for good). Answers `owner: {tenant, owner, model}` from the session's durable row (the admitting principal, resolved at creation; never a header, never the key): the trusted owner group a worker keys its own state on; stable across a duplicate attach |
+| `GET /internal/sessions/<id>` | the attached worker only | `status`, `cancel_requested`, `cancel_reason`, `deadline_at`, `owner`: the worker polls it (or reads its own socket) to learn of a cancellation |
+| `POST /internal/sessions/<id>:release` `{connection, outcome, gpu_seconds}` | the attached worker, after its own post-done cleanup | `attached -> ended`; the key's slot goes; `gpu_seconds` measured becomes spend, `null` (no metering) leaves the session `unknown` and its bound against the budget, never a measured zero. Idempotent for the same pod. Outcomes: `done`, `cancelled`, `disconnected`, `busy`, `error` |
+| `POST /v1/sessions/<id>:cancel`, the deadline, a client disconnect | the owner, the reconciler, the transport | cancellation *requests*: nothing is released by them. A session nobody bound ends at once (zero: no worker was reached). A bound or attached one keeps its slot until its worker releases it or its pod (exact UID) is gone or finished, which the reconciler confirms every 15 s (`worker_lost`, usage unknown). Never a replica-wide drain |
+| `GET /v1/sessions`, `GET /v1/sessions/<id>` | the owner (`read:operations`) | `status` (`claimed`, `bound`, `attached`, `ended`), `outcome`, `cancel_requested`, `attached`, `worker_session_id`, the timestamps, `gpu_seconds`, `usage` (`measured`, `unknown`, `none`) |
+
+**Idempotent creation (`Idempotency-Key`):** a create whose answer was lost is recovered by the same request under
+the same key: the same session (`replay: true`), one row, one admission on the key (a concurrent duplicate loses the
+unique index, releases its own admission and answers the winner's session). The key is owner-scoped (a peer's same
+key is its own session; the owner's session stays 404 to the peer) and names the *semantic* request: the effective
+`model`, deployment (`cluster`, `region`) and `timeout_s` after defaults, not the bytes sent (`{}` and
+`{"timeout_s": <the default>}` are one request); the same key with another request is 409. While the session is
+still `claimed` (unexpired, before the deadline, not cancelled) the replay answers a usable `claim_token` that
+**replaces** the earlier one (the earlier token no longer binds: still exactly one connection ever binds, by the same
+compare-and-swap; a bind racing with the replay either wins first, then the replay carries no claim, or finds the old
+token gone, 401). Once bound, attached or ended the replay is the same id without a claim: no second connection, no
+re-issued stream, no audio replayed. Nothing is extended: `expires_at` and `deadline_at` stay as admitted, an expired
+or cancelled claim replays without a claim. Without the header every create is a new session.
+A replay keeps the key's model grant, scope and validity checks but takes no new request from the budget: the
+admission counted once at the first create, so a key whose last request the session was recovers its lost answer
+(never 402); a new session is a new request and is refused as before.
+**No reconnect, by design and kept so:** a dropped connection ends at the worker (`disconnected`), the token binds once,
+a new session is a new admission; a client that needs continuity re-creates a session (the App's adapter owns that).
+**Cold attachment:** the hook binds the claim before the endpoint has a pod, so a bound session is `starting`
+(`phase`) until the reconciler observes a Ready replica of the endpoint in the session's region (one status read per
+model and region per sweep; a status it cannot read is unknown, never Ready). That first observation is recorded
+once (`ready_seen_at`, never reset by a later flap) with the attach deadline (`attach_deadline_at` =
+`sessions.attach_wait_s`, 60 s, after it, capped by the admitted `deadline_at`); the session is then
+`waiting_for_worker`. A bound session no worker attached by that deadline, or that never saw a Ready replica by its
+admitted deadline (the hard bound: never longer than `timeout_s`, no extra reservation), ends `unattached` with usage
+unknown. No GPU time is advertised for a session that never attached (`gpu_seconds` null; the key's bound stays
+unknown, separately). The public view carries no token and no pod identity.
+Settlement on the key's ledger happens exactly once per session (the reconciler retries what a crash left unsettled).
+
+**Transport deadline:** a single-node (Knative) endpoint ends every request at its revision timeout (the model's
+`timeout_s`, 600 s by default, within the fleet's Knative maximum), WebSocket or NDJSON alike, with no record on the
+session; `POST …:session` therefore refuses a `timeout_s` above it (400 naming the bound) instead of admitting a
+stream the transport would cut. A multi-node endpoint's route carries no request timeout; its sessions are bounded by
+`timeout_s` alone. **Idle shutdown:** a multi-node endpoint with `scaling.idle_s` counts its bound and attached
+sessions as activity (a stream makes no stamped call of its own).
+
+## Native execution leases (endpoint calls whose worker holds GPU state)
+
+An endpoint call's reservation (the key's slot, request and GPU bound) must not end with its CPU caller: a worker that
+received the request may still be computing after the caller exited, timed out, was deleted or the call was cancelled
+(an abort enqueue is not a settlement). A *native execution* is the worker's side of one admitted call, one per
+operation, on the existing ledger (the operation's member; nothing new is queued or scheduled):
+
+| Step | Who | What |
+|---|---|---|
+| prepare | the gateway hook, on the verified inference POST of the caller attempt | one execution per operation; another attempt's POST while one is prepared or attached is 409 (a caller's retry pod never overlaps the worker's work on the first request); the same attempt replays; after the worker settled the next attempt's POST replaces it. A row an earlier caller only *prepared* (the worker never attached) whose caller pod is gone or finished (exact read by name in its namespace, nothing else) is closed (`caller replaced`) so the replacement pod of a preempted caller can post; an attached row is never freed this way |
+| markers | the hook → the worker | the policy forwards `x-serverless2-operation` and `x-serverless2-attempt` only from the hook's verified context (empty on a direct call; what a client sent is overridden). The hook emits them on the same answer that prepared the execution, and logs one line per admitted inference POST (`authorize <model>: admitted POST of <op> attempt <attempt>: markers emitted`): a `prepared` execution that is never `attached` while the worker answered the request means the markers were lost downstream of the hook (the policy's `headersToBackend`, the Knative data path, or the worker's reading of the headers), never that the hook did not emit them. A direct POST (no admission) to a `native_lease: required` model passes the hook with empty markers (logged) and is refused by the worker, as before |
+| `POST /internal/executions/<op>:attach` `{attempt, worker_request_id}` | the worker pod (its own ServiceAccount token; TokenReview, pod UID, the endpoint's own pod, the call's model) | **atomically before it enqueues GPU work**: `prepared → attached` for the prepared attempt only, while the operation's live reservation holds (its own, or its root's for an active member such as an endpoint child: the same resolver as the gateway's admission); a stale attempt, another pod or no prepared execution is 409 and the worker fails closed (it does not run the request). Idempotent for the same (operation, attempt, pod UID, worker_request_id): a dropped response is retried safely |
+| `GET /internal/executions/<op>` | the attached worker only | `cancel_requested`, `cancel_reason`: the cooperative abort signal |
+| `POST /internal/executions/<op>:release` `{attempt, worker_request_id, outcome, gpu_seconds}` | the attached pod, after its own settlement (natural completion, or the stop ACK of a drain) | `attached → released` for exactly that attempt, pod and request id (a stale same-pod release naming another attempt or request id is 409); `lane_seconds` (wall-clock occupancy, attached → released, always recorded) distinct from `gpu_seconds` (only what the worker measured; null = unknown, never zero). Idempotent for the same tuple. Frees nothing by itself |
+| lost | the reconciler | an attached execution whose pod, by exact UID, no longer exists or finished, **or whose worker container restarted inside the same pod** (the restart count of the non-queue-proxy containers at attach is recorded and compared: same pod, same UID, but the engine's state and the request are gone and nothing will release): `lost`, usage unknown, `lost_reason` says which. Never from readiness, a timeout, or an API lookup that failed: those keep it attached and the slot held |
+| closed | the join (billing) | the caller is over and the live execution was never attached: closed in the same transaction that decides the settlement, so a delayed worker cannot attach and enqueue GPU work after the reservation went (attach → 409) |
+| owner context | the lease routes → the attached worker | `attach` and `GET` answer with `owner: {tenant, owner, model}` from the operation's durable owner record (written at admission, pod-authenticated to read): the trusted owner group a worker may key its own state on; never a client header, never the tenant/key-alias headers |
+| cancel | `:cancel` on the call, the deadline | a request (`cancel_requested`) to the attached worker; the caller Job is stopped as before; nothing is released |
+
+Settlement is a JOIN, decided atomically with the execution rows under the operation's lock: the operation's member
+settles when the caller is terminal (its Job finished, read by the billing pass) **and** no execution is attached
+(released, lost, or never attached once the caller is over, which closes it). Every attempt keeps its own row: the
+settled value sums every ended attempt's measured GPU seconds and is unknown when any ended attempt carries no
+measurement or the worker was lost. Attach is refused atomically against a closed row, a cancel requested before the
+attach, a released reservation, a stale attempt or another pod. The
+worker's release before the caller finished frees nothing; the caller's end before the worker released frees nothing
+(the pass defers, `serverless2.nebius/native` on the Job says why). The key's concurrency counts the execution until
+then: no new root of the key takes the slot, a retry of the caller cannot run a second native execution, and the
+original root keeps the billing. `native_lease` on an endpoint model: `optional` (default: a worker that never
+attaches releases at the caller's end, but GPU usage is unknown without measurement) or `required` (a caller that ended without an attached
+execution settles unknown and the handle says so; the worker refuses requests it cannot attach). The handle carries
+`native` (`state`, `attempt`, `worker_request_id`, timings, `outcome`, `lane_seconds`, `gpu_seconds`,
+`cancel_requested`, `settled`).
+
+The caller and transfer pods have no GPUs; their zero allocation is not evidence
+of zero endpoint GPU usage. Chain totals use native worker measurements, with
+`gpu_seconds_complete: false` when any member is unmeasured. A verified
+transfer-only export retry contributes zero; it never repeats inference. Old
+optional-call annotations that claimed zero without metering read as unknown.
+
+Once the join decided (the caller is over, every execution ended), the operation is **fenced** durably (ledger
+`native_fences`, written in the join's transaction, kept across the ledger release): a later prepare or attach for any
+attempt of that operation, seen before or never seen, is 409. Nothing can start native work on a settled operation.
+
+### Lease clients
+
+A model opts in with `native_lease: optional | required`; the render then gives every pod of the endpoint exactly this,
+and nothing else changes in the apply shape (same four objects; on a fleet with a CA bundle, plus one ConfigMap of the
+endpoint):
+
+| What | Where | Value |
+|---|---|---|
+| identity | projected volume `s2-lease`, file `/var/run/secrets/serverless2/token`, read-only | a ServiceAccount token bound to the pod (TokenReview reports the pod's name and UID; an exfiltrated token dies with the pod), audience `serverless2` (`sessions.token_audience`, the same value the API verifies), 1 h lifetime, renewed by the kubelet |
+| `S2_API_URL` | container env | the control API's public URL (`PUBLIC_API_URL`): the lease routes are on the control API, reached through its gateway like any client; a GPU region's pod leaves the cluster for it (egress: `models` pods carry no egress policy; the hostname is public). The control API's HTTPRoute routes exactly the worker prefixes `/internal/attempts`, `/internal/authorize`, `/internal/executions`, `/internal/sessions` (each authenticated by the pod's own token, nothing from headers) and answers 404 for anything else under `/internal` (`tools/check.sh` asserts it; platform chart 0.1.9: 0.1.8 lacked the executions and sessions prefixes, so every attach got the 404 and the worker refused the request) |
+| `S2_LEASE_TOKEN_FILE` | container env | the token file above |
+| `S2_LEASE_MODE` | container env | `optional` or `required` |
+| `S2_LEASE_AUDIENCE` | container env | the token's audience, for a client that mints nothing and checks what it was given |
+| trust bundle | file `/var/run/secrets/serverless2/ca-bundle.pem` in the same projected volume, only on a fleet with a CA bundle (`/etc/ssl/msp` on the API) | public CA material: the API's own merged roots (the system roots plus the fleet CAs, the same bundle the async caller mounts), whole, from the endpoint's ConfigMap `<name>-trust` in `models` (applied before, removed with the endpoint's other objects). The control hostnames are ACME-signed in public mode, so the system roots suffice and nothing is projected. Never an environment value: a bundle is hundreds of KB, above the kernel's single-argument bound, and a container with it in its environment never execs |
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` | container env, with the file above | the file above: the standard seams of OpenSSL/Python (`ssl.create_default_context`, what the shared client uses), requests, curl and the AWS SDKs; a client built on any of them trusts the fleet without a rebuild, and loses no public root (the file is the full merged bundle) |
+| `S2_CA_FILE` | container env, with the file above | the file above, for a client that wants the platform's bundle by name |
+
+The request's markers arrive as headers on the inference call (`x-serverless2-operation`, `x-serverless2-attempt`),
+forwarded by the gateway from the hook's verified context only (empty on a direct call; what a client sent is
+overridden).
+
+`services/lease-client/s2lease.py` is the shared client (standard library only; copy or vendor it; one implementation
+rather than one per model): `Lease.from_env()` (None without the projection), `lease.attach(headers,
+worker_request_id)` **before any GPU enqueue** (None for an unleased request in optional mode; `LeaseRefused` in
+required mode or on any refusal: fail closed, do not run the request; `LeaseUnavailable` after the transport retries),
+`exe.cancel_requested()` between steps, `exe.release(outcome, gpu_seconds)` after the worker's own settlement
+(`gpu_seconds` only as measured, `None` = unknown). Transport errors are retried with the same tuple (idempotent on
+the API), a 4xx/409 answer is final for the request. The worker keys its own state on `exe.owner`
+(`{tenant, owner, model}`), never on a client header.
+
+### Ingress isolation (declared ports)
+
+An engine that binds a second port on every interface (a vendor NIM on 9000 behind the wrapper the endpoint declares on
+8080) is reachable on that port by any pod that can reach the pod's IP, with no key, no markers and no lease. Tenant
+pods cannot (their egress is an allow-list, `docs/OPERATIONS.md` "Tenant isolation"), but the `models` namespace carries
+no policy of its own, so another model's container could. `ingress_isolation: declared-ports` on an endpoint model
+(opt-in; nothing changes for a model that does not name it) renders one more object next to the endpoint's, a namespaced
+`CiliumNetworkPolicy <id>-ingress` on that endpoint's pods, which admits only:
+
+| from | to | why |
+|---|---|---|
+| the node (`host`, `remote-node` entities) | every port | kubelet probes, the queue-proxy drain on preStop |
+| `envoy-gateway-system` | 8012, 8112 (queue-proxy http1/h2c); a multi-node leader: the declared port | the gateway's data path: every request the endpoint serves comes this way, through the key check, the markers and the lease |
+| `knative-serving` (Knative shape only) | 8012, 8112, 9090 | the activator (scale from zero, bursts) and the autoscaler's queue-proxy scrape |
+| Prometheus (`monitoring`) | 9090, 9091 (queue-proxy metrics); multi-node: the declared port | the fleet's metrics |
+| the replica group's own pods (multi-node only) | every port | NCCL and the engine's own group ports |
+
+Everything else into the pods is dropped: the second port, the declared container port itself (the queue-proxy reaches it
+over localhost), from any other model, tenant or namespace. Egress is not touched (the lease client's path to the control
+API stays). Cilium policies are allow-lists that add up, so the object widens nothing elsewhere; it is applied, updated
+and deleted with the endpoint's other objects (platform chart 0.1.7 gives both API Roles `ciliumnetworkpolicies` in
+`models`, nothing wider). A required-lease endpoint should opt in: its lease protocol protects only what arrives through
+the gateway.
+
+## Bindings and execution options (runs, and endpoint calls with private I/O)
 
 `PUT /v1/bindings/{ref}` `{"data": {"<key>": "<value>", ...}}` (at most 64 KiB) stores a confidential input of the
 tenant; `GET /v1/bindings` lists them (reference, bound operation, keys; never the data); `DELETE /v1/bindings/{ref}`
-revokes one (both need `artifacts:write`). A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
+revokes one (both need `artifacts:write`). An endpoint call (`mode: async`) may name a binding too: its request and
+its output destination then come from the binding (docs/JOBS.md "Endpoint calls with private input and
+application-owned output"). A run names a binding as `execution.private_input_ref`; the other fields of the `execution` block
 (`io_mode`, `profile_ref`, `workload_identity_ref`, `placement`, `recovery`) are described in docs/JOBS.md
 "Execution options". `GET /v1/fleet` carries `execution` (capability discovery: io modes, the tenant's identities and
 profiles, the regions' OIDC issuers, the `recovery` policies and bounds the fleet supports, the application `finalize`
 roles and retry bound, docs/JOBS.md "Finalization by the application"). `POST /v1/operations/{id}:resume` takes an optional body
-`{"checkpoint_ref": "...", "gpu_class": "..."}`. Operations report their resolved block as `execution` and their lifecycle
+`{"checkpoint_ref": "...", "gpu_class": "...", "restart_from_inputs": true}` (the last: a FAILED root whose Job and work volume expired is rendered again from its admission record on a fresh volume, docs/JOBS.md "Resume"). Operations report their resolved block as `execution` and their lifecycle
 (`root_operation_id`, `attempt_id`, `epoch`, `revision`, `cluster`, `image_digest`, `export_state`, `result_ref`,
 `checkpoint_ref`; docs/JOBS.md "Attempts and finalization"); `GET /v1/operations/{id}?since=<revision>` answers 304
 while nothing changed; `POST /v1/operations/{id}:export` retries a failed export without rerunning the simulation;

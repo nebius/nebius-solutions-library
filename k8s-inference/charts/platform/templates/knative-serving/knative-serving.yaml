@@ -65,7 +65,9 @@ spec:
       # Knative's hostPath support only allows read-only mounts, so hostPath is not used.
     defaults:
       revision-timeout-seconds: "600"
-      max-revision-timeout-seconds: "3600"
+      # the ceiling of an endpoint's timeout_s: the API registers nothing above it (values.knative.maxRevisionTimeoutSeconds
+      # reaches both; a definition above the ceiling would store but never reconcile)
+      max-revision-timeout-seconds: {{ .Values.knative.maxRevisionTimeoutSeconds | quote }}
     deployment:
       progress-deadline: "3600s"   # a trillion-parameter model on a cold node: boot, drivers, image and weights take up to an hour
       # the logical registry host resolves only on the nodes (containerd hosts.toml, docs/IMAGES.md), not in the

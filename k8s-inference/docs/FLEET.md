@@ -61,6 +61,7 @@ fleet = {
         }
       }
       cpu_pools = { ... }              # optional CPU-only pools, tainted serverless2.nebius/cpu-pool
+  assets = { <alias> = { kind = "file" | "tree", host_path = "/mnt/weights/...", gid = 65532, sha256 = "...", size = N } }  # restricted assets (docs/JOBS.md)
     }
   }
   prices = { "<platform>" = { on_demand = 4.50, spot = 0.79 }, ... }   # USD per GPU-hour (a default table
@@ -153,13 +154,40 @@ Control cluster (Kueue MultiKueue manager):
 Endpoints: Knative scales them (a revision superseded by a newer one is
 collected after an hour; a model whose first revision never becomes Ready
 keeps its Pending pod and GPU request until the model is changed or deleted,
-Knative never collects the latest revision). The API pins every endpoint
+Knative never collects the latest revision). A superseded revision that never
+became Ready (a crash-looping container, no node for its GPUs) also keeps its
+initial replica, and so its GPU request, until Knative's activation timeout:
+the revision's progress deadline plus 30 s, measured from its PodAutoscaler's
+`Active=Unknown` transition (`kubectl -n models get podautoscaler
+<model>-predictor-0000N -o jsonpath='{.status.conditions}'`). The fleet's
+deadline is `progress-deadline: 3600s` (`charts/platform/templates/knative-serving`,
+sized for a trillion-parameter model on a cold node), so on a pool that cannot
+add a node the new revision waits up to an hour for the old one's GPU;
+on a pool with room the autoscaler adds a node and the new revision starts
+beside it. Future knob, not implemented: Knative reads a per-revision
+`serving.knative.dev/progress-deadline` annotation before the fleet default,
+so the renderer could carry a per-model startup deadline (a small model's
+never-ready revision would release its GPU in minutes while the giants keep
+the hour). The API pins every endpoint
 deployment to a pool (`docs/SCHEDULING.md` "What a model declares"), so
 endpoints stay outside Kueue and their warm replicas are the static
 `endpoint_floor_gpus` deduction of their pool. The renderer can also hand an
 endpoint to Kueue (`queue.name`; the `models` namespace is Kueue-managed),
 in which case its replicas count in the quota exactly and the floor must be
 0 for them; the API does not use that mode.
+
+## Ephemeral storage
+
+A run class may request the kubelet's node-local scratch (`ephemeral_storage` / `ephemeralStorage`, docs/JOBS.md "Run
+class"). Kueue admits a request only for a resource the ClusterQueue covers, so every queue covers `ephemeral-storage`
+and every flavor budgets it from the pool's boot disk: per node `boot_disk_gib x node_reserve.ephemeral_fraction`
+(0.85) `- node_reserve.ephemeral_gib` (4 Gi), times the pool's nodes (the same `max_nodes` minus the warm floor as
+for CPU and memory); the `system` flavor from the system nodes' fixed 128 GiB disk. The budget stays under what the
+kubelet reports allocatable (measured on this fleet: ~109.6 Gi of a 128 GiB disk, ~444.4 Gi of a 512 GiB one; the
+budget is 104 and 431 Gi), which keeps the system reservation, the image cache and the containers' writable layers
+their headroom. The quota is an admission bound, not a provisioning: a pod's actual scratch is still the node's disk,
+and a `local-nvme` scratch class lands on NVMe pools as before. Tune `node_reserve.ephemeral_fraction` /
+`ephemeral_gib` per fleet when a node image reserves more.
 
 ## Tenants
 
@@ -287,6 +315,67 @@ cannot fit the `system` flavor and takes its pool flavor as before; a GPU-free w
 an export retry, a CPU run class) fits it first and is scheduled onto the system nodes of the cluster that admitted
 it, with the pool node selector of a GPU flavor never injected. No node is added and no GPU quota changes; the
 budget is what the system nodes already have. `tools/check.sh` asserts the rendered order and quotas.
+
+## CPU pools
+
+A run that needs more CPU or memory than the system nodes budget (an AlphaFold 3 data pipeline at 16 CPUs / 64 GiB
+on 8-vCPU system nodes) gets a CPU pool: `regions.<r>.cpu_pools.<name> = { platform, preset = "<n>vcpu-<n>gb",
+min_nodes (0), max_nodes, boot_disk_gib (128), shared_filesystem (true) }`. The cloud stage creates the node group
+(label `serverless2.nebius/pool=<name>`, taint `serverless2.nebius/cpu-pool=present:NoSchedule`, autoscaled between
+min and max) and, with `shared_filesystem`, attaches and mounts the region's weights filesystem at `/mnt/weights`
+exactly like a GPU pool (a run class's `weights`/`data`, the shared checkpoints and the restricted assets need it on
+the node; the system nodes have it only with `weights_filesystem.mount_on_system`). `charts/fleet` renders one
+ResourceFlavor per CPU pool (its node label, its taint tolerated, no GPU toleration) and lists it in every ClusterQueue
+**after `system`** with `nvidia.com/gpu: 0` and CPU/memory = `max_nodes` × preset minus the per-node `system_reserve`.
+Kueue's flavor order does the routing: a GPU request skips the GPU-free flavors; a GPU-free workload that fits the
+system nodes stays there (finalizers, export retries, small CPU classes); one that does not takes the CPU pool, is
+admitted against the pool's quota, lands Pending with the pool's node selector and toleration (Kueue injects both),
+the node group scales up, the pod runs, the group scales back down. The manager mirrors the flavors and quotas, so a
+fleet-placed CPU run goes to a region whose CPU pool has room. No class setting is needed; a class may still pin
+`pool: <name>`. `tools/check.sh` asserts the order (system, CPU pools, GPU pools) and the tolerations. The flavor
+order alone is an aggregate decision: a GPU-free run that does not fit the CPU pool's quota for the moment would move
+on to a GPU pool whose aggregate CPU covers it while no single node does; the API's per-node fit
+(docs/SCHEDULING.md "Per-node fit", `fit.yaml` of the fleet document) keeps such a run on the pools whose node holds it.
+
+## Customer CPU pools: tenants off the system nodes (`tenant_system_flavor`, charts/fleet 0.1.13, api 0.11.122)
+
+By default a GPU-free tenant workload (a CPU-only class, an endpoint call's caller Job, an export retry, a finalizer)
+takes the `system` flavor first: the platform's own CPU nodes. `tenant_system_flavor = false` (fleet level,
+`terraform.tfvars`) keeps every tenant off them:
+
+- `charts/fleet` renders the tenant queues (`<tenant>-<profile>`, worker and manager mirror) **without** the `system`
+  flavor; the lender queue (`default`, the platform's own GPU-free pods) keeps it. A GPU-free tenant workload takes the
+  region's customer CPU pool (the `cpu_pools` flavors, smallest preset first, then the warm ones, then by name; scaled
+  between `min_nodes` and `max_nodes`) or
+  waits QUEUED; it never lands on a system node.
+- the API (`kube.tenant_pool`) pins a definition that names `system` (a GPU-free endpoint, its async callers, a saved
+  definition with `system` baked in) to the region's first CPU pool in that order at render time, with the pool's taint tolerated;
+  nothing has to be re-saved. A region without a `cpu_pools` entry keeps `system` and the API logs it: give every
+  region a customer CPU pool before flipping the switch (`cpu_pools.<name> = { platform = "cpu-d3", preset =
+  "8vcpu-32gb", min_nodes = 1, max_nodes = 2 }`; `min_nodes = 1` keeps one node warm so finalizers and export retries
+  do not wait for a boot).
+- the fleet document carries the policy (`policy.yaml`) and the GPU-free pools per cluster (`cpu_pools.yaml`: the
+  system nodes and every CPU pool with platform/preset and, for a CPU pool, its node group from the cloud state;
+  `clusters.yaml` gains the mk8s `cluster_id`): what `GET /v1/fleet` lists and what the console links go through
+  (docs/API.md "Placement").
+
+Flip it in one apply order: cloud stage (the node groups), then platform stage on every worker and the control
+cluster. Running workloads keep their admission; a Workload admitted on a system flavor before the change finishes
+there. `tools/check.sh` keeps asserting the lender's system flavor; `services/api/tests/test_fleet_chart_queues.py`
+asserts the tenant queues without it.
+
+## Filesystem-aware placement
+
+The shared weights filesystem is a hostPath on the nodes that mount it (every GPU pool of a region that has it, CPU
+pools with `shared_filesystem`, the system pool only with `weights_filesystem.mount_on_system`). A run that mounts it
+(`weights`, `data`, `checkpoints: shared`, `assets`) must land on such a node, else the kubelet fails the mount for
+ever. Three pieces make that structural: the cluster module labels every node group `serverless2.nebius/shared-fs`
+`true` or `false` by its attachment; every worker ResourceFlavor carries the same label in `nodeLabels`; the API
+renders a required node affinity `serverless2.nebius/shared-fs In [true]` on such runs (as it does `local-nvme` for
+`scratch: local-nvme`). Kueue never assigns a flavor whose `nodeLabels` contradict a pod's required affinity, so such a
+run skips the unmounted `system` flavor and takes a CPU pool or its GPU pool; a run that mounts nothing shared keeps
+`system`. Existing Jobs do not gain the affinity by a rollout (docs/OPERATIONS.md "Repair a run admitted on an unmounted
+flavor"); the static PVs keep no node affinity (immutable once created; the flavor label is the guard).
 
 ## GPU drivers: the node image or the NVIDIA GPU Operator
 

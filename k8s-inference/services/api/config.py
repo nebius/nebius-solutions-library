@@ -33,12 +33,6 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://kube-prometheus-stack-
 )
 LOKI_URL = os.environ.get("LOKI_URL", "http://loki.monitoring.svc:3100").rstrip("/")
 MODELS_NAMESPACE = os.environ.get("MODELS_NAMESPACE", "models")
-# The API's own namespace: runtime model definitions live there as ConfigMaps `catalog-<id>` (services/api/models.py)
-API_NAMESPACE = os.environ.get("API_NAMESPACE") or (
-    open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
-    if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-    else "api"
-)
 IMAGES_HOST = os.environ.get(
     "IMAGES_HOST", "registry.serverless2.local"
 )  # the logical registry host (terraform.tfvars images.host)
@@ -107,11 +101,21 @@ WEIGHTS_SHARED_PVC = os.environ.get(
 )  # the region's weights, read-only for runs (charts/tenant)
 KUEUE_PRIORITY = os.environ.get("KUEUE_PRIORITY", "customer-batch")
 JOB_TTL_S = int(os.environ.get("JOB_TTL_S", str(90 * 86400)))  # finished Jobs stay this long (operation history)
+# the tenant-wide Job/pod listing behind GET /v1/operations is reused this long (a console polling every 8 s and
+# its page flips share one listing; 0 = none): docs/API.md "Pagination"
+OPS_LIST_CACHE_S = float(os.environ.get("OPS_LIST_CACHE_S", "10"))
+# the warmer re-reads the listings asked for within OPS_LIST_WARM_WINDOW_S every OPS_LIST_WARM_S, so a console that
+# polls is served from memory (api 0.11.128); 0 = no warmer
+OPS_LIST_WARM_S = float(os.environ.get("OPS_LIST_WARM_S", "4"))
+OPS_LIST_WARM_WINDOW_S = float(os.environ.get("OPS_LIST_WARM_WINDOW_S", "90"))
 JOB_BACKOFF_LIMIT = int(
     os.environ.get("JOB_BACKOFF_LIMIT", "3")
 )  # application failures before a Job is FAILED (disruptions do not count)
 JOB_PVC_SIZE_GI = int(os.environ.get("JOB_PVC_SIZE_GI", "50"))
 SYNC_TIMEOUT_S = int(os.environ.get("SYNC_TIMEOUT_S", "600"))
+# Knative Serving's max-revision-timeout-seconds of this fleet (charts/platform values.knative.maxRevisionTimeoutSeconds,
+# fleet.knative.max_revision_timeout_s): the ceiling of an endpoint's timeout_s; the chart sets both from one value
+KNATIVE_MAX_REVISION_TIMEOUT_S = int(os.environ.get("KNATIVE_MAX_REVISION_TIMEOUT_S", "3600"))
 AUTH_CACHE_S = int(os.environ.get("AUTH_CACHE_S", "30"))
 LABEL = "serverless2.nebius"
 # OIDC issuer of every region's cluster ("<region>=<url>,..."): what a storage provider's federation trusts for the
@@ -167,3 +171,20 @@ def refresh_trust() -> None:
 
 
 _trust_file()
+
+# Live sessions (docs/API.md "Sessions"): admitted streams to an endpoint, bound to one connection and one worker pod.
+# Off unless the fleet enables it (stack tfvars `sessions.enabled`); the routes answer 404 and the gateway hook ignores
+# session claims while off.
+SESSIONS_ENABLED = os.environ.get("SESSIONS_ENABLED", "false").lower() == "true"
+SESSION_CLAIM_TTL_S = int(os.environ.get("SESSION_CLAIM_TTL_S", "120"))  # the upgrade must bind the claim within it
+SESSION_ATTACH_WAIT_S = int(
+    os.environ.get("SESSION_ATTACH_WAIT_S", "60")
+)  # a bound session unattached this long ends unknown
+SESSION_TOKEN_AUDIENCE = os.environ.get(
+    "SESSION_TOKEN_AUDIENCE", "serverless2"
+)  # the lease/session workers' token audience
+
+# Stage composition (docs/JOBS.md "Stage composition", "Failure settlement"): an open graph in which nothing is active
+# and a lineage head (the root or a stage) FAILED is the owner's to resume or cancel; when it stays so for this long
+# after the failure, the gate closes it (waiting stages retired, the root's slot released). 0 closes on the next pass.
+GRAPH_FAILURE_GRACE_S = int(os.environ.get("GRAPH_FAILURE_GRACE_S", "1800"))

@@ -48,7 +48,7 @@ digest), so a model can pin a digest and the cache serves exactly it.
 | Zot 2.1.22 (CNCF) | pull-through cache: sync extension `onDemand` from every upstream, `docker2s2` compat, anonymous read only (pushes get 401), GC + retention (tags not pulled for `images.cache.keep_days` are dropped, untagged after 24 h), Prometheus metrics | app `clusters/common/apps/zot.yaml` (chart `zot` 0.1.128), values `clusters/common/values/zot.yaml`, config rendered by `charts/fleet/templates/image-cache.yaml` from the `images` block into ConfigMap `registry/zot-config` |
 | Spegel 0.7.4 (CNCF sandbox) | peer-to-peer distribution of layers between the nodes of a cluster, and the writer of containerd's `hosts.toml` for the logical host and the public registries (`additionalMirrorTargets` = the Zot NodePort) | app `clusters/common/apps/spegel.yaml` (native OCI chart), values `clusters/common/values/spegel.yaml` |
 | node-config DaemonSet | containerd on the GPU node images has no registry `config_path`: a drop-in `/etc/containerd/conf.d/serverless2-registry.toml` (`config_path`, `discard_unpacked_layers = false`) and one containerd restart per node, through the host's systemd (`hostPID`, privileged init container; the CPU images already ship the setting and are left alone) | `charts/platform/templates/node-config`, app `node-config` |
-| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"<source registry host>": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | written by the platform stage (`stack/platform/secrets.tf`) from the key `stack/scripts/registry-static-key.sh` issues; by hand: `nebius iam static-key issue --parent-id <hub project> --account-service-account-id <ops SA> --service CONTAINER_REGISTRY --expires-at <date>` (up to 3 years) |
+| Secret `registry/zot-sync-credentials` | `credentials.json`: `{"<source registry host>": {"username": "iam", "password": "<static key>"}, "nvcr.io": {"username": "$oauthtoken", "password": "<NGC key>"}}`; one per cluster, never in git | written by the platform stage (`stack/platform/secrets.tf`) from the environment variable `secrets.registry_key_env` names (default `REGISTRY_STATIC_KEY`); the operator issues the key once per fleet with `stack/scripts/registry-static-key.sh` (the Nebius CLI's `static-key issue` for the hub ops SA, `CONTAINER_REGISTRY`, 365 days; `--rotate` for a new one), a plan never issues one |
 | Knative | `registries-skipping-tag-resolving: registry.serverless2.local` (the host resolves on nodes, not in the cluster network) | `charts/platform/templates/knative-serving/knative-serving.yaml` |
 
 There is no per-region image rewriting: `services/api` renders references as
@@ -133,11 +133,25 @@ rewrites that file with its peers once it runs (it keeps a copy under
 happen before Spegel has started, fall back to DNS for the logical host and sit in
 the kubelet's pull back-off for minutes.
 
+The same fragment is written on every **CPU batch pool** (never the system pool, which
+keeps its plain cloud-init): a CPU node scaled from zero otherwise met its first
+workload pull between node Ready and Spegel's `hosts.toml` (about 46 s on the
+2026-10-14 LeRobot node) and fell back to DNS for the logical host ("server
+misbehaving"), then sat in the kubelet's back-off; and node-config restarted containerd
+post-Ready for the memlock drop-in (a sandbox creation in flight saw "EOF"). With the
+fragment both are done at boot. The fragment is one local (`registry_bootstrap_*`) that
+the GPU and the CPU batch pools share; a change of it re-creates those node groups.
+
 The `node-config` DaemonSet is the catch-all for a node that lacks the drop-in: such
 a node pulls its first workload image before the DaemonSet has restarted containerd
 (one failed pull, retried by the kubelet about 10 s later; with several pods landing
 at once the kubelet's pull back-off stretches that to minutes). It does nothing on a
-node that already has the setting (same marker file). The cloud-init fragment
+node that already has the setting (same marker file). Since platform chart 0.1.12 it
+also writes a bootstrap `hosts.toml` for the logical host when a node has none yet
+(pointing at the cache on the node's loopback) and never over a file that exists
+(cloud-init's, or Spegel's with its peers); it restarts containerd only when the
+running process does not serve the mirrors or lacks the unlimited memlock
+(`charts/platform/files/node-config.sh`, `tools/node-config-test.sh`). The cloud-init fragment
 Terraform renders:
 
 ```yaml
@@ -180,7 +194,7 @@ runcmd:
 The cache is on by default. `images.cache = { enabled = false }` in the tfvars leaves it out of a fleet
 whose nodes can reach their registries directly and that does not need the per-region warm layer: no Zot
 release, no `registry` namespace, no cache claim, no registry static key
-(`stack/scripts/registry-static-key.sh` is not run, Secret `registry/zot-sync-credentials` is not written),
+(`secrets.registry_key_env` is not required, Secret `registry/zot-sync-credentials` is not written),
 no `node-config` DaemonSet and no containerd drop-in in the GPU pools' cloud-init (`stack/modules/cluster`:
 a change of this flag rolls the GPU pools), and Knative's `registries-skipping-tag-resolving` lists `nvcr.io`
 only. Spegel stays and still mirrors the public registries between the nodes (on the CPU node images, whose

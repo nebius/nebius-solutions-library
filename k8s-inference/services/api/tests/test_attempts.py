@@ -47,6 +47,22 @@ def _record(name, pod, st="succeeded", **kw):
     }
 
 
+def test_a_cancelled_operations_interrupted_record_reads_cancelled_not_preempted():
+    """The cancel deleted the pod; its record says "interrupted". While the Job exists the cancelled annotation
+    settles it; once only the record is left (an expired Job, a chain member) the cancel mark must settle it the same
+    way, or the attempt flips from CANCELLED to PREEMPTED after cleanup (op-cd2ce536ce2a6f7d, 2026-10-15)."""
+    name = "op-cancelled-1"
+    rec = _record(name, f"{name}-a", "interrupted")
+    live = _job(name, complete=False)
+    live["metadata"]["annotations"][f"{LABEL}/cancelled"] = "2026-10-15T19:10:00Z"
+    assert status.normalise(live, None, [rec])["attempts"][-1]["status"] == "CANCELLED"
+    only_records = status._attempts([], [rec], name)
+    assert only_records[-1]["status"] == "PREEMPTED"  # the bare projection, before the cancel mark is applied
+    assert status.cancel_attempt(only_records, True)[-1]["status"] == "CANCELLED"
+    assert status.cancel_attempt(only_records, True)[-1]["reason"] == "cancelled"
+    assert status.cancel_attempt(status._attempts([], [rec], name), False)[-1]["status"] == "PREEMPTED"
+
+
 def test_exit_zero_is_not_delivery():
     name = "op-container-run-1"
     ok = status.normalise(_job(name), None, [_record(name, f"{name}-a", export="succeeded")])
@@ -107,6 +123,31 @@ def test_a_finalizing_pod_is_a_running_operation():
         }
     ]
     assert status.normalise(job)["status"] == "RUNNING"
+
+
+@pytest.mark.parametrize("peer_first", [False, True])
+@pytest.mark.parametrize(
+    "export,ref,expected", [("committed", "result-5", "SUCCEEDED"), ("failed", None, "EXPORT_FAILED")]
+)
+def test_gang_peer_na_never_overrides_coordinator_delivery(peer_first, export, ref, expected):
+    name = "op-gang-delivery"
+    job = {**_job(name, {"io_mode": "application"}), "kind": "JobSet"}
+    leader = _record(name, "rank-zero", epoch=5, gang_rank=0, export_state=export, result_ref=ref)
+    peer = _record(name, "rank-one", epoch=5, gang_rank=1, export_state="n/a", started_at="2026-10-11T10:00:01Z")
+    rows = [peer, leader] if peer_first else [leader, peer]
+    operation = status.normalise(job, records=rows)
+    assert operation["status"] == expected
+    assert len(operation["attempts"]) == 2  # Both ranks remain visible and billable.
+
+
+def test_gang_new_peer_does_not_borrow_old_coordinator_result():
+    name = "op-gang-delivery"
+    job = {**_job(name, {"io_mode": "application"}), "kind": "JobSet"}
+    rows = [
+        _record(name, "old-leader", epoch=4, gang_rank=0, export_state="committed", result_ref="old"),
+        _record(name, "new-peer", epoch=5, gang_rank=1, export_state="n/a"),
+    ]
+    assert status.normalise(job, records=rows)["status"] == "FINALIZING"
 
 
 def test_lifecycle_fields_come_from_the_rows(monkeypatch):
@@ -203,6 +244,7 @@ def test_operation_reports_lifecycle_and_revision_cursor(client, monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == op else [])
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     got = c.get(f"/v1/operations/{op}", headers=H).json()
     assert (
@@ -221,6 +263,34 @@ def test_operation_reports_lifecycle_and_revision_cursor(client, monkeypatch):
     assert res["export_state"] == "succeeded"
 
 
+def test_an_export_failed_run_whose_volume_is_gone_says_so_and_offers_no_export(client, monkeypatch):
+    """The uploader of op-bb1275a5f615d662 (2026-10-15) released the volume of a run whose export had failed; the
+    status kept promising a kept volume and a transfer retry. A gone claim is reported as gone."""
+    c, fake = client
+    r = c.post(
+        "/v1/models/container-run:invoke",
+        json={"input": {"image": "x", "command": "y"}, "region": "eu-north1"},
+        headers=H,
+    )
+    op = r.json()["id"]
+    fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    monkeypatch.setattr(attempts, "enabled", lambda: True)
+    monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
+    monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
+    monkeypatch.setattr(
+        attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="failed"), "operation": op}]
+    )
+    kept = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert kept["status"] == "EXPORT_FAILED" and "volume is kept" in kept["error"] and kept["resumable"] is True
+    del fake.pvcs[("tenant-demo", f"{op}-work")]  # released by an uploader, or cleaned up
+    gone = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert gone["status"] == "EXPORT_FAILED" and "already gone" in gone["error"] and gone["resumable"] is False
+    assert "volume is kept" not in gone["error"]
+    r = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert r.status_code == 409 and "gone" in r.text
+
+
 def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypatch):
     c, fake = client
     r = c.post(
@@ -232,6 +302,7 @@ def test_export_retry_reuses_the_volume_without_the_simulation(client, monkeypat
     fake.jobs[("tenant-demo", op)]["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: None)
     monkeypatch.setattr(
         attempts, "for_operation", lambda root: [{**_record(op, f"{op}-a", export="failed"), "operation": op}]
