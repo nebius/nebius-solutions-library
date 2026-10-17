@@ -104,12 +104,7 @@ def public(s: dict) -> dict:
         "cancel_reason": s["cancel_reason"],
         "attached": s["attached_at"] is not None,
         "worker_session_id": s["worker_session_id"],
-        "created_at": iso(s["created_at"]),
-        "expires_at": iso(s["expires_at"]),
-        "deadline_at": iso(s["deadline_at"]),
-        "bound_at": iso(s["bound_at"]),
-        "attached_at": iso(s["attached_at"]),
-        "ended_at": iso(s["ended_at"]),
+        **{k: iso(s[k]) for k in ("created_at", "expires_at", "deadline_at", "bound_at", "attached_at", "ended_at")},
         "gpu_seconds": float(s["gpu_seconds"]) if s["gpu_seconds"] is not None else None,
         "usage": s["usage"],
     }
@@ -159,14 +154,15 @@ def request_hash(model: str, cluster: str | None, region: str, timeout_s: int, g
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
+def _select(where: str, params: tuple = ()) -> list[dict]:
+    with db.pool().connection() as c:
+        return [_row(r) for r in c.execute(f"select {COLUMNS} from sessions where {where}", params).fetchall()]
+
+
 def find_replay(tenant: str, owner: str, idempotency_key: str) -> dict | None:
     """The session an owner's Idempotency-Key names (owner-scoped: another owner's same key is another namespace)."""
-    with db.pool().connection() as c:
-        r = c.execute(
-            f"select {COLUMNS} from sessions where tenant = %s and owner = %s and idempotency_key = %s",
-            (tenant, owner, idempotency_key),
-        ).fetchone()
-    return _row(r) if r else None
+    rows = _select("tenant = %s and owner = %s and idempotency_key = %s", (tenant, owner, idempotency_key))
+    return next(iter(rows), None)
 
 
 def replay(s: dict, h: str) -> dict:
@@ -253,18 +249,22 @@ def create(
 
 
 def get(sid: str) -> dict | None:
-    with db.pool().connection() as c:
-        r = c.execute(f"select {COLUMNS} from sessions where id = %s", (sid,)).fetchone()
-    return _row(r) if r else None
+    return next(iter(_select("id = %s", (sid,))), None)
 
 
 def list_owner(tenant: str, owner: str, limit: int = 100) -> list[dict]:
-    with db.pool().connection() as c:
-        rows = c.execute(
-            f"select {COLUMNS} from sessions where tenant = %s and owner = %s order by created_at desc limit %s",
-            (tenant, owner, limit),
-        ).fetchall()
-    return [public(_row(r)) for r in rows]
+    return [
+        public(s)
+        for s in _select("tenant = %s and owner = %s order by created_at desc limit %s", (tenant, owner, limit))
+    ]
+
+
+def _current(c, sid: str) -> tuple:
+    """(state, connection, pod_uid) of a session a conditional transition did not match; 404 without the session."""
+    s = c.execute("select state, connection, pod_uid from sessions where id = %s", (sid,)).fetchone()
+    if s is None:
+        raise HTTPException(404, "no such session")
+    return s
 
 
 def claim_of(headers) -> str | None:
@@ -309,9 +309,7 @@ def attach(sid: str, connection: str, worker: dict, worker_session_id: str | Non
             (worker["pod"], worker["namespace"], worker["uid"], worker_session_id, sid, connection),
         ).fetchone()
         if r is None:
-            s = c.execute("select state, connection, pod_uid from sessions where id = %s", (sid,)).fetchone()
-            if s is None:
-                raise HTTPException(404, "no such session")
+            s = _current(c, sid)
             if s[0] == "attached" and s[2] == worker["uid"] and s[1] == connection:
                 return get(sid)  # the same worker's retry
             raise HTTPException(
@@ -333,10 +331,8 @@ def release(sid: str, worker: dict, outcome: str, gpu_seconds: float | None) -> 
             (outcome, gpu_seconds, "measured" if gpu_seconds is not None else "unknown", sid, worker["uid"]),
         ).fetchone()
         if r is None:
-            s = c.execute("select state, pod_uid from sessions where id = %s", (sid,)).fetchone()
-            if s is None:
-                raise HTTPException(404, "no such session")
-            if s[0] == "ended" and s[1] == worker["uid"]:
+            s = _current(c, sid)
+            if s[0] == "ended" and s[2] == worker["uid"]:
                 return settle(sid)  # the same worker's retry: settled once
             raise HTTPException(409, f"session is {s[0]}; only its attached worker releases it")
     return settle(sid)
@@ -400,7 +396,7 @@ def verify_worker(token: str, s: dict, endpoint_model) -> dict:
     if not st or not st.authenticated:
         raise HTTPException(401, "worker token not accepted by the session's cluster")
     parts, pod, uid = attempts.pod_claims(st)
-    if len(parts) != 4 or parts[0] != "system" or parts[1] != "serviceaccount":
+    if len(parts) != 4 or parts[:2] != ["system", "serviceaccount"]:
         raise HTTPException(401, "not a pod identity")
     if not pod or not uid:
         raise HTTPException(401, "token is not bound to a pod")
@@ -466,12 +462,9 @@ def sweep() -> list[str]:
     if not enabled():
         return []
     out = []
-    with db.pool().connection() as c:
-        rows = c.execute(f"select {COLUMNS} from sessions where state <> 'ended' or settled_at is null").fetchall()
     now = datetime.now(timezone.utc)
     ready_cache: dict = {}
-    for r in rows:
-        s = _row(r)
+    for s in _select("state <> 'ended' or settled_at is null"):
         sid = s["id"]
         try:
             with db.pool().connection() as c, c.transaction():

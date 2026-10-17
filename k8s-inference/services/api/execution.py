@@ -179,29 +179,8 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         }
     if name := _ref(spec.private_input_ref, "private_input_ref"):
         ex["private_input_ref"] = name
-    if spec.placement:
-        pl = {}
-        if spec.placement.gpu_preference is not None:
-            classes = model.get("gpu_classes") or []
-            pref = [c for c in spec.placement.gpu_preference if c in classes]
-            if not pref:
-                raise HTTPException(
-                    400,
-                    f"gpu_preference {spec.placement.gpu_preference} has no class of model {model.get('name')} ({classes})",
-                )
-            pl["gpu_preference"] = pref
-        if spec.placement.allowed_clusters is not None:
-            regions = [r for r in spec.placement.allowed_clusters if r in (model.get("regions") or [])]
-            if not regions:
-                raise HTTPException(
-                    400,
-                    f"allowed_clusters {spec.placement.allowed_clusters} has no region of model {model.get('name')} ({model.get('regions')})",
-                )
-            pl["allowed_clusters"] = regions
-        if spec.placement.fallback_wait_s is not None:
-            pl["fallback_wait_s"] = spec.placement.fallback_wait_s
-        if pl:
-            ex["placement"] = pl
+    if spec.placement and (pl := _placement(spec.placement, model)):
+        ex["placement"] = pl
     if spec.graph and spec.stage:
         raise HTTPException(400, "execution.graph declares a root's stages; execution.stage submits one: not both")
     if spec.graph:
@@ -237,6 +216,28 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         elif bounds:
             raise HTTPException(400, f"recovery.{'/'.join(bounds)}: only with on_infrastructure_loss: recover")
     return ex
+
+
+def _placement(placement: PlacementSpec, model: dict) -> dict:
+    """The placement block, narrowed to the model's classes and regions (400 when nothing of the model is left)."""
+    pl = {}
+    if placement.gpu_preference is not None:
+        classes = model.get("gpu_classes") or []
+        pl["gpu_preference"] = [c for c in placement.gpu_preference if c in classes]
+        if not pl["gpu_preference"]:
+            raise HTTPException(
+                400, f"gpu_preference {placement.gpu_preference} has no class of model {model.get('name')} ({classes})"
+            )
+    if placement.allowed_clusters is not None:
+        pl["allowed_clusters"] = [r for r in placement.allowed_clusters if r in (model.get("regions") or [])]
+        if not pl["allowed_clusters"]:
+            raise HTTPException(
+                400,
+                f"allowed_clusters {placement.allowed_clusters} has no region of model {model.get('name')} ({model.get('regions')})",
+            )
+    if placement.fallback_wait_s is not None:
+        pl["fallback_wait_s"] = placement.fallback_wait_s
+    return pl
 
 
 STAGE_ID = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
@@ -376,6 +377,25 @@ def _mount_private(pod: dict, main: dict, name: str) -> None:
     main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
 
 
+def _identity_and_inputs(pod: dict, main: dict, ex: dict, name: str, token_var: str, merge: bool) -> None:
+    """The workload identity projected into main (its token file named by `token_var`, the identity's env after it:
+    `merge` replaces the caller's variables of the same name, the identity's values win; else they are appended)
+    and the private binding mounted."""
+    identity = ex.get("identity")
+    if identity:
+        _project_identity(pod, main, identity)
+        extra = [{"name": token_var, "value": f"{IDENTITY_DIR}/token"}]
+        extra += [{"name": k, "value": v} for k, v in identity.get("env", {}).items()]
+        if merge:
+            env = {e["name"]: e for e in main.get("env", [])}
+            env.update({e["name"]: e for e in extra})
+            main["env"] = list(env.values())
+        else:
+            main.setdefault("env", []).extend(extra)
+    if ex.get("private_input_ref"):
+        _mount_private(pod, main, name)
+
+
 def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
     """Shape a run pod after its execution block (build_run calls this before the Job shell is built)."""
     main = next(c for c in pod["containers"] if c["name"] == "main")
@@ -397,16 +417,7 @@ def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
             400,
             f"execution profile {profile['name']} keeps the shared filesystem out of the run: no data, no shared checkpoints",
         )
-    identity = ex.get("identity")
-    if identity:
-        _project_identity(pod, main, identity)
-        env = {e["name"]: e for e in main.get("env", [])}
-        env["AWS_WEB_IDENTITY_TOKEN_FILE"] = {"name": "AWS_WEB_IDENTITY_TOKEN_FILE", "value": f"{IDENTITY_DIR}/token"}
-        for k, v in identity.get("env", {}).items():
-            env[k] = {"name": k, "value": v}  # the identity's values win over the caller's
-        main["env"] = list(env.values())
-    if ex.get("private_input_ref"):
-        _mount_private(pod, main, name)
+    _identity_and_inputs(pod, main, ex, name, "AWS_WEB_IDENTITY_TOKEN_FILE", merge=True)
     ckpt = (ex.get("recovery") or {}).get("checkpoint_ref")
     if ckpt:
         main.setdefault("env", []).append({"name": "CHECKPOINT_REF", "value": ckpt})
@@ -421,14 +432,7 @@ def apply_async(pod: dict, ex: dict, name: str) -> None:
     if ex.get("io_mode") == "application" and uploader:
         _record_mode(uploader)
         main.setdefault("env", []).append({"name": "IO_MODE", "value": "application"})
-    identity = ex.get("identity")
-    if identity:
-        _project_identity(pod, main, identity)
-        main.setdefault("env", []).append({"name": "IDENTITY_TOKEN_FILE", "value": f"{IDENTITY_DIR}/token"})
-        for k, v in identity.get("env", {}).items():
-            main["env"].append({"name": k, "value": v})
-    if ex.get("private_input_ref"):
-        _mount_private(pod, main, name)
+    _identity_and_inputs(pod, main, ex, name, "IDENTITY_TOKEN_FILE", merge=False)
 
 
 def apply_job(job: dict, ex: dict) -> None:
@@ -487,6 +491,13 @@ OWNER_ANNOTATION = f"{LABEL}/owner"
 BINDING_UID_ANNOTATION = f"{LABEL}/binding-uid"
 
 
+def _object(name: str, labels, annotations, rv=None, **rest) -> dict:
+    """A Secret to write; `rv` (a resourceVersion) makes the write a compare-and-swap the API server refuses when
+    stale (409)."""
+    md = {"name": name, "labels": labels, "annotations": annotations, **({"resourceVersion": str(rv)} if rv else {})}
+    return {"apiVersion": "v1", "kind": "Secret", "metadata": md, **rest}
+
+
 def _owned_by(secret: dict, owner: str | None, admin: bool) -> bool:
     """The binding is the caller's: its owner annotation (the stable principal the API records on every operation,
     auth.Principal.owner) equals the caller's. An admin may act on any binding of the tenant. A binding without an
@@ -543,12 +554,6 @@ def put_binding(
             400, "binding data: 1 to 64 KiB of string values under file-name keys (letters, digits, . _ -)"
         )
     name = BINDING_PREFIX + ref
-    body = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {"name": name, "labels": {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref}},
-        "stringData": data,
-    }
     core = kube.core(region)
     existing = _secret(region, ns, name)
     if existing and not _owned_by(existing, owner, admin):
@@ -556,19 +561,19 @@ def put_binding(
     revision = (existing or {}).get("metadata", {}).get("resourceVersion")
     if existing and if_match is not None and if_match != str(revision):
         raise HTTPException(409, f"binding {ref} changed (revision {revision}); re-read it before replacing it")
-    written = None
+    if existing:
+        ann = dict(existing["metadata"].get("annotations") or {})
+        ann.setdefault(OWNER_ANNOTATION, owner or "")
+        ann = {k: v for k, v in ann.items() if v}
+    else:
+        ann = {OWNER_ANNOTATION: owner} if owner else {}
+    labels = {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref}
     try:
-        if existing:
-            ann = dict(existing["metadata"].get("annotations") or {})
-            ann.setdefault(OWNER_ANNOTATION, owner or "")
-            body["metadata"]["annotations"] = {k: v for k, v in ann.items() if v}
-            if revision:
-                body["metadata"]["resourceVersion"] = str(revision)  # the API server refuses a stale replacement
-            body["data"] = None
+        if existing:  # a stale replacement (the resourceVersion moved) is refused by the API server
+            body = _object(name, labels, ann, revision, stringData=data, data=None)
             written = retry(core.replace_namespaced_secret, name, ns, body)
         else:
-            body["metadata"]["annotations"] = {OWNER_ANNOTATION: owner} if owner else {}
-            written = retry(core.create_namespaced_secret, ns, body)
+            written = retry(core.create_namespaced_secret, ns, _object(name, labels, ann, stringData=data))
     except ApiException as e:
         if e.status == 409:
             raise HTTPException(409, f"binding {ref} was written concurrently; re-read it and replace it again")
@@ -581,7 +586,7 @@ def put_binding(
         "operation": bound,
         "keys": sorted(data),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "owner": (body["metadata"].get("annotations") or {}).get(OWNER_ANNOTATION),
+        "owner": ann.get(OWNER_ANNOTATION),
         "revision": _revision(written),
     }
 
@@ -681,18 +686,8 @@ def _refresh_copies(ns: str, ref: str, data: dict[str, str], binding: dict, dele
             if uid:
                 ann[BINDING_UID_ANNOTATION] = uid
             rv = s["metadata"].get("resourceVersion")
-            body = {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": name,
-                    "labels": s["metadata"].get("labels"),
-                    "annotations": ann,
-                    "ownerReferences": s["metadata"].get("ownerReferences"),
-                    **({"resourceVersion": str(rv)} if rv else {}),
-                },
-                "stringData": data,
-            }
+            body = _object(name, s["metadata"].get("labels"), ann, rv, stringData=data)
+            body["metadata"]["ownerReferences"] = s["metadata"].get("ownerReferences")
             try:
                 written = retry(kube.core(r).replace_namespaced_secret, name, ns, body)
                 if delete:
@@ -755,21 +750,10 @@ def deliver(
         claim[f"{LABEL}/operation"] = root
         if owner:
             claim.setdefault(OWNER_ANNOTATION, owner)
-        body = {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {
-                "name": BINDING_PREFIX + ref,
-                "labels": binding["metadata"].get("labels"),
-                "annotations": claim,
-                **(
-                    {"resourceVersion": str(binding["metadata"]["resourceVersion"])}
-                    if binding["metadata"].get("resourceVersion")
-                    else {}
-                ),
-            },
-            "data": binding.get("data") or {},
-        }
+        md = binding["metadata"]
+        body = _object(
+            BINDING_PREFIX + ref, md.get("labels"), claim, md.get("resourceVersion"), data=binding.get("data") or {}
+        )
         try:
             retry(kube.core(region).replace_namespaced_secret, BINDING_PREFIX + ref, ns, body)
         except ApiException as e:
@@ -785,26 +769,19 @@ def deliver(
                     )
             else:
                 raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    copy = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": f"{name}-private",
-            "labels": {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref, f"{LABEL}/operation": root},
-            # the identity of the binding this copy came from: a refresh or revocation of a later binding under the
-            # same ref (deleted and re-created, possibly by another principal) never reaches this copy
-            "annotations": {
-                k: v
-                for k, v in {
-                    BINDING_UID_ANNOTATION: binding["metadata"].get("uid"),
-                    OWNER_ANNOTATION: (binding["metadata"].get("annotations") or {}).get(OWNER_ANNOTATION) or owner,
-                    f"{LABEL}/operation": root,
-                }.items()
-                if v
-            },
-        },
-        "data": binding.get("data") or {},
+    # the copy's annotations name the binding it came from: a refresh or revocation of a later binding under the same
+    # ref (deleted and re-created, possibly by another principal) never reaches this copy
+    provenance = {
+        BINDING_UID_ANNOTATION: binding["metadata"].get("uid"),
+        OWNER_ANNOTATION: (binding["metadata"].get("annotations") or {}).get(OWNER_ANNOTATION) or owner,
+        f"{LABEL}/operation": root,
     }
+    copy = _object(
+        f"{name}-private",
+        {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref, f"{LABEL}/operation": root},
+        {k: v for k, v in provenance.items() if v},
+        data=binding.get("data") or {},
+    )
     # `regions` are the run's candidate clusters as the dispatcher names them (cluster ids: `north`, `south`, `hub`, or a
     # region name); the Kubernetes client is keyed by the Nebius region, so every id is mapped through the fleet
     # document first (kube.cluster_region) and deduplicated (two ids in one region share a cluster only never)

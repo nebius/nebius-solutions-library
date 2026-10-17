@@ -177,16 +177,14 @@ def ledger_head(ns: str, operation: str) -> str | None:
     if not head or head == operation:
         return None
     try:
-        hj, _r = jobs.find(ns, head)
-    except HTTPException as e:
-        if e.status_code != 404:
-            return None
-        # the head's Job expired too (TTL): the durable attempt rows say what it was. An export retry or finalizer
-        # records its role; a compute continuation records `run` (or nothing yet, when it never started): followed
-        hj = None
-    if hj is not None:
-        ann = hj["metadata"].get("annotations") or {}
+        found = jobs.find_or_none(ns, head)
+    except HTTPException:
+        return None
+    if found is not None:
+        ann = found[0]["metadata"].get("annotations") or {}
         return None if ann.get(f"{LABEL}/export-of") or ann.get(f"{LABEL}/finalize-of") else head
+    # the head's Job expired too (TTL): the durable attempt rows say what it was. An export retry or finalizer
+    # records its role; a compute continuation records `run` (or nothing yet, when it never started): followed
     if attempts.enabled():
         rows = [r for r in attempts.for_operation(m["root"]) if r.get("operation") == head]
         if any((r.get("role") or "run") in ("export", "finalize") for r in rows):
@@ -301,13 +299,12 @@ def evaluate(ns: str, graph: dict, deps: list[str], memo: dict | None = None) ->
         if st["status"] == "SUCCEEDED":
             if not st.get("result_ref"):
                 return "failed", f"dependency {dep} ({st['operation']}) succeeded without a result_ref: not runnable"
+            # the delivering operation and attempt (a finalizer or export retry when one delivered), the producer
             results[dep] = {
-                "operation": st[
-                    "operation"
-                ],  # the delivering operation (a finalizer or export retry when one delivered)
+                "operation": st["operation"],
                 "producer": st.get("producer") or st["operation"],
                 "result_ref": st["result_ref"],
-                "attempt_id": st.get("attempt_id"),  # the delivering attempt
+                "attempt_id": st.get("attempt_id"),
                 "epoch": st.get("epoch"),
             }
         elif st["status"] is None:
@@ -363,14 +360,14 @@ def _admit_stage(ns: str, job: dict, results: dict) -> None:
     profile = md["labels"].get(f"{LABEL}/profile")
     if not profile:
         raise HTTPException(500, f"stage {name}: no profile label: cannot name its Kueue queue")
+    bound = json.dumps(results, sort_keys=True)  # on the Job too: continuations inherit it
     body = {
         "metadata": {
             "labels": {QUEUE_LABEL: profile, WAITING: None},
-            "annotations": {ADMITTED_AT: iso(datetime.now(timezone.utc)), WAIT_REASON: None},
+            "annotations": {ADMITTED_AT: iso(datetime.now(timezone.utc)), WAIT_REASON: None, RESULTS: bound},
         },
-        "spec": {"template": {"metadata": {"annotations": {RESULTS: json.dumps(results, sort_keys=True)}}}},
+        "spec": {"template": {"metadata": {"annotations": {RESULTS: bound}}}},
     }
-    body["metadata"]["annotations"][RESULTS] = json.dumps(results, sort_keys=True)  # continuations inherit it
     retry(kube.batch().patch_namespaced_job, name, ns, body)
     log.info("stage %s/%s admitted: %s", ns, name, sorted(results))
 
@@ -407,22 +404,27 @@ def cancel_members(ns: str, root: str, why: str) -> list[str]:
         if m.get("kind") != "stage" or m["state"] != "active":
             continue
         name = m["operation"]
-        try:
-            job, _region = jobs.find(ns, name)
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
+        found = jobs.find_or_none(ns, name)
+        if found is None:
             continue
+        job = found[0]
         if status.finished(job) or (job["metadata"].get("annotations") or {}).get(f"{LABEL}/cancelled"):
             continue
         if is_waiting(job):
             _cancel_stage(ns, job, why)
         else:
-            attempts.mark_cancelled(name)
-            settle_deleted(jobs.cancel(ns, name, REGION))
-            keys.note_member(name, why)
+            _stop(ns, name, REGION, why)
         out.append(name)
     return out
+
+
+def _stop(ns: str, name: str, home: str, why: str | None = None) -> None:
+    """A live member stopped as any cancel: its attempt marked (a late success is refused from now on), the Job
+    stopped, a never-started one settled at zero, the reason (when given) noted for the root's graph view."""
+    attempts.mark_cancelled(name)
+    settle_deleted(jobs.cancel(ns, name, home))
+    if why:
+        keys.note_member(name, why)
 
 
 def _close(ns: str, root: str, why: str) -> list[str]:
@@ -805,25 +807,15 @@ def _reconcile_continuation(name: str, ns: str | None, e: Exception):
     the API server. So the member stays a pending admission in every case: the Job found is returned (the
     continuation exists, whoever created it); otherwise the same request replays the intent (continue_run admits it as
     a replay of the member and creates the Job). Returns the Job when it exists, else None."""
+    found = None
     if ns is not None:
         try:
             found = jobs.find_or_none(ns, name)
         except HTTPException as f:
-            log.warning(
-                "continuation %s: create failed (%s), cluster unreadable (%s): member kept", name, str(e)[:80], f.detail
-            )
-            return None
-        if found is not None:
-            log.warning(
-                "continuation %s: its Job exists although this create failed (%s); member kept", name, str(e)[:120]
-            )
-            return found[0]
-    log.warning(
-        "continuation %s: create failed (%s): member kept as a pending admission (the same request replays it)",
-        name,
-        str(e)[:120],
-    )
-    return None
+            log.warning("continuation %s: create failed (%s), cluster unreadable (%s)", name, str(e)[:80], f.detail)
+    what = "its Job exists" if found else "a pending admission (the same request replays it)"
+    log.warning("continuation %s: create failed (%s): member kept, %s", name, str(e)[:120], what)
+    return found[0] if found else None
 
 
 def settle_deleted(job: dict) -> None:
@@ -993,10 +985,9 @@ def cancel_run(ns: str, job: dict, current: str, root: str) -> dict:
     if db.enabled() and (g := keys.graph_of(root)) and not g.get("cancelled_at"):
         # the root of a graph: every stage goes with it, and so does the root lineage's current head (a resumed root
         # that is still queued or running); nothing attaches any more
-        names = cancel_graph_members(ns, root, current)
+        log.info("cancel %s: stages cancelled: %s", root, cancel_graph_members(ns, root, current))
         op["graph"] = graph_view(ns, keys.graph_of(root))
         op["status"] = "CANCELLED"
-        log.info("cancel %s: stages cancelled: %s", root, names)
     return op
 
 
@@ -1009,8 +1000,7 @@ def cancel_graph_members(ns: str, root: str, current: str) -> list[str]:
     if head and head != current:
         found = jobs.find_or_none(ns, head)
         if found is not None and not status.finished(found[0]):
-            attempts.mark_cancelled(head)
-            settle_deleted(jobs.cancel(ns, head, jobs.home_of(found[0])))
+            _stop(ns, head, jobs.home_of(found[0]))
             names.append(head)
     keys.cancel_graph(root, why)
     return names
@@ -1027,8 +1017,7 @@ def cancel_expired_root(ns: str, id: str, synthetic: dict) -> dict:
     op = dict(synthetic["_synthetic"])
     if not g.get("cancelled_at"):
         attempts.mark_cancelled(id)
-        names = cancel_graph_members(ns, root, id)
-        log.info("cancel %s (expired root): graph cancelled: %s", root, names)
+        log.info("cancel %s (expired root): graph cancelled: %s", root, cancel_graph_members(ns, root, id))
     op["graph"] = graph_view(ns, keys.graph_of(root))
     op["status"] = "CANCELLED"
     return op

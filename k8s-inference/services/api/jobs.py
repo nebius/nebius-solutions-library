@@ -45,19 +45,15 @@ import kube
 import placement
 from config import (
     ENDPOINT_CONNECT_TO,
-    EXECUTOR_SA,
     INFINIBAND_CLAIM_TEMPLATE,
     INFINIBAND_ENV,
-    JOB_BACKOFF_LIMIT,
     JOB_PVC_SIZE_GI,
-    JOB_TTL_S,
     JOBSET_GROUP,
     JOBSET_NAME_LABEL,
     JOBSET_PLURAL,
     JOBSET_VERSION,
     LABEL,
     LITELLM_URL,
-    MULTIKUEUE_MANAGED_BY,
     MULTINODE_MAX_NODES,
     OPS_LIST_CACHE_S,
     OPS_LIST_WARM_WINDOW_S,
@@ -70,14 +66,14 @@ from config import (
     WEIGHTS_SHARED_PVC,
 )
 from models import normalise_image
-from pod_metadata import normalise as normalise_pod_metadata
 from render import (
     CONTAINER_HARDENING,
-    POD_SECURITY_CONTEXT,
     PRIORITY_CLASS,
     RUNNER_SECURITY_CONTEXT,
     _job_shell,
+    _jobset_shell,
     _meta,
+    _pod,
     _render,
     _uploader,
     class_images,
@@ -459,29 +455,14 @@ def check_gpu_bound(job: dict, rendered: dict, model_name: str) -> None:
         )
 
 
-def build_run(
-    name: str,
-    model: dict,
-    params: dict,
-    tenant: str,
-    label: str | None,
-    idem: str | None,
-    timeout_s: int | None,
-    priority: str | None,
-    region: str | None = REGION,
-    defaults: dict | None = None,
-    key_hash: str | None = None,
-    pvc: str | None = None,
-    placement: dict | None = None,
-    gpu_class: str | None = None,
-    ex: dict | None = None,
-) -> dict:
-    """Render the catalog entry's `job` block with the parameters (caller's input over the region's
-    defaults over the entry's defaults) into a Job; the per-operation PVC is `<name>-work` unless a
-    resume passes the original run's. region None = fleet placement (the dispatcher picks the worker).
-    `gpu_class`: the class chosen at submission for a run class with per-class images (`job.images`,
-    placement.choose_class): that class's image, a node affinity over that class's pools only, and the
-    class's profile queue; a run with one image keeps switching class at queue time."""
+def _run_values(
+    name: str, model: dict, params: dict, defaults: dict | None, gpu_class: str | None
+) -> tuple[dict, dict, dict, str | None]:
+    """The catalog entry's `job` block rendered with the effective parameters (the caller's input over the region's
+    defaults over the entry's defaults; the operator's declared bounds checked first): (the job block, the rendered
+    block, the values, the GPU class pinned for a class with per-class images, None for a class with one image).
+    `gpu_class` (per-class images, placement.choose_class): that class's image; a run with one image keeps switching
+    class at queue time."""
     job = dict(model.get("job") or {})
     images = class_images(model)
     if images:
@@ -519,6 +500,12 @@ def build_run(
     r = _render(job, values)
     check_gpu_bound(job, r, model["name"])  # job.maxGpus: nodes x GPUs per node, on the rendered shape
     r["image"] = normalise_image(str(r.get("image") or ""))  # after the parameters: `{{image}}` is now a reference
+    _typed_inputs(job, r, values)
+    return job, r, values, gpu_class
+
+
+def _typed_inputs(job: dict, r: dict, values: dict) -> None:
+    """`argsParameter` / `envParameter`: typed argv and environment from the input, never string interpolation."""
     if argument_parameter := job.get("argsParameter"):
         arguments = values.get(argument_parameter, [])
         if not isinstance(arguments, list) or len(arguments) > 100 or not all(isinstance(a, str) for a in arguments):
@@ -536,9 +523,14 @@ def build_run(
         ):
             raise HTTPException(400, "env must map valid environment names to string values (at most 100)")
         r["env"] = {**environment, **(r.get("env") or {})}
+
+
+def _main_container(r: dict) -> tuple[dict, int]:
+    """The model's container of a rendered job block and its GPU count: image and command (a shell string still
+    receives typed arguments as literal argv values, not shell syntax), requests and limits, /work and /dev/shm, the
+    hardening (the model container keeps the image's user unless the class sets `runAsNonRoot`)."""
     cmd = r["command"]
     if isinstance(cmd, str):
-        # Shell strings still receive typed arguments as literal argv values, not shell syntax.
         cmd = ["/bin/sh", "-c", cmd + ' "$@"', "--"] if r.get("args") else ["/bin/sh", "-c", cmd]
     gpus = int(r.get("gpu", 0) or 0)
     res = {
@@ -555,14 +547,6 @@ def build_run(
         res["limits"]["ephemeral-storage"] = str(r.get("ephemeralStorageLimit") or req)
     if gpus:
         res["requests"]["nvidia.com/gpu"] = res["limits"]["nvidia.com/gpu"] = str(gpus)
-    pvc = pvc or f"{name}-work"
-    # scratch: network (default) = the per-operation PVC, re-attached to the replacement pod after a preemption
-    # (automatic resume); local-nvme = an emptyDir on the node's host NVMe (pools with local_nvme), fastest I/O,
-    # gone with the pod: the run must checkpoint to object storage itself. Pins the run to NVMe nodes.
-    scratch = str(r.get("scratch") or "network").lower()
-    if scratch not in ("network", "local-nvme"):
-        raise HTTPException(400, f"scratch must be network or local-nvme, not {scratch!r}")
-    local_nvme = scratch == "local-nvme"
     main = {
         "name": "main",
         "image": r["image"],
@@ -582,7 +566,12 @@ def build_run(
         main["envFrom"] = (main.get("envFrom") or []) + [
             {"secretRef": {"name": S3_ENV_SECRET}}
         ]  # next to env_secrets, not instead
-    fetch = {
+    return main, gpus
+
+
+def _fetch_container(r: dict, values: dict) -> dict:
+    """The init container that syncs the inputs prefix to /work/in (runner image)."""
+    return {
         "name": "fetch",
         "image": RUNNER_IMAGE,
         "command": ["/usr/local/bin/fetch.sh"],
@@ -592,79 +581,58 @@ def build_run(
         "volumeMounts": [{"name": "work", "mountPath": "/work"}],
         "securityContext": RUNNER_SECURITY_CONTEXT,
     }
-    pod = {
-        "restartPolicy": "Never",
-        "serviceAccountName": EXECUTOR_SA,
-        "terminationGracePeriodSeconds": int(r.get("graceSeconds", 120)),
-        "priorityClassName": PRIORITY_CLASS.get(priority, "serverless2-batch"),
-        # the runner containers run as uid 10001; the volume is group-owned by them so fetch/upload work
-        # whatever user the model image runs as (root-created files stay group-readable)
-        "securityContext": {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch", **POD_SECURITY_CONTEXT},
-        # shared PID namespace: the command's shell is not PID 1, so SIGTERM (preemption, cancel) actually
-        # terminates `sh -c ...` commands instead of being ignored until the grace period's SIGKILL
-        "shareProcessNamespace": True,
-        "initContainers": [fetch],
-        "containers": [
-            main,
-            _uploader(
-                name,
-                region,
-                values["output_prefix"],
-                None if local_nvme else pvc,
-                r.get("uploadExcludes", ""),
-                gpus,
-                placement,
-                gpu_class,
-            ),
-        ],
-        "volumes": [
-            {"name": "work", "emptyDir": {"sizeLimit": f"{r.get('pvcSizeGi', JOB_PVC_SIZE_GI)}Gi"}}
-            if local_nvme
-            else {"name": "work", "persistentVolumeClaim": {"claimName": pvc}},
-            {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": r.get("shm", "8Gi")}},
-        ],
-    }
-    if gpus:
-        pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+
+
+def _run_scratch(r: dict) -> tuple[str, bool]:
+    """`scratch`: network (default) = the per-operation PVC, re-attached to the replacement pod after a preemption
+    (automatic resume); local-nvme = an emptyDir on the node's host NVMe (pools with local_nvme), fastest I/O, gone
+    with the pod: the run must checkpoint to object storage itself. Pins the run to NVMe nodes."""
+    scratch = str(r.get("scratch") or "network").lower()
+    if scratch not in ("network", "local-nvme"):
+        raise HTTPException(400, f"scratch must be network or local-nvme, not {scratch!r}")
+    return scratch, scratch == "local-nvme"
+
+
+def _run_volumes(r: dict, pvc: str, local_nvme: bool) -> list[dict]:
+    return [
+        {"name": "work", "emptyDir": {"sizeLimit": f"{r.get('pvcSizeGi', JOB_PVC_SIZE_GI)}Gi"}}
+        if local_nvme
+        else {"name": "work", "persistentVolumeClaim": {"claimName": pvc}},
+        {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": r.get("shm", "8Gi")}},
+    ]
+
+
+def _run_terms(
+    pod: dict,
+    r: dict,
+    model: dict,
+    gpus: int,
+    region: str | None,
+    placement: dict | None,
+    gpu_class: str | None,
+    local_nvme: bool,
+) -> tuple[list[dict], dict | None]:
+    """Where a run's pod may land, before the per-node fit (docs/SCHEDULING.md): an explicit `pool:` as a nodeSelector
+    (a definition pinned to `system` goes to the region's customer CPU pool instead when the fleet keeps tenants off
+    the system nodes, kube.tenant_pool; a CPU pool is tainted), else the pools of the image's GPU classes (the
+    preference queue may fall back to another class; Kueue assigns only flavors whose node labels satisfy the
+    affinity; with per-class images only the chosen class's pools, with a caller's gpu_preference only the narrowed
+    list), the local-NVMe and shared-filesystem terms, the pull secret. Returns the required terms and the (possibly
+    narrowed) placement."""
     terms = []
     if r.get("pool"):
-        # a definition pinned to `system` (a GPU-free class, an async caller) goes to the region's customer CPU pool
-        # instead when the fleet keeps tenants off the system nodes (kube.tenant_pool); a CPU pool is tainted
         cid = kube.cluster_id_or_none(region) if region else None
         pool = kube.tenant_pool(cid, r["pool"])
         pod["nodeSelector"] = {f"{LABEL}/pool": pool}
         if not gpus and kube.is_cpu_pool(cid, pool):
             pod["tolerations"] = [dict(kube.CPU_POOL_TOLERATION)]
     elif gpus and gpu_classes(model):
-        # the preference queue may fall back to another GPU class; keep it to the classes the image runs on
-        # (Kueue assigns only flavors whose node labels satisfy the affinity, docs/SCHEDULING.md). With per-class
-        # images the image is the chosen class's, so only that class's pools qualify.
-        # the run's own class list when the caller narrowed it (execution.placement.gpu_preference), else the model's
         pools = kube.class_pools([gpu_class] if gpu_class else ((placement or {}).get("classes") or gpu_classes(model)))
         if pools:
             terms.append({"key": f"{LABEL}/pool", "operator": "In", "values": pools})
     if local_nvme:
         terms.append({"key": f"{LABEL}/local-nvme", "operator": "In", "values": ["true"]})
-        # only regions with an NVMe pool are candidates for the dispatcher: Kueue ignores an affinity key that
-        # no flavor of a cluster declares, so a worker without such a pool would admit the run and leave its pod
-        # Pending for ever (the flavor of a local_nvme pool carries the label)
-        nvme_regions = sorted(
-            {p["region"] for p in (kube.fleet().get("pools") or {}).values() if p.get("local_nvme") in (True, "true")}
-        )
-        if kube.fleet().get("pools") and not nvme_regions:
-            raise HTTPException(
-                400,
-                'scratch local-nvme needs a pool with local_nvme = true; this fleet has none (docs/FLEET.md "Local NVMe")',
-            )
-        if placement is not None and nvme_regions:
-            wanted = placement.get("regions") or nvme_regions
-            keep = [r for r in wanted if r in nvme_regions]
-            if not keep:
-                raise HTTPException(
-                    400,
-                    f"scratch local-nvme: none of the regions {wanted} has a pool with local_nvme = true (regions with one: {nvme_regions})",
-                )
-            placement = {**placement, "regions": keep}
+        placement = _nvme_regions(placement)
     if needs_shared_fs(r):
         # the run mounts the region's shared filesystem (weights, data, shared checkpoints, a restricted asset): only a
         # node that mounts it can run it; Kueue skips a flavor whose nodeLabels contradict this (the system flavor
@@ -672,9 +640,37 @@ def build_run(
         terms.append({"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]})
     if r.get("imagePullSecret"):
         pod["imagePullSecrets"] = [{"name": r["imagePullSecret"]}]
-    # the queue follows the class actually asked for: the pinned class, else the first of the run's (narrowed) class
-    # list, else the model's own profile; a gpu_preference without per-class images used to keep the model's queue
-    # and so landed every run on the model's first class
+    return terms, placement
+
+
+def _nvme_regions(placement: dict | None) -> dict | None:
+    """Only regions with an NVMe pool are candidates for the dispatcher: Kueue ignores an affinity key that no flavor
+    of a cluster declares, so a worker without such a pool would admit the run and leave its pod Pending for ever
+    (the flavor of a local_nvme pool carries the label)."""
+    nvme_regions = sorted(
+        {p["region"] for p in (kube.fleet().get("pools") or {}).values() if p.get("local_nvme") in (True, "true")}
+    )
+    if kube.fleet().get("pools") and not nvme_regions:
+        raise HTTPException(
+            400,
+            'scratch local-nvme needs a pool with local_nvme = true; this fleet has none (docs/FLEET.md "Local NVMe")',
+        )
+    if placement is None or not nvme_regions:
+        return placement
+    wanted = placement.get("regions") or nvme_regions
+    keep = [r for r in wanted if r in nvme_regions]
+    if not keep:
+        raise HTTPException(
+            400,
+            f"scratch local-nvme: none of the regions {wanted} has a pool with local_nvme = true (regions with one: {nvme_regions})",
+        )
+    return {**placement, "regions": keep}
+
+
+def _run_profile(model: dict, placement: dict | None, gpu_class: str | None) -> tuple[str, dict | None]:
+    """The queue follows the class actually asked for: the pinned class, else the first of the run's (narrowed) class
+    list, else the model's own profile (a gpu_preference without per-class images used to keep the model's queue and
+    so landed every run on the model's first class). A pinned class is what the dispatcher keeps the run on."""
     classes_here = (placement or {}).get("classes") or []
     profile = (
         f"prefer-{gpu_class}"
@@ -682,16 +678,13 @@ def build_run(
         else (f"prefer-{classes_here[0]}" if classes_here else ((placement or {}).get("profile") or profile_of(model)))
     )
     if gpu_class and placement:
-        placement = {
-            **placement,
-            "profile": profile,
-            "classes": [gpu_class],
-        }  # the dispatcher keeps the run on this class
-    meta = _meta(
-        name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class, ex
-    )
-    if model.get("version") is not None:
-        meta["annotations"][f"{LABEL}/model-version"] = str(model["version"])  # the revision this run is rendered from
+        placement = {**placement, "profile": profile, "classes": [gpu_class]}
+    return profile, placement
+
+
+def _billing_rates(model: dict) -> str:
+    """The run's GPU-hour rates per region and pool, frozen on the Job (billing reads the annotation): the model's
+    deployment price, else the pool's."""
     rates = {}
     for pool in kube.fleet().get("pools", {}).values():
         pool_region = kube.cluster_region(pool["region"])
@@ -700,10 +693,63 @@ def build_run(
         )
         if rate is not None:
             rates.setdefault(pool_region, {})[pool["pool"]] = rate
-    meta["annotations"][f"{LABEL}/billing-rates"] = json.dumps(rates, sort_keys=True)
-    meta["annotations"][f"{LABEL}/scratch"] = scratch
-    if gpu_class:
-        meta["annotations"][f"{LABEL}/image"] = job["image"]
+    return json.dumps(rates, sort_keys=True)
+
+
+def build_run(
+    name: str,
+    model: dict,
+    params: dict,
+    tenant: str,
+    label: str | None,
+    idem: str | None,
+    timeout_s: int | None,
+    priority: str | None,
+    region: str | None = REGION,
+    defaults: dict | None = None,
+    key_hash: str | None = None,
+    pvc: str | None = None,
+    placement: dict | None = None,
+    gpu_class: str | None = None,
+    ex: dict | None = None,
+) -> dict:
+    """Render the catalog entry's `job` block with the parameters (caller's input over the region's
+    defaults over the entry's defaults) into a Job (a JobSet for `nodes` > 1, _multinode); the per-operation PVC is
+    `<name>-work` unless a resume passes the original run's. region None = fleet placement (the dispatcher picks the
+    worker). `gpu_class`: the class chosen at submission for a run class with per-class images (`job.images`,
+    placement.choose_class): that class's image, a node affinity over that class's pools only, and the class's
+    profile queue. The pod is shaped in order: the containers, the placement terms, the execution block
+    (execution.apply_run), the per-node fit over the FINAL pod, then the affinity."""
+    job, r, values, gpu_class = _run_values(name, model, params, defaults, gpu_class)
+    main, gpus = _main_container(r)
+    fetch = _fetch_container(r, values)
+    pvc = pvc or f"{name}-work"
+    scratch, local_nvme = _run_scratch(r)
+    uploader = _uploader(
+        name,
+        region,
+        values["output_prefix"],
+        None if local_nvme else pvc,
+        r.get("uploadExcludes", ""),
+        gpus,
+        placement,
+        gpu_class,
+    )
+    pod = _pod(
+        [main, uploader],
+        _run_volumes(r, pvc, local_nvme),
+        int(r.get("graceSeconds", 120)),
+        PRIORITY_CLASS.get(priority, "serverless2-batch"),
+        init=[fetch],
+    )
+    if gpus:
+        pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+    terms, placement = _run_terms(pod, r, model, gpus, region, placement, gpu_class, local_nvme)
+    profile, placement = _run_profile(model, placement, gpu_class)
+    meta = _meta(
+        name, tenant, model["name"], "run", region, label, params, idem, priority, key_hash, profile, gpu_class, ex
+    )
+    _stamp_run(meta, model, scratch, job["image"] if gpu_class else None)
     nodes = int(r.get("nodes", 1) or 1)
     if ex:
         execution.apply_run(pod, r, ex, name, S3_ENV_SECRET)  # io mode, identity, private input, profile (docs/JOBS.md)
@@ -713,45 +759,59 @@ def build_run(
     if terms:
         pod["affinity"] = _required_affinity(terms)
     if nodes > 1:
-        if (ex or {}).get("retry") or _class_retry(r):
-            raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
-        if work_aliases(r):
-            raise HTTPException(400, "workMountAliases apply to single-node runs (/work is node-local per pod there)")
-        if r.get("assets"):
-            raise HTTPException(400, "assets apply to single-node runs")
-        return _multinode(name, model, r, values, pod, nodes, gpus, meta, timeout_s, placement)
-    pod["_tenant"] = tenant
-    _mount_data(r, pod, [main])
-    _mount_weights(r, pod, [main])
-    _mount_aliases(r, [main], fetch)  # after the data and weights mounts: an alias may overlap none of them
-    if ident := _mount_assets(r, pod, main, tenant):  # last: an asset may overlap no mount at all, aliases included
-        meta["annotations"][f"{LABEL}/assets"] = ident
-    pod.pop("_tenant", None)
+        return _multinode(name, model, r, pod, nodes, gpus, meta, timeout_s, placement, ex)
+    _mount_run(r, pod, main, fetch, tenant, meta)
     if not local_nvme:
         meta["annotations"][f"{LABEL}/pvc"] = pvc
         meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
     if r.get("childEndpoints"):  # endpoint children (docs/JOBS.md): the attempt's own identity, no credential
         _project_parent_identity(pod, name, r)
-        meta["annotations"][f"{LABEL}/child-endpoints"] = ",".join(r["childEndpoints"])
-        meta["annotations"][f"{LABEL}/child-max-units"] = str(int(r.get("childMaxUnits") or 0))
-        meta["annotations"][f"{LABEL}/child-delivery"] = str(r.get("childDelivery") or "platform")
-    job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"))
-    if (fz := r.get("finalize")) and fz.get("onExitCodes"):
-        # "compute done, delivery pending" ends the Job at once: the GPU computation is never restarted by the Job's
-        # backoff for a delivery problem; re-delivery is the model's finalizer through :export (bounded there)
-        job["spec"]["podFailurePolicy"]["rules"].insert(
-            0,
-            {
-                "action": "FailJob",
-                "onExitCodes": {"containerName": "main", "operator": "In", "values": list(fz["onExitCodes"])},
-            },
-        )
+        _stamp_children(meta, r)
+    job = _job_shell(name, meta, pod, timeout_s, placement, model.get("podMetadata"), _delivery_pending(r))
     if ex:
         execution.apply_job(job, ex)
     retry = (ex or {}).get("retry") or _class_retry(r)
     if retry:
         execution.apply_retry(job, retry)  # the request's policy, else the class's (docs/JOBS.md "Retries")
     return job
+
+
+def _stamp_run(meta: dict, model: dict, scratch: str, image: str | None) -> None:
+    """What a run's Job records about its render: the model revision it is rendered from, the GPU-hour rates frozen
+    for billing, the scratch kind, the class image when the class was pinned."""
+    if model.get("version") is not None:
+        meta["annotations"][f"{LABEL}/model-version"] = str(model["version"])
+    meta["annotations"][f"{LABEL}/billing-rates"] = _billing_rates(model)
+    meta["annotations"][f"{LABEL}/scratch"] = scratch
+    if image:
+        meta["annotations"][f"{LABEL}/image"] = image
+
+
+def _stamp_children(meta: dict, r: dict) -> None:
+    meta["annotations"][f"{LABEL}/child-endpoints"] = ",".join(r["childEndpoints"])
+    meta["annotations"][f"{LABEL}/child-max-units"] = str(int(r.get("childMaxUnits") or 0))
+    meta["annotations"][f"{LABEL}/child-delivery"] = str(r.get("childDelivery") or "platform")
+
+
+def _mount_run(r: dict, pod: dict, main: dict, fetch: dict, tenant: str, meta: dict) -> None:
+    """A single-node run's extra mounts, in the order the overlap checks need: shared data and weights, then the work
+    aliases (an alias may overlap none of them), then the restricted assets (an asset may overlap no mount at all,
+    aliases included; its identity goes onto the Job)."""
+    pod["_tenant"] = tenant
+    _mount_data(r, pod, [main])
+    _mount_weights(r, pod, [main])
+    _mount_aliases(r, [main], fetch)
+    if ident := _mount_assets(r, pod, main, tenant):
+        meta["annotations"][f"{LABEL}/assets"] = ident
+    pod.pop("_tenant", None)
+
+
+def _delivery_pending(r: dict) -> list | None:
+    """The class's "compute done, delivery pending" exit codes (`finalize.onExitCodes`): the Job ends at once on
+    them, the GPU computation is never restarted by the Job's backoff for a delivery problem; re-delivery is the
+    model's finalizer through :export (bounded there). None without a finalizer."""
+    fz = r.get("finalize")
+    return list(fz["onExitCodes"]) if fz and fz.get("onExitCodes") else None
 
 
 def _class_retry(r: dict) -> dict | None:
@@ -808,14 +868,23 @@ def _multinode(
     name: str,
     model: dict,
     r: dict,
-    values: dict,
     pod: dict,
     nodes: int,
     gpus: int,
     meta: dict,
     timeout_s: int | None,
     placement: dict | None,
+    ex: dict | None,
 ) -> dict:
+    """The single-node pod of build_run reshaped into a rank pod and wrapped in a JobSet (render._jobset_shell):
+    whole-node placement, node-local /work, the shared checkpoint leaf, the torchrun/NCCL environment, the fabric.
+    Retries, work aliases and assets are single-node things (a gang restarts as a whole; /work is node-local per pod)."""
+    if (ex or {}).get("retry") or _class_retry(r):
+        raise HTTPException(400, "retry applies to single-node runs (a multi-node run restarts as a whole)")
+    if work_aliases(r):
+        raise HTTPException(400, "workMountAliases apply to single-node runs (/work is node-local per pod there)")
+    if r.get("assets"):
+        raise HTTPException(400, "assets apply to single-node runs")
     if nodes > MULTINODE_MAX_NODES:
         raise HTTPException(400, f"nodes must be <= {MULTINODE_MAX_NODES}")
     # Default `required`: a multi-node run without the fabric runs NCCL over TCP, which is useless for the models
@@ -829,9 +898,34 @@ def _multinode(
     ib = interconnect == "required"
     main = next(c for c in pod["containers"] if c["name"] == "main")
     uploader = next(c for c in pod["containers"] if c["name"] == "uploader")
-    # placement: whole nodes of the model's classes; InfiniBand pools only when required (preferred = soft). The
-    # the local-NVMe term of `scratch: local-nvme` and the shared-filesystem term (build_run) are kept; the single-node
-    # class affinity is replaced.
+    pools = _gang_affinity(pod, model, gpus, interconnect)
+    ib_count = int(r.get("ibDevicesPerNode") or kube.ib_devices_per_node(pools))
+    # /work per pod: node-local scratch (the kubelet's ephemeral storage: local NVMe on pools that have it), not a
+    # per-run RWO volume (N pods on N nodes). Checkpoints: `shared` = the tenant's RWX claim on the cluster's
+    # shared filesystem (survives a restart and a :resume), `local` = under /work, gone with the pod.
+    disk = int(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
+    pod["volumes"] = [{"name": "work", "emptyDir": {"sizeLimit": f"{disk}Gi"}}] + [
+        v for v in pod["volumes"] if v["name"] != "work"
+    ]
+    root = meta["annotations"].get(f"{LABEL}/resumed-from") or name
+    if checkpoints == "shared":
+        _gang_checkpoints(pod, (main, uploader), root)
+    _mount_data(r, pod, [main])
+    _mount_weights(r, pod, [main])
+    _gang_env(main, uploader, name, nodes, gpus, ib, r.get("uploadExcludes") is None)
+    if ib:
+        _gang_fabric(pod, main, ib_count)
+    meta["annotations"][f"{LABEL}/nodes"] = str(nodes)
+    meta["annotations"][f"{LABEL}/interconnect"] = interconnect
+    meta["annotations"][f"{LABEL}/checkpoints"] = checkpoints
+    return _jobset_shell(name, meta, pod, nodes, timeout_s, placement, model.get("podMetadata"), _delivery_pending(r))
+
+
+def _gang_affinity(pod: dict, model: dict, gpus: int, interconnect: str) -> list[str]:
+    """Placement of a rank pod: whole nodes of the model's classes; InfiniBand pools only when required (preferred =
+    soft). The local-NVMe term of `scratch: local-nvme` and the shared-filesystem term (build_run) are kept; the
+    single-node class affinity is replaced. Returns the candidate pools."""
+    ib = interconnect == "required"
     classes = gpu_classes(model)
     kept = [
         t
@@ -872,29 +966,29 @@ def _multinode(
         pod.setdefault("affinity", {}).setdefault("nodeAffinity", {})[
             "preferredDuringSchedulingIgnoredDuringExecution"
         ] = [{"weight": 100, "preference": {"matchExpressions": [fabric]}}]
-    ib_count = int(r.get("ibDevicesPerNode") or kube.ib_devices_per_node(pools))
-    # /work per pod: node-local scratch (the kubelet's ephemeral storage: local NVMe on pools that have it), not a
-    # per-run RWO volume (N pods on N nodes). Checkpoints: `shared` = the tenant's RWX claim on the cluster's
-    # shared filesystem (survives a restart and a :resume), `local` = under /work, gone with the pod.
-    disk = int(r.get("pvcSizeGi", JOB_PVC_SIZE_GI))
-    pod["volumes"] = [{"name": "work", "emptyDir": {"sizeLimit": f"{disk}Gi"}}] + [
-        v for v in pod["volumes"] if v["name"] != "work"
-    ]
-    root = meta["annotations"].get(f"{LABEL}/resumed-from") or name
-    if checkpoints == "shared":
-        pod["volumes"].append({"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}})
-        for c in (main, uploader):
-            c["volumeMounts"].append(
-                {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
-            )
-        # the kubelet creates a missing subPath directory root-owned 0755: the ranks (10001, no capability) could not
-        # write their checkpoints there (the first real 2x1 MPI run on a fresh root). The same trusted init as the
-        # shared-scratch caller provisions EXACTLY that leaf (chown 10001:10001, chmod 2770 of the mount point, not
-        # recursive, nothing outside it) before any rank starts; idempotent on a restart or a resume (existing files
-        # untouched); every rank pod runs it (the leaf is shared, the second one finds it done)
-        pod["initContainers"] = list(pod.get("initContainers") or []) + [_checkpoint_provision(root)]  # after fetch
-    _mount_data(r, pod, [main])
-    _mount_weights(r, pod, [main])
+    return pools
+
+
+def _gang_checkpoints(pod: dict, containers: tuple, root: str) -> None:
+    """The gang's shared checkpoint leaf: the tenant's RWX claim at `checkpoints/<root>` on every rank (main and the
+    uploader) under /work/checkpoint. The kubelet creates a missing subPath directory root-owned 0755: the ranks
+    (10001, no capability) could not write their checkpoints there (the first real 2x1 MPI run on a fresh root). The
+    same trusted init as the shared-scratch caller provisions EXACTLY that leaf (chown 10001:10001, chmod 2770 of the
+    mount point, not recursive, nothing outside it) before any rank starts; idempotent on a restart or a resume
+    (existing files untouched); every rank pod runs it (the leaf is shared, the second one finds it done)."""
+    pod["volumes"].append({"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}})
+    for c in containers:
+        c["volumeMounts"].append(
+            {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
+        )
+    pod["initContainers"] = list(pod.get("initContainers") or []) + [_checkpoint_provision(root)]  # after fetch
+
+
+def _gang_env(
+    main: dict, uploader: dict, name: str, nodes: int, gpus: int, ib: bool, exclude_checkpoints: bool
+) -> None:
+    """The torchrun/NCCL conventions on every rank (the job class's own env wins), the rank index from the indexed
+    Job's completion index, and the uploader scoped to rank 0 (checkpoints are not results)."""
     rank = {
         "name": "NODE_RANK",
         "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['batch.kubernetes.io/job-completion-index']"}},
@@ -917,100 +1011,23 @@ def _multinode(
         rank,
         {"name": "UPLOAD_SCOPE", "value": "rank0"},
     ]
-    if r.get("uploadExcludes") is None:
-        uploader["env"].append(
-            {"name": "UPLOAD_EXCLUDES", "value": "--exclude checkpoint/*"}
-        )  # checkpoints are not results
-    if ib:
-        # every InfiniBand NIC of the node through DRA (DeviceClass ib.networking.nebius.ai, DraNet on the node image).
-        # No capability: RDMA pins memory, which RLIMIT_MEMLOCK bounds, and the GPU nodes' container runtime runs
-        # with an unlimited memlock limit (cloud-init + node-config), so `drop: [ALL]` under PSA baseline holds
-        # (docs/JOBS.md "Multi-node runs"). The contract is STATED to the run (an application validator that expects
-        # IPC_LOCK/no_new_privs reads it instead of probing for capabilities the platform never grants)
-        pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
-        main["resources"]["claims"] = [{"name": "ib"}]
-        main["env"] += [
-            {
-                "name": "S2_RDMA_MEMLOCK_POLICY",
-                "value": "node-unlimited",
-            },  # RLIMIT_MEMLOCK unlimited by the node runtime
-            {"name": "S2_RDMA_CAPABILITIES", "value": "none"},  # drop ALL stays; no IPC_LOCK, no privilege
-            {"name": "S2_RDMA_DEVICES_PER_NODE", "value": str(ib_count)},
-        ]
-    pod["subdomain"] = name
-    execution.scope_runner_token(pod)
-    extra = normalise_pod_metadata(model.get("podMetadata"))
-    tmpl_meta = {
-        "labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}
-    }
-    ann = dict(extra.get("annotations", {}))
-    if placement and placement.get("classes"):
-        ann[f"{LABEL}/gpu-classes"] = ",".join(placement["classes"])
-    if placement and placement.get("regions"):
-        ann[f"{LABEL}/regions"] = ",".join(placement["regions"])
-    if ann:
-        tmpl_meta["annotations"] = ann
-    job_spec = {
-        "parallelism": nodes,
-        "completions": nodes,
-        "completionMode": "Indexed",
-        "backoffLimit": 0,
-        "template": {"metadata": tmpl_meta, "spec": pod},
-    }
-    if timeout_s:
-        job_spec["activeDeadlineSeconds"] = timeout_s
-    delivery_pending = bool((fz := r.get("finalize")) and fz.get("onExitCodes"))
-    if delivery_pending:
-        # "compute done, delivery pending" (docs/JOBS.md "Finalization by the application") ends the gang at once and
-        # for good: the indexed Job fails on that exit of main (podFailurePolicy, reason PodFailurePolicy) and the
-        # JobSet's failure policy turns THAT reason into FailJobSet instead of its Recreate restart, so the completed
-        # science is never recomputed by a whole-gang restart; re-delivery is the model's CPU finalizer (:export)
-        job_spec["podFailurePolicy"] = {
-            "rules": [
-                {
-                    "action": "FailJob",
-                    "onExitCodes": {"containerName": "main", "operator": "In", "values": list(fz["onExitCodes"])},
-                }
-            ]
-        }
-    meta["annotations"][f"{LABEL}/nodes"] = str(nodes)
-    meta["annotations"][f"{LABEL}/interconnect"] = interconnect
-    meta["annotations"][f"{LABEL}/checkpoints"] = checkpoints
-    spec = {
-        "network": {"enableDNSHostnames": True, "subdomain": name, "publishNotReadyAddresses": True},
-        "successPolicy": {"operator": "All", "targetReplicatedJobs": ["workers"]},
-        # any pod loss (preemption, node loss, application failure) fails the indexed Job (backoffLimit 0) and the
-        # JobSet recreates every pod: ranks restart together from the last checkpoint
-        "failurePolicy": {
-            "maxRestarts": JOB_BACKOFF_LIMIT,
-            "restartStrategy": "Recreate",
-            **(
-                {
-                    "rules": [
-                        {
-                            "name": "delivery_pending",  # JobSet rule names: [A-Za-z0-9_:]+ only (webhook)
-                            "action": "FailJobSet",
-                            "onJobFailureReasons": ["PodFailurePolicy"],
-                            "targetReplicatedJobs": ["workers"],
-                        }
-                    ]
-                }
-                if delivery_pending
-                else {}
-            ),
-        },
-        "ttlSecondsAfterFinished": JOB_TTL_S,
-        "replicatedJobs": [
-            {
-                "name": "workers",
-                "replicas": 1,
-                "template": {"metadata": {"labels": dict(tmpl_meta["labels"])}, "spec": job_spec},
-            }
-        ],
-    }
-    if placement and placement.get("manager"):
-        spec["managedBy"] = MULTIKUEUE_MANAGED_BY
-    return {"apiVersion": f"{JOBSET_GROUP}/{JOBSET_VERSION}", "kind": "JobSet", "metadata": meta, "spec": spec}
+    if exclude_checkpoints:
+        uploader["env"].append({"name": "UPLOAD_EXCLUDES", "value": "--exclude checkpoint/*"})
+
+
+def _gang_fabric(pod: dict, main: dict, ib_count: int) -> None:
+    """Every InfiniBand NIC of the node through DRA (DeviceClass ib.networking.nebius.ai, DraNet on the node image).
+    No capability: RDMA pins memory, which RLIMIT_MEMLOCK bounds, and the GPU nodes' container runtime runs with an
+    unlimited memlock limit (cloud-init + node-config), so `drop: [ALL]` under PSA baseline holds (docs/JOBS.md
+    "Multi-node runs"). The contract is STATED to the run (an application validator that expects IPC_LOCK/no_new_privs
+    reads it instead of probing for capabilities the platform never grants)."""
+    pod["resourceClaims"] = [{"name": "ib", "resourceClaimTemplateName": f"{INFINIBAND_CLAIM_TEMPLATE}-{ib_count}"}]
+    main["resources"]["claims"] = [{"name": "ib"}]
+    main["env"] += [
+        {"name": "S2_RDMA_MEMLOCK_POLICY", "value": "node-unlimited"},  # RLIMIT_MEMLOCK unlimited by the node runtime
+        {"name": "S2_RDMA_CAPABILITIES", "value": "none"},  # drop ALL stays; no IPC_LOCK, no privilege
+        {"name": "S2_RDMA_DEVICES_PER_NODE", "value": str(ib_count)},
+    ]
 
 
 def _jobset_as_job(js: dict) -> dict:
@@ -1062,51 +1079,38 @@ def pods_selector(job: dict) -> str:
     return f"{JOBSET_NAME_LABEL}={job['metadata']['name']}" if is_jobset(job) else f"job-name={job['metadata']['name']}"
 
 
-def build_async(
+def _call_target(model: dict, region: str, key: str) -> tuple[str, str, list[dict]]:
+    """Where the caller POSTs and how it authenticates: LiteLLM's pass-through route when the model has one (spend
+    lands on the caller's key), else the gateway of the endpoint's region with the caller's key (TLS, key check,
+    per-key rate limit: the same path as an external client; never the predictor Service, so no call skips the key
+    check or the accounting). Returns (url, authorization header, the caller's first env entries)."""
+    import models as runtime_models
+
+    if model.get("litellm_route"):
+        return LITELLM_URL + model["litellm_route"], f"Bearer {key}", []
+    if not runtime_models.endpoint_domain(region):
+        raise HTTPException(503, f"async calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
+    url = f"https://{runtime_models.endpoint_host(model, region)}{model['endpoint_path']}"
+    env = []
+    if ENDPOINT_CONNECT_TO:
+        env.append({"name": "CONNECT_TO", "value": f"{url.split('/')[2]}:443:{ENDPOINT_CONNECT_TO}"})
+    return url, f"Bearer {key}", env
+
+
+def _call_env(
     name: str,
     model: dict,
     inp: dict,
-    tenant: str,
-    key: str,
-    label: str | None,
-    idem: str | None,
+    url: str,
+    secret_name: str,
     timeout_s: int | None,
-    output_prefix: str,
-    region: str = REGION,
-    ex: dict | None = None,
-    key_hash: str | None = None,
-    admitted: str | None = None,
-    pvc: str | None = None,
-    transfer_only: bool = False,
-    scratch_leaf_of: str | None = None,
-) -> tuple[dict, dict]:
-    """(Job, Secret): a queued endpoint call through LiteLLM's pass-through route when the model has
-    one (spend lands on the caller's key), else through the gateway of the endpoint's region with the caller's key
-    (TLS, key check, per-key rate limit: the same path as an external client; never the predictor
-    Service, so no call skips the key check or the accounting). The Job runs in that region (services/api/app.py
-    `invoke` creates it there). The key goes into a per-operation Secret owned by the Job, never into the Job spec;
-    `admitted` (the API's admission token) goes next to it, so the gateway hook counts the call once.
-    `ex` (docs/API.md "Endpoint calls"): private input through a binding, application-owned output, the capture on a
-    retained work volume (`<name>-work`); `transfer_only` re-renders the caller on the original's volume (`pvc`) to
-    deliver a complete capture again without calling the endpoint."""
-    import models as runtime_models
-
-    env = []
-    # the durable capture's home (docs/JOBS.md "Scratch storage"): the tenant's shared-scratch leaf `calls/<op>` when the
-    # model says `call_scratch: shared` and the region and namespace can carry it, else the per-call claim; a transfer-
-    # only retry keeps whatever the original had (`pvc` or `scratch_leaf_of`)
-    leaf, fallback = None, ""
-    want_shared = bool(ex) and (bool(scratch_leaf_of) or (not pvc and model.get("call_scratch") == "shared"))
-    if model.get("litellm_route"):
-        url, auth = LITELLM_URL + model["litellm_route"], f"Bearer {key}"
-    else:
-        if not runtime_models.endpoint_domain(region):
-            raise HTTPException(503, f"async calls need the endpoint domain of {region} (ENDPOINT_DOMAINS)")
-        url, auth = f"https://{runtime_models.endpoint_host(model, region)}{model['endpoint_path']}", f"Bearer {key}"
-        if ENDPOINT_CONNECT_TO:
-            host = url.split("/")[2]
-            env.append({"name": "CONNECT_TO", "value": f"{host}:443:{ENDPOINT_CONNECT_TO}"})
-    secret_name = f"{name}-auth"
+    ex: dict | None,
+    transfer_only: bool,
+    admitted: str | None,
+) -> tuple[list[dict], dict]:
+    """The caller's environment (services/jobs/bin/call.sh) and the request the Job records: the key and the admission
+    token come from the per-operation Secret, never the Job spec. With `ex` the request lives in the binding, never in
+    the Job (docs/API.md "Endpoint calls"); a transfer-only retry never calls the endpoint."""
     if (
         model.get("protocol") == "openai"
         and model.get("served_model")
@@ -1114,7 +1118,7 @@ def build_async(
         and not inp.get("model")
     ):
         inp = {**inp, "model": model["served_model"]}  # callers know the catalog id, not the served name
-    env += [
+    env = [
         {"name": "URL", "value": url},
         {"name": "OPERATION", "value": name},
         {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
@@ -1124,7 +1128,7 @@ def build_async(
         },
         {"name": "CALL_TIMEOUT", "value": str(min(timeout_s or 3600, 3600) if not ex else (timeout_s or 3600))},
     ]
-    if ex:  # the request lives in the binding, never in the Job (docs/API.md "Endpoint calls")
+    if ex:
         inp = {}
         if transfer_only:
             env.append({"name": "TRANSFER_ONLY", "value": "1"})
@@ -1143,33 +1147,26 @@ def build_async(
                 "valueFrom": {"secretKeyRef": {"name": secret_name, "key": "admitted", "optional": True}},
             }
         )
-    trust = trust_bundle()
-    if trust:
-        # the fleet's CA bundle (public CA material: the system roots plus the CAs mounted under /etc/ssl/msp, the
-        # fleet CA among them) next to the caller: the regional gateways' certificates are fleet-CA signed
-        # (edge.regional_certificates), the runner image knows the public roots only; curl, python and the AWS SDK
-        # read one file, verification stays on
-        env += [
-            {"name": k, "value": TRUST_FILE}
-            for k in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE")
-        ]
-    main = {
-        "name": "main",
-        "image": RUNNER_IMAGE,
-        "command": ["/usr/local/bin/call.sh"],
-        "env": env,
-        "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}},
-        "volumeMounts": [{"name": "work", "mountPath": "/work"}]
-        + ([{"name": "trust", "mountPath": TRUST_DIR, "readOnly": True}] if trust else []),
-        "securityContext": RUNNER_SECURITY_CONTEXT,
-    }
-    uploader = _uploader(name, region, output_prefix, None)
-    pools: list[str] = []
-    if want_shared:  # judged on the caller's own requests (main, uploader, the provisioning init), retry included
-        probe = {
-            "containers": [main, uploader],
-            "initContainers": [{"name": "scratch-provision", "resources": {"requests": SCRATCH_PROVISION_REQUESTS}}],
-        }
+    return env, inp
+
+
+def _call_scratch(
+    name: str,
+    model: dict,
+    tenant: str,
+    region: str,
+    ex: dict | None,
+    pvc: str | None,
+    scratch_leaf_of: str | None,
+    probe: dict,
+) -> tuple[str | None, str, list[str], str | None]:
+    """The durable capture's home (docs/JOBS.md "Scratch storage"): the tenant's shared-scratch leaf `calls/<op>` when
+    the model says `call_scratch: shared` and the region and namespace can carry it (judged on the caller's own
+    requests, `probe`), else the per-call claim; a transfer-only retry keeps whatever the original had (`pvc` or
+    `scratch_leaf_of`). Returns (leaf, why the leaf was not possible, the leaf's eligible pools, the claim)."""
+    leaf, fallback, pools = None, "", []
+    want_shared = bool(ex) and (bool(scratch_leaf_of) or (not pvc and model.get("call_scratch") == "shared"))
+    if want_shared:
         ok, fallback, pools = shared_scratch_available(f"{TENANT_NS_PREFIX}{tenant}", region, probe)
         if scratch_leaf_of:
             # a transfer-only retry must reach the ORIGINAL's leaf: the same claim and placement rules, judged now; it
@@ -1182,66 +1179,69 @@ def build_async(
         else:
             leaf = scratch_leaf(name) if ok else None
     work = None if leaf else (pvc or (f"{name}-work" if ex else None))
+    return leaf, fallback, pools, work
+
+
+def build_async(
+    name: str,
+    model: dict,
+    inp: dict,
+    tenant: str,
+    key: str,
+    label: str | None,
+    idem: str | None,
+    timeout_s: int | None,
+    output_prefix: str,
+    region: str = REGION,
+    ex: dict | None = None,
+    key_hash: str | None = None,
+    admitted: str | None = None,
+    pvc: str | None = None,
+    transfer_only: bool = False,
+    scratch_leaf_of: str | None = None,
+) -> tuple[dict, dict]:
+    """(Job, Secret): a queued endpoint call through the endpoint's gateway (_call_target). The Job runs in that
+    region (services/api/app.py `invoke` creates it there). The key goes into a per-operation Secret owned by the
+    Job, never into the Job spec; `admitted` (the API's admission token) goes next to it, so the gateway hook counts
+    the call once. `ex` (docs/API.md "Endpoint calls"): private input through a binding, application-owned output,
+    the capture on a retained work volume (`<name>-work`); `transfer_only` re-renders the caller on the original's
+    volume (`pvc`) to deliver a complete capture again without calling the endpoint."""
+    url, auth, env = _call_target(model, region, key)
+    secret_name = f"{name}-auth"
+    more, inp = _call_env(name, model, inp, url, secret_name, timeout_s, ex, transfer_only, admitted)
+    trust = trust_bundle()
+    main = _caller_container(env + more, trust)
+    uploader = _uploader(name, region, output_prefix, None)
+    probe = {  # the caller's own requests (main, uploader, the provisioning init), retry included
+        "containers": [main, uploader],
+        "initContainers": [{"name": "scratch-provision", "resources": {"requests": SCRATCH_PROVISION_REQUESTS}}],
+    }
+    leaf, fallback, pools, work = _call_scratch(name, model, tenant, region, ex, pvc, scratch_leaf_of, probe)
     if work:
         uploader["env"].append({"name": "PVC_NAME", "value": work})
-    pod = {
-        "restartPolicy": "Never",
-        "serviceAccountName": EXECUTOR_SA,
-        "terminationGracePeriodSeconds": 60,
-        "priorityClassName": "serverless2-batch",
-        # the runner (uid/gid 10001) writes the work volume (a claim's root is root-owned until the kubelet applies the
-        # group) and reads the private binding (a Secret volume, mode 0440): the file-system group makes both its, as
-        # for a run's pod (build_run)
-        "securityContext": {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch", **POD_SECURITY_CONTEXT},
-        # shared PID namespace, as a run's pod: the uploader records `started` only once it sees the caller's process
-        # (upload.sh main_alive) and `finished` when it is gone; in separate namespaces it never sees either and the
-        # attempt is never opened (the application's refresh broker then refuses the caller for good: a deadlock)
-        "shareProcessNamespace": True,
-        "containers": [main, uploader],
-        "volumes": [
-            {"name": "work", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
-            if leaf
-            else {"name": "work", "persistentVolumeClaim": {"claimName": work}}
-            if work
-            else {"name": "work", "emptyDir": {"sizeLimit": "1Gi"}}
-        ]
-        + (
-            [
-                {
-                    "name": "trust",
-                    "secret": {"secretName": secret_name, "items": [{"key": TRUST_KEY, "path": TRUST_KEY}]},
-                }
-            ]
-            if trust
-            else []
-        ),
-    }
+    volumes = [
+        {"name": "work", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
+        if leaf
+        else {"name": "work", "persistentVolumeClaim": {"claimName": work}}
+        if work
+        else {"name": "work", "emptyDir": {"sizeLimit": "1Gi"}}
+    ]
+    if trust:
+        volumes.append(
+            {"name": "trust", "secret": {"secretName": secret_name, "items": [{"key": TRUST_KEY, "path": TRUST_KEY}]}}
+        )
+    pod = _pod([main, uploader], volumes, 60, "serverless2-batch")
     if ex:
         execution.apply_async(pod, ex, name)
     if leaf:
         _mount_scratch_leaf(pod, leaf, pools)
     meta = _meta(name, tenant, model["name"], "async", region, label, inp, idem, None, key_hash, execution=ex)
-    if leaf:  # the capture is retained on the tenant's shared-scratch leaf (no claim of its own, nothing to attach)
-        meta["annotations"][f"{LABEL}/scratch"] = "shared"
-        meta["annotations"][f"{LABEL}/scratch-leaf"] = leaf
-    elif work:  # the capture is retained for a transfer-only export retry (create() makes the claim with the Job)
-        meta["annotations"][f"{LABEL}/pvc"] = work
-        meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(ASYNC_PVC_SIZE_GI)
-        if fallback:
-            meta["annotations"][f"{LABEL}/scratch"] = "network"
-            meta["annotations"][f"{LABEL}/scratch-fallback"] = fallback
-    job = _job_shell(name, meta, pod, timeout_s)
-    job["spec"]["backoffLimit"] = 6
+    _stamp_call(meta, leaf, work, fallback)
     # a 4xx from the endpoint is the caller's error (call.sh exit 2): fail the Job, no pod retries; with application
     # I/O also the endpoint's own error (exit 5), an unknown inference outcome (exit 4) and nothing to export (exit 3):
     # never a second inference POST
-    job["spec"]["podFailurePolicy"]["rules"].insert(
-        0,
-        {
-            "action": "FailJob",
-            "onExitCodes": {"containerName": "main", "operator": "In", "values": [2, 3, 4, 5] if ex else [2]},
-        },
-    )
+    job = _job_shell(name, meta, pod, timeout_s, fail_codes=[2, 3, 4, 5] if ex else [2])
+    job["spec"]["backoffLimit"] = 6
     secret = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -1253,6 +1253,43 @@ def build_async(
         },
     }
     return job, secret
+
+
+def _caller_container(env: list[dict], trust: str | None) -> dict:
+    """The caller (services/jobs/bin/call.sh, the runner image). With a fleet CA bundle (`trust`: public CA material,
+    the system roots plus the CAs mounted under /etc/ssl/msp, the fleet CA among them; the regional gateways'
+    certificates are fleet-CA signed, edge.regional_certificates, and the runner image knows the public roots only)
+    curl, python and the AWS SDK read that one file; verification stays on."""
+    if trust:
+        env = env + [
+            {"name": k, "value": TRUST_FILE}
+            for k in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE")
+        ]
+    return {
+        "name": "main",
+        "image": RUNNER_IMAGE,
+        "command": ["/usr/local/bin/call.sh"],
+        "env": env,
+        "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}},
+        "volumeMounts": [{"name": "work", "mountPath": "/work"}]
+        + ([{"name": "trust", "mountPath": TRUST_DIR, "readOnly": True}] if trust else []),
+        "securityContext": RUNNER_SECURITY_CONTEXT,
+    }
+
+
+def _stamp_call(meta: dict, leaf: str | None, work: str | None, fallback: str) -> None:
+    """Where the call's capture is retained: the tenant's shared-scratch leaf (no claim of its own, nothing to attach),
+    or the per-call claim for a transfer-only export retry (create() makes the claim with the Job), and why the leaf
+    was not possible."""
+    if leaf:
+        meta["annotations"][f"{LABEL}/scratch"] = "shared"
+        meta["annotations"][f"{LABEL}/scratch-leaf"] = leaf
+    elif work:
+        meta["annotations"][f"{LABEL}/pvc"] = work
+        meta["annotations"][f"{LABEL}/pvc-size-gi"] = str(ASYNC_PVC_SIZE_GI)
+        if fallback:
+            meta["annotations"][f"{LABEL}/scratch"] = "network"
+            meta["annotations"][f"{LABEL}/scratch-fallback"] = fallback
 
 
 def _mount_scratch_leaf(pod: dict, leaf: str, pools: list[str]) -> None:
@@ -1588,10 +1625,22 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
     if is_jobset(job):
         return created, was_created  # no per-run volume: /work is node-local, checkpoints on the shared claim
     owner = {"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": created["metadata"].get("uid", "")}
-    ann, core = job["metadata"].get("annotations", {}), kube.core(region)
-    pvc = None if is_manager_job(job) else ann.get(f"{LABEL}/pvc")
-    if pvc and (not ann.get(f"{LABEL}/resumed-from") or pvc == f"{name}-work"):
-        # A portable resume gets a fresh volume, unlike a same-region resume that reuses the old one.
+    if not is_manager_job(job):
+        _own_work_volume(ns, region, job, owner)
+    if secret:
+        secret["metadata"]["ownerReferences"] = [owner]
+        _create_ignore_exists(kube.core(region).create_namespaced_secret, ns, secret, region)
+    return created, was_created
+
+
+def _own_work_volume(ns: str, region: str, job: dict, owner: dict) -> None:
+    """The Job's work volume, owned by it: created for a first render and for a portable resume (a fresh volume),
+    co-owned for a same-region resume that reuses the old one (so it outlives the original Job's TTL or deletion)."""
+    name, ann, core = job["metadata"]["name"], job["metadata"].get("annotations", {}), kube.core(region)
+    pvc = ann.get(f"{LABEL}/pvc")
+    if not pvc:
+        return
+    if not ann.get(f"{LABEL}/resumed-from") or pvc == f"{name}-work":
         body = {
             "apiVersion": "v1",
             "kind": "PersistentVolumeClaim",
@@ -1602,20 +1651,13 @@ def create(ns: str, job: dict, region: str = REGION, secret: dict | None = None)
             },
         }
         _create_ignore_exists(core.create_namespaced_persistent_volume_claim, ns, body, region)
-    elif pvc:
-        # a resumed run co-owns the volume, so it outlives the original Job's TTL or deletion
-        try:
-            cur = core.api_client.sanitize_for_serialization(
-                retry(core.read_namespaced_persistent_volume_claim, pvc, ns)
-            )
-            refs = [r for r in (cur["metadata"].get("ownerReferences") or []) if r.get("uid") != owner["uid"]] + [owner]
-            retry(core.patch_namespaced_persistent_volume_claim, pvc, ns, {"metadata": {"ownerReferences": refs}})
-        except ApiException as e:
-            raise HTTPException(502, f"kubernetes ({region}): work volume {pvc}: {e.reason}")
-    if secret:
-        secret["metadata"]["ownerReferences"] = [owner]
-        _create_ignore_exists(core.create_namespaced_secret, ns, secret, region)
-    return created, was_created
+        return
+    try:
+        cur = core.api_client.sanitize_for_serialization(retry(core.read_namespaced_persistent_volume_claim, pvc, ns))
+        refs = [r for r in (cur["metadata"].get("ownerReferences") or []) if r.get("uid") != owner["uid"]] + [owner]
+        retry(core.patch_namespaced_persistent_volume_claim, pvc, ns, {"metadata": {"ownerReferences": refs}})
+    except ApiException as e:
+        raise HTTPException(502, f"kubernetes ({region}): work volume {pvc}: {e.reason}")
 
 
 def _create_ignore_exists(fn, ns: str, body: dict, region: str):
@@ -2071,6 +2113,51 @@ def _cancel_jobset(ns: str, name: str, region: str, job: dict) -> dict:
 EXPORT_RETRIES_MAX = 3
 
 
+# ---- continuations: one re-render path, five policies ---------------------------------------------------------
+# Every continuation of a run (a fallback to the next class, an unschedulable switch, an automatic recovery, a manual
+# resume, an export retry or finalizer) is the ORIGINAL RENDERED AGAIN by build_run as a new operation `<root>-r<n>`,
+# `<root>-r-<sha8>` or `<root>-x<n>` from the original's input, label, priority, key and the pinned model revision:
+# nothing the Job controller or Kueue injected (selector, workload annotation, flavor labels) is copied. `_successor`
+# is that path; a policy decides what changes about the render (the region or worker, the work volume, the placement,
+# the GPU class, the execution block, the deadline) and which lineage marks the successor carries, then shapes the
+# result where the render alone cannot say it (a transfer or finalizer container, a pin to the admitting cluster, the
+# gang's root checkpoint leaf), and fences the original before the successor exists.
+
+
+def _successor(
+    orig: dict, op: dict, model: dict, new: str, region: str | None, defaults: dict, change: dict, shape=None
+) -> dict:
+    """The original `orig` (as `get` returns it; `op` its normalised view) rendered again as `new`, with the lineage:
+    `resumed-from` names the root, the owner, the requester and the stage follow (_inherit_owner), then the policy's
+    own `annotations`. `change`: pvc, placement, gpu_class, ex, timeout_s, annotations. `shape`: the policy's rewrite
+    of the rendered Job before the lineage is stamped (a stage's dependency results bind into the final main)."""
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    job = build_run(
+        new,
+        model,
+        op["input"],
+        labels[f"{LABEL}/tenant"],
+        ann.get(f"{LABEL}/name"),
+        None,
+        change.get("timeout_s"),
+        labels.get(f"{LABEL}/priority"),
+        region,
+        defaults,
+        ann.get(f"{LABEL}/key"),
+        pvc=change.get("pvc"),
+        placement=change.get("placement"),
+        gpu_class=change.get("gpu_class"),
+        ex=change.get("ex"),
+    )
+    if shape:
+        shape(job)
+    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = ann.get(f"{LABEL}/resumed-from", md["name"])
+    _inherit_owner(job, ann)
+    job["metadata"]["annotations"].update(change.get("annotations") or {})
+    return job
+
+
 def _pin_to_worker(job: dict, orig: dict) -> None:
     """A retry on the original's kept volume must land on the cluster that holds it: the Job is pinned to the admitting
     cluster by its id (the dispatcher's `serverless2.nebius/region` label, Kueue copies it to the Workload) and the
@@ -2084,223 +2171,13 @@ def _pin_to_worker(job: dict, orig: dict) -> None:
     job["spec"]["template"]["metadata"].setdefault("annotations", {})[f"{LABEL}/regions"] = cluster
 
 
-def export_again(
-    ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None, admit=None
-) -> tuple[dict, bool]:
-    """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
-    exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization"). With `finalize`
-    (docs/JOBS.md "Finalization by the application": {"spec": job.finalize, "attempt": the failed attempt's record})
-    the main container is the model's own image running the model's `finalize.command` on that volume, CPU only,
-    with the finalized attempt named in its environment: the application re-delivers what it computed; the
-    platform re-runs nothing."""
-    orig = get(ns, name, region)
-    op = normalise(orig)
-    md = orig["metadata"]
-    labels, ann = md.get("labels", {}), md.get("annotations", {})
-    pvc = ann.get(f"{LABEL}/pvc")
-    worker = orig["_region"] if is_manager_job(orig) else region
-    gang = is_jobset(orig)
-    if gang:
-        # a multi-node run keeps no per-pod work volume (/work is node-local on every rank): what survives the gang is
-        # the coordinator's publication on the tenant's shared checkpoint claim (`checkpoints: shared`, subPath
-        # checkpoints/<root>); only the model's finalizer can deliver from it (application-owned bytes); a managed
-        # export has nothing retained to transfer
-        if ann.get(f"{LABEL}/checkpoints") != "shared":
-            raise HTTPException(
-                409,
-                f"operation {name}: a multi-node run retains bytes only with `checkpoints: shared` (the coordinator's "
-                "publication on the shared claim); nothing is kept to export or finalize",
-            )
-        if not finalize:
-            raise HTTPException(
-                409,
-                f"operation {name}: a multi-node run is delivered again only by its model's finalizer (job.finalize, "
-                "application I/O) from the shared checkpoint claim; the platform exports nothing of a gang's node-local /work",
-            )
-        if not worker:
-            raise HTTPException(
-                409, f"operation {name}: the admitting cluster of the gang is unknown; nothing to finalize"
-            )
-    elif not pvc or not worker:
-        raise HTTPException(409, f"operation {name} has no kept work volume to export")
-    model = catalog.pinned(model, ann)
-    if gang:
-        _require_claim(
-            worker, ns, SHARED_SCRATCH_PVC, f"shared checkpoint claim {SHARED_SCRATCH_PVC} is gone; nothing to finalize"
-        )
-        # the finalizer is ONE CPU pod, never the gang again: a single-node render of the model (no nodes, no GPU, no
-        # fabric), its own small /work claim, the gang's shared checkpoint subPath mounted where the gang had it
-        jb = dict(model.get("job") or {})
-        # Keep the admitted class's immutable image before dropping compute-only
-        # image selection. The CPU renderer has no GPU class; the finalizer below
-        # still prefers the finalized attempt's recorded digest when available.
-        jb["image"] = image_for_class(model, labels.get(f"{LABEL}/gpu-class"))
-        for k in ("nodes", "interconnect", "ibDevicesPerNode", "checkpoints", "images"):
-            jb.pop(k, None)
-        jb["gpu"] = 0
-        jb["pvcSizeGi"] = JOB_PVC_SIZE_GI
-        model = {**model, "job": jb, "gpu_classes": []}
-        pvc = None
-    else:
-        _require_claim(worker, ns, pvc, f"work volume {pvc} is gone; nothing to export")
-    root = ann.get(f"{LABEL}/resumed-from", name)
-    n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
-    if n > EXPORT_RETRIES_MAX:
-        raise HTTPException(
-            409, f"operation {root}: {EXPORT_RETRIES_MAX} export/finalization retries used; submit a new run"
-        )
-    new = f"{root}-x{n}"
-    d = dict(defaults)
-    out = output_prefix(orig) or ""
-    d["output_prefix"] = out  # the same prefix: the retry completes the original export
-    ex = execution_of(ann)
-    fz = (finalize or {}).get("spec") or {}
-    job = build_run(
-        new,
-        model,
-        op["input"],
-        labels[f"{LABEL}/tenant"],
-        ann.get(f"{LABEL}/name"),
-        None,
-        int(fz.get("timeoutS") or 3600),
-        labels.get(f"{LABEL}/priority"),
-        worker,
-        d,
-        ann.get(f"{LABEL}/key"),
-        pvc=pvc,
-        placement={"manager": True} if is_manager_job(orig) else None,
-        gpu_class=None if gang else labels.get(f"{LABEL}/gpu-class"),
-        ex=ex,
-    )
-    _strip_assets(job)  # main-compute-only: a transfer or finalizer container never sees a restricted asset
-    spec = job["spec"]["template"]["spec"]
-    if gang:
-        # the gang's shared checkpoint subPath, exactly where every rank had it (/work/checkpoint): the finalizer reads
-        # the coordinator's publication; the JobSet's incarnation and coordinator pod are named in its environment
-        spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "checkpoints"] + [
-            {"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
-        ]
-        for c in spec["containers"]:
-            c.setdefault("volumeMounts", []).append(
-                {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
-            )
-            if c["name"] == "main":
-                done = (finalize or {}).get("attempt") or {}
-                c["env"] = [
-                    e
-                    for e in c.get("env", [])
-                    if e["name"] not in ("CHECKPOINT_DIR", "FINALIZE_RANK", "FINALIZE_GANG_RESTART", "FINALIZE_NODES")
-                ] + [
-                    {"name": "CHECKPOINT_DIR", "value": "/work/checkpoint"},
-                    {
-                        "name": "FINALIZE_RANK",
-                        "value": str(done.get("gang_rank") if done.get("gang_rank") is not None else 0),
-                    },
-                    {
-                        "name": "FINALIZE_GANG_RESTART",
-                        "value": str(done.get("gang_restart") if done.get("gang_restart") is not None else ""),
-                    },
-                    {"name": "FINALIZE_NODES", "value": str(ann.get(f"{LABEL}/nodes") or "")},
-                ]
-    spec["initContainers"] = [_checkpoint_provision(root)] if gang else []
-    role = "finalize" if finalize else "export"
-    if finalize:
-        # the retained scratch still carries the compute attempt's bridge files (its checkpoint pointer, its RESULT.json
-        # if any, the uploader's acknowledgement): removed before the finalizer starts, so the new attempt's uploader
-        # records only what the finalizer itself writes and an old result marker can never become this attempt's
-        # success; the application's own workspace and delivery marker are not touched
-        spec["initContainers"] = [
-            {
-                "name": "bridge-reset",
-                "image": RUNNER_IMAGE,
-                "command": [
-                    "/bin/sh",
-                    "-c",
-                    "rm -f /work/CHECKPOINT.json /work/CHECKPOINT.json.tmp /work/CHECKPOINT.ack.json /work/RESULT.json /work/attempts/.ack.json",
-                ],
-                "volumeMounts": [{"name": "work", "mountPath": "/work"}],
-                "securityContext": RUNNER_SECURITY_CONTEXT,
-                "resources": {
-                    "requests": {"cpu": "50m", "memory": "32Mi"},
-                    "limits": {"cpu": "200m", "memory": "64Mi"},
-                },
-            }
-        ]
-    for c in spec["containers"]:
-        if c["name"] == "main" and finalize:
-            # the model's own image (the finalized attempt's digest when on record, else the pinned revision's image) and
-            # its fixed finalize command; CPU only; the attempt it finalizes named in the environment (docs/JOBS.md)
-            done = finalize.get("attempt") or {}
-            # the canonical work aliases (docs/JOBS.md "Work mount aliases") show the finalized attempt's own directory:
-            # the pod name in the alias expression is the finalized pod's, a literal, not this pod's
-            c["env"] = [
-                {"name": POD_NAME_ENV, "value": str(done.get("pod") or "")} if e.get("name") == POD_NAME_ENV else e
-                for e in c.get("env") or []
-            ]
-            c.update(
-                {
-                    "image": done.get("image_digest") or c["image"],
-                    "command": ["/bin/sh", "-c", fz["command"]],
-                    "resources": {
-                        "requests": {"cpu": fz["cpu"], "memory": fz["memory"]},
-                        "limits": {"cpu": fz["cpu"], "memory": fz["memory"]},
-                    },
-                }
-            )
-            c.pop("args", None)
-            c["env"] = [
-                e
-                for e in c.get("env", [])
-                if e["name"] not in ("ATTEMPT_ROLE", "FINALIZE_OF", "FINALIZE_EPOCH", "FINALIZE_EXIT_CODE", "WORK_DIR")
-            ] + [
-                {"name": "ATTEMPT_ROLE", "value": "finalize"},
-                {"name": "FINALIZE_OF", "value": str(done.get("pod") or "")},
-                {"name": "FINALIZE_EPOCH", "value": str(done.get("epoch") or "")},
-                {
-                    "name": "FINALIZE_EXIT_CODE",
-                    "value": str(done.get("exit_code") if done.get("exit_code") is not None else ""),
-                },
-                {"name": "WORK_DIR", "value": "/work"},
-            ]
-        elif c["name"] == "main":
-            # a transfer-only export: main only exits 0 on the kept volume; its work aliases keep the rendered expression
-            # (this pod's own, empty, directory), nothing of the finalizer's context applies here
-            c.update(
-                {
-                    "image": RUNNER_IMAGE,
-                    "command": ["/bin/sh", "-c", "true"],
-                    "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}},
-                }
-            )
-            c.pop("args", None)
-        elif c["name"] == "uploader":
-            # the transfer runs on no GPU: its attempt record must say so (the record stands in for the pod once it is
-            # gone, and billing reads the record's gpus; the original class is not this attempt's)
-            c["env"] = [e for e in c.get("env", []) if e["name"] not in ("GPUS", "GPU_CLASS")] + [
-                {"name": "GPUS", "value": "0"},
-                {"name": "GPU_CLASS", "value": ""},
-            ]
-    spec.pop("nodeSelector", None)
-    spec.pop("affinity", None)  # the compute attempt's class, pool and NVMe constraints: not the transfer's
-    spec.pop("tolerations", None)
-    if _mounts_shared_fs(spec):
-        # the delivery still mounts the shared filesystem (weights, data, shared checkpoints: what the export or the
-        # finalizer reads from); the one placement need that survives, recomputed from the RETAINED volumes, never from
-        # the stripped assets (docs/FLEET.md "Filesystem-aware placement")
-        spec["affinity"] = _required_affinity([{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}])
-    job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
-    _pin_to_worker(job, orig)
-    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
-    job["metadata"]["annotations"][f"{LABEL}/export-of"] = name
-    _inherit_owner(job, ann)
-    # the role is the platform's statement about this Job: the API stamps every attempt record of it with it
-    job["metadata"]["annotations"][f"{LABEL}/attempt-role"] = role
-    job["spec"]["template"]["metadata"].setdefault("labels", {})[f"{LABEL}/attempt-role"] = role
-    if finalize:
-        job["metadata"]["annotations"][f"{LABEL}/finalize-of"] = str((finalize.get("attempt") or {}).get("pod") or name)
-    if admit:
-        admit(job)
-    return create(ns, job, region)
+def _continuation_name(ns: str, tenant: str, root: str, name: str, idem: str | None) -> str:
+    """`<root>-r-<sha8>` for a keyed continuation (one per (source operation, intent): the same key replays the same
+    operation, `create` returns it, a different input under the same key is 409, concurrent replays collide on the
+    Job name), else the next `<root>-r<n>` of the chain."""
+    if idem:
+        return f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
+    return f"{root}-r{1 + continuations(ns, tenant, root)}"
 
 
 def _continuation_of(ns: str, orig: dict, defaults: dict) -> tuple[str, str, dict]:
@@ -2309,26 +2186,48 @@ def _continuation_of(ns: str, orig: dict, defaults: dict) -> tuple[str, str, dic
     md = orig["metadata"]
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     root = ann.get(f"{LABEL}/resumed-from", md["name"])
-    new = f"{root}-r{1 + continuations(ns, labels[f'{LABEL}/tenant'], root)}"
+    new = _continuation_name(ns, labels[f"{LABEL}/tenant"], root, md["name"], None)
     d = dict(defaults)
     out = output_prefix(orig) or ""
     d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else ""
     return root, new, d
 
 
-def _fence(ns: str, name: str, region: str, uid: str, annotations: dict, what: str) -> None:
-    """Fence an original BEFORE its successor exists: suspended and annotated (its successor: a readable handle, status
-    SUPERSEDED), its Workload deactivated so Kueue never admits it again (the worker's copy and its pods go)."""
+def _candidate_clusters(orig: dict, ex: dict, model: dict) -> list[str]:
+    """The clusters a same-root successor of a fleet run may land in: the caller's (allowed_clusters, else the model's),
+    never the original's template annotation: that one was narrowed by the per-node fit to the clusters holding a pool
+    of the FIRST class (an RTX-only cluster), where the next class has no pool at all; build_run narrows it again for
+    the successor. Only a run pinned to one cluster from the start (the `region` label) keeps that pin."""
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
+        f"{LABEL}/regions"
+    )
+    if tmpl_regions and labels.get(f"{LABEL}/region"):
+        return tmpl_regions.split(",")
+    return (
+        [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
+        or (ex.get("placement") or {}).get("allowed_clusters")
+        or model["regions"]
+    )
+
+
+def _patch_job(ns: str, name: str, region: str, body: dict, jobset: bool = False) -> None:
+    """A merge patch onto an original's Job (JobSet); one that expired (404, TTL) is left to its durable record."""
     try:
-        retry(
-            kube.batch(region).patch_namespaced_job,
-            name,
-            ns,
-            {"metadata": {"annotations": annotations}, "spec": {"suspend": True}},
-        )
+        if jobset:
+            patch_jobset(ns, name, region, body)
+        else:
+            retry(kube.batch(region).patch_namespaced_job, name, ns, body)
     except ApiException as e:
         if e.status != 404:
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+
+
+def _fence(ns: str, name: str, region: str, uid: str, annotations: dict, what: str) -> None:
+    """Fence an original BEFORE its successor exists: suspended and annotated (its successor: a readable handle, status
+    SUPERSEDED), its Workload deactivated so Kueue never admits it again (the worker's copy and its pods go)."""
+    _patch_job(ns, name, region, {"metadata": {"annotations": annotations}, "spec": {"suspend": True}})
     try:
         kube.deactivate_workload(ns, uid, region)
     except Exception as e:  # noqa: BLE001 - the Job is suspended either way
@@ -2384,40 +2283,20 @@ def switch_class(
         "manager": True,
         "profile": f"prefer-{next_class}",
         "classes": remaining,
-        "regions": [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
-        or (ex.get("placement") or {}).get("allowed_clusters")
-        or model["regions"],
+        "regions": _candidate_clusters(orig, ex, model),
     }
-    # the candidate clusters of the NEXT class are the caller's (allowed_clusters, else the model's), never the
-    # original's template annotation: that one was narrowed by the per-node fit to the clusters holding a pool of
-    # the FIRST class (an RTX-only cluster), where the next class has no pool at all; build_run narrows it again
-    # for the next class. Only a run pinned to one cluster from the start (the `region` label) keeps that pin.
-    tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
-        f"{LABEL}/regions"
+    why = (
+        f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} "
+        f"after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
     )
-    if tmpl_regions and labels.get(f"{LABEL}/region"):
-        placement["regions"] = tmpl_regions.split(",")
-    job = build_run(
-        new,
-        model,
-        op["input"],
-        labels[f"{LABEL}/tenant"],
-        ann.get(f"{LABEL}/name"),
-        None,
-        op["timeout_s"],
-        labels.get(f"{LABEL}/priority"),
-        None,
-        d,
-        ann.get(f"{LABEL}/key"),
-        placement=placement,
-        gpu_class=next_class,
-        ex=ex,
-    )
-    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
-    _inherit_owner(job, ann)
-    job["metadata"]["annotations"][f"{LABEL}/fallback"] = (
-        f"{labels.get(f'{LABEL}/gpu-class') or 'preferred class'} -> {next_class} after {ann.get(f'{LABEL}/fallback-wait-s', '?')} s without capacity"
-    )
+    change = {
+        "placement": placement,
+        "gpu_class": next_class,
+        "ex": ex,
+        "timeout_s": op["timeout_s"],
+        "annotations": {f"{LABEL}/fallback": why},
+    }
+    job = _successor(orig, op, model, new, None, d, change)
     # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
     execution.deliver(
         ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
@@ -2485,44 +2364,20 @@ def switch_unschedulable(
     ex = execution_of(ann) or {}
     root, new, d = _continuation_of(ns, orig, defaults)
     gpu_class = labels.get(f"{LABEL}/gpu-class") or None
-    pl = ex.get("placement") or {}
-    tmpl_regions = ((orig.get("spec") or {}).get("template", {}).get("metadata", {}).get("annotations") or {}).get(
-        f"{LABEL}/regions"
-    )
     placement = {
         "manager": True,
         "profile": labels.get("kueue.x-k8s.io/queue-name") or profile_of(model),
-        "classes": [gpu_class] if gpu_class else (pl.get("gpu_preference") or []),
-        # the caller's clusters (allowed_clusters, else the model's), re-narrowed by the fit for the pod as it is now;
-        # the original's template annotation only when the run is pinned to one cluster (see switch_class)
-        "regions": tmpl_regions.split(",")
-        if tmpl_regions and labels.get(f"{LABEL}/region")
-        else (
-            [r for r in (ann.get(f"{LABEL}/regions") or "").split(",") if r]
-            or pl.get("allowed_clusters")
-            or model["regions"]
-        ),
+        "classes": [gpu_class] if gpu_class else ((ex.get("placement") or {}).get("gpu_preference") or []),
+        "regions": _candidate_clusters(orig, ex, model),  # re-narrowed by the fit for the pod as it is now
     }
-    job = build_run(
-        new,
-        model,
-        op["input"],
-        labels[f"{LABEL}/tenant"],
-        ann.get(f"{LABEL}/name"),
-        None,
-        op["timeout_s"],
-        labels.get(f"{LABEL}/priority"),
-        None,
-        d,
-        ann.get(f"{LABEL}/key"),
-        placement=placement,
-        gpu_class=gpu_class,
-        ex=ex,
-    )
-    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
-    _inherit_owner(job, ann)
-    job["metadata"]["annotations"][f"{LABEL}/recovered-from"] = name
-    job["metadata"]["annotations"][f"{LABEL}/recovery"] = why
+    change = {
+        "placement": placement,
+        "gpu_class": gpu_class,
+        "ex": ex,
+        "timeout_s": op["timeout_s"],
+        "annotations": {f"{LABEL}/recovered-from": name, f"{LABEL}/recovery": why},
+    }
+    job = _successor(orig, op, model, new, None, d, change)
     execution.deliver(
         ex, new, root, ns, labels[f"{LABEL}/tenant"], placement["regions"] or [region], owner=operation_owner(ann, root)
     )
@@ -2538,53 +2393,39 @@ def switch_unschedulable(
             f"operation {name}: attempt {fresh[0]['pod']} bound to {fresh[0]['node'] or 'a node'} before the fence; no "
             "unschedulable switch (the run is proceeding)",
         )
-    _fence(
-        ns,
-        name,
-        region,
-        md.get("uid", ""),
-        {f"{LABEL}/successor": new, f"{LABEL}/recovery": why},
-        "unschedulable switch",
-    )
-    try:
-        late = _started_pods(
-            [p for p in (get(ns, name, region).get("_pods") or []) if p["metadata"].get("uid") in snapshot_uids]
-        )
-    except Exception:  # noqa: BLE001 - the worker's copy may be gone already: no evidence is not evidence of a start
-        late = []
-    if late:
-        note = f"attempt {late[0]['pod']} had bound to {late[0]['node'] or 'a node'} ({late[0]['phase']}) before the fence took effect; its records are retained"
-        why = f"{why}; {note}"
-        job["metadata"]["annotations"][f"{LABEL}/recovery"] = why
-        log.warning("unschedulable switch %s/%s: %s", ns, name, note)
-        try:
-            retry(
-                kube.batch(region).patch_namespaced_job,
-                name,
-                ns,
-                {
-                    "metadata": {
-                        "annotations": {
-                            f"{LABEL}/started-before-fence": json.dumps(late, sort_keys=True),
-                            f"{LABEL}/recovery": why,
-                        }
-                    }
-                },
-            )
-        except ApiException as e:
-            if e.status != 404:
-                raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    uid = md.get("uid", "")
+    _fence(ns, name, region, uid, {f"{LABEL}/successor": new, f"{LABEL}/recovery": why}, "unschedulable switch")
+    _record_late_start(ns, name, region, snapshot_uids, why, job)
     # a failed successor restores the original as it was (a recorded late start stays recorded)
     return _create_successor(
         ns,
         job,
         region,
         name,
-        md.get("uid", ""),
+        uid,
         {f"{LABEL}/successor": None, f"{LABEL}/recovery": None},
         "unschedulable switch",
         admit,
     )
+
+
+def _record_late_start(ns: str, name: str, region: str, snapshot_uids: set, why: str, job: dict) -> None:
+    """After the fence: a pod of the snapshot that bound in the last instants before the fence took effect is recorded
+    on the original (`started-before-fence`) and in the successor's reason; its records are retained."""
+    try:
+        late = _started_pods(
+            [p for p in (get(ns, name, region).get("_pods") or []) if p["metadata"].get("uid") in snapshot_uids]
+        )
+    except Exception:  # noqa: BLE001 - the worker's copy may be gone already: no evidence is not evidence of a start
+        return
+    if not late:
+        return
+    note = f"attempt {late[0]['pod']} had bound to {late[0]['node'] or 'a node'} ({late[0]['phase']}) before the fence took effect; its records are retained"
+    why = f"{why}; {note}"
+    job["metadata"]["annotations"][f"{LABEL}/recovery"] = why
+    log.warning("unschedulable switch %s/%s: %s", ns, name, note)
+    marks = {f"{LABEL}/started-before-fence": json.dumps(late, sort_keys=True), f"{LABEL}/recovery": why}
+    _patch_job(ns, name, region, {"metadata": {"annotations": marks}})
 
 
 def recoveries(ns: str, tenant: str, root: str) -> int:
@@ -2610,7 +2451,7 @@ def recover(
     infrastructure loss"): the original is fenced first (successor mark in the fleet database: every further record of
     it is refused; its Workload deactivated: the worker's copy and any pod go; the Job suspended), then the successor
     `<root>-r-<sha8>` is created from the acknowledged checkpoint pointer on `next_class` with that class's image and a
-    fresh volume. The name is a function of (original, lost epoch): competing API replicas and repeated ticks
+    fresh volume (resume). The name is a function of (original, lost epoch): competing API replicas and repeated ticks
     converge on one Job (create is ignore-exists). Returns (successor, created)."""
     ops_cache_invalidate(None)  # the listing behind GET /v1/operations must show this mutation at once
     orig = get(ns, name, region)
@@ -2618,7 +2459,7 @@ def recover(
     labels, ann = md.get("labels", {}), md.get("annotations", {})
     root = ann.get(f"{LABEL}/resumed-from", name)
     idem = f"recover:{lost_epoch}"
-    new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
+    new = _continuation_name(ns, labels[f"{LABEL}/tenant"], root, name, idem)
     ex = execution_of(ann) or {}
     ex["placement"] = {**(ex.get("placement") or {}), "gpu_preference": remaining}
     # the private input must be deliverable before anything is fenced: a revoked binding leaves the original untouched
@@ -2646,17 +2487,88 @@ def recover(
         timeout_s=timeout_s,
         admit=admit,
     )
-    try:
-        retry(
-            kube.batch(region).patch_namespaced_job,
-            name,
-            ns,
-            {"metadata": {"annotations": {f"{LABEL}/successor": new, f"{LABEL}/recovery": reason}}},
-        )
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    _patch_job(
+        ns, name, region, {"metadata": {"annotations": {f"{LABEL}/successor": new, f"{LABEL}/recovery": reason}}}
+    )
     return created, was_created
+
+
+def _expired_original(ns: str, name: str, region: str) -> dict:
+    """The original of a resume: its Job, or, once the Job expired (TTL), the admission record (api 0.11.74+) that
+    remains of its inputs; without one the resume is refused as before, never reconstructed from thin air
+    (docs/JOBS.md "Resume")."""
+    try:
+        return get(ns, name, region)
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+    rec = admissions.get(name)
+    if rec is None:
+        raise HTTPException(
+            404,
+            f"operation {name}: its Job expired and it has no admission record (admitted before api 0.11.74); submit a new run",
+        )
+    durable = attempts.synthesize(name, rec["tenant"]) if attempts.enabled() else None
+    orig = admissions.as_job(rec, (durable or {}).get("status"))
+    if (durable or {}).get("status") == "SUCCEEDED":
+        raise HTTPException(409, f"operation {name} SUCCEEDED; its result stands, nothing to restart")
+    return orig
+
+
+def _resume_volume(
+    ns: str,
+    name: str,
+    region: str,
+    orig: dict,
+    placement: dict | None,
+    checkpoint_ref: str | None,
+    gpu_class: str | None,
+    pointer: str | None,
+    restart_from_inputs: bool,
+) -> tuple[str | None, str | None, dict | None, str | None]:
+    """Where a resume continues from: (the work volume to reuse, the worker to pin to, the execution block, the
+    checkpoint reference). A portable checkpoint (explicit, or the chain's newest acknowledged pointer when the volume
+    is gone or the caller wants another class) needs neither the old volume nor the old region: a fresh volume where
+    the fleet places it. An expired original restarts from its recorded inputs on a fresh volume, asked for explicitly
+    (never a checkpoint dropped unnoticed); a fleet-placed run is placed by the fleet again. Otherwise the kept volume
+    (a gang: the shared claim, mounted by name under checkpoints/<root>) must still exist."""
+    ann = orig["metadata"].get("annotations", {})
+    expired = bool(orig.get("_expired"))
+    pvc = ann.get(f"{LABEL}/pvc")
+    worker = orig["_region"] if is_manager_job(orig) else region
+    ex = execution_of(ann)
+    if not checkpoint_ref and pointer and not is_jobset(orig):
+        volume_ok = False
+        if pvc and worker:
+            try:
+                retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
+                volume_ok = True
+            except ApiException:
+                volume_ok = False
+        if gpu_class or not volume_ok:
+            checkpoint_ref = pointer
+    if checkpoint_ref:
+        ex = {**(ex or {}), "recovery": {**((ex or {}).get("recovery") or {}), "checkpoint_ref": checkpoint_ref}}
+        return None, (worker if not placement else None), ex, checkpoint_ref
+    if expired:
+        if not restart_from_inputs:
+            raise HTTPException(
+                409,
+                f"operation {name}: its Job and work volume expired; a resume renders it again from its recorded inputs "
+                "on a fresh volume: pass restart_from_inputs: true (or a checkpoint_ref)",
+            )
+        return None, (None if is_manager_job(orig) else worker), ex, None
+    if not worker:
+        raise HTTPException(409, f"operation {name} never reached a worker; submit a new run")
+    if is_jobset(orig):
+        if ann.get(f"{LABEL}/checkpoints") != "shared":
+            raise HTTPException(
+                409,
+                f"operation {name} kept its checkpoints on node-local scratch (checkpoints: local); submit a new run",
+            )
+        return None, worker, ex, None
+    _require_claim(worker, ns, pvc, f"checkpoint volume {pvc} is gone (successful runs release it); submit a new run")
+    return pvc, worker, ex, None
 
 
 def resume(
@@ -2677,30 +2589,12 @@ def resume(
     restart_from_inputs: bool = False,
 ) -> tuple[dict, bool]:
     """A new Job `<root>-rN` rendered again from the catalog entry with the original input, on the
-    original PVC (same region: the volume is regional), linked through the resumed-from annotation.
-    Rendering anew (rather than copying the finished Job's spec) leaves behind everything the Job
-    controller and Kueue injected into it (selector, workload annotation, flavor labels). The
-    original must be finished and its PVC must exist. `region` is the cluster the original is read
-    from (the manager for a fleet-placed run); the new Job is pinned to the worker's region.
+    original PVC (same region: the volume is regional), linked through the resumed-from annotation (_successor).
+    The original must be finished and its PVC must exist (_resume_volume). `region` is the cluster the original is
+    read from (the manager for a fleet-placed run); the new Job is pinned to the worker's region.
     `superseding`: automatic recovery (jobs.recover) continues a run the platform fenced itself; its annotations
     go onto the successor and the original's state is not a precondition."""
-    try:
-        orig = _orig or get(ns, name, region)
-    except HTTPException as e:
-        if e.status_code != 404:
-            raise
-        # the Job expired (TTL): the admission record (api 0.11.74+) is what remains of its inputs; without one the
-        # resume is refused as before, never reconstructed from thin air (docs/JOBS.md "Resume")
-        rec = admissions.get(name)
-        if rec is None:
-            raise HTTPException(
-                404,
-                f"operation {name}: its Job expired and it has no admission record (admitted before api 0.11.74); submit a new run",
-            )
-        durable = attempts.synthesize(name, rec["tenant"]) if attempts.enabled() else None
-        orig = admissions.as_job(rec, (durable or {}).get("status"))
-        if (durable or {}).get("status") == "SUCCEEDED":
-            raise HTTPException(409, f"operation {name} SUCCEEDED; its result stands, nothing to restart")
+    orig = _orig or _expired_original(ns, name, region)
     expired = bool(orig.get("_expired"))
     op = normalise(orig)
     md = orig["metadata"]
@@ -2710,110 +2604,284 @@ def resume(
     if op["mode"] != "run":
         raise HTTPException(400, "only run operations can be resumed")
     model = catalog.pinned(model, ann)
-    pvc = ann.get(f"{LABEL}/pvc")
-    worker = orig["_region"] if is_manager_job(orig) else region
-    ex = execution_of(ann)
-    if not checkpoint_ref and pointer and not is_jobset(orig):
-        # no explicit checkpoint: the newest acknowledged pointer of the chain stands in when the volume is gone or the
-        # caller wants another class (docs/JOBS.md "Attempts and finalization")
-        volume_ok = False
-        if pvc and worker:
-            try:
-                retry(kube.core(worker).read_namespaced_persistent_volume_claim, pvc, ns)
-                volume_ok = True
-            except ApiException:
-                volume_ok = False
-        if gpu_class or not volume_ok:
-            checkpoint_ref = pointer
-    if checkpoint_ref:
-        # a portable checkpoint (docs/JOBS.md "Execution options"): the application restores it from its own storage, so
-        # the new attempt needs neither the old volume nor the old region: a fresh volume where the fleet places it
-        ex = {**(ex or {}), "recovery": {**((ex or {}).get("recovery") or {}), "checkpoint_ref": checkpoint_ref}}
-        pvc, worker = None, (worker if not placement else None)
-    elif expired:
-        # the work volume went with the Job (it owned the claim): a restart from the recorded inputs on a fresh volume,
-        # asked for explicitly so a checkpoint is never dropped unnoticed; a fleet-placed run is placed by the fleet
-        # again (manager Job, no worker pin), a single-cluster run restarts on its own cluster
-        if not restart_from_inputs:
-            raise HTTPException(
-                409,
-                f"operation {name}: its Job and work volume expired; a resume renders it again from its recorded inputs "
-                "on a fresh volume: pass restart_from_inputs: true (or a checkpoint_ref)",
-            )
-        pvc, worker = None, (None if is_manager_job(orig) else worker)
-    elif not worker:
-        raise HTTPException(409, f"operation {name} never reached a worker; submit a new run")
-    if checkpoint_ref or expired:
-        pass  # decided above: a portable checkpoint, or a fresh volume (fleet placement for a manager run)
-    elif is_jobset(orig):
-        if ann.get(f"{LABEL}/checkpoints") != "shared":
-            raise HTTPException(
-                409,
-                f"operation {name} kept its checkpoints on node-local scratch (checkpoints: local); submit a new run",
-            )
-        pvc = None  # the shared claim is mounted by name, under checkpoints/<root>
-    else:
-        _require_claim(
-            worker, ns, pvc, f"checkpoint volume {pvc} is gone (successful runs release it); submit a new run"
-        )
+    pvc, worker, ex, checkpoint_ref = _resume_volume(
+        ns, name, region, orig, placement, checkpoint_ref, gpu_class, pointer, restart_from_inputs
+    )
     root = ann.get(f"{LABEL}/resumed-from", name)
-    if idem:
-        # one continuation per (tenant, source operation, intent): the same key replays the same operation (`create`
-        # returns it; a different input under the same key is 409), concurrent replays collide on the Job name
-        new = f"{root}-r-{hashlib.sha256(f'{name}:{idem}'.encode()).hexdigest()[:8]}"
-    else:
-        n = 1 + continuations(ns, labels[f"{LABEL}/tenant"], root)
-        new = f"{root}-r{n}"
+    new = _continuation_name(ns, labels[f"{LABEL}/tenant"], root, name, idem)
     out = output_prefix(orig) or ""
     d = dict(defaults)
     d["output_prefix"] = out.rsplit("/", 1)[0] + "/" + new if out else f"operations/{new}"
     pl = execution.narrow_placement(dict(placement or {}), ex) or {}
     if is_manager_job(orig):
         pl["manager"] = True
-    # a run with per-class images keeps the class it was submitted with (its checkpoints were written by that image),
-    # unless the caller resumes a portable checkpoint on another class (`gpu_class`)
-    job = build_run(
-        new,
-        model,
-        op["input"],
-        labels[f"{LABEL}/tenant"],
-        ann.get(f"{LABEL}/name"),
-        None,
-        min(op["timeout_s"], timeout_s) if op["timeout_s"] and timeout_s else (timeout_s or op["timeout_s"]),
-        labels.get(f"{LABEL}/priority"),
-        worker,
-        d,
-        ann.get(f"{LABEL}/key"),
-        pvc=pvc,
-        placement=pl or None,
-        gpu_class=gpu_class
+    # the successor's marks: its intent key; automatic recovery says where it comes from and why (status.py `reason`);
+    # a restart from the recorded inputs names the expired original. A run with per-class images keeps the class it
+    # was submitted with (its checkpoints were written by that image), unless the caller resumes a portable checkpoint
+    # on another class (`gpu_class`)
+    marks = {
+        **({f"{LABEL}/idempotency-key": idem} if idem else {}),
+        **(superseding or {}),
+        **({f"{LABEL}/restarted-from-inputs": name} if expired else {}),
+    }
+    change = {
+        "pvc": pvc,
+        "placement": pl or None,
+        "gpu_class": gpu_class
         or labels.get(f"{LABEL}/gpu-class")
         or (gpu_classes(model)[0] if class_images(model) else None),
-        ex=ex,
-    )
-    job["metadata"]["annotations"][f"{LABEL}/resumed-from"] = root
-    _inherit_owner(job, ann)
-    if idem:
-        job["metadata"]["annotations"][f"{LABEL}/idempotency-key"] = idem
-    if superseding:  # automatic recovery: the successor says where it comes from and why (status.py `reason`)
-        job["metadata"]["annotations"].update(superseding)
+        "ex": ex,
+        "timeout_s": min(op["timeout_s"], timeout_s)
+        if op["timeout_s"] and timeout_s
+        else (timeout_s or op["timeout_s"]),
+        "annotations": marks,
+    }
+    job = _successor(orig, op, model, new, worker, d, change)
     if pvc and not checkpoint_ref and not is_jobset(orig):
         _pin_to_worker(job, orig)  # the same volume: the same cluster, by id
-    if expired:
-        job["metadata"]["annotations"][f"{LABEL}/restarted-from-inputs"] = name
-    if is_jobset(job):  # the shared checkpoint directory is keyed by the root operation
-        # every container of the rank pod, the provisioning init included (it must provision the ROOT's leaf, the one
-        # the ranks restore from, never a fresh `checkpoints/<successor>`)
-        pod_spec = job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
-        for c in list(pod_spec.get("containers") or []) + list(pod_spec.get("initContainers") or []):
-            for m in c.get("volumeMounts", []):
-                if m["name"] == "checkpoints":
-                    m["subPath"] = f"checkpoints/{root}"
+    if is_jobset(job):
+        _gang_root_leaf(job, root)
     if admit:
         admit(job)  # the run's ledger admits the member before its Job exists (stages.continuation_admission)
     created, was_created = create(ns, job, region)
     _link_successor(ns, name, new, region, jobset=is_jobset(orig))
     return created, was_created
+
+
+def _gang_root_leaf(job: dict, root: str) -> None:
+    """A resumed gang's shared checkpoint directory is keyed by the root operation: every container of the rank pod,
+    the provisioning init included (it must provision the ROOT's leaf, the one the ranks restore from, never a fresh
+    `checkpoints/<successor>`)."""
+    pod_spec = job["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    for c in list(pod_spec.get("containers") or []) + list(pod_spec.get("initContainers") or []):
+        for m in c.get("volumeMounts", []):
+            if m["name"] == "checkpoints":
+                m["subPath"] = f"checkpoints/{root}"
+
+
+def _export_preconditions(name: str, ann: dict, pvc: str | None, worker: str | None, gang: bool, finalize) -> None:
+    """What an export retry or finalizer needs retained: a single-node run its kept work volume on a known worker; a
+    multi-node run keeps no per-pod work volume (/work is node-local on every rank): what survives the gang is the
+    coordinator's publication on the tenant's shared checkpoint claim (`checkpoints: shared`, subPath
+    checkpoints/<root>); only the model's finalizer can deliver from it (application-owned bytes); a managed export
+    has nothing retained to transfer."""
+    if not gang:
+        if not pvc or not worker:
+            raise HTTPException(409, f"operation {name} has no kept work volume to export")
+        return
+    if ann.get(f"{LABEL}/checkpoints") != "shared":
+        raise HTTPException(
+            409,
+            f"operation {name}: a multi-node run retains bytes only with `checkpoints: shared` (the coordinator's "
+            "publication on the shared claim); nothing is kept to export or finalize",
+        )
+    if not finalize:
+        raise HTTPException(
+            409,
+            f"operation {name}: a multi-node run is delivered again only by its model's finalizer (job.finalize, "
+            "application I/O) from the shared checkpoint claim; the platform exports nothing of a gang's node-local /work",
+        )
+    if not worker:
+        raise HTTPException(409, f"operation {name}: the admitting cluster of the gang is unknown; nothing to finalize")
+
+
+def _finalizer_class(model: dict, labels: dict) -> dict:
+    """The gang's model as ONE CPU pod renders it (never the gang again): a single-node render (no nodes, no GPU, no
+    fabric), its own small /work claim; the admitted class's immutable image kept before the compute-only image
+    selection is dropped (the finalizer prefers the finalized attempt's recorded digest when available)."""
+    jb = dict(model.get("job") or {})
+    jb["image"] = image_for_class(model, labels.get(f"{LABEL}/gpu-class"))
+    for k in ("nodes", "interconnect", "ibDevicesPerNode", "checkpoints", "images"):
+        jb.pop(k, None)
+    jb["gpu"] = 0
+    jb["pvcSizeGi"] = JOB_PVC_SIZE_GI
+    return {**model, "job": jb, "gpu_classes": []}
+
+
+def export_again(
+    ns: str, name: str, region: str, model: dict, defaults: dict, finalize: dict | None = None, admit=None
+) -> tuple[dict, bool]:
+    """`<root>-x<n>`: the original run's Job rendered again on its kept work volume with a main container that only
+    exits 0, so the uploader exports /work once more (docs/JOBS.md "Attempts and finalization"). With `finalize`
+    (docs/JOBS.md "Finalization by the application": {"spec": job.finalize, "attempt": the failed attempt's record})
+    the main container is the model's own image running the model's `finalize.command` on that volume, CPU only,
+    with the finalized attempt named in its environment: the application re-delivers what it computed; the
+    platform re-runs nothing."""
+    orig = get(ns, name, region)
+    op = normalise(orig)
+    md = orig["metadata"]
+    labels, ann = md.get("labels", {}), md.get("annotations", {})
+    pvc = ann.get(f"{LABEL}/pvc")
+    worker = orig["_region"] if is_manager_job(orig) else region
+    gang = is_jobset(orig)
+    _export_preconditions(name, ann, pvc, worker, gang, finalize)
+    model = catalog.pinned(model, ann)
+    if gang:
+        _require_claim(
+            worker, ns, SHARED_SCRATCH_PVC, f"shared checkpoint claim {SHARED_SCRATCH_PVC} is gone; nothing to finalize"
+        )
+        model, pvc = _finalizer_class(model, labels), None
+    else:
+        _require_claim(worker, ns, pvc, f"work volume {pvc} is gone; nothing to export")
+    root = ann.get(f"{LABEL}/resumed-from", name)
+    n = 1 + export_retries(ns, labels[f"{LABEL}/tenant"], root)
+    if n > EXPORT_RETRIES_MAX:
+        raise HTTPException(
+            409, f"operation {root}: {EXPORT_RETRIES_MAX} export/finalization retries used; submit a new run"
+        )
+    new = f"{root}-x{n}"
+    d = dict(defaults)
+    d["output_prefix"] = output_prefix(orig) or ""  # the same prefix: the retry completes the original export
+    fz = (finalize or {}).get("spec") or {}
+    role = "finalize" if finalize else "export"  # the platform's statement about this Job: on every attempt record
+    marks = {f"{LABEL}/export-of": name, f"{LABEL}/attempt-role": role}
+    if finalize:
+        marks[f"{LABEL}/finalize-of"] = str((finalize.get("attempt") or {}).get("pod") or name)
+    change = {
+        "pvc": pvc,
+        "placement": {"manager": True} if is_manager_job(orig) else None,
+        "gpu_class": None if gang else labels.get(f"{LABEL}/gpu-class"),
+        "ex": execution_of(ann),
+        "timeout_s": int(fz.get("timeoutS") or 3600),
+        "annotations": marks,
+    }
+
+    def shape(job: dict) -> None:
+        _strip_assets(job)  # main-compute-only: a transfer or finalizer container never sees a restricted asset
+        _delivery_pod(job["spec"]["template"]["spec"], finalize, fz, root, gang, ann)
+        job["metadata"]["labels"].pop(f"{LABEL}/gpu-class", None)
+        _pin_to_worker(job, orig)
+
+    job = _successor(orig, op, model, new, worker, d, change, shape)
+    job["spec"]["template"]["metadata"].setdefault("labels", {})[f"{LABEL}/attempt-role"] = role
+    if admit:
+        admit(job)
+    return create(ns, job, region)
+
+
+def _delivery_pod(spec: dict, finalize: dict | None, fz: dict, root: str, gang: bool, ann: dict) -> None:
+    """The rendered compute pod turned into the delivery's: the gang's shared checkpoint subPath exactly where every
+    rank had it, the bridge reset before a finalizer, main as the finalizer or a transfer (exit 0), the uploader on no
+    GPU, and the compute attempt's class, pool and NVMe constraints dropped: the one placement need that survives is
+    the shared filesystem the delivery still mounts (weights, data, shared checkpoints), recomputed from the RETAINED
+    volumes, never from the stripped assets (docs/FLEET.md "Filesystem-aware placement")."""
+    if gang:
+        _gang_delivery_mount(spec, finalize, root, ann)
+    spec["initContainers"] = [_checkpoint_provision(root)] if gang else []
+    if finalize:
+        # the retained scratch still carries the compute attempt's bridge files (its checkpoint pointer, its RESULT.json
+        # if any, the uploader's acknowledgement): removed before the finalizer starts, so the new attempt's uploader
+        # records only what the finalizer itself writes and an old result marker can never become this attempt's
+        # success; the application's own workspace and delivery marker are not touched
+        spec["initContainers"] = [_bridge_reset()]
+    for c in spec["containers"]:
+        if c["name"] == "main" and finalize:
+            _finalizer_main(c, fz, finalize.get("attempt") or {})
+        elif c["name"] == "main":
+            # a transfer-only export: main only exits 0 on the kept volume; its work aliases keep the rendered expression
+            # (this pod's own, empty, directory), nothing of the finalizer's context applies here
+            c.update(
+                {
+                    "image": RUNNER_IMAGE,
+                    "command": ["/bin/sh", "-c", "true"],
+                    "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}},
+                }
+            )
+            c.pop("args", None)
+        elif c["name"] == "uploader":
+            # the transfer runs on no GPU: its attempt record must say so (the record stands in for the pod once it is
+            # gone, and billing reads the record's gpus; the original class is not this attempt's)
+            c["env"] = [e for e in c.get("env", []) if e["name"] not in ("GPUS", "GPU_CLASS")] + [
+                {"name": "GPUS", "value": "0"},
+                {"name": "GPU_CLASS", "value": ""},
+            ]
+    spec.pop("nodeSelector", None)
+    spec.pop("affinity", None)
+    spec.pop("tolerations", None)
+    if _mounts_shared_fs(spec):
+        spec["affinity"] = _required_affinity([{"key": f"{LABEL}/shared-fs", "operator": "In", "values": ["true"]}])
+
+
+def _gang_delivery_mount(spec: dict, finalize: dict | None, root: str, ann: dict) -> None:
+    """The gang's shared checkpoint subPath on the finalizer's containers, exactly where every rank had it
+    (/work/checkpoint): the finalizer reads the coordinator's publication; the JobSet's incarnation and coordinator
+    pod are named in its environment."""
+    spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "checkpoints"] + [
+        {"name": "checkpoints", "persistentVolumeClaim": {"claimName": SHARED_SCRATCH_PVC}}
+    ]
+    done = (finalize or {}).get("attempt") or {}
+    for c in spec["containers"]:
+        c.setdefault("volumeMounts", []).append(
+            {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{root}"}
+        )
+        if c["name"] == "main":
+            c["env"] = [
+                e
+                for e in c.get("env", [])
+                if e["name"] not in ("CHECKPOINT_DIR", "FINALIZE_RANK", "FINALIZE_GANG_RESTART", "FINALIZE_NODES")
+            ] + [
+                {"name": "CHECKPOINT_DIR", "value": "/work/checkpoint"},
+                {
+                    "name": "FINALIZE_RANK",
+                    "value": str(done.get("gang_rank") if done.get("gang_rank") is not None else 0),
+                },
+                {
+                    "name": "FINALIZE_GANG_RESTART",
+                    "value": str(done.get("gang_restart") if done.get("gang_restart") is not None else ""),
+                },
+                {"name": "FINALIZE_NODES", "value": str(ann.get(f"{LABEL}/nodes") or "")},
+            ]
+
+
+def _bridge_reset() -> dict:
+    return {
+        "name": "bridge-reset",
+        "image": RUNNER_IMAGE,
+        "command": [
+            "/bin/sh",
+            "-c",
+            "rm -f /work/CHECKPOINT.json /work/CHECKPOINT.json.tmp /work/CHECKPOINT.ack.json /work/RESULT.json /work/attempts/.ack.json",
+        ],
+        "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+        "securityContext": RUNNER_SECURITY_CONTEXT,
+        "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "200m", "memory": "64Mi"}},
+    }
+
+
+def _finalizer_main(c: dict, fz: dict, done: dict) -> None:
+    """main as the model's finalizer: the model's own image (the finalized attempt's digest when on record, else the
+    pinned revision's image) and its fixed finalize command; CPU only; the attempt it finalizes named in the
+    environment (docs/JOBS.md). The canonical work aliases (docs/JOBS.md "Work mount aliases") show the finalized
+    attempt's own directory: the pod name in the alias expression is the finalized pod's, a literal, not this pod's."""
+    c["env"] = [
+        {"name": POD_NAME_ENV, "value": str(done.get("pod") or "")} if e.get("name") == POD_NAME_ENV else e
+        for e in c.get("env") or []
+    ]
+    c.update(
+        {
+            "image": done.get("image_digest") or c["image"],
+            "command": ["/bin/sh", "-c", fz["command"]],
+            "resources": {
+                "requests": {"cpu": fz["cpu"], "memory": fz["memory"]},
+                "limits": {"cpu": fz["cpu"], "memory": fz["memory"]},
+            },
+        }
+    )
+    c.pop("args", None)
+    c["env"] = [
+        e
+        for e in c.get("env", [])
+        if e["name"] not in ("ATTEMPT_ROLE", "FINALIZE_OF", "FINALIZE_EPOCH", "FINALIZE_EXIT_CODE", "WORK_DIR")
+    ] + [
+        {"name": "ATTEMPT_ROLE", "value": "finalize"},
+        {"name": "FINALIZE_OF", "value": str(done.get("pod") or "")},
+        {"name": "FINALIZE_EPOCH", "value": str(done.get("epoch") or "")},
+        {
+            "name": "FINALIZE_EXIT_CODE",
+            "value": str(done.get("exit_code") if done.get("exit_code") is not None else ""),
+        },
+        {"name": "WORK_DIR", "value": "/work"},
+    ]
 
 
 def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = False) -> None:
@@ -2828,15 +2896,7 @@ def _link_successor(ns: str, name: str, new: str, region: str, jobset: bool = Fa
         attempts.mark_successor(name, new)
     except Exception as e:  # noqa: BLE001 - the annotation below still links while the Job exists; the mark is retried on replay
         log.warning("successor mark %s -> %s: %s", name, new, e)
-    body = {"metadata": {"annotations": {f"{LABEL}/successor": new}}}
-    try:
-        if jobset:
-            patch_jobset(ns, name, region, body)
-        else:
-            retry(kube.batch(region).patch_namespaced_job, name, ns, body)
-    except ApiException as e:
-        if e.status != 404:  # the original expired (TTL): the durable mark is the link
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    _patch_job(ns, name, region, {"metadata": {"annotations": {f"{LABEL}/successor": new}}}, jobset=jobset)
 
 
 # ---- submission: what a request becomes before it is admitted -------------------------------------------------
@@ -3037,28 +3097,7 @@ def render_submission(
     run on the manager (the dispatcher picks the worker), or a run in the one region; the owner, the requester and,
     for an endpoint call, the revision it could reach are stamped on it. Returns (job, secret, region): the region
     the Job is created in; `manager`: this API is the fleet manager (FLEET_MANAGER, the route's)."""
-    if mode == "async" and ex:
-        # an endpoint call with private input and application-owned output (docs/API.md "Endpoint calls")
-        if ex.get("placement") or ex.get("recovery"):
-            raise HTTPException(400, "execution.placement and execution.recovery apply to runs, not to endpoint calls")
-        if ex.get("io_mode") == "application" and not ex.get("private_input_ref"):
-            raise HTTPException(
-                400,
-                "an application-I/O endpoint call takes its request and its destination from a binding: give private_input_ref",
-            )
-        if ex.get("private_input_ref") and req.input:
-            raise HTTPException(
-                400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
-            )
-    if ex and ex.get("require_converged") and mode != "async":
-        raise HTTPException(400, "execution.require_converged applies to endpoint calls (mode async)")
-    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
-    if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
-        # an explicit region that contradicts the caller's own cluster list; an implicit one (the default) is no
-        # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
-        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
-    if allowed and not manager and mode == "run" and region not in allowed:
-        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
+    _check_submission(mode, ex, req, region, manager)
     timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
     secret, rollout = None, None
     if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
@@ -3114,3 +3153,29 @@ def render_submission(
         if rollout.get("serving_images"):
             ann[f"{LABEL}/endpoint-image"] = str(rollout["serving_images"][0])[:1000]
     return job, secret, region
+
+
+def _check_submission(mode: str, ex: dict | None, req, region: str, manager: bool) -> None:
+    """What a submission may ask for: an endpoint call with private input and application-owned output (docs/API.md
+    "Endpoint calls") takes no run-only options and no inline request; `require_converged` is a call's; an explicit
+    region must be among the caller's allowed_clusters (an implicit one, the default, is no request: a fleet run is
+    placed within allowed_clusters, a single-cluster run must be allowed here)."""
+    if mode == "async" and ex:
+        if ex.get("placement") or ex.get("recovery"):
+            raise HTTPException(400, "execution.placement and execution.recovery apply to runs, not to endpoint calls")
+        if ex.get("io_mode") == "application" and not ex.get("private_input_ref"):
+            raise HTTPException(
+                400,
+                "an application-I/O endpoint call takes its request and its destination from a binding: give private_input_ref",
+            )
+        if ex.get("private_input_ref") and req.input:
+            raise HTTPException(
+                400, "the request of an endpoint call with private_input_ref lives in the binding: input must be empty"
+            )
+    if ex and ex.get("require_converged") and mode != "async":
+        raise HTTPException(400, "execution.require_converged applies to endpoint calls (mode async)")
+    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
+    if allowed and req.region and req.region not in allowed and kube.cluster_region(req.region) not in allowed:
+        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
+    if allowed and not manager and mode == "run" and region not in allowed:
+        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")

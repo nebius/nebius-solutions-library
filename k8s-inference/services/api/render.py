@@ -6,7 +6,9 @@
 - `_meta`: labels and annotations of the Job (tenant, model, queue, priority, region pin, input)
 - `_uploader`: the sidecar that uploads outputs and attempt records
 - hardening: the security context of every rendered container and pod
-- `_job_shell`: the Job envelope (failure policy, deadline, MultiKueue `managedBy`)
+- `_pod`: the pod skeleton every job kind shares (runner service account, group-owned volumes, shared PID namespace)
+- `_job_shell` / `_jobset_shell`: the Job (JobSet) envelope: pod template metadata for the dispatcher, failure policy,
+  deadline, MultiKueue `managedBy`
 
 Nothing here talks to Kubernetes; jobs.py does."""
 
@@ -18,8 +20,11 @@ import uuid
 from fastapi import HTTPException
 
 from config import (
+    EXECUTOR_SA,
     JOB_BACKOFF_LIMIT,
     JOB_TTL_S,
+    JOBSET_GROUP,
+    JOBSET_VERSION,
     KUEUE_PRIORITY,
     KUEUE_QUEUE,
     LABEL,
@@ -215,21 +220,33 @@ RUNNER_SECURITY_CONTEXT = {**CONTAINER_HARDENING, "runAsNonRoot": True, "runAsUs
 POD_SECURITY_CONTEXT = {"seccompProfile": {"type": "RuntimeDefault"}}
 
 
-def _job_shell(
-    name: str,
-    meta: dict,
-    pod_spec: dict,
-    timeout_s: int | None,
-    placement: dict | None = None,
-    pod_metadata: dict | None = None,
+def _pod(
+    containers: list[dict], volumes: list[dict], grace_s: int, priority_class: str, init: list | None = None
 ) -> dict:
-    """placement (fleet path): {manager: bool, classes: [...], regions: [...]}; the pod template carries what
-    the dispatcher needs (it sees the Workload's pod template, not the Job): allowed GPU classes and regions,
-    work volume size."""
-    extra = normalise_pod_metadata(pod_metadata)
-    from execution import scope_runner_token
+    """The pod every job kind shares: the runner ServiceAccount; the work volume group-owned by the runner (uid/gid
+    10001: a claim's root is root-owned until the kubelet applies the group), so fetch/upload work whatever user the
+    model image runs as and the runner reads a private binding (a Secret volume, mode 0440); a shared PID namespace
+    (the command's shell is not PID 1, so SIGTERM on preemption or cancel actually ends `sh -c ...` instead of being
+    ignored until the grace period's SIGKILL; the uploader sees the main process start and end: upload.sh main_alive)."""
+    pod = {
+        "restartPolicy": "Never",
+        "serviceAccountName": EXECUTOR_SA,
+        "terminationGracePeriodSeconds": grace_s,
+        "priorityClassName": priority_class,
+        "securityContext": {"fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch", **POD_SECURITY_CONTEXT},
+        "shareProcessNamespace": True,
+    }
+    if init is not None:
+        pod["initContainers"] = init
+    pod["containers"] = containers
+    pod["volumes"] = volumes
+    return pod
 
-    scope_runner_token(pod_spec)
+
+def _template_meta(meta: dict, placement: dict | None, pod_metadata: dict | None) -> dict:
+    """The pod template's metadata: the operator's pod_metadata, the Job's own labels, and what the dispatcher needs
+    (it sees the Workload's pod template, not the Job): allowed GPU classes and regions, work volume size."""
+    extra = normalise_pod_metadata(pod_metadata)
     tmpl_meta = {
         "labels": {**extra.get("labels", {}), **{k: v for k, v in meta["labels"].items() if k.startswith(LABEL)}}
     }
@@ -242,21 +259,106 @@ def _job_shell(
         ann[f"{LABEL}/regions"] = ",".join(placement["regions"])
     if ann:
         tmpl_meta["annotations"] = ann
+    return tmpl_meta
+
+
+def _fail_rule(codes: list) -> dict:
+    """The pod failure rule that ends the Job at once on one of main's exit codes (never a pod retry)."""
+    return {"action": "FailJob", "onExitCodes": {"containerName": "main", "operator": "In", "values": list(codes)}}
+
+
+def _job_shell(
+    name: str,
+    meta: dict,
+    pod_spec: dict,
+    timeout_s: int | None,
+    placement: dict | None = None,
+    pod_metadata: dict | None = None,
+    fail_codes: list | None = None,
+) -> dict:
+    """placement (fleet path): {manager: bool, classes: [...], regions: [...]}. `fail_codes`: exit codes of main that
+    fail the Job at once (a run class's "delivery pending" codes, an endpoint call's caller errors), before the
+    platform's own rules (a node drain or preemption, and SIGKILL / SIGTERM, never count as a failure)."""
+    from execution import scope_runner_token
+
+    scope_runner_token(pod_spec)
+    rules = [
+        {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},
+        {"action": "Ignore", "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]}},
+    ]
+    if fail_codes:
+        rules.insert(0, _fail_rule(fail_codes))
     spec = {
         "parallelism": 1,
         "completions": 1,
         "backoffLimit": JOB_BACKOFF_LIMIT,
         "ttlSecondsAfterFinished": JOB_TTL_S,
-        "podFailurePolicy": {  # a node drain or preemption, and SIGKILL / SIGTERM, never count as a failure
-            "rules": [
-                {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},
-                {"action": "Ignore", "onExitCodes": {"containerName": "main", "operator": "In", "values": [137, 143]}},
-            ]
-        },
-        "template": {"metadata": tmpl_meta, "spec": pod_spec},
+        "podFailurePolicy": {"rules": rules},
+        "template": {"metadata": _template_meta(meta, placement, pod_metadata), "spec": pod_spec},
     }
     if timeout_s:
         spec["activeDeadlineSeconds"] = timeout_s
     if placement and placement.get("manager"):
         spec["managedBy"] = MULTIKUEUE_MANAGED_BY  # the manager's Job controller leaves it to Kueue MultiKueue
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": spec}
+
+
+def _jobset_shell(
+    name: str,
+    meta: dict,
+    pod_spec: dict,
+    nodes: int,
+    timeout_s: int | None,
+    placement: dict | None,
+    pod_metadata: dict | None,
+    fail_codes: list | None,
+) -> dict:
+    """A multi-node run's envelope (docs/JOBS.md "Multi-node runs"): a JobSet of one indexed Job with `nodes` pods, a
+    headless Service for rank discovery (the pod's subdomain), and restart-all on any pod loss: the indexed Job fails
+    on any pod loss (backoffLimit 0) and the JobSet recreates every pod, so the ranks restart together from the last
+    checkpoint. `fail_codes` ("compute done, delivery pending", docs/JOBS.md "Finalization by the application") end
+    the gang at once and for good: the indexed Job fails on that exit of main (podFailurePolicy, reason
+    PodFailurePolicy) and the JobSet's failure policy turns THAT reason into FailJobSet instead of its Recreate
+    restart, so the completed science is never recomputed; re-delivery is the model's CPU finalizer (:export)."""
+    from execution import scope_runner_token
+
+    pod_spec["subdomain"] = name
+    scope_runner_token(pod_spec)
+    tmpl_meta = _template_meta(meta, placement, pod_metadata)
+    job_spec = {
+        "parallelism": nodes,
+        "completions": nodes,
+        "completionMode": "Indexed",
+        "backoffLimit": 0,
+        "template": {"metadata": tmpl_meta, "spec": pod_spec},
+    }
+    if timeout_s:
+        job_spec["activeDeadlineSeconds"] = timeout_s
+    if fail_codes:
+        job_spec["podFailurePolicy"] = {"rules": [_fail_rule(fail_codes)]}
+    failure = {"maxRestarts": JOB_BACKOFF_LIMIT, "restartStrategy": "Recreate"}
+    if fail_codes:
+        failure["rules"] = [
+            {
+                "name": "delivery_pending",  # JobSet rule names: [A-Za-z0-9_:]+ only (webhook)
+                "action": "FailJobSet",
+                "onJobFailureReasons": ["PodFailurePolicy"],
+                "targetReplicatedJobs": ["workers"],
+            }
+        ]
+    spec = {
+        "network": {"enableDNSHostnames": True, "subdomain": name, "publishNotReadyAddresses": True},
+        "successPolicy": {"operator": "All", "targetReplicatedJobs": ["workers"]},
+        "failurePolicy": failure,
+        "ttlSecondsAfterFinished": JOB_TTL_S,
+        "replicatedJobs": [
+            {
+                "name": "workers",
+                "replicas": 1,
+                "template": {"metadata": {"labels": dict(tmpl_meta["labels"])}, "spec": job_spec},
+            }
+        ],
+    }
+    if placement and placement.get("manager"):
+        spec["managedBy"] = MULTIKUEUE_MANAGED_BY
+    return {"apiVersion": f"{JOBSET_GROUP}/{JOBSET_VERSION}", "kind": "JobSet", "metadata": meta, "spec": spec}

@@ -13,6 +13,7 @@ import db
 from config import LABEL
 
 log = logging.getLogger("api.admissions")
+COLS = "operation, tenant, region, labels, annotations, timeout_s, output_prefix, managed_by"
 
 
 def enabled() -> bool:
@@ -33,7 +34,7 @@ def record(job: dict, region: str | None, output_prefix: str | None) -> None:
     try:
         with db.pool().connection() as c:
             c.execute(
-                """insert into run_admissions (operation, tenant, region, labels, annotations, timeout_s, output_prefix, managed_by)
+                f"""insert into run_admissions ({COLS})
                    values (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s) on conflict (operation) do nothing""",
                 (
                     md["name"],
@@ -54,23 +55,12 @@ def get(operation: str) -> dict | None:
     if not enabled():
         return None
     with db.pool().connection() as c:
-        r = c.execute(
-            "select operation, tenant, region, labels, annotations, timeout_s, output_prefix, managed_by "
-            "from run_admissions where operation = %s",
-            (operation,),
-        ).fetchone()
+        r = c.execute(f"select {COLS} from run_admissions where operation = %s", (operation,)).fetchone()
     if r is None:
         return None
-    return {
-        "operation": r[0],
-        "tenant": r[1],
-        "region": r[2],
-        "labels": r[3] or {},
-        "annotations": r[4] or {},
-        "timeout_s": r[5],
-        "output_prefix": r[6],
-        "managed_by": r[7],
-    }
+    rec = dict(zip(COLS.split(", "), r, strict=True))
+    rec["labels"], rec["annotations"] = rec["labels"] or {}, rec["annotations"] or {}
+    return rec
 
 
 def as_job(rec: dict, status: str | None = None) -> dict:

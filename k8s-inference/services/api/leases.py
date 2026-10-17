@@ -85,9 +85,7 @@ def public(e: dict | None, history: list[dict] | None = None) -> dict | None:
             "state": x["state"],
             "attempt": x["attempt"],
             "worker_request_id": x["worker_request_id"],
-            "prepared_at": iso(x["prepared_at"]),
-            "attached_at": iso(x["attached_at"]),
-            "released_at": iso(x["released_at"]),
+            **{k: iso(x[k]) for k in ("prepared_at", "attached_at", "released_at")},
             "outcome": x["outcome"],
             "lane_seconds": float(x["lane_seconds"]) if x["lane_seconds"] is not None else None,
             "gpu_seconds": float(x["gpu_seconds"]) if x["gpu_seconds"] is not None else None,
@@ -102,23 +100,31 @@ def public(e: dict | None, history: list[dict] | None = None) -> dict | None:
     return out
 
 
+def _rows(c, where: str, params: tuple = ()) -> list[dict]:
+    return [_row(r) for r in c.execute(f"select {COLUMNS} from native_executions where {where}", params).fetchall()]
+
+
+def _select(where: str, params: tuple = ()) -> list[dict]:
+    with db.pool().connection() as c:
+        return _rows(c, where, params)
+
+
 def get(operation: str) -> dict | None:
     """The operation's current execution: the live row, else the newest terminal one."""
-    with db.pool().connection() as c:
-        r = c.execute(
-            f"select {COLUMNS} from native_executions where operation = %s "
-            "order by (state in ('prepared', 'attached')) desc, prepared_at desc limit 1",
-            (operation,),
-        ).fetchone()
-    return _row(r) if r else None
+    order = "order by (state in ('prepared', 'attached')) desc, prepared_at desc limit 1"
+    return next(iter(_select(f"operation = %s {order}", (operation,))), None)
 
 
 def history(operation: str) -> list[dict]:
-    with db.pool().connection() as c:
-        rows = c.execute(
-            f"select {COLUMNS} from native_executions where operation = %s order by prepared_at", (operation,)
-        ).fetchall()
-    return [_row(r) for r in rows]
+    return _select("operation = %s order by prepared_at", (operation,))
+
+
+def _live(c, operation: str):
+    """(attempt, state) of the operation's live execution (prepared or attached), None without one."""
+    return c.execute(
+        "select attempt, state from native_executions where operation = %s and state in ('prepared', 'attached')",
+        (operation,),
+    ).fetchone()
 
 
 # ---- transitions ------------------------------------------------------------------------------------------------
@@ -135,10 +141,7 @@ def prepare(operation: str, attempt: str, region: str, model: str, caller_gone=N
             raise HTTPException(
                 409, f"operation {operation}: its native executions are over (the caller finished and the join decided)"
             )
-        live = c.execute(
-            "select attempt, state from native_executions where operation = %s and state in ('prepared', 'attached')",
-            (operation,),
-        ).fetchone()
+        live = _live(c, operation)
         if live and live[0] != attempt and live[1] == "prepared" and caller_gone and caller_gone(live[0]):
             c.execute(
                 "update native_executions set state = 'closed', released_at = now(), outcome = 'caller replaced' "
@@ -180,10 +183,7 @@ def attach(operation: str, attempt: str, worker: dict, worker_request_id: str | 
             (operation, attempt),
         ).fetchone()
         if cur is None:
-            live = c.execute(
-                "select attempt, state from native_executions where operation = %s and state in ('prepared', 'attached')",
-                (operation,),
-            ).fetchone()
+            live = _live(c, operation)
             if live:
                 raise HTTPException(
                     409,
@@ -284,12 +284,7 @@ def settle_decision(operation: str, required: bool) -> tuple[bool, float | None,
     measurement of the endpoint it invoked. The caller closes normally, but no worker time is invented."""
     with db.pool().connection() as c, c.transaction():
         _lock(c, operation)
-        rows = [
-            _row(r)
-            for r in c.execute(
-                f"select {COLUMNS} from native_executions where operation = %s order by prepared_at", (operation,)
-            ).fetchall()
-        ]
+        rows = _rows(c, "operation = %s order by prepared_at", (operation,))
         if any(r["state"] == "attached" for r in rows):
             return False, None, "native execution attached: the worker has not settled"
         c.execute(
@@ -336,10 +331,7 @@ def sweep() -> list[str]:
     if not enabled():
         return []
     out = []
-    with db.pool().connection() as c:
-        rows = c.execute(f"select {COLUMNS} from native_executions where state = 'attached'").fetchall()
-    for r in rows:
-        e = _row(r)
+    for e in _select("state = 'attached'"):
         try:
             gone = _worker_gone(e)
         except Exception as ex:  # noqa: BLE001 - unknown is not lost

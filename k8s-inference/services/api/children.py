@@ -169,7 +169,7 @@ def _live_parent(identity: dict, parent: str) -> tuple[dict, str, str, dict]:
     return job, region, root, m
 
 
-def _frozen_allowlist(job: dict, m: dict) -> tuple[list[str], int]:
+def _frozen_allowlist(job: dict) -> tuple[list[str], int]:
     """The child endpoints and the bound the parent was RENDERED with (its annotations), never the class as it is
     now: a changed class does not widen or move a running run's grant, and a run rendered without the grant (no
     annotation) has none, whatever its class declares today."""
@@ -236,18 +236,17 @@ def _row(r) -> dict:
     return dict(zip([k.strip() for k in _ROW.split(",")], r, strict=True))
 
 
-def _get(root: str, unit_id: str) -> dict | None:
+def _rows(where: str, params: tuple = ()) -> list[dict]:
     with db.pool().connection() as c:
-        r = c.execute(
-            f"select {_ROW} from endpoint_children where root = %s and unit_id = %s", (root, unit_id)
-        ).fetchone()
-    return _row(r) if r else None
+        return [_row(r) for r in c.execute(f"select {_ROW} from endpoint_children where {where}", params).fetchall()]
+
+
+def _get(root: str, unit_id: str) -> dict | None:
+    return next(iter(_rows("root = %s and unit_id = %s", (root, unit_id))), None)
 
 
 def by_child(child: str) -> dict | None:
-    with db.pool().connection() as c:
-        r = c.execute(f"select {_ROW} from endpoint_children where child = %s", (child,)).fetchone()
-    return _row(r) if r else None
+    return next(iter(_rows("child = %s", (child,))), None)
 
 
 def result_ref(ns: str, region: str, child: str) -> str:
@@ -265,22 +264,17 @@ def capture_of(row: dict) -> dict | None:
         return None
     if not isinstance(m, dict) or not m.get("capture_complete"):
         return None
-    out = {
-        "uri": ref,
-        "sha256": m.get("sha256"),
-        "content_type": m.get("content_type"),
-        "size_bytes": m.get("size_bytes"),
-        "http_status": m.get("http_status"),
-        "attempt_id": m.get("attempt_id"),
-        "timings": m.get("timings"),
-        "delivered": True,
-    }
+    manifest = ("sha256", "content_type", "size_bytes", "http_status", "attempt_id", "timings")
+    out = {"uri": ref, **{k: m.get(k) for k in manifest}, "delivered": True}
     try:
         d = artifacts.presign_download(ns, ref, URL_EXPIRES_S, region=row["region"])
         out["download_url"], out["download_expires_in_s"] = d["url"], URL_EXPIRES_S
     except HTTPException as e:
         out["download_error"] = e.detail
     return out
+
+
+_READBACK = "child parent parent_pod model model_image request_sha256 request state timeout_s region".split()
 
 
 def readback(ns: str, root: str, unit_id: str) -> dict | None:
@@ -290,16 +284,7 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
     out = {
         "root": root,
         "unit_id": unit_id,
-        "child": row["child"],
-        "parent": row["parent"],
-        "parent_pod": row["parent_pod"],
-        "model": row["model"],
-        "model_image": row["model_image"],
-        "request_sha256": row["request_sha256"],
-        "request": row["request"],
-        "state": row["state"],
-        "timeout_s": row["timeout_s"],
-        "region": row["region"],
+        **{k: row[k] for k in _READBACK},
         "cancel_requested_at": iso(row["cancel_requested_at"]),
         "reason": row["reason"],
         "created_at": iso(row["created_at"]),
@@ -341,14 +326,18 @@ def readback(ns: str, root: str, unit_id: str) -> dict | None:
         op = jobs.normalise(job)
         out.update({"status": op["status"], "error": op.get("error"), "ended": op.get("ended_at")})
     except HTTPException as e:
-        if e.status_code != 404:
-            out["status"] = "UNAVAILABLE"
-        elif row["state"] == "pending":
-            out["status"] = "PENDING"
-        elif out["attempt"] and out["attempt"]["status"]:
-            out["status"] = str(out["attempt"]["status"]).upper()  # the record outlives the Job
-        else:
-            out["status"] = "ENDED" if row["state"] == "ended" else "UNKNOWN"
+        att = out["attempt"]
+        out["status"] = (
+            "UNAVAILABLE"
+            if e.status_code != 404
+            else "PENDING"
+            if row["state"] == "pending"
+            else str(att["status"]).upper()  # the record outlives the Job
+            if att and att["status"]
+            else "ENDED"
+            if row["state"] == "ended"
+            else "UNKNOWN"
+        )
     # the outcome the parent may act on: a delivered capture decides (its HTTP status); without one, the producing
     # attempt's exit says whether a capture exists to deliver again (0/2/5 with a failed export: `:export` by the
     # owner), or whether the inference outcome is unknown for good (4: posted, no response; 3: nothing captured),
@@ -405,43 +394,143 @@ def _never_inferred(recs: list) -> bool:
     return all(not r.get("capture") and r.get("exit_code") == 2 for r in recs)
 
 
-def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
-    """Admit one child (see the module docstring). Returns (readback, created)."""
+def _validated(body: dict) -> tuple[str, str, dict | None, dict | None, dict, int | None]:
+    """(unit_id, model, inline input, input reference, transport, requested timeout) of a child request; 400 unless
+    well-formed."""
     unit_id = str(body.get("unit_id") or "")
     if not re.fullmatch(UNIT_RE, unit_id):
         raise HTTPException(400, "unit_id: 1..128 of [A-Za-z0-9._:-], starting alphanumeric")
-    model = str(body.get("model") or "")
     inp, input_ref, transport = _input_of(body)
-    req_timeout = body.get("timeout_s")
-    if req_timeout is not None and (
-        not isinstance(req_timeout, int) or isinstance(req_timeout, bool) or req_timeout < 1
-    ):
+    timeout = body.get("timeout_s")
+    if timeout is not None and (not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1):
         raise HTTPException(400, "timeout_s must be a positive integer")
-    job, region, root, m = _live_parent(identity, parent)
-    ns = identity["namespace"]
-    allowed, max_units = _frozen_allowlist(job, m)
-    delivery = _frozen_delivery(job)
-    app_result_ref = None
-    if delivery == "application":
-        # the parent's broker delivers (external storage): each child request carries its application delivery (the
-        # renewable broker, or static URLs) and the application's immutable reference for the captured object
-        app_result_ref = str(body.get("result_ref") or "")
-        if not app_result_ref or len(app_result_ref) > 512:
-            raise HTTPException(
-                400, "result_ref: the application's immutable reference for the captured object (1..512 chars)"
-            )
-        has_broker = str(transport.get("refresh_url") or "").startswith("https://") and bool(
-            transport.get("refresh_token")
+    return unit_id, str(body.get("model") or ""), inp, input_ref, transport, timeout
+
+
+def _application_result_ref(body: dict, transport: dict) -> str:
+    """Application delivery (the parent's broker, external storage): each child request carries its delivery (the
+    renewable broker, or static URLs) and the application's immutable reference for the captured object."""
+    ref = str(body.get("result_ref") or "")
+    if not ref or len(ref) > 512:
+        raise HTTPException(
+            400, "result_ref: the application's immutable reference for the captured object (1..512 chars)"
         )
-        has_static = str(transport.get("response_url") or "").startswith("https://") and str(
-            transport.get("call_url") or ""
-        ).startswith("https://")
-        if not has_broker and not has_static:
-            raise HTTPException(
-                400,
-                "application delivery: transport needs refresh_url (https) + refresh_token (the application's broker, "
-                "call.sh's refresh contract), or static response_url + call_url (https)",
-            )
+    broker = str(transport.get("refresh_url") or "").startswith("https://") and bool(transport.get("refresh_token"))
+    static = all(str(transport.get(k) or "").startswith("https://") for k in ("response_url", "call_url"))
+    if not broker and not static:
+        raise HTTPException(
+            400,
+            "application delivery: transport needs refresh_url (https) + refresh_token (the application's broker, "
+            "call.sh's refresh contract), or static response_url + call_url (https)",
+        )
+    return ref
+
+
+def _retry_allowed(existing, root: str, unit_id: str, parent: str, ann: dict) -> None:
+    """Unit retry, explicit (docs/JOBS.md "Endpoint children"): the caller asks to run an ended unit again. Only a
+    LATER parent of the root (an owner's continuation, not the parent that owned the ended child) may, with the same
+    bound request, and only for a child that definitely never inferred (no capture, no outcome-unknown attempt): the
+    unit reopens as the next incarnation (a new Job, binding and ledger member; the earlier child's Job and records
+    stay as history). 409 otherwise."""
+    row_now = _get(root, unit_id)
+    recs = attempts.for_operation(row_now["child"]) if attempts.enabled() else []
+    if _delivered(row_now, recs):
+        raise HTTPException(409, f"unit {unit_id} of {root} delivered its capture ({existing[0]}); a unit infers once")
+    if parent == row_now["parent"] or not ann.get(f"{LABEL}/resumed-from"):
+        raise HTTPException(
+            409,
+            f"unit {unit_id} of {root}: only a later continuation of the root (an owner's resume) retries a "
+            f"unit; {parent} is the parent that owned {existing[0]}",
+        )
+    if not _never_inferred(recs):
+        raise HTTPException(
+            409,
+            f"unit {unit_id} of {root}: the outcome of {existing[0]} is unknown (its inference was posted); "
+            "it is not retried",
+        )
+
+
+_RETRY_COLS = ("child", "parent", "parent_pod", "parent_pod_uid", "namespace", "region", "timeout_s", "transport")
+
+
+def _open_unit(
+    c, intent: dict, job: dict, ann: dict, cm: dict, body: dict, max_units: int, cls: str
+) -> tuple[bool, bool]:
+    """Under the root's lock: the unit's durable intent (the row FIRST, `pending`) as the unit's first child, as its
+    next incarnation (an explicit retry of an ended one), or nothing (a replay of the same bound request reads the
+    unit back; renewed transfer URLs are recorded on an open one). Returns (pending: an intent is open to complete,
+    created: this call opened it)."""
+    root, unit_id, parent, transport = intent["root"], intent["unit_id"], intent["parent"], intent["transport"]
+    existing = c.execute(
+        "select child, request_sha256, state, incarnation from endpoint_children where root = %s and unit_id = %s",
+        (root, unit_id),
+    ).fetchone()
+    if existing and existing[1] != intent["request_sha256"]:
+        raise HTTPException(
+            409,
+            f"unit {unit_id} of {root} already has a child with a different request ({existing[0]}: the model, "
+            "input or input_ref.sha256, timeout_s and region of a unit are bound at its first admission)",
+        )
+    if existing and transport and existing[2] in OPEN:
+        c.execute(
+            "update endpoint_children set transport = %s where root = %s and unit_id = %s",
+            (json.dumps(transport), root, unit_id),
+        )
+    retry = bool(existing) and existing[2] == "ended" and body.get("retry") is True
+    if retry:
+        _retry_allowed(existing, root, unit_id, parent, ann)
+    if existing and not retry:
+        return existing[2] == "pending", False
+    active = c.execute(
+        "select child, unit_id, state from endpoint_children where root = %s and state in ('pending', 'active')",
+        (root,),
+    ).fetchone()
+    if active:
+        raise HTTPException(
+            409,
+            f"run {root}: child {active[0]} (unit {active[1]}) is still {active[2]}; one child at a time, "
+            "until its terminal settlement",
+        )
+    remaining = _remaining_s(job)
+    if remaining is not None and remaining < MIN_REMAINING_S:
+        raise HTTPException(409, f"run {parent}: {remaining} s of its deadline left; no child attaches")
+    timeout = int(body.get("timeout_s") or int(cm.get("timeout_s") or 600))
+    if remaining is not None:
+        timeout = min(timeout, remaining)
+    if timeout < MIN_REMAINING_S:
+        raise HTTPException(400, f"timeout_s must leave at least {MIN_REMAINING_S} s")
+    incarnation = int(existing[3] or 1) + 1 if retry else 1
+    child = child_id(root, unit_id, incarnation)
+    row = {**intent, "child": child, "timeout_s": timeout, "binding_ref": binding_ref(child)}
+    for k in ("request", "transport"):
+        row[k] = json.dumps(row[k])
+    if retry:
+        row.update({"incarnation": incarnation, "previous_child": existing[0]})
+        cols = _RETRY_COLS + ("model_image", "binding_ref", "incarnation", "previous_child")
+        c.execute(
+            f"update endpoint_children set {', '.join(f'{k} = %s' for k in cols)}, state = 'pending', ended_at = null, "
+            "reason = null, cancel_requested_at = null where root = %s and unit_id = %s and state = 'ended'",
+            (*(row[k] for k in cols), root, unit_id),
+        )
+        return True, True
+    n = c.execute("select count(*) from endpoint_children where root = %s", (root,)).fetchone()[0]
+    if n >= max_units:
+        raise HTTPException(409, f"run {root}: {max_units} children already (child_max_units of {cls})")
+    c.execute(
+        f"insert into endpoint_children ({', '.join(row)}, state) values ({', '.join('%s' for _ in row)}, 'pending')",
+        tuple(row.values()),
+    )
+    return True, True
+
+
+def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
+    """Admit one child (see the module docstring). Returns (readback, created)."""
+    unit_id, model, inp, input_ref, transport, req_timeout = _validated(body)
+    job, _region, root, m = _live_parent(identity, parent)
+    ns = identity["namespace"]
+    allowed, max_units = _frozen_allowlist(job)
+    delivery = _frozen_delivery(job)
+    app_result_ref = _application_result_ref(body, transport) if delivery == "application" else None
     if not allowed:
         raise HTTPException(403, f"run class {m['name']} declares no child endpoints")
     if model not in allowed:
@@ -450,8 +539,6 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
     if cm is None or cm.get("mode") == "run":
         raise HTTPException(400, f"child model {model} is not an endpoint")
     req = bound_request(model, inp, input_ref, req_timeout, body.get("region"), app_result_ref)
-    h = request_hash(req)
-    child = child_id(root, unit_id)
     ann = job["metadata"].get("annotations") or {}
     key_hash = ann.get(f"{LABEL}/key")
     tenant = (job["metadata"].get("labels") or {}).get(f"{LABEL}/tenant")
@@ -473,130 +560,30 @@ def create(identity: dict, parent: str, body: dict) -> tuple[dict, bool]:
         raise HTTPException(503, "endpoint children need PUBLIC_API_URL (the child's refresh broker is this API)")
     _cluster, child_region = api._deployment_of(cm, req["region"])  # definite (400/404) before anything is recorded
     if delivery == "platform":
-        result_ref(ns, child_region, child)  # the tenant's storage in that region exists (404/503 before any record)
-    image = str(cm.get("image") or "")
+        result_ref(ns, child_region, child_id(root, unit_id))  # the tenant's storage in that region (404/503 first)
+    intent = {
+        "root": root,
+        "unit_id": unit_id,
+        "parent": parent,
+        "parent_pod": identity["pod"],
+        "parent_pod_uid": identity["uid"],
+        "model": model,
+        "request_sha256": request_hash(req),
+        "namespace": ns,
+        "region": child_region,
+        "request": req,
+        "transport": transport,
+        "model_image": str(cm.get("image") or ""),
+        "delivery": delivery,
+    }
     # the durable intent first, under the one-open-child and per-unit identities (compare-and-swap on the primary key)
     with db.pool().connection() as c, c.transaction():
         c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 3))", (root,))
-        existing = c.execute(
-            "select child, request_sha256, state, incarnation from endpoint_children where root = %s and unit_id = %s",
-            (root, unit_id),
-        ).fetchone()
-        retry = False
-        if existing:
-            if existing[1] != h:
-                raise HTTPException(
-                    409,
-                    f"unit {unit_id} of {root} already has a child with a different request ({existing[0]}: the model, "
-                    "input or input_ref.sha256, timeout_s and region of a unit are bound at its first admission)",
-                )
-            pending = existing[2] == "pending"
-            if transport and existing[2] in OPEN:  # renewed transfer URLs for the same bound request
-                c.execute(
-                    "update endpoint_children set transport = %s where root = %s and unit_id = %s",
-                    (json.dumps(transport), root, unit_id),
-                )
-            if existing[2] == "ended" and body.get("retry") is True:
-                # unit retry, explicit (docs/JOBS.md "Endpoint children"): the caller asks to run the unit again. Only a
-                # LATER parent of the root (an owner's continuation, not the parent that owned the ended child) may, with
-                # the same bound request, and only for a child that definitely never inferred (no capture, no
-                # outcome-unknown attempt): the unit reopens as the next incarnation (a new Job, binding and ledger
-                # member; the earlier child's Job and records stay as history). Without `retry` the ended row replays.
-                row_now = _get(root, unit_id)
-                recs = attempts.for_operation(row_now["child"]) if attempts.enabled() else []
-                if _delivered(row_now, recs):
-                    raise HTTPException(
-                        409, f"unit {unit_id} of {root} delivered its capture ({existing[0]}); a unit infers once"
-                    )
-                if parent == row_now["parent"] or not ann.get(f"{LABEL}/resumed-from"):
-                    raise HTTPException(
-                        409,
-                        f"unit {unit_id} of {root}: only a later continuation of the root (an owner's resume) retries a "
-                        f"unit; {parent} is the parent that owned {existing[0]}",
-                    )
-                if not _never_inferred(recs):
-                    raise HTTPException(
-                        409,
-                        f"unit {unit_id} of {root}: the outcome of {existing[0]} is unknown (its inference was posted); "
-                        "it is not retried",
-                    )
-                retry = True
-        if retry or not existing:
-            active = c.execute(
-                "select child, unit_id, state from endpoint_children where root = %s and state in ('pending', 'active')",
-                (root,),
-            ).fetchone()
-            if active:
-                raise HTTPException(
-                    409,
-                    f"run {root}: child {active[0]} (unit {active[1]}) is still {active[2]}; one child at a time, "
-                    "until its terminal settlement",
-                )
-            remaining = _remaining_s(job)
-            if remaining is not None and remaining < MIN_REMAINING_S:
-                raise HTTPException(409, f"run {parent}: {remaining} s of its deadline left; no child attaches")
-            timeout = int(req_timeout or int(cm.get("timeout_s") or 600))
-            if remaining is not None:
-                timeout = min(timeout, remaining)
-            if timeout < MIN_REMAINING_S:
-                raise HTTPException(400, f"timeout_s must leave at least {MIN_REMAINING_S} s")
-        if retry:
-            incarnation = int(existing[3] or 1) + 1
-            child = child_id(root, unit_id, incarnation)
-            c.execute(
-                "update endpoint_children set child = %s, parent = %s, parent_pod = %s, parent_pod_uid = %s, "
-                "state = 'pending', ended_at = null, reason = null, cancel_requested_at = null, namespace = %s, "
-                "region = %s, timeout_s = %s, transport = %s, model_image = %s, binding_ref = %s, incarnation = %s, "
-                "previous_child = %s where root = %s and unit_id = %s and state = 'ended'",
-                (
-                    child,
-                    parent,
-                    identity["pod"],
-                    identity["uid"],
-                    ns,
-                    child_region,
-                    timeout,
-                    json.dumps(transport),
-                    image,
-                    binding_ref(child),
-                    incarnation,
-                    existing[0],
-                    root,
-                    unit_id,
-                ),
-            )
-            pending = True
-        elif not existing:
-            n = c.execute("select count(*) from endpoint_children where root = %s", (root,)).fetchone()[0]
-            if n >= max_units:
-                raise HTTPException(409, f"run {root}: {max_units} children already (child_max_units of {m['name']})")
-            c.execute(
-                "insert into endpoint_children (root, unit_id, child, parent, parent_pod, parent_pod_uid, model, request_sha256, state, namespace, region, timeout_s, request, transport, model_image, binding_ref, delivery) values (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    root,
-                    unit_id,
-                    child,
-                    parent,
-                    identity["pod"],
-                    identity["uid"],
-                    model,
-                    h,
-                    ns,
-                    child_region,
-                    timeout,
-                    json.dumps(req),
-                    json.dumps(transport),
-                    image,
-                    binding_ref(child),
-                    delivery,
-                ),
-            )
-            pending = True
+        pending, created = _open_unit(c, intent, job, ann, cm, body, max_units, m["name"])
     if not pending:
         return readback(ns, root, unit_id), False  # replay / readback after a lost response
-    row = _get(root, unit_id)
-    complete(row, parent_ann=ann, tenant=tenant, key_hash=key_hash, synchronous=True)
-    return readback(ns, root, unit_id), retry or not bool(existing)
+    complete(_get(root, unit_id), parent_ann=ann, tenant=tenant, key_hash=key_hash, synchronous=True)
+    return readback(ns, root, unit_id), created
 
 
 def _binding_data(row: dict, admitted: str) -> dict[str, str]:
@@ -659,14 +646,11 @@ def complete(
             synchronous,
         )
     if parent_ann is None or tenant is None or key_hash is None:
-        try:
-            pjob, _ = jobs.find(ns, row["parent"])
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
+        pjob = jobs.find_or_none(ns, row["parent"])
+        if pjob is None:
             return _refuse(row, f"parent {row['parent']} is gone before the child was created", 409, synchronous)
-        parent_ann = pjob["metadata"].get("annotations") or {}
-        tenant = (pjob["metadata"].get("labels") or {}).get(f"{LABEL}/tenant")
+        parent_ann = pjob[0]["metadata"].get("annotations") or {}
+        tenant = (pjob[0]["metadata"].get("labels") or {}).get(f"{LABEL}/tenant")
         key_hash = parent_ann.get(f"{LABEL}/key")
         if not tenant or not key_hash:
             return _refuse(row, f"parent {row['parent']} carries no key on record", 409, synchronous)
@@ -693,13 +677,7 @@ def complete(
             )
         except keys.KeyLimit as e:
             return _refuse(row, e.detail, e.status, synchronous)
-        try:
-            cjob, region = jobs.find(ns, child)
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise  # unreachable clusters: ambiguous, the intent stays pending
-            cjob = None
-        if cjob is None:
+        if jobs.find_or_none(ns, child) is None:  # unreachable clusters raise: ambiguous, the intent stays pending
             admitted = api._admitted_token(key_hash, cm["name"], child)
             try:
                 # the binding lives where the API's delivery reads it (the API's own cluster, as a caller's
@@ -714,50 +692,7 @@ def complete(
                     keys.rollback_run_member(child)
                     return _refuse(row, f"the child's binding was refused: {e.detail}", e.status_code, synchronous)
                 return _ambiguous(row, f"binding: {e.detail}", synchronous)
-            prefix = (
-                ""
-                if row.get("delivery") == "application"
-                else f"s3://{result_ref(ns, row['region'], child)[5:].split('/', 1)[0]}/operations/{child}"
-            )
-            # the parent's FROZEN execution (its Job's annotation, never the current tenant config): the child's caller
-            # runs under the same workload identity (call.sh sends its own projected token to the broker) and the
-            # same execution profile; the parent's placement/recovery/graph options do not apply to a call
-            pex = jobs.execution_of(parent_ann) or {}
-            ex = {"io_mode": "application", "private_input_ref": row["binding_ref"]}
-            for k in ("identity", "profile"):
-                if pex.get(k):
-                    ex[k] = pex[k]
-            # the child's caller carries ONLY the operation-scoped credential: the admission token (HMAC of the root's
-            # key hash, the child model and the child operation), presented as `Bearer s2-admitted.<token>`; the
-            # gateway hook rebuilds the principal from the key record by hash and accepts it only while the child
-            # holds a live reservation. No customer or admin key is stored or forwarded; the call goes through the
-            # model's gateway (never LiteLLM's pass-through, which would need a key). Application I/O: the request
-            # from the binding, one durable POST, the capture delivered to the platform-owned destination
-            cjob, secret = jobs.build_async(
-                child,
-                {**cm, "litellm_route": None},
-                {},
-                tenant,
-                f"{api.ADMITTED_BEARER_PREFIX}{admitted}",
-                f"child:{unit_id}",
-                None,
-                int(row["timeout_s"]),
-                prefix,
-                row["region"],
-                ex=ex,
-                key_hash=key_hash,
-                admitted=admitted,
-            )
-            a = cjob["metadata"]["annotations"]
-            a[f"{LABEL}/child-of"] = row["parent"]
-            a[f"{LABEL}/child-root"] = root
-            a[f"{LABEL}/child-unit"] = unit_id
-            a[f"{LABEL}/child-request-sha256"] = row["request_sha256"]
-            jobs._inherit_owner(cjob, parent_ann)
-            if ex.get("profile"):  # the parent's execution profile selects the child's network policy as well
-                cjob["spec"]["template"].setdefault("metadata", {}).setdefault("labels", {})[
-                    f"{LABEL}/execution-profile"
-                ] = ex["profile"]["name"]
+            cjob, secret = _caller_job(row, cm, parent_ann, tenant, key_hash, admitted)
             try:
                 jobs.create(ns, cjob, row["region"], secret)
             except HTTPException as e:
@@ -775,6 +710,57 @@ def complete(
         )
     log.info("child %s of %s (root %s, unit %s) active on %s", child, row["parent"], root, unit_id, row["region"])
     return "active"
+
+
+def _caller_job(row: dict, cm: dict, parent_ann: dict, tenant: str, key_hash: str, admitted: str) -> tuple[dict, dict]:
+    """The child's caller Job (jobs.build_async): rendered under the parent's FROZEN execution (its Job's annotation,
+    never the current tenant config: the same workload identity, call.sh sends its own projected token to the broker,
+    and the same execution profile, which selects the child's network policy as well; the parent's placement/recovery/
+    graph options do not apply to a call). The caller carries ONLY the operation-scoped credential: the admission
+    token (HMAC of the root's key hash, the child model and the child operation), presented as
+    `Bearer s2-admitted.<token>`; the gateway hook rebuilds the principal from the key record by hash and accepts it
+    only while the child holds a live reservation. No customer or admin key is stored or forwarded; the call goes
+    through the model's gateway (never LiteLLM's pass-through, which would need a key). Application I/O: the request
+    from the binding, one durable POST, the capture delivered to the platform-owned destination."""
+    import app as api
+
+    child, unit_id, root = row["child"], row["unit_id"], row["root"]
+    prefix = (
+        ""
+        if row.get("delivery") == "application"
+        else f"s3://{result_ref(row['namespace'], row['region'], child)[5:].split('/', 1)[0]}/operations/{child}"
+    )
+    pex = jobs.execution_of(parent_ann) or {}
+    ex = {"io_mode": "application", "private_input_ref": row["binding_ref"]}
+    ex.update({k: pex[k] for k in ("identity", "profile") if pex.get(k)})
+    cjob, secret = jobs.build_async(
+        child,
+        {**cm, "litellm_route": None},
+        {},
+        tenant,
+        f"{api.ADMITTED_BEARER_PREFIX}{admitted}",
+        f"child:{unit_id}",
+        None,
+        int(row["timeout_s"]),
+        prefix,
+        row["region"],
+        ex=ex,
+        key_hash=key_hash,
+        admitted=admitted,
+    )
+    cjob["metadata"]["annotations"].update(
+        {
+            f"{LABEL}/child-of": row["parent"],
+            f"{LABEL}/child-root": root,
+            f"{LABEL}/child-unit": unit_id,
+            f"{LABEL}/child-request-sha256": row["request_sha256"],
+        }
+    )
+    jobs._inherit_owner(cjob, parent_ann)
+    if ex.get("profile"):
+        tmpl = cjob["spec"]["template"]
+        tmpl.setdefault("metadata", {}).setdefault("labels", {})[f"{LABEL}/execution-profile"] = ex["profile"]["name"]
+    return cjob, secret
 
 
 def _refuse(row: dict, why: str, code: int, synchronous: bool) -> str:
@@ -833,12 +819,10 @@ def refresh(child: str, token: str, body: dict) -> dict:
         raise HTTPException(409, f"child {child} is {row['state']}: nothing to transfer any more")
     attempt = str(body.get("attempt_id") or "")
     ns, region = row["namespace"], row["region"]
-    try:
-        job, _ = jobs.find(ns, op_id)
-    except HTTPException as e:
-        if e.status_code != 404:
-            raise
+    found = jobs.find_or_none(ns, op_id)
+    if found is None:
         raise HTTPException(409, f"operation {op_id} has no Job any more: no live attempt to transfer for")
+    job = found[0]
     if (job["metadata"].get("annotations") or {}).get(f"{LABEL}/key") != h or status.finished(job):
         raise HTTPException(409, f"operation {op_id} is over or not the child's")
     live = [
@@ -870,22 +854,19 @@ def _parent_over(ns: str, root: str, parent: str) -> str | None:
         return "root cancelled"
     name = parent
     for _ in range(16):
-        try:
-            pjob, _ = jobs.find(ns, name)
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
+        pjob = jobs.find_or_none(ns, name)
+        if pjob is None:
             if attempts.enabled() and attempts.for_operation(root):
                 return None  # the Job expired but the run is on record: nothing to judge from here
             return f"parent {name} gone"
-        pann = pjob["metadata"].get("annotations") or {}
+        pann = pjob[0]["metadata"].get("annotations") or {}
         if pann.get(f"{LABEL}/cancelled"):
             return f"parent {name} cancelled"
         succ = pann.get(f"{LABEL}/successor")
         if succ and succ != name:
             name = succ  # judged by the successor attempt
             continue
-        if status.finished(pjob):
+        if status.finished(pjob[0]):
             return f"parent {name} finished without a successor"
         return None
     return None
@@ -905,34 +886,16 @@ def sweep() -> list[str]:
     if not enabled():
         return []
     out = []
-    with db.pool().connection() as c:
-        rows = [
-            _row(r)
-            for r in c.execute(
-                f"select {_ROW} from endpoint_children where state in ('pending', 'active') order by created_at"
-            ).fetchall()
-        ]
-    for row in rows:
+    for row in _rows("state in ('pending', 'active') order by created_at"):
         child, root, unit_id, ns = row["child"], row["root"], row["unit_id"], row["namespace"]
         try:
             if row["state"] == "pending":
                 over = _parent_over(ns, root, row["parent"])
-                if over:
-                    if keys.member_of(child):
-                        try:
-                            jobs.find(ns, child)
-                        except HTTPException as e:
-                            if e.status_code != 404:
-                                raise
-                            keys.rollback_run_member(child)  # confirmed absent: never created
-                            _end(root, unit_id, f"{over} before the child was created")
-                            out.append(f"{child}:ended")
-                            continue
-                        # the Job exists after all (created, the row not yet active): finish and cancel below
-                    else:
-                        _end(root, unit_id, f"{over} before the child was created")
-                        out.append(f"{child}:ended")
-                        continue
+                # with a member, the Job may exist after all (created, the row not yet active): finish and cancel below
+                if over and (keys.member_of(child) is None or jobs.find_or_none(ns, child) is None):
+                    _never_created(row, over)
+                    out.append(f"{child}:ended")
+                    continue
                 state = complete(row)
                 out.append(f"{child}:{state}")
                 if state != "active":
@@ -942,11 +905,8 @@ def sweep() -> list[str]:
                 _end(root, unit_id, row["reason"] or "settled")
                 out.append(f"{child}:ended")
                 continue
-            try:
-                cjob, cregion = jobs.find(ns, child)
-            except HTTPException as e:
-                if e.status_code != 404:
-                    raise
+            found = jobs.find_or_none(ns, child)
+            if found is None:
                 if keys.member_of(child) is None or row["cancel_requested_at"] is not None:
                     _end(root, unit_id, row["reason"] or "lost")  # nothing to settle, nothing drains
                     out.append(f"{child}:ended")
@@ -955,7 +915,7 @@ def sweep() -> list[str]:
                 continue  # issued; the settlement ends it
             over = _parent_over(ns, root, row["parent"])
             if over:
-                _cancel(row, cjob, cregion, over)
+                _cancel(row, found[0], found[1], over)
                 out.append(f"{child}:cancelled")
         except Exception:  # noqa: BLE001
             log.exception("child sweep: %s", child)
@@ -988,33 +948,26 @@ def cancel_for_root(ns: str, root: str, why: str = "root cancelled by its owner"
     out = []
     if not enabled():
         return out
-    with db.pool().connection() as c:
-        rows = [
-            _row(r)
-            for r in c.execute(
-                f"select {_ROW} from endpoint_children where root = %s and state in ('pending', 'active')", (root,)
-            ).fetchall()
-        ]
-    for row in rows:
+    for row in _rows("root = %s and state in ('pending', 'active')", (root,)):
         child, unit_id = row["child"], row["unit_id"]
         if row["cancel_requested_at"] is not None:
             continue
-        try:
-            cjob, cregion = jobs.find(ns, child)
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
-            if row["state"] == "pending":
-                if keys.member_of(child):
-                    keys.rollback_run_member(child)  # confirmed absent: never created
-                _end(root, unit_id, f"{why} before the child was created")
-            else:
-                _end(root, unit_id, f"cancelled: {why} (job gone)")
-            out.append(child)
-            continue
-        _cancel(row, cjob, cregion, why)
+        found = jobs.find_or_none(ns, child)
+        if found is not None:
+            _cancel(row, found[0], found[1], why)
+        elif row["state"] == "pending":
+            _never_created(row, why)
+        else:
+            _end(root, unit_id, f"cancelled: {why} (job gone)")
         out.append(child)
     return out
+
+
+def _never_created(row: dict, why: str) -> None:
+    """A pending intent whose Job is confirmed absent: its member (if any) rolled back, the row ended."""
+    if keys.member_of(row["child"]):
+        keys.rollback_run_member(row["child"])
+    _end(row["root"], row["unit_id"], f"{why} before the child was created")
 
 
 def _end(root: str, unit_id: str, reason: str | None = None) -> None:

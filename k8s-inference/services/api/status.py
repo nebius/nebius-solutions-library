@@ -99,19 +99,8 @@ def _pod_gang_fields(p: dict) -> dict:
 
 def _lifecycle_fields(r: dict) -> dict:
     """What an attempt record carries beyond the pod's state (the uploader's `export`, the database's `export_state`)."""
-    out = {
-        k: r.get(k)
-        for k in (
-            "result_ref",
-            "checkpoint_ref",
-            "image_digest",
-            "epoch",
-            "pod_uid",
-            "gang_rank",
-            "gang_restart",
-        )
-        if r.get(k) is not None
-    }
+    keys = ("result_ref", "checkpoint_ref", "image_digest", "epoch", "pod_uid", "gang_rank", "gang_restart")
+    out = {k: r.get(k) for k in keys if r.get(k) is not None}
     # the incarnation-frozen restore triple (docs/JOBS.md "Restoring a gang"): present exactly on a gang's
     # authenticated records (the start ACK froze it there; an explicit null triple = nothing to restore), absent else
     out.update(attempts.restore_fields(r))
@@ -119,6 +108,22 @@ def _lifecycle_fields(r: dict) -> dict:
     if export is not None:
         out["export_state"] = export
     return out
+
+
+def _pod_status(p: dict, phase: str, term: dict, run: dict, disrupted: bool) -> str:
+    """The attempt's status from its pod: `main` decides once it terminated (the uploader may still be running after
+    it; an OOM kill ends with 137 like a preemption's SIGKILL: the kubelet's reason tells them apart, an OOM is the
+    application's), a pod being deleted or disrupted is PREEMPTED, else the pod's phase."""
+    deleting = bool(p["metadata"].get("deletionTimestamp"))
+    if term:
+        if term.get("exitCode") == 0:
+            return "SUCCEEDED"
+        if term.get("reason") == "OOMKilled":
+            return "FAILED"
+        return "PREEMPTED" if disrupted or term.get("exitCode") in (137, 143) else "FAILED"
+    if run:
+        return "PREEMPTED" if deleting else "RUNNING"
+    return "PREEMPTED" if (phase == "Failed" and disrupted) or deleting else PHASE.get(phase, "QUEUED")
 
 
 def _attempts(pods: list, records: list | None = None, name: str | None = None) -> list[dict]:
@@ -132,27 +137,7 @@ def _attempts(pods: list, records: list | None = None, name: str | None = None) 
         disrupted = any(
             c.get("type") == "DisruptionTarget" and c.get("status") == "True" for c in (st.get("conditions") or [])
         )
-        if term:  # the attempt is `main`: the uploader may still be running after it
-            # an OOM kill ends with 137 like a preemption's SIGKILL: the kubelet's reason tells them apart (an OOM is the application's)
-            s = (
-                "SUCCEEDED"
-                if term.get("exitCode") == 0
-                else (
-                    "FAILED"
-                    if term.get("reason") == "OOMKilled"
-                    else "PREEMPTED"
-                    if disrupted or term.get("exitCode") in (137, 143)
-                    else "FAILED"
-                )
-            )
-        elif run:
-            s = "PREEMPTED" if p["metadata"].get("deletionTimestamp") else "RUNNING"
-        else:
-            s = (
-                "PREEMPTED"
-                if (phase == "Failed" and disrupted) or p["metadata"].get("deletionTimestamp")
-                else PHASE.get(phase, "QUEUED")
-            )
+        s = _pod_status(p, phase, term, run, disrupted)
         reason = term.get("reason") if term else (st.get("reason") or None)
         if disrupted:
             reason = next((c.get("message") for c in st["conditions"] if c.get("type") == "DisruptionTarget"), reason)
@@ -271,11 +256,11 @@ def accounting_annotations(job: dict) -> dict:
     return ann
 
 
-def _json(text: str | None):
+def _json(text: str | None, default=None):
     try:
-        return json.loads(text) if text else None
+        return json.loads(text) if text else default
     except ValueError:
-        return None
+        return default
 
 
 def _waiting(job: dict, region: str | None) -> tuple[str, str | None]:
@@ -316,6 +301,45 @@ def cancel_attempt(attempts: list, cancelled: bool) -> list:
     return attempts
 
 
+def _delivery(atts: list[dict], ann: dict, labels: dict, st: dict) -> tuple[str, str | None]:
+    """(status, error) of a Job that completed: delivery, not exit code, decides. A verified export (managed I/O) or
+    the application's finalization record (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization")
+    must be on record. The delivering attempt is the newest successful one that carries a delivery record (a
+    multi-node run's rank 0 exports for every rank: the newest incarnation's coordinator, `attempts.authority`; peers
+    record export_state 'n/a', which is neither a delivery failure nor an acknowledgement, and a previous
+    coordinator's result is never borrowed when only a peer recorded in the new incarnation), else the newest
+    successful one. Exit 0 without a delivery record is not delivered: the uploader may still be exporting or posting
+    (FINALIZING); after the grace period the delivery is unconfirmed."""
+    if any(a.get("gang_rank") is not None for a in atts):
+        c = attempts.authority(atts)
+        last = c if c and c.get("gang_rank") == 0 and c["status"] == "SUCCEEDED" else None
+    else:
+        ok = [a for a in atts if a["status"] == "SUCCEEDED"]
+        last = next((a for a in reversed(ok) if a.get("export_state") is not None), ok[-1] if ok else None)
+    export = (last or {}).get("export_state")
+    application = (_json(ann.get(f"{LABEL}/execution")) or {}).get("io_mode") == "application"
+    mode = labels.get(f"{LABEL}/mode")
+    if export == "failed":
+        return (
+            "EXPORT_FAILED",
+            "export failed after a successful run; the volume is kept (POST /v1/operations/<id>:export retries the transfer)",
+        )
+    if last and application and export is not None and not last.get("result_ref"):
+        return (
+            "EXPORT_FAILED",
+            "the run ended without a finalization record (RESULT.json): its results are not confirmed",
+        )
+    if (mode == "run" or (mode == "async" and application)) and export is None:
+        done_at = _ts(st.get("completionTime"))
+        if done_at and (datetime.now(timezone.utc) - done_at).total_seconds() > FINALIZING_GRACE_S:
+            return (
+                "EXPORT_FAILED",
+                "no delivery record for the successful run: its export or finalization was not confirmed (volume kept if the uploader could not acknowledge)",
+            )
+        return "FINALIZING", None
+    return "SUCCEEDED", None
+
+
 def normalise(job: dict, price_per_call: float | None = None, records: list | None = None) -> dict:
     md, st, sp = job.get("metadata", {}), job.get("status", {}) or {}, job.get("spec", {})
     labels, ann = md.get("labels", {}), accounting_annotations(job)
@@ -324,90 +348,31 @@ def normalise(job: dict, price_per_call: float | None = None, records: list | No
         {k: v for k, v in a.items() if not k.startswith("_")}
         for a in _attempts(job.get("_pods", []), records, md.get("name"))
     ]
-    error = None
-    if ann.get(f"{LABEL}/successor") and not ann.get(f"{LABEL}/cancelled"):
+    cancelled, error = bool(ann.get(f"{LABEL}/cancelled")), None
+    if ann.get(f"{LABEL}/successor") and not cancelled:
         status = (
             "SUPERSEDED"  # fallback or recovery moved the run: the successor is the live operation (docs/SCHEDULING.md)
         )
     elif "Complete" in conds or "SuccessCriteriaMet" in conds:
-        status = "SUCCEEDED"
-        # delivery, not exit code: a verified export (managed I/O) or the application's finalization record
-        # (application I/O: RESULT.json, docs/JOBS.md "Attempts and finalization") must be on record
-        # the delivering attempt: the newest successful one that carries a delivery record (a multi-node run's rank 0
-        # exports for every rank), else the newest successful one
-        if any(a.get("gang_rank") is not None for a in atts):
-            # Peers record export_state='n/a': that is not a delivery failure or
-            # acknowledgement. Reuse lifecycle's newest-incarnation authority;
-            # never borrow a previous coordinator's result when only a peer has
-            # recorded in the new incarnation.
-            coordinator = attempts.authority(atts)
-            last = (
-                coordinator
-                if coordinator and coordinator.get("gang_rank") == 0 and coordinator["status"] == "SUCCEEDED"
-                else None
-            )
-        else:
-            last = next(
-                (a for a in reversed(atts) if a["status"] == "SUCCEEDED" and a.get("export_state") is not None),
-                None,
-            ) or next((a for a in reversed(atts) if a["status"] == "SUCCEEDED"), None)
-        execution = _json(ann.get(f"{LABEL}/execution")) or {}
-        done_at = _ts(st.get("completionTime"))
-        age = (datetime.now(timezone.utc) - done_at).total_seconds() if done_at else None
-        if last and last.get("export_state") == "failed":
-            status, error = (
-                "EXPORT_FAILED",
-                "export failed after a successful run; the volume is kept (POST /v1/operations/<id>:export retries the transfer)",
-            )
-        elif (
-            last
-            and execution.get("io_mode") == "application"
-            and last.get("export_state") is not None
-            and not last.get("result_ref")
-        ):
-            status, error = (
-                "EXPORT_FAILED",
-                "the run ended without a finalization record (RESULT.json): its results are not confirmed",
-            )
-        elif (
-            labels.get(f"{LABEL}/mode") == "run"
-            or (labels.get(f"{LABEL}/mode") == "async" and execution.get("io_mode") == "application")
-        ) and (not last or last.get("export_state") is None):
-            # exit 0 without a delivery record is not delivered: the uploader may still be exporting or posting
-            # (FINALIZING), after the grace period the delivery is unconfirmed (docs/JOBS.md "Attempts and finalization")
-            if age is not None and age > FINALIZING_GRACE_S:
-                status, error = (
-                    "EXPORT_FAILED",
-                    "no delivery record for the successful run: its export or finalization was not confirmed (volume kept if the uploader could not acknowledge)",
-                )
-            else:
-                status = "FINALIZING"
-    elif "Failed" in conds or "FailureTarget" in conds:
-        status = "CANCELLED" if ann.get(f"{LABEL}/cancelled") else "FAILED"
-    elif ann.get(f"{LABEL}/cancelled"):
-        status = "CANCELLED"
+        status, error = _delivery(atts, ann, labels, st)
+    elif "Failed" in conds or "FailureTarget" in conds or cancelled:
+        status = "CANCELLED" if cancelled else "FAILED"
     elif atts and atts[-1]["status"] == "FAILED" and _fails_job(job, atts[-1].get("exit_code")):
         # the main container ended with an exit code the Job's failure policy turns into FailJob: the Job fails as soon
         # as the pod ends (the uploader may still be posting the record); the operation is over now, not RUNNING
         status = "FAILED"
-        error = (
-            f"main exited {atts[-1].get('exit_code')}: {atts[-1].get('reason') or 'the Job fails on this exit code'}"
-        )
     elif any(a["status"] == "RUNNING" for a in atts) or any(
         (p.get("status") or {}).get("phase") == "Running" for p in job.get("_pods", [])
     ):
         status = "RUNNING"  # includes finalization: main ended, the uploader is still exporting
     else:
         status = "QUEUED"  # gated by Kueue, pending for a node, being placed, or between attempts after a preemption
-    cancel_attempt(atts, bool(ann.get(f"{LABEL}/cancelled")))  # the attempt the cancel interrupted
-    c = conds.get("Failed") or conds.get("FailureTarget") or {}
+    cancel_attempt(atts, cancelled)  # the attempt the cancel interrupted
     if status == "FAILED":
+        c = conds.get("Failed") or conds.get("FailureTarget") or {}
         last = next((a for a in reversed(atts) if a["status"] == "FAILED"), None)
         error = (last or {}).get("reason") or c.get("message") or c.get("reason")
-    try:
-        inp = json.loads(ann.get(f"{LABEL}/input", "{}"))
-    except ValueError:
-        inp = {}
+    inp = _json(ann.get(f"{LABEL}/input") or "{}", {})
     # the region label is the dispatcher's pin (a cluster id or a region name); the operation's `region` is always the Nebius region
     pinned = labels.get(f"{LABEL}/region")
     region = (

@@ -56,17 +56,9 @@ _IMPORT_COLS = (
 _IMPORT_VALUES = ", ".join("coalesce(%s, now())" if k == "created_at" else "%s" for k in _IMPORT_COLS.split(", "))
 _GRAPH_COLUMNS = "root, stages, deadline_at, cancelled_at, closed_at, reason, tenant, owner, sealed_at, models"
 # what a key may do; an empty list on a key means everything (keys created before scopes existed, Terraform's keys)
-SCOPES = (
-    "invoke:sync",
-    "invoke:async",
-    "run:submit",
-    "run:control",
-    "read:catalog",
-    "read:operations",
-    "read:results",
-    "read:logs",
-    "read:metrics",
-    "artifacts:write",
+SCOPES = tuple(
+    "invoke:sync invoke:async run:submit run:control read:catalog read:operations read:results read:logs read:metrics "
+    "artifacts:write".split()
 )
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
@@ -217,23 +209,17 @@ def update(
 ) -> dict | None:
     """Budget (a number, or None for unlimited; UNSET keeps it), allowed models, expiry (days from now; 0 = never),
     the block flag; fields left out stay. Spend never changes here."""
-    sets, args = [], []
-    if blocked is not None:
-        sets.append("blocked = %s")
-        args.append(blocked)
-    if budget is not UNSET:
-        sets.append("budget = %s")
-        args.append(budget)
-    if models is not None:
-        sets.append("models = %s")
-        args.append(json.dumps(models))
-    if expires_days is not None:
-        sets.append("expires = %s")
-        args.append(_expiry(expires_days))
+    given = (
+        ("blocked", blocked, blocked is not None),
+        ("budget", budget, budget is not UNSET),
+        ("models", json.dumps(models), models is not None),
+        ("expires", _expiry(expires_days), expires_days is not None),
+    )
+    sets = [f"{k} = %s" for k, _v, ok in given if ok]
     with db.pool().connection() as c, c.transaction():
         r = c.execute(
             f"update keys set {', '.join(sets + ['updated_at = now()'])} where tenant = %s and alias = %s returning {COLS}",
-            (*args, tenant, alias),
+            (*(v for _k, v, ok in given if ok), tenant, alias),
         ).fetchone()
     if r is None:
         return None
@@ -592,12 +578,7 @@ def admit(
     The key row is locked, so two API replicas never admit past a limit together; a reservation that already exists
     (a replay with the same idempotency key) counts once. Raises KeyLimit(402 | 429)."""
     with _connection() as c, c.transaction():
-        k = c.execute(
-            "select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit from keys where hash = %s for update",
-            (h,),
-        ).fetchone()
-        if k is None:
-            raise KeyLimit(401, "invalid API key")
+        max_c, b_req, b_gpu, s_req, s_gpu, _blocked, _expires, rate = _locked_key(c, h, "invalid API key")
         existing = c.execute(
             "select key_hash, tenant from key_reservations where operation = %s", (operation,)
         ).fetchone()
@@ -605,22 +586,16 @@ def admit(
             raise KeyLimit(409, "operation is reserved by another key")
         if existing:
             return {"operation": operation, "replay": True}
-        max_c, b_req, b_gpu, s_req, s_gpu, rate = k
-        active, r_req, r_gpu = c.execute(
-            "select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s",
-            (h,),
-        ).fetchone()
-        # attempts that ran without a trustworthy measurement keep their bound
-        r_gpu = float(r_gpu) + _unknown_gpu(c, h)
-        if max_c is not None and active >= max_c:
-            raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+        active, r_req, r_gpu = _reserved(c, h)
+        r_gpu += _unknown_gpu(c, h)  # attempts that ran without a trustworthy measurement keep their bound
+        _concurrency(active, max_c)
         req = 1 if counts_request else 0
-        if b_req is not None and req and float(s_req) + float(r_req) + req > float(b_req):
+        if b_req is not None and req and float(s_req) + r_req + req > float(b_req):
             raise KeyLimit(402, "key request budget exhausted")
-        if b_gpu is not None and float(s_gpu) + float(r_gpu) + gpu_seconds > float(b_gpu):
+        if b_gpu is not None and float(s_gpu) + r_gpu + gpu_seconds > float(b_gpu):
             raise KeyLimit(
                 402,
-                f"key GPU-second budget exhausted ({max(0.0, float(b_gpu) - float(s_gpu) - float(r_gpu)):.0f} s left, {gpu_seconds:.0f} s needed)",
+                f"key GPU-second budget exhausted ({max(0.0, float(b_gpu) - float(s_gpu) - r_gpu):.0f} s left, {gpu_seconds:.0f} s needed)",
             )
         if rate and req:
             _rate_call(c, h, rate)
@@ -638,7 +613,33 @@ def admit(
                 "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound) values (%s, %s, null, %s, %s, %s) on conflict do nothing",
                 (operation, operation, h, tenant, gpu_seconds),
             )
-        return {"operation": operation, "replay": False, "active": int(active) + 1}
+        return {"operation": operation, "replay": False, "active": active + 1}
+
+
+_LIMITS = "max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, blocked, expires, rate_limit"
+
+
+def _locked_key(c, h: str, gone: str) -> tuple:
+    """The key's limits (`_LIMITS`), its row locked for the transaction: two API replicas never admit past a limit
+    together. KeyLimit(401, `gone`) when the key no longer exists."""
+    k = c.execute(f"select {_LIMITS} from keys where hash = %s for update", (h,)).fetchone()
+    if k is None:
+        raise KeyLimit(401, gone)
+    return k
+
+
+def _reserved(c, h: str) -> tuple[int, float, float]:
+    """(operations in flight, requests, GPU seconds) the key's live reservations hold."""
+    active, req, gpu = c.execute(
+        "select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s",
+        (h,),
+    ).fetchone()
+    return int(active), float(req), float(gpu)
+
+
+def _concurrency(active: int, max_c) -> None:
+    if max_c is not None and active >= max_c:
+        raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
 
 
 def _rate_call(c, h: str, rate: dict) -> None:
@@ -750,10 +751,15 @@ def _unknown_gpu(c, h: str) -> float:
     )
 
 
-def run_member(operation: str) -> dict | None:
+def _one(cols: str, source: str, params: tuple) -> dict | None:
+    """The first row of `select <cols> from <source>` as a dict (`_dicts`), None when there is none."""
     with _connection() as c:
-        rows = c.execute(f"select {_MEMBER} from key_run_members where operation = %s", (operation,)).fetchall()
-    return next(iter(_dicts(_MEMBER, rows)), None)
+        rows = c.execute(f"select {cols} from {source}", params).fetchall()
+    return next(iter(_dicts(cols, rows)), None)
+
+
+def run_member(operation: str) -> dict | None:
+    return _one(_MEMBER, "key_run_members where operation = %s", (operation,))
 
 
 def admitting_key_hashes(operations: set[str]) -> dict[str, set[str]]:
@@ -830,9 +836,8 @@ def _graphs(rows) -> list[dict]:
 
 
 def graph_of(root: str) -> dict | None:
-    with _connection() as c:
-        rows = c.execute(f"select {_GRAPH_COLUMNS} from run_graphs where root = %s", (root,)).fetchall()
-    return next(iter(_graphs(rows)), None)
+    g = _one(_GRAPH_COLUMNS, "run_graphs where root = %s", (root,))
+    return {**g, "models": g["models"] or {}} if g else None
 
 
 def open_graphs() -> list[dict]:
@@ -897,10 +902,9 @@ def stage_head(root: str, stage: str) -> str | None:
 def member_of(operation: str) -> dict | None:
     """The ledger row of an operation: its root, kind (`continuation` | `stage` | `child`), stage (the unit for a
     child) and state; None when it is no member (no ledger)."""
-    cols = "root, kind, stage, state, predecessor, created_at"
-    with _connection() as c:
-        rows = c.execute(f"select {cols} from key_run_members where operation = %s", (operation,)).fetchall()
-    return next(iter(_dicts(cols, rows)), None)
+    return _one(
+        "root, kind, stage, state, predecessor, created_at", "key_run_members where operation = %s", (operation,)
+    )
 
 
 def prepare_run_member(
@@ -930,17 +934,12 @@ def prepare_run_member(
         h, tenant = own
         if c.execute("select 1 from key_run_members where operation = %s", (operation,)).fetchone():
             return {"operation": operation, "replay": True}
-        k = c.execute(
-            "select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, blocked, expires, rate_limit from keys where hash = %s for update",
-            (h,),
-        ).fetchone()
-        if k is None:
-            raise KeyLimit(401, "the run's key no longer exists")
-        max_c, _b_req, b_gpu, _s_req, s_gpu, blocked, expires, rate = k
+        max_c, b_req, b_gpu, s_req, s_gpu, blocked, expires, rate = _locked_key(c, h, "the run's key no longer exists")
         if blocked:
             raise KeyLimit(403, "the run's key is blocked")
         if expires is not None and expires < datetime.now(timezone.utc):
             raise KeyLimit(401, "the run's key has expired")
+        active, r_req, reserved = _reserved(c, h)
         if kind == "stage":
             # a declared stage of the root's graph (docs/JOBS.md "Stage composition"), or a continuation of one: each
             # stage is its own lineage inside the root's run (one head per stage; siblings coexist; the stage's
@@ -980,10 +979,7 @@ def prepare_run_member(
             # key's request budget and rate window (one inference each)
             if c.execute("select 1 from key_reservations where operation = %s", (root,)).fetchone() is None:
                 raise KeyLimit(409, f"run {root} is closed (its reservation is settled); no child attaches to it")
-            r_req = c.execute(
-                "select coalesce(sum(requests), 0) from key_reservations where key_hash = %s", (h,)
-            ).fetchone()[0]
-            if _b_req is not None and float(_s_req) + float(r_req) + 1 > float(_b_req):
+            if b_req is not None and float(s_req) + r_req + 1 > float(b_req):
                 raise KeyLimit(402, "key request budget exhausted for the child")
             if rate and isinstance(rate, dict):
                 _rate_call(c, h, rate)
@@ -997,16 +993,11 @@ def prepare_run_member(
             if not timeout_s:
                 raise KeyLimit(400, "this key has a GPU-second budget: the continuation needs a bounded timeout")
             bound = float(gpus * int(timeout_s))
-        reserved = c.execute(
-            "select coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)
-        ).fetchone()[0]
-        if b_gpu is not None and bound and float(s_gpu) + float(reserved) + _unknown_gpu(c, h) + bound > float(b_gpu):
+        if b_gpu is not None and bound and float(s_gpu) + reserved + _unknown_gpu(c, h) + bound > float(b_gpu):
             raise KeyLimit(402, "key GPU-second budget exhausted for the continuation")
         res = c.execute("select gpu_seconds from key_reservations where operation = %s for update", (root,)).fetchone()
         if res is None:  # the run had closed (every member settled): the continuation re-acquires the slot
-            active = c.execute("select count(*) from key_reservations where key_hash = %s", (h,)).fetchone()[0]
-            if max_c is not None and active >= max_c:
-                raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+            _concurrency(active, max_c)
             c.execute(
                 "insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, 0)",
                 (root, h, tenant, bound),

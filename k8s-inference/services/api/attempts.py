@@ -66,12 +66,7 @@ def verify_pod_token(token: str) -> dict:
         if not st or not st.authenticated:
             continue
         parts, pod, uid = pod_claims(st)
-        if (
-            len(parts) != 4
-            or parts[0] != "system"
-            or parts[1] != "serviceaccount"
-            or not parts[2].startswith(TENANT_NS_PREFIX)
-        ):
+        if len(parts) != 4 or parts[:2] != ["system", "serviceaccount"] or not parts[2].startswith(TENANT_NS_PREFIX):
             raise HTTPException(401, "not a tenant run identity")
         if not pod:
             raise HTTPException(401, "token is not bound to a pod")
@@ -111,34 +106,25 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
         marks = c.execute(
             "select cancelled_at, successor from operation_marks where operation = %s", (operation,)
         ).fetchone()
-        cancelled = (marks[0],) if marks else None
-        if cur:
-            epoch = cur[0]  # a known pod keeps the epoch it was recorded with, whatever can be read now
-        elif gang:
-            # one epoch per gang incarnation: the siblings of one JobSet restart share it (they never fence each
-            # other); a new incarnation (every pod recreated) is the next epoch, and the prior one is stale as any
-            # replaced attempt. The incarnation is the restart-attempt OBSERVED on the pod; a gang pod the API cannot
-            # read and never recorded has no proof of its incarnation: it is refused, never attributed to any gang
-            # (an old coordinator coming back late must not acquire the current epoch's publication authority)
-            if gang.get("restart") is None:
-                raise HTTPException(
-                    409,
-                    f"attempt {pod}: gang membership unverifiable (the pod cannot be read and has no record); "
-                    "an unverified incarnation is never attributed to the gang",
-                )
-            epoch = _gang_epoch(c, operation, gang, top)
-        else:
-            epoch = top + 1
-        # a replaced attempt (epoch < top): its own end (interruption or failure, with its measured time) may still close
-        # the accounting of an attempt already on record; a late start, progress or success of it is refused
-        if epoch < top and (not cur or status not in ("interrupted", "failed")):
-            raise HTTPException(409, f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused")
-        # fenced before its successor exists: a worker that comes back after the platform moved the run cannot publish
-        # progress (a start or pointer record) or a final success; its own interruption or failure may still close its
-        # attempt (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
-        if marks and marks[1] and status not in ("interrupted", "failed"):
-            raise HTTPException(409, f"operation {operation} was superseded by {marks[1]}: record refused")
-        if (gang and gang.get("rank") not in (None, 0)) or epoch < top or (marks and marks[1]):
+        cancelled_at, successor = marks or (None, None)
+        epoch = _epoch_of(c, operation, pod, cur, gang, top)
+        ends = status in ("interrupted", "failed")
+        for stale, why in (
+            # a replaced attempt (epoch < top): its own end (interruption or failure, with its measured time) may still
+            # close the accounting of an attempt already on record; a late start, progress or success of it is refused
+            (
+                epoch < top and (not cur or not ends),
+                f"attempt {pod} (epoch {epoch}) was replaced by epoch {top}: stale record refused",
+            ),
+            # fenced before its successor exists: a worker that comes back after the platform moved the run cannot
+            # publish progress (a start or pointer record) or a final success; its own interruption or failure may
+            # still close its attempt (docs/SCHEDULING.md "Automatic recovery after infrastructure loss")
+            (successor and not ends, f"operation {operation} was superseded by {successor}: record refused"),
+            (cancelled_at and status == "succeeded", f"operation {operation} was cancelled: finalization refused"),
+        ):
+            if stale:
+                raise HTTPException(409, why)
+        if (gang and gang.get("rank") not in (None, 0)) or epoch < top or successor:
             # a peer (rank 0 alone publishes the gang's pointer and result), a replaced attempt or a superseded pod
             # promotes nothing: no pointer, generation or result reaches the durable row; timings, exit and GPUs do
             body = {k: v for k, v in body.items() if k not in ("checkpoint_ref", "checkpoint_generation", "result_ref")}
@@ -146,22 +132,40 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
             return _row(c, operation, pod)  # a late duplicate of the current attempt's start record
         if status == "started" and not body.get("image_digest"):
             body = {**body, "image_digest": facts["digest"]}  # observed on the pod, or still None
-        if status in TERMINAL and cancelled and cancelled[0] and status == "succeeded":
-            raise HTTPException(409, f"operation {operation} was cancelled: finalization refused")
-        export = body.get("export") or (
-            "n/a" if body.get("io_mode") == "application" and status != "succeeded" else None
-        )
-        capture = _capture_of(body.get("capture"), operation, root, c)
         resume = (
             _resume_for(c, operation, root, epoch, gang, body.get("_explicit_checkpoint_ref"))
             if gang and not cur
             else (None, None, None)
         )
+        row = {
+            "operation": operation,
+            "pod": pod,
+            "root": root,
+            "tenant": tenant,
+            "namespace": ns,
+            "epoch": epoch,
+            "region": region,
+            "status": status,
+            **{k: body.get(k) or None for k in _NULLABLE},
+            "gpus": int(body.get("gpus") or 0),
+            "exit_code": body.get("exit_code"),
+            "started_at": parse_ts(body.get("started_at")),
+            "ended_at": parse_ts(body.get("ended_at")),
+            "export_state": body.get("export")
+            or ("n/a" if body.get("io_mode") == "application" and status != "succeeded" else None),
+            "checkpoint_generation": (
+                int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None
+            ),
+            "role": str(body.get("role") or "run"),
+            "gang_rank": gang.get("rank") if gang else None,
+            "gang_restart": gang.get("restart") if gang else None,
+            "pod_uid": facts["uid"],  # observed on every pod; an unreadable pod keeps the UID its row already has
+            **dict(zip(RESTORE_KEYS, resume, strict=True)),
+        }
+        capture = _capture_of(body.get("capture"), operation, root, c)
+        row["capture"] = Json(capture) if capture is not None else None
         c.execute(
-            """insert into attempts (operation, pod, root, tenant, namespace, epoch, region, node, pool, gpu_class, gpus, image,
-                        image_digest, status, exit_code, started_at, ended_at, export_state, result_ref, checkpoint_ref, checkpoint_generation, updated_at, role, cluster,
-                        mode, model, io_mode, gang_rank, gang_restart, pod_uid, capture, resume_checkpoint_ref, resume_source_epoch, resume_source)
-                     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            f"""insert into attempts ({", ".join(row)}, updated_at) values ({", ".join("%s" for _ in row)}, now())
                      on conflict (operation, pod) do update set
                         cluster = coalesce(excluded.cluster, attempts.cluster),
                         capture = coalesce(excluded.capture, attempts.capture),
@@ -182,43 +186,36 @@ def record(region: str, ns: str, pod: str, body: dict) -> dict:
                         checkpoint_ref = coalesce(excluded.checkpoint_ref, attempts.checkpoint_ref),
                         checkpoint_generation = coalesce(excluded.checkpoint_generation, attempts.checkpoint_generation),
                         revision = nextval('attempts_revision_seq'), updated_at = now()""",
-            (
-                operation,
-                pod,
-                root,
-                tenant,
-                ns,
-                epoch,
-                region,
-                body.get("node") or None,
-                body.get("pool") or None,
-                body.get("gpu_class") or None,
-                int(body.get("gpus") or 0),
-                body.get("image") or None,
-                body.get("image_digest") or None,
-                status,
-                body.get("exit_code"),
-                parse_ts(body.get("started_at")),
-                parse_ts(body.get("ended_at")),
-                export,
-                body.get("result_ref") or None,
-                body.get("checkpoint_ref") or None,
-                int(body["checkpoint_generation"]) if body.get("checkpoint_generation") is not None else None,
-                str(body.get("role") or "run"),
-                body.get("cluster") or None,
-                body.get("mode") or None,
-                body.get("model") or None,
-                body.get("io_mode") or None,
-                gang.get("rank") if gang else None,
-                gang.get("restart") if gang else None,
-                facts["uid"],  # the observed UID of every pod; an unreadable pod keeps the UID its row already has
-                Json(capture) if capture is not None else None,
-                resume[0],
-                resume[1],
-                resume[2],
-            ),
+            tuple(row.values()),
         )
         return _row(c, operation, pod)
+
+
+_NULLABLE = "node pool gpu_class image image_digest result_ref checkpoint_ref cluster mode model io_mode".split()
+
+
+def _epoch_of(c, operation: str, pod: str, cur, gang: dict | None, top: int) -> int:
+    """The epoch the record belongs to: a known pod keeps the epoch it was recorded with, whatever can be read now;
+    an ordinary new pod opens the next. One epoch per gang incarnation: the siblings of one JobSet restart share it
+    (they never fence each other); a new incarnation (every pod recreated) is the next epoch, and the prior one is
+    stale as any replaced attempt. The incarnation is the restart-attempt OBSERVED on the pod; a gang pod the API
+    cannot read and never recorded has no proof of its incarnation: it is refused (409), never attributed to any gang
+    (an old coordinator coming back late must not acquire the current epoch's publication authority)."""
+    if cur:
+        return cur[0]
+    if not gang:
+        return top + 1
+    if gang.get("restart") is None:
+        raise HTTPException(
+            409,
+            f"attempt {pod}: gang membership unverifiable (the pod cannot be read and has no record); "
+            "an unverified incarnation is never attributed to the gang",
+        )
+    r = c.execute(
+        "select epoch from attempts where operation = %s and gang_restart = %s order by epoch limit 1",
+        (operation, gang["restart"]),
+    ).fetchone()
+    return int(r[0]) if r else top + 1
 
 
 def _resume_for(c, operation: str, root: str, epoch: int, gang: dict, explicit: str | None) -> tuple:
@@ -320,16 +317,6 @@ def _pod_facts(region: str | None, namespace: str, pod: str, operation: str) -> 
         g = status._pod_gang_fields(p)
         out["gang"] = {"uid": md.get("uid"), "rank": g["gang_rank"], "restart": g["gang_restart"]}
     return out
-
-
-def _gang_epoch(c, operation: str, gang: dict, top: int) -> int:
-    """The epoch of the gang this pod belongs to: the incarnation's existing epoch when a sibling recorded it already
-    (the restart-attempt was observed on the pod), else the next epoch (a new incarnation)."""
-    r = c.execute(
-        "select epoch from attempts where operation = %s and gang_restart = %s order by epoch limit 1",
-        (operation, gang["restart"]),
-    ).fetchone()
-    return int(r[0]) if r else top + 1
 
 
 def authority(rows: list[dict]) -> dict | None:
@@ -476,6 +463,12 @@ def durable_index(tenant: str, owner: str | None, model: str | None) -> list[dic
     ]
 
 
+_SYNTHETIC_ATTEMPT = (
+    "started_at ended_at node gpu_class epoch export_state result_ref checkpoint_ref image_digest pod_uid gang_rank "
+    "gang_restart resume_checkpoint_ref resume_source_epoch resume_source"
+).split()
+
+
 def synthesize(operation: str, tenant: str) -> dict | None:
     """An operation whose Job is gone (TTL, cleanup) rebuilt from its rows: status, attempts and lifecycle survive
     the Kubernetes objects (docs/JOBS.md "Attempts and finalization")."""
@@ -497,21 +490,7 @@ def synthesize(operation: str, tenant: str) -> dict | None:
             "index": i + 1,
             "attempt_id": r["pod"],
             "status": status.RECORD_STATUS.get(r["status"], "FAILED"),
-            "started_at": r.get("started_at"),
-            "ended_at": r.get("ended_at"),
-            "node": r.get("node"),
-            "gpu_class": r.get("gpu_class"),
-            "epoch": r.get("epoch"),
-            "export_state": r.get("export_state"),
-            "result_ref": r.get("result_ref"),
-            "checkpoint_ref": r.get("checkpoint_ref"),
-            "image_digest": r.get("image_digest"),
-            "pod_uid": r.get("pod_uid"),
-            "gang_rank": r.get("gang_rank"),
-            "gang_restart": r.get("gang_restart"),
-            "resume_checkpoint_ref": r.get("resume_checkpoint_ref"),
-            "resume_source_epoch": r.get("resume_source_epoch"),
-            "resume_source": r.get("resume_source"),
+            **{k: r.get(k) for k in _SYNTHETIC_ATTEMPT},
         }
         for i, r in enumerate(rows)
     ]
