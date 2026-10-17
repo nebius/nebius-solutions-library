@@ -2,8 +2,8 @@
 the Nebius console page of the node (docs/API.md "Placement"), and who asked for it (`requester`, an opaque block
 the submitting application sends with :invoke; docs/API.md "Requester").
 
-Serverless 2 publishes this to its own API and console. The Scientific AI platform above it is the abstraction its
-customers see and forwards none of it (Rene, 2026-10-17).
+Serverless 2 publishes this to its own API and console. A domain platform built on top of it (a scientific
+workbench, say) is the abstraction its customers see and forwards none of it.
 """
 
 from __future__ import annotations
