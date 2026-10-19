@@ -183,6 +183,8 @@ jobs:
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "v1.11.4"
+        # Send signals to the real Terraform process, not the Node wrapper.
+        terraform_wrapper: false
 
     # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
     - name: Terraform Init
@@ -209,20 +211,46 @@ jobs:
 
         cluster_name="${TF_VAR_cluster_name:-k8s-training}"
         gpu_node_group_name="${cluster_name}-ng-gpu-0"
+        # Leave room within the 150-minute step timeout for the 110-minute
+        # test deadline, polling overhead, and 30-minute teardown allowance.
         poll_seconds=60
+        test_timeout_seconds=$((110 * 60))
+        shutdown_timeout_seconds=$((30 * 60))
 
         terraform test -junit-xml="${report_path}" &
         test_pid=$!
 
         stop_test() {
           if kill -0 "${test_pid}" 2>/dev/null; then
-            kill "${test_pid}" || true
+            echo "Interrupting terraform test and allowing up to ${shutdown_timeout_seconds} seconds for teardown"
+            # The first SIGINT lets Terraform finish its current operation
+            # and tear down. A second signal forces exit, potentially leaving
+            # resources. Go's signal.Notify re-enables SIGINT for Bash
+            # background jobs.
+            kill -INT "${test_pid}" || true
+
+            for ((elapsed=0; elapsed<shutdown_timeout_seconds; elapsed+=5)); do
+              if ! kill -0 "${test_pid}" 2>/dev/null; then
+                wait "${test_pid}" || true
+                return
+              fi
+              sleep 5
+            done
+
+            echo "Terraform did not exit within ${shutdown_timeout_seconds} seconds; sending a second signal"
+            kill -TERM "${test_pid}" || true
             wait "${test_pid}" || true
           fi
         }
 
+        test_started_seconds=$SECONDS
         # Fail early when the GPU node group reaches a terminal provisioning state.
         while kill -0 "${test_pid}" 2>/dev/null; do
+          if ((SECONDS - test_started_seconds >= test_timeout_seconds)); then
+            echo "::error::Terraform test exceeded ${test_timeout_seconds}s; stopping for teardown"
+            stop_test
+            exit 1
+          fi
           cluster_id="$(
             { nebius mk8s v1 cluster list --parent-id "${TF_VAR_parent_id}" --format json 2>/dev/null || true; } \
               | jq -r --arg name "${cluster_name}" '
@@ -384,7 +412,23 @@ jobs:
           | eval xargs -r -n 1 nebius $resource delete --id
         done
 
+    - name: Cleanup k8s node-group service accounts
+      if: always()
+      shell: bash
+      # k8s-training's node-group SA survives when no Terraform teardown
+      # happens (timeout, cancellation); a leftover one can fail the next run
+      # with AlreadyExists. The suffix filter excludes the CI account.
+      # Deleting the SA also removes its editors group membership (verified
+      # live), so no separate membership cleanup is needed here.
+      # Explicit Bash enables pipefail so a failed list cannot pass as empty.
+      run: |
+        nebius --format json iam service-account list --parent-id "${TF_VAR_parent_id}" --all \
+          | jq -r '(.items // [])[] | select(.metadata.name | endswith("-k8s-node-group-sa")) | .metadata.id' \
+          | xargs -r -n 1 nebius iam service-account delete --id
+
+    # Run bucket cleanup even if SA cleanup fails; the job still fails.
     - name: Force delete storage buckets (ttl=0)
+      if: always()
       run: |
         nebius --format json storage bucket list --parent-id "${TF_VAR_parent_id}" \
           | jq -r '(.items // [])[] | select(.metadata.name!="terraform-test-reports") | .metadata.id' \
@@ -395,6 +439,7 @@ jobs:
             done
 
     - name: Purge scheduled storage buckets
+      if: always()
       continue-on-error: true
       run: |
         nebius --format json storage bucket list --parent-id "${TF_VAR_parent_id}" \
