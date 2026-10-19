@@ -125,7 +125,7 @@ a positive whole number replaces the generic GPU node groups with one fixed MK8s
 node group and one NVLink instance group per rack. A production rack contains 18
 `gpu-gb300` nodes using the `4gpu-112vcpu-800gb` preset, for 72 GPUs per rack.
 
-The GB300 resources require Nebius Terraform provider `0.5.232` or newer and an
+This recipe requires Nebius Terraform provider `0.6.70` or newer and an
 explicit zero-surge rollout strategy. Replacing nodes one at a time avoids
 requesting capacity above the physical 18-node rack. An InfiniBand fabric is
 optional for one rack and required for deployments with two or more racks:
@@ -201,6 +201,9 @@ gb300 = {
 }
 ```
 
+If an existing working directory has an older provider in its lock file, run
+`terraform init -upgrade` before reviewing `terraform plan`.
+
 Keep the zero-surge strategy and, for multiple racks, the InfiniBand fabric
 configuration shown above. DRA applies to every rack created by `rack_count`.
 The recipe installs one NVIDIA GPU DRA Helm release (`0.4.1`) per cluster, with
@@ -208,8 +211,26 @@ its kubelet plugins selected onto all DRA-enabled GB300 nodes. MK8s disables its
 built-in device plugin and provides managed DRANet on fabric-attached GPU nodes.
 The recipe also skips its separate device-plugin installation.
 
-Workloads must supply GPU ResourceClaims and, for multi-node NVLink, a
-ComputeDomain and channel claims so NVIDIA DRA can manage workload IMEX.
+After applying, check driver readiness and advertised devices:
+
+```bash
+kubectl -n nvidia-dra-driver-gpu get deployments,daemonsets
+kubectl get deviceclasses
+kubectl get resourceslices
+# For nodes attached to an InfiniBand GPU cluster:
+kubectl -n kube-system get daemonset dranet
+```
+
+The NVIDIA controller should be available and its kubelet DaemonSet should be
+ready on all `18 * rack_count` GPU nodes. For fabric-attached racks, DRANet should
+also be ready on those nodes. DRA advertises GPUs through ResourceSlices.
+
+Workloads must request GPUs through ResourceClaims instead of `nvidia.com/gpu`
+limits. InfiniBand workloads also need DRANet device claims using an advertised
+DeviceClass. Multi-node NVLink workloads need a ComputeDomain and channel claims
+so NVIDIA DRA can manage workload IMEX. Create the ComputeDomain and wait for its
+generated channel ResourceClaimTemplate before submitting the workload. Use
+ARM64-compatible container images. MPIJobs additionally require MPI Operator.
 The recipe does not create workload claims or ComputeDomains. See the
 [public MK8s DRA setting](https://docs.nebius.com/terraform-provider/reference/resources/mk8s_v1_node_group#nestedatt--template--gpu_settings)
 and [NVIDIA DRA documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/v0.4.1).
