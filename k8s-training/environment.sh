@@ -5,6 +5,29 @@
 # NEBIUS_PROJECT_ID='project-...'
 # NEBIUS_REGION='eu-west2'
 
+# Match Terraform's default without parsing HCL or requiring a local tfvars file.
+TF_VAR_cluster_name="${TF_VAR_cluster_name:-k8s-training}"
+if [[ ! "${TF_VAR_cluster_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Error: export TF_VAR_cluster_name with a non-empty cluster name (letters, digits, dots, underscores, or hyphens)." >&2
+  return 1
+fi
+export TF_VAR_cluster_name
+
+# Preserve the historical key, including for existing clusters with custom names.
+# Additional clusters must explicitly choose a different K8S_TF_STATE_KEY.
+K8S_RESOLVED_TF_STATE_KEY="${K8S_TF_STATE_KEY-k8s-training.tfstate}"
+if [[ ! "${K8S_RESOLVED_TF_STATE_KEY}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.tfstate$ ]]; then
+  echo "Error: K8S_TF_STATE_KEY must be a non-empty key ending in .tfstate, using letters, digits, dots, underscores, hyphens, or slashes." >&2
+  return 1
+fi
+
+case "/${K8S_RESOLVED_TF_STATE_KEY}/" in
+  */./*|*/../*)
+    echo "Error: K8S_TF_STATE_KEY must not contain standalone . or .. path segments." >&2
+    return 1
+    ;;
+esac
+
 if [ -z "${NEBIUS_TENANT_ID}" ]; then
   echo "Error: NEBIUS_TENANT_ID is not set"
   return 1
@@ -128,12 +151,18 @@ export AWS_SECRET_ACCESS_KEY=$(nebius iam v2 access-key get \
   --format json \
   | jq -r '.status.secret')
 
-# Use Objext Storage as Terraform backend
+# Show the exact state location before writing the backend configuration.
+printf 'Terraform state: s3://%s/%s\n' "$NEBIUS_BUCKET_NAME" "$K8S_RESOLVED_TF_STATE_KEY"
+if [[ "$TF_VAR_cluster_name" != "k8s-training" && -z "${K8S_TF_STATE_KEY+x}" ]]; then
+  printf "Warning: cluster name is '%s' but state key is the legacy default; set K8S_TF_STATE_KEY for an additional cluster.\n" "$TF_VAR_cluster_name" >&2
+fi
+
+# Use Object Storage as Terraform backend
 cat > terraform_backend_override.tf << EOF
 terraform {
   backend "s3" {
     bucket = "${NEBIUS_BUCKET_NAME}"
-    key    = "k8s-training.tfstate"
+    key    = "${K8S_RESOLVED_TF_STATE_KEY}"
 
     endpoints = {
       s3 = "https://storage.${NEBIUS_REGION}.nebius.cloud:443"

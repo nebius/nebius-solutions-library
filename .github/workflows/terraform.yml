@@ -72,14 +72,27 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Test backend environment setup without cloud access
+      run: python3 -m unittest discover -s k8s-training/tests -p 'test_*.py'
+
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "v1.11.4"
 
+    - name: Test observability access keys with mocked providers
+      run: python3 modules/o11y/tests/check_access_keys.py
+
+    # Terraform does not discover .example files during recursive formatting.
+    - name: Prepare example variables for format checks
+      run: |
+        for solution in k8s-training vm-instance dsvm bastion wireguard; do
+          cp "$solution/terraform.tfvars.example" "$solution/terraform.tfvars"
+        done
+
     # Checks that all Terraform configuration files adhere to a canonical format
     - name: Terraform Format
-      run: terraform fmt -check -recursive . ../modules
+      run: terraform fmt -check -recursive .
 
   approve_terraform:
     needs: terraform-format
@@ -122,6 +135,10 @@ jobs:
     # Checkout the repository to the GitHub Actions runner
     - name: Checkout
       uses: actions/checkout@v4
+
+    # Preserve the inputs previously loaded from the tracked terraform.tfvars.
+    - name: Prepare example variables for Terraform
+      run: cp terraform.tfvars.example terraform.tfvars
 
     - name: Setup SSH keys and agent
       run: |

@@ -103,7 +103,7 @@ SOURCE_BASE="/mnt/shared/"            # Base directory for source files
 DEST_BASE="/mnt/different-shared/"               # Base directory for destination files
 ```
 
-as well as sync data with a different cluster. If you want to e.g. copy data from your proprietary slurm cluster into nebius cloud, you can simply spin up a couple of vm instances (see [terraform.tfvars](..%2Fvm-instance%2Fterraform.tfvars)) with public ip, and copy the data to all nodes in parallel:
+as well as sync data with a different cluster. If you want to e.g. copy data from your proprietary slurm cluster into nebius cloud, you can simply spin up a couple of vm instances (see [terraform.tfvars.example](../vm-instance/terraform.tfvars.example)) with public ip, and copy the data to all nodes in parallel:
 
 ```
 WORKER_NODES=("worker-0" "worker-1" "worker-2" "worker-3")       # List of worker nodes
