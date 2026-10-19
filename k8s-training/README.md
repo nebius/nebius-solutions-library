@@ -39,21 +39,23 @@
 
 To deploy a Kubernetes cluster, follow these steps:
 
-1. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in environment.sh.
+1. Copy the example variables file, then replace the placeholders with your values:
+   ```bash
+   cp terraform.tfvars.example terraform.tfvars
+   ```
+   Your local `terraform.tfvars` is ignored by Git. See [configuration variables](#configuration-variables) for details.
 
-2. Load environment variables:
+2. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in `environment.sh`.
+
+3. Load environment variables:
    ```bash
    source ./environment.sh
    ```
 
-3. Initialize Terraform:
+4. Initialize Terraform:
    ```bash
    terraform init
    ```
-
-4. Replace the placeholder content
-   in `terraform.tfvars` with configuration values that meet your specific
-   requirements. See the details [below](#configuration-variables).
 
 5. Preview the deployment plan:
    ```bash
@@ -67,7 +69,7 @@ To deploy a Kubernetes cluster, follow these steps:
 
 ## Configuration variables
 
-These are the basic configurations required to deploy Kubernetes for training in Nebius AI. Edit the configurations as necessary in the `terraform.tfvars` file.
+These are the basic configurations required to deploy Kubernetes for training in Nebius AI. Edit the configurations as necessary in your local `terraform.tfvars` file (copied from `terraform.tfvars.example`).
 
 Additional configurable variables can be found in the `variables.tf` file.
 
@@ -429,3 +431,23 @@ spec:
 - read-write many mode PV will work
 - MSP started testing that solution to enable early integration with mk8s.
 =======
+
+## Terragrunt
+
+When using this solution as a Git source, select the subdirectory with
+`git::https://github.com/nebius/nebius-solutions-library.git//k8s-training?ref=<commit>`.
+The double slash keeps the sibling `modules` directory available. Pin `ref` to a
+commit that includes the example-file migration.
+
+Supply deployment values through Terragrunt `inputs` and configure authentication
+and remote state in your Terragrunt configuration. Do not copy the example into
+Terragrunt's downloaded source: a local `terraform.tfvars` can override the values
+passed through `inputs`.
+
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.

@@ -70,19 +70,23 @@ ssh target
 
 To deploy the solution, follow these steps:
 
-1. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in environment.sh.
+1. Copy the example variables file, then replace the placeholders with your values:
+   ```bash
+   cp terraform.tfvars.example terraform.tfvars
+   ```
+   Your local `terraform.tfvars` is ignored by Git. See [configuration variables](#configuration-variables) for details.
 
-2. Load environment variables:
+2. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in `environment.sh`.
+
+3. Load environment variables:
    ```bash
    source ./environment.sh
    ```
 
-3. Initialize Terraform:
+4. Initialize Terraform:
    ```bash
    terraform init
    ```
-
-4. Replace the placeholder content in `terraform.tfvars` with the configuration values that you need. See the details [below](#configuration-variables).
 
 5. Preview the deployment plan:
    ```bash
@@ -189,3 +193,11 @@ public_ip_allocation_id = <public_ip_allocation_id>
 
 - **Apply Config:** After creating, deleting or changing WireGuard users, select "Apply Config".
 - **Allowed IPs:** When adding new users, specify the CIDRs of your existing infrastructure in the "Allowed IPs" field.
+
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.
