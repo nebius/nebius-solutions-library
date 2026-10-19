@@ -47,8 +47,9 @@ To deploy a Kubernetes cluster, follow these steps:
 
 2. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in `environment.sh`.
 
-3. Load environment variables:
+3. Set the cluster name, then load environment variables:
    ```bash
+   export TF_VAR_cluster_name="k8s-training"
    source ./environment.sh
    ```
 
@@ -451,3 +452,31 @@ Before updating an older checkout, back up your customized `terraform.tfvars` ou
 this repository. After updating, restore it as your local `terraform.tfvars` and
 compare it with the new example for added settings. Do not overwrite an existing
 local configuration with the copy command above.
+
+## Cluster names and existing Terraform state
+
+`environment.sh` requires an explicit `TF_VAR_cluster_name` before making cloud
+calls. It does not read `terraform.tfvars`, so it also works when that file is
+absent or deployment inputs are supplied by Terragrunt. Use the same cluster name
+in your deployment inputs. If you use the exported variable as the source of the
+name, remove the `cluster_name` assignment from your local `terraform.tfvars`:
+Terraform gives that file precedence over environment variables.
+
+For a new cluster, the backend key defaults to `<cluster_name>.tfstate`. To keep
+an existing deployment on its original state, set its exact existing key before
+sourcing the script. Deployments created before multi-cluster support used
+`k8s-training.tfstate`, even when the cluster had a different name:
+
+```bash
+export TF_VAR_cluster_name="my-existing-cluster"
+export K8S_TF_STATE_KEY="k8s-training.tfstate"
+source ./environment.sh
+terraform init
+```
+
+Retaining the original bucket and key avoids moving state. Do not apply against a
+new empty key for an existing deployment. If intentionally changing the key, back
+up the existing state first and use `terraform init -migrate-state` while the
+working directory still has its previous backend configuration in `.terraform`.
+Review the migration prompt and subsequent plan before applying. For new clusters,
+unset `K8S_TF_STATE_KEY` to use the cluster-specific default.

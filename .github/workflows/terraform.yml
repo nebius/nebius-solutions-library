@@ -72,6 +72,9 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Test backend environment setup without cloud access
+      run: python3 -m unittest discover -s k8s-training/tests -p 'test_*.py'
+
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:

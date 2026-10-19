@@ -5,8 +5,21 @@
 # NEBIUS_PROJECT_ID='project-...'
 # NEBIUS_REGION='eu-west2'
 
-#This viriable will be used for the TF state file name in the bucket
-K8S_CLUSTER_NAME=$(sed -n 's/cluster_name *= *"\([^"]*\)".*/\1/p' terraform.tfvars)
+# Set the name explicitly; do not parse HCL with sed or require a local tfvars file.
+# Terraform and Terragrunt can supply variables without terraform.tfvars.
+if [[ ! "${TF_VAR_cluster_name:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Error: export TF_VAR_cluster_name with a non-empty cluster name (letters, digits, dots, underscores, or hyphens)." >&2
+  return 1
+fi
+export TF_VAR_cluster_name
+
+# Existing deployments can retain their previous key with K8S_TF_STATE_KEY.
+# Keep the override separate so sourcing again recomputes the default for a new cluster.
+K8S_RESOLVED_TF_STATE_KEY="${K8S_TF_STATE_KEY-${TF_VAR_cluster_name}.tfstate}"
+if [[ ! "${K8S_RESOLVED_TF_STATE_KEY}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.tfstate$ ]]; then
+  echo "Error: K8S_TF_STATE_KEY must be a non-empty key ending in .tfstate, using letters, digits, dots, underscores, hyphens, or slashes." >&2
+  return 1
+fi
 
 if [ -z "${NEBIUS_TENANT_ID}" ]; then
   echo "Error: NEBIUS_TENANT_ID is not set"
@@ -136,7 +149,7 @@ cat > terraform_backend_override.tf << EOF
 terraform {
   backend "s3" {
     bucket = "${NEBIUS_BUCKET_NAME}"
-    key    = "${K8S_CLUSTER_NAME}.tfstate"
+    key    = "${K8S_RESOLVED_TF_STATE_KEY}"
 
     endpoints = {
       s3 = "https://storage.${NEBIUS_REGION}.nebius.cloud:443"
