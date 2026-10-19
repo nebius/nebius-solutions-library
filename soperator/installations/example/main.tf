@@ -84,7 +84,9 @@ locals {
   # becomes [{ name = "worker-rack0", size = 10 }]. Size = 0 keeps a
   # zero-replica rack nodeset so Terraform can downscale the generated node
   # groups while the Slurm NodeSet remains addressable.
-  # terraform_nodeset_name keeps the input name, e.g. "worker" for both racks above.
+  # aggregate_slurm_nodesets lists the aggregate Slurm NodeSets a generated NodeSet
+  # joins: user-defined ones and, for GB300, the input name, e.g. "worker" for both
+  # racks above.
   slurm_nodeset_workers = flatten([
     for nodeset in local.slurm_nodeset_workers_with_defaults :
     nodeset.resource.platform == local.gb300_platform ? [
@@ -94,13 +96,12 @@ locals {
           nodeset.name,
           rack,
         )
-        terraform_nodeset_name = nodeset.name
-        size                   = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
-        nodes_per_nodegroup    = local.gb300_nodes_per_nodegroup
+        aggregate_slurm_nodesets = distinct(concat([nodeset.name], nodeset.aggregate_slurm_nodesets))
+        size                     = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
+        nodes_per_nodegroup      = local.gb300_nodes_per_nodegroup
       })
       ] : [merge(nodeset, {
-        terraform_nodeset_name = nodeset.name
-        nodes_per_nodegroup    = local.default_nodes_per_nodegroup
+        nodes_per_nodegroup = local.default_nodes_per_nodegroup
     })]
   ])
 
@@ -117,14 +118,28 @@ locals {
     if nodeset.resource.platform == local.gb300_platform && floor(nodeset.size / local.gb300_nodes_per_nodegroup) > 0
   ]
 
-  # Slurm NodeSet name -> compute platform. The partition topology validations
-  # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
-  # worker nodeset it was generated from. Both generated names ("worker-rack0") and
-  # Terraform worker nodeset names ("worker") are valid refs: GB300 racks join the
-  # aggregate Slurm NodeSet named after their Terraform worker nodeset.
-  nodeset_platform = merge(
-    { for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform },
-    { for nodeset in local.slurm_nodeset_workers_with_defaults : nodeset.name => nodeset.resource.platform },
+  # Generated Slurm NodeSet name -> compute platform. The partition topology validations
+  # in variables.tf need to map a partition member back to the platform of the worker
+  # nodeset it was generated from.
+  nodeset_platform = {
+    for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform
+  }
+
+  # Slurm NodeSet name a partition can reference -> generated Slurm NodeSets it contains.
+  # Generated names refer to themselves; aggregate names to every generated NodeSet joining
+  # them. Example: GB300 worker "worker" with 2 racks gives
+  # { "worker-rack0" = ["worker-rack0"], "worker-rack1" = ["worker-rack1"],
+  #   "worker" = ["worker-rack0", "worker-rack1"] }.
+  # Generated names are merged last, as Soperator prefers a NodeSet to an aggregate of the same name.
+  slurm_nodeset_ref_members = merge(
+    {
+      for aggregate in distinct(flatten(local.slurm_nodeset_workers[*].aggregate_slurm_nodesets)) :
+      aggregate => [
+        for nodeset in local.slurm_nodeset_workers : nodeset.name
+        if contains(nodeset.aggregate_slurm_nodesets, aggregate)
+      ]
+    },
+    { for nodeset in local.slurm_nodeset_workers : nodeset.name => [nodeset.name] },
   )
 
   # NVMe device capacities are supplied in decimal GB because that is how the
@@ -721,7 +736,7 @@ module "slurm" {
   }]
   worker_nodesets = [for nodeset in local.slurm_nodeset_workers : {
     name                     = nodeset.name
-    aggregate_slurm_nodesets = nodeset.resource.platform == local.gb300_platform ? [nodeset.terraform_nodeset_name] : []
+    aggregate_slurm_nodesets = nodeset.aggregate_slurm_nodesets
     platform                 = nodeset.resource.platform
     replicas                 = nodeset.size
     max_unavailable          = "500"
