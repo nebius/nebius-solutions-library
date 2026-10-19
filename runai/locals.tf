@@ -65,17 +65,34 @@ locals {
     kubelet_numa_config_yaml = ""
   })
 
-  cpu_nodes_platform = coalesce(var.cpu_nodes_platform, local.regions_default[var.region].cpu_nodes_platform)
-  cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, local.regions_default[var.region].cpu_nodes_preset)
-  gpu_nodes_platform = coalesce(var.gpu_nodes_platform, local.regions_default[var.region].gpu_nodes_platform)
-  gpu_nodes_preset   = coalesce(var.gpu_nodes_preset, local.regions_default[var.region].gpu_nodes_preset)
+  # Regions without a defaults entry resolve to null and are rejected by the
+  # node-group preconditions in main.tf unless platform/preset are set explicitly.
+  region_defaults = lookup(local.regions_default, var.region, {})
+
+  cpu_nodes_platform = coalesce(var.cpu_nodes_platform, lookup(local.region_defaults, "cpu_nodes_platform", null))
+  cpu_nodes_preset   = coalesce(var.cpu_nodes_preset, lookup(local.region_defaults, "cpu_nodes_preset", null))
+  gpu_nodes_platform = coalesce(var.gpu_nodes_platform, lookup(local.region_defaults, "gpu_nodes_platform", null))
+  gpu_nodes_preset   = coalesce(var.gpu_nodes_preset, lookup(local.region_defaults, "gpu_nodes_preset", null))
+
+  # nvcr.io pull secret shared by the control plane (runai-backend namespace)
+  # and the cluster-registration chart (runai namespace) — one definition so
+  # the two copies cannot drift.
+  nvcr_dockerconfigjson = jsonencode({
+    auths = {
+      "nvcr.io" = {
+        username = "$oauthtoken"
+        password = var.ngc_api_key
+        auth     = base64encode("$oauthtoken:${var.ngc_api_key}")
+      }
+    }
+  })
 
   # Base domain for the Run:ai UI (served at https://runai.<base domain>).
   # byo: user-supplied. self-signed: derived from the HAProxy ingress LB IP.
   # Extracted defensively: a nil or empty LB IP (e.g. plan/apply re-run while the
   # ingress Service is still pending, or a hostname instead of an IP) falls back
   # to an "unavailable" sentinel instead of hard-erroring — a tobool() error here
-  # would block every plan and even terraform destroy (ADV-16). Readiness is
+  # would block every plan and even terraform destroy. Readiness is
   # enforced by the check block below and by preconditions on the TLS cert and
   # the backend helm release, which never run during destroy.
   haproxy_lb_ip = try(data.kubernetes_service.haproxy.status[0].load_balancer[0].ingress[0].ip, null)

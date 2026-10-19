@@ -76,15 +76,7 @@ resource "kubernetes_secret" "runai_reg_creds" {
   type = "kubernetes.io/dockerconfigjson"
 
   data = {
-    ".dockerconfigjson" = jsonencode({
-      auths = {
-        "nvcr.io" = {
-          username = "$oauthtoken"
-          password = var.ngc_api_key
-          auth     = base64encode("$oauthtoken:${var.ngc_api_key}")
-        }
-      }
-    })
+    ".dockerconfigjson" = local.nvcr_dockerconfigjson
   }
 }
 

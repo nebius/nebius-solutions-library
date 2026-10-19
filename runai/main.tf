@@ -3,7 +3,10 @@ resource "nebius_mk8s_v1_cluster" "k8s-cluster" {
   name      = var.cluster_name
   control_plane = {
     endpoints = {
-      public_endpoint = var.mk8s_cluster_public_endpoint ? { allowed_cidrs = var.mk8s_allowed_cidrs } : null
+      # The helm and kubernetes providers connect through the public endpoint
+      # (see provider.tf), so this solution cannot honour a private-only
+      # endpoint — the public endpoint is always enabled.
+      public_endpoint = { allowed_cidrs = var.mk8s_allowed_cidrs }
     }
     etcd_cluster_size = var.etcd_cluster_size
     subnet_id         = var.subnet_id
@@ -60,6 +63,13 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
     underlay_required    = false
     cloud_init_user_data = local.cloud_init_user_data
   }
+
+  lifecycle {
+    precondition {
+      condition     = local.cpu_nodes_platform != null && local.cpu_nodes_preset != null
+      error_message = "Region '${var.region}' has no platform/preset defaults in locals.tf — set cpu_nodes_platform and cpu_nodes_preset explicitly (regions: https://docs.nebius.com/overview/regions)."
+    }
+  }
 }
 
 ################
@@ -91,5 +101,12 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     }
     underlay_required    = false
     cloud_init_user_data = local.cloud_init_user_data
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.gpu_nodes_platform != null && local.gpu_nodes_preset != null
+      error_message = "Region '${var.region}' has no platform/preset defaults in locals.tf — set gpu_nodes_platform and gpu_nodes_preset explicitly (regions: https://docs.nebius.com/overview/regions)."
+    }
   }
 }

@@ -27,6 +27,11 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
     # will trigger an update of the resource even if no other fields are
     # changed" refers to `version`). Hash the rendered values so any change
     # to a helm value rolls the release instead of silently no-op'ing.
+    # Verified against the nebius provider schema from 0.6.23 (the lowest
+    # constraint of any caller of this module) upward: `sensitive.version`
+    # exists on nebius_applications_v1alpha1_k8s_release throughout.
+    # Existing deployments see a one-time in-place update of the k8s release
+    # on the first apply after picking up this change.
     version = sha256(jsonencode(local.helm_set))
     set     = local.helm_set
   }

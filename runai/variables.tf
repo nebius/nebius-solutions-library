@@ -9,13 +9,9 @@ variable "tenant_id" {
 }
 
 variable "region" {
-  description = "Nebius region."
+  description = "Project region. Node-group platform/preset defaults in locals.tf cover the regions listed at https://docs.nebius.com/overview/regions; for any other region, set cpu_nodes_platform/cpu_nodes_preset and gpu_nodes_platform/gpu_nodes_preset explicitly (the node-group preconditions in main.tf enforce this)."
   type        = string
-
-  validation {
-    condition     = contains(["eu-west1", "eu-north1", "eu-north2", "us-central1", "me-west1", "uk-south1", "eu-west2", "us-north1"], var.region)
-    error_message = "region must be one of the regions with a defaults entry in locals.tf."
-  }
+  default     = "eu-west2" # https://docs.nebius.com/overview/regions
 }
 
 variable "subnet_id" {
@@ -46,14 +42,8 @@ variable "cluster_name" {
   }
 }
 
-variable "mk8s_cluster_public_endpoint" {
-  description = "Expose the mk8s control plane API endpoint publicly."
-  type        = bool
-  default     = true
-}
-
 variable "mk8s_allowed_cidrs" {
-  description = "CIDRs allowed to reach the mk8s API public endpoint (e.g. [\"203.0.113.10/32\"]). Per Nebius semantics, null or an empty list leaves the endpoint open to the world — setting this is strongly recommended. Ignored when mk8s_cluster_public_endpoint = false."
+  description = "CIDRs allowed to reach the mk8s API public endpoint (e.g. [\"203.0.113.10/32\"]). Per Nebius semantics, null or an empty list leaves the endpoint open to the world — setting this is strongly recommended."
   type        = list(string)
   default     = null
 }
@@ -92,7 +82,7 @@ variable "ssh_user_name" {
 }
 
 variable "ssh_public_key" {
-  description = "Public SSH key for node access. Either 'key' (content) or 'path' must be set. 'key' must be a single-line OpenSSH public key — multi-line or non-key content is rejected because the value is interpolated into cloud-init YAML (YAML injection risk)."
+  description = "Public SSH key for node access. Either 'key' (content) or 'path' must be set. The key (inline or file-loaded) must be a single-line OpenSSH public key — multi-line or non-key content is rejected because the value is interpolated into cloud-init YAML (YAML injection risk)."
   type = object({
     key  = optional(string)
     path = optional(string, "~/.ssh/id_rsa.pub")
@@ -104,12 +94,13 @@ variable "ssh_public_key" {
     error_message = "ssh_public_key.key must be set, or ssh_public_key.path must point to an existing file."
   }
 
+  # The key lands unquoted in cloud-init YAML (modules/cloud-init/k8s-cloud-init.tftpl),
+  # so inline and file-loaded keys are held to the same single-line shape. An
+  # optional trailing comment (e.g. user@host, as ssh-keygen emits) is allowed,
+  # restricted to characters that stay safe in the unquoted YAML context.
   validation {
-    condition = var.ssh_public_key.key == null || (
-      can(regex("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}$", var.ssh_public_key.key)) &&
-      !strcontains(var.ssh_public_key.key, "\n")
-    )
-    error_message = "ssh_public_key.key must be a single-line OpenSSH public key (ssh-ed25519, ssh-rsa, or ecdsa-sha2-nistp256/384/521 followed by base64 key material, optional trailing '=' padding). Multi-line values and trailing text are rejected to prevent cloud-init YAML injection."
+    condition     = can(regex("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( [A-Za-z0-9@._-]*)?$", try(var.ssh_public_key.key != null ? var.ssh_public_key.key : chomp(file(var.ssh_public_key.path)), "")))
+    error_message = "ssh_public_key must be a single-line OpenSSH public key (ssh-ed25519, ssh-rsa, or ecdsa-sha2-nistp256/384/521 followed by base64 key material, with an optional 'user@host'-style comment). Multi-line values are rejected to prevent cloud-init YAML injection."
   }
 }
 
@@ -363,7 +354,7 @@ variable "haproxy_ingress_version" {
 }
 
 variable "helm_timeout" {
-  description = "Helm install/upgrade wait timeout in seconds for all helm releases. The Run:ai control plane can take ~15 minutes to become ready, so 900s left zero headroom (ADV-17)."
+  description = "Helm install/upgrade wait timeout in seconds for all helm releases. The Run:ai control plane can take ~15 minutes to become ready, so 900s left zero headroom."
   type        = number
   default     = 2400
 

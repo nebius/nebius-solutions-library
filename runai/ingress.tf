@@ -15,12 +15,12 @@ resource "helm_release" "ingress_controller" {
         # Run unprivileged with a restricted container securityContext
         # (runAsNonRoot, drop ALL caps, no privilege escalation, runtime-default
         # seccomp). These are the chart defaults, pinned here so a future chart
-        # upgrade cannot silently regress them (ADV-07).
+        # upgrade cannot silently regress them.
         unprivileged                       = true
         allowPrivilegeEscalation           = false
         enableRuntimeDefaultSeccompProfile = true
         # pprof (/debug/pprof heap dumps) and the unauthenticated stats page are
-        # enabled by default and exposed on the public LoadBalancer (ADV-07);
+        # enabled by default and exposed on the public LoadBalancer;
         # disable them on the Service. The /metrics endpoint on the stat port
         # is also unauthenticated; nothing in this solution scrapes Prometheus
         # metrics, so disable it at the controller too.

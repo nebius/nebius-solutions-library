@@ -32,7 +32,7 @@ Terraform core: `required_version = ">= 1.11"` (raised from `>= 1.9` in 9102a0d7
 | runai-cluster | `https://helm.ngc.nvidia.com/nvidia/runai` | **2.26.50** | 2.26.50 | `>=1.19.0-0` | Yes — NGC API key (`$oauthtoken`) |
 | kubernetes-ingress (HAProxy) | `https://haproxytech.github.io/helm-charts` | **1.54.3** | 3.2.17 | `>=1.23.0-0` | No (public) |
 
-Versions default from `runai/variables.tf` (`runai_version = "2.26.50"`, `haproxy_ingress_version = "1.54.3"`); both are overridable via `TF_VAR_`. All releases share the `helm_timeout` variable (default 2400s, added in 6e0ab132) and set `cleanup_on_fail = true`. The HAProxy release additionally pins unprivileged/restricted-securityContext operation, disables the stats/admin/QUIC service ports, pprof, and Prometheus metrics, and sets a TLS ≥1.2 minimum (`no-sslv3 no-tlsv10 no-tlsv11`) in its values (6e0ab132, ADV-07). Chart digests (`index.yaml`, fetched 2026-10-17):
+Versions default from `runai/variables.tf` (`runai_version = "2.26.50"`, `haproxy_ingress_version = "1.54.3"`); both are overridable via `TF_VAR_`. All releases share the `helm_timeout` variable (default 2400s, added in 6e0ab132) and set `cleanup_on_fail = true`. The HAProxy release additionally pins unprivileged/restricted-securityContext operation, disables the stats/admin/QUIC service ports, pprof, and Prometheus metrics, and sets a TLS ≥1.2 minimum (`no-sslv3 no-tlsv10 no-tlsv11`) in its values (6e0ab132). Chart digests (`index.yaml`, fetched 2026-10-17):
 
 - `control-plane` 2.26.50 — digest `6ff2fa8ac05098895e2e98a16ed0fe9f4e2b8bd22d3742ed54c477d64b734dae`, created 2026-09-23T19:48:26Z
 - `runai-cluster` 2.26.50 — digest `d10510489f5b7202ed1c9c611fdc83b363d67b3c16998727122a071aeab5f95b`, created 2026-09-23T19:44:41Z
@@ -115,7 +115,7 @@ Image tags/digests are **chart-resolved and unpinned at the Terraform layer**; t
 
 Resolved since the initial SBOM (**fixed in 9102a0d7 unless noted**): the lockfile is now committed and the `kubernetes` provider constrained (see below); `k8s_version` is pinned to `"1.36"` and validated against the Run:ai support matrix. Remaining gaps:
 
-1. **Chart image digests are unpinned at the Terraform layer** — images are resolved from chart `values.yaml` at deploy time; pinning the chart version is the only digest-level control. The `helm` provider cannot pin chart digests (ADV-33, accepted risk; digests recorded above).
+1. **Chart image digests are unpinned at the Terraform layer** — images are resolved from chart `values.yaml` at deploy time; pinning the chart version is the only digest-level control. The `helm` provider cannot pin chart digests (accepted risk; digests recorded above).
 2. **GPU operator version is platform-resolved** — `nebius_applications_v1alpha1_k8s_release` selects the version served by the Nebius marketplace for `nebius/nvidia-gpu-operator`; nothing in the repo records which version was deployed. (The write-only-`sensitive` silent-no-op gap was fixed in 9102a0d7: `sensitive.version` is now a SHA-256 of the rendered values.)
 3. **Tooling unversioned** — nebius CLI, jq, coreutils, openssl, and the Helm CLI have no version floor recorded in the repo (only Terraform has `required_version`).
 4. **NGC chart repo requires auth** — subchart deps behind `nvcr.io/artifactory/*` could not be metadata-verified anonymously; their versions are taken from the published `index.yaml` dependency lists of the parent charts (publicly fetchable).

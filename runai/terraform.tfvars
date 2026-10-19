@@ -3,9 +3,11 @@ cluster_name = "runai"
 
 # SSH config
 ssh_user_name = "ubuntu" # Username you want to use to connect to the nodes
+# Public key for node access: either paste a single-line OpenSSH key below, or
+# point 'path' at a key file (defaults to ~/.ssh/id_rsa.pub if both are unset).
 ssh_public_key = {
-  key = "put Nebius Cloud user's public SSH key here"
-  # path = "put path to public ssh key here"
+  # key  = "ssh-ed25519 AAAA... user@host"
+  # path = "~/.ssh/id_rsa.pub"
 }
 
 # K8s nodes
@@ -17,7 +19,7 @@ runai_version = "2.26.50"
 
 # Helm install/upgrade wait timeout in seconds for all helm releases. The
 # Run:ai control plane can take ~15 minutes to become ready — the previous
-# 900s default had zero headroom (ADV-17).
+# 900s default had zero headroom.
 # helm_timeout = 2400
 
 # NGC API key for helm repo auth and the nvcr.io pull secret.

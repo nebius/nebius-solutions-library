@@ -19,8 +19,6 @@ env:
   TF_VAR_parent_id: project-e02s5a0dpr00nk11bgb0p9
   TF_VAR_tenant_id: tenant-e00tem0x4n0edc3hv2
   TF_VAR_region: eu-north2
-  # Requires the NGC_API_KEY repository secret (NVIDIA NGC API key) for runai helm chart access.
-  TF_VAR_ngc_api_key: ${{ secrets.NGC_API_KEY }}
 
 jobs:
   detect-changes:
@@ -51,7 +49,10 @@ jobs:
           for file in $ALL_CHANGED_FILES; do
             solution="${file%%/*}"
             if [[ "$solution" == "modules" ]]; then
-              matched=("k8s-training" "runai" "wireguard" "bastion" "dsvm")
+              # runai is intentionally not added here: its CI leg provisions a
+              # full mk8s cluster and is the expensive, merge-blocking one, so
+              # it runs only when runai/** itself changes.
+              matched=("k8s-training" "wireguard" "bastion" "dsvm")
               break
             elif [[ "$solution" =~ $pattern ]]; then
               matched+=("$solution")
@@ -73,7 +74,10 @@ jobs:
         env:
           ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          patterns='(A(K|S)IA[0-9A-Z]{16}|NGC[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|^\s*password\s*=\s*"[^"]+")'
+          # NGC API keys have no distinguishing prefix and cannot be pattern-matched
+          # reliably; the effective guards are the AWS key, private-key and
+          # password patterns.
+          patterns='(A(K|S)IA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|^\s*password\s*=\s*"[^"]+")'
           found=0
           for file in $ALL_CHANGED_FILES; do
             case "$file" in
@@ -223,6 +227,9 @@ jobs:
       run: |
         if [ -n "${NGC_API_KEY}" ]; then
           echo "present=true" >> "$GITHUB_OUTPUT"
+          # Expose the key to this leg's later steps only — it is deliberately
+          # not set workflow-wide so no other solution's job receives it.
+          echo "TF_VAR_ngc_api_key=${NGC_API_KEY}" >> "$GITHUB_ENV"
         else
           echo "present=false" >> "$GITHUB_OUTPUT"
           echo "::warning::NGC_API_KEY secret is not configured - skipping terraform plan and test for the runai leg. Add the NGC_API_KEY repository secret to enable full runai CI."
@@ -231,6 +238,13 @@ jobs:
     - name: Generate Run:ai admin password
       if: matrix.solution == 'runai'
       run: RUNAI_PW="Aa1!$(openssl rand -hex 16)" && echo "::add-mask::$RUNAI_PW" && echo "TF_VAR_runai_admin_password=$RUNAI_PW" >> "$GITHUB_ENV"
+
+    # CI topology: the runai leg exercises plan/test of the control plane
+    # only, so skip the 8-GPU node (gpu_nodes_fixed_count allows 0) — it is
+    # expensive and squeezes the shared public-IPv4 quota (3 per region).
+    - name: Configure Run:ai CI topology
+      if: matrix.solution == 'runai'
+      run: echo "TF_VAR_gpu_nodes_fixed_count=0" >> "$GITHUB_ENV"
 
     # Generates an execution plan for Terraform
     - name: Terraform Plan
@@ -373,8 +387,8 @@ jobs:
     # NOTE: `if: always()` covers terraform-job failure/skip within a run, but
     # a CANCELLED run never reaches this job and leaks resources until the next
     # PR's cleanup or a manual delete. The scheduled sweeper cron (commented out
-    # above) was the backstop for that gap; re-enabling it is tracked separately
-    # (ADV-23) — deliberately not redesigned here.
+    # above) was the backstop for that gap; re-enabling it is a known
+    # follow-up — deliberately not redesigned here.
     environment:
       name: project-e02s5a0dpr00nk11bgb0p9
     concurrency:
