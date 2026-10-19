@@ -15,8 +15,9 @@ variable "cluster_id" {
 }
 
 variable "cluster_name" {
-  description = "MK8s cluster name."
+  description = "Optional cluster name used to namespace access keys. Null preserves legacy names for existing callers."
   type        = string
+  default     = null
 }
 
 variable "namespace" {
