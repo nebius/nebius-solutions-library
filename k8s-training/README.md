@@ -47,9 +47,8 @@ To deploy a Kubernetes cluster, follow these steps:
 
 2. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in `environment.sh`.
 
-3. Set the cluster name, then load environment variables:
+3. Load environment variables (the cluster name defaults to `k8s-training`):
    ```bash
-   export TF_VAR_cluster_name="k8s-training"
    source ./environment.sh
    ```
 
@@ -455,28 +454,53 @@ local configuration with the copy command above.
 
 ## Cluster names and existing Terraform state
 
-`environment.sh` requires an explicit `TF_VAR_cluster_name` before making cloud
-calls. It does not read `terraform.tfvars`, so it also works when that file is
-absent or deployment inputs are supplied by Terragrunt. Use the same cluster name
-in your deployment inputs. If you use the exported variable as the source of the
-name, remove the `cluster_name` assignment from your local `terraform.tfvars`:
-Terraform gives that file precedence over environment variables.
+`environment.sh` defaults an unset or empty `TF_VAR_cluster_name` to
+`k8s-training`, matching Terraform's default. It does not parse `terraform.tfvars`,
+so it also works when inputs are supplied through Terragrunt. A `cluster_name`
+assignment in your local tfvars file takes precedence over the environment variable.
 
-For a new cluster, the backend key defaults to `<cluster_name>.tfstate`. To keep
-an existing deployment on its original state, set its exact existing key before
-sourcing the script. Deployments created before multi-cluster support used
-`k8s-training.tfstate`, even when the cluster had a different name:
+The backend key defaults to `k8s-training.tfstate` for every cluster name. This
+preserves the state location of existing deployments, including clusters with
+custom names. The script prints the resolved bucket and key before writing
+`terraform_backend_override.tf`.
+
+For each **additional cluster**, explicitly set a different `K8S_TF_STATE_KEY`.
+Otherwise, deployments in the same project and tenant use the same state key.
+Keep each cluster's Terraform working directory separate. For example:
 
 ```bash
-export TF_VAR_cluster_name="my-existing-cluster"
-export K8S_TF_STATE_KEY="k8s-training.tfstate"
+export TF_VAR_cluster_name="training-b"
+export K8S_TF_STATE_KEY="training-b.tfstate"
 source ./environment.sh
 terraform init
 ```
 
-Retaining the original bucket and key avoids moving state. Do not apply against a
-new empty key for an existing deployment. If intentionally changing the key, back
-up the existing state first and use `terraform init -migrate-state` while the
-working directory still has its previous backend configuration in `.terraform`.
-Review the migration prompt and subsequent plan before applying. For new clusters,
-unset `K8S_TF_STATE_KEY` to use the cluster-specific default.
+Supply the same cluster name through your tfvars file or Terragrunt inputs. If
+using `TF_VAR_cluster_name` as the source of the name, remove the `cluster_name`
+assignment from your local tfvars file. State keys may contain slash-separated
+prefixes, but standalone `.` and `..` path segments are rejected.
+
+For an existing deployment, retain its exact bucket and key; changing the cluster
+name alone does not migrate state. If intentionally changing the key, back up the
+state first and use `terraform init -migrate-state` while the working directory
+still has its previous backend configuration in `.terraform`. Review the migration
+prompt and subsequent plan before applying. Unsetting `K8S_TF_STATE_KEY` restores
+the historical `k8s-training.tfstate` key, not a cluster-specific key.
+
+### Observability upgrades and testing
+
+Kubernetes training passes its cluster name to the observability module, which
+prefixes the Grafana and Loki access-key names. Existing module callers that omit
+`cluster_name` retain the legacy names. The checked Nebius provider versions
+(0.6.23 and 0.6.72) support updating the access-key name without marking it for
+replacement. Review the plan with your selected provider version before upgrading;
+no Terraform resource address changes, so a `moved` block is not needed.
+
+The example keeps `loki.enabled = false`, so copying it does not deploy Loki.
+Set it to `true` to enable Loki. CI separately plans a fixture with Loki enabled
+and mocked providers. The test harness copies the access-key resources and their IAM dependencies directly from
+this module, so it checks the production resource definitions without provisioning
+a cluster or changing the example's default. The fixture excludes ephemeral
+MysteryBox resources, which Terraform 1.11 cannot mock; secret retrieval and
+application deployment are not covered. Run the same check locally with
+`python3 modules/o11y/tests/check_access_keys.py` from the repository root.

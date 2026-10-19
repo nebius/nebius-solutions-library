@@ -80,6 +80,9 @@ jobs:
       with:
         terraform_version: "v1.11.4"
 
+    - name: Test observability access keys with mocked providers
+      run: python3 modules/o11y/tests/check_access_keys.py
+
     # Terraform does not discover .example files during recursive formatting.
     - name: Prepare example variables for format checks
       run: |

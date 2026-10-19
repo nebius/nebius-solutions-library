@@ -55,9 +55,9 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
         )
 
     def test_invalid_cluster_names_stop_before_cloud_calls(self):
-        for name in (None, "", " ", "bad name", 'bad"name', "bad\nname", "../cluster"):
+        for name in (" ", "bad name", 'bad"name', "bad\nname", "../cluster"):
             with self.subTest(name=name):
-                result = self.source({} if name is None else {"TF_VAR_cluster_name": name})
+                result = self.source({"TF_VAR_cluster_name": name})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("TF_VAR_cluster_name", result.stderr)
                 self.assertFalse(self.log.exists())
@@ -67,7 +67,7 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
         result = self.source({"TF_VAR_cluster_name": "training-a"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "terraform.tfvars").exists())
-        self.assertIn('key    = "training-a.tfstate"',
+        self.assertIn('key    = "k8s-training.tfstate"',
                       (self.root / "terraform_backend_override.tf").read_text())
         self.assertTrue(self.log.exists())
 
@@ -80,7 +80,8 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
                               (self.root / "terraform_backend_override.tf").read_text())
 
     def test_invalid_keys_stop_before_cloud_calls(self):
-        for key in ("", ".tfstate", "bad key.tfstate", 'bad"key.tfstate', "bad\nkey.tfstate", "state"):
+        for key in ("", ".tfstate", "bad key.tfstate", 'bad"key.tfstate', "bad\nkey.tfstate", "state",
+                    "a/../b.tfstate", "a/./b.tfstate", "a/b/../../c.tfstate"):
             with self.subTest(key=key):
                 result = self.source({"TF_VAR_cluster_name": "training-a", "K8S_TF_STATE_KEY": key})
                 self.assertNotEqual(result.returncode, 0)
@@ -88,19 +89,51 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
                 self.assertFalse(self.log.exists())
                 self.assertFalse((self.root / "terraform_backend_override.tf").exists())
 
-    def test_resourcing_recomputes_default_key(self):
+    def test_resourcing_with_new_cluster_name_keeps_legacy_key(self):
         result = self.source(
             {"TF_VAR_cluster_name": "training-a"},
             'source "$1" && export TF_VAR_cluster_name=training-b && source "$1"',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('key    = "training-b.tfstate"',
+        self.assertIn('key    = "k8s-training.tfstate"',
                       (self.root / "terraform_backend_override.tf").read_text())
 
-    def test_default_name_retains_legacy_key(self):
-        result = self.source({"TF_VAR_cluster_name": "k8s-training"})
+    def test_missing_or_empty_name_uses_terraform_default(self):
+        for variables in ({}, {"TF_VAR_cluster_name": ""}):
+            with self.subTest(variables=variables):
+                result = self.source(variables, 'source "$1" && printf "cluster=%s\\n" "$TF_VAR_cluster_name"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("cluster=k8s-training", result.stdout)
+                self.assertIn('key    = "k8s-training.tfstate"',
+                              (self.root / "terraform_backend_override.tf").read_text())
+
+    def test_custom_name_in_tfvars_keeps_legacy_key(self):
+        (self.root / "terraform.tfvars").write_text('cluster_name = "existing-custom-cluster"\n')
+        result = self.source()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('key    = "k8s-training.tfstate"',
+                      (self.root / "terraform_backend_override.tf").read_text())
+
+    def test_explicit_key_is_used_and_printed(self):
+        result = self.source({"TF_VAR_cluster_name": "training-b", "K8S_TF_STATE_KEY": "clusters/training-b.tfstate"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Terraform state: s3://tfstate-k8s-training-mockhash/clusters/training-b.tfstate", result.stdout)
+        self.assertIn('key    = "clusters/training-b.tfstate"',
+                      (self.root / "terraform_backend_override.tf").read_text())
+
+    def test_unsetting_override_restores_legacy_key(self):
+        result = self.source(
+            {"TF_VAR_cluster_name": "training-b", "K8S_TF_STATE_KEY": "training-b.tfstate"},
+            'source "$1" && unset K8S_TF_STATE_KEY && source "$1"',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('key    = "k8s-training.tfstate"',
+                      (self.root / "terraform_backend_override.tf").read_text())
+
+    def test_dots_inside_path_components_remain_valid(self):
+        result = self.source({"K8S_TF_STATE_KEY": "clusters/v1.2/cluster..backup.tfstate"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('key    = "clusters/v1.2/cluster..backup.tfstate"',
                       (self.root / "terraform_backend_override.tf").read_text())
 
 

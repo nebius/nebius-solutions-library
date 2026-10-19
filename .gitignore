@@ -53,3 +53,6 @@ terraform.rc
 # It's added to the root .gitignore because they shouldn't be ignored if commited to other repos.
 /soperator/installations/*
 !/soperator/installations/example
+
+# Python test bytecode
+__pycache__/
