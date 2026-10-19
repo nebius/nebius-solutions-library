@@ -92,9 +92,14 @@ resource "nebius_mk8s_v1_node_group" "gb300" {
 
   template = {
     metadata = {
-      labels = {
-        "nebius.com/nvlink-instance-group" = nebius_compute_v1_nvl_instance_group.gb300[each.key].id
-      }
+      labels = merge(
+        {
+          "nebius.com/nvlink-instance-group" = nebius_compute_v1_nvl_instance_group.gb300[each.key].id
+        },
+        local.gb300_dra_enabled ? {
+          "nvidia.com/dra-kubelet-plugin" = "true"
+        } : {}
+      )
     }
 
     boot_disk = {
@@ -130,8 +135,11 @@ resource "nebius_mk8s_v1_node_group" "gb300" {
       }
     }] : null
 
-    gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
-    gpu_settings = { drivers_preset = local.device_preset }
+    gpu_cluster = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
+    gpu_settings = {
+      drivers_preset = local.device_preset
+      dra            = var.gb300.dra
+    }
     nvlink = {
       nvl_instance_group_id = nebius_compute_v1_nvl_instance_group.gb300[each.key].id
     }

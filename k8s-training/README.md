@@ -187,11 +187,37 @@ over a complete 18-node rack. They do not reduce the MK8s node-group or NVLink
 instance-group size. Spare nodes should remain part of the rack and be excluded
 from normal workloads through Kubernetes scheduling policy.
 
-IMEX configuration is owned by MK8s Node Infrastructure for driverfull GB300
-node groups. Before deploying, confirm the selected Node Infrastructure version
-includes managed GB300 IMEX support. MK8s writes `/etc/nvidia-imex/nodes_config.cfg` and manages
-`nvidia-imex.service`. DRA mode is intentionally not exposed by this template
-until MK8s provides a supported public selection path.
+#### Optional GPU DRA
+
+Set `gb300.dra = true` to enable Dynamic Resource Allocation (DRA). Use Kubernetes
+`1.36` with Nebius Terraform provider `0.6.70` or newer:
+
+```hcl
+k8s_version = "1.36"
+
+gb300 = {
+  rack_count = 2
+  dra        = true
+}
+```
+
+Keep the zero-surge strategy and, for multiple racks, the InfiniBand fabric
+configuration shown above. DRA applies to every rack created by `rack_count`.
+The recipe installs one NVIDIA GPU DRA Helm release (`0.4.1`) per cluster, with
+its kubelet plugins selected onto all DRA-enabled GB300 nodes. MK8s disables its
+built-in device plugin and provides managed DRANet on fabric-attached GPU nodes.
+The recipe also skips its separate device-plugin installation.
+
+Workloads must supply GPU ResourceClaims and, for multi-node NVLink, a
+ComputeDomain and channel claims so NVIDIA DRA can manage workload IMEX.
+The recipe does not create workload claims or ComputeDomains. See the
+[public MK8s DRA setting](https://docs.nebius.com/terraform-provider/reference/resources/mk8s_v1_node_group#nestedatt--template--gpu_settings)
+and [NVIDIA DRA documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/v0.4.1).
+
+DRA is disabled by default. With `dra = false`, the existing device-plugin and
+MK8s-managed static IMEX path remains in use. Select DRA when creating the node
+groups. Changing an existing deployment requires reviewing the node rollout and
+migrating workloads to DRA claims before resuming them.
 
 The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
 MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the

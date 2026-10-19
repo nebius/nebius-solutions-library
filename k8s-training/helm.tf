@@ -34,7 +34,8 @@ module "gpu-operator-custom" {
 
 
 module "device-plugin" {
-  count = local.use_driverfull_gpu ? 1 : 0
+  # MK8s disables its built-in plugin for DRA. Skip this separate installation too.
+  count = local.use_driverfull_gpu && !local.gb300_dra_enabled ? 1 : 0
 
   source     = "../modules/device-plugin"
   parent_id  = var.parent_id
