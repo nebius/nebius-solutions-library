@@ -462,7 +462,9 @@ assignment in your local tfvars file takes precedence over the environment varia
 The backend key defaults to `k8s-training.tfstate` for every cluster name. This
 preserves the state location of existing deployments, including clusters with
 custom names. The script prints the resolved bucket and key before writing
-`terraform_backend_override.tf`.
+`terraform_backend_override.tf`. It warns when `TF_VAR_cluster_name` is non-default
+and `K8S_TF_STATE_KEY` is unset. Existing custom-named deployments can explicitly
+set `K8S_TF_STATE_KEY=k8s-training.tfstate` to acknowledge their legacy state key.
 
 For each **additional cluster**, explicitly set a different `K8S_TF_STATE_KEY`.
 Otherwise, deployments in the same project and tenant use the same state key.
@@ -491,16 +493,31 @@ the historical `k8s-training.tfstate` key, not a cluster-specific key.
 
 Kubernetes training passes its cluster name to the observability module, which
 prefixes the Grafana and Loki access-key names. Existing module callers that omit
-`cluster_name` retain the legacy names. The checked Nebius provider versions
-(0.6.23 and 0.6.72) support updating the access-key name without marking it for
-replacement. Review the plan with your selected provider version before upgrading;
-no Terraform resource address changes, so a `moved` block is not needed.
+`cluster_name` retain the legacy names. Source inspection of Nebius provider
+[0.6.23][access-key-schema-0623] and [0.6.72][access-key-schema-0672] shows no
+replacement modifier on `name`; their update implementations pass resource
+metadata to the API ([0.6.23][access-key-update-0623],
+[0.6.72][access-key-update-0672]). This supports an expected in-place rename, but
+does not demonstrate an upgrade against existing state. No live upgrade plan was
+run. Review the plan with your selected provider version before upgrading; no
+Terraform resource address changes, so a `moved` block is not needed.
+
+The published [API name schema][resource-metadata] has no restriction excluding
+dots. Acceptance of the prefixed names by the live API has not been tested.
 
 The example keeps `loki.enabled = false`, so copying it does not deploy Loki.
 Set it to `true` to enable Loki. CI separately plans a fixture with Loki enabled
-and mocked providers. The test harness copies the access-key resources and their IAM dependencies directly from
-this module, so it checks the production resource definitions without provisioning
-a cluster or changing the example's default. The fixture excludes ephemeral
-MysteryBox resources, which Terraform 1.11 cannot mock; secret retrieval and
-application deployment are not covered. Run the same check locally with
+and mocked providers. The test harness copies the access-key resources and their
+IAM dependencies directly from this module, so it checks the production resource
+definitions without provisioning a cluster or changing the example's default.
+These plans start with empty state and check names, not upgrade or replacement
+behavior. The fixture excludes ephemeral MysteryBox resources, which Terraform
+1.11 cannot mock; secret retrieval and application deployment are not covered.
+Run the same check locally with
 `python3 modules/o11y/tests/check_access_keys.py` from the repository root.
+
+[access-key-schema-0623]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.23/generated/nebius/iam/v2/access_key_service.tfgen.go#L206-L211
+[access-key-schema-0672]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.72/generated/nebius/iam/v2/access_key_service.tfgen.go#L210-L217
+[access-key-update-0623]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.23/generated/nebius/iam/v2/access_key_service.tfgen.go#L452-L463
+[access-key-update-0672]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.72/generated/nebius/iam/v2/access_key_service.tfgen.go#L469-L480
+[resource-metadata]: https://github.com/nebius/api/blob/main/nebius/common/v1/metadata.proto#L22-L25

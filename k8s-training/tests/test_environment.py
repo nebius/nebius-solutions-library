@@ -79,6 +79,32 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
                 self.assertIn(f'key    = "{key}"',
                               (self.root / "terraform_backend_override.tf").read_text())
 
+    def test_custom_name_without_explicit_key_warns(self):
+        result = self.source({"TF_VAR_cluster_name": "training-b"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "Warning: cluster name is 'training-b' but state key is the legacy "
+            "default; set K8S_TF_STATE_KEY for an additional cluster.",
+            result.stderr,
+        )
+        self.assertIn("Terraform state: s3://tfstate-k8s-training-mockhash/k8s-training.tfstate",
+                      result.stdout)
+        self.assertIn('key    = "k8s-training.tfstate"',
+                      (self.root / "terraform_backend_override.tf").read_text())
+
+    def test_default_name_or_explicit_key_does_not_warn(self):
+        for variables in (
+            {},
+            {"TF_VAR_cluster_name": ""},
+            {"TF_VAR_cluster_name": "k8s-training"},
+            {"TF_VAR_cluster_name": "training-b", "K8S_TF_STATE_KEY": "k8s-training.tfstate"},
+            {"TF_VAR_cluster_name": "training-b", "K8S_TF_STATE_KEY": "clusters/training-b.tfstate"},
+        ):
+            with self.subTest(variables=variables):
+                result = self.source(variables)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Warning:", result.stderr)
+
     def test_invalid_keys_stop_before_cloud_calls(self):
         for key in ("", ".tfstate", "bad key.tfstate", 'bad"key.tfstate', "bad\nkey.tfstate", "state",
                     "a/../b.tfstate", "a/./b.tfstate", "a/b/../../c.tfstate"):

@@ -153,6 +153,9 @@ export AWS_SECRET_ACCESS_KEY=$(nebius iam v2 access-key get \
 
 # Show the exact state location before writing the backend configuration.
 printf 'Terraform state: s3://%s/%s\n' "$NEBIUS_BUCKET_NAME" "$K8S_RESOLVED_TF_STATE_KEY"
+if [[ "$TF_VAR_cluster_name" != "k8s-training" && -z "${K8S_TF_STATE_KEY+x}" ]]; then
+  printf "Warning: cluster name is '%s' but state key is the legacy default; set K8S_TF_STATE_KEY for an additional cluster.\n" "$TF_VAR_cluster_name" >&2
+fi
 
 # Use Object Storage as Terraform backend
 cat > terraform_backend_override.tf << EOF
