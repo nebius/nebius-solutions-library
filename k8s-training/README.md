@@ -52,6 +52,20 @@ To deploy a Kubernetes cluster, follow these steps:
    source ./environment.sh
    ```
 
+   Subnet discovery prefers a subnet whose name starts with `default` in a
+   network whose name starts with `default`, then any subnet in such a network,
+   then the first subnet in the project. The script lists all pages and prints
+   the selected ID. Projects with custom network or subnet names remain supported.
+   To select a specific subnet and skip both VPC list calls, set its ID first:
+
+   ```bash
+   export NEBIUS_VPC_SUBNET_ID="vpcsubnet-..."
+   source ./environment.sh
+   ```
+
+   A non-empty `NEBIUS_VPC_SUBNET_ID` is preserved when sourcing the script again.
+   Unset it before sourcing to repeat discovery, including when changing projects.
+
 4. Initialize Terraform:
    ```bash
    terraform init

@@ -47,33 +47,44 @@ fi
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
 
-# VPC network (use the same "default" prefix as the Osmo environment helper)
-# Accept response envelopes and arrays when listing all pages.
-NEBIUS_VPC_NETWORK_ID=$(nebius vpc network list \
-  --parent-id "${NEBIUS_PROJECT_ID}" \
-  --all \
-  --format json \
-  | jq -r '(if type == "array" then . else (.items // []) end)
-    | map(select(.metadata.name | startswith("default")))
-    | .[0].metadata.id // empty')
-if [ -z "${NEBIUS_VPC_NETWORK_ID}" ]; then
-  echo "Error: no default network found in project ${NEBIUS_PROJECT_ID} (expected a network whose name starts with 'default')"
-  return 1
-fi
-export NEBIUS_VPC_NETWORK_ID
+# VPC subnet: honor an explicit ID, otherwise prefer subnets in default* networks.
+if [ -n "${NEBIUS_VPC_SUBNET_ID:-}" ]; then
+  echo "Using configured subnet: ${NEBIUS_VPC_SUBNET_ID}"
+else
+  if ! K8S_VPC_NETWORKS_JSON=$(nebius vpc network list \
+    --parent-id "${NEBIUS_PROJECT_ID}" --all --format json); then
+    echo "Error: failed to list networks in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
+  if ! K8S_VPC_SUBNETS_JSON=$(nebius vpc subnet list \
+    --parent-id "${NEBIUS_PROJECT_ID}" --all --format json); then
+    echo "Error: failed to list subnets in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
 
-# VPC subnet (the default subnet inside that network)
-NEBIUS_VPC_SUBNET_ID=$(nebius vpc subnet list \
-  --parent-id "${NEBIUS_PROJECT_ID}" \
-  --all \
-  --format json \
-  | jq -r --arg NET_ID "${NEBIUS_VPC_NETWORK_ID}" \
-    '(if type == "array" then . else (.items // []) end)
-    | map(select(.spec.network_id == $NET_ID and (.metadata.name | startswith("default"))))
-    | .[0].metadata.id // empty')
-if [ -z "${NEBIUS_VPC_SUBNET_ID}" ]; then
-  echo "Error: no default subnet found in network ${NEBIUS_VPC_NETWORK_ID} (expected a subnet whose name starts with 'default')"
-  return 1
+  # Accept list envelopes and arrays. Prefer a default* subnet in a default*
+  # network, then any subnet in those networks, then the first project subnet.
+  if ! NEBIUS_VPC_SUBNET_ID=$(jq -r --argjson NETWORKS "${K8S_VPC_NETWORKS_JSON}" '
+    def items: if type == "array" then . else (.items // []) end;
+    ($NETWORKS | items
+      | map(select((.metadata.name // "") | startswith("default"))
+        | .metadata.id // empty)) as $default_network_ids
+    | items as $subnets
+    | ($subnets | map(select(.spec.network_id as $network_id
+        | $default_network_ids | index($network_id)))) as $network_subnets
+    | (($network_subnets
+        | map(select((.metadata.name // "") | startswith("default"))) | .[0])
+      // $network_subnets[0] // $subnets[0])
+    | .metadata.id // empty' <<< "${K8S_VPC_SUBNETS_JSON}"); then
+    echo "Error: failed to parse VPC network/subnet responses in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
+  if [ -z "${NEBIUS_VPC_SUBNET_ID}" ]; then
+    echo "Error: no subnet found in project ${NEBIUS_PROJECT_ID}; create one or set NEBIUS_VPC_SUBNET_ID" >&2
+    return 1
+  fi
+  echo "Using discovered subnet: ${NEBIUS_VPC_SUBNET_ID}"
+  unset K8S_VPC_NETWORKS_JSON K8S_VPC_SUBNETS_JSON
 fi
 export NEBIUS_VPC_SUBNET_ID
 
@@ -212,7 +223,6 @@ echo "Exported variables:"
 echo "NEBIUS_TENANT_ID: ${NEBIUS_TENANT_ID}"
 echo "NEBIUS_PROJECT_ID: ${NEBIUS_PROJECT_ID}"
 echo "NEBIUS_REGION: ${NEBIUS_REGION}"
-echo "NEBIUS_VPC_NETWORK_ID: ${NEBIUS_VPC_NETWORK_ID}"
 echo "NEBIUS_VPC_SUBNET_ID: ${NEBIUS_VPC_SUBNET_ID}"
 echo "NEBIUS_BUCKET_NAME: ${NEBIUS_BUCKET_NAME}"
 echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
