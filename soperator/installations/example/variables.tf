@@ -718,8 +718,11 @@ variable "slurm_operator_stable" {
 variable "slurm_nodesets_partitions" {
   description = <<-EOT
     Partition configuration for generated Slurm NodeSets.
-    slurm_nodeset_refs must reference generated Slurm NodeSet names. A non-GB worker keeps its Terraform worker nodeset name.
-    A GB300 worker nodeset expands into rack-scoped Slurm NodeSets named <name>-rack<rack>.
+    slurm_nodeset_refs must reference Slurm NodeSet names. A non-GB worker keeps its Terraform worker nodeset name.
+    A GB300 worker nodeset expands into rack-scoped Slurm NodeSets named <name>-rack<rack>, and an aggregate
+    Slurm NodeSet named <name> containing all of its racks. Reference <name> to follow racks being added or removed,
+    or <name>-rack<rack> to select specific racks.
+    Names listed in slurm_nodeset_workers[].aggregate_slurm_nodesets are aggregate Slurm NodeSets too.
     Users must not remove the "hidden" partition.
     Users can modify the "main" partition, but should not remove it (there must be at least one default partition).
     topology is required. Available topologies: flat is always present, tree-ib is present for GPU NodeSets, and block-nvl72 is present for GB300 NodeSets.
@@ -750,27 +753,27 @@ variable "slurm_nodesets_partitions" {
   }
 
   validation {
-    # Validate partition refs against generated Slurm NodeSet names, not raw
-    # Terraform worker nodeset names. Example: gpu-gb300 worker "primtrain" with
-    # size = 36 generates ["primtrain-rack0", "primtrain-rack1"];
-    # non-GB worker "worker" stays "worker".
+    # Validate partition refs against Slurm NodeSet names. Example: gpu-gb300
+    # worker "primtrain" with size = 36 generates ["primtrain-rack0", "primtrain-rack1"]
+    # and the aggregate "primtrain" containing both racks;
+    # non-GB worker "worker" stays "worker";
+    # aggregate_slurm_nodesets = ["gpu"] adds the aggregate "gpu".
     condition = length(setsubtract(
       toset(flatten([
         for p in var.slurm_nodesets_partitions : coalesce(p.slurm_nodeset_refs, [])
       ])),
-      toset(flatten([
-        for w in var.slurm_nodeset_workers :
-        w.resource.platform == "gpu-gb300" ? [
-          for rack in range(max(1, try(ceil(w.size / 18), 0))) : format(
-            "%s-rack%d",
-            w.name,
-            rack,
-          )
-        ] : [w.name]
-      ]))
+      toset(keys(local.slurm_nodeset_ref_members))
     )) == 0
 
-    error_message = "All slurm_nodesets_partitions[].slurm_nodeset_refs must reference generated Slurm NodeSet names. GB300 worker nodesets generate <name>-rack<rack> names; other worker nodesets use <name>."
+    error_message = format(
+      "All slurm_nodesets_partitions[].slurm_nodeset_refs must reference Slurm NodeSet names. GB300 worker nodesets generate <name> for all racks and <name>-rack<rack> for each rack; other worker nodesets use <name>; aggregate_slurm_nodesets entries are valid too. Unknown: %s.",
+      join(", ", setsubtract(
+        toset(flatten([
+          for p in var.slurm_nodesets_partitions : coalesce(p.slurm_nodeset_refs, [])
+        ])),
+        toset(keys(local.slurm_nodeset_ref_members))
+      )),
+    )
   }
 
   validation {
@@ -788,24 +791,30 @@ variable "slurm_nodesets_partitions" {
     )
   }
 
-  # A partition's member NodeSets are either all of them (is_all) or the listed refs.
-  # An unknown ref defaults to a platform that passes here: reporting it belongs to the
-  # slurm_nodeset_refs validation above, and indexing the map directly would abort this
-  # validation with a bare "Invalid index" before that message is ever printed.
+  # A partition's members are the generated NodeSets of all of them (is_all) or of the listed
+  # refs, with aggregate refs expanded, so an aggregate mixing platforms is caught too.
+  # Unknown refs expand to nothing: reporting them belongs to the slurm_nodeset_refs validation above.
+  # The expansion is inlined, as a local built from this variable would form a dependency cycle.
   validation {
     condition = alltrue([
       for p in var.slurm_nodesets_partitions : alltrue([
-        for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : p.slurm_nodeset_refs) :
-        startswith(lookup(local.nodeset_platform, ref, "gpu-"), "gpu-")
+        for member in distinct(flatten([
+          for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : coalesce(p.slurm_nodeset_refs, [])) :
+          lookup(local.slurm_nodeset_ref_members, ref, [])
+        ])) :
+        startswith(local.nodeset_platform[member], "gpu-")
       ]) if p.topology == "tree-ib"
     ])
     error_message = format(
       "Topology \"tree-ib\" requires every NodeSet in the partition to be a GPU NodeSet (platform gpu-*). Offending: %s. Select only the GPU NodeSets with slurm_nodeset_refs instead of is_all = true, or use topology = \"flat\".",
       join("; ", flatten([
         for p in var.slurm_nodesets_partitions : [
-          for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : p.slurm_nodeset_refs) :
-          "partition \"${p.name}\" includes \"${ref}\" (${lookup(local.nodeset_platform, ref, "?")})"
-          if !startswith(lookup(local.nodeset_platform, ref, "gpu-"), "gpu-")
+          for member in distinct(flatten([
+            for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : coalesce(p.slurm_nodeset_refs, [])) :
+            lookup(local.slurm_nodeset_ref_members, ref, [])
+          ])) :
+          "partition \"${p.name}\" includes \"${member}\" (${local.nodeset_platform[member]})"
+          if !startswith(local.nodeset_platform[member], "gpu-")
         ] if p.topology == "tree-ib"
       ])),
     )
@@ -814,17 +823,23 @@ variable "slurm_nodesets_partitions" {
   validation {
     condition = alltrue([
       for p in var.slurm_nodesets_partitions : alltrue([
-        for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : p.slurm_nodeset_refs) :
-        lookup(local.nodeset_platform, ref, local.gb300_platform) == local.gb300_platform
+        for member in distinct(flatten([
+          for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : coalesce(p.slurm_nodeset_refs, [])) :
+          lookup(local.slurm_nodeset_ref_members, ref, [])
+        ])) :
+        local.nodeset_platform[member] == local.gb300_platform
       ]) if p.topology == "block-nvl72"
     ])
     error_message = format(
       "Topology \"block-nvl72\" requires every NodeSet in the partition to be a GB300 NodeSet (platform gpu-gb300). Offending: %s. Select only the GB300 NodeSets with slurm_nodeset_refs instead of is_all = true, or use topology = \"flat\".",
       join("; ", flatten([
         for p in var.slurm_nodesets_partitions : [
-          for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : p.slurm_nodeset_refs) :
-          "partition \"${p.name}\" includes \"${ref}\" (${lookup(local.nodeset_platform, ref, "?")})"
-          if lookup(local.nodeset_platform, ref, local.gb300_platform) != local.gb300_platform
+          for member in distinct(flatten([
+            for ref in(p.is_all ? local.slurm_nodeset_workers[*].name : coalesce(p.slurm_nodeset_refs, [])) :
+            lookup(local.slurm_nodeset_ref_members, ref, [])
+          ])) :
+          "partition \"${p.name}\" includes \"${member}\" (${local.nodeset_platform[member]})"
+          if local.nodeset_platform[member] != local.gb300_platform
         ] if p.topology == "block-nvl72"
       ])),
     )
@@ -1048,7 +1063,10 @@ variable "slurm_nodeset_workers" {
     extra_labels           = optional(map(string), {})
     placement_policy_nodes = optional(list(string))
     features               = optional(list(string))
-    auto_resume            = optional(bool)
+    # Aggregate Slurm NodeSets the nodes of this nodeset also belong to; partitions can reference them.
+    # GB300 nodesets always belong to the aggregate named after them.
+    aggregate_slurm_nodesets = optional(list(string), [])
+    auto_resume              = optional(bool)
     # Deprecated: Partition settings matter a lot, and it doesn't make sense to create partitions with default settings.
     create_partition               = optional(bool)
     ephemeral_nodes                = optional(bool, false)
@@ -1167,30 +1185,66 @@ variable "slurm_nodeset_workers" {
   }
 
   validation {
-    # Compare the set of generated worker NodeSet names with the full generated
+    # Compare the set of generated Slurm NodeSet names with the full generated
     # name list; a shorter distinct list means two inputs collide after
-    # expansion. Example collision: two non-GB workers named "worker" both
-    # generate "worker".
+    # expansion. Example collisions: two non-GB workers named "worker" both
+    # generate "worker"; a GB300 worker "worker" generates the aggregate
+    # "worker", which a non-GB worker "worker" would shadow.
     condition = length(distinct(flatten([
       for worker in var.slurm_nodeset_workers :
-      worker.resource.platform == "gpu-gb300" ? [
+      worker.resource.platform == "gpu-gb300" ? concat([worker.name], [
         for rack in range(max(1, try(ceil(worker.size / 18), 0))) : format(
           "%s-rack%d",
           worker.name,
           rack,
         )
-      ] : [worker.name]
+      ]) : [worker.name]
       ]))) == length(flatten([
       for worker in var.slurm_nodeset_workers :
-      worker.resource.platform == "gpu-gb300" ? [
+      worker.resource.platform == "gpu-gb300" ? concat([worker.name], [
         for rack in range(max(1, try(ceil(worker.size / 18), 0))) : format(
           "%s-rack%d",
           worker.name,
           rack,
         )
-      ] : [worker.name]
+      ]) : [worker.name]
     ]))
-    error_message = "All effective worker nodeset names must be unique. GB300 worker nodesets are named <name>-rack<rack>; other worker nodesets use <name>."
+    error_message = "All effective worker nodeset names must be unique. GB300 worker nodesets are named <name> (all racks) and <name>-rack<rack>; other worker nodesets use <name>."
+  }
+
+  validation {
+    # The aggregate Slurm NodeSet of a GB300 worker is named after it. Soperator accepts
+    # only lowercase alphanumerics and '-', starting and ending with an alphanumeric,
+    # up to 63 characters (Kubernetes DNS label rules), for aggregate names.
+    condition = alltrue([
+      for name in concat(
+        [for worker in var.slurm_nodeset_workers : worker.name if worker.resource.platform == "gpu-gb300"],
+        flatten(var.slurm_nodeset_workers[*].aggregate_slurm_nodesets),
+      ) :
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", name)) && length(name) <= 63
+    ])
+    error_message = "GB300 worker nodeset names and aggregate_slurm_nodesets entries must consist of lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters long."
+  }
+
+  validation {
+    # Soperator ignores an aggregate named like an existing Slurm NodeSet in favor of that
+    # NodeSet. Example: aggregate_slurm_nodesets = ["worker-rack0"] next to a GB300 worker
+    # "worker". Several nodesets may list the same aggregate, and it may be named like a
+    # GB300 worker to extend that worker's aggregate.
+    condition = length(setintersection(
+      toset(flatten(var.slurm_nodeset_workers[*].aggregate_slurm_nodesets)),
+      toset(flatten([
+        for worker in var.slurm_nodeset_workers :
+        worker.resource.platform == "gpu-gb300" ? [
+          for rack in range(max(1, try(ceil(worker.size / 18), 0))) : format(
+            "%s-rack%d",
+            worker.name,
+            rack,
+          )
+        ] : [worker.name]
+      ])),
+    )) == 0
+    error_message = "aggregate_slurm_nodesets entries must not match generated Slurm NodeSet names: <name>-rack<rack> of GB300 worker nodesets and <name> of other worker nodesets."
   }
 
   validation {
