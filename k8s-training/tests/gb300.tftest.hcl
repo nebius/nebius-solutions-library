@@ -7,9 +7,10 @@ mock_provider "time" {}
 mock_provider "units" {}
 
 variables {
-  tenant_id   = "tenant-e00r7z9vfxmg1bk99s"
-  parent_id   = "project-e00r7z9vfxmg1bk99s"
-  subnet_id   = "subnet-e00r7z9vfxmg1bk99s"
+  # Synthetic identifiers used only by these plan tests.
+  tenant_id   = "tenant-test-only"
+  parent_id   = "project-test-only"
+  subnet_id   = "vpcsubnet-test-only"
   region      = "eu-west1"
   iam_token   = "test-token"
   k8s_version = "1.36"
@@ -33,6 +34,10 @@ variables {
 
 run "valid_two_rack_production_configuration" {
   command = plan
+
+  variables {
+    k8s_version = null
+  }
 
   plan_options {
     target = [
@@ -99,6 +104,7 @@ run "valid_one_rack_production_configuration" {
   command = plan
 
   variables {
+    k8s_version       = "1.35"
     infiniband_fabric = ""
     gb300 = {
       rack_count = 1
@@ -299,10 +305,81 @@ run "dra_single_rack_without_fabric" {
   }
 }
 
+run "dra_rejects_unset_kubernetes_version" {
+  command = plan
+
+  variables {
+    k8s_version = null
+    gb300 = {
+      rack_count = 2
+      dra        = true
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gb300_validation]
+  }
+
+  expect_failures = [terraform_data.gb300_validation]
+}
+
+run "dra_rejects_older_kubernetes_version" {
+  command = plan
+
+  variables {
+    k8s_version = "1.35"
+    gb300 = {
+      rack_count = 2
+      dra        = true
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gb300_validation]
+  }
+
+  expect_failures = [terraform_data.gb300_validation]
+}
+
+run "dra_rejects_invalid_kubernetes_version" {
+  command = plan
+
+  variables {
+    k8s_version = "invalid"
+    gb300 = {
+      rack_count = 2
+      dra        = true
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gb300_validation]
+  }
+
+  expect_failures = [terraform_data.gb300_validation]
+}
+
+run "dra_accepts_newer_kubernetes_minor" {
+  command = plan
+
+  variables {
+    k8s_version = "1.37"
+    gb300 = {
+      rack_count = 2
+      dra        = true
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gb300_validation]
+  }
+}
+
 run "zero_racks_preserves_generic_gpu_path" {
   command = plan
 
   variables {
+    k8s_version                = null
     gpu_nodes_driverfull_image = true
     gb300 = {
       rack_count = 0

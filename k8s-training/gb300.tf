@@ -3,6 +3,15 @@ resource "terraform_data" "gb300_validation" {
 
   lifecycle {
     precondition {
+      condition = !var.gb300.dra || try(
+        tonumber(split(".", var.k8s_version)[0]) == 1 &&
+        tonumber(split(".", var.k8s_version)[1]) >= 36,
+        false
+      )
+      error_message = "GB300 DRA requires an explicit k8s_version of 1.36 or later."
+    }
+
+    precondition {
       condition     = local.gb300_rack_count == 1 || local.enable_gpu_cluster
       error_message = "GB300 deployments with two or more racks require infiniband_fabric for cross-rack connectivity. A single rack may omit it."
     }
@@ -138,7 +147,8 @@ resource "nebius_mk8s_v1_node_group" "gb300" {
     gpu_cluster = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
     gpu_settings = {
       drivers_preset = local.device_preset
-      dra            = var.gb300.dra
+      # Keep false explicit so switching DRA off also disables it on existing nodes.
+      dra = var.gb300.dra
     }
     nvlink = {
       nvl_instance_group_id = nebius_compute_v1_nvl_instance_group.gb300[each.key].id

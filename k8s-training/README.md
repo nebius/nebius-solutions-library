@@ -35,6 +35,10 @@
      sudo apt install jq -y
      ```
 
+Nebius Terraform provider `0.6.70` or newer is required for all configurations,
+including those with DRA disabled. In existing working directories with an older
+locked provider, run `terraform init -upgrade` before `terraform plan`.
+
 ## Usage
 
 To deploy a Kubernetes cluster, follow these steps:
@@ -189,8 +193,8 @@ from normal workloads through Kubernetes scheduling policy.
 
 #### Optional GPU DRA
 
-Set `gb300.dra = true` to enable Dynamic Resource Allocation (DRA). Use Kubernetes
-`1.36` with Nebius Terraform provider `0.6.70` or newer:
+Set `gb300.dra = true` to enable Dynamic Resource Allocation (DRA). This recipe
+requires an explicit `k8s_version` of `1.36` or later when DRA is enabled:
 
 ```hcl
 k8s_version = "1.36"
@@ -200,9 +204,6 @@ gb300 = {
   dra        = true
 }
 ```
-
-If an existing working directory has an older provider in its lock file, run
-`terraform init -upgrade` before reviewing `terraform plan`.
 
 Keep the zero-surge strategy and, for multiple racks, the InfiniBand fabric
 configuration shown above. DRA applies to every rack created by `rack_count`.
@@ -236,9 +237,23 @@ The recipe does not create workload claims or ComputeDomains. See the
 and [NVIDIA DRA documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/v0.4.1).
 
 DRA is disabled by default. With `dra = false`, the existing device-plugin and
-MK8s-managed static IMEX path remains in use. Select DRA when creating the node
-groups. Changing an existing deployment requires reviewing the node rollout and
-migrating workloads to DRA claims before resuming them.
+MK8s-managed static IMEX path remains in use. When upgrading an existing non-DRA
+deployment, check whether the plan changes an unset `gpu_settings.dra` to `false`.
+If it does, treat it as a node-group update and schedule a maintenance window.
+
+Prefer selecting DRA when creating the node groups. To enable it on an existing
+deployment, schedule a maintenance window. The device-plugin removal and node
+rollout are not ordered, so GPU allocation can be unavailable during the change:
+
+1. Pause GPU workload controllers or job submissions, then stop existing GPU
+   workloads so legacy GPU pods are not recreated during the migration.
+2. Set `k8s_version` to `1.36` or later and `gb300.dra = true`. Review
+   `terraform plan`, retaining the zero-surge strategy, then run `terraform apply`.
+3. Wait for the node rollout to finish and all GB300 nodes to become Ready.
+   Verify NVIDIA DRA, DRANet where applicable, and advertised devices using the
+   readiness checks above.
+4. Update workload manifests to use the required ResourceClaims and
+   ComputeDomains, then resume controllers or resubmit workloads.
 
 The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
 MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
