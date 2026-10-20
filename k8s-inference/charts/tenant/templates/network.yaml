@@ -1,0 +1,18 @@
+{{- $c := include "tenant.cluster" . | fromYaml -}}
+{{- if not $c.manager }}
+# Same-namespace traffic (multi-pod runs). The cluster-wide isolation policy
+# (charts/platform/templates/ops/tenant-isolation.yaml) cannot express "my own namespace".
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: tenant-local
+  namespace: {{ include "tenant.ns" . }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints: [{}]
+  egress:
+    - toEndpoints: [{}]
+{{- end }}

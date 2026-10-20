@@ -1,0 +1,37 @@
+# Helm values for the alloy Application (every cluster); version pinned in clusters/common/apps/alloy.yaml.
+# Grafana Alloy as the log shipper: one pod per node (GPU nodes included), tails every pod on its node through the
+# kubelet API and pushes to the single-binary Loki with labels namespace, pod, container, node, app, plus the platform
+# labels job (Kubernetes Job = operation), inferenceservice / revision (KServe, Knative) and queue (Kueue). Nothing else.
+controller:
+  type: daemonset
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  - key: DeletionCandidateOfClusterAutoscaler
+    operator: Exists
+    effect: PreferNoSchedule
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+alloy:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  configMap:
+    create: true
+    content: "discovery.kubernetes \"pods\" {\n  role = \"pod\"\n  selectors {\n    role  = \"pod\"\n    field = \"spec.nodeName=\" + sys.env(\"HOSTNAME\")\n  }\n}\n\ndiscovery.relabel \"pods\" {\n  targets\
+      \ = discovery.kubernetes.pods.targets\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_phase\"]\n    regex         = \"Pending|Succeeded|Failed|Completed\"\n    action        = \"drop\"\n \
+      \ }\n  rule {\n    source_labels = [\"__meta_kubernetes_namespace\"]\n    target_label = \"namespace\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_name\"]\n    target_label = \"pod\"\
+      \n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_container_name\"]\n    target_label = \"container\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_node_name\"]\n    target_label\
+      \ = \"node\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_label_app_kubernetes_io_name\"]\n    regex = \"(.+)\"\n    target_label = \"app\"\n  }\n  rule {\n    source_labels = [\"\
+      __meta_kubernetes_pod_label_app\"]\n    regex = \"(.+)\"\n    target_label = \"app\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_label_job_name\"]\n    regex\
+      \ = \"(.+)\"\n    target_label = \"job\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_label_serving_kserve_io_inferenceservice\"]\n    regex = \"(.+)\"\n    target_label = \"\
+      inferenceservice\"\n  }\n  rule {\n    source_labels = [\"__meta_kubernetes_pod_label_serving_knative_dev_revision\"]\n    regex = \"(.+)\"\n    target_label = \"revision\"\n  }\n  rule {\n    source_labels\
+      \ = [\"__meta_kubernetes_pod_label_kueue_x_k8s_io_queue_name\"]\n    regex = \"(.+)\"\n    target_label = \"queue\"\n  }\n}\n\nloki.source.kubernetes \"pods\" {\n  targets    = discovery.relabel.pods.output\n\
+      \  forward_to = [loki.write.default.receiver]\n}\n\nloki.write \"default\" {\n  endpoint {\n    url = \"http://loki.monitoring.svc:3100/loki/api/v1/push\"\n  }\n}\n"

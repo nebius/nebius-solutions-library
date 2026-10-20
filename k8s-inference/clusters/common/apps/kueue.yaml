@@ -1,0 +1,10 @@
+name: kueue
+component: kueue
+namespace: kueue-system
+wave: '1'
+placement: all
+kind: helm
+repoURL: registry.k8s.io/kueue/charts
+chart: kueue
+version: 0.20.0
+helmValues: 'true'

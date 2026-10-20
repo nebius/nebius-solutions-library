@@ -345,8 +345,19 @@ resources:
                 dumpDir: "${nccl_inspector_profiling.dump_dir}/%j/%s"
                 dumpVerbose: ${nccl_inspector_profiling.verbose}
 
-            %{~ if has_nccl_network_vars ~}
             slurmScripts:
+              builtIn:
+                # Clean /dev/shm shared with `docker run --ipc=host` containers around whole-node jobs.
+                drop_posix_shmem.sh:
+                  enabled: ${docker_enabled}
+              %{~ if has_nccl_network_vars ~}
+              taskPrologEnv:
+                enabled: true
+                sourceFiles:
+                  - /etc/profile.d/90-nccl-network-vars.sh
+                exportVars:
+                  - UCX_NET_DEVICES
+                  - NCCL_IB_HCA
               extra:
                 nccl-network-vars.sh:
                   content: |-
@@ -370,7 +381,7 @@ resources:
                       "log": "slurm_scripts/$worker.$name.$context.out",
                       "need_env": []
                     }
-            %{~ endif ~}
+              %{~ endif ~}
 
             partitionConfiguration:
               configType: structured
@@ -719,7 +730,7 @@ resources:
                     command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
                   %{~ if tailscale_enabled ~}
                   - name: tailscale
-                    image: cr.nebius.cloud/soperator/tailscale:latest # v1.88.4
+                    image: cr.nebius.cloud/soperator-proxy-docker-io/tailscale/tailscale:v1.104.1
                     imagePullPolicy: Always
                     restartPolicy: Always
                     securityContext:
@@ -733,8 +744,16 @@ resources:
                         valueFrom:
                           fieldRef:
                             fieldPath: metadata.uid
+                      - name: TS_AUTH_ONCE
+                        value: "true"
+                      - name: TS_BOOT_TIMEOUT
+                        value: 24h
                       - name: TS_DEBUG_FIREWALL_MODE
                         value: auto
+                      - name: TS_HOSTNAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
                       - name: TS_KUBE_SECRET
                         valueFrom:
                           fieldRef:

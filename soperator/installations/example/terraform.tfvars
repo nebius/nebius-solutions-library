@@ -144,7 +144,8 @@ nfs_in_k8s = {
 #                                                ┌───────────┼───────────┐              ┌───────────┼───────────┐
 #                                          [worker-rack0-0] ... [worker-rack0-17] [worker-rack1-0] ... [worker-rack1-17]
 #
-# NOTE: One _Terraform_ NodeSet corresponds to several _Slurm_ NodeSets for GB300 (one per rack).
+# NOTE: One _Terraform_ NodeSet corresponds to several _Slurm_ NodeSets for GB300 (one per rack), plus one aggregate
+# _Slurm_ NodeSet named after the _Terraform_ NodeSet (e.g. "worker") that contains all of its racks.
 #
 # "Slurm NodeSet" is not a runtime entity, it's just a name for referencing in partitions.
 # Users can also pass Slurm NodeSet names to Slurm commands ("sbatch", "scontrol", etc.) instead of full nodelists.
@@ -226,13 +227,14 @@ slurm_nodeset_workers = [
       policy = "AUTO" # Docs: https://docs.nebius.com/compute/virtual-machines/reservations#terraform
       # reservation_ids = ["capacityblockgroup-***"]
     }
-    preemptible             = null                      # Set to {} to use preemptible VMs.
-    placement_policy_nodes  = null                      # Optional list of bare-metal FQDNs where VMs can run.
-    rolling_update_strategy = "slurmAwareRollingUpdate" # Whether to update nodes without interrupting Slurm jobs.
-    drain_timeout           = "0s"                      # Graceful drain timeout for Mk8s nodegroups, 0 = no timeout.
-    extra_labels            = {}                        # Additional K8s node labels.
-    features                = null                      # List of strings to set Slurm node features.
-    max_pods                = 32                        # Maximum number of pods per K8s node to reduce Pod CIDR usage.
+    preemptible              = null                      # Set to {} to use preemptible VMs.
+    placement_policy_nodes   = null                      # Optional list of bare-metal FQDNs where VMs can run.
+    rolling_update_strategy  = "slurmAwareRollingUpdate" # Whether to update nodes without interrupting Slurm jobs.
+    drain_timeout            = "0s"                      # Graceful drain timeout for Mk8s nodegroups, 0 = no timeout.
+    extra_labels             = {}                        # Additional K8s node labels.
+    features                 = null                      # List of strings to set Slurm node features.
+    aggregate_slurm_nodesets = []                        # Shared Slurm NodeSet names to reference in partitions.
+    max_pods                 = 32                        # Maximum number of pods per K8s node to reduce Pod CIDR usage.
     persistent_volume_claim_retention_policy = {
       when_deleted = "Delete" # Set to "Retain" to preserve PVCs on NodeSet deletion.
       when_scaled  = "Delete" # Set to "Retain" to preserve PVCs on NodeSet scaling or ephemeral node suspention.
@@ -243,10 +245,16 @@ slurm_nodeset_workers = [
 # Slurm partition configuration.
 #
 # Each partition must have either is_all = true (includes all generated Slurm NodeSets)
-# or slurm_nodeset_refs (list of specific generated Slurm NodeSet names).
+# or slurm_nodeset_refs (list of specific Slurm NodeSet names).
 #
 # For GB300, one Terraform worker nodeset generates one Slurm nodeset per rack: e.g., a Terraform
 # nodeset "worker" with 3 racks will produce 3 Slurm nodesets: "worker-rack0", "worker-rack1", "worker-rack2".
+# It also produces the Slurm nodeset "worker" containing all of these racks. Reference "worker" to keep
+# the partition in sync when racks are added or removed, or "worker-rack<N>" to select specific racks.
+#
+# Worker nodesets of any platform can also join custom Slurm nodesets with aggregate_slurm_nodesets:
+# e.g., nodesets "h200-a" and "h200-b" both setting aggregate_slurm_nodesets = ["h200"] can be referenced
+# together as "h200". An aggregate name must not match a generated Slurm nodeset name.
 #
 # The setting "topology" is required. You must select one of 3 available topologies:
 # +-------------+--------------------------------------+-----------------+---------------------------
@@ -342,6 +350,7 @@ slurm_sssd_ldap_ca_config_map_ref_name = ""
 # - "prod_quick"      - run short GPU health checks. Takes additional ~30 minutes.
 # - "essential"       - skip everything that can be skipped in production.
 # - "skip_all"        - [Don't use in production] run only checks required for cluster initialization.
+# - "testing"         - [Don't use in production] disable scheduled GPU checks for E2E.
 #
 # WARNING: Terraform won't finish until all checks pass successfully, which can require manual retries from inside K8s.
 active_checks_scope = "essential"
@@ -479,9 +488,6 @@ use_preinstalled_gpu_drivers = true
 # Per-platform GPU driver preset overrides. Example: { gpu-h100-sxm = "cuda12.8", gpu-b300-sxm = "cuda13.0" }
 #---
 #platform_driver_presets = {}
-
-# Shared memory size for worker nodes.
-slurm_shared_memory_size_gibibytes = 1024
 
 # Which NodeGroups should be excluded from Soperator maintenance event handling.
 # Mk8s will handle them instead of Soperator.

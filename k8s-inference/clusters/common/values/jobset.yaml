@@ -1,0 +1,3 @@
+# Helm values for the jobset Application (both clusters unless hubOnly); version pinned in clusters/common/apps/jobset.yaml
+certManager:
+  enable: true   # webhook cert from cert-manager (wave 0): no chart-generated Secret to ignore, no Replace sync

@@ -7,31 +7,38 @@ resource "local_file" "flux_release_rendered_nodesets" {
     release_name     = "soperator-nodesets"
     cluster_name     = var.name
     apparmor_profile = local.apparmor_profile
+    slurm_node_extra = local.slurm_node_extra
 
-    nodesets = [for nodeset in var.worker_nodesets : merge(nodeset, {
-      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.name], null)
-      slurm_node_extra  = local.slurm_node_extra_by_nodeset[nodeset.name]
-    })]
-    resources = [for i, res in var.node_capacity.worker : {
-      cpu_cores = floor(
-        res.cpu_cores
-        -local.resources.munge.cpu
-        -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
-      ) - local.resources.kruise_daemon.cpu
-      memory_gibibytes = local.worker_memory[i]
-      ephemeral_storage_gibibytes = (
-        try(var.worker_nodesets[i].local_nvme.enabled, false) &&
-        try(var.worker_nodesets[i].local_nvme.size_limit_gibibytes, null) != null
-        ? var.worker_nodesets[i].local_nvme.size_limit_gibibytes
-        : floor(
-          res.ephemeral_storage_gibibytes
-          -local.resources.munge.ephemeral_storage
-          -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+    nodesets = [for i, nodeset in var.worker_nodesets : merge(nodeset, {
+      name = try(local.worker_nodeset_range_by_first_name[nodeset.name].name, nodeset.name)
+      range = try({
+        first_ordinal = local.worker_nodeset_range_by_first_name[nodeset.name].first_ordinal
+        last_ordinal  = local.worker_nodeset_range_by_first_name[nodeset.name].last_ordinal
+        suffix        = local.worker_nodeset_range_by_first_name[nodeset.name].suffix
+      }, null)
+      nccl_network_vars = try(local.worker_nccl_network_vars[nodeset.platform], null)
+      resources = {
+        cpu_cores = floor(
+          var.node_capacity.worker[i].cpu_cores
+          -local.resources.munge.cpu
+          -(var.sssd_enabled ? local.resources.sssd.cpu : 0)
+        ) - local.resources.kruise_daemon.cpu
+        memory_gibibytes = local.worker_memory[i]
+        ephemeral_storage_gibibytes = (
+          try(nodeset.local_nvme.enabled, false) &&
+          try(nodeset.local_nvme.size_limit_gibibytes, null) != null
+          ? nodeset.local_nvme.size_limit_gibibytes
+          : floor(
+            var.node_capacity.worker[i].ephemeral_storage_gibibytes
+            -local.resources.munge.ephemeral_storage
+            -(var.sssd_enabled ? local.resources.sssd.ephemeral_storage : 0)
+          )
         )
-      )
-      gpus          = res.gpus
-      shared_memory = var.shared_memory_size_gibibytes
-    }]
+        gpus = var.node_capacity.worker[i].gpus
+      }
+      })
+      if !contains(local.worker_nodeset_names_in_ranges, nodeset.name) || contains(keys(local.worker_nodeset_range_by_first_name), nodeset.name)
+    ]
 
     jail_submounts = {
       nfs = {

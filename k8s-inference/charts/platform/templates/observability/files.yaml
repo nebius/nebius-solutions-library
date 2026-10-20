@@ -1,0 +1,8 @@
+{{- /* Dashboards and alert rules carry Grafana and Prometheus template syntax (`{{ $labels.pod }}`), so they live under
+       files/observability as plain manifests and are emitted here untouched. */ -}}
+{{- if index .Values.components "observability" }}
+{{- range $path, $_ := .Files.Glob "files/observability/*.yaml" }}
+---
+{{ $.Files.Get $path }}
+{{- end }}
+{{- end }}

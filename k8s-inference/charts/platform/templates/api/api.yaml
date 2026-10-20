@@ -1,0 +1,223 @@
+{{- if index .Values.components "api" }}
+# Customer API (services/api): the fleet's one API, on the control cluster only (clusters/common/apps/api.yaml
+# `placement: control`). The platform stage passes the image, the environment (hostnames, the LiteLLM address, the
+# fleet database, the regions' kubeconfigs) and the trust volumes as values (stack/config/locals.tf
+# `platform_values`). Secret api/litellm-master (copy of litellm/litellm-master) is written by the platform stage,
+# never in git. The API reaches every GPU region with the kubeconfigs of their api-agent ServiceAccounts
+# (templates/api-agent): it deploys the endpoints there, creates the runs, reads pods, metrics and logs (through
+# the API server proxy); the regions' gateways authorize endpoint calls against it over its public hostname
+# (templates/edge: an Envoy Gateway Backend on the fleet CA; docs/ARCHITECTURE.md "One API").
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: api, namespace: api }
+---
+# RBAC for the `api` ServiceAccount: per tenant namespace a RoleBinding to ClusterRole `serverless2-api-tenant`
+# (charts/tenant, applied at onboarding; the ClusterRole comes from charts/platform/templates/api-agent: Jobs,
+# pods, work-volume PVCs, per-operation Secrets); scale-only Role on the endpoints in `models` (create/delete
+# are git-only); one cluster-wide read: the list of tenant namespaces (billing). Run classes are rendered from
+# the catalog entry's `job` block (docs/JOBS.md), so nothing is read outside tenant namespaces and `models`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-namespaces }
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  - apiGroups: [""]                 # the fleet page: ready nodes per pool and the GPUs their pods hold
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-namespaces }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-namespaces }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# the fleet's pools (GPU class per pool: nodeAffinity of a run) and registries (per-region image prefix) are read
+# from the fleet-prices ConfigMap charts/fleet renders in kueue-system
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-fleet, namespace: kueue-system }
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+    resourceNames: [fleet-prices]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-fleet, namespace: kueue-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-fleet }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# the model endpoints' certificate of this cluster (charts/platform/templates/gateway/models-tls.yaml): hostnames follow the models
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-models-certificate, namespace: envoy-gateway-system }
+rules:
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, patch]
+    resourceNames: [models]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-models-certificate, namespace: envoy-gateway-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-models-certificate }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+---
+# endpoints live only in `models`: read, scale (patch) for admin keys, pods for the replica count. On the control
+# cluster the Role is rendered under a name the RoleBinding does not reference (the control API deploys endpoints
+# through the regions' api-agent identities, never here); kept so that a live cluster sees no object change.
+{{- if .Values.role.worker }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-endpoints, namespace: models }
+rules:
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [get, list]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources: [securitypolicies]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices, localmodelcaches]
+    verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints
+  - apiGroups: [leaderworkerset.x-k8s.io]          # multi-node endpoints (`nodes` > 1): the replica group, its leader Service
+    resources: [leaderworkersets]                   # and the route to the gateway; the last-request stamp (idle shutdown)
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [patch, create, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-endpoints, namespace: models }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-endpoints }
+subjects: [{ kind: ServiceAccount, name: api, namespace: api }]
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: api }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      serviceAccountName: api
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: api
+          image: {{ .Values.images.api }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          ports: [{ containerPort: 8080 }]
+          # the whole environment is a value (services/api/config.py lists the variables): REGION (`control` on a
+          # dedicated control cluster, the region's name in single-cluster mode), the public hostnames (the API refuses
+          # to start while a value still carries example.invalid), LITELLM_URL, REGION_KUBECONFIGS, the fleet database
+          env:
+            {{- toYaml .Values.api.env | nindent 12 }}
+          volumeMounts:
+            - { name: kubeconfigs, mountPath: /etc/kubeconfigs, readOnly: true }
+            - { name: catalog, mountPath: /etc/catalog, readOnly: true }        # the built-in classes (ConfigMap api/catalog)
+            {{- toYaml .Values.trust.mounts | nindent 12 }}
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /livez, port: 8080 }, periodSeconds: 20 }     # process-only: a database outage never restarts the API
+      volumes:
+        - name: kubeconfigs          # one key per GPU region (stack/platform/secrets.tf)
+          secret: { secretName: region-kubeconfigs, optional: true }
+        - name: catalog
+          configMap: { name: catalog }
+        {{- toYaml .Values.trust.volumes | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api, namespace: api }
+spec:
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api, namespace: api }
+spec:
+  parentRefs:
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: https }
+  hostnames: [{{ .Values.hostnames.api | quote }}]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /internal/attempts } }]   # run pods post their attempt records with a pod-bound token (services/api/attempts.py)
+      backendRefs: [{ name: api, port: 80 }]
+    - matches: [{ path: { type: PathPrefix, value: /internal/authorize } }]  # the regions' gateways authorize endpoint calls here (ext-auth: a key check, nothing else)
+      backendRefs: [{ name: api, port: 80 }]
+    - matches: [{ path: { type: PathPrefix, value: /internal } }]   # everything else under /internal is this cluster's own gateway's (the Service directly)
+      filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
+    - backendRefs: [{ name: api, port: 80 }]
+      timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+---
+# Port 80 of the API hostname only redirects to HTTPS: a bearer key never travels in clear. cert-manager's ACME
+# challenge route on the same listener matches a longer path (/.well-known/acme-challenge/<token>) and takes
+# precedence, so issuance keeps working.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api-redirect, namespace: api }
+spec:
+  parentRefs:
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: http }
+  hostnames: [{{ .Values.hostnames.api | quote }}]
+  rules:
+    - filters: [{ type: RequestRedirect, requestRedirect: { scheme: https, statusCode: 301 } }]
+---
+# The authorizer for the GPU regions' gateways under any host: Envoy keeps the original request's authority on an
+# ext-auth call (the endpoint's hostname, `<model>-predictor.models.<region host>`), so the route cannot be bound to
+# this cluster's hostnames (the https listener of the control cluster therefore carries no hostname, templates/gateway).
+# Measured: the cross-cluster ext-auth adds ~5 ms to a call (same region); a distant
+# region adds its round trip once per call (Envoy keeps the connection).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api-authorize, namespace: api }
+spec:
+  parentRefs:
+    - { name: serverless2-external, namespace: envoy-gateway-system, sectionName: https }
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /internal/authorize } }]
+      backendRefs: [{ name: api, port: 80 }]
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata: { name: api-not-found, namespace: api }
+spec:
+  directResponse: { statusCode: 404 }
+---
+# Per-key rate limit for the API route: counted per distinct Authorization header in the shared Redis
+# (Envoy Gateway global rate limit), so it holds across Envoy replicas and API instances. Per-tenant
+# limits on the work itself live where it is admitted: Kueue (concurrent runs per tenant ClusterQueue) and
+# LiteLLM (`rpm_limit`, `max_budget` per key for sync/async). The Gateway-level policy in
+# charts/platform/templates/gateway/ratelimit.yaml covers every other route.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata: { name: api-rate-limit, namespace: api }
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: HTTPRoute, name: api }
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - { name: Authorization, type: Distinct, invert: false }   # invert is a server default; explicit avoids render/default differences
+          limit: { requests: {{ .Values.api.rateLimitPerMinute }}, unit: Minute }
+{{- end }}

@@ -1,0 +1,6 @@
+name: grafana-route
+component: grafana-route
+namespace: envoy-gateway-system
+wave: '3'
+placement: all
+kind: manifests

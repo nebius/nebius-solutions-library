@@ -39,21 +39,23 @@
 
 To deploy a Kubernetes cluster, follow these steps:
 
-1. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in environment.sh.
+1. Copy the example variables file, then replace the placeholders with your values:
+   ```bash
+   cp terraform.tfvars.example terraform.tfvars
+   ```
+   Your local `terraform.tfvars` is ignored by Git. See [configuration variables](#configuration-variables) for details.
 
-2. Load environment variables:
+2. Configure `NEBIUS_TENANT_ID`, `NEBIUS_PROJECT_ID` and `NEBIUS_REGION` in `environment.sh`.
+
+3. Load environment variables (the cluster name defaults to `k8s-training`):
    ```bash
    source ./environment.sh
    ```
 
-3. Initialize Terraform:
+4. Initialize Terraform:
    ```bash
    terraform init
    ```
-
-4. Replace the placeholder content
-   in `terraform.tfvars` with configuration values that meet your specific
-   requirements. See the details [below](#configuration-variables).
 
 5. Preview the deployment plan:
    ```bash
@@ -67,7 +69,7 @@ To deploy a Kubernetes cluster, follow these steps:
 
 ## Configuration variables
 
-These are the basic configurations required to deploy Kubernetes for training in Nebius AI. Edit the configurations as necessary in the `terraform.tfvars` file.
+These are the basic configurations required to deploy Kubernetes for training in Nebius AI. Edit the configurations as necessary in your local `terraform.tfvars` file (copied from `terraform.tfvars.example`).
 
 Additional configurable variables can be found in the `variables.tf` file.
 
@@ -93,6 +95,28 @@ gpu_nodes_count  = 1 # Number of GPU nodes
 gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 8 GPU can be added to gpu cluster with infiniband connection.
 
 ```
+
+### GPU capacity reservation
+
+`gpu_nodes_reservation_policy` controls capacity reservation placement for **generic GPU node groups only**. It does not apply to CPU or GB300 node groups. The same policy and ordered reservation IDs apply to every generic GPU node group.
+
+Leave this variable unset or `null` to inherit the provider default. To require reserved capacity without selecting specific capacity block groups:
+
+```hcl
+gpu_nodes_reservation_policy = {
+  policy = "STRICT"
+}
+```
+
+| `policy` | Behavior | `reservation_ids` |
+|---|---|---|
+| `STRICT` | Use the specified capacity block groups, or suitable available blocks when no IDs are supplied. Fail if capacity is unavailable; do not fall back to PAYG. | Optional. |
+| `AUTO` | Try specified reservations, then available capacity blocks, then fall back to pay-as-you-go (PAYG). | Optional. |
+| `FORBID` | Use PAYG capacity only; do not use reservations. | Omit or leave empty. |
+
+`reservation_ids` is an ordered list of capacity block group IDs. When the list is non-empty, explicitly set `policy` to `AUTO` or `STRICT`. Omit the list, set it to `null`, or use `[]` when you do not want to select specific groups. Individual entries must not be null, empty, or whitespace-only strings. An empty list does not force PAYG; use `policy = "FORBID"` for that.
+
+This policy is part of the GPU node template, so changing it can trigger node recreation. Review the Terraform plan and the existing [`node_group_strategy` configuration](./variables.tf) before applying it, especially when reserved capacity leaves no room for surge nodes.
 
 ### GB300 production racks
 
@@ -407,3 +431,93 @@ spec:
 - read-write many mode PV will work
 - MSP started testing that solution to enable early integration with mk8s.
 =======
+
+## Terragrunt
+
+When using this solution as a Git source, select the subdirectory with
+`git::https://github.com/nebius/nebius-solutions-library.git//k8s-training?ref=<commit>`.
+The double slash keeps the sibling `modules` directory available. Pin `ref` to a
+commit that includes the example-file migration.
+
+Supply deployment values through Terragrunt `inputs` and configure authentication
+and remote state in your Terragrunt configuration. Do not copy the example into
+Terragrunt's downloaded source: a local `terraform.tfvars` can override the values
+passed through `inputs`.
+
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.
+
+## Cluster names and existing Terraform state
+
+`environment.sh` defaults an unset or empty `TF_VAR_cluster_name` to
+`k8s-training`, matching Terraform's default. It does not parse `terraform.tfvars`,
+so it also works when inputs are supplied through Terragrunt. A `cluster_name`
+assignment in your local tfvars file takes precedence over the environment variable.
+
+The backend key defaults to `k8s-training.tfstate` for every cluster name. This
+preserves the state location of existing deployments, including clusters with
+custom names. The script prints the resolved bucket and key before writing
+`terraform_backend_override.tf`. It warns when `TF_VAR_cluster_name` is non-default
+and `K8S_TF_STATE_KEY` is unset. Existing custom-named deployments can explicitly
+set `K8S_TF_STATE_KEY=k8s-training.tfstate` to acknowledge their legacy state key.
+
+For each **additional cluster**, explicitly set a different `K8S_TF_STATE_KEY`.
+Otherwise, deployments in the same project and tenant use the same state key.
+Keep each cluster's Terraform working directory separate. For example:
+
+```bash
+export TF_VAR_cluster_name="training-b"
+export K8S_TF_STATE_KEY="training-b.tfstate"
+source ./environment.sh
+terraform init
+```
+
+Supply the same cluster name through your tfvars file or Terragrunt inputs. If
+using `TF_VAR_cluster_name` as the source of the name, remove the `cluster_name`
+assignment from your local tfvars file. State keys may contain slash-separated
+prefixes, but standalone `.` and `..` path segments are rejected.
+
+For an existing deployment, retain its exact bucket and key; changing the cluster
+name alone does not migrate state. If intentionally changing the key, back up the
+state first and use `terraform init -migrate-state` while the working directory
+still has its previous backend configuration in `.terraform`. Review the migration
+prompt and subsequent plan before applying. Unsetting `K8S_TF_STATE_KEY` restores
+the historical `k8s-training.tfstate` key, not a cluster-specific key.
+
+### Observability upgrades and testing
+
+Kubernetes training passes its cluster name to the observability module, which
+prefixes the Grafana and Loki access-key names. Existing module callers that omit
+`cluster_name` retain the legacy names. Source inspection of Nebius provider
+[0.6.23][access-key-schema-0623] and [0.6.72][access-key-schema-0672] shows no
+replacement modifier on `name`; their update implementations pass resource
+metadata to the API ([0.6.23][access-key-update-0623],
+[0.6.72][access-key-update-0672]). This supports an expected in-place rename, but
+does not demonstrate an upgrade against existing state. No live upgrade plan was
+run. Review the plan with your selected provider version before upgrading; no
+Terraform resource address changes, so a `moved` block is not needed.
+
+The published [API name schema][resource-metadata] has no restriction excluding
+dots. Acceptance of the prefixed names by the live API has not been tested.
+
+The example keeps `loki.enabled = false`, so copying it does not deploy Loki.
+Set it to `true` to enable Loki. CI separately plans a fixture with Loki enabled
+and mocked providers. The test harness copies the access-key resources and their
+IAM dependencies directly from this module, so it checks the production resource
+definitions without provisioning a cluster or changing the example's default.
+These plans start with empty state and check names, not upgrade or replacement
+behavior. The fixture excludes ephemeral MysteryBox resources, which Terraform
+1.11 cannot mock; secret retrieval and application deployment are not covered.
+Run the same check locally with
+`python3 modules/o11y/tests/check_access_keys.py` from the repository root.
+
+[access-key-schema-0623]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.23/generated/nebius/iam/v2/access_key_service.tfgen.go#L206-L211
+[access-key-schema-0672]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.72/generated/nebius/iam/v2/access_key_service.tfgen.go#L210-L217
+[access-key-update-0623]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.23/generated/nebius/iam/v2/access_key_service.tfgen.go#L452-L463
+[access-key-update-0672]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.72/generated/nebius/iam/v2/access_key_service.tfgen.go#L469-L480
+[resource-metadata]: https://github.com/nebius/api/blob/main/nebius/common/v1/metadata.proto#L22-L25

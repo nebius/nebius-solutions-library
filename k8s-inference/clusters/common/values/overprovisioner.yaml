@@ -1,0 +1,14 @@
+# Helm values for the overprovisioner Application (workers): warm spare GPU nodes, docs/FLEET.md "Warm spare nodes".
+# The per-pool `deployments` list comes from the platform stage (stack/platform/stage.tf); nothing here is per cluster.
+priorityClassOverprovision:
+  name: serverless2-warm-spare
+  value: -1                 # below every real pod (endpoints 0, runs 100 and up), above the autoscaler's cutoff (-10)
+priorityClassDefault:
+  enabled: false            # never a cluster-wide default PriorityClass
+image:
+  repository: registry.k8s.io/pause
+  tag: "3.10"
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+deployments: []             # replaced per cluster

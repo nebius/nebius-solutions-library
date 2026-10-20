@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nebius/nebius-solutions-library/k8s-inference/charts/fleet/values.schema.json",
+  "title": "charts/fleet values",
+  "description": "Every top-level key the templates read is declared here, so unknown keys are refused (additionalProperties: false). The `fleet` document is the one the config stage derives from terraform.tfvars (stack/config/locals.tf `chart_fleet`); its pool and region objects stay open because Terraform passes the typed pool objects whole and a new tfvars key must not break the chart.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cluster",
+    "fleet"
+  ],
+  "properties": {
+    "cluster": {
+      "type": "string",
+      "minLength": 1,
+      "description": "cluster id: the control cluster's id or a region's cluster id"
+    },
+    "cohort": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Kueue cohort shared by the lender queue and the tenant queues"
+    },
+    "namespaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kueue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "models": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "prepull": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "image"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "image": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "multikueue": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretPrefix": {
+          "type": "string"
+        }
+      }
+    },
+    "fleet": {
+      "$ref": "#/$defs/fleet"
+    }
+  },
+  "$defs": {
+    "fleet": {
+      "type": "object",
+      "description": "the `fleet:` document (stack/config/locals.tf chart_fleet)",
+      "additionalProperties": false,
+      "required": [
+        "control",
+        "regions",
+        "images"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "node_reserve": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "number"
+            },
+            "memory_gib": {
+              "type": "number"
+            }
+          }
+        },
+        "capacity_order": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "reserved",
+              "on_demand",
+              "spot"
+            ]
+          }
+        },
+        "images": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "description": "<host>/<path> of the registry the platform images are pushed to"
+            },
+            "cache": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "node_port": {
+                  "type": "integer"
+                },
+                "size_gib": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "keep_days": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "upstreams": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "region": {
+              "type": "string"
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "image_cache_size_gib": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        },
+        "regions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/region"
+          }
+        },
+        "prices": {
+          "type": "object",
+          "description": "USD per GPU-hour by platform {on_demand, spot}, plus the scalar reserved_marginal",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "on_demand": {
+                    "type": "number"
+                  },
+                  "spot": {
+                    "type": "number"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "tenants": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "gpu_quota": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "fair_share_weight": {
+                "type": "number"
+              },
+              "dedicated_pools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "system_reserve": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "memory_gib": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "description": "per-node reserve of the system pool left to the platform's add-ons; the rest budgets the CPU-only `system` flavor"
+        }
+      }
+    },
+    "region": {
+      "type": "object",
+      "required": [
+        "id",
+        "pools"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_cache_size_gib": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "weights_filesystem": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "size_gib": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mount_path": {
+              "type": "string"
+            }
+          }
+        },
+        "pools": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/pool"
+          }
+        },
+        "system_pool": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "platform": {
+              "type": "string"
+            },
+            "preset": {
+              "type": "string"
+            },
+            "node_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "the region's CPU nodes (tfvars regions.<r>.system_pool): what the `system` flavor budgets"
+        }
+      }
+    },
+    "pool": {
+      "type": "object",
+      "description": "a GPU pool as terraform.tfvars defines it (stack/config/variables.tf); the keys below are the ones the templates read",
+      "required": [
+        "platform",
+        "preset",
+        "gpu_class",
+        "max_nodes"
+      ],
+      "properties": {
+        "platform": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preset": {
+          "type": "string",
+          "pattern": "^[0-9]+gpu-[0-9]+vcpu-[0-9]+gb$"
+        },
+        "gpu_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capacity": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "reserved",
+                "on_demand",
+                "spot"
+              ]
+            },
+            "max_price": {
+              "type": [
+                "string",
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "min_nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endpoint_floor_gpus": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "interconnect": {
+          "type": "string",
+          "enum": [
+            "none",
+            "infiniband"
+          ]
+        },
+        "ib_devices_per_node": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_nvme": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

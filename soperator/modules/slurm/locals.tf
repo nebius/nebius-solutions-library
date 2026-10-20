@@ -146,17 +146,19 @@ locals {
     }
   }
 
-  slurm_node_extra = chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
-    rack_number           = null
-    nvl_instance_group_id = ""
-  }))
+  # Slurm Extra attached to every worker node.
+  slurm_node_extra = "{ \"ib_pod\": \"$TOPO_SWITCH_TIER2\", \"ib_su\": \"$TOPO_SWITCH_TIER1\" }"
 
-  slurm_node_extra_by_nodeset = {
-    for nodeset in var.worker_nodesets : nodeset.name => chomp(templatefile("${path.module}/templates/slurm_node_extra.tftpl", {
-      rack_number           = try(nodeset.rack_number, null)
-      nvl_instance_group_id = try(trimspace(nodeset.nvl_instance_group_id), "")
-    }))
+  worker_nodeset_range_by_first_name = {
+    for nodeset_range in var.worker_nodeset_ranges :
+    format("%s%s%d", nodeset_range.name, nodeset_range.suffix, nodeset_range.first_ordinal) => nodeset_range
   }
+  worker_nodeset_names_in_ranges = toset(flatten([
+    for nodeset_range in var.worker_nodeset_ranges : [
+      for ordinal in range(nodeset_range.first_ordinal, nodeset_range.last_ordinal + 1) :
+      format("%s%s%d", nodeset_range.name, nodeset_range.suffix, ordinal)
+    ]
+  ]))
 
   # Calculate vmagent remote write queue count based on cluster size
   # This sets metrics ingestion capacity for larger clusters properly

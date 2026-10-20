@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# The quality gate, the same locally (`make check`, `./stack.sh check`) and in CI (.github/workflows/k8s-inference.yml).
+# No cloud access: every Terraform stage and module must validate, terraform.tfvars.example must pass the
+# schema validations, every chart must render for every cluster of the example (charts/platform equal to its
+# golden set), and the tests of the API and the dispatcher must pass.
+#
+#   tools/check.sh            everything
+#   tools/check.sh lint | terraform | render | tests      one part
+#   UPDATE_GOLDEN=1 tools/check.sh render          after a deliberate manifest change: rewrite stack/platform/tests/golden
+#
+# PYTHON (default python3) runs the tests.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXAMPLE="${TFVARS_EXAMPLE:-$ROOT/terraform.tfvars.example}"
+# tests run with the repo's virtualenv when it exists (`make venv` creates it from the requirements files)
+if [ -z "${PYTHON:-}" ] && [ -x "$(dirname "$0")/../.venv-api/bin/python" ]; then PYTHON="$(cd "$(dirname "$0")/.." && pwd)/.venv-api/bin/python"; fi
+PYTHON="${PYTHON:-python3}"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export TF_IN_AUTOMATION=1
+part="${1:-all}"
+
+step() { echo "== $*"; }
+tf() { # <dir> <terraform args...>: an init without backend into a data directory of its own
+  local dir="$1"; shift
+  TF_DATA_DIR="$ROOT/$dir/.terraform-check" terraform -chdir="$ROOT/$dir" "$@"
+}
+render() { # a Terraform expression over terraform.tfvars.example (or TFVARS_EXAMPLE), as JSON
+  echo "$1" | tf stack/config console -var-file="${TFVARS_EXAMPLE:-$EXAMPLE}" | "$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read()))))'
+}
+
+check_lint() {
+  step "Python lint and format (Ruff)"
+  (cd "$ROOT" && "$PYTHON" -m ruff check services stack && "$PYTHON" -m ruff format --check services stack)
+  step "ShellCheck: fleet scripts and container entry points"
+  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh
+  step "terraform fmt"
+  terraform fmt -check -recursive "$ROOT/stack"
+}
+
+check_terraform() {
+  step "terraform validate: every stage and module"
+  for d in stack/config stack/cloud stack/platform stack/modules/cluster stack/modules/tenant-region; do
+    tf "$d" init -backend=false -input=false > /dev/null
+    tf "$d" validate -no-color > /dev/null; echo "   ok $d"
+  done
+  step "terraform.tfvars.example passes the schema validations"
+  tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
+}
+
+check_render() {
+  tf stack/config init -backend=false -input=false > /dev/null
+  render 'jsonencode(local.chart_fleet)' > "$TMP/fleet.json"
+  render 'jsonencode(local.catalog)' > "$TMP/catalog.json"
+  render 'jsonencode(local.plan)' > "$TMP/plan.json"
+  render 'jsonencode(local.platform_values)' > "$TMP/platform-values.json"
+  clusters=$("$PYTHON" -c 'import json; p=json.load(open("'"$TMP"'/plan.json")); print(" ".join(p["order"]))')
+  "$PYTHON" -c 'import json, sys, yaml
+tmp = sys.argv[1]
+for cid, v in json.load(open(f"{tmp}/platform-values.json")).items():
+    yaml.safe_dump(v, open(f"{tmp}/platform-{cid}.yaml", "w"))' "$TMP"
+  "$PYTHON" - "$TMP" <<'EOF'
+import json, sys, yaml
+tmp = sys.argv[1]
+fleet = json.load(open(f"{tmp}/fleet.json")); plan = json.load(open(f"{tmp}/plan.json")); catalog = json.load(open(f"{tmp}/catalog.json"))
+for cid, c in plan["clusters"].items():
+    worker = c["roles"]["worker"]
+    yaml.safe_dump({"cluster": cid, "fleet": fleet, "prepull": {"enabled": worker, "images": []}}, open(f"{tmp}/fleet-{cid}.yaml", "w"))
+    cluster = {"region": c["region"]} if worker else {"region": c["region"], "manager": True}
+    yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
+    for mid, e in catalog.items():
+        if "runtime" in e and cid in e.get("deployments", {}):
+            yaml.safe_dump(e, open(f"{tmp}/endpoint-{mid}-{cid}.yaml", "w"))
+EOF
+  step "helm lint"
+  first=$(echo "$clusters" | cut -d' ' -f1)
+  helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
+  helm lint "$ROOT/charts/tenant" -f "$TMP/tenant-$first.yaml" > /dev/null; echo "   ok charts/tenant"
+  helm lint "$ROOT/charts/platform" -f "$TMP/platform-$first.yaml" > /dev/null; echo "   ok charts/platform"
+  step "helm template: fleet and tenant charts for every cluster of the example; every deployed entry through the API's renderer and the reference chart"
+  for cid in $clusters; do
+    helm template fleet "$ROOT/charts/fleet" -f "$TMP/fleet-$cid.yaml" > "$TMP/fleet-$cid.rendered.yaml"; echo "   ok charts/fleet $cid"
+    # CPU-only admission (docs/FLEET.md "CPU-only runs"): the `system` flavor first in every queue with no GPU, the GPU pool
+    # flavors after it with their node labels and GPU quota: a GPU-free workload lands on the system nodes, a GPU one on its pool
+    "$PYTHON" - "$TMP/fleet-$cid.rendered.yaml" "$cid" <<'PYEOF2'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+cid = sys.argv[2]
+flavors = {d["metadata"]["name"]: d for d in docs if d["kind"] == "ResourceFlavor"}
+queues = [d for d in docs if d["kind"] == "ClusterQueue"]
+if not queues:
+    sys.exit(0)
+system = [n for n in flavors if n == "system" or n.endswith("-system")]
+assert system, f"{cid}: no system flavor rendered"
+for n in system:
+    spec = flavors[n]["spec"]
+    assert not spec.get("tolerations"), f"{cid}: {n} must not tolerate the GPU taint"
+    if n == "system":
+        assert spec.get("nodeLabels") == {"serverless2.nebius/pool": "system"}, f"{cid}: {n} must select the system nodes"
+for q in queues:
+    fl = q["spec"]["resourceGroups"][0]["flavors"]
+    first = [f for f in fl if f["name"] in system]
+    rest = [f for f in fl if f["name"] not in system]
+    assert fl[:len(first)] == first and first, f"{cid}: {q['metadata']['name']}: system flavors must come first"
+    for f in first:
+        res = {r["name"]: r for r in f["resources"]}
+        assert res["nvidia.com/gpu"].get("nominalQuota") == 0 and not res["nvidia.com/gpu"].get("borrowingLimit"), f"{cid}: {q['metadata']['name']}/{f['name']}: GPUs must be 0"
+        assert (res["cpu"].get("nominalQuota") or res["cpu"].get("borrowingLimit") or 0) > 0, f"{cid}: {q['metadata']['name']}/{f['name']}: no CPU budget"
+    for f in rest:
+        res = {r["name"]: r for r in f["resources"]}
+        assert (res["nvidia.com/gpu"].get("nominalQuota") or res["nvidia.com/gpu"].get("borrowingLimit") or 0) > 0, f"{cid}: {q['metadata']['name']}/{f['name']}: a GPU pool flavor without GPUs"
+        if f["name"] in flavors and flavors[f["name"]]["spec"].get("nodeLabels"):
+            assert flavors[f["name"]]["spec"]["nodeLabels"]["serverless2.nebius/pool"] == f["name"], f"{cid}: {f['name']} selects another pool"
+print(f"   ok charts/fleet {cid}: system flavor first ({len(system)}), {sum(len(q['spec']['resourceGroups'][0]['flavors']) for q in queues)} flavor entries in {len(queues)} queues")
+PYEOF2
+    helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null; echo "   ok charts/tenant $cid"
+    for f in "$TMP"/endpoint-*-"$cid".yaml; do
+      [ -f "$f" ] || continue
+      "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$f" > /dev/null; echo "   ok render_endpoint $(basename "$f" .yaml)"
+    done
+  done
+  step "example model (stack/platform/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
+import json, subprocess, sys
+tmp, root = sys.argv[1], sys.argv[2]
+fleet = json.load(open(f"{tmp}/fleet.json")); plan = json.load(open(f"{tmp}/plan.json"))
+# the pools the way the API reads them from fleet-prices (charts/fleet pools.yaml): region id, pool, GPU class, capacity
+pools = {f"{r['id']}-{pn}": {"region": r["id"], "pool": pn, "gpu_class": p["gpu_class"], "capacity": p["capacity"]["type"]}
+         for rn, r in fleet["regions"].items() for pn, p in r["pools"].items()}
+classes = sorted({p["gpu_class"] for p in pools.values() if p.get("gpu_class")})
+spec = dict(json.load(open(f"{root}/stack/platform/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
+json.dump(pools, open(f"{tmp}/pools.json", "w"))
+r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "entry", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
+if r.returncode: print(r.stderr); sys.exit(1)
+open(f"{tmp}/llm-example.yaml", "w").write(r.stdout)
+import yaml; e = yaml.safe_load(r.stdout)
+print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
+json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
+EOF
+  for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
+    "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$TMP/llm-example.yaml" > /dev/null; echo "   ok render_endpoint llm-example $cid"
+  done
+  # The image cache as an add-on (docs/IMAGES.md): the example with `images.cache.enabled = false` renders both charts
+  # without the cache's objects and with the platform images pulled from the registry itself.
+  step "image cache off: charts/fleet and charts/platform render without the cache"
+  sed 's/cache = {/cache = { enabled = false, /' "$EXAMPLE" > "$TMP/nocache.tfvars"
+  grep -q 'enabled = false' "$TMP/nocache.tfvars" || { echo "!! the example has no images.cache block to switch off" >&2; exit 1; }
+  TFVARS_EXAMPLE="$TMP/nocache.tfvars" render 'jsonencode({ fleet = local.chart_fleet, values = local.platform_values, prepull = local.prepull_by_cluster })' > "$TMP/nocache.json"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF2'
+import json, subprocess, sys, yaml
+tmp, root = sys.argv[1], sys.argv[2]
+d = json.load(open(f"{tmp}/nocache.json"))
+def render(chart, values):
+    yaml.safe_dump(values, open(f"{tmp}/nocache-values.yaml", "w"))
+    r = subprocess.run(["helm", "template", "x", f"{root}/charts/{chart}", "-f", f"{tmp}/nocache-values.yaml"], capture_output=True, text=True)
+    if r.returncode: sys.exit(r.stderr)
+    return [o for o in yaml.safe_load_all(r.stdout) if o]
+for cid, v in d["values"].items():
+    worker = v["role"]["worker"]
+    fleet = render("fleet", {"cluster": cid, "fleet": d["fleet"], "prepull": {"enabled": worker, "images": d["prepull"].get(cid, [])}})
+    assert not [o for o in fleet if o["metadata"]["name"] in ("zot-config", "zot-pvc-zot-0")], f"{cid}: charts/fleet renders the cache without it"
+    platform = render("platform", v)
+    kinds = {(o["kind"], o["metadata"]["name"]): o for o in platform}
+    assert ("DaemonSet", "containerd-registry-config") not in kinds, f"{cid}: the containerd DaemonSet is rendered without the cache"
+    if not v["role"]["control"]:
+        assert ("Deployment", "api") not in kinds, f"{cid}: the API is the control cluster's only"
+        print(f"   ok cache off {cid}: no zot, no containerd DaemonSet, no API (a GPU region)")
+        continue
+    image = kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["image"]
+    assert image.startswith(d["fleet"]["images"]["source"] + "/serverless2/api:"), f"{cid}: api image {image} is not pulled from the registry"
+    env = {e["name"]: e.get("value") for e in kinds[("Deployment", "api")]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env.get("IMAGES_HOST", "") == "", f"{cid}: IMAGES_HOST is set without the cache"
+    for img in d["prepull"].get(cid, []):
+        assert not img["image"].startswith(d["fleet"]["images"]["host"] + "/"), f"{cid}: pre-pull image {img['image']} names the logical host without the cache"
+    print(f"   ok cache off {cid}: no zot, no containerd DaemonSet, api from {image.rsplit('/', 2)[0]}")
+EOF2
+  # charts/platform for every cluster of the example against stack/platform/tests/golden/<cluster>.json: one hash per
+  # object (every field) plus its component (the wave, hence the state address), so a template change shows as the
+  # list of objects it changed and an unintended change fails the gate. UPDATE_GOLDEN=1 records a deliberate change.
+  step "charts/platform: the render of every cluster equals its record (stack/platform/tests/golden)"
+  for cid in $clusters; do
+    helm template platform "$ROOT/charts/platform" -f "$TMP/platform-$cid.yaml" > "$TMP/platform-$cid.rendered.yaml"
+    if [ "${UPDATE_GOLDEN:-0}" = 1 ]; then
+      "$PYTHON" "$ROOT/stack/platform/tests/render.py" --update "$ROOT/stack/platform/tests/golden/$cid.json" < "$TMP/platform-$cid.rendered.yaml"
+    else
+      "$PYTHON" "$ROOT/stack/platform/tests/render.py" "$ROOT/stack/platform/tests/golden/$cid.json" < "$TMP/platform-$cid.rendered.yaml"
+    fi
+  done
+  # The dispatcher's RBAC against what its source calls: every BatchV1Api method used on the manager Jobs needs its
+  # verb in the rendered ClusterRole (a live rollout of 0.2.11 found `list` missing: 403 on every tenant namespace,
+  # the sweeper preserved everything), and the rule stays read-only (`get` is kept next to `list`: the single-Job read
+  # of earlier versions, harmless and already granted on live clusters).
+  step "charts/platform: the dispatcher ClusterRole covers the batch/jobs calls of services/dispatcher/dispatcher.py"
+  # Security invariants of the rendered platform (what a reviewer of a public reference checks first): tenant pods
+  # never reach the instance metadata service, and the API hostname is served over HTTPS only (port 80 redirects).
+  step "charts/platform: tenant egress excludes the metadata service; the API route is HTTPS-only with a redirect"
+  echo "$clusters" > "$TMP/clusters.txt"
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF4'
+import sys, yaml
+tmp = sys.argv[1]
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    for o in objs:
+        if o["kind"] in ("CiliumClusterwideNetworkPolicy", "CiliumNetworkPolicy"):
+            for rule in o["spec"].get("egress") or []:
+                assert "world" not in (rule.get("toEntities") or []), f"{cid}: {o['metadata']['name']} grants egress to the world entity (the metadata service is part of it)"
+                for c in rule.get("toCIDRSet") or []:
+                    if c["cidr"] in ("0.0.0.0/0", "::/0"):
+                        assert "169.254.0.0/16" in (c.get("except") or []), f"{cid}: {o['metadata']['name']} allows 0.0.0.0/0 without excluding 169.254.0.0/16"
+    routes = {o["metadata"]["name"]: o for o in objs if o["kind"] == "HTTPRoute" and o["metadata"]["namespace"] == "api"}
+    if "api" in routes:
+        assert all(p.get("sectionName") == "https" for p in routes["api"]["spec"]["parentRefs"]), f"{cid}: the api HTTPRoute attaches to a non-HTTPS listener"
+        assert "api-redirect" in routes and any(f.get("type") == "RequestRedirect" and f["requestRedirect"].get("scheme") == "https"
+                                                for r in routes["api-redirect"]["spec"]["rules"] for f in r.get("filters", [])), f"{cid}: no HTTPS redirect route for the API hostname"
+        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect")
+EOF4
+  "$PYTHON" - "$TMP" "$ROOT" <<'EOF3'
+import re, sys, yaml
+tmp, root = sys.argv[1], sys.argv[2]
+src = open(f"{root}/services/dispatcher/dispatcher.py").read()
+verb_of = {"read": "get", "list": "list", "watch": "watch", "patch": "patch", "create": "create", "delete": "delete", "replace": "update"}
+called = {verb_of[m] for m in re.findall(r"batch\.(\w+?)_(?:namespaced_|cluster_)?job\b", src)}
+assert called, "no batch.<verb>_namespaced_job call found in dispatcher.py (the pattern is stale)"
+found = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "ClusterRole" and o["metadata"]["name"] == "serverless2-dispatcher"]
+    if not roles:
+        continue
+    found += 1
+    rules = [r for r in roles[0]["rules"] if "batch" in r.get("apiGroups", []) and "jobs" in r.get("resources", [])]
+    assert len(rules) == 1, f"{cid}: expected one batch/jobs rule in the dispatcher ClusterRole, got {len(rules)}"
+    verbs = set(rules[0]["verbs"])
+    assert called <= verbs, f"{cid}: dispatcher.py calls batch jobs {sorted(called)}, the ClusterRole grants {sorted(verbs)}"
+    assert verbs <= {"get", "list", "watch"}, f"{cid}: the dispatcher ClusterRole grants batch jobs {sorted(verbs)}: it only ever reads manager Jobs"
+    print(f"   ok dispatcher RBAC {cid}: batch/jobs {sorted(verbs)} covers the source's calls {sorted(called)}, read-only")
+assert found, "no cluster rendered the dispatcher ClusterRole"
+EOF3
+}
+
+check_tests() {
+  step "tests: API and dispatcher"
+  (cd "$ROOT" && "$PYTHON" -m pytest -q services/api/tests services/dispatcher)
+  step "tests: filesystem attachment and GPU scale-to-zero storage"
+  tf stack/modules/cluster init -backend=false -input=false > /dev/null
+  tf stack/modules/cluster test -no-color
+}
+
+case "$part" in
+  all) check_lint; check_terraform; check_render; check_tests ;;
+  lint) check_lint ;;
+  terraform) check_terraform ;;
+  render) check_render ;;
+  tests) check_tests ;;
+  *) sed -n 2,10p "$0" >&2; exit 2 ;;
+esac
+echo "== all checks passed"

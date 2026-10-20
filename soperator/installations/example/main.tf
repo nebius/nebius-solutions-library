@@ -84,6 +84,9 @@ locals {
   # becomes [{ name = "worker-rack0", size = 10 }]. Size = 0 keeps a
   # zero-replica rack nodeset so Terraform can downscale the generated node
   # groups while the Slurm NodeSet remains addressable.
+  # aggregate_slurm_nodesets lists the aggregate Slurm NodeSets a generated NodeSet
+  # joins: user-defined ones and, for GB300, the input name, e.g. "worker" for both
+  # racks above.
   slurm_nodeset_workers = flatten([
     for nodeset in local.slurm_nodeset_workers_with_defaults :
     nodeset.resource.platform == local.gb300_platform ? [
@@ -93,22 +96,51 @@ locals {
           nodeset.name,
           rack,
         )
-        size                = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
-        nodes_per_nodegroup = local.gb300_nodes_per_nodegroup
-        rack_number         = rack
+        aggregate_slurm_nodesets = distinct(concat([nodeset.name], nodeset.aggregate_slurm_nodesets))
+        size                     = min(local.gb300_nodes_per_nodegroup, nodeset.size - rack * local.gb300_nodes_per_nodegroup)
+        nodes_per_nodegroup      = local.gb300_nodes_per_nodegroup
       })
       ] : [merge(nodeset, {
         nodes_per_nodegroup = local.default_nodes_per_nodegroup
-        rack_number         = null
     })]
   ])
 
+  # Slurm NodeSets for complete GB300 racks have identical configuration. Keep
+  # the expanded list above for Mk8s resources and describe complete rack ranges
+  # separately so the Helm values do not duplicate the same configuration.
+  slurm_nodeset_worker_ranges = [
+    for nodeset in local.slurm_nodeset_workers_with_defaults : {
+      name          = nodeset.name
+      suffix        = "-rack"
+      first_ordinal = 0
+      last_ordinal  = floor(nodeset.size / local.gb300_nodes_per_nodegroup) - 1
+    }
+    if nodeset.resource.platform == local.gb300_platform && floor(nodeset.size / local.gb300_nodes_per_nodegroup) > 0
+  ]
+
   # Generated Slurm NodeSet name -> compute platform. The partition topology validations
-  # in variables.tf need to map a slurm_nodeset_refs entry back to the platform of the
-  # worker nodeset it was generated from.
+  # in variables.tf need to map a partition member back to the platform of the worker
+  # nodeset it was generated from.
   nodeset_platform = {
     for nodeset in local.slurm_nodeset_workers : nodeset.name => nodeset.resource.platform
   }
+
+  # Slurm NodeSet name a partition can reference -> generated Slurm NodeSets it contains.
+  # Generated names refer to themselves; aggregate names to every generated NodeSet joining
+  # them. Example: GB300 worker "worker" with 2 racks gives
+  # { "worker-rack0" = ["worker-rack0"], "worker-rack1" = ["worker-rack1"],
+  #   "worker" = ["worker-rack0", "worker-rack1"] }.
+  # Generated names are merged last, as Soperator prefers a NodeSet to an aggregate of the same name.
+  slurm_nodeset_ref_members = merge(
+    {
+      for aggregate in distinct(flatten(local.slurm_nodeset_workers[*].aggregate_slurm_nodesets)) :
+      aggregate => [
+        for nodeset in local.slurm_nodeset_workers : nodeset.name
+        if contains(nodeset.aggregate_slurm_nodesets, aggregate)
+      ]
+    },
+    { for nodeset in local.slurm_nodeset_workers : nodeset.name => [nodeset.name] },
+  )
 
   # NVMe device capacities are supplied in decimal GB because that is how the
   # hardware is advertised. Convert the per-nodeset total to GiB before using
@@ -142,28 +174,37 @@ locals {
 
   # Terraform creates at most one topology of each supported type. Additional
   # custom topologies can only be supplied through Helm values overrides.
+  #
+  # The cluster-default topology drives Slurm node ranking (TopologyParam=BlockAsNodeRank,SwitchAsNodeRank)
+  # and serves partitions without an explicit topology.
+  # Pick the most specific topology the configured NodeSets support:
+  # - block-nvl72 when any GB300 NodeSet exists,
+  # - tree-ib for other GPU NodeSets,
+  # - flat for CPU-only clusters.
+  # gb300_enabled implies gpu_enabled, so exactly one topology is the default.
   slurm_named_topologies = concat(
     [{
       name            = "flat"
-      cluster_default = true
+      cluster_default = !local.gpu_enabled
       type            = "flat"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }],
     local.gpu_enabled ? [{
       name            = "tree-ib"
-      cluster_default = false
+      cluster_default = !local.gb300_enabled
       type            = "tree"
       block_sizes     = []
       nodeset_refs    = ["ALL"]
     }] : [],
     local.gb300_enabled ? [{
       name            = "block-nvl72"
-      cluster_default = false
+      cluster_default = true
       type            = "block"
       block_sizes     = [coalesce(var.slurm_topology_block_size, local.gb300_nodes_per_nodegroup)]
+      # Aggregate Slurm NodeSet names, so the topology follows racks being added or removed.
       nodeset_refs = [
-        for nodeset in local.slurm_nodeset_workers : nodeset.name
+        for nodeset in local.slurm_nodeset_workers_with_defaults : nodeset.name
         if nodeset.resource.platform == local.gb300_platform
       ]
     }] : [],
@@ -678,7 +719,6 @@ module "slurm" {
   use_default_apparmor_profile    = var.use_default_apparmor_profile
   worker_sshd_config_map_ref_name = var.slurm_worker_sshd_config_map_ref_name
   login_on_worker_nodes           = local.gb300_enabled
-  shared_memory_size_gibibytes    = var.slurm_shared_memory_size_gibibytes
   wait_for_nvidia_persistenced    = var.slurm_wait_for_nvidia_persistenced
   slurm_custom_config_override    = var.slurm_custom_config_override
   slurm_partition_config_type     = var.slurm_partition_config_type
@@ -695,13 +735,12 @@ module "slurm" {
     config       = partition.config
   }]
   worker_nodesets = [for nodeset in local.slurm_nodeset_workers : {
-    name                    = nodeset.name
-    platform                = nodeset.resource.platform
-    replicas                = nodeset.size
-    max_unavailable         = "500"
-    rolling_update_strategy = nodeset.rolling_update_strategy
-    rack_number             = try(nodeset.rack_number, null)
-    nvl_instance_group_id   = try(nebius_compute_v1_nvl_instance_group.worker[nodeset.name].id, null)
+    name                     = nodeset.name
+    aggregate_slurm_nodesets = nodeset.aggregate_slurm_nodesets
+    platform                 = nodeset.resource.platform
+    replicas                 = nodeset.size
+    max_unavailable          = "500"
+    rolling_update_strategy  = nodeset.rolling_update_strategy
     features = concat(
       [
         provider::string-functions::snake_case(nodeset.resource.platform),
@@ -739,6 +778,8 @@ module "slurm" {
       fabric = nodeset.gpu_cluster != null ? module.k8s.gpu_cluster_id_by_fabric[nodeset.gpu_cluster.infiniband_fabric] : "root"
     }
   }]
+
+  worker_nodeset_ranges = local.slurm_nodeset_worker_ranges
 
   topology = {
     topologies = local.slurm_named_topologies

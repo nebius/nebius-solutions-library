@@ -135,6 +135,47 @@ variable "node_group_strategy" {
   }
 }
 
+# Generic GPU node group reservation policy
+variable "gpu_nodes_reservation_policy" {
+  description = "Capacity reservation policy for generic GPU node groups (not CPU or GB300 groups). policy: AUTO | STRICT | FORBID; required when reservation_ids is non-empty. Null inherits provider default."
+  type = object({
+    policy          = optional(string)
+    reservation_ids = optional(list(string))
+  })
+  default = null
+
+  validation {
+    condition = var.gpu_nodes_reservation_policy == null ? true : (
+      var.gpu_nodes_reservation_policy.policy == null ? true : contains(
+        ["AUTO", "STRICT", "FORBID"], var.gpu_nodes_reservation_policy.policy
+      )
+    )
+    error_message = "policy must be one of: AUTO, STRICT, FORBID."
+  }
+
+  validation {
+    condition = var.gpu_nodes_reservation_policy == null ? true : (
+      length(coalesce(var.gpu_nodes_reservation_policy.reservation_ids, [])) == 0 ||
+      var.gpu_nodes_reservation_policy.policy != null
+    )
+    error_message = "Set policy to AUTO or STRICT when reservation_ids is non-empty."
+  }
+
+  # FORBID must not name any reservation (on-demand/PAYG only).
+  validation {
+    condition     = var.gpu_nodes_reservation_policy == null ? true : var.gpu_nodes_reservation_policy.policy != "FORBID" || length(coalesce(var.gpu_nodes_reservation_policy.reservation_ids, [])) == 0
+    error_message = "reservation_ids must be empty when policy = FORBID."
+  }
+
+  # No null or empty-string IDs; use [] for no reservations.
+  validation {
+    condition = var.gpu_nodes_reservation_policy == null ? true : alltrue([
+      for id in coalesce(var.gpu_nodes_reservation_policy.reservation_ids, []) : try(trimspace(id) != "", false)
+    ])
+    error_message = "reservation_ids must not contain null or empty strings; use [] for no reservations."
+  }
+}
+
 # K8s CPU node group
 variable "cpu_nodes_fixed_count" {
   description = "Number of nodes in the CPU-only node group."

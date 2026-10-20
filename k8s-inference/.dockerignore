@@ -1,0 +1,12 @@
+# Build context of the API image is the solution root (tools/images.sh): keep it small
+.git
+.venv-api
+.terraform-check
+.pytest_cache
+**/__pycache__
+**/.terraform
+**/node_modules
+stack
+clusters
+docs
+tools
