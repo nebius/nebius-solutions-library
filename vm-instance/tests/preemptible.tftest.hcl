@@ -27,6 +27,8 @@ run "preemptible_instance_follows_spot_price" {
     error_message = "Preemptible instances must explicitly follow the spot price."
   }
 
+  # STOP, priority 3, and FAIL are explicitly set in modules/instance/main.tf, not API defaults.
+  # Preserve these existing settings when adding spot pricing.
   assert {
     condition     = try(nebius_compute_v1_instance.instance.preemptible.on_preemption == "STOP" && nebius_compute_v1_instance.instance.preemptible.priority == 3, false)
     error_message = "Preemptible instances must retain STOP behavior and priority 3."
