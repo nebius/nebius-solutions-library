@@ -109,7 +109,6 @@ filestore_forbid_deletion      = false # Set to true to protect Terraform-create
 #   chart_version                       = "0.1.5"
 #   image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
 #   namespace                           = "kube-system"
-#   make_default_storage_class          = true
 #   previous_default_storage_class_name = "compute-csi-default-sc"
 # }
 
