@@ -2,8 +2,8 @@ mock_provider "nebius" {}
 mock_provider "local" {}
 
 variables {
-  parent_id         = "project-e00r7z9vfxmg1bk99s"
-  subnet_id         = "vpcsubnet-e00r7z9vfxmg1bk99s"
+  parent_id         = "project-e00000000000000000"
+  subnet_id         = "vpcsubnet-e00000000000000000"
   region            = "eu-north1"
   platform          = "cpu-d3"
   preset            = "4vcpu-16gb"
