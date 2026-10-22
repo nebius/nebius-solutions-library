@@ -573,7 +573,7 @@ variable "filesystem_csi" {
     chart_version                       = optional(string, "0.1.5")
     image_repository                    = optional(string, "cr.nebius.cloud/mk8s/csi-mounted-fs-path")
     namespace                           = optional(string, "kube-system")
-    make_default_storage_class          = optional(bool, true)
+    make_default_storage_class          = optional(bool, false)
     previous_default_storage_class_name = optional(string, "compute-csi-default-sc")
   })
   default = {}
