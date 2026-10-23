@@ -551,7 +551,7 @@ allow_o11y_region_migration = false
 k8s_version = "1.36"
 
 # Mk8s node infra version to pin in Mk8s nodegroups.
-node_group_version = "75"
+node_group_version = "78"
 
 # Whether to add public IP address for each K8s node.
 k8s_cluster_node_ssh_access_public_ip = false
