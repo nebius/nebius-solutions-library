@@ -149,3 +149,19 @@ variable "preemptible" {
   type        = bool
   default     = false
 }
+
+variable "reservation_ids" {
+  description = "Capacity block group IDs to launch the VM in (order matters). Empty means no explicit reservation."
+  type        = list(string)
+  default     = []
+}
+
+variable "reservation_policy" {
+  description = "Capacity block usage policy: AUTO, STRICT or FORBID. Empty defaults to STRICT when reservation_ids is set, and to the API default otherwise."
+  type        = string
+  default     = ""
+  validation {
+    condition     = contains(["", "AUTO", "STRICT", "FORBID"], var.reservation_policy)
+    error_message = "reservation_policy must be one of: AUTO, STRICT, FORBID (or empty)."
+  }
+}
