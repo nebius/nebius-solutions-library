@@ -24,15 +24,9 @@ locals {
     effect = "NO_SCHEDULE"
   }
 
-  worker_pool_cidrs = try(flatten([
-    for pool in lookup(data.nebius_vpc_v1_subnet.workers.status, "ipv4_private_pools", null) : pool.cidrs
-  ]), [])
-
-  # Fall back to flat CIDRs when nested pool CIDRs are absent.
-  worker_cidrs = sort(distinct(try(coalescelist(
-    local.worker_pool_cidrs,
-    coalesce(data.nebius_vpc_v1_subnet.workers.status.ipv4_private_cidrs, []),
-  ), [])))
+  worker_cidrs = sort(distinct(flatten([
+    for pool in coalesce(data.nebius_vpc_v1_subnet.workers.status.ipv4_private_pools, []) : coalesce(pool.cidrs, [])
+  ])))
 }
 
 # Keep the gateways on an explicit direct-egress table so they cannot inherit

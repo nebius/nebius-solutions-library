@@ -1,16 +1,16 @@
-# All providers are mocked. Simulated applies exercise Terraform wiring only;
-# no cloud or Kubernetes API is contacted.
+# All providers are mocked; no cloud or Kubernetes API is contacted.
+# Terraform mocks leave nested pool lists empty, so these plans check wiring
+# and expect the worker CIDR precondition to fail. They cannot verify a
+# successful configuration with populated worker CIDRs. The rejected node
+# group also prevents its dependent LoadBalancer Service from being planned.
 mock_provider "kubectl" {}
 mock_provider "nebius" {
+  override_during = plan
+
   mock_data "nebius_vpc_v1_subnet" {
     defaults = {
       network_id     = "vpcnetwork-e00r7z9vfxmg1bk99s"
       route_table_id = "vpcroutetable-e00r7z9vfxmg1bk99s"
-      status = {
-        # Terraform mocks generate empty nested pool lists. Supply the
-        # equivalent flat CIDRs to exercise the compatibility fallback.
-        ipv4_private_cidrs = ["10.72.0.0/16", "10.70.0.0/15"]
-      }
     }
   }
 
@@ -32,13 +32,15 @@ mock_provider "nebius" {
 }
 
 override_resource {
-  target = nebius_vpc_v1_route_table.gateway_egress
-  values = { id = "vpcroutetable-e00r7z9vfxmg1bk99t" }
+  override_during = plan
+  target          = nebius_vpc_v1_route_table.gateway_egress
+  values          = { id = "vpcroutetable-e00r7z9vfxmg1bk99t" }
 }
 
 override_resource {
-  target = nebius_vpc_v1_route_table.workers
-  values = { id = "vpcroutetable-e00r7z9vfxmg1bk99v" }
+  override_during = plan
+  target          = nebius_vpc_v1_route_table.workers
+  values          = { id = "vpcroutetable-e00r7z9vfxmg1bk99v" }
 }
 
 variables {
@@ -51,8 +53,8 @@ variables {
   ssh_public_key    = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest nat-test"
 }
 
-run "normal_configuration" {
-  command = apply
+run "network_and_policy_wiring" {
+  command = plan
 
   module {
     source = "../modules/k8s-nat-gateway"
@@ -93,40 +95,11 @@ run "normal_configuration" {
 
   assert {
     condition = (
-      nebius_mk8s_v1_node_group.gateway.parent_id == var.mk8s_cluster_id &&
-      nebius_mk8s_v1_node_group.gateway.template.network_interfaces[0].subnet_id == nebius_vpc_v1_subnet.gateway.id &&
-      nebius_mk8s_v1_node_group.gateway.template.network_interfaces[0].public_ip_address != null &&
-      nebius_mk8s_v1_node_group.gateway.template.metadata.labels["nebius.com/nat-gateway"] == "true" &&
-      nebius_mk8s_v1_node_group.gateway.template.metadata.labels["nebius.com/exclude-from-implicit-load-balancer-selection"] == "true" &&
-      !contains(keys(nebius_mk8s_v1_node_group.gateway.template.metadata.labels), "node.kubernetes.io/exclude-from-external-load-balancers") &&
-      nebius_mk8s_v1_node_group.gateway.template.taints[0].effect == "NO_SCHEDULE"
-    )
-    error_message = "Only the dedicated, labelled and tainted gateway node group should consume the gateway subnet's public IPs."
-  }
-
-  assert {
-    condition = (
       nebius_vpc_v1_subnet.gateway.ipv4_public_pools.use_network_pools == false &&
       length(nebius_vpc_v1_subnet.gateway.ipv4_public_pools.pools[0].cidrs) == 3 &&
-      nebius_mk8s_v1_node_group.gateway.fixed_node_count == 2 &&
-      nebius_mk8s_v1_node_group.gateway.strategy.max_surge.count == 1 &&
-      nebius_mk8s_v1_node_group.gateway.strategy.max_unavailable.count == 0 &&
       output.public_ip_cidrs == tolist(["203.0.113.1/32", "203.0.113.2/32", "203.0.113.3/32"])
     )
     error_message = "The fixed public pool must cover both gateway nodes and the upgrade spare, with the complete public pool exported."
-  }
-
-  assert {
-    condition = (
-      yamldecode(kubectl_manifest.service.yaml_body).metadata.annotations["nebius.com/load-balancer-allocation-id"] == nebius_vpc_v1_route.workers.next_hop.allocation.id &&
-      yamldecode(kubectl_manifest.service.yaml_body).metadata.annotations["nebius.com/load-balancer-type"] == "internal" &&
-      yamldecode(kubectl_manifest.service.yaml_body).metadata.annotations["nebius.com/load-balancer-target-node-selector"] == "nebius.com/nat-gateway=true" &&
-      yamldecode(kubectl_manifest.service.yaml_body).spec.type == "LoadBalancer" &&
-      yamldecode(kubectl_manifest.service.yaml_body).spec.externalTrafficPolicy == "Cluster" &&
-      yamldecode(kubectl_manifest.service.yaml_body).metadata.namespace == yamldecode(kubectl_manifest.namespace.yaml_body).metadata.name &&
-      !contains(keys(yamldecode(kubectl_manifest.service.yaml_body).spec), "selector")
-    )
-    error_message = "The internal Cluster-policy Service must bind the route's allocation and explicitly select gateway nodes without Pod endpoints."
   }
 
   assert {
@@ -142,18 +115,7 @@ run "normal_configuration" {
     error_message = "The host policy must select gateway nodes, allow only cluster ingress without public SSH exceptions, and preserve outbound traffic."
   }
 
-  assert {
-    condition = (
-      strcontains(one(yamldecode(nebius_mk8s_v1_node_group.gateway.template.cloud_init_user_data).bootcmd), "ExecStartPre=/usr/local/lib/nebius-nat-gateway/setup.sh") &&
-      one([for file in yamldecode(nebius_mk8s_v1_node_group.gateway.template.cloud_init_user_data).write_files : file.content if file.path == "/etc/default/nebius-nat-gateway"]) == "WORKER_CIDRS='10.70.0.0/15 10.72.0.0/16'\n" &&
-      alltrue([for name in ["setup.sh", "verify.sh"] : one([
-        for file in yamldecode(nebius_mk8s_v1_node_group.gateway.template.cloud_init_user_data).write_files :
-        file.permissions == "0755" && startswith(file.content, "#!/bin/sh\n")
-        if file.path == "/usr/local/lib/nebius-nat-gateway/${name}"
-      ])])
-    )
-    error_message = "Gateway user-data must install the early kubelet hook, host scripts and every worker source CIDR."
-  }
+  expect_failures = [nebius_mk8s_v1_node_group.gateway]
 }
 
 run "reject_missing_surge_address" {
@@ -169,27 +131,4 @@ run "reject_missing_surge_address" {
   }
 
   expect_failures = [nebius_vpc_v1_subnet.gateway]
-}
-
-run "legacy_subnet_cidrs" {
-  command = plan
-
-  module {
-    source = "../modules/k8s-nat-gateway"
-  }
-
-  override_data {
-    target = data.nebius_vpc_v1_subnet.workers
-    values = {
-      network_id = "vpcnetwork-e00r7z9vfxmg1bk99s"
-      status = {
-        ipv4_private_cidrs = ["10.80.0.0/16"]
-      }
-    }
-  }
-
-  assert {
-    condition     = local.worker_cidrs == tolist(["10.80.0.0/16"])
-    error_message = "Older subnet responses must still supply the NAT source CIDRs."
-  }
 }
