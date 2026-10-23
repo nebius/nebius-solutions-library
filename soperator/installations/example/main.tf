@@ -395,7 +395,9 @@ module "nfs-server" {
 module "cleanup" {
   source = "../../modules/cleanup"
 
-  iam_project_id = var.iam_project_id
+  iam_project_id      = var.iam_project_id
+  expected_cluster_id = var.disk_cleanup.expected_cluster_id
+  disk_ids            = var.disk_cleanup.disk_ids
 }
 
 module "k8s_cleanup" {

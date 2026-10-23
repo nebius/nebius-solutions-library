@@ -394,6 +394,10 @@ backups_retention = {
 # WARNING: After changing this setting, you first need to run "terraform apply" before "terraform destroy".
 cleanup_bucket_on_destroy = false
 
+# Preserve leftover CSI disks by default. Optional deletion requires exact disk
+# IDs and their cluster's literal ID; see "Leftover CSI disks" in the README.
+disk_cleanup = {}
+
 # User credentials for direct SSH access to K8s nodes.
 #
 # NOTE: By default, K8s nodes only have private IP addresses.

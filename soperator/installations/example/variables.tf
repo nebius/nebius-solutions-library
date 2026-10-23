@@ -1995,6 +1995,16 @@ variable "cleanup_bucket_on_destroy" {
   type        = bool
 }
 
+variable "disk_cleanup" {
+  description = "Optional, explicit approval to delete specific leftover CSI disks on destroy. All leftover disks are preserved by default."
+  type = object({
+    expected_cluster_id = optional(string, "")
+    disk_ids            = optional(set(string), [])
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "use_default_apparmor_profile" {
   description = "Use the soperator-default AppArmor profile, which must be loaded on nodes by provisioning."
   type        = bool
@@ -2027,4 +2037,3 @@ variable "active_checks_scope" {
     error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all, testing."
   }
 }
-
