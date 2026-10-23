@@ -1,9 +1,10 @@
-"""Exercise backend generation without credentials or cloud access.
+"""Exercise environment setup without credentials or cloud access.
 
 Run with: python3 -m unittest discover -s k8s-training/tests -p 'test_*.py'
 Requires Bash and jq. Every Nebius command is replaced by a local stub.
 """
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +29,16 @@ class EnvironmentTests(unittest.TestCase):
         # Cover all response fields consumed by the setup script. No real CLI runs.
         self.stub("nebius", '''#!/bin/sh
 printf '%s\n' "$*" >> "$TEST_CALL_LOG"
+case "$*" in
+  "vpc network list "*)
+    printf '%s\\n' "$TEST_NETWORKS_JSON"
+    exit "${TEST_NETWORKS_EXIT:-0}"
+    ;;
+  "vpc subnet list "*)
+    printf '%s\\n' "$TEST_SUBNETS_JSON"
+    exit "${TEST_SUBNETS_EXIT:-0}"
+    ;;
+esac
 printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-subnet","name":"unused"}}],"memberships":[{"spec":{"member_id":"mock-id"}}],"status":{"aws_access_key_id":"mock-access","secret":"mock-secret"}}'
 ''')
         self.stub("md5sum", "#!/bin/sh\ncat >/dev/null\nprintf 'mockhash  -\\n'\n")
@@ -38,6 +49,8 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
             "NEBIUS_TENANT_ID": "mock-tenant",
             "NEBIUS_PROJECT_ID": "mock-project",
             "NEBIUS_REGION": "eu-west2",
+            "TEST_NETWORKS_JSON": '{"items":[]}',
+            "TEST_SUBNETS_JSON": '{"items":[{"metadata":{"id":"mock-subnet"}}]}',
         }
 
     def stub(self, name, body):
@@ -53,6 +66,129 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
             text=True,
             capture_output=True,
         )
+
+    @staticmethod
+    def resource(resource_id, name, network_id=None):
+        return {"metadata": {"id": resource_id, "name": name},
+                "spec": {"network_id": network_id}}
+
+    def vpc(self, networks, subnets):
+        self.env["TEST_NETWORKS_JSON"] = json.dumps(networks)
+        self.env["TEST_SUBNETS_JSON"] = json.dumps(subnets)
+
+    def assert_selected_subnet(self, subnet_id, variables=None):
+        result = self.source(
+            variables,
+            'source "$1" && printf "selected=%s\\n" "$TF_VAR_subnet_id"',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"selected={subnet_id}\n", result.stdout)
+        self.assertIn(f"subnet: {subnet_id}\n", result.stdout)
+
+    def test_default_subnet_preferred_only_in_default_network(self):
+        for name in ("default", "default-eu-north1", "default-subnet-a"):
+            with self.subTest(name=name):
+                self.vpc(
+                    {"items": [self.resource("custom-net", "custom"),
+                               self.resource("default-net", name)]},
+                    {"items": [self.resource("wrong-network", "default", "custom-net"),
+                               self.resource("custom-subnet", "custom", "default-net"),
+                               self.resource("chosen", name, "default-net"),
+                               self.resource("second-match", name, "default-net")]},
+                )
+                self.assert_selected_subnet("chosen")
+
+    def test_custom_subnet_in_default_network_preferred_over_project_first(self):
+        self.vpc(
+            [self.resource("net", "default")],
+            [self.resource("other", "default", "other-net"),
+             self.resource("chosen", "training", "net")],
+        )
+        self.assert_selected_subnet("chosen")
+
+    def test_project_first_subnet_used_without_matching_default_network(self):
+        for networks in (
+            [self.resource("net", "custom")],
+            [self.resource("empty-net", "default")],
+            [], {}, None, {"items": None},
+        ):
+            with self.subTest(networks=networks):
+                self.vpc(networks, [self.resource("chosen", "custom", "net"),
+                                    self.resource("later", "default", "net")])
+                self.assert_selected_subnet("chosen")
+
+    def test_default_subnet_in_later_default_network_is_preferred(self):
+        self.vpc(
+            [self.resource("net-a", "default-a"), self.resource("net-b", "default-b")],
+            [self.resource("custom", "training", "net-a"),
+             self.resource("chosen", "default", "net-b")],
+        )
+        self.assert_selected_subnet("chosen")
+
+    def test_list_envelopes_and_arrays_and_pagination(self):
+        networks = [self.resource("net", "default")]
+        subnets = [self.resource("chosen", "default", "net")]
+        for network_response in (networks, {"items": networks}):
+            for subnet_response in (subnets, {"items": subnets}):
+                with self.subTest(networks=network_response, subnets=subnet_response):
+                    self.vpc(network_response, subnet_response)
+                    self.assert_selected_subnet("chosen")
+        calls = self.log.read_text().splitlines()
+        vpc_calls = [call for call in calls if call.startswith("vpc ")]
+        self.assertEqual(len(vpc_calls), 8)
+        for call in vpc_calls:
+            self.assertIn("--parent-id mock-project --all --format json", call)
+
+    def test_explicit_subnet_skips_vpc_discovery_and_is_preserved(self):
+        self.env.update(TEST_NETWORKS_EXIT="7", TEST_SUBNETS_EXIT="7")
+        result = self.source(
+            {"NEBIUS_VPC_SUBNET_ID": "explicit"},
+            'source "$1" && source "$1" && printf "selected=%s\\n" "$TF_VAR_subnet_id"',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("selected=explicit\n", result.stdout)
+        self.assertIn("Using configured subnet: explicit", result.stdout)
+        self.assertNotIn("vpc ", self.log.read_text())
+
+    def test_empty_override_and_missing_names_allow_discovery(self):
+        self.vpc([{"metadata": {"id": "nameless-net"}}],
+                 [{"metadata": {"id": "nameless-subnet"}}])
+        self.assert_selected_subnet("nameless-subnet", {"NEBIUS_VPC_SUBNET_ID": ""})
+
+    def test_no_subnets_stops_before_resource_creation(self):
+        for response in ([], {}, None, {"items": []}, {"items": None}):
+            with self.subTest(response=response):
+                self.vpc([], response)
+                result = self.source()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no subnet found in project mock-project", result.stderr)
+                self.assertNotIn("storage ", self.log.read_text())
+                self.assertFalse((self.root / "terraform_backend_override.tf").exists())
+
+    def test_vpc_cli_failures_are_not_reported_as_missing_subnets(self):
+        for resource in ("NETWORKS", "SUBNETS"):
+            with self.subTest(resource=resource):
+                self.log.unlink(missing_ok=True)
+                result = self.source({f"TEST_{resource}_EXIT": "7"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"failed to list {resource.lower()}", result.stderr)
+                self.assertNotIn("no subnet found", result.stderr)
+                self.assertNotIn("storage ", self.log.read_text())
+                if resource == "NETWORKS":
+                    self.assertNotIn("vpc subnet list", self.log.read_text())
+
+    def test_invalid_vpc_json_stops_before_resource_creation(self):
+        subnet_response = json.dumps([self.resource("chosen", "custom", "net")])
+        for resource in ("NETWORKS", "SUBNETS"):
+            for response in ("not-json", "", " \n\t ", "[] []",
+                             f"{subnet_response}\n{subnet_response}"):
+                with self.subTest(resource=resource, response=response):
+                    result = self.source({f"TEST_{resource}_JSON": response})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("failed to parse VPC network/subnet responses", result.stderr)
+                    self.assertNotIn("no subnet found", result.stderr)
+                    self.assertNotIn("storage ", self.log.read_text())
+                    self.assertFalse((self.root / "terraform_backend_override.tf").exists())
 
     def test_invalid_cluster_names_stop_before_cloud_calls(self):
         for name in (" ", "bad name", 'bad"name', "bad\nname", "../cluster"):

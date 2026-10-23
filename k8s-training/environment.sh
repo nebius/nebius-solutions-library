@@ -47,11 +47,47 @@ fi
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
 
-# VPC subnet
-NEBIUS_VPC_SUBNET_ID=$(nebius vpc subnet list \
-  --parent-id "${NEBIUS_PROJECT_ID}" \
-  --format json \
-  | jq -r '.items[0].metadata.id')
+# VPC subnet: honor an explicit ID, otherwise prefer subnets in default* networks.
+if [ -n "${NEBIUS_VPC_SUBNET_ID:-}" ]; then
+  echo "Using configured subnet: ${NEBIUS_VPC_SUBNET_ID}"
+else
+  if ! K8S_VPC_NETWORKS_JSON=$(nebius vpc network list \
+    --parent-id "${NEBIUS_PROJECT_ID}" --all --format json); then
+    echo "Error: failed to list networks in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
+  if ! K8S_VPC_SUBNETS_JSON=$(nebius vpc subnet list \
+    --parent-id "${NEBIUS_PROJECT_ID}" --all --format json); then
+    echo "Error: failed to list subnets in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
+
+  # Accept list envelopes and arrays. Prefer a default* subnet in a default*
+  # network, then any subnet in those networks, then the first project subnet.
+  if ! NEBIUS_VPC_SUBNET_ID=$(jq -rs --argjson NETWORKS "${K8S_VPC_NETWORKS_JSON}" '
+    def items: if type == "array" then . else (.items // []) end;
+    # Reject empty responses and JSON streams before selecting a single subnet.
+    if length == 1 then .[0] else error("expected one subnet list response") end
+    | ($NETWORKS | items
+      | map(select((.metadata.name // "") | startswith("default"))
+        | .metadata.id // empty)) as $default_network_ids
+    | items as $subnets
+    | ($subnets | map(select(.spec.network_id as $network_id
+        | $default_network_ids | index($network_id)))) as $network_subnets
+    | (($network_subnets
+        | map(select((.metadata.name // "") | startswith("default"))) | .[0])
+      // $network_subnets[0] // $subnets[0])
+    | .metadata.id // empty' <<< "${K8S_VPC_SUBNETS_JSON}"); then
+    echo "Error: failed to parse VPC network/subnet responses in project ${NEBIUS_PROJECT_ID}" >&2
+    return 1
+  fi
+  if [ -z "${NEBIUS_VPC_SUBNET_ID}" ]; then
+    echo "Error: no subnet found in project ${NEBIUS_PROJECT_ID}; create one or set NEBIUS_VPC_SUBNET_ID" >&2
+    return 1
+  fi
+  echo "Using discovered subnet: ${NEBIUS_VPC_SUBNET_ID}"
+  unset K8S_VPC_NETWORKS_JSON K8S_VPC_SUBNETS_JSON
+fi
 export NEBIUS_VPC_SUBNET_ID
 
 # Object Storage Bucket
