@@ -64,9 +64,11 @@ else
 
   # Accept list envelopes and arrays. Prefer a default* subnet in a default*
   # network, then any subnet in those networks, then the first project subnet.
-  if ! NEBIUS_VPC_SUBNET_ID=$(jq -r --argjson NETWORKS "${K8S_VPC_NETWORKS_JSON}" '
+  if ! NEBIUS_VPC_SUBNET_ID=$(jq -rs --argjson NETWORKS "${K8S_VPC_NETWORKS_JSON}" '
     def items: if type == "array" then . else (.items // []) end;
-    ($NETWORKS | items
+    # Reject empty responses and JSON streams before selecting a single subnet.
+    if length == 1 then .[0] else error("expected one subnet list response") end
+    | ($NETWORKS | items
       | map(select((.metadata.name // "") | startswith("default"))
         | .metadata.id // empty)) as $default_network_ids
     | items as $subnets

@@ -178,11 +178,15 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
                     self.assertNotIn("vpc subnet list", self.log.read_text())
 
     def test_invalid_vpc_json_stops_before_resource_creation(self):
+        subnet_response = json.dumps([self.resource("chosen", "custom", "net")])
         for resource in ("NETWORKS", "SUBNETS"):
-            for response in ("not-json", ""):
+            for response in ("not-json", "", " \n\t ", "[] []",
+                             f"{subnet_response}\n{subnet_response}"):
                 with self.subTest(resource=resource, response=response):
                     result = self.source({f"TEST_{resource}_JSON": response})
                     self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("failed to parse VPC network/subnet responses", result.stderr)
+                    self.assertNotIn("no subnet found", result.stderr)
                     self.assertNotIn("storage ", self.log.read_text())
                     self.assertFalse((self.root / "terraform_backend_override.tf").exists())
 
