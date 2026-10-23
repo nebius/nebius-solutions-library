@@ -384,3 +384,13 @@ If this fails (timeout, connection refused, non-200), the cluster cannot reach N
 **Step 4 – Re-run 04 with correct env**
 
 If you fixed issuer or network, re-run so the IdP config is updated. You can also edit the IdP in Keycloak Admin (change issuer, save) and retry without re-running 04.
+
+
+### Private Keycloak CA
+
+Keycloak administration and token requests verify TLS, including `.local` deployments.
+Set `OSMO_KC_CA_BUNDLE=/path/to/keycloak-ca.pem` before running setup scripts 05 and 06
+when the server uses a private or self-signed CA. The path can contain spaces.
+`OSMO_KC_SKIP_TLS_VERIFY=true` is no longer supported. A missing or untrusted CA stops
+the request before credentials are sent. Refresh the operator machine's public roots
+for public Keycloak certificates; see the repository's CA remediation runbook.

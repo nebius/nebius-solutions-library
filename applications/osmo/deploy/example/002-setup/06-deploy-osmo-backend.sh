@@ -8,6 +8,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/tls.sh"
 source "${SCRIPT_DIR}/defaults.sh"
 
 echo ""
@@ -72,16 +73,6 @@ derive_backend_image_tag() {
 
 resolve_keycloak_token_url() {
     KC_INGRESS_HOST=$(kubectl get ingress -n "${OSMO_NAMESPACE:-osmo}" keycloak -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
-    KC_CURL_TLS_OPT=""
-
-    if [[ "${OSMO_KC_SKIP_TLS_VERIFY:-false}" == "true" ]]; then
-        KC_CURL_TLS_OPT="-k"
-        log_warning "TLS verification disabled for Keycloak token request (OSMO_KC_SKIP_TLS_VERIFY=true)"
-    elif [[ "${KEYCLOAK_HOSTNAME:-}" == *.local || "${KC_INGRESS_HOST:-}" == *.local ]]; then
-        KC_CURL_TLS_OPT="-k"
-        log_warning "Self-signed cert detected (.local hostname) — skipping TLS verification for Keycloak token request"
-    fi
-
     if [[ -n "${KEYCLOAK_HOSTNAME:-}" ]]; then
         KEYCLOAK_TOKEN_URL="https://${KEYCLOAK_HOSTNAME}/realms/osmo/protocol/openid-connect/token"
         log_info "Keycloak token endpoint (KEYCLOAK_HOSTNAME): ${KEYCLOAK_TOKEN_URL}"
@@ -119,7 +110,7 @@ validate_keycloak_operator_user() {
     resolve_keycloak_token_url
 
     log_info "Authenticating backend operator user '${OSMO_OPERATOR_USERNAME}' with Keycloak..."
-    kc_response=$(curl -s ${KC_CURL_TLS_OPT} -X POST "${KEYCLOAK_TOKEN_URL}" \
+    kc_response=$(keycloak_curl -sS -X POST "${KEYCLOAK_TOKEN_URL}" \
         -d "grant_type=password" \
         -d "client_id=osmo-device" \
         -d "username=${OSMO_OPERATOR_USERNAME}" \
@@ -258,7 +249,7 @@ if [[ "$BACKEND_LOGIN_METHOD" == "token" && -z "${OSMO_SERVICE_TOKEN:-}" ]]; the
             # in 04-deploy-osmo-control-plane.sh or set OSMO_KC_ADMIN_USER/OSMO_KC_ADMIN_PASS to a valid local user.
 
             log_info "Authenticating with Keycloak as '${KC_ADMIN_USER}'..."
-            KC_RESPONSE=$(curl -s ${KC_CURL_TLS_OPT} -X POST "${KEYCLOAK_TOKEN_URL}" \
+            KC_RESPONSE=$(keycloak_curl -sS -X POST "${KEYCLOAK_TOKEN_URL}" \
                 -d "grant_type=password" \
                 -d "client_id=osmo-device" \
                 -d "username=${KC_ADMIN_USER}" \

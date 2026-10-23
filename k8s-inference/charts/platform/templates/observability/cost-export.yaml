@@ -38,7 +38,7 @@ spec:
               volumeMounts: [{ name: out, mountPath: /out }]
           containers:
             - name: upload
-              image: amazon/aws-cli:2.22.35
+              image: {{ .Values.images.jobs }}
               command: [sh, -c]
               args:
                 - |
