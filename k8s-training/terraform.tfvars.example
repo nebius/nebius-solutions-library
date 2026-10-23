@@ -98,7 +98,7 @@ loki = {
 }
 # Storage
 enable_filestore               = false # Enable or disable Filestore integration with true or false
-existing_filestore             = ""    # If enable_filestore = true, with this variable we can add existing filestore. Require string, example existing_filestore = "computefilesystem-e00r7z9vfxmg1bk99s"
+existing_filestore             = ""    # If enable_filestore = true, with this variable we can add existing filestore. Require string, example existing_filestore = "YOUR_FILESYSTEM_ID"
 filestore_disk_size_gibibytes  = 100   # Set Filestore disk size in Gbytes.
 filestore_block_size_kibibytes = 4     # Set Filestore block size in bytes
 filestore_forbid_deletion      = false # Set to true to protect Terraform-created Filestore from deletion.
@@ -109,7 +109,6 @@ filestore_forbid_deletion      = false # Set to true to protect Terraform-create
 #   chart_version                       = "0.1.5"
 #   image_repository                    = "cr.nebius.cloud/mk8s/csi-mounted-fs-path"
 #   namespace                           = "kube-system"
-#   make_default_storage_class          = true
 #   previous_default_storage_class_name = "compute-csi-default-sc"
 # }
 

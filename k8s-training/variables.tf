@@ -263,12 +263,15 @@ variable "gb300" {
     boot_disk_size_gibibytes controls the network-backed boot disk size.
     Set local_nvme to true to pass through the host NVMe devices and combine
     them into kubelet ephemeral storage on each GB300 node.
+    Set dra to true to enable GPU DRA and install the NVIDIA DRA driver for
+    GPU ResourceClaims and ComputeDomains. Disabled by default.
     Set rack_count to zero to disable the GB300 path.
   EOT
   type = object({
     rack_count               = optional(number, 0)
     boot_disk_size_gibibytes = optional(number, 1024)
     local_nvme               = optional(bool, false)
+    dra                      = optional(bool, false)
   })
   default = {}
 
@@ -570,7 +573,7 @@ variable "filesystem_csi" {
     chart_version                       = optional(string, "0.1.5")
     image_repository                    = optional(string, "cr.nebius.cloud/mk8s/csi-mounted-fs-path")
     namespace                           = optional(string, "kube-system")
-    make_default_storage_class          = optional(bool, true)
+    make_default_storage_class          = optional(bool, false)
     previous_default_storage_class_name = optional(string, "compute-csi-default-sc")
   })
   default = {}
