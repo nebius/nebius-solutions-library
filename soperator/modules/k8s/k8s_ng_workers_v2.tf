@@ -59,6 +59,7 @@ resource "nebius_mk8s_v1_node_group" "worker_v2" {
 
   depends_on = [
     nebius_mk8s_v1_cluster.this,
+    nebius_mk8s_v1_node_group.system.this,
     nebius_compute_v1_gpu_cluster.this_v2,
     terraform_data.check_resource_preset_sufficiency,
   ]
