@@ -67,8 +67,8 @@ def _fleet(monkeypatch):
     monkeypatch.setattr(kube, "cluster_region", lambda c: "eu-north1" if c == "hub" else c)
 
 
-def test_entry_carries_variants_with_per_class_images():
-    e = models.to_entry(SPEC)
+def test_definition_carries_variants_with_per_class_images():
+    e = models.definition(SPEC)
     d = e["deployments"]["hub"]
     assert d["pool"] == "h100-res-1x" and [v["name"] for v in d["variants"]] == ["reserved", "spot", "cheap"]
     assert d["variants"][0]["min"] == 1 and d["variants"][1]["max"] == 4
@@ -82,7 +82,7 @@ def test_entry_carries_variants_with_per_class_images():
         {"name": "primary", "pool": "h100-spot-1x", "min": None, "max": None, "image": None, "object": "plain"}
     ]
     # a single deployment of a class with its own image takes it
-    single = models.to_entry(
+    single = models.definition(
         {
             "id": "one",
             "kind": "endpoint",
@@ -97,7 +97,7 @@ def test_entry_carries_variants_with_per_class_images():
 def test_validation_of_variants_and_routing():
     def bad(patch, code=400):
         with pytest.raises(HTTPException) as e:
-            models.to_entry({**SPEC, **patch})
+            models.definition({**SPEC, **patch})
         assert e.value.status_code == code
 
     bad({"deployments": {"eu-north1": {"variants": [{"name": "x", "pool": "nope"}]}}})
@@ -115,7 +115,7 @@ def test_validation_of_variants_and_routing():
 
 
 def test_each_variant_renders_its_own_objects_under_the_model_label():
-    e = models.to_entry(SPEC)
+    e = models.definition(SPEC)
     docs = models.render(e, "hub")
     isvcs = {d["metadata"]["name"]: d for d in docs if d["kind"] == "InferenceService"}
     assert set(isvcs) == {"chat", "chat-spot", "chat-cheap"}
@@ -141,7 +141,7 @@ def test_each_variant_renders_its_own_objects_under_the_model_label():
 
 
 def test_hostnames_and_litellm_deployments_follow_the_variants(monkeypatch):
-    e = models.to_entry(SPEC)
+    e = models.definition(SPEC)
     monkeypatch.setattr(models, "endpoint_domain", lambda region: "203.0.113.1.sslip.io")
     assert models.variant_hosts(e, "eu-north1") == [
         "chat-predictor.models.203.0.113.1.sslip.io",
@@ -204,7 +204,7 @@ def test_hostnames_and_litellm_deployments_follow_the_variants(monkeypatch):
 def test_sync_requests_pick_a_variant_by_field_then_by_readiness(client, monkeypatch):
     c, _ = client
     monkeypatch.setattr(kube, "fleet", lambda: VARIANT_FLEET)
-    e = catalog.normalise(models.to_entry(SPEC))
+    e = models.definition(SPEC)
     monkeypatch.setattr(catalog, "get", lambda name: e if name == "chat" else None)
     monkeypatch.setattr(models, "cluster_id", lambda: "hub")
     ready = {"chat": 0, "chat-spot": 2, "chat-cheap": 0}
@@ -233,6 +233,9 @@ def test_sync_requests_pick_a_variant_by_field_then_by_readiness(client, monkeyp
 
         async def __aexit__(self, *a):
             return False
+
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
 
         async def post(self, url, json=None, headers=None):
             hit["url"] = url

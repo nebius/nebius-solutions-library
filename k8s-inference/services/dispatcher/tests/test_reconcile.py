@@ -53,7 +53,7 @@ def workload(job, cluster=None, pending=False, finished=False):
         "metadata": {
             "namespace": T,
             "name": f"job-{job}",
-            "ownerReferences": [{"kind": "Job", "name": job}],
+            "ownerReferences": [{"kind": "Job", "name": job, "uid": f"uid-{job}"}],
             "annotations": {},
         },
         "spec": {"queueName": "default", "podSets": [{"count": 1, "template": template(f"{job}-work")}]},
@@ -64,8 +64,9 @@ def workload(job, cluster=None, pending=False, finished=False):
 def mjob(name, claim, successor=None):
     ann = {d.SUCCESSOR_ANN: successor} if successor else {}
     return NS(
-        metadata=NS(name=name, annotations=ann),
+        metadata=NS(name=name, uid=f"uid-{name}", annotations=ann, deletion_timestamp=None),
         spec=NS(template=NS(spec=NS(volumes=[NS(name="work", persistent_volume_claim=NS(claim_name=claim))]))),
+        status=NS(conditions=[]),
     )
 
 
@@ -125,13 +126,21 @@ class ControlCustom:
 
 class ControlBatch:
     def __init__(self, jobs):
-        self.jobs, self.lists = jobs, 0
+        self.jobs, self.lists, self.reads = jobs, 0, []
 
     def list_namespaced_job(self, ns):
         self.lists += 1
         if self.jobs is None:
             raise RuntimeError("manager unreachable")
         return NS(items=[j for j in self.jobs.values()])
+
+    def read_namespaced_job(self, name, ns):
+        self.reads.append((name, ns))
+        if self.jobs is None:
+            raise RuntimeError("manager unreachable")
+        if name not in self.jobs:
+            raise api_exc(404)
+        return self.jobs[name]
 
 
 class WorkerCustom:
@@ -247,12 +256,134 @@ def test_reconcile_nominates_creates_and_sweeps_through_the_entrypoint(fleet):
 
 
 def test_reconcile_preserves_everything_when_the_manager_cannot_be_listed(fleet):
-    """The old behaviour on unknown: the volume pass still ensures volumes, the sweeper deletes nothing."""
+    """Unknown manager state neither creates/adopts claims nor removes retained volumes."""
     wls = [workload("op-1", cluster="hub"), workload("op-3", cluster="hub", finished=True)]
     custom = ControlCustom(wls)
     d.reconcile(ControlCore(), custom, ControlBatch(None))
     assert fleet.deleted == [] and fleet.created == [] and set(fleet.pvcs) == {"op-1-work", "op-3-work"}
     assert custom.nominated == []
+
+
+@pytest.mark.parametrize("condition", ["Complete", "Failed"])
+@pytest.mark.parametrize("retained", [False, True])
+def test_terminal_manager_fences_creation_before_workload_finished(fleet, condition, retained):
+    """C1 argon race: the manager is terminal but its Workload still says Admitted. A released claim stays gone;
+    an existing failed/export-needed claim is retained, even beyond the orphan grace period."""
+    fleet.pvcs.clear()
+    if retained:
+        fleet.pvcs["op-done-work"] = pvc("op-done-work", "op-done", age_s=10**7)
+    job = mjob("op-done", "op-done-work")
+    job.status = k8s.V1JobStatus(
+        conditions=[k8s.V1JobCondition(type=condition, status="True")],
+        completion_time=datetime.now(timezone.utc),
+    )
+    wl = workload("op-done", cluster="hub")
+    assert not d.finished(wl)
+    for _ in range(3):
+        d.reconcile(ControlCore(), ControlCustom([wl]), ControlBatch({"op-done": job}))
+    assert fleet.created == fleet.patched == fleet.deleted == []
+    assert set(fleet.pvcs) == ({"op-done-work"} if retained else set())
+
+
+@pytest.mark.parametrize("jobs", [None, {}])
+def test_missing_or_unreadable_manager_defers_new_claim_until_known(fleet, jobs):
+    fleet.pvcs.clear()
+    wl = workload("op-wait", cluster="hub")
+    d.reconcile(ControlCore(), ControlCustom([wl]), ControlBatch(jobs))
+    assert fleet.created == fleet.patched == fleet.deleted == []
+    known = ControlBatch({"op-wait": mjob("op-wait", "op-wait-work")})
+    d.reconcile(ControlCore(), ControlCustom([wl]), known)
+    assert fleet.created == ["op-wait-work"] and known.lists == 1
+
+
+@pytest.mark.parametrize("suspended", [False, True])
+def test_running_or_admitted_suspended_manager_still_gets_claim(fleet, suspended):
+    fleet.pvcs.clear()
+    job = mjob("op-run", "op-run-work")
+    job.spec.suspend = suspended  # Kueue can leave the manager suspended while its worker runs.
+    job.status = k8s.V1JobStatus(
+        active=0,
+        failed=1,
+        succeeded=1,
+        conditions=[
+            k8s.V1JobCondition(type="Complete", status="Unknown"),
+            k8s.V1JobCondition(type="Failed", status="False"),
+            k8s.V1JobCondition(type="SuccessCriteriaMet", status="True"),
+        ],
+    )
+    d.reconcile(ControlCore(), ControlCustom([workload("op-run", cluster="hub")]), ControlBatch({"op-run": job}))
+    assert fleet.created == ["op-run-work"] and fleet.deleted == []
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_terminal_predecessor_does_not_block_its_live_same_claim_finalizer(fleet, retained):
+    fleet.pvcs.clear()
+    if retained:
+        fleet.pvcs["op-done-work"] = pvc("op-done-work", "op-done", age_s=10**7)
+    old = mjob("op-done", "op-done-work")
+    old.status.conditions = [k8s.V1JobCondition(type="Failed", status="True")]
+    finalizer = mjob("op-done-x1", "op-done-work")
+    next_wl = workload("op-done-x1", cluster="hub")
+    next_wl["spec"]["podSets"][0]["template"] = template("op-done-work")
+    d.reconcile(
+        ControlCore(),
+        ControlCustom([workload("op-done", cluster="hub"), next_wl]),
+        ControlBatch({"op-done": old, "op-done-x1": finalizer}),
+    )
+    assert fleet.deleted == []
+    assert fleet.created == ([] if retained else ["op-done-work"])
+    assert fleet.patched == ([("op-done-work", "op-done,op-done-x1")] if retained else [])
+
+
+@pytest.mark.parametrize("changed", ["uid", "deleting", "jobset", "ambiguous"])
+def test_unknown_or_replaced_manager_owner_cannot_create_claim(fleet, changed):
+    fleet.pvcs.clear()
+    job = mjob("op-run", "op-run-work")
+    wl = workload("op-run", cluster="hub")
+    if changed == "uid":
+        job.metadata.uid = "replacement-job-uid"
+    elif changed == "deleting":
+        job.metadata.deletion_timestamp = datetime.now(timezone.utc)
+    elif changed == "jobset":
+        wl["metadata"]["ownerReferences"][0]["kind"] = "JobSet"
+    else:
+        wl["metadata"]["ownerReferences"].append({"kind": "Job", "name": "another"})
+    d.reconcile(ControlCore(), ControlCustom([wl]), ControlBatch({"op-run": job}))
+    assert fleet.created == fleet.patched == fleet.deleted == []
+
+
+@pytest.mark.parametrize("changed", ["Complete", "Failed", "superseded", "uid", "missing", "unreachable"])
+def test_missing_claim_rechecks_manager_after_cached_list(fleet, changed):
+    fleet.pvcs.clear()
+    initial = mjob("op-run", "op-run-work")
+
+    class ChangedManager(ControlBatch):
+        def read_namespaced_job(self, name, ns):
+            self.reads.append((name, ns))
+            if changed == "missing":
+                raise api_exc(404)
+            if changed == "unreachable":
+                raise RuntimeError("manager unreachable")
+            current = mjob(name, "op-run-work", successor="op-next" if changed == "superseded" else None)
+            if changed == "uid":
+                current.metadata.uid = "replacement"
+            else:
+                current.status.conditions = [k8s.V1JobCondition(type=changed, status="True")]
+            return current
+
+    batch = ChangedManager({"op-run": initial})
+    d.reconcile(ControlCore(), ControlCustom([workload("op-run", cluster="hub")]), batch)
+    assert batch.lists == 1 and batch.reads == [("op-run", T)]
+    assert fleet.created == fleet.patched == fleet.deleted == []
+
+
+def test_existing_claim_does_not_add_per_workload_manager_reads(fleet):
+    fleet.pvcs.clear()
+    fleet.pvcs["op-run-work"] = pvc("op-run-work", "op-run")
+    batch = ControlBatch({"op-run": mjob("op-run", "op-run-work")})
+    d.reconcile(ControlCore(), ControlCustom([workload("op-run", cluster="hub")]), batch)
+    assert batch.lists == 1 and batch.reads == []
+    assert fleet.created == fleet.patched == fleet.deleted == []
 
 
 def test_timed_client_adds_a_request_timeout_to_every_call():

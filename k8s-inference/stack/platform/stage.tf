@@ -17,9 +17,14 @@ locals {
   # for it: the dispatcher raises an InfiniBand pool's floor through the Nebius API while a multi-node run waits for
   # its nodes (docs/SCHEDULING.md "InfiniBand pools grow on demand"); null for a pool the cloud stage has not applied
   # yet (the dispatcher leaves such a pool alone).
+  # ... and, for the console links the API publishes (docs/API.md "Placement"), the mk8s cluster id of every cluster
+  # and the node group of every customer CPU pool (null before the cloud stage created them).
   fleet_doc = merge(local.chart_fleet, {
+    control = merge(local.chart_fleet.control, { cluster_id = try(local.cloud.clusters[local.chart_fleet.control.id].cluster_id, null) })
     regions = { for rn, r in local.chart_fleet.regions : rn => merge(r, {
-      pools = { for pn, p in r.pools : pn => merge(p, { node_group_id = try(local.cloud.clusters[r.id].gpu_node_group_ids[pn], null) }) }
+      cluster_id = try(local.cloud.clusters[r.id].cluster_id, null)
+      pools      = { for pn, p in r.pools : pn => merge(p, { node_group_id = try(local.cloud.clusters[r.id].gpu_node_group_ids[pn], null) }) }
+      cpu_pools  = { for pn, p in r.cpu_pools : pn => merge(p, { node_group_id = try(local.cloud.clusters[r.id].cpu_node_group_ids[pn], null) }) }
     }) }
   })
 

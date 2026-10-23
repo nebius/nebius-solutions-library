@@ -9,11 +9,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator
 
 from config import REGION
 
-INVOKE_TIMEOUT_MAX_S = 7 * 86400
+INVOKE_TIMEOUT_MAX_S = 14 * 86400  # the long-run contract: 14-day MD runs with an explicit, budgeted timeout
 RECOVERY_MAX = 3
 
 
@@ -34,13 +34,26 @@ class ScalingSpec(BaseModel):
 
 
 class EphemeralVolumeSpec(BaseModel):
-    """Endpoint scratch space, not a host path, customer bucket or shared cache."""
+    """Endpoint scratch space, not a host path, customer bucket or shared cache. The mount path is a canonical absolute
+    path: components may contain dots (an engine's `/app/.cache` is ordinary scratch), but never are `.` or `..`, no
+    empty component (`//`), no trailing slash, not `/` itself; the reserved roots and the weights/shm overlap are
+    refused by the model builder."""
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
-    mount_path: str = Field(pattern=r"^/[A-Za-z0-9_/-]+$")
+    mount_path: str = Field(pattern=r"^/[A-Za-z0-9._/-]+$", max_length=200)
     size_limit: str = Field(pattern=r"^[1-9][0-9]*(Mi|Gi)$")
     memory: bool = False
+
+    @field_validator("mount_path")
+    @classmethod
+    def _canonical(cls, v: str) -> str:
+        parts = v.split("/")
+        if v == "/" or v.endswith("/") or any(p == "" for p in parts[1:]) or any(p in (".", "..") for p in parts):
+            raise ValueError(
+                "mount_path: a canonical absolute path (no `.`/`..` components, no `//`, no trailing slash, not `/`)"
+            )
+        return v
 
 
 class PlacementSpec(BaseModel):
@@ -54,13 +67,54 @@ class RecoverySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     on_infrastructure_loss: Literal["retry", "fail", "recover"] = "retry"
     checkpoint_ref: str | None = Field(default=None, max_length=1024)
-    max_recoveries: int | None = Field(
-        default=None, ge=1, le=RECOVERY_MAX
-    )  # `recover` only: automatic continuations per root
+    # `recover` only: automatic continuations per root
+    max_recoveries: int | None = Field(default=None, ge=1, le=RECOVERY_MAX)
     wait_s: int | None = Field(default=None, ge=0, le=86400)  # `recover` only: time to come back on its own class first
-    deadline_s: int | None = Field(
-        default=None, ge=60, le=7 * 86400
-    )  # `recover` only: no recovery past root.created_at + deadline_s
+    # `recover` only: no recovery past root.created_at + deadline_s (a 14-day run may recover until its end)
+    deadline_s: int | None = Field(default=None, ge=60, le=14 * 86400)
+
+
+MAX_STAGES = 256
+
+
+class GraphSpec(BaseModel):
+    """The stages a root declares at submission (docs/JOBS.md "Stage composition"): stage id -> the stages it depends on
+    (`root` = the root's own run). Sealed: no stage attaches later. Acyclic, at most MAX_STAGES stages."""
+
+    model_config = ConfigDict(extra="forbid")
+    stages: dict[str, "list[str] | StageDecl"]
+    # stages still waiting after it are cancelled (default 14 days)
+    deadline_s: int | None = Field(default=None, ge=60, le=30 * 86400)
+
+
+class StageDecl(BaseModel):
+    """A declared stage: its dependencies and, optionally, the model it is bound to (docs/JOBS.md "Delegated stages":
+    the root's owner may then submit it on that model when the root's run class delegates to it)."""
+
+    model_config = ConfigDict(extra="forbid")
+    depends_on: list[str] = Field(default_factory=list)
+    model: str | None = None
+
+
+class StageSpec(BaseModel):
+    """A run that is one declared stage of a root's graph: admitted only after its dependencies delivered."""
+
+    model_config = ConfigDict(extra="forbid")
+    root: str
+    id: str
+
+
+RETRY_MAX_ATTEMPTS = 10
+
+
+class RetrySpec(BaseModel):
+    """Bounded application retries of one run (docs/JOBS.md "Retries"): at most `max_attempts` pods of the same Job, a
+    replacement only after an exit code in `on_exit_codes` (137/143 by default: the retained scientific policy); any
+    other non-zero exit fails the run at once. Infrastructure disruptions stay the platform's (never counted)."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_attempts: int = Field(ge=1, le=RETRY_MAX_ATTEMPTS)
+    on_exit_codes: list[int] = Field(default_factory=lambda: [137, 143])
 
 
 class ExecutionSpec(BaseModel):
@@ -71,6 +125,10 @@ class ExecutionSpec(BaseModel):
     private_input_ref: str | None = None
     placement: PlacementSpec | None = None
     recovery: RecoverySpec | None = None
+    graph: GraphSpec | None = None
+    stage: StageSpec | None = None
+    retry: RetrySpec | None = None  # docs/JOBS.md "Retries": overrides the run class's own policy
+    require_converged: bool | None = None  # endpoint calls: refused while the endpoint's rollout is not converged
 
 
 class BindingRequest(BaseModel):
@@ -85,14 +143,88 @@ class InvokeRequest(BaseModel):
     region: str | None = None
     priority: str | None = None
     timeout_s: int | None = Field(default=None, ge=1, le=INVOKE_TIMEOUT_MAX_S)
-    execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs only)
+    execution: ExecutionSpec | None = None  # docs/JOBS.md "Execution options" (runs; endpoint calls: docs/API.md)
+    # who asked, as the submitting application states it (docs/API.md "Requester"): at most 8 snake_case keys with
+    # string values of at most 128 characters (team, user, customer id; never a secret), stored on the Job and
+    # returned on every read of the operation and its continuations
+    requester: dict[str, str] | None = None
+
+    @field_validator("requester")
+    @classmethod
+    def _requester(cls, v):
+        import instances
+
+        return instances.validate_requester(v)
+
+
+class OperationIdentityRequest(BaseModel):
+    mode: Literal["run", "async"] | None = None  # the model's own mode by default
+
+
+class OperationIdentity(BaseModel):
+    """`POST /v1/models/{model}:operation-id` (docs/API.md "Operation identity"): the id a later :invoke with the same
+    key, model and Idempotency-Key creates; no side effect."""
+
+    id: str
+    model: str
+    mode: Literal["run", "async"]
+    owner_scope: Literal["key", "principal"]  # the owner namespace the id is derived in (an imported key's principal)
+
+
+class SessionRequest(BaseModel):
+    """`POST /v1/models/{model}:session` (docs/API.md "Sessions")."""
+
+    model_config = ConfigDict(extra="forbid")
+    # the session's deadline from its creation; default: the endpoint's transport deadline (a single-node endpoint's
+    # timeout_s), 3600 without one (multi-node)
+    timeout_s: int | None = Field(default=None, ge=60, le=86400)
+    region: str | None = None  # a cluster id or region of the model's deployments (docs/API.md)
+
+
+class Session(BaseModel):
+    id: str
+    model: str
+    cluster: str | None = None
+    region: str
+    status: Literal["claimed", "bound", "attached", "ended"]
+    phase: Literal["claimed", "starting", "waiting_for_worker", "attached", "ended"] | None = None
+    ready_seen_at: str | None = None  # the first Ready replica observed while bound (once; never reset)
+    attach_deadline_at: str | None = None  # attach_wait_s after it, capped by deadline_at
+    outcome: str | None = None
+    cancel_requested: bool
+    cancel_reason: str | None = None
+    attached: bool
+    worker_session_id: str | None = None
+    created_at: str | None = None
+    expires_at: str | None = None
+    deadline_at: str | None = None
+    bound_at: str | None = None
+    attached_at: str | None = None
+    ended_at: str | None = None
+    gpu_seconds: float | None = None
+    usage: str | None = None
+    claim_token: str | None = None  # on creation only
+
+
+class SessionAttach(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    connection: str
+    worker_session_id: str | None = Field(default=None, max_length=200)
+
+
+class SessionRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    connection: str
+    outcome: Literal["done", "cancelled", "disconnected", "busy", "error"]
+    gpu_seconds: float | None = Field(default=None, ge=0)  # null = unknown (no metering): the bound stays
 
 
 class ResumeRequest(BaseModel):
-    checkpoint_ref: str | None = Field(
-        default=None, max_length=1024
-    )  # a portable checkpoint: no volume, any permitted cluster/class
+    # a portable checkpoint: no volume, any permitted cluster/class
+    checkpoint_ref: str | None = Field(default=None, max_length=1024)
     gpu_class: str | None = None
+    # a FAILED root whose Job and volume expired: render again from its admission record (docs/JOBS.md)
+    restart_from_inputs: bool = False
 
 
 class UploadRequest(BaseModel):
@@ -112,15 +244,19 @@ class ScalingRequest(BaseModel):
 
 
 class KeyRequest(BaseModel):
+    """A new key: `budget` in USD (default 10; an explicit `null` is unlimited), the model allow-list (empty = every
+    model), `expires_days` (null = never)."""
+
     alias: str
-    budget: float = 10.0
+    budget: float | None = Field(default=10.0, ge=0)
     models: list[str] = Field(default_factory=list)
-    expires_days: int | None = None
+    expires_days: int | None = Field(default=None, ge=0)
 
 
 class KeyUpdate(BaseModel):
     """What an admin may change on an existing key: the spending limit, the model allow-list, the expiry (days from
-    now; 0 = never). Fields left out stay as they are; spend and the key value never change here."""
+    now; 0 = never). Fields left out stay as they are; `budget: null` given explicitly removes the limit (unlimited);
+    spend and the key value never change here."""
 
     budget: float | None = Field(default=None, ge=0)
     models: list[str] | None = None
@@ -198,14 +334,20 @@ class GpuSpec(BaseModel):
 
 
 class ResourcesSpec(BaseModel):
-    cpu: str | None = None
-    memory: str | None = None
+    cpu: str | None = None  # request (= limit unless cpu_limit)
+    memory: str | None = None  # request (= limit unless memory_limit)
+    cpu_limit: str | None = None
+    memory_limit: str | None = None
+    ephemeral_storage: str | None = None  # node-local scratch request of the endpoint container (optional)
+    ephemeral_storage_limit: str | None = None  # = the request unless given
 
 
 class WeightsSpec(BaseModel):
     path: str | None = None
     mount_path: str | None = None
     env: dict[str, str] | None = None
+    read_only: bool | None = None  # a verified, immutable payload: mounted readOnly, no prepare step (default false)
+    prepare: bool | None = None  # the init step that creates the directory (default: not read_only)
 
 
 class DataSpec(BaseModel):
@@ -230,6 +372,9 @@ class RoutingSpec(BaseModel):
     field: str | None = None
     map: dict[str, str] | None = None
     default: str | None = None
+
+
+_FieldRef = Literal["metadata.uid", "metadata.name", "metadata.namespace"]
 
 
 class FinalizeSpec(BaseModel):
@@ -259,6 +404,9 @@ class ModelSpec(BaseModel):
     env_secrets: SkipValidation[list[str] | None] = None
     pod_metadata: SkipValidation[PodMetadataSpec | None] = None
     automount_service_account_token: SkipValidation[bool | None] = None
+    # endpoint calls with application I/O: where the caller keeps its durable capture (docs/JOBS.md "Scratch storage"):
+    # `network` (the per-call claim, default) or `shared` (the tenant's shared-scratch leaf, no per-call block device)
+    call_scratch: SkipValidation[Literal["network", "shared"] | None] = None
     port: SkipValidation[int | None] = None
     protocol: SkipValidation[Literal["http", "openai", "websocket", "grpc"] | None] = None
     path: SkipValidation[str | None] = None
@@ -273,9 +421,7 @@ class ModelSpec(BaseModel):
     timeout_s: SkipValidation[int | None] = None
     shm_gib: SkipValidation[int | None] = None
     empty_dirs: SkipValidation[list[EphemeralVolumeSpec] | None] = None
-    env_field_refs: SkipValidation[dict[str, Literal["metadata.uid", "metadata.name", "metadata.namespace"]] | None] = (
-        None
-    )
+    env_field_refs: SkipValidation[dict[str, _FieldRef] | None] = None
     pull_secret: SkipValidation[str | None] = None
     weights: SkipValidation[WeightsSpec | None] = None
     data: SkipValidation[DataSpec | None] = None
@@ -285,13 +431,35 @@ class ModelSpec(BaseModel):
     display_name: SkipValidation[str | None] = None
     description: SkipValidation[str | None] = None
     task: SkipValidation[str | None] = None
-    cpu: SkipValidation[str | None] = None
-    memory: SkipValidation[str | None] = None
+    cpu: SkipValidation[str | None] = None  # request
+    memory: SkipValidation[str | None] = None  # request (= limit unless memory_limit)
+    cpu_limit: SkipValidation[str | None] = None  # optional: no CFS quota without it
+    memory_limit: SkipValidation[str | None] = None  # a limit above the request is not guaranteed memory
+    ephemeral_storage: SkipValidation[str | None] = None  # node-local scratch request (the kubelet's ephemeral storage)
+    ephemeral_storage_limit: SkipValidation[str | None] = None  # = the request unless given
+    # run classes a graph of this root may bind stages to (operator-owned)
+    delegates: SkipValidation[list[str] | None] = None
+    # endpoints: whether the worker must attach to each call's native execution (docs/API.md)
+    native_lease: SkipValidation[Literal["optional", "required"] | None] = None
+    # endpoints: a CiliumNetworkPolicy admits only the platform's data path into the pods (docs/API.md)
+    ingress_isolation: SkipValidation[Literal["declared-ports"] | None] = None
+    # {max_attempts, on_exit_codes}: the class's policy (docs/JOBS.md "Retries")
+    retry: SkipValidation[dict[str, Any] | None] = None
     disk_gi: SkipValidation[int | None] = None
     grace_seconds: SkipValidation[int | None] = None
     scratch: SkipValidation[Literal["network", "local-nvme"] | None] = None
+    # [{path: /abs/canonical, scope: attempt | run}]: the work volume at a canonical path (docs/JOBS.md "Work mount aliases")
+    work_mount_aliases: SkipValidation[list[dict[str, str]] | None] = None
+    # [{alias, mount_path}]: restricted assets of the fleet registry, granted to the tenant, main-only read-only (docs/JOBS.md)
+    assets: SkipValidation[list[dict[str, str]] | None] = None
     parameters: SkipValidation[list[dict[str, Any]] | None] = None
     finalize: SkipValidation[FinalizeSpec | None] = None
+    # endpoint children (docs/JOBS.md "Endpoint children"): the endpoint models a live attempt of this run class may
+    # ask the platform to call as bounded async children, and the explicit bound on their number per root
+    child_endpoints: SkipValidation[list[str] | None] = None
+    child_max_units: SkipValidation[int | None] = None
+    # platform (default: the tenant bucket) | application (the parent's broker)
+    child_delivery: SkipValidation[str | None] = None
 
 
 class Error(BaseModel):
@@ -305,6 +473,7 @@ class ModelGpu(BaseModel):
 
 class ModelRegion(BaseModel):
     region: str | None = None
+    cluster: str | None = None
     status: Literal["ready", "scaled-to-zero", "deploying", "error", "unavailable"] | None = None
     replicas_ready: int | None = None
     reason: str | None = None
@@ -314,6 +483,7 @@ class ModelRegion(BaseModel):
     started_at: str | None = None
     ready_at: str | None = None
     last_request_at: str | None = None
+    rollout: ModelRollout | None = None
 
 
 class ModelParameter(BaseModel):
@@ -324,6 +494,42 @@ class ModelParameter(BaseModel):
     options: list[str] | None = None
     required: bool | None = None
     help: str | None = None
+
+
+class ModelExecution(BaseModel):
+    """The public execution identity of a run class (docs/API.md "Models"): what a caller may know without the
+    container configuration (`spec` stays fleet administrators'): the image reference as registered, whether it is
+    digest-pinned, per-GPU-class images, the classes, the node count, the operator-approved delegate class ids
+    (no grant implied), the bounded retry policy, whether a finalizer exists."""
+
+    image: str | None = None
+    immutable: bool = False
+    images: dict[str, str] | None = None
+    gpu_classes: list[str] | None = None
+    nodes: int | None = None
+    delegates: list[str] | None = None
+    retry: dict[str, Any] | None = None
+    finalize: bool = False
+
+
+class ModelRollout(BaseModel):
+    """An endpoint's revision state (docs/API.md "Models"): Knative routes to the latest *ready* revision, so a spec
+    change serves the previous revision until the new one is ready; `converged` = the created, ready and rolled-out
+    revisions are one (a property of the revisions, true for a converged endpoint at zero), `serving_images` what the
+    ready pods run."""
+
+    latest_created: str | None = None
+    latest_ready: str | None = None
+    latest_rolled_out: str | None = None
+    generation: int | None = None  # the InferenceService's spec generation and what the controller reconciled
+    observed_generation: int | None = None
+    # the spec's image; `revision_image` the ready Revision's (stored template evidence)
+    desired_image: str | None = None
+    revision_image: str | None = None
+    revision_image_digest: str | None = None
+    serving_images: list[str] | None = None
+    converged: bool | None = None  # reconciled + one revision + revision image == desired + ready pods on it
+    reason: str | None = None  # why not converged
 
 
 class Model(BaseModel):
@@ -346,6 +552,9 @@ class Model(BaseModel):
     spec: ModelSpec | None = None
     example: dict[str, Any] | None = None
     parameters: list[ModelParameter] | None = None
+    execution: ModelExecution | None = None  # run classes: the sanitized execution identity
+    native_lease: Literal["optional", "required"] | None = None  # endpoints: docs/API.md "Native execution leases"
+    ingress_isolation: Literal["declared-ports"] | None = None  # endpoints: docs/API.md "Ingress isolation"
 
 
 class SyncResponse(BaseModel):
@@ -362,16 +571,31 @@ class Attempt(BaseModel):
     status: AttemptStatus | None = None
     node: str | None = None
     gpu_class: str | None = None
+    # placement (docs/API.md "Placement"): the pool the pod was pinned to or admitted on, the instance type as
+    # `<platform>/<preset>`, the mk8s node group and the Nebius console page of the node; `instance_exact` false =
+    # the node is gone (a reclaimed spot node) and the type is the pool's, not the node's
+    pool: str | None = None
+    instance_type: str | None = None
+    node_group: str | None = None
+    console_url: str | None = None
+    instance_exact: bool | None = None
+    cluster: str | None = None
     reason: str | None = None
     exit_code: int | None = None
     epoch: int | None = None
     export_state: ExportState | None = None
     result_ref: str | None = None
     checkpoint_ref: str | None = None
-    image_digest: str | None = None
+    image_digest: str | None = None  # the runtime digest observed on the pod, or the record's
     operation: str | None = None
     image: str | None = None
     gpu_seconds: float | None = None
+    pod_uid: str | None = None  # observed on the pod (docs/JOBS.md "Gang attempts")
+    gang_rank: int | None = None  # a JobSet pod's completion index, observed
+    gang_restart: int | None = None  # the JobSet incarnation the pod belongs to, observed
+    resume_checkpoint_ref: str | None = None  # the incarnation-frozen pointer the gang was told to restore
+    resume_source_epoch: int | None = None  # the earlier epoch that committed it (None for an explicit reference)
+    resume_source: Literal["committed", "explicit"] | None = None
 
 
 class ChainMember(BaseModel):
@@ -386,13 +610,106 @@ class ChainMember(BaseModel):
     cost: float | None = None
 
 
+class NativeExecution(BaseModel):
+    state: Literal["prepared", "attached", "released", "lost", "closed"] | None = None
+    attempt: str | None = None
+    worker_request_id: str | None = None
+    prepared_at: str | None = None
+    attached_at: str | None = None
+    released_at: str | None = None
+    outcome: str | None = None
+    lane_seconds: float | None = None  # wall-clock occupancy of the worker's lane (attached -> released/lost)
+    gpu_seconds: float | None = None  # only what the worker measured; null = unknown, never zero
+    cancel_requested: bool | None = None
+    settled: bool | None = None
+    attempts: list[dict[str, Any]] | None = None  # every attempt's evidence, oldest first
+    # why the reconciler marked it lost: pod gone | pod replaced | pod finished | worker container restarted (...)
+    lost_reason: str | None = None
+
+
+class NativeAttach(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt: str
+    worker_request_id: str | None = Field(default=None, max_length=200)
+
+
+class NativeRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt: str
+    worker_request_id: str | None = Field(default=None, max_length=200)  # the same tuple the worker attached with
+    outcome: Literal["done", "cancelled", "error", "disconnected"]
+    gpu_seconds: float | None = Field(default=None, ge=0)
+
+
+class GraphStage(BaseModel):
+    id: str | None = None
+    depends_on: list[str] | None = None
+    operation: str | None = None
+    status: str | None = None
+    attempt_id: str | None = None  # the delivering attempt (of `delivered_by` when a finalizer or retry delivered)
+    epoch: int | None = None
+    delivered_by: str | None = None
+    result_ref: str | None = None
+    continuations: int | None = None
+    reason: str | None = None
+    gated: bool | None = None  # a QUEUED member parked by the gate (dependencies not delivered), not admitted
+
+
+class BlockedStage(BaseModel):
+    stage: str
+    operation: str | None = None
+    status: str | None = None
+    attempt_id: str | None = None
+    actions: list[str] | None = None  # ":resume <operation>", ":cancel <root>"
+    dependents: list[str] | None = None  # the stages parked on it
+
+
+class GraphStatus(BaseModel):
+    """A root's declared stages and where each stands (docs/JOBS.md "Stage composition")."""
+
+    status: str | None = None
+    stages: list[GraphStage] | None = None
+    deadline_at: str | None = None
+    cancelled: bool | None = None
+    # open graph, nothing active, a FAILED stage: the owner resumes it or cancels the root
+    action_required: bool | None = None
+    blocked_on: list[BlockedStage] | None = None
+    waiting: list[str] | None = None  # the dependency-gated stages
+
+
+class ChildReadback(BaseModel):
+    """One endpoint child of a run, read back by its owner or by a live attempt of the run (docs/JOBS.md "Endpoint
+    children"): the durable row, the authoritative capture manifest once delivered, the latest attempt record."""
+
+    model_config = ConfigDict(extra="allow")
+    root: str
+    unit_id: str
+    child: str
+    parent: str | None = None
+    model: str | None = None
+    model_image: str | None = None
+    request_sha256: str
+    request: dict[str, Any] | None = None
+    state: Literal["pending", "active", "ended"]
+    status: str | None = None
+    outcome: Literal["pending", "succeeded", "failed", "undelivered", "unknown"]
+    exportable: bool | None = None
+    reason: str | None = None
+    result_ref: str | None = None
+    capture: dict[str, Any] | None = None
+    attempt: dict[str, Any] | None = None
+    cancel_requested_at: str | None = None
+    created_at: str | None = None
+    ended_at: str | None = None
+
+
 class Operation(BaseModel):
     id: str
     name: str | None = None
     model: str | None
     mode: Mode
     status: OperationStatus
-    phase: Literal["waiting_for_admission", "waiting_for_node", "starting", None] = None
+    phase: Literal["waiting_for_admission", "waiting_for_node", "starting", "stages", "action_required", None] = None
     reason: str | None = None
     region: str | None
     cluster: str | None = None
@@ -409,7 +726,16 @@ class Operation(BaseModel):
     error: str | None = None
     input: dict[str, Any] | None = None
     execution: dict[str, Any] | None = None
+    graph: GraphStatus | None = None  # a root that declared stages
+    stage: GraphStage | None = None  # a run that is a stage of a root's graph
     resumed_from: str | None = None
+    child: dict[str, Any] | None = None  # an endpoint child: {root, unit, parent} (docs/JOBS.md "Endpoint children")
+    pod_uid: str | None = None  # the current attempt's observed pod UID (docs/JOBS.md "Gang attempts")
+    gang_rank: int | None = None  # the current attempt's observed rank (a gang's coordinator: 0)
+    gang_restart: int | None = None  # the current attempt's observed JobSet incarnation
+    resume_checkpoint_ref: str | None = None  # the incarnation-frozen pointer the current gang restores from
+    resume_source_epoch: int | None = None
+    resume_source: Literal["committed", "explicit"] | None = None
     resumable: bool | None = None
     gpu_class: str | None = None
     image: str | None = None
@@ -417,6 +743,7 @@ class Operation(BaseModel):
     interconnect: str | None = None
     cost: float | None = None
     gpu_seconds: float | None = None
+    usage: str | None = None  # measured | unknown (settled without a measurement; the reservation stays) | pending
     gpu_seconds_complete: bool | None = None
     successor: str | None = None
     recovered_from: str | None = None
@@ -430,10 +757,19 @@ class Operation(BaseModel):
     revision: int | None = None
     export_state: ExportState | None = None
     exported_by: str | None = None
+    exported_by_attempt_id: str | None = None  # the delivering attempt (an export retry or finalizer that delivered)
+    endpoint_revision: str | None = None  # an endpoint call: the ready revision at admission (not per-request proof)
+    endpoint_image: str | None = None
+    requester: dict[str, str] | None = None  # the submitting application's block (docs/API.md "Requester")
+    key_alias: str | None = None  # the alias of the submitting key (never its value)
+    native: NativeExecution | None = None  # an endpoint call's native execution lease (docs/API.md)
+    exported_by_epoch: int | None = None
     result_ref: str | None = None
     checkpoint_ref: str | None = None
     checkpoint_generation: int | None = None
     image_digest: str | None = None
+    # observed = exact runtime digest; pending = the attempt runs, the kubelet has not reported it yet (transient); unknown = ended without one
+    image_digest_state: Literal["observed", "pending", "unknown"] | None = None
     finalize_attempts: int | None = None
     finalizing_by: str | None = None
 
@@ -487,17 +823,35 @@ class EndpointVariant(BaseModel):
     replicas_ready: int | None = None
 
 
+class EndpointReplica(BaseModel):
+    """One pod of an endpoint and where it runs (docs/API.md "Placement")."""
+
+    pod: str | None = None
+    ready: bool | None = None
+    phase: str | None = None
+    node: str | None = None
+    started_at: str | None = None
+    pool: str | None = None
+    instance_type: str | None = None
+    node_group: str | None = None
+    console_url: str | None = None
+    instance_exact: bool | None = None
+
+
 class Endpoint(BaseModel):
     id: str
     name: str
     model: str
     region: str
+    # the deployment's cluster id as the catalog keys it (`north`); `region` is where the API reaches it
+    cluster: str | None = None
     url: str
     status: Literal["ready", "scaled-to-zero", "deploying", "error", "unavailable"]
     replicas_ready: int | None
     nodes: int | None = None
     interconnect: str | None = None
     pods_ready: int | None = None
+    replicas: list[EndpointReplica] | None = None  # the pods and their instances (docs/API.md "Placement")
     last_request_at: str | None = None
     startup_s: int | None = None
     started_at: str | None = None
@@ -536,6 +890,24 @@ class FleetPool(BaseModel):
     nodes_ready: int | None = None
     gpus_total: int | None = None
     gpus_used: int | None = None
+    node_group_id: str | None = None  # the mk8s node group behind the pool (docs/API.md "Placement")
+    console_url: str | None = None  # its Nebius console page
+
+
+class FleetCpuPool(BaseModel):
+    """A GPU-free pool of a cluster: the system nodes (`kind: system`) or a customer CPU pool (`kind: cpu`, docs/FLEET.md
+    "Customer CPU pools")."""
+
+    region: str | None = None
+    cluster: str | None = None
+    pool: str | None = None
+    kind: Literal["system", "cpu"] | None = None
+    platform: str | None = None
+    preset: str | None = None
+    min_nodes: int | None = None
+    max_nodes: int | None = None
+    node_group_id: str | None = None
+    console_url: str | None = None
 
 
 class FleetCluster(BaseModel):
@@ -549,6 +921,8 @@ class FleetCluster(BaseModel):
     nodes_ready: int | None = None
     gpu_nodes_ready: int | None = None
     kubernetes_version: str | None = None
+    cluster_id: str | None = None  # the mk8s cluster id (docs/API.md "Placement")
+    console_url: str | None = None
 
 
 class TenantUsage(BaseModel):
@@ -584,8 +958,36 @@ class ExecutionCapabilitiesRecovery(BaseModel):
     requires: str | None = None
 
 
+class ExecutionCapabilitiesAsyncPrivateIO(BaseModel):
+    """Endpoint calls with private input and application-owned output (docs/JOBS.md): present when the API has them."""
+
+    version: int | None = None
+    refresh: bool | None = None
+    retained_export: bool | None = None
+    binding_keys: list[str] | None = None
+
+
+class ExecutionCapabilitiesRetry(BaseModel):
+    max_attempts: list[int] | None = None  # [min, max]
+    default_exit_codes: list[int] | None = None
+
+
+class ExecutionCapabilitiesEndpointChildren(BaseModel):
+    """Endpoint children of a run (docs/JOBS.md "Endpoint children"): absent on an API without them."""
+
+    api: str | None = None
+    delivery: list[str] | None = None  # platform | application
+    transport: list[str] | None = None  # refresh | static
+    request: list[str] | None = None  # input | input_ref
+    capture_record: bool | None = None
+    readback: list[str] | None = None
+    observed_attempt_fields: list[str] | None = None
+    preflight: str | None = None
+
+
 class ExecutionCapabilities(BaseModel):
     io_modes: list[Literal["managed", "application"]] | None = None
+    async_private_io: ExecutionCapabilitiesAsyncPrivateIO | None = None
     identities: list[str] | None = None
     execution_profiles: list[str] | None = None
     oidc_issuers: dict[str, str] | None = None
@@ -593,6 +995,8 @@ class ExecutionCapabilities(BaseModel):
     identity_token_file: str | None = None
     finalize: ExecutionCapabilitiesFinalize | None = None
     recovery: ExecutionCapabilitiesRecovery | None = None
+    retry: ExecutionCapabilitiesRetry | None = None  # docs/JOBS.md "Retries"
+    endpoint_children: ExecutionCapabilitiesEndpointChildren | None = None
 
 
 class FleetInfo(BaseModel):
@@ -604,6 +1008,8 @@ class FleetInfo(BaseModel):
     pools: list[FleetPool] | None = None
     tenant: FleetTenant | None = None
     clusters: list[FleetCluster] | None = None
+    cpu_pools: list[FleetCpuPool] | None = None  # the GPU-free pools per cluster (docs/FLEET.md "Customer CPU pools")
+    tenant_system_flavor: bool | None = None  # whether tenant work may take the system nodes (fleet policy)
 
 
 class Binding(BaseModel):
@@ -611,6 +1017,8 @@ class Binding(BaseModel):
     operation: str | None = None
     keys: list[str] | None = None
     updated_at: str | None = None
+    owner: str | None = None
+    revision: str | None = None
 
 
 class MetricSeries(BaseModel):
@@ -654,6 +1062,76 @@ class RateLimit(BaseModel):
     window_s: int | None = None
 
 
+class SubmissionPauseRequest(BaseModel):
+    """`POST /v1/fleet/submissions:pause` (docs/API.md "Submission pause")."""
+
+    model_config = ConfigDict(extra="forbid")
+    tenants: list[str] | None = None  # None: every tenant
+    reason: str = Field(max_length=300)
+    retry_after_s: int | None = Field(default=None, ge=1, le=3600)  # the Retry-After paused callers get (30)
+    max_s: int | None = Field(default=None, ge=1, le=6 * 3600)  # the pause lifts itself after this (6 h)
+    exports: bool = False  # also refuse :export (transfer-only retries); default: exports keep working
+
+
+class SubmissionPause(BaseModel):
+    paused: bool
+    tenants: list[str] | None = None
+    exports: bool | None = None
+    reason: str | None = None
+    retry_after_s: int | None = None
+    since: str | None = None
+    until: str | None = None
+    by: str | None = None
+    resumed_at: str | None = None
+    expired: dict[str, Any] | None = None
+
+
+class FleetOperation(BaseModel):
+    """One in-flight operation of the fleet as the fleet operator sees it (GET /v1/fleet/operations): identity and
+    state only, never an input, a result or a key value."""
+
+    id: str
+    tenant: str | None = None
+    model: str | None = None
+    mode: str | None = None
+    status: Literal["RUNNING", "QUEUED", "SUPERSEDED", "SUCCEEDED", "FAILED", "CANCELLED"]
+    created_at: str | None = None
+    started_at: str | None = None
+    cluster: str | None = None
+    region: str | None = None
+    successor: str | None = None
+    key_alias: str | None = None
+    owner: str | None = None  # the opaque owner hash (the tenant's own API resolves it to a principal)
+    requester: dict[str, str] | None = None
+
+
+class FleetTenantRecord(BaseModel):
+    """A tenant as the fleet operator sees it (docs/API.md "Fleet operators"): the fleet document's grants, the keys on
+    record and what they hold. No key value, no hash."""
+
+    tenant: str
+    namespace: str | None = None
+    in_fleet_document: bool | None = None
+    gpu_quota: float | None = None
+    fair_share_weight: float | None = None
+    dedicated_pools: list[str] | None = None
+    assets: list[str] | None = None
+    keys: int | None = None
+    admins: int | None = None
+    blocked: int | None = None
+    spend: float | None = None
+    usage: "KeyUsage | None" = None
+
+
+class KeyUsage(BaseModel):
+    """What the key holds beyond its spend (docs/API.md "Keys"): operations in flight, GPU seconds reserved by active
+    work, GPU seconds of attempts that ended without a trustworthy measurement (kept against the budget)."""
+
+    active_operations: int | None = None
+    reserved_gpu_seconds: float | None = None
+    unknown_gpu_seconds: float | None = None
+
+
 class ApiKey(BaseModel):
     id: str | None = None
     key: str | None = None
@@ -666,7 +1144,8 @@ class ApiKey(BaseModel):
     models: list[str] | None = None
     created_at: str | None = None
     expires_at: str | None = None
-    status: Literal["active", "exhausted", "expired"] | None = None
+    status: Literal["active", "exhausted", "expired", "blocked"] | None = None
+    blocked: bool | None = None  # a retained blocked key (imported with unknown scopes, or blocked by the admin)
     scopes: list[str] | None = None
     max_concurrent: int | None = None
     budget_requests: float | None = None
@@ -676,6 +1155,7 @@ class ApiKey(BaseModel):
     rate_limit: RateLimit | None = None
     principal_id: str | None = None
     legacy: dict[str, Any] | None = None
+    usage: KeyUsage | None = None
 
 
 class ModelWrite(BaseModel):

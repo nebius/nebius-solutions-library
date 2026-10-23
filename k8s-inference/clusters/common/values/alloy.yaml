@@ -1,11 +1,14 @@
 # Helm values for the alloy Application (every cluster); version pinned in clusters/common/apps/alloy.yaml.
-# Grafana Alloy as the log shipper: one pod per node (GPU nodes included), tails every pod on its node through the
+# Grafana Alloy as the log shipper: one pod per node (GPU and CPU-pool nodes included), tails every pod on its node through the
 # kubelet API and pushes to the single-binary Loki with labels namespace, pod, container, node, app, plus the platform
 # labels job (Kubernetes Job = operation), inferenceservice / revision (KServe, Knative) and queue (Kueue). Nothing else.
 controller:
   type: daemonset
   tolerations:
   - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  - key: serverless2.nebius/cpu-pool   # CPU pools (stack/modules/cluster/main.tf): a run there has logs too
     operator: Exists
     effect: NoSchedule
   - key: DeletionCandidateOfClusterAutoscaler

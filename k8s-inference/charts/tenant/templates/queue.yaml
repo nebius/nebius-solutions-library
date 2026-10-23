@@ -4,6 +4,9 @@
 # A run carries `kueue.x-k8s.io/queue-name: <profile>` (its catalog entry's first GPU class), so the same Job queues
 # the same way on the manager and on any worker.
 {{- range $profile := include "tenant.profiles" . | fromYamlArray }}
+{{- if eq $profile "serverless2-stage-waiting" }}
+{{- fail "a scheduling profile cannot be named serverless2-stage-waiting: it is the queue a waiting stage names so that Kueue admits nothing for it (services/api/stages.py)" }}
+{{- end }}
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
