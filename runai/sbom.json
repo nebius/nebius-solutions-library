@@ -1,0 +1,501 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:9f3c1a7e-4b2d-4c8f-9a1e-2f6d4b8c0e51",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-17T00:00:00Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "runai-solution",
+      "name": "nebius-solutions-library/runai",
+      "version": "main@2026-10-17 (refreshed post-remediation: 9102a0d7, 6e0ab132, 78971dea)"
+    },
+    "tools": [
+      { "name": "terraform", "version": "1.9.8" }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:terraform/provider/nebius/nebius@0.6.71",
+      "name": "nebius",
+      "version": "0.6.71",
+      "purl": "pkg:terraform/provider/nebius/nebius@0.6.71",
+      "licenses": [{ "license": { "id": "Apache-2.0" } }],
+      "properties": [
+        { "name": "registry:source", "value": "registry.terraform.io/nebius/nebius" },
+        { "name": "registry:constraint", "value": ">= 0.6.23, < 1.0" },
+        { "name": "registry:locked_via", "value": ".terraform.lock.hcl (committed in runai/ since 9102a0d7)" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:terraform/provider/hashicorp/helm@3.3.0",
+      "name": "helm",
+      "version": "3.3.0",
+      "purl": "pkg:terraform/provider/hashicorp/helm@3.3.0",
+      "licenses": [{ "license": { "id": "MPL-2.0" } }],
+      "properties": [
+        { "name": "registry:source", "value": "registry.terraform.io/hashicorp/helm" },
+        { "name": "registry:constraint", "value": "~> 3.3" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:terraform/provider/hashicorp/kubernetes@3.3.0",
+      "name": "kubernetes",
+      "version": "3.3.0",
+      "purl": "pkg:terraform/provider/hashicorp/kubernetes@3.3.0",
+      "licenses": [{ "license": { "id": "MPL-2.0" } }],
+      "properties": [
+        { "name": "registry:source", "value": "registry.terraform.io/hashicorp/kubernetes" },
+        { "name": "registry:constraint", "value": "~> 3.3" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:terraform/provider/hashicorp/tls@4.4.1",
+      "name": "tls",
+      "version": "4.4.1",
+      "purl": "pkg:terraform/provider/hashicorp/tls@4.4.1",
+      "licenses": [{ "license": { "id": "MPL-2.0" } }],
+      "properties": [
+        { "name": "registry:source", "value": "registry.terraform.io/hashicorp/tls" },
+        { "name": "registry:constraint", "value": ">= 4.0, < 5.0" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:helm/control-plane@2.26.50",
+      "name": "control-plane",
+      "version": "2.26.50",
+      "purl": "pkg:helm/control-plane@2.26.50?repo_url=https%3A%2F%2Fhelm.ngc.nvidia.com%2Fnvidia%2Frunai",
+      "hashes": [{ "alg": "SHA-256", "content": "6ff2fa8ac05098895e2e98a16ed0fe9f4e2b8bd22d3742ed54c477d64b734dae" }],
+      "properties": [
+        { "name": "chart:repo_url", "value": "https://helm.ngc.nvidia.com/nvidia/runai" },
+        { "name": "chart:appVersion", "value": "2.26.50" },
+        { "name": "chart:kubeVersion", "value": ">=1.19.0-0" },
+        { "name": "chart:created", "value": "2026-09-23T19:48:26Z" },
+        { "name": "chart:auth_required", "value": "yes: NGC API key ($oauthtoken)" },
+        { "name": "chart:pinned_in", "value": "runai/variables.tf runai_version" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:helm/runai-cluster@2.26.50",
+      "name": "runai-cluster",
+      "version": "2.26.50",
+      "purl": "pkg:helm/runai-cluster@2.26.50?repo_url=https%3A%2F%2Fhelm.ngc.nvidia.com%2Fnvidia%2Frunai",
+      "hashes": [{ "alg": "SHA-256", "content": "d10510489f5b7202ed1c9c611fdc83b363d67b3c16998727122a071aeab5f95b" }],
+      "properties": [
+        { "name": "chart:repo_url", "value": "https://helm.ngc.nvidia.com/nvidia/runai" },
+        { "name": "chart:appVersion", "value": "2.26.50" },
+        { "name": "chart:kubeVersion", "value": ">=1.19.0-0" },
+        { "name": "chart:created", "value": "2026-09-23T19:44:41Z" },
+        { "name": "chart:auth_required", "value": "yes: NGC API key ($oauthtoken)" },
+        { "name": "chart:pinned_in", "value": "runai/variables.tf runai_version" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:helm/kubernetes-ingress@1.54.3",
+      "name": "kubernetes-ingress",
+      "version": "1.54.3",
+      "purl": "pkg:helm/kubernetes-ingress@1.54.3?repo_url=https%3A%2F%2Fhaproxytech.github.io%2Fhelm-charts",
+      "licenses": [{ "license": { "id": "Apache-2.0" } }],
+      "hashes": [{ "alg": "SHA-256", "content": "1d3258dc0979e94c4ae5c4cd1c05e4ac6291a5a8bada4ab046b16f107c6d1750" }],
+      "properties": [
+        { "name": "chart:repo_url", "value": "https://haproxytech.github.io/helm-charts" },
+        { "name": "chart:appVersion", "value": "3.2.17" },
+        { "name": "chart:kubeVersion", "value": ">=1.23.0-0" },
+        { "name": "chart:created", "value": "2026-10-16T16:43:05Z" },
+        { "name": "chart:auth_required", "value": "no" },
+        { "name": "chart:pinned_in", "value": "runai/variables.tf haproxy_ingress_version" },
+        { "name": "chart:controller_image", "value": "docker.io/haproxytech/kubernetes-ingress:3.2.17" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:helm/gpu-operator@platform-resolved",
+      "name": "gpu-operator",
+      "version": "platform-resolved",
+      "purl": "pkg:generic/nebius/nvidia-gpu-operator@platform-resolved",
+      "properties": [
+        { "name": "chart:deployed_via", "value": "nebius_applications_v1alpha1_k8s_release (Nebius managed-apps API)" },
+        { "name": "chart:product_slug", "value": "nebius/nvidia-gpu-operator" },
+        { "name": "chart:namespace", "value": "gpu-operator" },
+        { "name": "chart:auth_required", "value": "Nebius IAM token" },
+        { "name": "chart:note", "value": "No helm repo URL or chart version pinned in repo; version resolved by Nebius platform at deploy time" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:postgresql@15.5.38",
+      "name": "postgresql",
+      "version": "15.5.38",
+      "purl": "pkg:helm/postgresql@15.5.38?repo_url=https%3A%2F%2Fcharts.bitnami.com%2Fbitnami",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://charts.bitnami.com/bitnami" },
+        { "name": "chart:auth_required", "value": "no" },
+        { "name": "chart:note", "value": "subchart dependency, pinned by parent Chart.lock, not by Terraform" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:keycloakx@7.2.2",
+      "name": "keycloakx",
+      "version": "7.2.2",
+      "purl": "pkg:helm/keycloakx@7.2.2?repo_url=https%3A%2F%2Fcodecentric.github.io%2Fhelm-charts",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://codecentric.github.io/helm-charts" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:thanos@16.0.7",
+      "name": "thanos",
+      "version": "16.0.7",
+      "purl": "pkg:helm/thanos@16.0.7?repo_url=https%3A%2F%2Fcharts.bitnami.com%2Fbitnami",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://charts.bitnami.com/bitnami" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:notifications-service@1.5.43",
+      "name": "notifications-service",
+      "version": "1.5.43",
+      "purl": "pkg:helm/notifications-service@1.5.43?repo_url=https%3A%2F%2Fnvcr.io%2Fartifactory%2Fnotifications",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50 (alias notificationsService)" },
+        { "name": "chart:repo_url", "value": "https://nvcr.io/artifactory/notifications" },
+        { "name": "chart:auth_required", "value": "yes: NGC API key" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:nats@9.0.28",
+      "name": "nats",
+      "version": "9.0.28",
+      "purl": "pkg:helm/nats@9.0.28?repo_url=https%3A%2F%2Fcharts.bitnami.com%2Fbitnami",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://charts.bitnami.com/bitnami" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:common@2.40.0",
+      "name": "common",
+      "version": "2.40.0",
+      "purl": "pkg:helm/common@2.40.0?repo_url=https%3A%2F%2Fcharts.bitnami.com%2Fbitnami",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://charts.bitnami.com/bitnami" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:unleash-edge@2.7.4",
+      "name": "unleash-edge",
+      "version": "2.7.4",
+      "purl": "pkg:helm/unleash-edge@2.7.4?repo_url=https%3A%2F%2Fdocs.getunleash.io%2Fhelm-charts",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50 (alias unleashEdge)" },
+        { "name": "chart:repo_url", "value": "https://docs.getunleash.io/helm-charts" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:runai-common-chart@1.0.62",
+      "name": "runai-common-chart",
+      "version": "1.0.62",
+      "purl": "pkg:generic/runai-common-chart@1.0.62",
+      "properties": [
+        { "name": "chart:parent", "value": "control-plane@2.26.50" },
+        { "name": "chart:repo_url", "value": "bundled in chart (file://../../runai-common-chart)" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:runai-engine@v3.41.19",
+      "name": "runai-engine",
+      "version": "v3.41.19",
+      "purl": "pkg:helm/runai-engine@v3.41.19?repo_url=https%3A%2F%2Fnvcr.io%2Fartifactory%2Fop-charts-prod%2F",
+      "properties": [
+        { "name": "chart:parent", "value": "runai-cluster@2.26.50" },
+        { "name": "chart:repo_url", "value": "https://nvcr.io/artifactory/op-charts-prod/" },
+        { "name": "chart:auth_required", "value": "yes: NGC API key" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:karta@0.1.0",
+      "name": "karta",
+      "version": "0.1.0",
+      "purl": "pkg:oci/karta@0.1.0?repository_url=ghcr.io/run-ai/karta",
+      "properties": [
+        { "name": "chart:parent", "value": "runai-cluster@2.26.50" },
+        { "name": "chart:repo_url", "value": "oci://ghcr.io/run-ai/karta" },
+        { "name": "chart:auth_required", "value": "no" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "subchart:crds@0.0.0",
+      "name": "crds",
+      "version": "0.0.0",
+      "purl": "pkg:generic/crds@0.0.0",
+      "properties": [
+        { "name": "chart:parent", "value": "runai-cluster@2.26.50" },
+        { "name": "chart:repo_url", "value": "bundled in chart (file://charts/crds)" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:terraform@>=1.11",
+      "name": "terraform",
+      "version": ">=1.11",
+      "purl": "pkg:generic/terraform@%3E%3D1.9",
+      "properties": [
+        { "name": "tool:required_version", "value": ">= 1.9 (runai/provider.tf)" },
+        { "name": "tool:ci_pin", "value": "1.11.4 (.github/workflows/terraform.yml)" },
+        { "name": "tool:sbom_inventory_version", "value": "1.9.8" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:helm@>=3.14",
+      "name": "helm",
+      "version": ">=3.14",
+      "purl": "pkg:generic/helm@%3E%3D3.14",
+      "properties": [
+        { "name": "tool:note", "value": "Version floor per Run:ai install docs; not pinned in repo" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:nebius-cli",
+      "name": "nebius-cli",
+      "version": "unversioned",
+      "purl": "pkg:generic/nebius-cli",
+      "properties": [
+        { "name": "tool:note", "value": "No version floor recorded; used by environment.sh and CI" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:jq",
+      "name": "jq",
+      "version": "unversioned",
+      "purl": "pkg:generic/jq",
+      "properties": [
+        { "name": "tool:note", "value": "environment.sh and CI workflows" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:coreutils",
+      "name": "coreutils",
+      "version": "unversioned",
+      "purl": "pkg:generic/coreutils",
+      "properties": [
+        { "name": "tool:note", "value": "md5sum, date (environment.sh bucket naming and access-key expiry)" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "tool:openssl",
+      "name": "openssl",
+      "version": "unversioned",
+      "purl": "pkg:generic/openssl",
+      "properties": [
+        { "name": "tool:note", "value": "CI only: openssl rand -hex 16 for TF_VAR_runai_admin_password" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:helm.ngc.nvidia.com",
+      "name": "helm.ngc.nvidia.com",
+      "purl": "pkg:generic/helm.ngc.nvidia.com",
+      "properties": [
+        { "name": "service:purpose", "value": "Run:ai helm chart repository (control-plane, runai-cluster)" },
+        { "name": "service:auth", "value": "NGC API key ($oauthtoken)" },
+        { "name": "service:failure_mode", "value": "Helm releases fail; no Run:ai install" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:nvcr.io",
+      "name": "nvcr.io",
+      "purl": "pkg:generic/nvcr.io",
+      "properties": [
+        { "name": "service:purpose", "value": "Container registry for Run:ai images; artifactory chart repos for notifications-service and runai-engine subcharts" },
+        { "name": "service:auth", "value": "NGC API key (runai-reg-creds pull secret)" },
+        { "name": "service:failure_mode", "value": "Image pulls / subchart fetches fail" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:haproxytech.github.io",
+      "name": "haproxytech.github.io",
+      "purl": "pkg:generic/haproxytech.github.io",
+      "properties": [
+        { "name": "service:purpose", "value": "HAProxy kubernetes-ingress helm chart index" },
+        { "name": "service:auth", "value": "none" },
+        { "name": "service:failure_mode", "value": "Ingress release fails" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:registry.terraform.io",
+      "name": "registry.terraform.io",
+      "purl": "pkg:generic/registry.terraform.io",
+      "properties": [
+        { "name": "service:purpose", "value": "Terraform provider downloads at init" },
+        { "name": "service:auth", "value": "none" },
+        { "name": "service:failure_mode", "value": "terraform init fails" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:sslip.io",
+      "name": "sslip.io",
+      "purl": "pkg:generic/sslip.io",
+      "properties": [
+        { "name": "service:purpose", "value": "Runtime DNS wildcard for self-signed TLS mode (<LB-IP>.sslip.io)" },
+        { "name": "service:auth", "value": "none" },
+        { "name": "service:failure_mode", "value": "Run:ai UI URL unresolvable in self-signed mode" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:storage.nebius.cloud",
+      "name": "storage.<region>.nebius.cloud",
+      "purl": "pkg:generic/storage.nebius.cloud",
+      "properties": [
+        { "name": "service:purpose", "value": "S3-compatible Terraform state backend (runai.tfstate)" },
+        { "name": "service:auth", "value": "Temporary service-account access key created by environment.sh (1-day expiry)" },
+        { "name": "service:failure_mode", "value": "State read/write fails" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:nebius-platform-apis",
+      "name": "Nebius platform APIs",
+      "purl": "pkg:generic/api.nebius.cloud",
+      "properties": [
+        { "name": "service:purpose", "value": "All nebius_* resources: mk8s, iam, vpc, applications (managed GPU operator), storage" },
+        { "name": "service:auth", "value": "NEBIUS_IAM_TOKEN (nebius iam get-access-token)" },
+        { "name": "service:failure_mode", "value": "All infrastructure operations fail" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:charts.bitnami.com",
+      "name": "charts.bitnami.com",
+      "purl": "pkg:generic/charts.bitnami.com",
+      "properties": [
+        { "name": "service:purpose", "value": "Subchart dependency repo (postgresql, thanos, nats, common)" },
+        { "name": "service:auth", "value": "none" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:codecentric.github.io",
+      "name": "codecentric.github.io",
+      "purl": "pkg:generic/codecentric.github.io",
+      "properties": [
+        { "name": "service:purpose", "value": "Subchart dependency repo (keycloakx)" },
+        { "name": "service:auth", "value": "none" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:docs.getunleash.io",
+      "name": "docs.getunleash.io",
+      "purl": "pkg:generic/docs.getunleash.io",
+      "properties": [
+        { "name": "service:purpose", "value": "Subchart dependency repo (unleash-edge)" },
+        { "name": "service:auth", "value": "none" }
+      ]
+    },
+    {
+      "type": "service",
+      "bom-ref": "service:ghcr.io",
+      "name": "ghcr.io",
+      "purl": "pkg:generic/ghcr.io",
+      "properties": [
+        { "name": "service:purpose", "value": "OCI subchart repo (ghcr.io/run-ai/karta); GitHub release assets serve HAProxy chart tarballs" },
+        { "name": "service:auth", "value": "none" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "module:modules/gpu-operator",
+      "name": "modules/gpu-operator",
+      "version": "path-pinned (unversioned)",
+      "purl": "pkg:generic/modules/gpu-operator",
+      "properties": [
+        { "name": "module:source", "value": "../modules/gpu-operator (local path, tracks repo main)" },
+        { "name": "module:deploys", "value": "gpu-operator via Nebius managed-apps API, product_slug nebius/nvidia-gpu-operator" }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "module:modules/cloud-init",
+      "name": "modules/cloud-init",
+      "version": "path-pinned (unversioned)",
+      "purl": "pkg:generic/modules/cloud-init",
+      "properties": [
+        { "name": "module:source", "value": "../modules/cloud-init (local path, tracks repo main)" },
+        { "name": "module:used_template", "value": "k8s-cloud-init.tftpl" }
+      ]
+    }
+  ],
+  "dependencies": [
+    { "ref": "runai-solution", "dependsOn": [
+      "pkg:terraform/provider/nebius/nebius@0.6.71",
+      "pkg:terraform/provider/hashicorp/helm@3.3.0",
+      "pkg:terraform/provider/hashicorp/kubernetes@3.3.0",
+      "pkg:terraform/provider/hashicorp/tls@4.4.1",
+      "pkg:helm/control-plane@2.26.50",
+      "pkg:helm/runai-cluster@2.26.50",
+      "pkg:helm/kubernetes-ingress@1.54.3",
+      "pkg:helm/gpu-operator@platform-resolved",
+      "module:modules/gpu-operator",
+      "module:modules/cloud-init",
+      "service:helm.ngc.nvidia.com",
+      "service:nvcr.io",
+      "service:haproxytech.github.io",
+      "service:registry.terraform.io",
+      "service:sslip.io",
+      "service:storage.nebius.cloud",
+      "service:nebius-platform-apis"
+    ] },
+    { "ref": "pkg:helm/control-plane@2.26.50", "dependsOn": [
+      "subchart:runai-common-chart@1.0.62",
+      "subchart:postgresql@15.5.38",
+      "subchart:keycloakx@7.2.2",
+      "subchart:thanos@16.0.7",
+      "subchart:notifications-service@1.5.43",
+      "subchart:nats@9.0.28",
+      "subchart:common@2.40.0",
+      "subchart:unleash-edge@2.7.4"
+    ] },
+    { "ref": "pkg:helm/runai-cluster@2.26.50", "dependsOn": [
+      "subchart:runai-engine@v3.41.19",
+      "subchart:karta@0.1.0",
+      "subchart:crds@0.0.0"
+    ] }
+  ]
+}
