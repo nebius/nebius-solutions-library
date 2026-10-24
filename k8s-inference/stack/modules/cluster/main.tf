@@ -64,7 +64,7 @@ resource "nebius_mk8s_v1_node_group" "system" {
   }
   template = {
     metadata             = { labels = merge({ "serverless2.nebius/pool" = "system" }, local.snapshot_store_labels) }
-    boot_disk            = { size_gibibytes = 128, type = "NETWORK_SSD" }
+    boot_disk            = { size_gibibytes = var.system_pool.boot_disk_gib, type = "NETWORK_SSD" }
     network_interfaces   = [{ subnet_id = data.nebius_vpc_v1_subnet.target.id }]
     os                   = "ubuntu24.04"
     cloud_init_user_data = local.snapshot_system_cloud_init
