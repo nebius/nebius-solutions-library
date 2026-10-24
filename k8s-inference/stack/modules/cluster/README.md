@@ -27,6 +27,11 @@ platform stage.
 | `image_cache` | Logical registry host and cache NodePort for containerd | `object` | required |
 | `public_ip` | Static public IP for the gateway | `bool` | `true` |
 
+`system_pool.boot_disk_gib` optionally sizes the CPU system nodes' `NETWORK_SSD`
+boot disks. It defaults to 128 GiB, preserving existing callers. Changing it updates
+the node-group template and triggers the existing managed rolling replacement;
+filesystem attachments, GPU/CPU batch pools and the rollout strategy are unchanged.
+
 ## Outputs
 
 | Name | Description |
