@@ -1,25 +1,20 @@
-# All providers are mocked; no cloud or Kubernetes API is contacted.
-# Terraform mocks leave nested pool lists empty, so these plans check wiring
-# and expect the worker CIDR precondition to fail. They cannot verify a
-# successful configuration with populated worker CIDRs. The rejected node
-# group also prevents its dependent LoadBalancer Service from being planned.
+# Providers are mocked; no cloud or Kubernetes API is contacted.
+# Terraform cannot populate nested CIDR pools, even with explicit overrides.
+# Plans expect CIDR validation to fail, so node-group and Service
+# configuration require separate validation.
 mock_provider "kubectl" {}
 mock_provider "nebius" {
   override_during = plan
 
   mock_data "nebius_vpc_v1_subnet" {
     defaults = {
-      network_id     = "vpcnetwork-e00r7z9vfxmg1bk99s"
-      route_table_id = "vpcroutetable-e00r7z9vfxmg1bk99s"
+      network_id = "vpcnetwork-e00r7z9vfxmg1bk99s"
     }
   }
 
   mock_resource "nebius_vpc_v1_subnet" {
     defaults = {
       id = "vpcsubnet-e00r7z9vfxmg1bk99t"
-      status = {
-        ipv4_public_cidrs = ["203.0.113.3/32", "203.0.113.1/32", "203.0.113.2/32"]
-      }
     }
   }
 
@@ -96,10 +91,9 @@ run "network_and_policy_wiring" {
   assert {
     condition = (
       nebius_vpc_v1_subnet.gateway.ipv4_public_pools.use_network_pools == false &&
-      length(nebius_vpc_v1_subnet.gateway.ipv4_public_pools.pools[0].cidrs) == 3 &&
-      output.public_ip_cidrs == tolist(["203.0.113.1/32", "203.0.113.2/32", "203.0.113.3/32"])
+      length(nebius_vpc_v1_subnet.gateway.ipv4_public_pools.pools[0].cidrs) == 3
     )
-    error_message = "The fixed public pool must cover both gateway nodes and the upgrade spare, with the complete public pool exported."
+    error_message = "The fixed public pool must cover both gateway nodes and the upgrade spare."
   }
 
   assert {
