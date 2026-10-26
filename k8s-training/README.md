@@ -309,10 +309,10 @@ rollout are not ordered, so GPU allocation can be unavailable during the change:
 4. Update workload manifests to use the required ResourceClaims and
    ComputeDomains, then resume controllers or resubmit workloads.
 
-The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
-MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
-bundled KubeRay profiles. These guardrails keep the initial production path
-within the components validated for Grace ARM rack deployments.
+The GB300 path currently rejects autoscaling, preemptible or spot-priced nodes,
+public GPU nodes, MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL
+test, and the bundled KubeRay profiles. These guardrails keep the initial
+production path within the components validated for Grace ARM rack deployments.
 
 ### Nvidia Multi Instance GPU (MIG) configuration
 

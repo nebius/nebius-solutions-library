@@ -172,6 +172,20 @@ run "reject_fractional_rack_count" {
   ]
 }
 
+run "reject_spot_pricing_policy" {
+  command = plan
+
+  variables {
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  plan_options {
+    target = [terraform_data.gb300_validation]
+  }
+
+  expect_failures = [terraform_data.gb300_validation]
+}
+
 run "reject_missing_rollout_strategy" {
   command = plan
 
