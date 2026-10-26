@@ -147,7 +147,7 @@ run "reject_pricing_policy_from_another_project" {
     target = [nebius_mk8s_v1_node_group.gpu]
   }
 
-  expect_failures = [nebius_mk8s_v1_node_group.gpu]
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
 }
 
 run "reject_pricing_policy_for_another_gpu_platform" {
@@ -174,7 +174,30 @@ run "reject_pricing_policy_for_another_gpu_platform" {
     target = [nebius_mk8s_v1_node_group.gpu]
   }
 
-  expect_failures = [nebius_mk8s_v1_node_group.gpu]
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
+}
+
+run "reject_pricing_policy_without_v1_compute_spec" {
+  command = plan
+
+  variables {
+    gpu_nodes_preemptible            = true
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id             = "project-test-only"
+      compute_instance_spec = {}
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gpu_spot_pricing_validation]
+  }
+
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
 }
 
 run "reject_pricing_policy_for_on_demand_gpu_nodes" {
@@ -188,5 +211,48 @@ run "reject_pricing_policy_for_on_demand_gpu_nodes" {
     target = [nebius_mk8s_v1_node_group.gpu]
   }
 
-  expect_failures = [nebius_mk8s_v1_node_group.gpu]
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
+}
+
+run "reject_pricing_policy_for_on_demand_when_gpu_node_group_count_is_zero" {
+  command = plan
+
+  variables {
+    gpu_node_groups                  = 0
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  plan_options {
+    target = [terraform_data.gpu_spot_pricing_validation]
+  }
+
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
+}
+
+run "reject_mismatched_pricing_policy_when_gpu_node_group_count_is_zero" {
+  command = plan
+
+  variables {
+    gpu_node_groups                  = 0
+    gpu_nodes_preemptible            = true
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id = "project-other-test"
+      compute_instance_spec = {
+        v1 = {
+          platform = "gpu-h200-sxm"
+        }
+      }
+    }
+  }
+
+  plan_options {
+    target = [terraform_data.gpu_spot_pricing_validation]
+  }
+
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
 }

@@ -117,32 +117,43 @@ data "nebius_billing_v1_pricing_policy" "gpu_spot" {
   id = var.gpu_nodes_spot_pricing_policy_id
 }
 
-resource "nebius_mk8s_v1_node_group" "gpu" {
-  count = local.gb300_enabled ? 0 : var.gpu_node_groups
+resource "terraform_data" "gpu_spot_pricing_validation" {
+  count = var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
   lifecycle {
     precondition {
-      condition     = !local.enable_gpu_cluster || startswith(local.gpu_nodes_preset, "8gpu-")
-      error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_nodes_preset}'."
-    }
-
-    precondition {
-      condition     = var.gpu_nodes_preemptible || var.gpu_nodes_spot_pricing_policy_id == null
+      condition     = var.gpu_nodes_preemptible
       error_message = "gpu_nodes_spot_pricing_policy_id requires gpu_nodes_preemptible = true."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null ? (
+      condition = var.gpu_nodes_preemptible ? (
         data.nebius_billing_v1_pricing_policy.gpu_spot[0].parent_id == var.parent_id
       ) : true
       error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy in parent_id."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null ? (
-        data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == local.gpu_nodes_platform
+      condition = var.gpu_nodes_preemptible ? (
+        try(
+          data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == local.gpu_nodes_platform,
+          false
+        )
       ) : true
       error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy for the selected GPU platform."
+    }
+  }
+}
+
+resource "nebius_mk8s_v1_node_group" "gpu" {
+  count = local.gb300_enabled ? 0 : var.gpu_node_groups
+
+  depends_on = [terraform_data.gpu_spot_pricing_validation]
+
+  lifecycle {
+    precondition {
+      condition     = !local.enable_gpu_cluster || startswith(local.gpu_nodes_preset, "8gpu-")
+      error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_nodes_preset}'."
     }
   }
 
