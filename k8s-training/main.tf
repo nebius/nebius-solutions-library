@@ -117,6 +117,7 @@ data "nebius_billing_v1_pricing_policy" "gpu_spot" {
   id = var.gpu_nodes_spot_pricing_policy_id
 }
 
+# Validate capped pricing policies independently of node-group count.
 resource "terraform_data" "gpu_spot_pricing_validation" {
   count = var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
