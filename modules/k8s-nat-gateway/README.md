@@ -15,6 +15,17 @@ out of other `LoadBalancer` Services that use default node selection. The NAT
 Service uses `nebius.com/load-balancer-target-node-selector` with
 `nebius.com/nat-gateway=true` to select only gateway nodes.
 
+## Which gateway should I use?
+
+Both options provide a reserved public IP pool for outbound traffic:
+
+- **Cilium Egress Gateway:** Choose this to select which Pods and destinations
+  use the gateway. It does not cover `hostNetwork` Pods, container image pulls
+  or other traffic from the nodes themselves.
+- **Kubernetes NAT gateway:** Choose this to route IPv4 internet traffic from
+  an entire subnet, including regular Pods, `hostNetwork` Pods, worker nodes
+  and standalone VMs.
+
 ## Usage
 
 Follow the [k8s-training setup instructions](../../k8s-training/README.md). Add
