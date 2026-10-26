@@ -131,18 +131,13 @@ gpu_nodes_preemptible            = true
 gpu_nodes_spot_pricing_policy_id = "pricingpolicy-..."
 ```
 
-"Outside this solution" does not require creating the policy outside Terraform.
-The policy can be managed in another Terraform root or module and its generated
-ID passed to this solution, for example:
-
-```hcl
-gpu_nodes_spot_pricing_policy_id = nebius_billing_v1_pricing_policy.gpu_spot.id
-```
-
-Alternatively, create the policy in the Nebius console or with the CLI and pass
-the resulting ID through `terraform.tfvars`. Keeping policy creation separate
-allows a billing or platform team to own and reuse one policy across multiple
-VM or MK8s deployments.
+This solution does not create the pricing policy. Supply the ID of a pre-existing
+policy as a literal value in `terraform.tfvars`. The policy can be created by a
+separate Terraform configuration, in the Nebius console, or with the CLI. If a
+separate Terraform configuration creates it, pass that configuration's output
+ID into this solution; a `.tfvars` file cannot directly reference a resource in
+another Terraform root. Keeping policy creation separate allows a billing or
+platform team to own and reuse one policy across multiple VM or MK8s deployments.
 
 The CPU equivalents are `cpu_nodes_preemptible` and
 `cpu_nodes_spot_pricing_policy_id`. A pricing policy ID requires the corresponding
