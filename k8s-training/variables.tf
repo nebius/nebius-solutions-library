@@ -555,7 +555,7 @@ variable "cpu_nodes_spot_pricing_policy_id" {
   nullable    = true
 
   validation {
-    condition     = var.cpu_nodes_spot_pricing_policy_id == null || trimspace(var.cpu_nodes_spot_pricing_policy_id) != ""
+    condition     = var.cpu_nodes_spot_pricing_policy_id == null ? true : trimspace(var.cpu_nodes_spot_pricing_policy_id) != ""
     error_message = "cpu_nodes_spot_pricing_policy_id must be null or a non-empty pricing policy ID."
   }
 }
@@ -573,7 +573,7 @@ variable "gpu_nodes_spot_pricing_policy_id" {
   nullable    = true
 
   validation {
-    condition     = var.gpu_nodes_spot_pricing_policy_id == null || trimspace(var.gpu_nodes_spot_pricing_policy_id) != ""
+    condition     = var.gpu_nodes_spot_pricing_policy_id == null ? true : trimspace(var.gpu_nodes_spot_pricing_policy_id) != ""
     error_message = "gpu_nodes_spot_pricing_policy_id must be null or a non-empty pricing policy ID."
   }
 }
