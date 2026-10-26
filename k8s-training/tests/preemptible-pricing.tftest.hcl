@@ -23,7 +23,7 @@ variables {
   }
 }
 
-run "on_demand_by_default" {
+run "regular_nodes_keep_implicit_on_demand_default" {
   command = plan
 
   plan_options {
@@ -35,12 +35,41 @@ run "on_demand_by_default" {
 
   assert {
     condition = (
-      nebius_mk8s_v1_node_group.cpu-only.template.on_demand != null &&
+      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
       nebius_mk8s_v1_node_group.cpu-only.template.preemptible == null &&
-      nebius_mk8s_v1_node_group.gpu[0].template.on_demand != null &&
-      nebius_mk8s_v1_node_group.gpu[0].template.preemptible == null
+      nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price == null &&
+      nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.preemptible == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null
     )
-    error_message = "Regular CPU and GPU node groups must use on-demand pricing."
+    error_message = "Regular CPU and GPU node groups must retain the implicit on-demand default."
+  }
+}
+
+run "on_demand_gpu_nodes_preserve_capacity_reservation" {
+  command = plan
+
+  variables {
+    gpu_nodes_reservation_policy = {
+      policy = "STRICT"
+    }
+  }
+
+  plan_options {
+    target = [nebius_mk8s_v1_node_group.gpu]
+  }
+
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.preemptible == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.reservation_policy.policy == "STRICT"
+    )
+    error_message = "Capacity-reserved GPU nodes must retain implicit on-demand pricing and their reservation policy."
   }
 }
 
@@ -62,9 +91,11 @@ run "preemptible_nodes_follow_spot_by_default" {
   assert {
     condition = (
       nebius_mk8s_v1_node_group.cpu-only.template.preemptible != null &&
+      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
       nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price != null &&
       nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.preemptible != null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price != null &&
       nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null
     )
@@ -91,8 +122,12 @@ run "preemptible_nodes_use_pricing_policy" {
 
   assert {
     condition = (
+      nebius_mk8s_v1_node_group.cpu-only.template.preemptible != null &&
+      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
       nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price == null &&
       nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy.id == "pricingpolicy-cpu-test" &&
+      nebius_mk8s_v1_node_group.gpu[0].template.preemptible != null &&
+      nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy.id == "pricingpolicy-gpu-test"
     )

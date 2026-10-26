@@ -101,7 +101,6 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
     ] : null
     underlay_required = false
     preemptible       = var.cpu_nodes_preemptible ? {} : null
-    on_demand         = var.cpu_nodes_preemptible ? null : {}
     follows_spot_price = (
       var.cpu_nodes_preemptible && var.cpu_nodes_spot_pricing_policy_id == null
     ) ? {} : null
@@ -188,7 +187,6 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
     gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
     preemptible  = var.gpu_nodes_preemptible ? {} : null
-    on_demand    = var.gpu_nodes_preemptible ? null : {}
     follows_spot_price = (
       var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id == null
     ) ? {} : null

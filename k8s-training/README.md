@@ -116,6 +116,11 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ### Preemptible node pricing
 
+Regular CPU and GPU node groups continue to use Nebius's implicit on-demand
+default. This solution only sets a pricing model explicitly for preemptible
+nodes, so existing on-demand and Capacity Block Group configurations are left
+unchanged.
+
 Set `cpu_nodes_preemptible` or `gpu_nodes_preemptible` to `true` to create a
 preemptible node group. By default, its VMs accept the current spot price:
 
