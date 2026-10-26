@@ -548,10 +548,34 @@ variable "cpu_nodes_preemptible" {
   default     = false
 }
 
+variable "cpu_nodes_spot_pricing_policy_id" {
+  description = "Optional pricing policy ID that caps the spot price for preemptible CPU nodes. Null follows the current spot price."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.cpu_nodes_spot_pricing_policy_id == null || trimspace(var.cpu_nodes_spot_pricing_policy_id) != ""
+    error_message = "cpu_nodes_spot_pricing_policy_id must be null or a non-empty pricing policy ID."
+  }
+}
+
 variable "gpu_nodes_preemptible" {
   description = "Use preemptible VMs for GPU nodes"
   type        = bool
   default     = false
+}
+
+variable "gpu_nodes_spot_pricing_policy_id" {
+  description = "Optional pricing policy ID that caps the spot price for preemptible GPU nodes. Null follows the current spot price."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.gpu_nodes_spot_pricing_policy_id == null || trimspace(var.gpu_nodes_spot_pricing_policy_id) != ""
+    error_message = "gpu_nodes_spot_pricing_policy_id must be null or a non-empty pricing policy ID."
+  }
 }
 
 variable "custom_driver" {

@@ -48,6 +48,12 @@ resource "nebius_iam_v1_group_membership" "k8s_node_group_sa-admin" {
 # CPU NODE GROUP
 ################
 resource "nebius_mk8s_v1_node_group" "cpu-only" {
+  lifecycle {
+    precondition {
+      condition     = var.cpu_nodes_preemptible || var.cpu_nodes_spot_pricing_policy_id == null
+      error_message = "cpu_nodes_spot_pricing_policy_id requires cpu_nodes_preemptible = true."
+    }
+  }
 
   autoscaling = var.cpu_nodes_autoscaling.enabled ? {
     min_node_count = var.cpu_nodes_autoscaling.min_size == null ? var.cpu_nodes_autoscaling.max_size : var.cpu_nodes_autoscaling.min_size
@@ -94,9 +100,15 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
       }
     ] : null
     underlay_required = false
-    preemptible = var.cpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 3
+    preemptible       = var.cpu_nodes_preemptible ? {} : null
+    on_demand         = var.cpu_nodes_preemptible ? null : {}
+    follows_spot_price = (
+      var.cpu_nodes_preemptible && var.cpu_nodes_spot_pricing_policy_id == null
+    ) ? {} : null
+    spot_pricing_policy = (
+      var.cpu_nodes_preemptible && var.cpu_nodes_spot_pricing_policy_id != null
+      ) ? {
+      id = var.cpu_nodes_spot_pricing_policy_id
     } : null
     cloud_init_user_data = templatefile("${path.module}/../modules/cloud-init/k8s-cloud-init.tftpl", {
       enable_filestore         = var.enable_filestore ? "true" : "false",
@@ -118,6 +130,11 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     precondition {
       condition     = !local.enable_gpu_cluster || startswith(local.gpu_nodes_preset, "8gpu-")
       error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_nodes_preset}'."
+    }
+
+    precondition {
+      condition     = var.gpu_nodes_preemptible || var.gpu_nodes_spot_pricing_policy_id == null
+      error_message = "gpu_nodes_spot_pricing_policy_id requires gpu_nodes_preemptible = true."
     }
   }
 
@@ -170,9 +187,15 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     ] : null
     gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
     gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
-    preemptible = var.gpu_nodes_preemptible ? {
-      on_preemption = "STOP"
-      priority      = 3
+    preemptible  = var.gpu_nodes_preemptible ? {} : null
+    on_demand    = var.gpu_nodes_preemptible ? null : {}
+    follows_spot_price = (
+      var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id == null
+    ) ? {} : null
+    spot_pricing_policy = (
+      var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null
+      ) ? {
+      id = var.gpu_nodes_spot_pricing_policy_id
     } : null
 
     local_disks = var.gpu_enable_local_disks ? {

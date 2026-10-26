@@ -114,6 +114,28 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### Preemptible node pricing
+
+Set `cpu_nodes_preemptible` or `gpu_nodes_preemptible` to `true` to create a
+preemptible node group. By default, its VMs accept the current spot price:
+
+```hcl
+gpu_nodes_preemptible = true
+```
+
+To cap the accepted spot price, create a Nebius Billing pricing policy outside
+this solution and pass its ID for the applicable node group:
+
+```hcl
+gpu_nodes_preemptible            = true
+gpu_nodes_spot_pricing_policy_id = "pricingpolicy-..."
+```
+
+The CPU equivalents are `cpu_nodes_preemptible` and
+`cpu_nodes_spot_pricing_policy_id`. A pricing policy ID requires the corresponding
+preemptible flag to be `true`; otherwise planning fails. The same pricing choice
+applies to every VM created in the node group.
+
 ### GPU capacity reservation
 
 `gpu_nodes_reservation_policy` controls capacity reservation placement for **generic GPU node groups only**. It does not apply to CPU or GB300 node groups. The same policy and ordered reservation IDs apply to every generic GPU node group.
