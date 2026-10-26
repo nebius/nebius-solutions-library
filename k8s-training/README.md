@@ -128,6 +128,12 @@ default, its VMs accept the current spot price:
 gpu_nodes_preemptible = true
 ```
 
+> **Upgrade note:** Existing preemptible GPU node groups created by an earlier
+> version of this solution did not set a pricing model explicitly. Adding the
+> follow-spot pricing model changes the node-group template and may trigger a
+> node roll-out on the next apply. Review the Terraform plan first and allow for
+> workload disruption or limited spot capacity while replacement nodes start.
+
 To cap the accepted spot price, create a Nebius Billing pricing policy outside
 this solution and pass its ID for the applicable node group:
 
