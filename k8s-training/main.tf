@@ -111,6 +111,12 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 #################
 # GPU NODE GROUPS
 #################
+data "nebius_billing_v1_pricing_policy" "gpu_spot" {
+  count = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+
+  id = var.gpu_nodes_spot_pricing_policy_id
+}
+
 resource "nebius_mk8s_v1_node_group" "gpu" {
   count = local.gb300_enabled ? 0 : var.gpu_node_groups
 
@@ -123,6 +129,20 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     precondition {
       condition     = var.gpu_nodes_preemptible || var.gpu_nodes_spot_pricing_policy_id == null
       error_message = "gpu_nodes_spot_pricing_policy_id requires gpu_nodes_preemptible = true."
+    }
+
+    precondition {
+      condition = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null ? (
+        data.nebius_billing_v1_pricing_policy.gpu_spot[0].parent_id == var.parent_id
+      ) : true
+      error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy in parent_id."
+    }
+
+    precondition {
+      condition = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null ? (
+        data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == local.gpu_nodes_platform
+      ) : true
+      error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy for the selected GPU platform."
     }
   }
 

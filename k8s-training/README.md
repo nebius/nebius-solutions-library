@@ -152,7 +152,21 @@ platform team to own and reuse one policy across multiple VM or MK8s deployments
 
 A pricing policy ID requires `gpu_nodes_preemptible` to be `true`; otherwise
 planning fails. The same pricing choice applies to every VM created in the node
-group.
+group. When an ID is set, Terraform reads the policy and verifies that it belongs
+to `parent_id` and targets the selected GPU platform. The identity running
+Terraform therefore needs permission to read Billing pricing policies. These
+checks catch configuration mismatches but do not guarantee spot capacity.
+
+Pricing-policy behavior to consider:
+
+- Without a policy, nodes follow the current spot price. It can change every
+  15 minutes, while remaining below the regular PAYG price for the GPU platform.
+- If a policy's maximum price is below the current spot price, scheduling is
+  blocked until the price falls or the maximum is raised.
+- A policy's maximum price can change only when its `status.running_vm_count` is
+  zero. For a shared policy, every running consumer must be stopped first.
+- A policy can be shared only by deployments in the same project that use the
+  same GPU platform.
 
 ### GPU capacity reservation
 

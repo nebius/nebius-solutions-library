@@ -96,6 +96,18 @@ run "preemptible_gpu_nodes_use_pricing_policy" {
     gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
   }
 
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id = "project-test-only"
+      compute_instance_spec = {
+        v1 = {
+          platform = "gpu-h200-sxm"
+        }
+      }
+    }
+  }
+
   plan_options {
     target = [nebius_mk8s_v1_node_group.gpu]
   }
@@ -109,6 +121,60 @@ run "preemptible_gpu_nodes_use_pricing_policy" {
     )
     error_message = "Preemptible node groups must use their configured pricing policy IDs."
   }
+}
+
+run "reject_pricing_policy_from_another_project" {
+  command = plan
+
+  variables {
+    gpu_nodes_preemptible            = true
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id = "project-other-test"
+      compute_instance_spec = {
+        v1 = {
+          platform = "gpu-h200-sxm"
+        }
+      }
+    }
+  }
+
+  plan_options {
+    target = [nebius_mk8s_v1_node_group.gpu]
+  }
+
+  expect_failures = [nebius_mk8s_v1_node_group.gpu]
+}
+
+run "reject_pricing_policy_for_another_gpu_platform" {
+  command = plan
+
+  variables {
+    gpu_nodes_preemptible            = true
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+  }
+
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id = "project-test-only"
+      compute_instance_spec = {
+        v1 = {
+          platform = "gpu-b200-sxm"
+        }
+      }
+    }
+  }
+
+  plan_options {
+    target = [nebius_mk8s_v1_node_group.gpu]
+  }
+
+  expect_failures = [nebius_mk8s_v1_node_group.gpu]
 }
 
 run "reject_pricing_policy_for_on_demand_gpu_nodes" {
