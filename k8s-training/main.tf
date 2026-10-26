@@ -112,14 +112,14 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 data "nebius_billing_v1_pricing_policy" "gpu_spot" {
-  count = var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
   id = var.gpu_nodes_spot_pricing_policy_id
 }
 
-# Validate capped pricing policies independently of node-group count.
+# Validate capped pricing policies once before creating GPU node groups.
 resource "terraform_data" "gpu_spot_pricing_validation" {
-  count = var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
   lifecycle {
     precondition {
