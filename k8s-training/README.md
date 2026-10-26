@@ -116,13 +116,13 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ### Preemptible node pricing
 
-Regular CPU and GPU node groups continue to use Nebius's implicit on-demand
-default. This solution only sets a pricing model explicitly for preemptible
-nodes, so existing on-demand and Capacity Block Group configurations are left
-unchanged.
+Regular GPU node groups continue to use Nebius's implicit on-demand default.
+This solution only sets a pricing model explicitly for preemptible GPU nodes,
+so existing on-demand and Capacity Block Group configurations are left
+unchanged. Spot pricing is available only for GPU platforms.
 
-Set `cpu_nodes_preemptible` or `gpu_nodes_preemptible` to `true` to create a
-preemptible node group. By default, its VMs accept the current spot price:
+Set `gpu_nodes_preemptible` to `true` to create a preemptible GPU node group. By
+default, its VMs accept the current spot price:
 
 ```hcl
 gpu_nodes_preemptible = true
@@ -144,10 +144,9 @@ ID into this solution; a `.tfvars` file cannot directly reference a resource in
 another Terraform root. Keeping policy creation separate allows a billing or
 platform team to own and reuse one policy across multiple VM or MK8s deployments.
 
-The CPU equivalents are `cpu_nodes_preemptible` and
-`cpu_nodes_spot_pricing_policy_id`. A pricing policy ID requires the corresponding
-preemptible flag to be `true`; otherwise planning fails. The same pricing choice
-applies to every VM created in the node group.
+A pricing policy ID requires `gpu_nodes_preemptible` to be `true`; otherwise
+planning fails. The same pricing choice applies to every VM created in the node
+group.
 
 ### GPU capacity reservation
 

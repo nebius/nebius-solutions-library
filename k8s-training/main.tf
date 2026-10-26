@@ -48,12 +48,6 @@ resource "nebius_iam_v1_group_membership" "k8s_node_group_sa-admin" {
 # CPU NODE GROUP
 ################
 resource "nebius_mk8s_v1_node_group" "cpu-only" {
-  lifecycle {
-    precondition {
-      condition     = var.cpu_nodes_preemptible || var.cpu_nodes_spot_pricing_policy_id == null
-      error_message = "cpu_nodes_spot_pricing_policy_id requires cpu_nodes_preemptible = true."
-    }
-  }
 
   autoscaling = var.cpu_nodes_autoscaling.enabled ? {
     min_node_count = var.cpu_nodes_autoscaling.min_size == null ? var.cpu_nodes_autoscaling.max_size : var.cpu_nodes_autoscaling.min_size
@@ -100,14 +94,9 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
       }
     ] : null
     underlay_required = false
-    preemptible       = var.cpu_nodes_preemptible ? {} : null
-    follows_spot_price = (
-      var.cpu_nodes_preemptible && var.cpu_nodes_spot_pricing_policy_id == null
-    ) ? {} : null
-    spot_pricing_policy = (
-      var.cpu_nodes_preemptible && var.cpu_nodes_spot_pricing_policy_id != null
-      ) ? {
-      id = var.cpu_nodes_spot_pricing_policy_id
+    preemptible = var.cpu_nodes_preemptible ? {
+      on_preemption = "STOP"
+      priority      = 3
     } : null
     cloud_init_user_data = templatefile("${path.module}/../modules/cloud-init/k8s-cloud-init.tftpl", {
       enable_filestore         = var.enable_filestore ? "true" : "false",

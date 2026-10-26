@@ -23,28 +23,21 @@ variables {
   }
 }
 
-run "regular_nodes_keep_implicit_on_demand_default" {
+run "regular_gpu_nodes_keep_implicit_on_demand_default" {
   command = plan
 
   plan_options {
-    target = [
-      nebius_mk8s_v1_node_group.cpu-only,
-      nebius_mk8s_v1_node_group.gpu,
-    ]
+    target = [nebius_mk8s_v1_node_group.gpu]
   }
 
   assert {
     condition = (
-      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.preemptible == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.preemptible == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null
     )
-    error_message = "Regular CPU and GPU node groups must retain the implicit on-demand default."
+    error_message = "Regular GPU node groups must retain the implicit on-demand default."
   }
 }
 
@@ -73,59 +66,42 @@ run "on_demand_gpu_nodes_preserve_capacity_reservation" {
   }
 }
 
-run "preemptible_nodes_follow_spot_by_default" {
+run "preemptible_gpu_nodes_follow_spot_by_default" {
   command = plan
 
   variables {
-    cpu_nodes_preemptible = true
     gpu_nodes_preemptible = true
   }
 
   plan_options {
-    target = [
-      nebius_mk8s_v1_node_group.cpu-only,
-      nebius_mk8s_v1_node_group.gpu,
-    ]
+    target = [nebius_mk8s_v1_node_group.gpu]
   }
 
   assert {
     condition = (
-      nebius_mk8s_v1_node_group.cpu-only.template.preemptible != null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price != null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.preemptible != null &&
       nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price != null &&
       nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null
     )
-    error_message = "Preemptible node groups without a pricing policy must follow the current spot price."
+    error_message = "Preemptible GPU nodes without a pricing policy must follow the current spot price."
   }
 }
 
-run "preemptible_nodes_use_pricing_policy" {
+run "preemptible_gpu_nodes_use_pricing_policy" {
   command = plan
 
   variables {
-    cpu_nodes_preemptible            = true
-    cpu_nodes_spot_pricing_policy_id = "pricingpolicy-cpu-test"
     gpu_nodes_preemptible            = true
     gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
   }
 
   plan_options {
-    target = [
-      nebius_mk8s_v1_node_group.cpu-only,
-      nebius_mk8s_v1_node_group.gpu,
-    ]
+    target = [nebius_mk8s_v1_node_group.gpu]
   }
 
   assert {
     condition = (
-      nebius_mk8s_v1_node_group.cpu-only.template.preemptible != null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.on_demand == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.follows_spot_price == null &&
-      nebius_mk8s_v1_node_group.cpu-only.template.spot_pricing_policy.id == "pricingpolicy-cpu-test" &&
       nebius_mk8s_v1_node_group.gpu[0].template.preemptible != null &&
       nebius_mk8s_v1_node_group.gpu[0].template.on_demand == null &&
       nebius_mk8s_v1_node_group.gpu[0].template.follows_spot_price == null &&
@@ -135,23 +111,16 @@ run "preemptible_nodes_use_pricing_policy" {
   }
 }
 
-run "reject_pricing_policy_for_on_demand_nodes" {
+run "reject_pricing_policy_for_on_demand_gpu_nodes" {
   command = plan
 
   variables {
-    cpu_nodes_spot_pricing_policy_id = "pricingpolicy-cpu-test"
     gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
   }
 
   plan_options {
-    target = [
-      nebius_mk8s_v1_node_group.cpu-only,
-      nebius_mk8s_v1_node_group.gpu,
-    ]
+    target = [nebius_mk8s_v1_node_group.gpu]
   }
 
-  expect_failures = [
-    nebius_mk8s_v1_node_group.cpu-only,
-    nebius_mk8s_v1_node_group.gpu,
-  ]
+  expect_failures = [nebius_mk8s_v1_node_group.gpu]
 }
