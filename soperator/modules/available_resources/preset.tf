@@ -6,11 +6,9 @@ locals {
     p-16c-64g    = "16vcpu-64gb"
     p-32c-128g   = "32vcpu-128gb"
     p-48c-192g   = "48vcpu-192gb"
-    p-56c-224g   = "56vcpu-224gb"
     p-64c-256g   = "64vcpu-256gb"
     p-80c-320g   = "80vcpu-320gb"
     p-96c-384g   = "96vcpu-384gb"
-    p-112c-448g  = "112vcpu-448gb"
     p-128c-512g  = "128vcpu-512gb"
     p-160c-640g  = "160vcpu-640gb"
     p-192c-768g  = "192vcpu-768gb"
@@ -101,36 +99,6 @@ locals {
         (module.labels.name_nodeset_accounting) = true
         (module.labels.name_nodeset_nfs)        = true
         weka                                    = true
-      }
-    }
-    c-56vcpu-224gb = {
-      cpu_cores              = 56 * local.reserve.cpu.coefficient - local.reserve.cpu.count
-      memory_gibibytes       = 224 * local.reserve.ram.coefficient - local.reserve.ram.count
-      gpus                   = 0
-      gpu_cluster_compatible = false
-      sufficient = {
-        (module.labels.name_nodeset_system)     = false
-        (module.labels.name_nodeset_controller) = false
-        (module.labels.name_nodeset_worker)     = false
-        (module.labels.name_nodeset_login)      = true
-        (module.labels.name_nodeset_accounting) = false
-        (module.labels.name_nodeset_nfs)        = false
-        weka                                    = false
-      }
-    }
-    c-112vcpu-448gb = {
-      cpu_cores              = 112 * local.reserve.cpu.coefficient - local.reserve.cpu.count
-      memory_gibibytes       = 448 * local.reserve.ram.coefficient - local.reserve.ram.count
-      gpus                   = 0
-      gpu_cluster_compatible = false
-      sufficient = {
-        (module.labels.name_nodeset_system)     = false
-        (module.labels.name_nodeset_controller) = false
-        (module.labels.name_nodeset_worker)     = false
-        (module.labels.name_nodeset_login)      = true
-        (module.labels.name_nodeset_accounting) = false
-        (module.labels.name_nodeset_nfs)        = false
-        weka                                    = false
       }
     }
     c-48vcpu-192gb = {
@@ -388,23 +356,25 @@ locals {
   ])
 
   presets_by_platforms_raw = tomap({
-    # ARM CPU nodes are supported only for login. Smaller presets remain in the
-    # catalog, but none below 16 vCPUs meets the login sufficiency minimum.
+    # Grace presets have 6 GiB per vCPU, so they do not share names with the x86
+    # catalog. ARM CPU nodes are supported only for login, which needs at least
+    # 16 vCPUs. Weka needs at least 32 vCPUs, as on x86.
     (local.platforms.cpu-g1) = tomap({
-      for preset, resources in {
-        (local.presets.p-2c-8g)     = local.presets_cpu.c-2vcpu-8gb
-        (local.presets.p-4c-16g)    = local.presets_cpu.c-4vcpu-16gb
-        (local.presets.p-8c-32g)    = local.presets_cpu.c-8vcpu-32gb
-        (local.presets.p-16c-64g)   = local.presets_cpu.c-16vcpu-64gb
-        (local.presets.p-32c-128g)  = local.presets_cpu.c-32vcpu-128gb
-        (local.presets.p-56c-224g)  = local.presets_cpu.c-56vcpu-224gb
-        (local.presets.p-112c-448g) = local.presets_cpu.c-112vcpu-448gb
-        } : preset => merge(resources, {
-          sufficient = {
-            for role, sufficient in resources.sufficient :
-            role => role == module.labels.name_nodeset_login && sufficient
-          }
-      })
+      for vcpus in [2, 4, 8, 16, 32, 56, 112] : "${vcpus}vcpu-${vcpus * 6}gb" => {
+        cpu_cores              = vcpus * local.reserve.cpu.coefficient - local.reserve.cpu.count
+        memory_gibibytes       = vcpus * 6 * local.reserve.ram.coefficient - local.reserve.ram.count
+        gpus                   = 0
+        gpu_cluster_compatible = false
+        sufficient = {
+          (module.labels.name_nodeset_system)     = false
+          (module.labels.name_nodeset_controller) = false
+          (module.labels.name_nodeset_worker)     = false
+          (module.labels.name_nodeset_login)      = vcpus >= 16
+          (module.labels.name_nodeset_accounting) = false
+          (module.labels.name_nodeset_nfs)        = false
+          weka                                    = vcpus >= 32
+        }
+      }
     })
 
     (local.platforms.cpu-e2) = tomap({

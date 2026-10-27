@@ -1416,7 +1416,7 @@ variable "slurm_login_on_worker_nodes" {
 }
 
 variable "slurm_nodeset_login" {
-  description = "Configuration of Slurm Login node set. Omitted platform/preset resolve to cpu-g1/32vcpu-128gb for GB300 and cpu-d3/16vcpu-64gb otherwise. Login pod autoscaling is disabled by default; when enabled, its replica bounds override size."
+  description = "Configuration of Slurm Login node set. Omitted platform/preset resolve to cpu-g1/32vcpu-192gb for GB300 and cpu-d3/16vcpu-64gb otherwise. Login pod autoscaling is disabled by default; when enabled, its replica bounds override size."
   type = object({
     size               = number
     node_group_enabled = optional(bool, true)
@@ -1439,6 +1439,7 @@ variable "slurm_nodeset_login" {
       size_gibibytes       = 256
       block_size_kibibytes = 4
     })
+    placement_policy_nodes = optional(list(string))
   })
   nullable = false
   default = {
@@ -1452,6 +1453,11 @@ variable "slurm_nodeset_login" {
   validation {
     condition     = var.slurm_nodeset_login.boot_disk.size_gibibytes >= 256
     error_message = "Boot disks for login nodes must be at least 256 GiB."
+  }
+  validation {
+    # The default platform depends on the workers, and preset names differ per platform.
+    condition     = var.slurm_nodeset_login.resource.preset == null || var.slurm_nodeset_login.resource.platform != null
+    error_message = "slurm_nodeset_login.resource.preset requires slurm_nodeset_login.resource.platform to be set too."
   }
   validation {
     condition     = var.slurm_nodeset_login.size >= 1

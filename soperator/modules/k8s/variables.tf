@@ -198,6 +198,7 @@ variable "node_group_login" {
       size_gibibytes       = number
       block_size_kibibytes = number
     })
+    placement_policy_nodes = optional(list(string))
   })
 }
 

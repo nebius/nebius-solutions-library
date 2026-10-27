@@ -61,7 +61,7 @@ locals {
     node_group_enabled = local.login_on_worker_nodes ? false : var.slurm_nodeset_login.node_group_enabled
     resource = {
       platform = coalesce(var.slurm_nodeset_login.resource.platform, local.gb300_enabled ? "cpu-g1" : "cpu-d3")
-      preset   = coalesce(var.slurm_nodeset_login.resource.preset, local.gb300_enabled ? "32vcpu-128gb" : "16vcpu-64gb")
+      preset   = coalesce(var.slurm_nodeset_login.resource.preset, local.gb300_enabled ? "32vcpu-192gb" : "16vcpu-64gb")
     }
   })
 

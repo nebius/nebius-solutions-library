@@ -306,13 +306,13 @@ slurm_nodesets_partitions = [
 slurm_login_on_worker_nodes = false
 
 # size controls pod replicas; login VMs scale independently between 1 and 100.
-# Omit platform to select cpu-g1 for GB300 and cpu-d3 for other workers.
 slurm_nodeset_login = {
   size = 2
-  resource = {
-    preset = "32vcpu-128gb"
-  }
+  # resource omitted -> cpu-g1/32vcpu-192gb with GB300 workers, cpu-d3/16vcpu-64gb otherwise.
+  # Preset names differ per platform, so set platform and preset together, e.g.:
+  # resource = { platform = "cpu-d3", preset = "32vcpu-128gb" }
   # boot_disk omitted -> defaults are used.
+  placement_policy_nodes = null # Optional list of bare-metal FQDNs where login VMs can run.
 }
 
 # SSH public keys for connecting to Slurm login nodes via SSH as "root" user.
