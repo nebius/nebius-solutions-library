@@ -1,0 +1,26 @@
+# Helm values for the gpu-operator Application (worker clusters, when terraform.tfvars gpu_operator.enabled); version
+# pinned in clusters/common/apps/gpu-operator.yaml. driver.version, driver.kernelModuleType and gds.enabled are set
+# per fleet by stack/platform/stage.tf from terraform.tfvars `gpu_operator`. The chart's Nebius defaults stay: images
+# from the marketplace registry, one NVIDIADriver resource per platform (nebius.nvidiaDriverCRDPatch) with host-MOFED
+# GPUDirect RDMA on the H100/H200/B200/B300 platforms, the uvm_disable_hmm kernel parameter, tolerations for the
+# nvidia.com/gpu taint on every operand (daemonsets.tolerations).
+# The fleet runs its own DCGM exporter (clusters/common/apps/dcgm-exporter.yaml: pod labels, ServiceMonitor, the L40S
+# profiling workaround); the operator's stays off so no node exports its GPUs twice.
+dcgmExporter:
+  enabled: false
+# One NVIDIADriver per GPU platform (the chart's own list, repeated here so the fleet can extend it): the platform
+# stage appends a profile for every platform of this cluster's pools that is missing below (a regional variant such
+# as gpu-rtx6000-a inherits the manager settings of its longest-prefix sibling), stack/platform/stage.tf. A node whose
+# instance-type matches no profile never gets a driver and stays at zero allocatable GPUs.
+nebius:
+  nvidiaDriverCRDPatch:
+    profiles:
+      - { name: gpu-rtx6000, nodeSelector: { node.kubernetes.io/instance-type: gpu-rtx6000 }, managerEnv: [] }
+      - { name: gpu-l40s-a, nodeSelector: { node.kubernetes.io/instance-type: gpu-l40s-a }, managerEnv: [] }
+      - { name: gpu-l40s-d, nodeSelector: { node.kubernetes.io/instance-type: gpu-l40s-d }, managerEnv: [] }
+      - { name: gpu-h100-sxm, nodeSelector: { node.kubernetes.io/instance-type: gpu-h100-sxm }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }
+      - { name: gpu-h200-sxm, nodeSelector: { node.kubernetes.io/instance-type: gpu-h200-sxm }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }
+      - { name: gpu-b200-sxm, nodeSelector: { node.kubernetes.io/instance-type: gpu-b200-sxm }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }
+      - { name: gpu-b200-sxm-a, nodeSelector: { node.kubernetes.io/instance-type: gpu-b200-sxm-a }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }
+      - { name: gpu-b300-sxm, nodeSelector: { node.kubernetes.io/instance-type: gpu-b300-sxm }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }
+      - { name: gpu-gb300, nodeSelector: { node.kubernetes.io/instance-type: gpu-gb300 }, managerEnv: [{ name: GPU_DIRECT_RDMA_ENABLED, value: "true" }, { name: USE_HOST_MOFED, value: "true" }] }

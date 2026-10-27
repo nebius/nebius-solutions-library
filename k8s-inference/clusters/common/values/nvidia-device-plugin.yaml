@@ -1,0 +1,4 @@
+# Helm values for the nvidia-device-plugin Application (both clusters unless hubOnly); version pinned in clusters/common/apps/nvidia-device-plugin.yaml
+gfd:
+  enabled: true
+nodeSelector: {}

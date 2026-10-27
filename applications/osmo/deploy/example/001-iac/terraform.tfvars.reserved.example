@@ -21,7 +21,7 @@
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-north1"
+region       = "eu-west2"
 environment  = "pro"
 project_name = "osmo"
 
@@ -46,14 +46,14 @@ cpu_nodes_assign_public_ip = false
 # -----------------------------------------------------------------------------
 gpu_nodes_count_per_group  = 2               # Must match your reservation size
 gpu_node_groups            = 1
-gpu_nodes_platform         = "gpu-h100-sxm"
-gpu_nodes_preset           = "8gpu-128vcpu-1600gb"
+gpu_nodes_platform         = null            # Use the selected region's default from locals.tf
+gpu_nodes_preset           = null            # Use the selected region's default from locals.tf
 gpu_disk_size_gib          = 1023
 gpu_nodes_assign_public_ip = false
 enable_gpu_cluster         = true            # InfiniBand for multi-node training
 enable_gpu_taints          = true
 gpu_nodes_preemptible      = false           # Reserved nodes are not preemptible
-gpu_nodes_driverfull_image = false
+gpu_nodes_driverfull_image = true
 infiniband_fabric          = null  # Use region default
 
 # RESERVATION: Set your Capacity Block Group ID here
@@ -61,6 +61,7 @@ gpu_reservation_ids = ["capacityblockgroup-e00xxxxx"]
 
 # GPU reservation options by region:
 #   eu-north1:   gpu-h100-sxm (8gpu-128vcpu-1600gb), gpu-h200-sxm (8gpu-128vcpu-1600gb)
+#   eu-west2:    gpu-b300-sxm (8gpu-192vcpu-2768gb)
 #   eu-north2:   gpu-h200-sxm (8gpu-128vcpu-1600gb)
 #   eu-west1:    gpu-h200-sxm (8gpu-128vcpu-1600gb)
 #   me-west1:    gpu-b200-sxm-a (8gpu-160vcpu-1792gb)

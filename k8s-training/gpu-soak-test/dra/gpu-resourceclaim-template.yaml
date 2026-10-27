@@ -1,0 +1,29 @@
+# =============================================================================
+# GB300 / DRA GPU claim for the soak pods.
+#
+# Applied ONLY on DRA clusters (Grace/GB300), which advertise GPUs via Dynamic
+# Resource Allocation instead of the nvidia.com/gpu device plugin. x86
+# device-plugin clusters never reach this file — run-soak-test.sh auto-detects
+# the mode and uses templates/pytorchjob.yaml (limits.nvidia.com/gpu) there.
+#
+# Scoped to the gpu-soak namespace (created fresh per run and torn down on
+# cleanup), so this claim is removed with the namespace — no separate cleanup.
+#
+# Placeholder patched by run-soak-test.sh:
+#   __SLOTS__   GPUs to claim per pod (auto-detected from resourceslices)
+# =============================================================================
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: soak-gpus
+  labels:
+    app: gpu-soak
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: __SLOTS__

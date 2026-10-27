@@ -13,7 +13,13 @@ variable "subnet_id" {
 variable "region" {
   type        = string
   description = "region"
-  default     = "eu-north1"
+  default     = "eu-west2"
+}
+
+variable "boot_image_family" {
+  type        = string
+  description = "Boot image family."
+  default     = null
 }
 
 variable "instance_name" {

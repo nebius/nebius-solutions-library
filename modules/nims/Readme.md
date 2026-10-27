@@ -1,181 +1,231 @@
 # NIMs Kubernetes Terraform Module
 
-This Terraform module provisions a Kubernetes namespace, secrets, and LoadBalancer services for NVIDIA NIMs used in drug discovery and bio/chem workflows. It is designed for GPU‑enabled clusters and is used by the demo app under `applications/nims-drug-discovery-demo/`.
+This module creates the Kubernetes namespace, NGC pull/API secrets, NIM model
+deployments, internal services, nginx TCP gateways, ServiceMonitors, and optional
+HPAs used by the NIM drug-discovery demo.
 
----
+## Catalog Workflow
 
-## What This Module Deploys
+All NIM model wiring is driven by `local.default_model_catalog` in
+`catalog.tf`. Module users can override entries through `var.model_catalog`.
+Adding a NIM requires adding one catalog entry only; deployments, ClusterIP
+services, proxy upstreams, LoadBalancer ports, ServiceMonitors, and optional HPA
+resources are derived from that entry.
 
-- **Dedicated namespace** for NIM workloads.
-- **NGC secrets**:
-  - Docker registry secret for pulling images from `nvcr.io`.
-  - NGC API key secret for NVIDIA services.
-- **LoadBalancer services** that expose multiple NIMs on fixed ports.
-- **Model cache** on a shared filesystem (for faster cold starts).
-- **BioNeMo stack** on a separate LoadBalancer.
+The resolved catalog is exported as `nim_catalog`. Each entry includes its enabled
+state, image/version, internal service URL, load-balancer group, derived proxy
+port, and scaling metadata. In-cluster clients can consume this output instead of
+maintaining a second model-to-port table.
 
----
+Each catalog entry carries:
 
-## Exposed NIMs and Ports (Default)
+- `enabled`, `replicas`, `image`, and `version`.
+- Kubernetes names: `deployment_name`, `service_name`, `app`, and
+  `container_name`.
+- `resources`, `shared_memory_size`, optional `command`, optional
+  `security_context`, and extra `env`.
+- `lb_group`: `protein-apps` or `cosmos`.
+- `scaling`: either fixed-replica metadata or HPA settings.
 
-The module exposes NIMs using a shared LoadBalancer per group. The demo UI expects these port mappings by default (editable in the UI):
-
-### Protein / Structure / Sequence (Main LB)
-- **OpenFold3** → `8000`
-- **Boltz2** → `8001`
-- **Evo2‑40B** → `8002`
-- **MSA Search** → `8003`
-- **OpenFold2** → `8004`
-- **GenMol** → `8005` *(if enabled in this module)*
-- **MolMIM** → `8006` *(if enabled in this module)*
-- **DiffDock** → `8007` *(if enabled in this module)*
-- **Qwen3** → `8008` *(if enabled in this module)*
-- **ProteinMPNN** → `8009` *(if enabled in this module)*
-- **RFdiffusion** → `8010` *(if enabled in this module)*
-
-### Cosmos / World Foundation Models (Separate LB)
-- **Cosmos-Reason1-7B** → `8000`
-- **Cosmos-Reason2-8B** → `8001`
-- **Cosmos-Reason2-2B** → `8002`
-- **Cosmos-Embed1** → `8003`
-- **Nemotron Nano 12B v2 VL (NAno2 VL)** → `8004` *(if enabled in this module)*
-
-### BioNeMo (Separate LB)
-- Deployed via `bionemo.tf` (ports and services defined there).
-
-> If your cluster uses different ports, update the demo UI’s LoadBalancer configuration.
-
----
-
-## File‑by‑File Documentation
-
-### Core Module
-- `main.tf`  
-  Creates the namespace, secrets, and base LoadBalancer service(s).
-
-- `provider.tf`  
-  Kubernetes provider configuration.
-
-- `variables.tf`  
-  All configurable inputs (namespace, NGC keys, images, resource limits, etc.).
-
-- `output.tf`  
-  Outputs LoadBalancer IPs and service details.
-
-### NIM Deployments
-- `openfold2.tf`  
-  Deploys OpenFold2 (monomer structure prediction).
-
-- `openfold3.tf`  
-  Deploys OpenFold3 (complex structure prediction).
-
-- `boltz2.tf`  
-  Deploys Boltz2 (structure prediction with ligands/constraints).
-
-- `evo2_40.tf`  
-  Deploys Evo2‑40B (sequence generation/reasoning).
-
-- `msa-search.tf`  
-  Deploys an MSA search service used to build alignments.
-
-- `genmol.tf`  
-  Deploys GenMol (molecule generation).
-
-- `proteinmpnn.tf`  
-  Deploys ProteinMPNN (sequence design from a given backbone).
-
-- `rfdiffusion.tf`  
-  Deploys RFdiffusion (generative backbone design).
-
-- `qwen3-next-80b-a3b-instruct.tf`
-  Deploys Qwen3 (LLM copilot for workflow adoption).
-
-- `cosmos-reason1-7b.tf`
-  Deploys Cosmos-Reason1-7B (world foundation model for physical AI reasoning).
-
-- `cosmos-reason2-8b.tf`
-  Deploys Cosmos-Reason2-8B (world foundation model for physical AI reasoning, 8B parameters).
-
-- `cosmos-reason2-2b.tf`
-  Deploys Cosmos-Reason2-2B (world foundation model for physical AI reasoning, 2B parameters).
-
-- `cosmos-embed1.tf`
-  Deploys Cosmos-Embed1 (world foundation model for embeddings).
-
-- `cosmos-proxy.tf`
-  Nginx TCP proxy and LoadBalancer for Cosmos World Foundation Models (separate external IP).
-
-- `bionemo.tf`
-  Deploys BioNeMo NIMs on a separate LoadBalancer.
-
-- `nemotron-nano-12b-v2-vl.tf`
-  Deploys Nemotron Nano 12B v2 VL (Nano2 VL), a vision-language model for document intelligence, video understanding, and multimodal reasoning.
-
----
-
-## How the Demo App Uses This Module
-
-The demo app connects directly to the LoadBalancer IP created by this module and expects:
-
-- **Health checks** on each service port:
-  - `GET /v1/health/ready`
-  - `GET /v1/health/live`
-  - `GET /v1/metrics`
-- **Inference endpoints** per NIM (paths defined in the demo UI).
-
-See `applications/nims-drug-discovery-demo/README.md` for the demo workflow.
-
----
-
-## Notes
-- Requires CUDA 13 on GPU nodes. If your cluster uses a custom driver, enable it (e.g., `custom_driver = true` in your infrastructure setup).
-- A shared filestore is required for model cache; plan for **5 TB+**.
-- Ensure GPU nodes and runtime class are available before applying.
-- Update resource limits/requests as needed for your cluster size.
-- Secrets are required for pulling NGC images and using NIM services.
-
----
-
-## Example Usage
-
-Add the module to your root `main.tf` (adjust paths and flags as needed):
+Example override:
 
 ```hcl
 module "nims" {
   source = "../modules/nims"
 
-  ngc_key   = "REPLACE_WITH_YOUR_NGC_KEY"
   parent_id = var.parent_id
+  ngc_key   = var.ngc_key
 
-  # Protein structure prediction
-  openfold2  = true
-  openfold3  = true
-  boltz2     = true
-  msa_search = true
+  service_monitor_labels = {
+    release = "kube-prometheus-stack"
+  }
 
-  # Molecule generation & docking
-  genmol      = true
-  molmim      = true
-  diffdock    = true
-  diffdock_replicas = 3
+  model_catalog = {
+    openfold3 = {
+      enabled  = true
+      replicas = 1
+      version  = "latest"
+    }
 
-  # Protein design
-  proteinmpnn = true
-  rfdiffusion = true
-
-  # Sequence models
-  evo2_40b = true
-
-  # LLM copilot
-  qwen3-next-80b-a3b-instruct = true
-
-  # Cosmos World Foundation Models
-  cosmos_reason1_7b = true
-  cosmos_reason2_8b = true
-  cosmos_reason2_2b = true
-  cosmos_embed1     = true
-
-  # Vision-language (Nano2 VL)
-  nemotron_nano_12b_v2_vl = true
+    qwen3-next-80b-a3b-instruct = {
+      enabled = true
+      version = "latest"
+      scaling = {
+        enabled      = true
+        min_replicas = 1
+        max_replicas = 2
+        metric_type  = "Pods"
+        metric_name  = "vllm_num_requests_running"
+        target_type  = "AverageValue"
+        threshold    = "2"
+      }
+    }
+  }
 }
 ```
+
+## Gateway Ports
+
+Public ports are derived per `lb_group` from a base port plus the catalog order
+kept in `proxies.tf`. Existing port mappings are preserved:
+
+### `protein-apps` / `nims_lb_ip`
+
+- OpenFold3: `8000`
+- Boltz2: `8001`
+- Evo2-40B: `8002`
+- MSA Search: `8003`
+- OpenFold2: `8004`
+- GenMol: `8005`
+- MolMIM: `8006`
+- DiffDock: `8007`
+- Qwen3 Next 80B A3B Instruct: `8008`
+- ProteinMPNN: `8009`
+- RFdiffusion: `8010`
+- Metadata service: `8080`
+
+### `cosmos` / `cosmos_lb_ip`
+
+- Cosmos-Reason1-7B: `8000`
+- Cosmos-Reason2-8B: `8001`
+- Cosmos-Reason2-2B: `8002`
+- Cosmos-Embed1: `8003`
+- Nemotron Nano 12B v2 VL: `8004`
+
+## Shared Filesystem Requirement
+
+NIM cache storage is intentionally explicit:
+
+- Pods mount hostPath `/mnt/data`.
+- The hostPath type is `Directory`, not `DirectoryOrCreate`.
+- NIM containers mount that hostPath with `subPath = "nim"` at
+  `/opt/nim/.cache`.
+- A small init container creates `/mnt/data/nim` only after the hostPath check
+  succeeds, so a fresh shared filesystem works without weakening the missing-mount
+  failure mode.
+
+This makes a cluster without the shared filesystem fail during pod startup
+instead of silently creating `/mnt/data/nim` on a node boot disk.
+
+BioNeMo remains a notebook workload, but it is also catalog-driven and mounts
+the same `/mnt/data` hostPath with `subPath = "bionemo"`; its init container
+prepares that subdirectory under the same strict hostPath check.
+
+## Autoscaling
+
+The module does not use the NVIDIA NIM Operator and does not implement
+scale-to-zero. Autoscaling is plain Kubernetes HPA v2 over custom metrics:
+
+- `enabled = false` creates a zero-replica Deployment and no HPA.
+- `scaling.enabled = true` creates
+  `kubernetes_horizontal_pod_autoscaler_v2`.
+- Deployments ignore replica drift with
+  `lifecycle { ignore_changes = [spec[0].replicas] }` so Terraform does not
+  fight HPA-managed counts.
+- A ServiceMonitor is emitted per NIM for `/v1/metrics` on service port `http`
+  (`8000`).
+
+Required cluster add-ons:
+
+- Prometheus Operator CRDs for `ServiceMonitor`.
+- Prometheus scraping the generated ServiceMonitors.
+- Prometheus Adapter or another custom-metrics adapter exposing the configured
+  HPA metric names through `custom.metrics.k8s.io`.
+- GPU node-group autoscaling with enough quota/capacity for the HPA
+  `max_replicas`; otherwise HPA can request pods that remain Pending.
+
+For the repository's Nebius `k8s-training` stack, configure the GPU node group
+with `gpu_nodes_autoscaling.enabled = true`, set `min_size` high enough to keep
+the HPA minimum schedulable, and set `max_size` high enough for the sum of the
+enabled NIM HPA maxima. Reserved GPU capacity and project quota must cover that
+maximum. A pod's complete GPU request must fit on one node; Kubernetes cannot
+split a multi-GPU NIM pod across single-GPU nodes.
+
+For `prometheus-community/prometheus-adapter`, the vLLM rule used by this module
+has this shape (adjust the Prometheus service URL for the cluster):
+
+```yaml
+prometheus:
+  url: http://kube-prometheus-stack-prometheus.monitoring.svc
+  port: 9090
+
+rules:
+  default: false
+  custom:
+    - seriesQuery: 'vllm:num_requests_running{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace:
+            resource: namespace
+          pod:
+            resource: pod
+      name:
+        matches: '^vllm:num_requests_running$'
+        as: vllm_num_requests_running
+      metricsQuery: 'max by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
+```
+
+Set `service_monitor_labels` to labels selected by the cluster Prometheus
+instance. With kube-prometheus-stack this is commonly
+`release = "kube-prometheus-stack"`. Verify the adapter before enabling an HPA:
+
+```bash
+kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 \
+  | jq '.resources[] | select(.name == "pods/vllm_num_requests_running")'
+```
+
+NVIDIA documents that LLM NIMs expose Prometheus metrics at `/v1/metrics` and
+pass through vLLM metrics. VLM docs list request gauges such as
+`num_requests_running` and `num_requests_waiting`; Triton-backed NIMs expose
+metrics such as `nv_inference_request_success` and
+`nv_inference_pending_request_count`. The module uses the adapter metric
+`vllm_num_requests_running`, mapped from `vllm:num_requests_running`, only for
+the LLM/VLM family where this has a direct request-concurrency meaning.
+
+Scalable catalog entries:
+
+- Qwen3 Next 80B A3B Instruct
+- Cosmos-Reason1-7B
+- Cosmos-Reason2-8B
+- Cosmos-Reason2-2B
+- Nemotron Nano 12B v2 VL
+
+Fixed-replica catalog entries:
+
+- OpenFold2, OpenFold3, Boltz2, MSA Search, Evo2-40B
+- GenMol, MolMIM, DiffDock
+- ProteinMPNN, RFdiffusion
+- Cosmos-Embed1
+- BioNeMo notebook
+
+These entries stay fixed until their backend exposes a validated request or
+inference metric that is useful for per-pod HPA decisions.
+
+## Validation Notes
+
+For this change, local validation must include:
+
+```bash
+terraform -chdir=modules/nims fmt
+terraform -chdir=modules/nims init -backend=false
+terraform -chdir=modules/nims validate
+terraform -chdir=modules/nims test
+```
+
+Live validation should use fresh dedicated MK8s resources only. Record the
+project, region, cluster ID, node group IDs, GPU type, image tags, test payloads,
+scale-out time, scale-down time, HPA status, and cleanup status in the PR.
+
+The shared-filesystem negative test is expected to leave a NIM pod in a visible
+mount failure when `/mnt/data` is absent.
+
+Reference documentation:
+
+- NVIDIA NIM LLM logging and observability:
+  https://docs.nvidia.com/nim/large-language-models/latest/reference/logging-and-observability.html
+- NVIDIA NIM VLM observability:
+  https://docs.nvidia.com/nim/vision-language-models/latest/observability.html
+- NVIDIA NIM Visual GenAI observability:
+  https://docs.nvidia.com/nim/visual-genai/latest/observability.html
+- Triton metrics:
+  https://github.com/triton-inference-server/server/blob/main/docs/user_guide/metrics.md

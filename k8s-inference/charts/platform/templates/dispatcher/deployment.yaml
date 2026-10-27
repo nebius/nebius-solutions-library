@@ -1,0 +1,46 @@
+{{- if index .Values.components "dispatcher" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatcher
+  namespace: kueue-system
+  labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
+spec:
+  replicas: 2                      # Kubernetes client leader election; the second replica is a standby
+  selector:
+    matchLabels: { app.kubernetes.io/name: dispatcher }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: dispatcher, app.kubernetes.io/part-of: serverless2 }
+    spec:
+      serviceAccountName: dispatcher
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: dispatcher
+          image: {{ .Values.images.dispatcher }}
+          args: ["/app/dispatcher.py"]
+          # no port, no probe: the dispatcher serves nothing (the API ranks from the fleet document itself); a
+          # replica that loses the leader lease exits and is restarted
+          env:
+            - { name: INTERVAL_S, value: "15" }
+            - { name: RENOMINATE_AFTER_S, value: "300" }
+            - { name: PRICES_NAMESPACE, value: kueue-system }
+            - { name: FLEET_CONFIGMAP, value: fleet-prices }
+            - { name: SPOT_CONFIGMAP, value: spot-prices }
+            # InfiniBand pool floors (infiniband.py): an InfiniBand pool's min_nodes follows the multi-node runs that wait
+            # for it, through the Nebius API as the region's ops identity (one key per region under /etc/nebius), and
+            # returns to the fleet's value RESTORE_AFTER_S after the last such run; INFINIBAND=0 switches it off
+            - { name: INFINIBAND, value: "1" }
+            - { name: RESTORE_AFTER_S, value: "600" }
+            - { name: INFINIBAND_CONFIGMAP, value: infiniband-pools }
+            - { name: HOME, value: /tmp }     # the CLI's profiles (nebius_cli.py) live under $HOME
+          volumeMounts:
+            - { name: nebius-sa, mountPath: /etc/nebius, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumes:
+        - name: nebius-sa                     # <region>.json per GPU region (stack/platform/secrets.tf); without it the floors stay manual
+          secret: { secretName: price-feed-nebius-sa, optional: true }
+{{- end }}

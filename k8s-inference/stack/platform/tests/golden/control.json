@@ -1,0 +1,274 @@
+{
+ "_/ConfigMap/kueue-system/dispatcher-leader": {
+  "component": "dispatcher",
+  "sha256": "ea98dc15cb4763403944ed79c1c4b89adf505ec34cd35f013d68b5b78b011fd1"
+ },
+ "_/ConfigMap/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "4dce1b6a345c28d899a04297ac20265f1221bd829c5806b9bb66ba329ffb62cb"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-cost": {
+  "component": "observability",
+  "sha256": "57e08bcd0c68a49719e43cdef2bb8500dfeb917e4ac270d2c4e4154b99c40c1a"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-endpoints": {
+  "component": "observability",
+  "sha256": "1ddc4f528dd6128696dd35c4b689e4a8734fd02803d1ff887de396d0e553eca5"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-jobs": {
+  "component": "observability",
+  "sha256": "4c608a8e8eb720e61d86e4fe9d059335f223cb5a21dcddea0072b8f3885e765f"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-logs": {
+  "component": "observability",
+  "sha256": "3cfd36d414501ac592dbb5f6102077fda9f6f2be58dafe02fc30c67bb9188375"
+ },
+ "_/ConfigMap/monitoring/serverless2-dashboard-platform": {
+  "component": "observability",
+  "sha256": "5cc750308ef96f1da4fafc03c5ba3e0ad32925f0bcc24f15aca0e495e157825b"
+ },
+ "_/ConfigMap/monitoring/serverless2-datasource-loki": {
+  "component": "observability",
+  "sha256": "ab461582bf667273cbb5515d54fd6de7336ed990f763d6e5285a79a51c51f2e2"
+ },
+ "_/Namespace/_/models": {
+  "component": "scheduling",
+  "sha256": "7865f2564bb0b837b3eccac81d77bf464698cada20f9730d10fa8d5763d3439e"
+ },
+ "_/Namespace/_/ops": {
+  "component": "ops",
+  "sha256": "32375c24b59f152b14001377a0e46d8d070fb96ad292aff485b9c03aaee8f9c4"
+ },
+ "_/PersistentVolumeClaim/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "44b4f1b5474b90832efaf5732b7436665b2fb1080310de1facbad334525073d6"
+ },
+ "_/Service/api/api": {
+  "component": "api",
+  "sha256": "1d184e45617051b6c112a5f39145a13c5bc23ea9e6b3fa28ee272b6d04cdae26"
+ },
+ "_/Service/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "e19d2dd366b1e7879b331fb4493e82804dc59055f89ca2b59418c11382a15852"
+ },
+ "_/Service/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "576c411cb314ffc37dc5fd0f6aab783cabcdad62d7b17a1d7c417219588b3843"
+ },
+ "_/ServiceAccount/api/api": {
+  "component": "api",
+  "sha256": "de68b5c80c143dab715bf1a656e1d1df4b59b1e81d76509bcca901c44e855f34"
+ },
+ "_/ServiceAccount/kueue-system/dispatcher": {
+  "component": "dispatcher",
+  "sha256": "f4de1c20dc917e1cb9728d77fc9b52e98b16667efc04c4b62bf8335504e9a5fc"
+ },
+ "apps/DaemonSet/spegel/containerd-registry-config": {
+  "component": "node-config",
+  "sha256": "2becbada53207f175db8b8f0227e1b1f148dde959540133ee836cc3e96481623"
+ },
+ "apps/Deployment/api/api": {
+  "component": "api",
+  "sha256": "da3514d2100f1055df98c0448f4b72ee896bc2ab14ee5ae74ddc757ba0019ddd"
+ },
+ "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "d516577d9208c5263d90a85853d5db21f3ec3a5db5cc9c68c44e96452513e1ee"
+ },
+ "apps/Deployment/kueue-system/dispatcher": {
+  "component": "dispatcher",
+  "sha256": "e0d14a4f1c370a87d083c5c9b37b0774b4882453f770d8614493b7fb69e03f8b"
+ },
+ "apps/Deployment/monitoring/alert-sink": {
+  "component": "observability",
+  "sha256": "2246f80c558b2bfdc0715bd6cc67fe35432b5c641707d6a9865c8c6b177a9e91"
+ },
+ "batch/CronJob/kueue-system/price-feed": {
+  "component": "dispatcher",
+  "sha256": "dbb892d8e1933c0213879cbf97de397d0d247cd24415a79025211c825fd2edb7"
+ },
+ "batch/CronJob/monitoring/cost-export": {
+  "component": "observability",
+  "sha256": "60022369941725eea58563aebd1c00c5a5af6dfe60ccc5658632dd70246d0f9e"
+ },
+ "batch/CronJob/ops/recover-stopped-nodes": {
+  "component": "ops",
+  "sha256": "f402c254e9d228443884f71c67bd14908cc9c5984850d3bf753e771f01c1b271"
+ },
+ "cert-manager.io/Certificate/envoy-gateway-system/models": {
+  "component": "gateway",
+  "sha256": "8fa2699c4c923eeec30df03f415af22bd32e69645b28d3da9d1aa8fabafd4f78"
+ },
+ "cert-manager.io/ClusterIssuer/_/letsencrypt": {
+  "component": "gateway",
+  "sha256": "d365f8ad0c3bb10dd4f77b3a5abb82e3b61af1129f28a4d7a4ca5118e06a6993"
+ },
+ "cert-manager.io/ClusterIssuer/_/letsencrypt-staging": {
+  "component": "gateway",
+  "sha256": "2fd83997a065ee2dd5ca6c888868f4e556b6201b655ef1dd46a396d68719db02"
+ },
+ "cert-manager.io/ClusterIssuer/_/selfsigned": {
+  "component": "gateway",
+  "sha256": "290f4c8ce8617c5a88541f8cd9e23efad1248f1fc54d9bfeabf558316240545f"
+ },
+ "cilium.io/CiliumClusterwideNetworkPolicy/_/tenant-egress-world": {
+  "component": "ops",
+  "sha256": "1e21c3753109d663ce754ec9746546268e50ffc802d87a59ff191b2da34a6176"
+ },
+ "cilium.io/CiliumClusterwideNetworkPolicy/_/tenant-isolation": {
+  "component": "ops",
+  "sha256": "e99262d714d9351ca321afcdf6625bce0f793cb8557ada56dd2ab8e351d5bb33"
+ },
+ "gateway.envoyproxy.io/BackendTrafficPolicy/api/api-rate-limit": {
+  "component": "api",
+  "sha256": "6f09fd3e17544bf0c7cd162ee07087430f3f2ea7fa526d0c7d4406b536ceaccc"
+ },
+ "gateway.envoyproxy.io/BackendTrafficPolicy/envoy-gateway-system/per-key-rate-limit": {
+  "component": "gateway",
+  "sha256": "27971608c4ffb479f6146146b1bfe42493935832f3b1f45d4c071e94ff3b6fc6"
+ },
+ "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/external": {
+  "component": "gateway",
+  "sha256": "55c1c384cf9f5a77b0efc1811f29703e5b17cd1a0a3a047462c44636c908f984"
+ },
+ "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/internal": {
+  "component": "gateway",
+  "sha256": "e21ed94e2bbff8ee5db419c90c3a022ff0df89b9d1f96257e24c8b41531abd09"
+ },
+ "gateway.envoyproxy.io/HTTPRouteFilter/api/api-not-found": {
+  "component": "api",
+  "sha256": "7cb890f687ab3a9fc9f0594ec20587ae404de43a9d01c40584cc9d293f1cabb1"
+ },
+ "gateway.networking.k8s.io/Gateway/envoy-gateway-system/serverless2-external": {
+  "component": "gateway",
+  "sha256": "74fab7d65a212c014f457e34632fd73c3eda4077d154551a4a87ebe4f5c30aab"
+ },
+ "gateway.networking.k8s.io/Gateway/envoy-gateway-system/serverless2-internal": {
+  "component": "gateway",
+  "sha256": "6f7e9eb71d71999755fefd7552631d6db00e5ec8d7a4c8bf96ad4e3af59205f7"
+ },
+ "gateway.networking.k8s.io/GatewayClass/_/eg": {
+  "component": "gateway",
+  "sha256": "30c042ba895d1087dc39f086a0088ab4fb6fb4e63f98a3252ac68f641a6cb076"
+ },
+ "gateway.networking.k8s.io/HTTPRoute/api/api": {
+  "component": "api",
+  "sha256": "165cd30a721032f5986b9e17c8c15b2a3d202014535b696ca78653829818decb"
+ },
+ "gateway.networking.k8s.io/HTTPRoute/api/api-authorize": {
+  "component": "api",
+  "sha256": "60370aded84d6efae47c1e6d366eea464991a2b68efdf81a3c983c7e485f92fe"
+ },
+ "gateway.networking.k8s.io/HTTPRoute/api/api-redirect": {
+  "component": "api",
+  "sha256": "34dc9c34acbf66af8a4de650ffa2d71314c53d78eb27b9700f3be3d9612fb5f0"
+ },
+ "gateway.networking.k8s.io/HTTPRoute/monitoring/grafana": {
+  "component": "grafana-route",
+  "sha256": "703c1087c2e311d0cc61760514c25be914bffb589214bab4d4be7eb7f923616c"
+ },
+ "kueue.x-k8s.io/LocalQueue/models/endpoints": {
+  "component": "scheduling",
+  "sha256": "16bef4bfe0bf3434add7bd76aae2cdc57e72f61f3cfff854b90c3c73e666c1c2"
+ },
+ "kueue.x-k8s.io/WorkloadPriorityClass/_/bulk-backfill": {
+  "component": "scheduling",
+  "sha256": "c36b13ffcef722660fa67fdfc4d063fc5439d507ca782afd2c2602ee109f328d"
+ },
+ "kueue.x-k8s.io/WorkloadPriorityClass/_/customer-batch": {
+  "component": "scheduling",
+  "sha256": "205dfca77458e05dfd24eb008a74f08a4a5f1fdc85f19cea98b2e9d99396cc4f"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/cert-manager": {
+  "component": "observability",
+  "sha256": "5ad52d3172415836d3095df058d7cd442b10e9b413e655ab928b723ad59d1831"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/envoy-gateway-proxies": {
+  "component": "observability",
+  "sha256": "a7a648b460addbbf2f8c7a58735f221c2905266a7bf0faa4b8dfa780eb2ef8eb"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/knative-control-plane": {
+  "component": "observability",
+  "sha256": "618bf2b7a3f39529b74f4ba53c9a6ba19eca655313dc8923a9af599c01dab261"
+ },
+ "monitoring.coreos.com/PodMonitor/monitoring/knative-queue-proxy": {
+  "component": "observability",
+  "sha256": "6e7e3b3c881dcf71fedfc9b2be2832be7b33670ddff59323316b89f1e67b578b"
+ },
+ "monitoring.coreos.com/PrometheusRule/monitoring/serverless2-capacity": {
+  "component": "observability",
+  "sha256": "e77281df4c35d4d289693a2a3467da96057a46866775ecf7185abab00b46033f"
+ },
+ "monitoring.coreos.com/PrometheusRule/monitoring/serverless2-platform": {
+  "component": "observability",
+  "sha256": "b1e624e5cae87370b414bd22097fe436ea50289f0b3801c5e2a50fca029e061e"
+ },
+ "monitoring.coreos.com/ServiceMonitor/monitoring/kserve-controller": {
+  "component": "observability",
+  "sha256": "8eaac31dafa70bcccfdaba9c1df37f72756c0204a88d945e1294db079550fbef"
+ },
+ "monitoring.coreos.com/ServiceMonitor/monitoring/kueue": {
+  "component": "observability",
+  "sha256": "fc2f91f9e7586ddfcfbe9a8fb8a946d4b5fd0aba55f7b6e8f5adf5a2037b5c24"
+ },
+ "networking.k8s.io/NetworkPolicy/envoy-gateway-system/ratelimit-redis": {
+  "component": "gateway",
+  "sha256": "e6d7134a849bd0e913ed06e7b28cb0e2e5dc5e9e0953cda43a1719b1461ca6d2"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-namespaces": {
+  "component": "api",
+  "sha256": "a1914f5e78479952980cfd97f0a36a27e1ab685c269ee5d32c7e1d614714cea1"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
+  "component": "tenant-clusterrole",
+  "sha256": "a9ad5ab84800b533cde7e84c334d3633c405b71658e62b3cf691e27c3985f80e"
+ },
+ "rbac.authorization.k8s.io/ClusterRole/_/serverless2-dispatcher": {
+  "component": "dispatcher",
+  "sha256": "cfe40782c86e62d5de7d61a139c9522b27f00789f55f1b3568fddb2bfd5a2f9b"
+ },
+ "rbac.authorization.k8s.io/ClusterRoleBinding/_/serverless2-api-namespaces": {
+  "component": "api",
+  "sha256": "cb33ea5fdc42a6e02c5f9ab7be12428e70613847efeeb1285e1ba0190aa1bfa3"
+ },
+ "rbac.authorization.k8s.io/ClusterRoleBinding/_/serverless2-dispatcher": {
+  "component": "dispatcher",
+  "sha256": "0a2df4af0079f81f36f4018a86bfbec0a5cce3d2a9eb057bcbf177d727da84ec"
+ },
+ "rbac.authorization.k8s.io/Role/envoy-gateway-system/serverless2-api-models-certificate": {
+  "component": "api",
+  "sha256": "6fdfb9668bcb44f6ab67b4008cd28d33c31391ff51d78c7f5ed8e3fb419cf598"
+ },
+ "rbac.authorization.k8s.io/Role/kueue-system/serverless2-api-fleet": {
+  "component": "api",
+  "sha256": "4e9cdd03cc946531d87714b1973a256708d2af443b2ebfdb249e86776db144aa"
+ },
+ "rbac.authorization.k8s.io/Role/kueue-system/serverless2-dispatcher": {
+  "component": "dispatcher",
+  "sha256": "d89bdd0288aa03e04d6961e1a477cf40654fbd82c8712e266495701178da0cf0"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/envoy-gateway-system/serverless2-api-models-certificate": {
+  "component": "api",
+  "sha256": "4356a379d5cae52170445a3d2fd2c17d3d5d0f758b52dbe2a6d9875139042eee"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/kueue-system/serverless2-api-fleet": {
+  "component": "api",
+  "sha256": "bd67eae72ac4e8e84c88a717b681773112205e5f7547e44342e8e07e0aa4917d"
+ },
+ "rbac.authorization.k8s.io/RoleBinding/kueue-system/serverless2-dispatcher": {
+  "component": "dispatcher",
+  "sha256": "2beea09d73548859991c8264df7d36f63cc2508f3084d5af929279bf409c3c30"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-batch": {
+  "component": "scheduling",
+  "sha256": "76e9fbaa5d629d63dfd45ca054d8f162879a9400c198970585c76e2dba107588"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-batch-priority": {
+  "component": "scheduling",
+  "sha256": "3a71950acf06001bcf692ec88acb22db4c6ec61cbad87899ed1c0089c1c98a52"
+ },
+ "scheduling.k8s.io/PriorityClass/_/serverless2-interactive": {
+  "component": "scheduling",
+  "sha256": "814a8f6fb955f741c0bc46f929998998cf4d253ab9f4d8b6420e8e1216cbdac2"
+ }
+}

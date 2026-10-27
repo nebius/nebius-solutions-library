@@ -113,8 +113,8 @@ module "wireguard" {
   name_prefix = local.name_prefix
 
   # Network
-  subnet_id   = var.subnet_id
-  wg_network  = var.wireguard_network
+  subnet_id  = var.subnet_id
+  wg_network = var.wireguard_network
 
   # Instance config
   platform      = var.wireguard_platform
@@ -122,8 +122,8 @@ module "wireguard" {
   disk_size_gib = var.wireguard_disk_size_gib
 
   # WireGuard config
-  wg_port    = var.wireguard_port
-  ui_port    = var.wireguard_ui_port
+  wg_port = var.wireguard_port
+  ui_port = var.wireguard_ui_port
 
   # SSH
   ssh_user_name  = var.ssh_user_name

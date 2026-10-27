@@ -1,0 +1,60 @@
+# charts/platform values. The platform stage passes them per cluster (stack/config/locals.tf `platform_values`); the
+# defaults below are placeholders that make `helm template` of the chart alone render (the API refuses to start on a
+# hostname that still carries example.invalid). tools/check.sh renders the chart for every cluster of
+# terraform.tfvars.example and compares the objects with stack/platform/tests/golden/<cluster>.json.
+cluster: hub                   # cluster id
+role:                          # what this cluster is (stack/config/locals.tf `roles`)
+  control: false               # carries the control plane (API with the fleet database, LiteLLM, console)
+  manager: false               # the Kueue MultiKueue manager and the cost dispatcher (dedicated control cluster)
+  worker: true                 # a GPU region
+# Components rendered on this cluster: template directory -> true (api, edge, gateway, knative-serving, node-config,
+# observability, ops, scheduling, grafana-route, dispatcher, api-agent, fleet-access, tenant-clusterrole). The platform stage
+# derives it from clusters/common/apps/*.yaml (kind: manifests, `placement`) plus the identities of the cluster's role.
+components: {}                 # Helm merges maps, so the defaults list nothing: the stage names every component it renders
+host: example.invalid          # the gateway domain of this cluster: <gateway ip>.sslip.io or <cluster id>.<edge.domain>
+hostnames:                     # the public hostnames on it (api and litellm exist on the control cluster only: litellm is a route the stage renders)
+  api: api.example.invalid
+  grafana: grafana.example.invalid
+edge:
+  controlApiHost: api.example.invalid   # the fleet's API hostname: the ext-auth Backend of a GPU region's gateway (templates/edge)
+  caConfigMap: ""                       # internal mode: ConfigMap (namespace api, key ca.crt) that validates that hostname; empty = system roots
+images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
+  host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.39
+  dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.12
+  ops: registry.serverless2.local/nebius/serverless2/ops:0.1.12
+api:                           # the control cluster only (clusters/common/apps/api.yaml)
+  rateLimitPerMinute: 600      # edge.api_rate_limit_per_minute, per API key
+  env:                         # the API container's environment, complete (services/api/config.py)
+    - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
+    - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
+    - { name: REGION, value: control }
+    - { name: PUBLIC_API_URL, value: https://api.example.invalid }
+    - { name: GRAFANA_URLS, value: "<region>=https://grafana.example.invalid" }
+    - { name: REGION_KUBECONFIGS, value: "" }
+trust:                         # the CA bundle ConfigMap `trust` (stack/platform/trust.tf) mounted into the API
+  volumes: [{ name: trust, configMap: { name: trust } }]
+  mounts: [{ name: trust, mountPath: /etc/ssl/msp, readOnly: true }]
+knative:
+  skipTagResolving: [registry.serverless2.local, nvcr.io]   # registries Knative never resolves tags on (the logical host resolves on nodes only)
+gateway:
+  wildcardSecret: hub-wildcard-tls   # the TLS Secret of the cluster's public hostnames (Certificate <cluster id>-wildcard, platform stage)
+  serviceAnnotations: {}             # on the external Envoy Service: the static address's allocation id, the internal load-balancer type
+  acme:
+    enabled: true                    # false = internal mode: no Let's Encrypt issuers (the private CA issuer comes from the stage)
+    email: ""                        # edge.acme.email
+observability:
+  costExport:                  # the daily OpenCost report into the fleet's backups bucket (observability.cost_export)
+    enabled: true
+    cluster: unknown
+    bucket: unset
+    endpoint: https://storage.example.invalid
+    region: unset
+ops:
+  recoverStoppedNodes:         # spot-node recovery, workers only (suspended elsewhere)
+    enabled: true
+    projectId: project-example
+    clusterId: mk8scluster-example
+  rotateKeys: false            # in-cluster rotation of ops/nebius-sa (off: keys are Terraform resources, docs/OPERATIONS.md)
+grafanaRoute:
+  public: true                 # edge.grafana_public: the Grafana route on the external (true) or the internal gateway

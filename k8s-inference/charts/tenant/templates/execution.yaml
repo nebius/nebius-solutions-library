@@ -1,0 +1,43 @@
+{{- $c := include "tenant.cluster" . | fromYaml -}}
+{{- if not $c.manager }}
+{{- range $name, $p := .Values.executionProfiles }}
+---
+# Execution profile `{{ $name }}` (docs/JOBS.md "Execution options"): the pods of runs that name it carry the label
+# serverless2.nebius/execution-profile={{ $name }}, which the cluster-wide "world" egress policy does not select; this
+# policy is then the complete list of what such a pod may reach: DNS (with the DNS proxy, so FQDN rules resolve), the
+# API server (the uploader's pod lookup), the gateway (the fleet's APIs and endpoints), the fleet's API hostnames,
+# and the profile's destinations. The metadata service and other namespaces are not in the list.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: execution-profile-{{ $name }}
+  namespace: {{ include "tenant.ns" $ }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels: { serverless2.nebius/execution-profile: {{ $name | quote }} }
+  egress:
+    - toEndpoints:
+        - matchLabels: { io.kubernetes.pod.namespace: kube-system, k8s-app: coredns }
+      toPorts:
+        - ports: [{ port: "53", protocol: UDP }, { port: "53", protocol: TCP }]
+          rules: { dns: [{ matchPattern: "*" }] }
+    - toEntities: [kube-apiserver]
+    - toEndpoints:
+        - matchLabels: { io.kubernetes.pod.namespace: envoy-gateway-system }
+    {{- $fqdns := concat (default list $.Values.apiHosts) (default list $p.egress_fqdns) }}
+    {{- if $fqdns }}
+    - toFQDNs:
+      {{- range $h := $fqdns }}
+        - { matchName: {{ $h | quote }} }
+      {{- end }}
+    {{- end }}
+    {{- if $p.egress_cidrs }}
+    - toCIDRSet:
+      {{- range $cidr := $p.egress_cidrs }}
+        - { cidr: {{ $cidr | quote }} }
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

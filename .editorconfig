@@ -17,3 +17,7 @@ trim_trailing_whitespace = false
 [*.mermaid]
 indent_style = tab
 indent_size = 4
+
+[*.py]
+indent_style = space
+indent_size = 4

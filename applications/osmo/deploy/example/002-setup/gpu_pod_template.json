@@ -14,7 +14,7 @@
           "env": [
             {
               "name": "AWS_ENDPOINT_URL_S3",
-              "value": "https://storage.{{NEBIUS_REGION}}.nebius.cloud:443"
+              "value": "{{NEBIUS_STORAGE_ENDPOINT}}"
             },
             {
               "name": "AWS_S3_FORCE_PATH_STYLE",
@@ -47,7 +47,7 @@
           "env": [
             {
               "name": "AWS_ENDPOINT_URL_S3",
-              "value": "https://storage.{{NEBIUS_REGION}}.nebius.cloud:443"
+              "value": "{{NEBIUS_STORAGE_ENDPOINT}}"
             },
             {
               "name": "AWS_S3_FORCE_PATH_STYLE",

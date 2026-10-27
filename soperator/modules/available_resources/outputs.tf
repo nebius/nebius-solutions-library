@@ -18,6 +18,11 @@ output "platform_regions" {
   value       = local.platform_regions
 }
 
+output "cpu_platform_by_platform" {
+  description = "Map of binary-compatible CPU platform grouped by Nebius platform."
+  value       = local.cpu_platform_by_platform
+}
+
 output "by_platform" {
   description = "Map of available resource presets grouped by platform."
   value       = local.presets_by_platforms
@@ -44,6 +49,11 @@ output "disk_types" {
 output "filesystem_types" {
   description = "Supported filesystem types."
   value       = local.filesystem_types
+}
+
+output "shared_filesystem_types" {
+  description = "Supported shared filesystem types."
+  value       = local.shared_filesystem_types
 }
 
 output "cpu_topology_by_platform" {

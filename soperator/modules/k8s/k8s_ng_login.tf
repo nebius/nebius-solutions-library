@@ -17,7 +17,16 @@ resource "nebius_mk8s_v1_node_group" "login" {
     module.labels.label_jail,
   )
 
-  fixed_node_count = var.node_group_login.size
+  # These are broad infrastructure guardrails, not desired node counts: one
+  # node keeps baseline login capacity available, while 100 caps runaway VM
+  # provisioning. The Kubernetes autoscaler adds nodes only when login pods
+  # are unschedulable and removes unused nodes down to the minimum.
+  autoscaling = {
+    min_node_count = 1
+    max_node_count = 100
+  }
+
+  fixed_node_count = null
 
   template = {
     metadata = {
@@ -68,14 +77,14 @@ resource "nebius_mk8s_v1_node_group" "login" {
 
     network_interfaces = [
       {
-        public_ip_address = local.node_ssh_access.enabled ? {} : null
+        public_ip_address = local.node_ssh_access_public_ip.enabled ? {} : null
         subnet_id         = var.vpc_subnet_id
       }
     ]
 
     os = "ubuntu24.04"
 
-    cloud_init_user_data = local.node_ssh_access.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
+    cloud_init_user_data = local.node_cloud_init.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
   }
 
   lifecycle {

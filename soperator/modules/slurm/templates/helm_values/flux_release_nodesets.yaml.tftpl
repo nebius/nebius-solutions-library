@@ -12,22 +12,46 @@ nodesets:
     nodesets:
       %{~ for i, nodeset in nodesets ~}
       - name: ${nodeset.name}
+        nameNodeSelector: "slurm.nebius.ai/nodeset-name"
+        %{~ if nodeset.range != null ~}
+        range:
+          firstOrdinal: ${nodeset.range.first_ordinal}
+          lastOrdinal: ${nodeset.range.last_ordinal}
+          suffix: ${jsonencode(nodeset.range.suffix)}
+        %{~ endif ~}
+        %{~ if length(nodeset.aggregate_slurm_nodesets) > 0 ~}
+        aggregateSlurmNodeSets:
+          %{~ for aggregate in nodeset.aggregate_slurm_nodesets ~}
+          - ${jsonencode(aggregate)}
+          %{~ endfor ~}
+        %{~ endif ~}
         annotations:
           slurm.nebius.ai/parental-cluster-ref: soperator
 
         replicas: ${nodeset.replicas}
         maxUnavailable: ${nodeset.max_unavailable}
+        updateStrategy: ${nodeset.rolling_update_strategy}
         %{~ if nodeset.ephemeral_nodes ~}
         ephemeralNodes: true
         initialNumberEphemeralNodes: ${nodeset.initial_number_ephemeral_nodes}
         %{~ endif ~}
 
         gpu:
-          enabled: ${resources[i].gpus > 0}
+          enabled: ${nodeset.resources.gpus > 0}
           nvidia:
             gdrCopyEnabled: true
 
+        # Docker needs node-local image-storage disks for storing OCI data.
+        docker:
+          enabled: ${nodeset.node_local_image_storage.enabled}
+
+        %{~ if nodeset.topology != null ~}
+        topology:
+          fabric: ${nodeset.topology.fabric}
+        %{~ endif ~}
+
         nodeConfig:
+          autoResume: ${nodeset.auto_resume}
           %{~ if length(nodeset.features) > 0 ~}
           features:
             %{~ for feature in nodeset.features ~}
@@ -40,9 +64,9 @@ nodesets:
             format("SocketsPerBoard=%d", nodeset.cpu_topology.sockets_per_board),
             format("CoresPerSocket=%d", nodeset.cpu_topology.cores_per_socket),
             format("ThreadsPerCore=%d", nodeset.cpu_topology.threads_per_core),
-            resources[i].gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, resources[i].gpus) : "",
+            nodeset.resources.gpus > 0 ? format("Gres=gpu:%s:%d", nodeset.gres_name, nodeset.resources.gpus) : "",
           ]))}"
-          dynamic: "${extra}"
+          dynamic: ${jsonencode(slurm_node_extra)}
           %{~ if nodeset.gres_config != null && length(nodeset.gres_config) > 0 ~}
           gresConfig:
             %{~ for gres_line in nodeset.gres_config ~}
@@ -51,17 +75,17 @@ nodesets:
           %{~ endif ~}
 
         slurmd:
-          %{~ if resources[i].gpus > 0 ~}
+          %{~ if nodeset.resources.gpus > 0 ~}
           customEnv:
             - name: "NVIDIA_DRIVER_CAPABILITIES"
               value: "compute,graphics,utility,video"
           %{~ endif ~}
           resources:
-            cpu: ${floor(resources[i].cpu_cores * 1000)}m
-            memory: ${floor(resources[i].memory_gibibytes)}Gi
-            ephemeralStorage: ${resources[i].ephemeral_storage_gibibytes}Gi
-            %{~ if resources[i].gpus > 0 ~}
-            gpu: ${resources[i].gpus}
+            cpu: ${floor(nodeset.resources.cpu_cores * 1000)}m
+            memory: ${floor(nodeset.resources.memory_gibibytes)}Gi
+            ephemeralStorage: ${nodeset.resources.ephemeral_storage_gibibytes}Gi
+            %{~ if nodeset.resources.gpus > 0 ~}
+            gpu: ${nodeset.resources.gpus}
             %{~ endif ~}
 
           volumes:
@@ -117,9 +141,8 @@ nodesets:
               - name: local-nvme
                 mountPath: ${try(nodeset.local_nvme.mount_path, "/mnt/local-nvme")}
                 volumeSource:
-                  hostPath:
-                    path: ${try(nodeset.local_nvme.mount_path, "/mnt/local-nvme")}
-                    type: Directory
+                  emptyDir:
+                    sizeLimit: ${nodeset.resources.ephemeral_storage_gibibytes}Gi
               %{~ endif ~}
 
               %{~ if nodeset.node_local_image_storage.enabled ~}
@@ -145,14 +168,14 @@ nodesets:
                 mountPath: /opt/slurm_scripts/
                 volumeSource:
                   configMap:
-                    name: slurm-scripts
+                    name: ${cluster_name}-slurm-scripts
                     defaultMode: 0755
 
               - name: slurm-scripts-jail
                 mountPath: /mnt/jail.upper/opt/slurm_scripts/
                 volumeSource:
                   configMap:
-                    name: slurm-scripts
+                    name: ${cluster_name}-slurm-scripts
                     defaultMode: 0755
 
               - name: sys-host
@@ -163,6 +186,17 @@ nodesets:
                     path: /sys
                     type: Directory
 
+              %{~ if nodeset.nccl_network_vars != null ~}
+              - name: nccl-network-vars
+                mountPath: /mnt/jail.upper/etc/profile.d/${nodeset.nccl_network_vars.file_name}
+                subPath: ${nodeset.nccl_network_vars.file_name}
+                readOnly: true
+                volumeSource:
+                  configMap:
+                    name: ${nodeset.nccl_network_vars.config_map_name}
+                    defaultMode: 0444
+
+              %{~ endif ~}
               %{~ if nodeset.node_local_image_storage.enabled ~}
               - name: enroot-on-image-storage
                 mountPath: /etc/enroot/enroot.conf.d/custom-dirs.conf
@@ -183,15 +217,6 @@ nodesets:
                     defaultMode: 500
               %{~ endif ~}
 
-              %{~ if gpu.dcgm_job_mapping.enabled ~}
-              - name: hpc-jobs-dir
-                mountPath: ${gpu.dcgm_job_mapping.dir}
-                volumeSource:
-                  hostPath:
-                    path: ${gpu.dcgm_job_mapping.dir}
-                    type: DirectoryOrCreate
-              %{~ endif ~}
-
               %{~ if gpu.use_preinstalled_drivers~}
               - name: nvidia-driver-root
                 mountPath: /run/nvidia/driver
@@ -202,10 +227,8 @@ nodesets:
                     type: ""
               %{~ endif ~}
 
-            sharedMemorySize: ${resources[i].shared_memory}Gi
-
           security:
-            appArmorProfile: unconfined
+            appArmorProfile: ${jsonencode(apparmor_profile)}
 
         munge:
           resources:
@@ -226,15 +249,12 @@ nodesets:
         sssdConfSecretRefName: ${jsonencode(sssd.conf_secret_ref_name)}
         sssdLdapCAConfigMapRefName: ${jsonencode(sssd.ldap_ca_config_map_ref_name)}
 
-        configMapRefSupervisord: custom-supervisord-config
         configMapRefSshd: ${sshd.config_map_ref}
 
         enableHostUserNamespace: true
 
         priorityClass: soperator-worker-high-priority
-        nodeSelector:
-          slurm.nebius.ai/nodeset-name: ${nodeset.name}
-        %{~ if resources[i].gpus > 0 ~}
+        %{~ if nodeset.resources.gpus > 0 ~}
         tolerations:
           - key: nvidia.com/gpu
             operator: Exists
@@ -242,6 +262,26 @@ nodesets:
         %{~ endif ~}
 
         customInitContainers:
+          %{~ if gpu.wait_for_persistenced && gpu.use_preinstalled_drivers && nodeset.resources.gpus > 0 ~}
+          # SCHED-1418: wait before worker-init/slurmd creation so the NVIDIA runtime can inject the host socket.
+          # The driver volume is mounted whole, without subPath: a subPath makes kubelet keep a host-side bind
+          # of /run that collects mounts of pods started later and then cannot be unmounted on worker deletion.
+          - name: wait-for-nvidia-persistenced
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+            volumeMounts:
+              - name: nvidia-driver-root
+                mountPath: /host
+                readOnly: true
+            command: ["/bin/sh", "-ec"]
+            args:
+              - |
+                until [ -S /host/run/nvidia-persistenced/socket ]; do
+                    echo "Waiting for the NVIDIA persistenced socket on the host..."
+                    sleep 5
+                done
+                echo "NVIDIA persistenced socket is ready"
+          %{~ endif ~}
+
           - name: ensure-jail-virtiofs
             image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: jail, mountPath: /volume-mount }]
@@ -258,30 +298,14 @@ nodesets:
           - name: ensure-node-local-jail-submount-${sub_mount.name}-${sub_mount.filesystem_type}
             image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
-            command: ["grep", ' /volume-mount ${sub_mount.filesystem_type} ', "/proc/mounts"]
+            command: ["sh", "-c", "grep ' /volume-mount ${sub_mount.filesystem_type} ' /proc/mounts && chmod 777 /volume-mount"]
           %{~ endfor ~}
 
           %{~ if try(nodeset.local_nvme.enabled, false) ~}
-          - name: ensure-node-local-jail-submount-local-nvme-${try(nodeset.local_nvme.filesystem_type, "ext4")}
+          - name: prepare-local-nvme-permissions
             image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: 'local-nvme', mountPath: /volume-mount }]
-            command:
-              - sh
-              - -ec
-              - |
-                mount_source="$(awk '$2 == "/volume-mount" && $3 == "${try(nodeset.local_nvme.filesystem_type, "ext4")}" { print $1; exit }' /proc/mounts)"
-                case "$${mount_source}" in
-                  /dev/md[0-9]*) ;;
-                  *)
-                    echo "ERROR: /volume-mount is not backed by an MD RAID device (source=$${mount_source:-missing})" >&2
-                    exit 1
-                    ;;
-                esac
-                raid_device="$${mount_source#/dev/}"
-                test -d "/sys/class/block/$${raid_device}/md" || {
-                  echo "ERROR: $${mount_source} is not an MD RAID device" >&2
-                  exit 1
-                }
+            command: ["chmod", "777", "/volume-mount"]
           %{~ endif ~}
 
           %{~ if nodeset.node_local_image_storage.enabled ~}

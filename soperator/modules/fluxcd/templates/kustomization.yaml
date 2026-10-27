@@ -1,0 +1,88 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - install.yaml
+
+patches:
+  # Install only the components used by Soperator. The full upstream manifest
+  # also contains the image, notification, and source-watcher components.
+  - target:
+      group: apiextensions.k8s.io
+      version: v1
+      kind: CustomResourceDefinition
+      name: >-
+        (artifactgenerators.source.extensions.fluxcd.io|imagepolicies.image.toolkit.fluxcd.io|imagerepositories.image.toolkit.fluxcd.io|imageupdateautomations.image.toolkit.fluxcd.io|alerts.notification.toolkit.fluxcd.io|providers.notification.toolkit.fluxcd.io|receivers.notification.toolkit.fluxcd.io)
+    patch: |-
+      apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      metadata:
+        name: unused
+      $patch: delete
+
+  - target:
+      version: v1
+      kind: ServiceAccount
+      labelSelector: >-
+        app.kubernetes.io/component in
+        (image-automation-controller,image-reflector-controller,notification-controller,source-watcher)
+    patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: unused
+      $patch: delete
+
+  - target:
+      version: v1
+      kind: Service
+      labelSelector: >-
+        app.kubernetes.io/component in (notification-controller,source-watcher)
+    patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: unused
+      $patch: delete
+
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      labelSelector: >-
+        app.kubernetes.io/component in
+        (image-automation-controller,image-reflector-controller,notification-controller,source-watcher)
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: unused
+      $patch: delete
+
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: allow-webhooks
+    patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: unused
+      $patch: delete
+
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: (helm|kustomize|source)-controller
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/args/0
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          slurm.nebius.ai/nodeset: system
+      - op: add
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m

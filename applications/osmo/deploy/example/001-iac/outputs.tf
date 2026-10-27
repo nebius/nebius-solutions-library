@@ -47,6 +47,7 @@ output "storage_bucket" {
   value = {
     name     = module.platform.storage_bucket_name
     endpoint = module.platform.storage_endpoint
+    region   = module.platform.storage_region
   }
 }
 
@@ -142,7 +143,7 @@ output "gpu_nodes_driverfull_image" {
 
 output "gpu_nodes_platform" {
   description = "GPU platform type (e.g. gpu-h100-sxm, gpu-h200-sxm)"
-  value       = var.gpu_nodes_platform
+  value       = local.gpu_nodes_platform
 }
 
 # -----------------------------------------------------------------------------

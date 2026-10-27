@@ -1,0 +1,6 @@
+name: knative-serving
+component: knative-serving
+namespace: knative-serving
+wave: '2'
+placement: worker
+kind: manifests

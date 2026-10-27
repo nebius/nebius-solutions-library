@@ -9,10 +9,13 @@ resource "nebius_compute_v1_instance" "bastion_instance" {
 
   network_interfaces = [
     {
-      name              = "eth0"
-      subnet_id         = var.subnet_id
-      ip_address        = {}
-      public_ip_address = {}
+      name            = "eth0"
+      subnet_id       = var.subnet_id
+      ip_address      = {}
+      security_groups = local.bastion_security_group_refs
+      public_ip_address = {
+        allocation_id = var.public_ip_allocation_id
+      }
     }
   ]
 
@@ -28,5 +31,11 @@ resource "nebius_compute_v1_instance" "bastion_instance" {
     ssh_public_key     = local.ssh_public_key
     parent_id          = var.parent_id
     service_account_id = local.service_account_id
+    cli_install_url    = var.nebius_cli_install_url
+    api_endpoint       = var.nebius_api_endpoint
   })
+
+  depends_on = [
+    module.bastion_security_group,
+  ]
 }

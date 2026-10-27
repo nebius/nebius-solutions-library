@@ -1,0 +1,9 @@
+# Per-node preparation the mk8s node images lack: containerd registry mirror support on the GPU node images
+# (charts/platform/templates/node-config, docs/IMAGES.md). Lives in the spegel namespace next to the component
+# that depends on it.
+name: node-config
+component: node-config
+namespace: spegel
+wave: '0'
+placement: all
+kind: manifests

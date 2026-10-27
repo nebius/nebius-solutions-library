@@ -1,0 +1,36 @@
+# Rendered once per tenant per cluster by the platform stage (stack/platform/tenants.tf), which passes `name`, `cluster`
+# and the `clusters` entry of that cluster, plus the fleet document whose GPU classes name the scheduling-profile LocalQueues.
+name: ""                       # tenant name; namespace tenant-<name>
+cluster: hub                   # key of `clusters` below
+apiSubjects:                   # API identities bound to ClusterRole serverless2-api-tenant in the namespace
+  - { kind: ServiceAccount, name: api, namespace: api }          # this cluster's API
+  - { kind: ServiceAccount, name: api-agent, namespace: api }    # the control cluster's API, on a worker
+runnerServiceAccount: job-runner   # ServiceAccount of the run pods (EXECUTOR_SA on the API)
+allowedImages: []              # image prefixes a container-run of this tenant may use (namespace annotation the API enforces); empty: any
+# Execution options (docs/JOBS.md "Execution options"; terraform.tfvars tenants.<name>.identities / execution_profiles).
+# identities: <ref>: { audience: <token audience>, env: { AWS_ROLE_ARN: ... } } -> ServiceAccount identity-<ref> (bound to
+# the same Role as the runner) whose projected token the run's main container gets for OIDC federation.
+# executionProfiles: <name>: { egress_fqdns: [...], egress_cidrs: [...], shared_filesystem: false } -> a network policy
+# for pods labelled serverless2.nebius/execution-profile=<name> (DNS, the API server, the gateway, the fleet's API hosts
+# and the listed destinations; never the world, never the metadata service).
+identities: {}
+executionProfiles: {}
+apiHosts: []                   # the fleet's API hostnames (every cluster's), reachable from every execution profile
+profiles: []                   # extra LocalQueue names (profiles) besides `default` and `prefer-<class>` from fleet.yaml
+# Multi-node runs (docs/JOBS.md "Multi-node runs"). infiniband: the tenant may run jobs with `interconnect: required`
+# (a DRA ResourceClaimTemplate for the node's InfiniBand NICs is rendered; the namespace stays under PSA baseline,
+# no capability needed, docs/JOBS.md). sharedScratch: the RWX checkpoint claim on the cluster's weights filesystem (rendered where
+# fleet.yaml enables the filesystem; `checkpoints: shared` mounts it under /work/checkpoint).
+infiniband: false
+infinibandClaimTemplate: ib          # ResourceClaimTemplates ib-<n> for every n in infinibandClaimCounts
+infinibandClaimCounts: [8, 4]       # NICs per node: 8 on H100/H200/B200/B300 full nodes, 4 on GB300
+infinibandDeviceClass: ib.networking.nebius.ai
+sharedScratch: { claim: scratch-shared, size: 1Ti }
+sharedWeights: { claim: weights-shared }   # the region's model weights, read-only for runs (`weights` of a job class, docs/JOBS.md)
+fleet: {}                      # fleet.yaml `fleet:` document (GPU classes -> prefer-<class> queues); passed by onboarding
+clusters:                      # keyed by cluster id: the platform stage passes this cluster's entry. Placeholders below.
+  control:                     # the MultiKueue manager: namespace, profile queues and the API binding only (no pods run here)
+    region: ""
+    manager: true
+  hub:                         # a worker: its region
+    region: ""
