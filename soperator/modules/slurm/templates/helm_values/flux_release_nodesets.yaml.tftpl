@@ -267,7 +267,7 @@ nodesets:
           # The driver volume is mounted whole, without subPath: a subPath makes kubelet keep a host-side bind
           # of /run that collects mounts of pods started later and then cannot be unmounted on worker deletion.
           - name: wait-for-nvidia-persistenced
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts:
               - name: nvidia-driver-root
                 mountPath: /host
@@ -283,39 +283,39 @@ nodesets:
           %{~ endif ~}
 
           - name: ensure-jail-virtiofs
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: jail, mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
 
           %{~ for sub_mount in jail_submounts.shared ~}
           - name: ensure-jail-submount-${sub_mount.name}-virtiofs
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
             command: ["grep", " /volume-mount virtiofs ", "/proc/mounts"]
           %{~ endfor ~}
 
           %{~ for sub_mount in nodeset.node_local_jail_submounts ~}
           - name: ensure-node-local-jail-submount-${sub_mount.name}-${sub_mount.filesystem_type}
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: '${sub_mount.name}', mountPath: /volume-mount }]
             command: ["sh", "-c", "grep ' /volume-mount ${sub_mount.filesystem_type} ' /proc/mounts && chmod 777 /volume-mount"]
           %{~ endfor ~}
 
           %{~ if try(nodeset.local_nvme.enabled, false) ~}
           - name: prepare-local-nvme-permissions
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: 'local-nvme', mountPath: /volume-mount }]
             command: ["chmod", "777", "/volume-mount"]
           %{~ endif ~}
 
           %{~ if nodeset.node_local_image_storage.enabled ~}
           - name: ensure-node-local-image-storage-${nodeset.node_local_image_storage.spec.filesystem_type}
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command: ["grep", ' /volume-mount ${nodeset.node_local_image_storage.spec.filesystem_type} ', "/proc/mounts"]
 
           - name: prepare-node-local-image-storage
-            image: cr.nebius.cloud/soperator/busybox
+            image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command:
             - "sh"
