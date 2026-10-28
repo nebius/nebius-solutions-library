@@ -9,6 +9,10 @@ Service, and a route table for worker traffic.
 A Cilium host policy blocks Internet access to gateway host services, including
 SSH and the kubelet.
 
+This protection requires Cilium host firewall, enabled by default on Managed
+Kubernetes clusters created on or after April 17, 2025. For older clusters, follow
+the [host firewall enablement instructions](https://docs.nebius.com/kubernetes/networking/add-ons#host-firewall).
+
 Gateway nodes have the label
 `nebius.com/exclude-from-implicit-load-balancer-selection=true`, which keeps them
 out of other `LoadBalancer` Services that use default node selection. The NAT
@@ -104,6 +108,9 @@ through the gateway. This applies to every resource in that subnet.
    uncached image to verify container image pulls.
 
 ## Undo the routing change
+
+Before applying `enable_nat_gateway = false` or running `terraform destroy`,
+restore the worker subnet's previous routing using the instructions below.
 
 To restore the worker subnet's previous routing, use the route table ID saved in
 step 2. Update the Terraform configuration that manages the subnet, or repeat the
