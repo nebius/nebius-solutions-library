@@ -114,6 +114,60 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### Preemptible node pricing
+
+Regular GPU node groups continue to use Nebius's implicit on-demand default.
+This solution only sets a pricing model explicitly for preemptible GPU nodes,
+so existing on-demand and Capacity Block Group configurations are left
+unchanged. Spot pricing is available only for GPU platforms.
+
+Set `gpu_nodes_preemptible` to `true` to create a preemptible GPU node group. By
+default, its VMs accept the current spot price:
+
+```hcl
+gpu_nodes_preemptible = true
+```
+
+> **Upgrade note:** Existing preemptible GPU node groups created by an earlier
+> version of this solution did not set a pricing model explicitly. Adding the
+> follow-spot pricing model changes the node-group template and may trigger a
+> node roll-out on the next apply. Review the Terraform plan first and allow for
+> workload disruption or limited spot capacity while replacement nodes start.
+
+To cap the accepted spot price, create a Nebius Billing pricing policy outside
+this solution and pass its ID for the applicable node group:
+
+```hcl
+gpu_nodes_preemptible            = true
+gpu_nodes_spot_pricing_policy_id = "pricingpolicy-..."
+```
+
+This solution does not create the pricing policy. Supply the ID of a pre-existing
+policy as a literal value in `terraform.tfvars`. The policy can be created by a
+separate Terraform configuration, in the Nebius console, or with the CLI. If a
+separate Terraform configuration creates it, pass that configuration's output
+ID into this solution; a `.tfvars` file cannot directly reference a resource in
+another Terraform root. Keeping policy creation separate allows a billing or
+platform team to own and reuse one policy across multiple VM or MK8s deployments.
+
+A pricing policy ID requires `gpu_nodes_preemptible` to be `true`; otherwise
+planning fails. The same pricing choice applies to every VM created in the node
+group. When an ID is set, Terraform reads the policy and verifies that it belongs
+to `parent_id` and targets the selected GPU platform. The identity running
+Terraform therefore needs permission to read Billing pricing policies. These
+checks catch configuration mismatches but do not guarantee spot capacity.
+
+Pricing-policy behavior to consider:
+
+- Without a policy, nodes follow the current spot price. It can change every
+  15 minutes, while remaining below the regular PAYG price for the GPU platform.
+- If a policy's maximum price is below the current spot price, scheduling is
+  blocked until the price falls or the maximum is raised.
+- A policy's maximum price can change only when its `status.running_vm_count` is
+  zero. For a shared policy, every running consumer must be stopped first.
+- A policy can be shared only by deployments in the same project that use the
+  same GPU platform.
+
 ### GPU capacity reservation
 
 `gpu_nodes_reservation_policy` controls capacity reservation placement for **generic GPU node groups only**. It does not apply to CPU or GB300 node groups. The same policy and ordered reservation IDs apply to every generic GPU node group.
@@ -283,10 +337,10 @@ rollout are not ordered, so GPU allocation can be unavailable during the change:
 4. Update workload manifests to use the required ResourceClaims and
    ComputeDomains, then resume controllers or resubmit workloads.
 
-The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
-MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
-bundled KubeRay profiles. These guardrails keep the initial production path
-within the components validated for Grace ARM rack deployments.
+The GB300 path currently rejects autoscaling, preemptible or spot-priced nodes,
+public GPU nodes, MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL
+test, and the bundled KubeRay profiles. These guardrails keep the initial
+production path within the components validated for Grace ARM rack deployments.
 
 ### Nvidia Multi Instance GPU (MIG) configuration
 

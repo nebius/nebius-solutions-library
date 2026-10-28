@@ -75,6 +75,11 @@ enable_nat_gateway         = false
 cpu_nodes_preemptible      = false
 gpu_nodes_preemptible      = false
 
+# Preemptible GPU nodes follow the current spot price when the pricing policy ID
+# is omitted. Set an existing Nebius Billing pricing policy ID to cap the
+# accepted spot price for every VM in the GPU node group.
+# gpu_nodes_spot_pricing_policy_id = "pricingpolicy-..."
+
 # NCCL test image used when test_mode = true. Override for the selected GPU/CUDA platform.
 # nccl_test_image = "cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2"
 
