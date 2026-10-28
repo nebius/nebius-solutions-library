@@ -52,3 +52,8 @@ output "gb300_racks" {
     }
   }
 }
+
+output "nat_gateway" {
+  description = "NAT gateway public IP pool for allowlisting and prepared worker route-table ID for routing cutover; null when disabled."
+  value       = one(module.nat-gateway)
+}

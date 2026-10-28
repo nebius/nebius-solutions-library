@@ -46,6 +46,27 @@ variable "enable_egress_gateway" {
   default     = false
 }
 
+variable "enable_nat_gateway" {
+  description = "Create NAT gateway infrastructure for private Kubernetes nodes."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "nat_gateway" {
+  description = "Dedicated public gateway nodes and their fixed public IP pool. Reserve at least node_count + 1 IPs for upgrades."
+  type = object({
+    node_count          = optional(number, 2)
+    public_ip_pool_size = optional(number, 3)
+    nodes_platform      = optional(string, "cpu-d3")
+    nodes_preset        = optional(string, "4vcpu-16gb")
+    nodes_disk_type     = optional(string, "NETWORK_SSD")
+    nodes_disk_size     = optional(number, 128)
+  })
+  default  = {}
+  nullable = false
+}
+
 # K8s filestore
 variable "enable_filestore" {
   description = "Use Filestore."
