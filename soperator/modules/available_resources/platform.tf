@@ -23,8 +23,7 @@ locals {
     (local.platforms.gpu-gb300)      = "arm64"
   }
 
-  production_platform_regions = tomap({
-    # cpu-g1 availability has only been verified in testing.
+  platform_regions = tomap({
     (local.platforms.cpu-g1) = []
     (local.platforms.cpu-e2) = [
       local.regions.eu-north1,
@@ -63,16 +62,4 @@ locals {
       local.regions.eu-north1,
     ]
   })
-
-  # Testing support is intentionally limited to the platforms used by the
-  # GB300 dev recipe. GB300 is configured in omega, not beta.
-  testing_platform_regions = tomap({
-    for platform in values(local.platforms) : platform => (
-      contains([local.platforms.cpu-d3, local.platforms.cpu-g1], platform)
-      ? [local.regions.beta, local.regions.omega]
-      : (platform == local.platforms.gpu-gb300 ? [local.regions.omega] : [])
-    )
-  })
-
-  platform_regions = var.cloud_environment == "testing" ? local.testing_platform_regions : local.production_platform_regions
 }

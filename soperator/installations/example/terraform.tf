@@ -34,20 +34,18 @@ terraform {
 }
 
 provider "nebius" {
-  domain            = var.cloud_environment == "testing" ? "api.private-api.tst.man.nbhost.net" : "api.nebius.cloud"
+  domain            = "api.nebius.cloud"
   timeout           = "10m"
   per_retry_timeout = "1m"
   retries           = 10
-  profile           = var.cloud_environment == "testing" ? { name = "testing" } : {}
+  profile           = {}
 }
 
 locals {
   kubernetes_exec = {
     api_version = "client.authentication.k8s.io/v1beta1"
-    command     = var.cloud_environment == "testing" ? "npc" : "nebius"
-    args = var.cloud_environment == "testing" ? [
-      "mk8s", "cluster", "get-token", "--profile", "testing", "--format", "json",
-    ] : ["mk8s", "v1", "cluster", "get-token", "--format", "json"]
+    command     = "nebius"
+    args        = ["mk8s", "v1", "cluster", "get-token", "--format", "json"]
   }
 }
 
@@ -86,6 +84,5 @@ provider "helm" {
 }
 
 module "resources" {
-  source            = "../../modules/available_resources"
-  cloud_environment = var.cloud_environment
+  source = "../../modules/available_resources"
 }

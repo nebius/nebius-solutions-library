@@ -1,15 +1,3 @@
-variable "cloud_environment" {
-  description = "Cloud environment for provider routing and resource availability. Independent of the production deployment flag."
-  type        = string
-  default     = "production"
-  nullable    = false
-
-  validation {
-    condition     = contains(["production", "testing"], var.cloud_environment)
-    error_message = "cloud_environment must be production or testing."
-  }
-}
-
 variable "region" {
   description = "Region of the project."
   type        = string
@@ -19,7 +7,7 @@ resource "terraform_data" "check_region" {
   lifecycle {
     precondition {
       condition     = contains(module.resources.regions, var.region)
-      error_message = "Unknown region '${var.region}' for cloud_environment '${var.cloud_environment}'."
+      error_message = "Unknown region '${var.region}'. See https://docs.nebius.com/overview/regions"
     }
   }
 }
@@ -637,6 +625,7 @@ variable "platform_cuda_versions" {
     cpu-e1         = "13.0.3"
     cpu-e2         = "13.0.3"
     cpu-d3         = "13.0.3"
+    cpu-g1         = "13.0.3"
     gpu-l40s-a     = "13.0.3"
     gpu-l40s-d     = "13.0.3"
     gpu-h100-sxm   = "13.0.3"

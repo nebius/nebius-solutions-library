@@ -14,8 +14,8 @@ mock_provider "helm" {}
 # Exactly one topology is the default and the created set is unchanged by the choice.
 # No mixed CPU/GB300 run: GB300 is arm64 and workers must share one CPU
 # architecture, so that shape is rejected before topology selection matters.
-# GB300 runs keep login on workers: the dedicated cpu-g1 login default has no
-# production region yet, and login placement is irrelevant to topology.
+# GB300 runs keep login on workers: the dedicated cpu-g1 login default is not
+# available in eu-north1, and login placement is irrelevant to topology.
 
 variables {
   active_checks_scope              = "essential"

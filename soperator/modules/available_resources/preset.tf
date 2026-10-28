@@ -357,8 +357,9 @@ locals {
 
   presets_by_platforms_raw = tomap({
     # Grace presets have 6 GiB per vCPU, so they do not share names with the x86
-    # catalog. ARM CPU nodes are supported only for login, which needs at least
-    # 16 vCPUs. Weka needs at least 32 vCPUs, as on x86.
+    # catalog. ARM CPU nodes are supported for login (at least 16 vCPUs) and as
+    # CPU workers sharing an ARM jail (at least 4 vCPUs, as on x86). Weka needs
+    # at least 32 vCPUs, as on x86.
     (local.platforms.cpu-g1) = tomap({
       for vcpus in [2, 4, 8, 16, 32, 56, 112] : "${vcpus}vcpu-${vcpus * 6}gb" => {
         cpu_cores              = vcpus * local.reserve.cpu.coefficient - local.reserve.cpu.count
@@ -368,7 +369,7 @@ locals {
         sufficient = {
           (module.labels.name_nodeset_system)     = false
           (module.labels.name_nodeset_controller) = false
-          (module.labels.name_nodeset_worker)     = false
+          (module.labels.name_nodeset_worker)     = vcpus >= 4
           (module.labels.name_nodeset_login)      = vcpus >= 16
           (module.labels.name_nodeset_accounting) = false
           (module.labels.name_nodeset_nfs)        = false
@@ -435,7 +436,7 @@ locals {
   })
 
   local_nvme_supported_by_region_platform_preset = tomap({
-    for region in local.supported_regions : region => tomap({
+    for region in [for _, region in local.regions : region] : region => tomap({
       for platform, presets in local.presets_by_platforms_raw : platform => tomap({
         for preset, _ in presets : preset => anytrue([
           for candidate in setproduct(
@@ -453,10 +454,10 @@ locals {
       for preset, resources in presets : preset => merge(resources, {
         cpu_platform = local.cpu_platform_by_platform[platform]
         local_nvme_supported = anytrue([
-          for region in local.supported_regions : try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
+          for region in [for _, region in local.regions : region] : try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
         ])
         local_nvme_supported_by_region = tomap({
-          for region in local.supported_regions : region => try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
+          for region in [for _, region in local.regions : region] : region => try(local.local_nvme_supported_by_region_platform_preset[region][platform][preset], false)
         })
       })
     })
