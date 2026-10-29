@@ -194,6 +194,8 @@ run "mixed_cpu_gpu_rejects_tree_ib_on_all_nodesets" {
   expect_failures = [var.slurm_nodesets_partitions]
 }
 
+# Target the Slurm release that consumes the reserves so Terraform retains
+# their variable validation in the targeted plan.
 run "automatic_colocation_rejects_zero_cpu_reserve" {
   command = plan
   variables {
@@ -208,7 +210,7 @@ run "automatic_colocation_rejects_zero_cpu_reserve" {
     }
   }
   plan_options {
-    target = [terraform_data.check_slurm_worker_cpu_platform]
+    target = [module.slurm.helm_release.soperator_fluxcd_cm]
   }
   expect_failures = [var.gb300_login_pod_worker_reserve]
 }
@@ -227,7 +229,7 @@ run "automatic_colocation_rejects_negative_memory_reserve" {
     }
   }
   plan_options {
-    target = [terraform_data.check_slurm_worker_cpu_platform]
+    target = [module.slurm.helm_release.soperator_fluxcd_cm]
   }
   expect_failures = [var.gb300_login_pod_worker_reserve]
 }
@@ -246,7 +248,7 @@ run "automatic_colocation_rejects_zero_storage_reserve" {
     }
   }
   plan_options {
-    target = [terraform_data.check_slurm_worker_cpu_platform]
+    target = [module.slurm.helm_release.soperator_fluxcd_cm]
   }
   expect_failures = [var.gb300_login_pod_worker_reserve]
 }
