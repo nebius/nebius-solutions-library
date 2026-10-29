@@ -1486,14 +1486,14 @@ variable "gb300_login_pod_worker_reserve" {
 
   validation {
     condition = (
-      !coalesce(var.slurm_login_on_worker_nodes, false) ||
+      !local.login_on_worker_nodes ||
       (
         var.gb300_login_pod_worker_reserve.cpu_cores > 0 &&
         var.gb300_login_pod_worker_reserve.memory_gibibytes > 0 &&
         var.gb300_login_pod_worker_reserve.ephemeral_storage_gibibytes > 0
       )
     )
-    error_message = "GB300 login pod worker reserve values must be greater than zero when slurm_login_on_worker_nodes is true."
+    error_message = "GB300 login pod worker reserve values must be greater than zero whenever login pods run on workers, including automatic colocation (slurm_login_on_worker_nodes = null)."
   }
 }
 

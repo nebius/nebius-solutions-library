@@ -100,6 +100,10 @@ run "gb300_defaults_block_nvl72" {
     target = [module.slurm.helm_release.soperator_fluxcd_cm]
   }
   assert {
+    condition     = local.login_on_worker_nodes && !local.login_node_group.node_group_enabled && local.populate_jail_node_filter_name == "worker"
+    error_message = "GB300 without regional ARM login availability must keep login pods and populate-jail on workers."
+  }
+  assert {
     condition     = local.slurm_named_topologies[*].name == ["flat", "tree-ib", "block-nvl72"] && [for t in local.slurm_named_topologies : t.name if t.cluster_default] == ["block-nvl72"]
     error_message = "GB300: expected flat, tree-ib and block-nvl72, with block-nvl72 as the cluster default."
   }
@@ -188,4 +192,61 @@ run "mixed_cpu_gpu_rejects_tree_ib_on_all_nodesets" {
     target = [module.slurm.helm_release.soperator_fluxcd_cm]
   }
   expect_failures = [var.slurm_nodesets_partitions]
+}
+
+run "automatic_colocation_rejects_zero_cpu_reserve" {
+  command = plan
+  variables {
+    region                      = "eu-north1"
+    slurm_nodeset_workers       = [var.gb300_worker]
+    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    slurm_login_on_worker_nodes = null
+    gb300_login_pod_worker_reserve = {
+      cpu_cores                   = 0
+      memory_gibibytes            = 32
+      ephemeral_storage_gibibytes = 128
+    }
+  }
+  plan_options {
+    target = [terraform_data.check_slurm_worker_cpu_platform]
+  }
+  expect_failures = [var.gb300_login_pod_worker_reserve]
+}
+
+run "automatic_colocation_rejects_negative_memory_reserve" {
+  command = plan
+  variables {
+    region                      = "eu-north1"
+    slurm_nodeset_workers       = [var.gb300_worker]
+    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    slurm_login_on_worker_nodes = null
+    gb300_login_pod_worker_reserve = {
+      cpu_cores                   = 8
+      memory_gibibytes            = -1
+      ephemeral_storage_gibibytes = 128
+    }
+  }
+  plan_options {
+    target = [terraform_data.check_slurm_worker_cpu_platform]
+  }
+  expect_failures = [var.gb300_login_pod_worker_reserve]
+}
+
+run "automatic_colocation_rejects_zero_storage_reserve" {
+  command = plan
+  variables {
+    region                      = "eu-north1"
+    slurm_nodeset_workers       = [var.gb300_worker]
+    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    slurm_login_on_worker_nodes = null
+    gb300_login_pod_worker_reserve = {
+      cpu_cores                   = 8
+      memory_gibibytes            = 32
+      ephemeral_storage_gibibytes = 0
+    }
+  }
+  plan_options {
+    target = [terraform_data.check_slurm_worker_cpu_platform]
+  }
+  expect_failures = [var.gb300_login_pod_worker_reserve]
 }
