@@ -81,17 +81,17 @@ By default, `soperator-telemetry` is used as a profile for public o11y setup. Yo
 
 `cpu-g1` uses ARM64, supports seven presets with 6 GiB per vCPU, from `2vcpu-12gb` through `112vcpu-672gb`, and is
 supported for login nodes (minimum `16vcpu-96gb`) and CPU workers (minimum `4vcpu-24gb`). All workers sharing a jail
-must use the same CPU architecture, so `cpu-g1` workers can only be combined with GB300 or other ARM workers. GB300
-defaults to dedicated ARM login nodes and populates the shared jail on a login node. Omitted login resources resolve to
-`cpu-g1` / `32vcpu-192gb` for GB300 and `cpu-d3` / `16vcpu-64gb` for other workers. Explicit platform/preset values are
-preserved and checked for compatibility with the workers' jail architecture.
+must use the same CPU architecture, so `cpu-g1` workers can only be combined with GB300 or other ARM workers. Omitted
+login resources resolve to `cpu-g1` / `32vcpu-192gb` for GB300 and `cpu-d3` / `16vcpu-64gb` for other workers. Explicit
+platform/preset values are preserved and checked for compatibility with the workers' jail architecture.
 
-Existing GB300 deployments can retain worker colocation by explicitly setting `slurm_login_on_worker_nodes = true`
-before upgrading. This disables the dedicated login node group, places login pods and populate-jail on workers, and
-keeps `gb300_login_pod_worker_reserve` deductions. With `false` (the default), workers regain that capacity and login
-pods are sized from their own VMs. Provision ARM login capacity before migrating placement, and verify the existing jail
-contains compatible binaries; changing placement does not rebuild a populated jail. `cpu-g1` is not yet listed in any
-region, so GB300 deployments must retain colocation or set the login platform explicitly until it is.
+GB300 login placement follows `slurm_login_on_worker_nodes`. With the default `null`, login pods and populate-jail stay
+on GB300 workers, keeping the `gb300_login_pod_worker_reserve` deductions, while the login platform is not offered in
+the cluster's region. `cpu-g1` is not yet listed in any region, so GB300 clusters currently keep this colocation, as
+before. Once it is, GB300 clusters move to a dedicated ARM login node group that also populates the jail, and workers
+regain the reserved capacity. Set `true` to keep colocation, or `false` to require dedicated ARM login nodes. AMD64
+login platforms are rejected for GB300 because they cannot share the ARM jail. Changing placement does not rebuild a
+populated jail, so verify the existing jail contains compatible binaries before switching.
 
 Login `size` and `autoscaling` control pod replicas/HPA. Login VM autoscaling independently keeps at least one node and
 allows up to 100, provisioning additional nodes for pending pods. CPU, memory, and disk requests retain Kubernetes and

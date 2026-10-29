@@ -369,7 +369,7 @@ locals {
         sufficient = {
           (module.labels.name_nodeset_system)     = false
           (module.labels.name_nodeset_controller) = false
-          (module.labels.name_nodeset_worker)     = vcpus >= 4
+          (module.labels.name_nodeset_worker)     = false
           (module.labels.name_nodeset_login)      = vcpus >= 16
           (module.labels.name_nodeset_accounting) = false
           (module.labels.name_nodeset_nfs)        = false

@@ -1393,13 +1393,12 @@ variable "slurm_nodeset_auto_resume" {
 }
 
 variable "slurm_login_on_worker_nodes" {
-  description = "Retain GB300 login pods and populate-jail on workers, disable dedicated login VMs, and reserve worker capacity for login pods. false uses dedicated ARM login nodes for GB300. Set true explicitly for existing colocated deployments before upgrading."
+  description = "Place GB300 login pods and populate-jail on workers instead of dedicated ARM login nodes, reserving worker capacity for login pods. null (default) colocates while the login platform (cpu-g1 by default) is not offered in the region; true/false forces either mode."
   type        = bool
-  nullable    = false
-  default     = false
+  default     = null
 
   validation {
-    condition     = !var.slurm_login_on_worker_nodes || anytrue([for worker in var.slurm_nodeset_workers : worker.resource.platform == "gpu-gb300"])
+    condition     = !coalesce(var.slurm_login_on_worker_nodes, false) || anytrue([for worker in var.slurm_nodeset_workers : worker.resource.platform == "gpu-gb300"])
     error_message = "Worker colocation (slurm_login_on_worker_nodes) is supported only for GB300 clusters."
   }
 }
@@ -1487,7 +1486,7 @@ variable "gb300_login_pod_worker_reserve" {
 
   validation {
     condition = (
-      !var.slurm_login_on_worker_nodes ||
+      !coalesce(var.slurm_login_on_worker_nodes, false) ||
       (
         var.gb300_login_pod_worker_reserve.cpu_cores > 0 &&
         var.gb300_login_pod_worker_reserve.memory_gibibytes > 0 &&

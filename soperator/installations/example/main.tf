@@ -54,13 +54,18 @@ locals {
     local.gb300_platform,
   ])
 
-  # Dedicated ARM login nodes are the GB300 default. Existing clusters can
-  # explicitly retain worker colocation while migrating their shared jail.
-  login_on_worker_nodes = var.slurm_login_on_worker_nodes
+  login_platform = coalesce(var.slurm_nodeset_login.resource.platform, local.gb300_enabled ? "cpu-g1" : "cpu-d3")
+
+  # GB300 login pods stay on workers until the login platform is offered in the
+  # region; an explicit true/false overrides this.
+  login_on_worker_nodes = coalesce(
+    var.slurm_login_on_worker_nodes,
+    local.gb300_enabled && !contains(try(module.resources.platform_regions[local.login_platform], []), var.region),
+  )
   login_node_group = merge(var.slurm_nodeset_login, {
     node_group_enabled = local.login_on_worker_nodes ? false : var.slurm_nodeset_login.node_group_enabled
     resource = {
-      platform = coalesce(var.slurm_nodeset_login.resource.platform, local.gb300_enabled ? "cpu-g1" : "cpu-d3")
+      platform = local.login_platform
       preset   = coalesce(var.slurm_nodeset_login.resource.preset, local.gb300_enabled ? "32vcpu-192gb" : "16vcpu-64gb")
     }
   })

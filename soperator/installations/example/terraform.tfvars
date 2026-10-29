@@ -297,9 +297,9 @@ slurm_nodesets_partitions = [
 # Login nodes is where users appear when connect to the cluster.
 # Their number and size depends on user needs.
 #
-# GB300 defaults to dedicated ARM login nodes. Existing colocated GB300 clusters
-# must set this to true before upgrading to retain their placement and reserves.
-slurm_login_on_worker_nodes = false
+# GB300 login pods stay on workers while the ARM login platform (cpu-g1) is not offered in the region.
+# Set true/false to force colocation or dedicated ARM login nodes.
+# slurm_login_on_worker_nodes = null
 
 # size controls pod replicas; login VMs scale independently between 1 and 100.
 slurm_nodeset_login = {

@@ -14,8 +14,6 @@ mock_provider "helm" {}
 # Exactly one topology is the default and the created set is unchanged by the choice.
 # No mixed CPU/GB300 run: GB300 is arm64 and workers must share one CPU
 # architecture, so that shape is rejected before topology selection matters.
-# GB300 runs keep login on workers: the dedicated cpu-g1 login default is not
-# available in eu-north1, and login placement is irrelevant to topology.
 
 variables {
   active_checks_scope              = "essential"
@@ -94,10 +92,9 @@ run "gpu_defaults_tree_ib" {
 run "gb300_defaults_block_nvl72" {
   command = plan
   variables {
-    region                      = "eu-north1"
-    slurm_login_on_worker_nodes = true
-    slurm_nodeset_workers       = [var.gb300_worker]
-    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    region                    = "eu-north1"
+    slurm_nodeset_workers     = [var.gb300_worker]
+    slurm_nodesets_partitions = [var.main_partition, var.hidden_partition]
   }
   plan_options {
     target = [module.slurm.helm_release.soperator_fluxcd_cm]
@@ -120,10 +117,9 @@ run "gb300_defaults_block_nvl72" {
 run "gb300_complete_racks_share_one_range" {
   command = plan
   variables {
-    region                      = "eu-north1"
-    slurm_login_on_worker_nodes = true
-    slurm_nodeset_workers       = [merge(var.gb300_worker, { size = 36 })]
-    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    region                    = "eu-north1"
+    slurm_nodeset_workers     = [merge(var.gb300_worker, { size = 36 })]
+    slurm_nodesets_partitions = [var.main_partition, var.hidden_partition]
   }
   plan_options {
     target = [module.slurm.helm_release.soperator_fluxcd_cm]
@@ -148,10 +144,9 @@ run "gb300_complete_racks_share_one_range" {
 run "gb300_single_partial_rack_does_not_use_range" {
   command = plan
   variables {
-    region                      = "eu-north1"
-    slurm_login_on_worker_nodes = true
-    slurm_nodeset_workers       = [merge(var.gb300_worker, { size = 10 })]
-    slurm_nodesets_partitions   = [var.main_partition, var.hidden_partition]
+    region                    = "eu-north1"
+    slurm_nodeset_workers     = [merge(var.gb300_worker, { size = 10 })]
+    slurm_nodesets_partitions = [var.main_partition, var.hidden_partition]
   }
   plan_options {
     target = [module.slurm.helm_release.soperator_fluxcd_cm]
