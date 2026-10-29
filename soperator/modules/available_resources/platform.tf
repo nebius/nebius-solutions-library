@@ -2,6 +2,7 @@ locals {
   platforms = {
     cpu-e2         = "cpu-e2",
     cpu-d3         = "cpu-d3"
+    cpu-g1         = "cpu-g1"
     gpu-h100-sxm   = "gpu-h100-sxm"
     gpu-h200-sxm   = "gpu-h200-sxm"
     gpu-b200-sxm   = "gpu-b200-sxm"
@@ -13,6 +14,7 @@ locals {
   cpu_platform_by_platform = {
     (local.platforms.cpu-e2)         = "amd64"
     (local.platforms.cpu-d3)         = "amd64"
+    (local.platforms.cpu-g1)         = "arm64"
     (local.platforms.gpu-h100-sxm)   = "amd64"
     (local.platforms.gpu-h200-sxm)   = "amd64"
     (local.platforms.gpu-b200-sxm)   = "amd64"
@@ -22,6 +24,7 @@ locals {
   }
 
   platform_regions = tomap({
+    (local.platforms.cpu-g1) = []
     (local.platforms.cpu-e2) = [
       local.regions.eu-north1,
     ]

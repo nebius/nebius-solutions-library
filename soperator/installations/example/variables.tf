@@ -625,6 +625,7 @@ variable "platform_cuda_versions" {
     cpu-e1         = "13.0.3"
     cpu-e2         = "13.0.3"
     cpu-d3         = "13.0.3"
+    cpu-g1         = "13.0.3"
     gpu-l40s-a     = "13.0.3"
     gpu-l40s-d     = "13.0.3"
     gpu-h100-sxm   = "13.0.3"
@@ -1391,8 +1392,19 @@ variable "slurm_nodeset_auto_resume" {
   default     = false
 }
 
+variable "slurm_login_on_worker_nodes" {
+  description = "Place GB300 login pods and populate-jail on workers instead of dedicated ARM login nodes, reserving worker capacity for login pods. null (default) colocates while the login platform (cpu-g1 by default) is not offered in the region; true/false forces either mode."
+  type        = bool
+  default     = null
+
+  validation {
+    condition     = !coalesce(var.slurm_login_on_worker_nodes, false) || anytrue([for worker in var.slurm_nodeset_workers : worker.resource.platform == "gpu-gb300"])
+    error_message = "Worker colocation (slurm_login_on_worker_nodes) is supported only for GB300 clusters."
+  }
+}
+
 variable "slurm_nodeset_login" {
-  description = "Configuration of Slurm Login node set. Login pod autoscaling is disabled by default. When enabled, its replica bounds override size for login pods."
+  description = "Configuration of Slurm Login node set. Omitted platform/preset resolve to cpu-g1/32vcpu-192gb for GB300 and cpu-d3/16vcpu-64gb otherwise. Login pod autoscaling is disabled by default; when enabled, its replica bounds override size."
   type = object({
     size               = number
     node_group_enabled = optional(bool, true)
@@ -1402,10 +1414,10 @@ variable "slurm_nodeset_login" {
       max_size                          = optional(number, 4)
       target_cpu_utilization_percentage = optional(number, 70)
     }))
-    resource = object({
-      platform = string
-      preset   = string
-    })
+    resource = optional(object({
+      platform = optional(string)
+      preset   = optional(string)
+    }), {})
     boot_disk = optional(object({
       type                 = string
       size_gibibytes       = number
@@ -1415,14 +1427,11 @@ variable "slurm_nodeset_login" {
       size_gibibytes       = 256
       block_size_kibibytes = 4
     })
+    placement_policy_nodes = optional(list(string))
   })
   nullable = false
   default = {
     size = 1
-    resource = {
-      platform = "cpu-d3"
-      preset   = "16vcpu-64gb"
-    }
     boot_disk = {
       type                 = "NETWORK_SSD"
       size_gibibytes       = 256
@@ -1432,6 +1441,11 @@ variable "slurm_nodeset_login" {
   validation {
     condition     = var.slurm_nodeset_login.boot_disk.size_gibibytes >= 256
     error_message = "Boot disks for login nodes must be at least 256 GiB."
+  }
+  validation {
+    # The default platform depends on the workers, and preset names differ per platform.
+    condition     = var.slurm_nodeset_login.resource.preset == null || var.slurm_nodeset_login.resource.platform != null
+    error_message = "slurm_nodeset_login.resource.preset requires slurm_nodeset_login.resource.platform to be set too."
   }
   validation {
     condition     = var.slurm_nodeset_login.size >= 1
@@ -1472,14 +1486,14 @@ variable "gb300_login_pod_worker_reserve" {
 
   validation {
     condition = (
-      !anytrue([for worker in var.slurm_nodeset_workers : worker.resource.platform == "gpu-gb300"]) ||
+      !local.login_on_worker_nodes ||
       (
         var.gb300_login_pod_worker_reserve.cpu_cores > 0 &&
         var.gb300_login_pod_worker_reserve.memory_gibibytes > 0 &&
         var.gb300_login_pod_worker_reserve.ephemeral_storage_gibibytes > 0
       )
     )
-    error_message = "GB300 login pod worker reserve values must be greater than zero when GB300 workers are configured."
+    error_message = "GB300 login pod worker reserve values must be greater than zero whenever login pods run on workers, including automatic colocation (slurm_login_on_worker_nodes = null)."
   }
 }
 
@@ -1531,10 +1545,9 @@ resource "terraform_data" "check_slurm_nodeset_accounting" {
 
 resource "terraform_data" "check_slurm_nodeset" {
   for_each = merge({
-    "system"     = local.slurm_nodeset_system
-    "controller" = local.slurm_nodeset_controller
-    "login"      = var.slurm_nodeset_login
-    }, { for i, worker in var.slurm_nodeset_workers :
+    "system"                                        = local.slurm_nodeset_system
+    "controller"                                    = local.slurm_nodeset_controller
+    }, local.login_on_worker_nodes ? {} : { "login" = local.login_node_group }, { for i, worker in var.slurm_nodeset_workers :
     "worker_${i}" => worker
     },
     local.slurm_nodeset_nfs != null ? {
@@ -1602,6 +1615,13 @@ locals {
     for entry in local.slurm_worker_cpu_platform_entries :
     format("%s (%s) -> %s", entry.name, entry.platform, entry.cpu_platform)
   ])
+
+  slurm_login_cpu_platform = try(local.resources.login.cpu_platform, "")
+  populate_jail_cpu_platform = (
+    local.populate_jail_node_filter_name == "worker" ? try(local.slurm_worker_cpu_platforms[0], "") :
+    local.populate_jail_node_filter_name == "login" ? local.slurm_login_cpu_platform :
+    try(local.resources.system.cpu_platform, "")
+  )
 }
 
 resource "terraform_data" "check_slurm_worker_cpu_platform" {
@@ -1615,6 +1635,21 @@ resource "terraform_data" "check_slurm_worker_cpu_platform" {
       # worker nodesets must be binary-compatible.
       condition     = length(distinct(local.slurm_worker_cpu_platforms)) <= 1
       error_message = "Slurm worker nodesets must use the same CPU platform because they share one jail filesystem.\nConfigured CPU platforms:\n${local.slurm_worker_cpu_platform_message}"
+    }
+
+    precondition {
+      condition     = local.login_on_worker_nodes || alltrue([for architecture in local.slurm_worker_cpu_platforms : architecture == local.slurm_login_cpu_platform])
+      error_message = "Dedicated login nodes must use the same CPU platform as workers sharing the jail. Login: ${local.slurm_login_cpu_platform}.\nWorkers:\n${local.slurm_worker_cpu_platform_message}"
+    }
+
+    precondition {
+      condition     = alltrue([for architecture in local.slurm_worker_cpu_platforms : architecture == local.populate_jail_cpu_platform])
+      error_message = "The populate-jail target (${local.populate_jail_node_filter_name}, ${local.populate_jail_cpu_platform}) must match the workers' shared jail architecture."
+    }
+
+    precondition {
+      condition     = local.populate_jail_node_filter_name != "login" || local.login_node_group.node_group_enabled
+      error_message = "ARM jail population on dedicated login nodes requires slurm_nodeset_login.node_group_enabled = true. Use slurm_login_on_worker_nodes = true to retain GB300 worker colocation."
     }
   }
 }
@@ -2027,4 +2062,3 @@ variable "active_checks_scope" {
     error_message = "active_checks_scope must be one of: prod_quick, prod_acceptance, essential, skip_all, testing."
   }
 }
-
