@@ -91,7 +91,14 @@ fi
 export NEBIUS_VPC_SUBNET_ID
 
 # Object Storage Bucket
-export NEBIUS_BUCKET_NAME="tfstate-k8s-training-$(echo -n "${NEBIUS_TENANT_ID}-${NEBIUS_PROJECT_ID}" | md5sum | awk '$0=$1')"
+if command -v md5sum >/dev/null 2>&1; then
+  BUCKET_HASH=$(echo -n "${NEBIUS_TENANT_ID}-${NEBIUS_PROJECT_ID}" | md5sum | awk '$0=$1')
+else
+  # BSD md5 (stock macOS) — same digest, -q prints the hash only, so the
+  # bucket name is identical across Linux and macOS.
+  BUCKET_HASH=$(echo -n "${NEBIUS_TENANT_ID}-${NEBIUS_PROJECT_ID}" | md5 -q)
+fi
+export NEBIUS_BUCKET_NAME="tfstate-k8s-training-${BUCKET_HASH}"
 EXISTS=$(nebius storage bucket list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --format json \
@@ -105,6 +112,19 @@ if [ -z "${EXISTS}" ]; then
 else
   echo "Using existing bucket: ${NEBIUS_BUCKET_NAME}"
 fi
+
+# Resolve the bucket's S3 endpoint from the API (status.domain_name) rather
+# than hand-building storage.<region>.nebius.cloud — the API value is
+# authoritative if a region's endpoint ever differs from that pattern.
+BUCKET_INFO_OUTPUT=$(nebius storage bucket list \
+  --parent-id "${NEBIUS_PROJECT_ID}" \
+  --format json) || { echo "Error: failed to list storage buckets" >&2; return 1; }
+NEBIUS_BUCKET_DOMAIN=$(printf '%s' "${BUCKET_INFO_OUTPUT}" | jq -r --arg BUCKET "${NEBIUS_BUCKET_NAME}" '(.items[] | select(.metadata.name == $BUCKET) | .status.domain_name) // empty')
+if [ -z "${NEBIUS_BUCKET_DOMAIN}" ] || [ "${NEBIUS_BUCKET_DOMAIN}" = "null" ]; then
+  NEBIUS_BUCKET_DOMAIN="storage.${NEBIUS_REGION}.nebius.cloud"
+  echo "Warning: bucket domain_name not reported by the API; falling back to ${NEBIUS_BUCKET_DOMAIN}" >&2
+fi
+export NEBIUS_BUCKET_DOMAIN
 
 # Nebius service account
 NEBIUS_SA_NAME="k8s-training-sa"
@@ -201,7 +221,7 @@ terraform {
     key    = "${K8S_RESOLVED_TF_STATE_KEY}"
 
     endpoints = {
-      s3 = "https://storage.${NEBIUS_REGION}.nebius.cloud:443"
+      s3 = "https://${NEBIUS_BUCKET_DOMAIN}:443"
     }
     region = "${NEBIUS_REGION}"
 
@@ -227,5 +247,6 @@ echo "NEBIUS_PROJECT_ID: ${NEBIUS_PROJECT_ID}"
 echo "NEBIUS_REGION: ${NEBIUS_REGION}"
 echo "NEBIUS_VPC_SUBNET_ID: ${NEBIUS_VPC_SUBNET_ID}"
 echo "NEBIUS_BUCKET_NAME: ${NEBIUS_BUCKET_NAME}"
+echo "NEBIUS_BUCKET_DOMAIN: ${NEBIUS_BUCKET_DOMAIN}"
 echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
 echo "AWS_SECRET_ACCESS_KEY: <redacted>"
