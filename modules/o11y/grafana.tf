@@ -8,7 +8,32 @@ resource "random_password" "grafana_password" {
   override_special = "@#$%"
 }
 
-# Static access key for the existing k8s_node_group_sa service account
+resource "nebius_iam_v1_service_account" "grafana" {
+  count     = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
+  parent_id = var.parent_id
+  name      = "grafana-${var.cluster_id}"
+}
+
+resource "nebius_iam_v1_group" "grafana" {
+  count     = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
+  parent_id = var.parent_id
+  name      = "grafana-${var.cluster_id}"
+}
+
+resource "nebius_iam_v1_access_permit" "grafana" {
+  count       = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
+  parent_id   = nebius_iam_v1_group.grafana[0].id
+  resource_id = var.parent_id
+  role        = "viewer"
+}
+
+resource "nebius_iam_v1_group_membership" "grafana" {
+  count     = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
+  parent_id = nebius_iam_v1_group.grafana[0].id
+  member_id = nebius_iam_v1_service_account.grafana[0].id
+}
+
+# Grafana receives an Observability-only token from its own identity, never the node identity.
 resource "nebius_iam_v2_access_key" "grafana_key" {
   count       = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
   parent_id   = var.parent_id
@@ -16,18 +41,20 @@ resource "nebius_iam_v2_access_key" "grafana_key" {
   description = "Access key for Grafana module"
   account = {
     service_account = {
-      id = var.k8s_node_group_sa_id
+      id = nebius_iam_v1_service_account.grafana[0].id
     }
   }
 }
 
 # Generate access token from static key
 resource "terraform_data" "grafana_access_token" {
+  depends_on = [nebius_iam_v1_access_permit.grafana, nebius_iam_v1_group_membership.grafana]
+
   count = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
 
   triggers_replace = {
     access_key_id      = nebius_iam_v2_access_key.grafana_key[0].id
-    service_account_id = var.k8s_node_group_sa_id
+    service_account_id = nebius_iam_v1_service_account.grafana[0].id
   }
 
   provisioner "local-exec" {
@@ -47,7 +74,7 @@ TOKEN=$(nebius iam static-key issue \
   --parent-id "${var.parent_id}" \
   --account-service-account-id "$SERVICE_ACCOUNT_ID" \
   --service observability \
-  --name "grafana-token-$(date +%s)" \
+  --name "$SERVICE_ACCOUNT_ID-grafana-token-$(date +%s)" \
   --format json | jq -r '.token')
 
 if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
@@ -71,9 +98,15 @@ EOT
   }
 }
 
+data "local_sensitive_file" "grafana_access_token" {
+  depends_on = [terraform_data.grafana_access_token]
+
+  count    = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? 1 : 0
+  filename = "${path.root}/grafana_access_token.txt"
+}
+
 locals {
-  grafana_access_token_path = "${path.root}/grafana_access_token.txt"
-  grafana_access_token      = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? try(trimspace(file(local.grafana_access_token_path)), "") : ""
+  grafana_access_token = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? trimspace(data.local_sensitive_file.grafana_access_token[0].content) : ""
 }
 
 resource "nebius_applications_v1alpha1_k8s_release" "grafana" {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan the production access-key definitions with mocked providers.
+"""Check the production IAM and access-key definitions with mocked providers.
 
 Terraform 1.11 cannot mock the module's ephemeral MysteryBox resources. Build a
 temporary fixture containing the actual access-key blocks and IAM dependencies,
@@ -18,12 +18,23 @@ import tempfile
 MODULE = Path(__file__).resolve().parents[1]
 BLOCKS = {
     "loki.tf": (
-        ('data', 'nebius_iam_v1_group', 'loki_editors'),
+        ('resource', 'nebius_iam_v1_group', 'loki_storage'),
+        ('resource', 'nebius_iam_v1_access_permit', 'loki_storage'),
         ('resource', 'nebius_iam_v1_service_account', 'loki_s3_sa'),
         ('resource', 'nebius_iam_v1_group_membership', 'loki_sa_storage_editor'),
         ('resource', 'nebius_iam_v2_access_key', 'loki_s3_key'),
+        ('resource', 'random_string', 'loki_unique_id'),
+        ('resource', 'nebius_storage_v1_bucket', 'loki-bucket-chunks'),
+        ('resource', 'nebius_storage_v1_bucket', 'loki-bucket-ruler'),
+        ('resource', 'nebius_storage_v1_bucket', 'loki-bucket-admin'),
     ),
-    "grafana.tf": (('resource', 'nebius_iam_v2_access_key', 'grafana_key'),),
+    "grafana.tf": (
+        ('resource', 'nebius_iam_v1_service_account', 'grafana'),
+        ('resource', 'nebius_iam_v1_group', 'grafana'),
+        ('resource', 'nebius_iam_v1_access_permit', 'grafana'),
+        ('resource', 'nebius_iam_v1_group_membership', 'grafana'),
+        ('resource', 'nebius_iam_v2_access_key', 'grafana_key'),
+    ),
 }
 
 
@@ -47,6 +58,20 @@ def main():
                     raise RuntimeError(f"Expected one formatted {header} block in {filename}")
                 selected.append(matches[0])
             (fixture / filename).write_text("\n\n".join(selected) + "\n")
+        (fixture / "identity_names.tf").write_text('''output "identity_names" {
+  value = toset(concat(
+    nebius_iam_v1_service_account.grafana[*].name,
+    nebius_iam_v1_group.grafana[*].name,
+    nebius_iam_v1_service_account.loki_s3_sa[*].name,
+    nebius_iam_v1_group.loki_storage[*].name,
+    nebius_iam_v2_access_key.grafana_key[*].name,
+    nebius_iam_v2_access_key.loki_s3_key[*].name,
+    nebius_storage_v1_bucket.loki-bucket-chunks[*].name,
+    nebius_storage_v1_bucket.loki-bucket-ruler[*].name,
+    nebius_storage_v1_bucket.loki-bucket-admin[*].name,
+  ))
+}
+''')
         tests = fixture / "tests"
         tests.mkdir()
         shutil.copyfile(

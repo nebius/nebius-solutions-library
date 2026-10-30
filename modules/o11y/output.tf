@@ -26,7 +26,7 @@ output "nebius_grafana_password" {
 output "grafana_service_account" {
   description = "Grafana service account information"
   value = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? {
-    id                = var.k8s_node_group_sa_id
+    id                = nebius_iam_v1_service_account.grafana[0].id
     access_key_id     = nebius_iam_v2_access_key.grafana_key[0].status.aws_access_key_id
     secret_access_key = nebius_iam_v2_access_key.grafana_key[0].status.secret
     access_token      = local.grafana_access_token
