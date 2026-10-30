@@ -79,24 +79,6 @@ for o11y. This option defines whether you want to collect all infra logs in nebi
 By default, `soperator-telemetry` is used as a profile for public o11y setup. You can redefine it by setting
 `NEBIUS_OLLY_PROFILE` variable.
 
-`cpu-g1` uses ARM64 and defines seven presets with 6 GiB per vCPU, from `2vcpu-12gb` through `112vcpu-672gb`.
-It is supported for login nodes with at least `16vcpu-96gb`; `cpu-g1` worker nodes are currently rejected. All workers
-sharing a jail must use the same CPU architecture. Omitted login resources resolve to `cpu-g1` / `32vcpu-192gb` for
-GB300 and `cpu-d3` / `16vcpu-64gb` for other workers. Explicit platform/preset values are preserved and checked for
-compatibility with the workers' jail architecture.
-
-GB300 login placement follows `slurm_login_on_worker_nodes`. With the default `null`, login pods and populate-jail stay
-on GB300 workers, keeping the `gb300_login_pod_worker_reserve` deductions, while the login platform is not offered in
-the cluster's region. `cpu-g1` is not yet listed in any region, so GB300 clusters currently keep this colocation, as
-before. Once it is, GB300 clusters move to a dedicated ARM login node group that also populates the jail, and workers
-regain the reserved capacity. Set `true` to keep colocation, or `false` to require dedicated ARM login nodes. AMD64
-login platforms are rejected for GB300 because they cannot share the ARM jail. Changing placement does not rebuild a
-populated jail, so verify the existing jail contains compatible binaries before switching.
-
-Login `size` and `autoscaling` control pod replicas/HPA. Login VM autoscaling independently keeps at least one node and
-allows up to 100, provisioning additional nodes for pending pods. CPU, memory, and disk requests retain Kubernetes and
-sidecar reserves.
-
 ### 4. (Optional) Create Storage Infrastructure
 
 Create a "jail" filesystem - a shared filesystem for all Slurm nodes.

@@ -356,28 +356,6 @@ locals {
   ])
 
   presets_by_platforms_raw = tomap({
-    # Grace presets have 6 GiB per vCPU, so they do not share names with the x86
-    # catalog. ARM CPU nodes are supported for login (at least 16 vCPUs).
-    # Worker nodes are currently unsupported. Weka needs at least 32 vCPUs,
-    # as on x86.
-    (local.platforms.cpu-g1) = tomap({
-      for vcpus in [2, 4, 8, 16, 32, 56, 112] : "${vcpus}vcpu-${vcpus * 6}gb" => {
-        cpu_cores              = vcpus * local.reserve.cpu.coefficient - local.reserve.cpu.count
-        memory_gibibytes       = vcpus * 6 * local.reserve.ram.coefficient - local.reserve.ram.count
-        gpus                   = 0
-        gpu_cluster_compatible = false
-        sufficient = {
-          (module.labels.name_nodeset_system)     = false
-          (module.labels.name_nodeset_controller) = false
-          (module.labels.name_nodeset_worker)     = false
-          (module.labels.name_nodeset_login)      = vcpus >= 16
-          (module.labels.name_nodeset_accounting) = false
-          (module.labels.name_nodeset_nfs)        = false
-          weka                                    = vcpus >= 32
-        }
-      }
-    })
-
     (local.platforms.cpu-e2) = tomap({
       (local.presets.p-2c-8g)    = local.presets_cpu.c-2vcpu-8gb
       (local.presets.p-4c-16g)   = local.presets_cpu.c-4vcpu-16gb

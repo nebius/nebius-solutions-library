@@ -82,10 +82,6 @@ resource "nebius_mk8s_v1_node_group" "login" {
       }
     ]
 
-    placement_policy = length(coalesce(var.node_group_login.placement_policy_nodes, [])) > 0 ? {
-      nodes = var.node_group_login.placement_policy_nodes
-    } : null
-
     os = "ubuntu24.04"
 
     cloud_init_user_data = local.node_cloud_init.enabled ? local.node_cloud_init.cloud_init_data_no_nvidia : null
