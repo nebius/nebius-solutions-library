@@ -11,6 +11,6 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: ghcr.io/fluxcd/flux-cli:FLUX_VERSION
+          image: cr.nebius.cloud/soperator-proxy-ghcr-io/fluxcd/flux-cli:FLUX_VERSION
           args:
             - migrate

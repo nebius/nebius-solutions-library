@@ -9,7 +9,7 @@ variable "flux_version" {
   default     = "v2.9.6"
 
   validation {
-    condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$", var.flux_version))
-    error_message = "flux_version must be a stable semantic version such as v2.9.6."
+    condition     = var.flux_version == "v2.9.6"
+    error_message = "The eMudhra-patched controller images are pinned for Flux v2.9.6; update the image overrides before using another Flux version."
   }
 }
