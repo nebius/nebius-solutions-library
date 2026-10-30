@@ -142,3 +142,15 @@ variable "preemptible" {
   type        = bool
   default     = false
 }
+
+variable "reservation_ids" {
+  description = "Capacity block group IDs to launch the VMs in, e.g. [\"capacityblockgroup-xxxx\"]. With STRICT (the default when set), VMs never fall back to PAYG."
+  type        = list(string)
+  default     = []
+}
+
+variable "reservation_policy" {
+  description = "Capacity block usage policy: AUTO, STRICT or FORBID. Empty defaults to STRICT when reservation_ids is set."
+  type        = string
+  default     = ""
+}
