@@ -1,0 +1,11 @@
+# Existing versioned Nebius state bucket; keep access keys in the environment/vault.
+# Terragrunt adds a stable, separate key per configured cluster.
+bucket                      = "REPLACE_WITH_EXISTING_STATE_BUCKET"
+region                      = "eu-north1"
+endpoints                   = { s3 = "https://storage.eu-north1.nebius.cloud" }
+use_lockfile                = true
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_s3_checksum            = true
