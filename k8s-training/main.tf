@@ -68,10 +68,17 @@ module "nat-gateway" {
   ]
 }
 
-data "nebius_iam_v1_group" "editors" {
+resource "nebius_iam_v1_group" "editors" {
   count     = var.enable_k8s_node_group_sa ? 1 : 0
-  name      = "editors"
-  parent_id = var.tenant_id
+  name      = "${var.cluster_name}-node-editors"
+  parent_id = var.parent_id
+}
+
+resource "nebius_iam_v1_access_permit" "node_editor" {
+  count       = var.enable_k8s_node_group_sa ? 1 : 0
+  parent_id   = nebius_iam_v1_group.editors[0].id
+  resource_id = var.parent_id
+  role        = "editor"
 }
 
 resource "nebius_iam_v1_service_account" "k8s_node_group_sa" {
@@ -81,9 +88,15 @@ resource "nebius_iam_v1_service_account" "k8s_node_group_sa" {
 }
 
 resource "nebius_iam_v1_group_membership" "k8s_node_group_sa-admin" {
+  depends_on = [nebius_iam_v1_access_permit.node_editor]
+
   count     = var.enable_k8s_node_group_sa ? 1 : 0
-  parent_id = data.nebius_iam_v1_group.editors[0].id
+  parent_id = nebius_iam_v1_group.editors[0].id
   member_id = nebius_iam_v1_service_account.k8s_node_group_sa[count.index].id
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 ################
 # CPU NODE GROUP
