@@ -1,0 +1,38 @@
+inferenceDomain: ""
+ingressClass: haproxy
+tlsSecretName: runai-cluster-inference-tls
+servingVersion: "1.23.0"
+ingressAnnotations:
+  haproxy.org/ssl-redirect: "true"
+spec:
+  high-availability:
+    replicas: 2
+  ingress:
+    kourier:
+      enabled: true
+      service-type: ClusterIP
+  config:
+    autoscaler:
+      enable-scale-to-zero: "true"
+    features:
+      kubernetes.podspec-affinity: enabled
+      kubernetes.podspec-init-containers: enabled
+      kubernetes.podspec-persistent-volume-claim: enabled
+      kubernetes.podspec-persistent-volume-write: enabled
+      kubernetes.podspec-schedulername: enabled
+      kubernetes.podspec-securitycontext: enabled
+      kubernetes.podspec-tolerations: enabled
+      kubernetes.podspec-volumes-emptydir: enabled
+      kubernetes.podspec-fieldref: enabled
+      kubernetes.podspec-nodeselector: enabled
+      multi-container: enabled
+      multi-container-probing: enabled
+      secure-pod-defaults: enabled
+    network:
+      domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+      ingress-class: kourier.ingress.networking.knative.dev
+      default-external-scheme: https
+    observability:
+      metrics-protocol: prometheus
+      request-metrics-protocol: http/protobuf
+      request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics

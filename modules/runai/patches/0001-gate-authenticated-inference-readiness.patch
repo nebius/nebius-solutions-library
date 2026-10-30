@@ -1,0 +1,354 @@
+From aa4d0288767576635eedebd3b8cdd90bc8a5feaa Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rene=20Sch=C3=B6nfelder?= <rene.schoenfelder@tum.de>
+Date: Tue, 27 Oct 2026 09:19:46 +0000
+Subject: [PATCH] fix(composer): gate authenticated inference on model and
+ proxy readiness
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Keep model health checks on the model container and probe the OAuth listener independently. Knative multi-container probing must observe both before admitting serving traffic, including cold starts. Add native readiness regression coverage and preserve public serving behavior.
+
+Signed-off-by: Rene Schönfelder <rene.schoenfelder@tum.de>
+---
+ .../inference_workloads/compose_helpers.go    | 20 ++--
+ .../inference_to_knative_test.go              | 53 +++++++++-
+ ..._authenticated_external_auth_disabled.yaml |  5 +-
+ .../auth_groups_with_exposed_url_users.yaml   |  5 +-
+ .../inference_oauth2_contract_test.go         | 98 +++++++++++++++----
+ control-plane/workloads-and-policies/go.mod   |  2 +
+ control-plane/workloads-and-policies/go.sum   | 23 +++++
+ 7 files changed, 174 insertions(+), 32 deletions(-)
+
+diff --git a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/compose_helpers.go b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/compose_helpers.go
+index 1e09a6ee..a6818620 100644
+--- a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/compose_helpers.go
++++ b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/compose_helpers.go
+@@ -219,4 +219,4 @@
+ // public. No-op for public serving ports. Must run after CopyInt has projected
+-// the user container's port (the CustomizeServingProxy hook reads and clears
+-// the container's Ports and ReadinessProbe).
++// the user container's port (the CustomizeServingProxy hook clears its Ports
++// while preserving its ReadinessProbe).
+ func (itc *InferenceToKnativeComposer) buildAuthProxySidecar(
+@@ -260,11 +260,8 @@
+ 				OAuth2ProxyTemplatesSupported: itc.fc.Options.OAuth2ProxyTemplatesSupported,
+-				// Knative admits only one port-declaring spec.container:
+-				// hand the readiness probe to the serving proxy and clear
+-				// the user container's ports so it becomes a helper behind
+-				// the proxy.
++				// Only the proxy declares a port for Knative routing. Independent
++				// probes let multi-container probing check both model health and
++				// the proxy listener before admitting serving traffic.
+ 				CustomizeServingProxy: func(_ *corev1.PodSpec, servingProxy *corev1.Container) *workloadsApi.Error {
+-					servingProxy.ReadinessProbe = container.ReadinessProbe
+-					container.ReadinessProbe = nil
+-					if servingProxy.ReadinessProbe == nil {
+-						servingProxy.ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
++					if container.ReadinessProbe == nil {
++						container.ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+ 							TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(userPort)},
+@@ -272,2 +269,5 @@
+ 					}
++					servingProxy.ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
++						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(servingProxy.Ports[0].ContainerPort)},
++					}}
+ 					container.Ports = nil
+diff --git a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/inference_to_knative_test.go b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/inference_to_knative_test.go
+index c9936199..9522b5bf 100644
+--- a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/inference_to_knative_test.go
++++ b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/inference_to_knative_test.go
+@@ -24,2 +24,3 @@
+ 	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/util/intstr"
+ 	knapis "knative.dev/pkg/apis"
+@@ -31,2 +32,3 @@
+ type composerCase struct {
++	prepare                    func(*workloadsApi.InferenceSpecSpec)
+ 	name                       string
+@@ -105,2 +107,44 @@
+ 
++		Entry("authenticated serving preserves the model HTTP readiness probe", composerCase{
++			specFile:             "probes",
++			clusterStorageConfig: inferenceAuthTestConfig(),
++			prepare: func(spec *workloadsApi.InferenceSpecSpec) {
++				spec.ServingPort.Get().SetAuthorizationType(workloadsApi.SERVINGPORTACCESSAUTHORIZATIONTYPEENUM_AUTHENTICATED_USERS)
++				probe := spec.Probes.Get().Readiness.Get()
++				probe.Handler.Get().HttpGet.SetPort(9091)
++				probe.SetInitialDelaySeconds(7)
++				probe.SetPeriodSeconds(11)
++				probe.SetTimeoutSeconds(3)
++				probe.SetSuccessThreshold(2)
++				probe.SetFailureThreshold(4)
++			},
++			assert: func(target *KnativeServiceTarget) {
++				containers := target.Service.Spec.Template.Spec.Containers
++				Expect(containers[0].Ports).To(BeEmpty())
++				Expect(containers[0].ReadinessProbe).To(Equal(&corev1.Probe{
++					ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
++						Path: "/healthz", Port: intstr.FromInt32(9091),
++					}},
++					InitialDelaySeconds: 7, PeriodSeconds: 11, TimeoutSeconds: 3,
++					SuccessThreshold: 2, FailureThreshold: 4,
++				}))
++				Expect(containers[1].ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(composer.Oauth2ContainerDefaultPort))
++			},
++		}),
++
++		Entry("authenticated serving without a probe checks its actual model port", composerCase{
++			specFile:             "auth_authenticated",
++			clusterStorageConfig: inferenceAuthTestConfig(),
++			prepare: func(spec *workloadsApi.InferenceSpecSpec) {
++				spec.ServingPort.Get().SetContainer(7860)
++			},
++			assert: func(target *KnativeServiceTarget) {
++				containers := target.Service.Spec.Template.Spec.Containers
++				Expect(containers[0].Ports).To(BeEmpty())
++				Expect(containers[0].ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(7860)))
++				Expect(containers[1].ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(composer.Oauth2ContainerDefaultPort))
++				Expect(containers[1].Args).To(ContainElement("--upstream=http://localhost:7860"))
++			},
++		}),
++
+ 		Entry("serving auth still uses the proxy when external URL auth is disabled", composerCase{
+@@ -679,2 +723,5 @@
+ 	Expect(yaml.Unmarshal(specYaml, &src)).To(Succeed())
++	if tc.prepare != nil {
++		tc.prepare(&src)
++	}
+ 
+@@ -772,3 +819,5 @@
+ 	Expect(userContainer.Ports).To(BeEmpty())
+-	Expect(userContainer.ReadinessProbe).To(BeNil())
++	Expect(userContainer.ReadinessProbe).NotTo(BeNil())
++	Expect(userContainer.ReadinessProbe.TCPSocket).NotTo(BeNil())
++	Expect(userContainer.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(8080)))
+ 	Expect(proxyContainer.Name).To(Equal("runai-oauth2-proxy-0"))
+@@ -784,3 +833,3 @@
+ 	Expect(proxyContainer.ReadinessProbe.TCPSocket).NotTo(BeNil())
+-	Expect(proxyContainer.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(8080)))
++	Expect(proxyContainer.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(composer.Oauth2ContainerDefaultPort))
+ 	Expect(podSpec.Volumes).To(ContainElement(corev1.Volume{
+diff --git a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_authenticated_external_auth_disabled.yaml b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_authenticated_external_auth_disabled.yaml
+index 04e4bc13..1fb9897f 100755
+--- a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_authenticated_external_auth_disabled.yaml
++++ b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_authenticated_external_auth_disabled.yaml
+@@ -32,2 +32,5 @@
+           name: my-llm
++          readinessProbe:
++            tcpSocket:
++              port: 8080
+           resources: {}
+@@ -71,3 +74,3 @@
+             tcpSocket:
+-              port: 8080
++              port: 4180
+           resources: {}
+diff --git a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_groups_with_exposed_url_users.yaml b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_groups_with_exposed_url_users.yaml
+index 3fcfe56e..69548706 100644
+--- a/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_groups_with_exposed_url_users.yaml
++++ b/control-plane/workloads-and-policies/composer/composer_v2/inference_workloads/testing/expected/auth_groups_with_exposed_url_users.yaml
+@@ -62,2 +62,5 @@
+           name: my-llm
++          readinessProbe:
++            tcpSocket:
++              port: 8080
+           resources: {}
+@@ -102,3 +105,3 @@
+             tcpSocket:
+-              port: 8080
++              port: 4180
+           resources: {}
+diff --git a/control-plane/workloads-and-policies/composer/integration/inference_oauth2_contract_test.go b/control-plane/workloads-and-policies/composer/integration/inference_oauth2_contract_test.go
+index eb075aac..8d765d94 100644
+--- a/control-plane/workloads-and-policies/composer/integration/inference_oauth2_contract_test.go
++++ b/control-plane/workloads-and-policies/composer/integration/inference_oauth2_contract_test.go
+@@ -9,2 +9,5 @@
+ 	"context"
++	"net"
++	"net/http"
++	"net/http/httptest"
+ 
+@@ -20,2 +23,4 @@
+ 	corev1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/util/intstr"
++	"knative.dev/serving/pkg/queue/readiness"
+ )
+@@ -25,16 +30,3 @@
+ 		func(serviceSpecLabelsSupported bool, expectedNetworkingEndpoints int) {
+-			spec := authenticatedNIMInferenceSpec()
+-			composer := inference_workloads.NewInferenceToKnativeComposer(
+-				"my-llm",
+-				"team-a",
+-				"runai-team-a",
+-				"tester",
+-				nil,
+-				composer.FieldsComposerOptions{
+-					WorkloadV2ServiceSpecLabelsSupported: serviceSpecLabelsSupported,
+-				},
+-			).WithClusterStorageConfig(inferenceOAuth2ContractConfig())
+-			target := inference_workloads.NewMinimalKnativeServiceTarget()
+-
+-			Expect(composer.Compose(context.Background(), convutils.Ref(spec), target)()).To(BeNil())
++			target := composeAuthenticatedNIMInference(serviceSpecLabelsSupported)
+ 
+@@ -46,3 +38,8 @@
+ 			Expect(userContainer.Ports).To(BeEmpty())
+-			Expect(userContainer.ReadinessProbe).To(BeNil())
++			Expect(userContainer.ReadinessProbe).NotTo(BeNil())
++			Expect(userContainer.ReadinessProbe.HTTPGet).NotTo(BeNil())
++			Expect(userContainer.ReadinessProbe.HTTPGet.Path).To(Equal("/healthz"))
++			Expect(userContainer.ReadinessProbe.HTTPGet.Port.IntVal).To(Equal(int32(8080)))
++			Expect(userContainer.ReadinessProbe.InitialDelaySeconds).To(Equal(int32(5)))
++			Expect(userContainer.ReadinessProbe.PeriodSeconds).To(Equal(int32(10)))
+ 			Expect(proxyContainer.Name).To(Equal("runai-oauth2-proxy-0"))
+@@ -51,5 +48,4 @@
+ 			Expect(proxyContainer.ReadinessProbe).NotTo(BeNil())
+-			Expect(proxyContainer.ReadinessProbe.HTTPGet).NotTo(BeNil())
+-			Expect(proxyContainer.ReadinessProbe.HTTPGet.Path).To(Equal("/healthz"))
+-			Expect(proxyContainer.ReadinessProbe.HTTPGet.Port.IntVal).To(Equal(int32(8080)))
++			Expect(proxyContainer.ReadinessProbe.TCPSocket).NotTo(BeNil())
++			Expect(proxyContainer.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(4180)))
+ 
+@@ -83,4 +79,70 @@
+ 	)
++
++	DescribeTable("requires the model and OAuth listener to be ready before queue-proxy admits traffic",
++		func(modelHealthy, proxyListening, expectedReady bool) {
++			model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++				if !modelHealthy {
++					w.WriteHeader(http.StatusServiceUnavailable)
++				}
++			}))
++			DeferCleanup(model.Close)
++			proxy, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
++			Expect(err).NotTo(HaveOccurred())
++			proxyPort := proxy.Addr().(*net.TCPAddr).Port
++			if proxyListening {
++				DeferCleanup(func() { Expect(proxy.Close()).To(Succeed()) })
++			} else {
++				Expect(proxy.Close()).To(Succeed())
++			}
++
++			testPorts := map[int]int{8080: model.Listener.Addr().(*net.TCPAddr).Port, 4180: proxyPort}
++			remapPort := func(port intstr.IntOrString) intstr.IntOrString {
++				testPort, ok := testPorts[port.IntValue()]
++				Expect(ok).To(BeTrue(), "unexpected composed readiness port %s", port.String())
++				return intstr.FromInt(testPort)
++			}
++			var probes []*corev1.Probe
++			for _, container := range composeAuthenticatedNIMInference(true).Service.Spec.Template.Spec.Containers {
++				if container.ReadinessProbe == nil {
++					continue
++				}
++				probe := container.ReadinessProbe.DeepCopy()
++				probe.PeriodSeconds, probe.TimeoutSeconds = 1, 1
++				// Knative targets localhost; preserve each composed probe's destination.
++				switch {
++				case probe.HTTPGet != nil:
++					probe.HTTPGet.Host = "127.0.0.1"
++					if probe.HTTPGet.Scheme == "" {
++						probe.HTTPGet.Scheme = corev1.URISchemeHTTP
++					}
++					probe.HTTPGet.Port = remapPort(probe.HTTPGet.Port)
++				case probe.TCPSocket != nil:
++					probe.TCPSocket.Host = "127.0.0.1"
++					probe.TCPSocket.Port = remapPort(probe.TCPSocket.Port)
++				default:
++					Fail("authenticated NIM readiness must use HTTP or TCP")
++				}
++				probes = append(probes, probe)
++			}
++			Expect(readiness.NewProbe(probes).ProbeContainer()).To(Equal(expectedReady))
++		},
++		Entry("both are ready", true, true, true),
++		Entry("healthy model cannot hide a late OAuth listener", true, false, false),
++		Entry("OAuth listener cannot hide an unhealthy model", false, true, false),
++		Entry("neither is ready", false, false, false),
++	)
+ })
+ 
++func composeAuthenticatedNIMInference(serviceSpecLabelsSupported bool) *inference_workloads.KnativeServiceTarget {
++	GinkgoHelper()
++	spec := authenticatedNIMInferenceSpec()
++	infComposer := inference_workloads.NewInferenceToKnativeComposer(
++		"my-llm", "team-a", "runai-team-a", "tester", nil,
++		composer.FieldsComposerOptions{WorkloadV2ServiceSpecLabelsSupported: serviceSpecLabelsSupported},
++	).WithClusterStorageConfig(inferenceOAuth2ContractConfig())
++	target := inference_workloads.NewMinimalKnativeServiceTarget()
++	Expect(infComposer.Compose(context.Background(), convutils.Ref(spec), target)()).To(BeNil())
++	return target
++}
++
+ func authenticatedNIMInferenceSpec() workloadsApi.InferenceSpecSpec {
+diff --git a/control-plane/workloads-and-policies/go.mod b/control-plane/workloads-and-policies/go.mod
+index a4706351..e8635696 100644
+--- a/control-plane/workloads-and-policies/go.mod
++++ b/control-plane/workloads-and-policies/go.mod
+@@ -122,2 +122,3 @@
+ 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
++	github.com/gogo/protobuf v1.3.2 // indirect
+ 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+@@ -134,2 +135,3 @@
+ 	github.com/googleapis/google-cloud-go-testing v0.0.0-20210719221736-1c9a4c676720 // indirect
++	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
+ 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
+diff --git a/control-plane/workloads-and-policies/go.sum b/control-plane/workloads-and-policies/go.sum
+index 18c92dc6..20c5532e 100644
+--- a/control-plane/workloads-and-policies/go.sum
++++ b/control-plane/workloads-and-policies/go.sum
+@@ -237,2 +237,4 @@
+ github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++github.com/gogo/protobuf v1.3.2 h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=
++github.com/gogo/protobuf v1.3.2/go.mod h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q=
+ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+@@ -332,2 +334,4 @@
+ github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
++github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
++github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
+ github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=
+@@ -473,2 +477,4 @@
+ github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
++github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
++github.com/yuin/goldmark v1.2.1/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
+ github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
+@@ -525,2 +531,4 @@
+ golang.org/x/crypto v0.0.0-20190605123033-f99c8df09eb5/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
++golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
++golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+ golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
+@@ -538,2 +546,4 @@
+ golang.org/x/mobile v0.0.0-20190312151609-d3739f865fa6/go.mod h1:z+o9i4GpDbdi3rU15maQ/Ox0txvL9dWGYEHz965HBQE=
++golang.org/x/mod v0.2.0/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
++golang.org/x/mod v0.3.0/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
+ golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
+@@ -550,2 +560,4 @@
+ golang.org/x/net v0.0.0-20190620200207-3b0461eec859/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
++golang.org/x/net v0.0.0-20200226121028-0de0cce0169b/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
++golang.org/x/net v0.0.0-20201021035429-f5854403a974/go.mod h1:sp8m0HH+o8qH0wwXwYZr8TS3Oi6o0r6Gce1SSxlDquU=
+ golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
+@@ -562,2 +574,4 @@
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
++golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
++golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.23.0 h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=
+@@ -572,2 +586,3 @@
+ golang.org/x/sys v0.0.0-20190624142023-c5567b49c5d0/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.0.0-20200930185726-fdedc70b468f/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+@@ -580,2 +595,3 @@
+ golang.org/x/text v0.3.2/go.mod h1:bEr9sfX3Q8Zfm5fL9x+3itogRgK3+ptLWKqgva+5dAk=
++golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
+ golang.org/x/text v0.42.0 h1:JbOZXgfeCPU9gacVtYliJqOhD+zhrEqK4LfdpmlUZqI=
+@@ -596,4 +612,11 @@
+ golang.org/x/tools v0.0.0-20190628153133-6cdbf07be9d0/go.mod h1:/rFqwRUd4F7ZHNgwSSTFct+R/Kf4OFW1sUzUTQQTgfc=
++golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
++golang.org/x/tools v0.0.0-20200619180055-7c47624df98f/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
++golang.org/x/tools v0.0.0-20210106214847-113979e3529a/go.mod h1:emZCQorbCU4vsT4fOWvOPXz4eW1wZW4PmDk9uLelYpA=
+ golang.org/x/tools v0.50.0 h1:c2ifzfcuY7L90lZ2aKd8S4K2NpASF08SZx9ZuJkHmSU=
+ golang.org/x/tools v0.50.0/go.mod h1:7ulVMw3831Mwi5EZD6RomGyffr4VFjuNYXf2BbCEAV0=
++golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
++golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
++golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
++golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ gomodules.xyz/jsonpatch/v2 v2.5.0 h1:JELs8RLM12qJGXU4u/TO3V25KW8GreMKl9pdkk14RM0=

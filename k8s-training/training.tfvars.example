@@ -1,0 +1,22 @@
+# Supply tenant_id, parent_id, subnet_id and iam_token through environment.sh/TF_VAR_*.
+# Review regional accelerator availability and quota before applying.
+cluster_name                    = "training"
+region                          = "eu-north1"
+k8s_version                     = "1.35"
+ssh_public_key                  = { path = "~/.ssh/id_ed25519.pub" }
+cpu_nodes_platform              = "cpu-d3"
+cpu_nodes_preset                = "4vcpu-16gb"
+cpu_nodes_fixed_count           = 3
+cpu_disk_size                   = 512
+cpu_nodes_public_ips            = false
+gpu_nodes_public_ips            = false
+gpu_nodes_platform              = "gpu-h100-sxm"
+gpu_nodes_preset                = "1gpu-16vcpu-200gb"
+infiniband_fabric               = ""
+gpu_nodes_fixed_count_per_group = 1
+gpu_nodes_driverfull_image      = true
+enable_filestore                = true
+existing_filestore              = ""
+filestore_disk_size_gibibytes   = 100
+
+loki = { enabled = false }

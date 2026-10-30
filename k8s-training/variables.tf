@@ -19,7 +19,7 @@ variable "region" {
   type        = string
 }
 
-# K8s cluster 
+# K8s cluster
 
 # Mk8s cluster name
 variable "cluster_name" {
@@ -257,6 +257,58 @@ variable "gpu_node_groups" {
   description = "Number of GPU node groups."
   type        = number
   default     = 1
+}
+
+variable "gpu_node_group_overrides" {
+  description = "Optional settings in gpu_node_groups index order. Omitted settings inherit the existing GPU settings; keep indices stable."
+  type = list(object({
+    platform    = optional(string)
+    preset      = optional(string)
+    fixed_count = optional(number)
+    disk_type   = optional(string)
+    disk_size   = optional(number)
+    autoscaling = optional(object({
+      enabled  = optional(bool, false)
+      min_size = optional(number)
+      max_size = optional(number)
+    }))
+    preemptible = optional(bool)
+    reservation_policy = optional(object({
+      policy          = optional(string)
+      reservation_ids = optional(list(string))
+    }))
+    attach_gpu_cluster = optional(bool)
+    labels             = optional(map(string), {})
+    taints = optional(list(object({
+      key    = string
+      value  = optional(string, "")
+      effect = string
+    })))
+  }))
+  default  = []
+  nullable = false
+
+  validation {
+    condition     = length(var.gpu_node_group_overrides) <= var.gpu_node_groups
+    error_message = "GPU overrides must fit the existing gpu_node_groups count."
+  }
+
+  validation {
+    condition = alltrue([
+      for pool in var.gpu_node_group_overrides :
+      pool.reservation_policy == null ? true : (
+        !coalesce(pool.preemptible, var.gpu_nodes_preemptible) &&
+        (pool.reservation_policy.policy == null ? length(coalesce(pool.reservation_policy.reservation_ids, [])) == 0 :
+        contains(["AUTO", "STRICT", "FORBID"], pool.reservation_policy.policy)) &&
+        (pool.reservation_policy.policy != "FORBID" || length(coalesce(pool.reservation_policy.reservation_ids, [])) == 0) &&
+        alltrue([
+          for id in coalesce(pool.reservation_policy.reservation_ids, []) :
+          try(trimspace(id) != "", false)
+        ])
+      )
+    ])
+    error_message = "GPU reservations apply only to regular pools. Policy must be AUTO, STRICT or FORBID; IDs require a policy, must be nonempty, and cannot accompany FORBID."
+  }
 }
 
 variable "gpu_nodes_platform" {
@@ -599,6 +651,18 @@ variable "custom_driver" {
 
 }
 
+variable "gpu_operator_values" {
+  description = "Optional native values YAML content for the Marketplace GPU Operator."
+  type        = string
+  default     = null
+}
+
+variable "network_operator_values" {
+  description = "Optional native values YAML content for the Marketplace Network Operator."
+  type        = string
+  default     = null
+}
+
 variable "filesystem_csi" {
   description = "Configuration for Nebius Shared Filesystem CSI installation when a shared filesystem is present. Set previous_default_storage_class_name to an empty string to skip demoting another StorageClass."
   type = object({
@@ -697,4 +761,125 @@ variable "binpacking_forced_namespaces" {
   description = "If binpacking is enabled, force it for these namespaces instead of requiring each pod to opt in. Requires opa_gatekeeper_enable = true unless set to []."
   type        = list(string)
   default     = ["default"]
+}
+
+# Optional platform modules; native configuration is typed by each child module.
+variable "enable_runai" {
+  type     = bool
+  default  = false
+  nullable = false
+  validation {
+    condition     = !var.enable_runai || var.runai != null
+    error_message = "enable_runai requires runai configuration (control-plane or worker)."
+  }
+
+
+}
+variable "runai" {
+  description = "modules/runai config; a worker additionally supplies bootstrap_token_file outside Git."
+  type        = any
+  default     = null
+}
+variable "enable_dynamo" {
+  type     = bool
+  default  = false
+  nullable = false
+
+}
+variable "dynamo" {
+  description = "modules/dynamo configuration; Run:ai workers automatically reuse Run:ai's KAI scheduler."
+  type        = any
+  default     = {}
+  nullable    = false
+  validation {
+    condition     = !(var.enable_dynamo && var.enable_runai && try(var.runai.role == "worker", false)) || coalesce(try(var.dynamo.scheduler_mode, null), "runai") == "runai"
+    error_message = "Combined Run:ai/Dynamo must reuse Run:ai's KAI owner: omit scheduler_mode or set it to runai."
+  }
+}
+variable "enable_opencost" {
+  type     = bool
+  default  = false
+  nullable = false
+  validation {
+    condition     = !var.enable_opencost || var.opencost != null
+    error_message = "enable_opencost requires the existing Prometheus URL in opencost.prometheus_url."
+  }
+}
+variable "opencost" {
+  description = "Existing Prometheus URL and optional upstream values files."
+  type = object({
+    prometheus_url = string
+    namespace      = optional(string, "opencost")
+    chart_version  = optional(string, "2.5.33")
+    chart_path     = optional(string)
+    values_files   = optional(list(string), [])
+  })
+  default = null
+}
+
+variable "enable_nim_operator" {
+  description = "Install the native NIM Operator; model caches and services are separate resources."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "nim_operator" {
+  description = "modules/nim-operator configuration, including pinned chart and native values files."
+  type        = any
+  default     = {}
+  nullable    = false
+}
+
+variable "enable_mpi_operator" {
+  description = "Install the native MPI Operator; MPI workloads remain externally managed."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "mpi_operator" {
+  description = "modules/mpi-operator configuration; uses its pinned official manifest unless manifest_file is supplied."
+  type        = any
+  default     = {}
+  nullable    = false
+}
+
+variable "platform_namespaces" {
+  description = "Additional prerequisite namespaces; never include namespaces owned by Run:ai projects."
+  type        = set(string)
+  default     = []
+  nullable    = false
+}
+
+variable "platform_secrets" {
+  description = "Native Secret names and protected data files (TLS, CA, NGC, database). Increment revision when rotating data."
+  type = map(object({
+    name       = string
+    namespace  = string
+    type       = optional(string, "Opaque")
+    labels     = optional(map(string), {})
+    data_files = map(string)
+    revision   = optional(number, 1)
+  }))
+  default  = {}
+  nullable = false
+  validation {
+    condition     = alltrue([for secret in values(var.platform_secrets) : secret.revision >= 1])
+    error_message = "Secret revisions must be positive. Helm release storage may still retain referenced credentials."
+  }
+}
+
+variable "platform_releases" {
+  description = "Optional shared infrastructure charts, applied after native platform controllers. Model releases belong to the external application."
+  type = map(object({
+    namespace    = string
+    repository   = optional(string)
+    chart        = string
+    version      = string
+    values_files = optional(list(string), [])
+    timeout      = optional(number, 1800)
+  }))
+  default  = {}
+  nullable = false
 }

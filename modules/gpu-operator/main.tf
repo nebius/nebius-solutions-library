@@ -7,7 +7,7 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
   product_slug     = "nebius/nvidia-gpu-operator"
 
   sensitive = {
-    set = {
+    set = merge({
       "dcgmExporter.enabled"                                       = var.enable_dcgm_exporter
       "dcgmExporter.serviceMonitor.enabled"                        = var.enable_dcgm_service_monitor
       "dcgmExporter.serviceMonitor.honorLabels"                    = var.relabel_dcgm_exporter ? "false" : null
@@ -18,6 +18,18 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
       "dcgmExporter.serviceMonitor.relabelings[0].targetLabel"     = var.relabel_dcgm_exporter ? "app_kubernetes_io_name" : null
       "mig.strategy"                                               = var.mig_strategy != null ? var.mig_strategy : null
       "cdi.enabled"                                                = var.cdi_enabled
-    }
+      }, var.managed_image ? {
+      "driver.enabled"                 = false
+      "toolkit.enabled"                = false
+      "devicePlugin.enabled"           = false
+      "dcgm.enabled"                   = false
+      "dcgmExporter.enabled"           = false
+      "driver.nvidiaDriverCRD.enabled" = false
+    } : {})
+    values = var.values
+    version = var.managed_image || var.values != null ? sha256(jsonencode([
+      var.values, var.managed_image,
+      var.enable_dcgm_exporter, var.enable_dcgm_service_monitor, var.relabel_dcgm_exporter, var.mig_strategy, var.cdi_enabled
+    ])) : null
   }
 }
