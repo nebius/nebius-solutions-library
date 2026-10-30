@@ -69,7 +69,7 @@
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "da3514d2100f1055df98c0448f4b72ee896bc2ab14ee5ae74ddc757ba0019ddd"
+  "sha256": "256dba00c9eebd5bf43a288d1b1a51edb889e421b1acbddcc49228e38c838698"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -77,7 +77,7 @@
  },
  "apps/Deployment/kueue-system/dispatcher": {
   "component": "dispatcher",
-  "sha256": "e0d14a4f1c370a87d083c5c9b37b0774b4882453f770d8614493b7fb69e03f8b"
+  "sha256": "04e4b7562c00dec2c23d9d69edbce9e383a328d841180f69e18a7223599c5ed4"
  },
  "apps/Deployment/monitoring/alert-sink": {
   "component": "observability",
@@ -85,15 +85,15 @@
  },
  "batch/CronJob/kueue-system/price-feed": {
   "component": "dispatcher",
-  "sha256": "dbb892d8e1933c0213879cbf97de397d0d247cd24415a79025211c825fd2edb7"
+  "sha256": "013860d3d6720a6d853ab27fe9666b5ecce133ff766dcd043a0da679ad78e680"
  },
  "batch/CronJob/monitoring/cost-export": {
   "component": "observability",
-  "sha256": "60022369941725eea58563aebd1c00c5a5af6dfe60ccc5658632dd70246d0f9e"
+  "sha256": "f0c64bf9fa59c2eec891f70943872968fc967260de47ac088db12cdc67bf7096"
  },
  "batch/CronJob/ops/recover-stopped-nodes": {
   "component": "ops",
-  "sha256": "f402c254e9d228443884f71c67bd14908cc9c5984850d3bf753e771f01c1b271"
+  "sha256": "cd5daef76226267cc44c5a5f9df92e599e32d3c25597b3699f633db77399d064"
  },
  "cert-manager.io/Certificate/envoy-gateway-system/models": {
   "component": "gateway",
