@@ -1,0 +1,36 @@
+{{- $domain := required "inferenceDomain must be a wildcard DNS name" .Values.inferenceDomain -}}
+{{- if not (hasPrefix "*." $domain) -}}{{ fail "inferenceDomain must start with *." }}{{- end -}}
+{{- $spec := deepCopy .Values.spec -}}
+{{- $_ := set $spec "version" .Values.servingVersion -}}
+{{- $_ := set $spec.config "domain" (dict (trimPrefix "*." $domain) "") -}}
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: knative-serving
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml .Values.ingressAnnotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingressClass }}
+  rules:
+    - host: {{ $domain | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kourier
+                port:
+                  number: 80
+  tls:
+    - hosts: [{{ $domain | quote }}]
+      secretName: {{ required "tlsSecretName must reference an existing TLS Secret" .Values.tlsSecretName }}

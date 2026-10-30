@@ -1,5 +1,67 @@
 # Kubernetes for training in Nebius AI
 
+## Optional Run:ai and Dynamo installation
+
+New integrations are disabled by default:
+
+- `enable_runai`: one Run:ai control plane or registered worker; optional
+  ingress, Prometheus Operator and Knative/Kourier prerequisites.
+- `enable_dynamo`: Dynamo/Grove, reusing Run:ai's KAI scheduler on Run:ai workers.
+- `enable_nim_operator`, `enable_mpi_operator`, `enable_opencost`: the native
+  NIM Operator, stock Kubeflow MPI Operator and OpenCost.
+
+The [Run:ai module](../modules/runai/README.md) documents registration, TLS,
+PostgreSQL, prerequisites and the explicit 3.0.20 authenticated-readiness patch.
+Use [Dynamo's module](../modules/dynamo/README.md) for scheduler ownership.
+Customer identities, buckets, notebooks, model workloads and warm-reserve jobs
+belong to the external application, using native APIs.
+
+Copy an example to `terraform.tfvars` and supply its project, subnet, IAM and
+protected file inputs:
+
+- `training.tfvars.example`: ordinary training.
+- `inference.tfvars.example`: standalone Dynamo inference.
+- `runai-control-plane.tfvars.example`: a separate CPU control cluster.
+- `runai-dynamo.tfvars.example`: a worker with the current platform extensions.
+
+Run:ai profiles select Nebius managed driver images, disable duplicate
+observability installations, and supply TLS/CA/database Secrets.
+GPU/Network Operators use the existing Marketplace installers. Optional
+`gpu_operator_values` and `network_operator_values` accept YAML strings.
+Use inline YAML in `.tfvars`, or load a file with `file(...)` in Terraform or
+Terragrunt configuration. Explicit module settings override YAML; managed-image
+protections remain enforced.
+Run:ai workers using managed GPU images disable operator-owned drivers, runtime,
+device plugin and DCGM, including the Marketplace driver CRs. Marketplace owns
+operator chart versions; check installed versions against NVIDIA support matrices.
+Stock GPU discovery uses `platform_releases`; disable its device plugin and NFD.
+
+The write-only credential inputs require Kubernetes provider >=2.36 and Helm
+provider >=3.0.
+
+### Independently configured regional pools
+
+The existing CPU variables configure the single `cpu-only` group.
+`gpu_node_group_overrides` supplies settings that differ between the existing
+indexed GPU groups; `gpu_node_groups` remains their count. Omitted GPU settings
+inherit the flat GPU inputs. All groups share `node_group_strategy` for rollouts.
+The original `cpu-only` and `gpu[count]` addresses are retained.
+
+Use the existing regional defaults or supply explicit CPU/GPU platform and preset
+strings for regions outside the inherited defaults. Check the project's native
+platform catalog and MK8s compatibility matrix before selecting a shape.
+
+Provision infrastructure before installing controllers that require its API.
+For a new Run:ai fleet, install the CPU control plane, register workers through
+the native API/UI, then pass each worker's UUID/bootstrap token and install its
+extensions. Supply namespaces/Secrets before charts that reference them.
+MPI uses its stock versioned manifest, including its own namespace.
+
+Keep existing resources in their original backends. Existing Helm-owned operators
+and MPI installations require a reviewed ownership transition before adoption;
+no automatic migration or state commands are included.
+
+
 ## Features
 
 - Creating a Kubernetes cluster with CPU and GPU nodes.

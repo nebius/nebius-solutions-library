@@ -1,0 +1,8 @@
+# Synthetic conflicting component values exercise managed-image ownership.
+driver: {enabled: true}
+toolkit: {enabled: true}
+devicePlugin: {enabled: true}
+dcgm: {enabled: true}
+dcgmExporter: {enabled: true}
+gfd: {enabled: false}
+nfd: {enabled: false}

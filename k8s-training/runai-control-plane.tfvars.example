@@ -1,0 +1,44 @@
+# Separate CPU-only control cluster/state; supply tenant_id, parent_id, subnet_id
+# and iam_token externally. DNS, registry, PostgreSQL and certificates are inputs.
+cluster_name               = "runai-control"
+region                     = "eu-north1"
+k8s_version                = "1.35"
+ssh_public_key             = { path = "~/.ssh/id_ed25519.pub" }
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "8vcpu-32gb"
+cpu_nodes_fixed_count      = 3
+cpu_disk_size              = 128
+cpu_nodes_public_ips       = false
+gpu_node_groups            = 0
+gpu_nodes_driverfull_image = true
+custom_driver              = false
+infiniband_fabric          = ""
+enable_grafana             = false
+enable_prometheus          = false
+enable_nebius_o11y_agent   = false
+loki                       = { enabled = false }
+enable_runai               = true
+runai = {
+  role    = "control-plane"
+  version = "3.0.20"
+  domain  = "runai.example.com"
+  # The second file pins the reviewed readiness-patched workloads image.
+  # See modules/runai/README.md before building or selecting that image.
+  values_files = ["/secure/runai-control-plane-values.yaml", "/secure/runai-readiness-fix-values.yaml"]
+}
+platform_namespaces = ["runai-backend"]
+platform_secrets = {
+  control_tls = {
+    name       = "runai-backend-tls", namespace = "runai-backend", type = "kubernetes.io/tls"
+    data_files = { "tls.crt" = "/secure/control.crt", "tls.key" = "/secure/control.key" }
+  }
+  ca = {
+    name       = "runai-ca-cert", namespace = "runai-backend"
+    data_files = { "runai-ca.pem" = "/secure/ca-chain.pem" }
+  }
+  database = {
+    name       = "runai-postgresql", namespace = "runai-backend"
+    data_files = { "password" = "/secure/postgres-password", "postgres-password" = "/secure/postgres-password" }
+  }
+}
+# No users, customer buckets, notebooks, model releases or inference endpoints.
