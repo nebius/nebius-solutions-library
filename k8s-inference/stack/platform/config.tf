@@ -64,15 +64,22 @@ locals {
   platform_values             = module.config.platform_values[var.target]
 }
 
-# The Nebius IAM access token for the Kubernetes and Helm providers of this cluster; stack.sh sets
+# The Nebius IAM access token for the Kubernetes, Helm and kubectl providers of this cluster; stack.sh sets
 # TF_VAR_iam_token from NEBIUS_IAM_TOKEN (`nebius iam get-access-token`), exactly as k8s-training does.
+# Ephemeral (Terraform >= 1.10; this stage requires >= 1.12): the value is never written into a saved plan or the state,
+# and `terraform apply <saved plan>` reads it again from the environment at apply time. Until this change the token
+# was frozen into the plan file and Terraform ignored the fresh environment value at apply ("Ignoring variable when
+# applying a saved plan"), so a plan reviewed longer than the token's lifetime failed every Helm write with an expired
+# token (2026-10-14, three platform applies). Provider configuration may reference ephemeral values; no resource,
+# output or local may (tools/check.sh asserts the variable is ephemeral and referenced by providers.tf only).
 variable "iam_token" {
   type      = string
   sensitive = true
+  ephemeral = true
 }
 
 # Secret inputs named in terraform.tfvars `secrets` (the names of environment variables): stack.sh exports each named
-# variable as TF_VAR_<input> and refuses to run when a named variable is unset. A feature is off only when its name
+# variable as TF_VAR_<input> and refuses to plan, apply or destroy this stage when a named variable is unset. A feature is off only when its name
 # is set to "" in the tfvars, never because a variable happened to be missing from the shell (an apply without the
 # NGC key used to delete the NGC Secrets and the cache's nvcr.io credentials on every worker).
 variable "ngc_api_key" {
@@ -88,6 +95,17 @@ variable "hf_token" {
 }
 
 variable "registry_credentials" {
+  type      = string
+  sensitive = true
+  default   = null
+}
+
+# The image cache's static Container Registry key (secrets.registry_key_env, default REGISTRY_STATIC_KEY): issued
+# once per fleet by the operator with stack/scripts/registry-static-key.sh, never by Terraform. Until api 0.11.78 an
+# `external` data source issued it during `terraform plan` when its gitignored cache file was missing (a fresh
+# checkout, a second worktree): a read-only plan minted a real credential, two clusters planned in the same minute
+# collided on the key's name, and every cluster's plan proposed its own rotation of registry/zot-sync-credentials.
+variable "registry_key" {
   type      = string
   sensitive = true
   default   = null

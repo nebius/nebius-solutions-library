@@ -1,5 +1,6 @@
 # Namespaces, Secrets and cross-cluster identities. Values come from the cloud state (generated once) and
-# from the environment (secrets.*_env in terraform.tfvars); nothing is read from files in the repository.
+# from the environment (secrets.*_env in terraform.tfvars); nothing is read from files in the repository and
+# nothing here calls a cloud API: a plan of this stage issues no credential.
 locals {
   # knative-serving: the KnativeServing CR (wave 2) lives there; created here before the operator reconciles it.
   # registry: the image cache's namespace, only with the cache (images.cache.enabled).
@@ -37,6 +38,9 @@ locals {
   extra_registry = local.registry_off || var.registry_credentials == null || var.registry_credentials == "" ? {} : jsondecode(var.registry_credentials)
   ngc_on         = nonsensitive(local.ngc_key != "")
   hf_on          = nonsensitive(local.hf_token != "")
+  # the image cache's static key (variable registry_key): with the cache on, stack.sh refuses to run while the named
+  # variable is unset; a direct terraform call without it is stopped by the precondition on the Secret below
+  registry_key = var.registry_key == null ? "" : var.registry_key
 }
 
 check "secret_inputs_present" {
@@ -148,24 +152,13 @@ resource "kubernetes_secret_v1" "hf_token" {
   depends_on = [kubernetes_namespace_v1.ns]
 }
 
-# Image cache credentials (only with the cache, images.cache.enabled): a static Container Registry key of the hub
-# ops SA (issued once per operator by the Nebius CLI, cached under stack/.secrets; see
-# scripts/registry-static-key.sh) plus NGC and extra upstreams.
-data "external" "registry_key" {
-  count   = local.images_cache ? 1 : 0
-  program = ["bash", "${path.module}/../scripts/registry-static-key.sh"]
-  query = {
-    project = local.hub_project
-    sa_id   = local.cloud.clusters[local.hub_id].ops_service_account_id
-    name    = "${local.name}-image-cache"
-    cache   = "${local.repo}/stack/.secrets/${local.name}-registry-key.json"
-  }
-}
-
+# Image cache credentials (only with the cache, images.cache.enabled): the static Container Registry key of the hub
+# ops SA (variable registry_key, from the environment: issued once per fleet by the operator with
+# scripts/registry-static-key.sh, the same value on every cluster) plus NGC and extra upstreams.
 locals {
   registry_host = split("/", local.cloud.hub.registry)[0]
   zot_credentials = merge(
-    { (local.registry_host) = { username = "iam", password = try(data.external.registry_key[0].result.key, "") } },
+    { (local.registry_host) = { username = "iam", password = local.registry_key } },
     local.ngc_on == false ? {} : { "nvcr.io" = { username = "$oauthtoken", password = local.ngc_key } },
     local.extra_registry,
   )
@@ -179,6 +172,12 @@ resource "kubernetes_secret_v1" "zot_sync" {
   }
   data       = { "credentials.json" = jsonencode(local.zot_credentials) }
   depends_on = [kubernetes_namespace_v1.ns]
+  lifecycle {
+    precondition {
+      condition     = local.registry_key != ""
+      error_message = "images.cache is enabled but the registry static key is empty: export the variable named by secrets.registry_key_env (default REGISTRY_STATIC_KEY; issue the key once per fleet with stack/scripts/registry-static-key.sh). A plan never issues it."
+    }
+  }
 }
 
 # The model catalog the API serves (/etc/catalog): one file per entry, from stack/config locals.

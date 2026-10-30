@@ -39,3 +39,24 @@ def test_endpoint_domain_accepts_a_cluster_id(monkeypatch):
     assert models.endpoint_domain("eu-north1") == "203.0.113.1.sslip.io"
     assert models.endpoint_domain("north") == "203.0.113.1.sslip.io"  # the fleet's own id for that worker
     assert models.endpoint_domain("south") == ""  # no domain for that region: the caller gets its 503
+
+
+def test_fourteen_day_runs_and_recovery_deadlines_are_accepted(client, monkeypatch):
+    """The long-run contract: a run's timeout_s and recovery.deadline_s accept 14 days (1209600 s), one second more is
+    refused; the GPU bound of a budgeted key follows the explicit timeout."""
+    c, cl = client
+    body = {
+        "mode": "run",
+        "input": {},
+        "timeout_s": 14 * 86400,
+        "execution": {"recovery": {"on_infrastructure_loss": "recover", "deadline_s": 14 * 86400}},
+    }
+    r = c.post("/v1/models/hello-run:invoke", headers=H, json=body)
+    assert r.status_code == 202, r.text
+    assert cl.jobs[("tenant-demo", r.json()["id"])]["spec"]["activeDeadlineSeconds"] == 14 * 86400
+    assert appmod.INVOKE_TIMEOUT_MAX_S == 14 * 86400
+    body["timeout_s"] = 14 * 86400 + 1
+    assert c.post("/v1/models/hello-run:invoke", headers=H, json=body).status_code == 422
+    body["timeout_s"] = 3600
+    body["execution"]["recovery"]["deadline_s"] = 14 * 86400 + 1
+    assert c.post("/v1/models/hello-run:invoke", headers=H, json=body).status_code == 422

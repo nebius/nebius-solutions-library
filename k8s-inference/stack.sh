@@ -23,10 +23,11 @@ export TF_IN_AUTOMATION=1
 [ "$cmd" = check ] && exec "$ROOT/tools/check.sh" "$@"
 # Authentication, the same way as the library's other solutions: an IAM access token of the Nebius CLI's active
 # profile (`nebius profile activate <name>` to switch), read by the Nebius provider from NEBIUS_IAM_TOKEN and
-# passed to the Kubernetes/Helm providers as TF_VAR_iam_token. The CLI hands out its cached token, whose remaining
-# lifetime is unknown here, so the token is fetched again before every stage run (a token that expires inside one
-# stage fails that stage with "Unauthorized"; re-run it). Set NEBIUS_IAM_TOKEN yourself (CI: a service-account
-# token) to skip the CLI calls.
+# passed to the Kubernetes/Helm providers as TF_VAR_iam_token (an ephemeral variable: never in a plan file or the
+# state; `tf platform <id> -- apply <saved plan>` takes the token this script exports at apply time, however old the
+# plan is). The CLI hands out its cached token, whose remaining lifetime is unknown here, so the token is fetched
+# again before every stage run (a token that expires inside one stage fails that stage with "Unauthorized"; re-run
+# it). Set NEBIUS_IAM_TOKEN yourself (CI: a service-account token) to skip the CLI calls.
 TOKEN_FROM_CLI=0
 [ -n "${NEBIUS_IAM_TOKEN:-}" ] || TOKEN_FROM_CLI=1
 token() { [ "$TOKEN_FROM_CLI" = 1 ] && NEBIUS_IAM_TOKEN="$(nebius iam get-access-token)"; export NEBIUS_IAM_TOKEN TF_VAR_iam_token="$NEBIUS_IAM_TOKEN"; }
@@ -44,9 +45,11 @@ NAME=$(pq 'p["name"]'); BUCKET=$(pq 'p["state"]["bucket"]'); REGION=$(pq 'p["sta
 ORDER=$(pq '" ".join(p["order"])')
 
 # Secret inputs: terraform.tfvars `secrets` names the environment variables; each becomes TF_VAR_<input> of the
-# platform stage. A named variable that is unset stops here: nothing is planned or applied without it (an apply
-# without the NGC key would otherwise delete the NGC Secrets and the cache's credentials; set the name to null in the
-# tfvars to "" to run a fleet without that secret on purpose).
+# platform stage. A named variable that is unset stops a platform plan/apply/destroy before anything runs (an apply
+# without the NGC key would otherwise delete the NGC Secrets and the cache's credentials; set the name in the tfvars
+# to "" to run a fleet without that secret on purpose). Only the platform stage consumes them: the cloud stage,
+# `output`, `registry`, `clusters` and any read-only `tf` call run without (stack/scripts/registry-static-key.sh
+# discovers the hub project and ops SA through `output cloud` BEFORE the registry key exists).
 secret_inputs() {
   local pair input name missing=0
   for pair in $(pq '" ".join(f"{k}={v}" for k, v in p["secrets"].items() if v)'); do
@@ -68,8 +71,6 @@ creds() {
     set +a
   fi
 }
-
-secret_inputs
 
 tf_init() { # <stage> [<cluster-id>]
   local stage="$1" id="${2:-}" key dir="$ROOT/stack/$1"
@@ -109,6 +110,7 @@ case "$cmd" in
   preflight) python3 "$ROOT/stack/scripts/preflight.py" "$TFVARS" <<< "$PLAN" ;;
   plan|apply|destroy)
     target="${1:-all}"; shift || true
+    case "$target" in all|platform) secret_inputs ;; esac
     case "$target" in
       all)
         if [ "$cmd" = destroy ]; then
@@ -130,6 +132,7 @@ case "$cmd" in
     stage="${1:?stage}"; shift; id=""
     case "$stage" in platform) id="${1:?cluster id}"; shift ;; esac
     [ "${1:-}" = "--" ] && shift
+    case "$stage/${1:-}" in platform/plan|platform/apply|platform/destroy) secret_inputs ;; esac
     tf_init "$stage" "$id"; terraform -chdir="$ROOT/stack/$stage" "$@" ;;
   *) sed -n 2,18p "$0" >&2; exit 2 ;;
 esac

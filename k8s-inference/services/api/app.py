@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -9,11 +10,11 @@ import logging
 import time
 import urllib.parse
 import uuid
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 
@@ -25,14 +26,20 @@ import config as cfg
 import db
 import endpoints as ep
 import execution
+import instances
 import jobs
 import keys
 import kube
+import leases
 import models
 import monitoring
-import placement as placing
+import pause
+import placement as placing  # noqa: F401 - tests patch placing.choose_class through this name
 import render
 import schemas
+import sessions
+import stages
+import status
 from auth import (
     Principal,
     _principal,
@@ -40,8 +47,10 @@ from auth import (
     allows_model,
     authorize,
     check_model,
+    fleet_operator,
     forget,
     forget_hash,
+    key_view,
     principal,
     scoped,
 )
@@ -54,6 +63,8 @@ from reconciliation import fallback_switch as fallback_switch
 from reconciliation import idle_shutdown as idle_shutdown
 from reconciliation import recovery_switch as recovery_switch
 from reconciliation import release_stale_reservations as release_stale_reservations
+from reconciliation import unschedulable_switch as unschedulable_switch
+from resilience import cached, iso
 from schemas import INVOKE_TIMEOUT_MAX_S as INVOKE_TIMEOUT_MAX_S
 from schemas import (
     BindingRequest,
@@ -68,6 +79,10 @@ from schemas import (
 )
 
 log = logging.getLogger("api")
+_admit, _release = stages.admit, stages.release  # the sync and gateway admissions (tests patch these names)
+_job_deadline, _job_gpus = jobs.deadline_of, jobs.gpus_of  # tests read these names
+PAGE_DEFAULT, PAGE_MAX = 50, 500  # every list route: `limit` default and ceiling (docs/API.md "Pagination")
+_ops_auth_cache: dict = {}  # (listing id, key hash, role, models) -> (listing, until, names, entries): list_operations
 
 
 def check_placeholders() -> None:
@@ -99,6 +114,8 @@ async def _lifespan(_app: FastAPI):
         else:
             log.warning("ROUTER_KEY is not set: LiteLLM model groups are not registered")
         tasks = [asyncio.create_task(_reconcile_loop())]
+    if cfg.OPS_LIST_WARM_S > 0:
+        tasks.append(asyncio.create_task(_warm_loop()))  # the listing warmer (docs/API.md "Pagination")
     try:
         yield
     finally:
@@ -110,7 +127,7 @@ async def _lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.39", lifespan=_lifespan)
+app = FastAPI(title="Nebius Serverless 2.0 customer API", version="0.11.131", lifespan=_lifespan)
 
 
 INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annotation, env): bounded, never truncated
@@ -119,64 +136,106 @@ INPUT_MAX_BYTES = 60000  # a run's or async call's input lives on its Job (annot
 ADMITTED_HEADER = "x-serverless2-admitted"  # the API's own proxied call to a gateway: the hook must not count it again
 
 
-def _admit(p: Principal, operation: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
-    """Reserve the slot, the request and the GPU seconds of `operation` on the caller's key (keys.admit); nothing
-    without the database, nothing for the router key (it carries no budget)."""
-    if not db.enabled() or p.role == keys.ROUTER["role"]:
-        return {"replay": False}
-    try:
-        return keys.admit(keys.key_hash(p.key), operation, p.tenant, gpu_seconds, counts_request)
-    except keys.KeyLimit as e:
-        raise HTTPException(e.status, e.detail)
-
-
-def _release(operation: str, gpu_seconds: float | None = None) -> None:
-    if db.enabled():
+async def _warm_loop():
+    """Every OPS_LIST_WARM_S: re-read the operation listings callers asked for lately (jobs.warm_ops_listings)."""
+    while True:
         try:
-            keys.release(operation, gpu_seconds)
-        except Exception as e:  # noqa: BLE001 - the reconciler's sweep releases what this missed
-            log.warning("release of %s: %s", operation, e)
+            await asyncio.to_thread(jobs.warm_ops_listings)
+        except Exception as e:  # noqa: BLE001 - never ends the loop
+            log.warning("listing warmer pass failed: %s", str(e)[:160])
+        await asyncio.sleep(cfg.OPS_LIST_WARM_S)
 
 
-def _job_gpus(job: dict) -> int:
-    """GPUs a rendered Job (or JobSet) holds while it runs: nvidia.com/gpu over its containers times its parallelism."""
-
-    def pods(spec: dict) -> int:
-        tmpl = (spec.get("template") or {}).get("spec") or {}
-        n = 0
-        for c in (tmpl.get("containers") or []) + (tmpl.get("initContainers") or []):
-            res = c.get("resources") or {}
-            n += int(
-                str(
-                    (res.get("limits") or {}).get("nvidia.com/gpu")
-                    or (res.get("requests") or {}).get("nvidia.com/gpu")
-                    or 0
-                )
-            )
-        return n * int(spec.get("parallelism") or 1)
-
-    if job.get("kind") == "JobSet":
-        return sum(
-            pods((rj.get("template") or {}).get("spec") or {}) * int(rj.get("replicas") or 1)
-            for rj in (job.get("spec") or {}).get("replicatedJobs") or []
-        )
-    return pods(job.get("spec") or {})
+OPERATION_HEADER = "x-serverless2-operation"  # the admitted operation a caller names (with its token)
+ATTEMPT_HEADER = "x-serverless2-attempt"  # the caller's pod (an endpoint call's attempt)
+_admission_cache: dict[tuple, float] = {}  # (operation, attempt, key hash) -> verified until (the readiness loop polls)
+_admission_region: dict[tuple, str] = {}  # (operation, attempt) -> the region the caller's Job runs in
+ADMISSION_CACHE_S = 30
 
 
-def _gpu_reservation(gpus: int, req: "InvokeRequest", p: Principal) -> float:
-    """GPU seconds a run may take: its GPUs times its enforced timeout, for a key with a finite GPU-second budget
-    (such a key must give timeout_s on a GPU run); unbounded keys and CPU-only runs reserve nothing."""
-    if p.info.get("budget_gpu_seconds") is None or gpus == 0:
-        return 0.0
-    if not req.timeout_s:
-        raise HTTPException(400, "this key has a GPU-second budget: give timeout_s so the run's reservation is bounded")
-    return float(gpus * req.timeout_s)
+def _admitted_token(key_hash: str, model: str | None = None, operation: str | None = None) -> str:
+    """HMAC the gateway hook verifies on the API's own admitted calls: one API admission + its gateway authorization
+    is one logical request. Bound to the key, the model and the operation the admission was for
+    (`<key hash>:<model>:<operation>`: a proxied synchronous call's `sync-…` admission, an endpoint call's operation);
+    the router key is the shared secret of this fleet."""
+    msg = ":".join(x for x in (key_hash, model, operation) if x)
+    return hmac.new((cfg.ROUTER_KEY or "").encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
-def _admitted_token(key_hash: str) -> str:
-    """HMAC the gateway hook verifies on the API's own proxied calls (one API call + its gateway authorization is one
-    logical request); the router key is the shared secret of this fleet."""
-    return hmac.new((cfg.ROUTER_KEY or "").encode(), key_hash.encode(), hashlib.sha256).hexdigest()
+ADMITTED_BEARER_PREFIX = "s2-admitted."
+
+
+def _admitted_principal(token: str, operation: str, model: str) -> Principal:
+    """The principal of an admitted-only call: the operation's reservation names the key (by hash); the token must be
+    that key's admission for this model and operation; the key record (fleet database) gives scopes, models, budgets
+    and the tenant. 401 for anything else. The attenuation is structural: the credential is useless for any other
+    operation or model, and dies with the reservation (cancel, settlement)."""
+    if not cfg.ROUTER_KEY or not db.enabled() or not operation or not token:
+        raise HTTPException(401, "admitted credential not accepted")
+    h = keys.reservation_key_of(operation)  # the key the operation (or its root) is admitted on; None once released
+    if not h or not hmac.compare_digest(token, _admitted_token(h, model, operation)):
+        raise HTTPException(401, "admitted credential not accepted (no live reservation for it)")
+    info = keys.info(h)
+    if not info:
+        raise HTTPException(401, "the admitted operation's key no longer exists")
+    tenant = (info.get("metadata") or {}).get("tenant") or ""
+    if not tenant:
+        raise HTTPException(401, "the admitted operation's key carries no tenant")
+    return Principal(key=f"{ADMITTED_BEARER_PREFIX}{token}", tenant=tenant, info=info, key_hash=h)
+
+
+def _is_admitted(p: Principal, token: str, model: str, operation: str, attempt: str) -> bool:
+    """An exact, bounded proof that the gateway call is the API's own admitted call (docs/API.md "Endpoint calls"): the
+    token is the HMAC for this key, this model and the operation named; the operation holds a live reservation on
+    this key (admitted, not released: the ledger); for an endpoint call's caller the operation's Job is this key's,
+    this model's and not over, and the attempt named is one of its live pods. The reservation and the cancel fence
+    are read on every call; only the identity (Job, owner, pod) is remembered for ADMISSION_CACHE_S (the caller's
+    readiness loop), so a release or a cancel closes the gate at once."""
+    if not cfg.ROUTER_KEY or not token:
+        return False
+    key_hash = p.hash
+    if operation and hmac.compare_digest(token, _admitted_token(key_hash, model, operation)):
+        # the live state, on every call (never cached): the reservation and the cancel fence
+        if db.enabled():
+            try:
+                if keys.reservation_key_of(operation) != key_hash:
+                    return False  # not admitted on this key, or released already (terminal, cancelled, billed)
+                if not operation.startswith("sync-") and attempts.enabled():
+                    marks = attempts._marks(operation)
+                    if marks and marks[1]:
+                        return False  # cancelled: no fresh work for a cancelled operation
+            except Exception as e:  # noqa: BLE001 - no proof without the ledger
+                log.warning("admission check of %s: %s", operation, e)
+                return False
+        if operation.startswith("sync-"):
+            return True
+        # the identity, cached ADMISSION_CACHE_S (immutable while it holds): the operation's Job is this key's and this
+        # model's, not over, and the attempt named is one of its live pods
+        now = time.time()
+        if _admission_cache.get((operation, attempt, key_hash), 0) > now:
+            return True
+        try:
+            job, region = jobs.find(p.namespace, operation)
+        except HTTPException:
+            return False
+        _admission_region[(operation, attempt)] = region or REGION
+        md = job["metadata"]
+        if (md.get("annotations") or {}).get(f"{cfg.LABEL}/key") != key_hash:
+            return False
+        if (md.get("labels") or {}).get(f"{cfg.LABEL}/model") != model or status.finished(job):
+            return False
+        if not attempt:
+            return False
+        pods = [
+            x
+            for x in (job.get("_pods") or [])
+            if x["metadata"]["name"] == attempt and (x.get("status") or {}).get("phase") in ("Pending", "Running")
+        ]
+        if not pods:
+            return False
+        _admission_cache[(operation, attempt, key_hash)] = now + ADMISSION_CACHE_S
+        return True
+    return False
 
 
 def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
@@ -199,23 +258,6 @@ def _endpoint_limits(p: Principal, mode: str, admitted: bool = False) -> None:
     if mode == "gateway" and not admitted and p.info.get("max_concurrent") is not None:
         raise HTTPException(
             501, "direct endpoints cannot hold per-key concurrency reservations; use the synchronous API invoke path"
-        )
-    if mode == "async" and any(p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "rate_limit")):
-        raise HTTPException(
-            501,
-            "bounded asynchronous endpoint admission awaits the authenticated caller integration; use synchronous API invoke",
-        )
-
-
-def _continuation_limits(p: Principal) -> None:
-    # Resume/export/recovery currently create a new Job outside _create_admitted.
-    # Do not let that re-entry path bypass a migrated key's reserved units.
-    if any(
-        p.info.get(k) is not None for k in ("max_concurrent", "budget_requests", "budget_gpu_seconds", "rate_limit")
-    ):
-        raise HTTPException(
-            501,
-            "bounded key continuations require reservation transfer; resume/export/fallback/recovery are not yet supported",
         )
 
 
@@ -248,18 +290,69 @@ def _variant_for(m: dict, inp, cluster: str) -> dict:
     return vs[0]
 
 
+def _deployment_of(m: dict, requested: str | None) -> tuple[str, str]:
+    """Where a request for model `m` goes: (the deployment's cluster id as the catalog keys it, the Nebius region this
+    API reaches it in). `requested` (a request's `region`) may name the cluster id (`north`) or the region
+    (`eu-north1`); nothing = this API's own cluster when the model is deployed there, else the model's only
+    deployment. Two deployments in one region are never guessed between (400: name the cluster); a cluster this API
+    cannot reach is 400 (one kubeconfig per region, docs/API.md)."""
+    deps = list(m.get("regions") or [])
+    if not deps:
+        raise HTTPException(400, f"model {m.get('name')} is not deployed anywhere")
+    by_region: dict[str, list[str]] = {}
+    for cid in deps:
+        by_region.setdefault(kube.cluster_region(cid), []).append(cid)
+    if requested is None:
+        own = by_region.get(REGION) or []
+        if len(own) > 1:
+            raise HTTPException(400, f"model {m['name']} has several deployments in {REGION} ({own}); give region")
+        if own:
+            cid = own[0]
+        elif len(deps) == 1:
+            cid = deps[0]
+        else:
+            raise HTTPException(400, f"model {m['name']} is deployed in {deps}; give region (a cluster id or a region)")
+    elif requested in deps:
+        cid = requested
+    else:
+        same = by_region.get(requested) or []
+        if not same:
+            raise HTTPException(400, f"model {m['name']} is deployed in {deps}, not {requested}")
+        if len(same) > 1:
+            raise HTTPException(
+                400, f"region {requested} has several deployments of {m['name']} ({same}); give the cluster id"
+            )
+        cid = same[0]
+    region = kube.cluster_region(cid)
+    if region not in kube.regions():
+        raise HTTPException(400, f"cluster {cid} ({region}) is not served by this API (available: {kube.regions()})")
+    if len(by_region.get(region) or []) > 1 and kube.cluster_id_or_none(region) != cid:
+        raise HTTPException(
+            400,
+            f"cluster {cid} shares region {region} with {by_region[region]}; this API reaches one cluster per region",
+        )
+    return cid, region
+
+
+def _status_of(obj: str, ns: str, region: str) -> dict:
+    """kube.endpoint_status of a deployed object; `unavailable` when its region cannot be read."""
+    try:
+        return kube.endpoint_status(obj, ns, region)
+    except (HTTPException, ApiException):
+        return {"status": "unavailable", "replicas_ready": None}
+
+
 def _public(m: dict, p: Principal | None = None) -> dict:
     if p is not None and (p.info.get("metadata") or {}).get("role") != "admin":
         m = {**m, "spec": None}  # container configuration belongs to fleet administrators
     if m["mode"] == "run":
         return catalog.to_public(m)
-    statuses = []
-    for region in m["regions"]:  # the endpoints' live state, read in their clusters (REGION_KUBECONFIGS)
-        try:
-            st = kube.endpoint_status(m["k8s_name"], m["namespace"], region)
-        except (HTTPException, ApiException):
-            st = {"status": "unavailable", "replicas_ready": None}
-        statuses.append({"region": region, **st})
+    # deployments by cluster id; the live state is read in the cluster's region (REGION_KUBECONFIGS)
+    statuses = [
+        {"region": r, "cluster": cid, **_status_of(m["k8s_name"], m["namespace"], r)}
+        for cid in m["regions"]
+        for r in (kube.cluster_region(cid),)
+    ]
     return catalog.to_public(m, statuses)
 
 
@@ -311,9 +404,31 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                 "max_nodes": pool.get("max_nodes"),
                 "interconnect": pool.get("interconnect"),
                 "local_nvme": bool(pool.get("local_nvme")),
+                # the node group behind the pool and its console page (docs/API.md "Placement")
+                "node_group_id": pool.get("node_group_id"),
+                "console_url": kube.console_node_url(pool.get("region"), pool.get("node_group_id"), None),
             }
             for pool in pools
         ],
+        # the GPU-free pools per cluster: the system nodes and the customer CPU pools (docs/FLEET.md "Customer CPU
+        # pools"), and whether tenant work may take the system nodes at all
+        "cpu_pools": [
+            {
+                "region": kube.cluster_region(cid),
+                "cluster": cid,
+                "pool": name,
+                "kind": entry.get("kind"),
+                "platform": entry.get("platform"),
+                "preset": entry.get("preset"),
+                "min_nodes": entry.get("min_nodes"),
+                "max_nodes": entry.get("max_nodes"),
+                "node_group_id": entry.get("node_group_id"),
+                "console_url": kube.console_node_url(cid, entry.get("node_group_id"), None),
+            }
+            for cid, by_name in sorted((kube.fleet().get("cpu_pools") or {}).items())
+            for name, entry in sorted((by_name or {}).items())
+        ],
+        "tenant_system_flavor": kube.tenant_system_allowed(),
     }
     # the caller's tenant: its quotas as terraform.tfvars shaped them (charts/fleet tenants.yaml) and, live, what its
     # queues hold per region (docs/FLEET.md "Tenants")
@@ -347,6 +462,9 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
                     "roles": ["control", "manager"] if control else ["worker"],
                     "api_url": PUBLIC_API_URL if region == REGION else None,  # the fleet's one API
                     "grafana_url": GRAFANA_URLS.get("control" if control else region) or GRAFANA_URLS.get(region),
+                    # the mk8s cluster behind the id and its console page (docs/API.md "Placement")
+                    "cluster_id": kube.cluster_entry("control" if control else cid).get("cluster_id"),
+                    "console_url": _console_cluster_url("control" if control else cid),
                     **kube.cluster_summary(region),
                 }
             )
@@ -355,8 +473,16 @@ def fleet_info(live: bool = False, p: Principal = Depends(principal)):
 
 
 @app.get("/v1/models", responses={200: {"model": list[schemas.Model]}})
-def list_models(p: Principal = Depends(scoped("read:catalog"))):
-    return [_public(m, p) for m in catalog.all_models().values() if allows_model(p, m["name"])]
+def list_models(
+    response: Response,
+    p: Principal = Depends(scoped("read:catalog")),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The definitions the key may see, by id, one page at a time (docs/API.md "Pagination": `limit`, `cursor`,
+    `X-Next-Cursor`, `X-Total-Count`); the live endpoint state is read for the page's definitions only."""
+    mine = [m for m in catalog.all_models().values() if allows_model(p, m["name"])]
+    return [_public(m, p) for m in _page(response, mine, lambda m: m["name"], cursor, limit)]
 
 
 def _runtime_or_409(mid: str) -> dict:
@@ -378,25 +504,25 @@ def _writes_here():
 def _write_model(spec: dict, p: Principal, replace: bool, expected: int | None = None) -> dict:
     """Commit desired state and history, then attempt its durable reconciliation."""
     _writes_here()
-    entry = models.to_entry(spec, managed_by="api")
-    if "scaling" in entry["spec"]:
+    d = models.definition(spec, managed_by="api")
+    if "scaling" in d["spec"]:
         spec = {
             **spec,
-            "scaling": entry["spec"]["scaling"],
+            "scaling": d["spec"]["scaling"],
         }  # store the complete policy that was rendered (models.validate)
-    mid = entry["id"]
+    mid = d["id"]
     existing = catalog.get(mid)
     if existing and not replace:
         raise HTTPException(409, f"model {mid} exists (PUT replaces it)")
     if existing:
         _runtime_or_409(mid)
-    result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(entry["deployments"]), "applied": {}}
+    result = {"id": mid, "kind": spec.get("kind", "endpoint"), "regions": list(d["deployments"]), "applied": {}}
     row = db.upsert_model(
-        entry, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace
+        d, spec, by=p.info.get("key_alias") or p.info.get("key_name"), expected=expected, create_only=not replace
     )
     catalog.invalidate()
     result.update(reconcile_models().get(mid, {"pending": True}))
-    result.update({"version": row.get("version"), "model": catalog.to_public(catalog.normalise(entry))})
+    result.update({"version": row.get("version"), "model": catalog.to_public(d)})
     return result
 
 
@@ -455,6 +581,25 @@ def get_model(model: str, p: Principal = Depends(scoped("read:catalog"))):
 )
 async def authorize_endpoint(model: str, request: Request, path: str = ""):
     """Envoy prefixes the original URI with a model identity fixed by the endpoint's SecurityPolicy."""
+    if sessions.enabled():
+        if any(request.headers.get(h) for h in sessions.INJECTED):
+            # only the hook sets these towards the worker; a client that sends them is forging a worker identity
+            raise HTTPException(403, "x-serverless2-session / x-serverless2-connection are not client headers")
+        claim = sessions.claim_of(request.headers)
+        if claim:
+            # a live session (docs/API.md "Sessions"): the claim binds exactly once, the session already holds the
+            # key's slot and request; the worker learns the session and connection ids from the injected headers
+            m = catalog.get(model) or _endpoint_model(model)
+            s = await asyncio.to_thread(sessions.bind, claim, m["name"])
+            return JSONResponse(
+                {},
+                headers={
+                    "x-serverless2-tenant": s["tenant"],
+                    "x-serverless2-key-alias": "",
+                    sessions.SESSION_HEADER: s["id"],
+                    sessions.CONNECTION_HEADER: s["connection"],
+                },
+            )
     key = request.headers.get("authorization", "")
     if not key.lower().startswith("bearer "):
         token = request.query_params.get("api_key", "")
@@ -463,25 +608,107 @@ async def authorize_endpoint(model: str, request: Request, path: str = ""):
             if not token and (protocol.startswith("bearer.") or protocol.startswith("sk-")):
                 token = protocol.removeprefix("bearer.")
         key = f"Bearer {token}" if token else ""
-    p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
+    if key.startswith(f"Bearer {ADMITTED_BEARER_PREFIX}"):
+        # an operation-scoped credential (docs/JOBS.md "Endpoint children"): the admitted token itself, bound to the
+        # key's hash, the model and the operation, valid only while that operation holds a live reservation; the
+        # principal is rebuilt server-side from the key record by hash. No customer key travels, none is stored.
+        p = await asyncio.to_thread(
+            _admitted_principal,
+            key[len(f"Bearer {ADMITTED_BEARER_PREFIX}") :],
+            request.headers.get(OPERATION_HEADER, ""),
+            model,
+        )
+    else:
+        p = await _principal(key, allow_router=True)  # LiteLLM's deployments call here with the fleet's router key
     token = request.headers.get(ADMITTED_HEADER, "")
-    admitted = (
-        bool(cfg.ROUTER_KEY) and bool(token) and hmac.compare_digest(token, _admitted_token(keys.key_hash(p.key)))
-    )
-    await asyncio.to_thread(
-        _authorize_model, p, model, admitted
+    verified = await asyncio.to_thread(
+        _authorize_model,
+        p,
+        model,
+        token,
+        request.headers.get(OPERATION_HEADER, ""),
+        request.headers.get(ATTEMPT_HEADER, ""),
+        request.method,
     )  # catalog (database) and Kubernetes calls: off the event loop
+    # the markers the worker attaches its native execution to come only from this verified context: on an admitted
+    # call the operation and attempt the token proved, on any other call empty (Envoy overrides what a client sent)
     return JSONResponse(
-        {}, headers={"x-serverless2-tenant": p.tenant, "x-serverless2-key-alias": str(p.info.get("key_alias") or "")}
+        {},
+        headers={
+            "x-serverless2-tenant": p.tenant,
+            "x-serverless2-key-alias": str(p.info.get("key_alias") or ""),
+            OPERATION_HEADER: verified[0],
+            ATTEMPT_HEADER: verified[1],
+        },
     )
 
 
-def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
+def _delegated_child(operation: str) -> bool:
+    """Whether `operation` is a live endpoint child of a run on the ledger (keys.member_of kind `child`, active): its
+    model was granted by the parent run class's frozen `child_endpoints` (children.create), not by the key's own
+    allow-list. Nothing without the ledger."""
+    if not operation or not db.enabled():
+        return False
+    try:
+        member = keys.member_of(operation)
+    except Exception as e:  # noqa: BLE001 - no proof without the ledger
+        log.warning("delegation check of %s: %s", operation, e)
+        return False
+    return bool(member) and member.get("kind") == "child" and member.get("state") in (None, "active")
+
+
+def _authorize_model(
+    p: Principal, model: str, token: str = "", operation: str = "", attempt: str = "", method: str = "GET"
+) -> tuple[str, str]:
+    """The gateway's authorization of a call to an endpoint: the key's model allow-list and budget always; a direct
+    call needs `invoke:sync` and is counted here; the API's own admitted call (the admission token bound to this key
+    and model: a proxied synchronous call, or an endpoint call's caller probing readiness and posting its one
+    inference) was counted at admission and needs the scope that admission had, `invoke:sync` or `invoke:async`: an
+    asynchronous-only key reaches its own endpoint call, nothing else."""
     m = catalog.get(model) or _endpoint_model(model)
-    authorize(p, m["name"], "invoke:sync", budget=True)
+    admitted = _is_admitted(p, token, m["name"], operation, attempt) if p.role != keys.ROUTER["role"] else False
+    # an endpoint child's caller (docs/JOBS.md "Endpoint children") acts under the PARENT's grant: the child model was
+    # allowed by the run class's frozen `child_endpoints` at the child's admission, the proof above bound the
+    # credential to exactly that child, model and live attempt, and the key's own allow-list (the parent class only,
+    # on a parent-only grant) is not widened: the model check is the admission's, the scope and budget checks stay
+    delegated = admitted and _delegated_child(operation)
+    authorize(
+        p,
+        m["name"],
+        ("invoke:sync", "invoke:async") if admitted else "invoke:sync",
+        budget=True,
+        model_check=not delegated,
+    )
     _endpoint_limits(p, "gateway", admitted)
+    if admitted and method.upper() == "POST" and not operation.startswith("sync-") and db.enabled():
+        # the inference POST of an endpoint call's caller: prepare its native execution (docs/API.md "Native execution
+        # leases"); a retry attempt's POST while another attempt's execution is prepared or attached is refused here,
+        # so no two native executions overlap under one reservation
+        region = _admission_region.get((operation, attempt)) or REGION
+        ns = p.namespace
+        leases.prepare(
+            operation, attempt, region, m["name"], caller_gone=lambda old: leases.caller_gone(ns, old, region)
+        )
     if m["mode"] == "run":
         raise HTTPException(404, "not an endpoint")
+    if method.upper() == "POST":
+        if admitted:
+            # one line per admitted inference (never per readiness probe): the proof that the markers left the hook
+            # towards the gateway at this instant; a prepared-never-attached execution after this line is a loss
+            # downstream of the hook (policy, Knative data path, the worker's reading), never a missing emission
+            log.info(
+                "authorize %s: admitted POST of %s attempt %s: markers emitted (x-serverless2-operation/-attempt)",
+                m["name"],
+                operation,
+                attempt or "-",
+            )
+        elif leases.mode_of(m) == "required":
+            # a direct POST to an endpoint whose worker requires a lease carries no markers: the worker refuses it
+            # (required mode fails closed, unchanged); named here so the refusal is attributable from the API log
+            log.info(  # no caller identity in this line: the shared telemetry carries no customer identities
+                "authorize %s: a direct POST carries no markers (the model requires a native lease: the worker refuses it)",
+                m["name"],
+            )
     if not admitted and p.role != keys.ROUTER["role"]:
         # a direct call to the endpoint's hostname: one request against the key's budget and rate window (the slot is
         # not held: the hook cannot see the call end); the API's own proxied call was admitted already
@@ -493,12 +720,55 @@ def _authorize_model(p: Principal, model: str, admitted: bool = False) -> None:
             kube.stamp_last_request(
                 m["k8s_name"], m["namespace"], region
             )  # deployment (idle shutdown reads it, throttled)
+    return (operation, attempt) if admitted else ("", "")
 
 
 @app.get("/v1/keys/me", responses={200: {"model": schemas.ApiKey}})
 def key_me(p: Principal = Depends(principal)):
     forget(p.key)
-    return p.public()
+    out = p.public()
+    if db.enabled() and p.role != keys.ROUTER["role"]:
+        out["usage"] = keys.run_usage(keys.key_hash(p.key))
+    return out
+
+
+def _console_cluster_url(cluster: str | None) -> str | None:
+    c = kube.cluster_entry(cluster)
+    if not (c.get("project") and c.get("cluster_id")):
+        return None
+    return f"{kube.CONSOLE_URL}/{c['project']}/mk8s/{c['cluster_id']}"
+
+
+@app.post("/v1/models/{model}:operation-id", responses={200: {"model": schemas.OperationIdentity}})
+def operation_identity(
+    model: str,
+    req: schemas.OperationIdentityRequest | None = None,
+    p: Principal = Depends(principal),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """The operation id a later `:invoke` with the same key, model and `Idempotency-Key` creates (docs/API.md
+    "Operation identity"): `render.op_name(p.owner, model, key)`, the very call :invoke makes, under the same owner
+    namespace (an imported key's explicit principal, else the key itself). Authorized like :invoke's prelude (the model
+    allow-list, the mode's scope) but with no budget or admission check and no side effect at all: no reservation, no
+    Job, no record. A stage (`execution.stage`) is named by its root and id, never by an Idempotency-Key, and a
+    submission without the header gets a random id: both are refused here."""
+    m = _model(model)
+    mode = (req.mode if req else None) or m["mode"]
+    if mode not in m["modes"]:
+        raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
+    if mode == "sync":
+        raise HTTPException(400, "a synchronous call has no durable operation id")
+    authorize(p, model, {"async": "invoke:async"}.get(mode, "run:submit"), budget=False)
+    if not idempotency_key:
+        raise HTTPException(400, "Idempotency-Key is required: without it :invoke names the operation at random")
+    # the header exactly as :invoke hashes it (no trimming, no bound): the same bytes give the same id
+    legacy = (p.info.get("metadata") or {}).get("legacy") or {}
+    return {
+        "id": render.op_name(p.owner, model, idempotency_key),
+        "model": model,
+        "mode": mode,
+        "owner_scope": "principal" if legacy.get("principal_id") else "key",
+    }
 
 
 @app.post(
@@ -508,26 +778,52 @@ def key_me(p: Principal = Depends(principal)):
 async def invoke(
     model: str,
     req: InvokeRequest,
+    request: Request,
     p: Principal = Depends(principal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     m = _model(model)
+    pause.check(
+        p.tenant
+    )  # a paused tenant's submission: 503 + Retry-After, nothing created (docs/API.md "Submission pause")
     mode = req.mode or m["mode"]
-    authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
+    if mode == "run" and req.execution and req.execution.stage and not allows_model(p, model):
+        # a stage on a model the key is not granted: only as a delegated stage of a root the operator's run class
+        # delegates to (docs/JOBS.md "Delegated stages"); the declaration alone confers nothing
+        stages.require_delegation(p, model, req.execution.stage.root, req.execution.stage.id)
+        authorize(p, model, "run:submit", budget=True, model_check=False)
+    else:
+        authorize(p, model, {"sync": "invoke:sync", "async": "invoke:async"}.get(mode, "run:submit"), budget=True)
     if mode not in m["modes"]:
         raise HTTPException(400, f"model {model} supports modes {m['modes']}, not {mode}")
-    region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
-    if region not in m["regions"]:
-        raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
-    if req.execution and mode != "run":
-        raise HTTPException(400, "execution options apply to runs only")
+    if mode == "run":
+        # a run's region is where its Job is created (the manager on the fleet path, where the dispatcher places it):
+        # the class's first region by default; a cluster id or a region name of the class is accepted
+        region = req.region or (REGION if REGION in m["regions"] else m["regions"][0])
+        if region not in m["regions"] and kube.cluster_region(region) not in m["regions"]:
+            raise HTTPException(400, f"model {model} is deployed in {m['regions']}, not {region}")
+        region = region if region in m["regions"] else kube.cluster_region(region)
+        if (m.get("job") or {}).get("childEndpoints"):
+            import children
+
+            # endpoint children (docs/JOBS.md "Endpoint children"): the capture backend the children will need is
+            # checked NOW, before any admission, so a parent is never accepted whose children could not deliver
+            await asyncio.to_thread(children.preflight_parent, p.namespace, m)
+    else:
+        _cluster, region = _deployment_of(
+            m, req.region
+        )  # the endpoint's cluster id, and the region the API reaches it in
+    if req.execution and mode == "sync":
+        raise HTTPException(
+            400, "execution options apply to runs and asynchronous endpoint calls, not to synchronous calls"
+        )
     if mode != "run":
         _endpoint_limits(p, mode)
     if mode == "sync":
         sid = f"sync-{uuid.uuid4().hex[:12]}"
         await asyncio.to_thread(_admit, p, sid)  # a slot and a request for the duration of the call
         try:
-            return await _sync(m, req, p, region)
+            return await _sync(m, req, p, region, sid, request)
         finally:
             await asyncio.to_thread(_release, sid, None)  # no per-request GPU measurement exists for shared endpoints
     if len(json.dumps(req.input)) > INPUT_MAX_BYTES:
@@ -536,216 +832,68 @@ async def invoke(
             f"input exceeds {INPUT_MAX_BYTES} bytes; pass large inputs by reference (input_prefix, an artifact upload or a binding)",
         )
     # the rest renders and creates a Job: synchronous Kubernetes, database and bucket calls, run in a worker thread
-    return await asyncio.to_thread(_invoke_job, m, model, req, p, region, mode, idempotency_key)
+    return await asyncio.to_thread(_submit, m, model, req, p, region, mode, idempotency_key)
 
 
-def _invoke_job(
+def _submit(
     m: dict, model: str, req: InvokeRequest, p: Principal, region: str, mode: str, idempotency_key: str | None
-):
-    # Imported principal keys share an idempotency namespace only with the same
-    # principal; a tenant's shared bucket never shares private operation state.
-    name = render.op_name(p.owner, model, idempotency_key)
-    timeout = req.timeout_s  # no deadline unless asked for: queued work waits for as long as it takes (days)
-    secret = None
-    ex = execution.resolve(req.execution, p.namespace, m) if mode == "run" else None
-    if ex and (
-        (ex.get("placement") or {}).get("fallback_wait_s") is not None
-        or (ex.get("recovery") or {}).get("on_infrastructure_loss") == "recover"
-    ):
-        _continuation_limits(p)
-    allowed = (ex.get("placement") or {}).get("allowed_clusters") if ex else None
-    if allowed and req.region and req.region not in allowed:
-        # an explicit region that contradicts the caller's own cluster list; an implicit one (the default above) is no
-        # request: a fleet run is placed within allowed_clusters, a single-cluster run must be allowed here
-        raise HTTPException(400, f"region {req.region} is not in allowed_clusters {allowed}")
-    if allowed and not FLEET_MANAGER and mode == "run" and region not in allowed:
-        raise HTTPException(400, f"this API runs jobs in {region} only, which allowed_clusters {allowed} excludes")
-    if mode == "async":  # the caller Job runs in the endpoint's region, through that region's gateway
-        output_prefix = f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
-        job, secret = jobs.build_async(
-            name, m, req.input, p.tenant, p.key, req.name, idempotency_key, timeout, output_prefix, region
-        )
-    elif FLEET_MANAGER:
-        _guard_run_input(m, req, p, REGION, ex)
-        job = _fleet_run(m, req, p, name, timeout, idempotency_key, ex)
-        region = REGION  # created on the manager; the dispatcher picks the worker
+) -> JSONResponse:
+    """A run or endpoint call: its operation id (an Idempotency-Key's under the owner namespace, or the declared
+    stage's), the rendered Job (jobs.render_submission) and its admission on the caller's key (stages.create_admitted).
+    202 with the new operation, 200 with the current state of a replay or of a stage that already ran."""
+    ex = execution.resolve(req.execution, p.namespace, m) if mode in ("run", "async") else None
+    stage, graph = stages.stage_request(ex, mode, p, idempotency_key)
+    if stage:
+        name = stages.stage_name(stage["root"], stage["id"])
+        if (done := _settled_stage(p, graph, stage)) is not None:
+            return JSONResponse(done, status_code=200)  # a stage that ran is never run again: its durable state
+        if graph.get("closed_at"):
+            raise HTTPException(409, f"the graph of {stage['root']} is closed: no new stage attaches")
     else:
-        _guard_run_input(m, req, p, region, ex)
-        defaults = catalog.region_params(m, region)
-        if not (ex and ex.get("io_mode") == "application"):
-            defaults.setdefault(
-                "output_prefix", f"s3://{artifacts.storage(p.namespace, region)['bucket']}/operations/{name}"
-            )
-        else:
-            defaults.setdefault("output_prefix", "")
-        job = jobs.build_run(
-            name,
-            m,
-            req.input,
-            p.tenant,
-            req.name,
-            idempotency_key,
-            timeout,
-            req.priority,
-            region,
-            defaults,
-            billing.key_hash(p.key),
-            gpu_class=_class_for(m, req, region, p.tenant, ex),
-            ex=ex,
-        )
-    # admission on the caller's key, from the rendered Job (its real GPU count): a slot, a request and, for a key with a
-    # GPU-second budget, GPUs x the run's timeout; released with the measured value when the attempt is billed (billing.py)
-    ann = job["metadata"].setdefault("annotations", {})
-    ann[f"{cfg.LABEL}/owner"] = p.owner
-    if db.enabled():
-        try:
-            keys.own_operation(name, p.tenant, p.owner, model)
-        except keys.KeyLimit as e:
-            raise HTTPException(e.status, e.detail)
-    with keys.operation_lock(name) if db.enabled() else nullcontext():
-        created_job, created = _create_admitted(p, name, job, region, secret, req, mode)
+        name = render.op_name(p.owner, model, idempotency_key)
+    admitted = _admitted_token(keys.key_hash(p.key), m["name"], name) if mode == "async" and cfg.ROUTER_KEY else None
+    job, secret, region = jobs.render_submission(
+        m, req, p, region, mode, idempotency_key, ex, name, admitted, FLEET_MANAGER
+    )
+    if stage:
+        stages.mark_waiting(job, stage["root"], stage["id"], stages.dependencies(graph, stage["id"]))
+    created_job, created = stages.create_admitted(p, name, job, region, secret, req, mode, model, stage=stage)
     if created:
-        return JSONResponse(jobs.normalise(created_job, m.get("price_per_call")), status_code=202)
-    return JSONResponse(
-        _operation(p, created_job, created_job["metadata"]["name"], region), status_code=200
-    )  # a replay: its current state
+        op = jobs.normalise(created_job, m.get("price_per_call"))
+        return JSONResponse(_who(instances.enrich_operation(op), created_job), status_code=202)
+    return JSONResponse(_operation(p, created_job, created_job["metadata"]["name"], region), status_code=200)
 
 
-def _create_admitted(p, name, job, region, secret, req, mode):
-    """Called under the per-operation database lock; a refund cannot race a replay."""
-    # Existing Jobs already own their admission, including terminal replays.
+def _settled_stage(p: Principal, g: dict, stage: dict) -> dict | None:
+    """A stage whose member already settled (ran, was cancelled) is not run again: its current state, or None when
+    the stage has no settled member (a replay of an active stage is the Job's replay)."""
+    head = keys.stage_head(stage["root"], stage["id"])
+    if head is None:
+        return None  # a declared stage is submitted once: its lineage (the stage, its continuations) answers afterwards
     try:
-        existing = jobs.get(p.namespace, name, region)
+        job, region = _owned(p, head)
     except HTTPException as e:
         if e.status_code != 404:
             raise
-        existing = None
-    if existing:
-        _check_operation_owner(p, existing)
-        reservation = {"replay": True}
-    else:
-        reservation = _admit(p, name, _gpu_reservation(_job_gpus(job), req, p) if mode == "run" else 0.0)
-    try:
-        created_job, created = jobs.create(p.namespace, job, region, secret)
-    except Exception:
-        if db.enabled() and not reservation.get("replay"):
-            # A timeout can mean the create succeeded. Only a confirmed absence
-            # permits a refund; ambiguous failures retain the reservation.
-            try:
-                jobs.get(p.namespace, name, region)
-            except HTTPException as missing:
-                if missing.status_code == 404:
-                    keys.abandon(name, keys.key_hash(p.key))
-            except Exception:
-                pass
-        raise
-    _check_operation_owner(p, created_job)
-    return created_job, created
-
-
-def _guard_run_input(m: dict, req: InvokeRequest, p: Principal, region: str, ex: dict | None = None) -> None:
-    """A caller-supplied output_prefix must stay inside the tenant's own bucket of that region (never another
-    tenant's), and an `image` parameter (container-run) must match the tenant's image allow-list when one is set.
-    Application-managed I/O names no bucket at all."""
-    out = req.input.get("output_prefix")
-    if ex and ex.get("io_mode") == "application":
-        if out or req.input.get("input_prefix"):
-            raise HTTPException(
-                400, "application-managed I/O takes no input_prefix/output_prefix: the run moves its own data"
-            )
-        out = None
-    if out:
-        bucket = artifacts.storage(p.namespace, region)["bucket"]
-        if not str(out).startswith(f"s3://{bucket}/"):
-            raise HTTPException(400, f"output_prefix must be inside the tenant's bucket s3://{bucket}/")
-    if req.input.get("image"):
-        jobs.check_image_allowed(p.namespace, str(req.input["image"]), region)
-
-
-def _fleet_run(
-    m: dict,
-    req: InvokeRequest,
-    p: Principal,
-    name: str,
-    timeout: int | None,
-    idempotency_key: str | None,
-    ex: dict | None = None,
-) -> dict:
-    """Fleet placement (control cluster, docs/JOBS.md): the Job is created on the manager and MultiKueue +
-    the dispatcher pick the worker among the model's regions and GPU classes. Inputs and outputs live in the
-    tenant's hub-region bucket (the one this cluster's tenant-storage names). Per-region parameter defaults
-    apply when every deployment agrees on them, or when the caller pins a region. Image references are
-    fleet-wide (the logical registry host, docs/IMAGES.md), so an unpinned run is placed at queue time: the
-    dispatcher nominates the cheapest free cluster and re-nominates while the run waits."""
-    application = bool(ex and ex.get("io_mode") == "application")
-    bucket = None if application else artifacts.storage(p.namespace, REGION)["bucket"]
-    inp = req.input.get("input_prefix")
-    if inp and not str(inp).startswith(f"s3://{bucket}/"):
         raise HTTPException(
-            400,
-            f"input_prefix must be in the tenant's fleet bucket s3://{bucket}/ (upload through this API, or pass region to run next to another bucket)",
+            409, f"stage {stage['id']!r} of {stage['root']} already ran ({head}); nothing durable remains"
         )
-    placement = execution.narrow_placement(
-        {"manager": True, "profile": jobs.profile_of(m), "classes": jobs.gpu_classes(m), "regions": m["regions"]}, ex
-    )
-    region = req.region
-    defaults = catalog.region_params(m, region) if region else catalog.fleet_params(m)
-    defaults.setdefault("output_prefix", "" if application else f"s3://{bucket}/operations/{name}")
-    return jobs.build_run(
-        name,
-        m,
-        req.input,
-        p.tenant,
-        req.name,
-        idempotency_key,
-        timeout,
-        req.priority,
-        region,
-        defaults,
-        billing.key_hash(p.key),
-        placement=placement,
-        gpu_class=_class_for(m, req, region, p.tenant, ex, placement.get("regions")),
-        ex=ex,
-    )
+    return _operation(p, job, job["metadata"]["name"], region)
 
 
-def _class_for(
-    m: dict,
-    req: InvokeRequest,
-    region: str | None,
-    tenant: str | None = None,
-    ex: dict | None = None,
-    regions: list[str] | None = None,
-) -> str | None:
-    """A run class with per-GPU-class images gets its class at submission (docs/SCHEDULING.md "Per-GPU images for
-    runs"): the best pool of the fleet document among the model's classes and regions (the caller's region when
-    given, services/api/placement.py). None for a class with one image: Kueue may then switch class at queue time as before."""
-    if not jobs.class_images(m):
-        return None
-    gpus = (m.get("job") or {}).get("gpu", 1)
-    try:
-        gpus = int(gpus)
-    except (TypeError, ValueError):  # a parameter placeholder: one GPU for the ranking
-        gpus = (
-            int(req.input.get("gpus", 1) or 1)
-            if isinstance(req.input.get("gpus", 1), (int, str)) and str(req.input.get("gpus", 1)).isdigit()
-            else 1
-        )
-    available = (
-        (ex.get("placement") or {}).get("gpu_preference") if ex else None
-    )  # the caller's order narrows the model's
-    cls, how = placing.choose_class(
-        m, region, gpus, available, tenant, regions
-    )  # `regions`: the run's allowed clusters
-    log.info("%s: GPU class %s chosen by %s", m["name"], cls, how)
-    return cls
+DISCONNECT_POLL_S = 1.0  # how often a proxied synchronous call looks for its caller (docs/API.md "Synchronous calls")
 
 
-async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
+async def _sync(
+    m: dict, req: InvokeRequest, p: Principal, region: str, admission: str = "", request: Request | None = None
+):
     """Proxy to the endpoint. Via LiteLLM's pass-through route when the model has one (budget, spend and the
     per-call price are enforced there); else straight to the predictor Service when the endpoint runs on this
     cluster, and through the region's gateway hostname (the one LiteLLM uses, TLS on the fleet CA) with the caller's
-    key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API."""
+    key for an endpoint in another region: the gateway's ext-auth checks the key once more against this API.
+    While the endpoint works, the caller is looked for every DISCONNECT_POLL_S: a caller that went away ends the
+    downstream call at once (the connection is closed: Knative's queue-proxy sees the client gone; what the worker
+    process does with that is the application's) and the admission is released by the caller (api 0.11.127)."""
     if int(m.get("nodes") or 1) > 1:
         st = kube.endpoint_status(m["k8s_name"], m["namespace"], region, nodes=int(m["nodes"]))
         kube.stamp_last_request(
@@ -775,17 +923,17 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
         v = _variant_for(m, req.input, region)
         url, headers = (
             f"https://{models.endpoint_host(m, region, v['object'])}{m['endpoint_path']}",
-            {"Authorization": f"Bearer {p.key}", ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key))},
+            {
+                "Authorization": f"Bearer {p.key}",
+                ADMITTED_HEADER: _admitted_token(keys.key_hash(p.key), m["name"], admission),
+                OPERATION_HEADER: admission,
+            },
         )
     t0 = time.time()
-    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        async with httpx.AsyncClient(timeout=req.timeout_s or SYNC_TIMEOUT_S) as c:
-            r = await c.post(url, json=with_served_model(m, req.input), headers=headers)
-    except httpx.TimeoutException:
-        raise HTTPException(504, f"endpoint did not answer within {req.timeout_s or SYNC_TIMEOUT_S}s")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"endpoint unreachable: {e}")
+    started = iso(datetime.now(timezone.utc))
+    r = await _proxy_until_answer_or_disconnect(
+        url, with_served_model(m, req.input), headers, req.timeout_s or SYNC_TIMEOUT_S, request
+    )
     forget(p.key)
     ok = 200 <= r.status_code < 300
     try:
@@ -813,7 +961,7 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
         "tenant": p.tenant,
         "created_at": started,
         "started_at": started,
-        "ended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ended_at": iso(datetime.now(timezone.utc)),
         "duration_s": round(time.time() - t0, 3),
         "attempts": [
             {"index": 1, "status": "SUCCEEDED" if ok else "FAILED", "reason": None if ok else f"HTTP {r.status_code}"}
@@ -821,6 +969,8 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
         "input": req.input,
         "cost": m.get("price_per_call") if ok else None,
         "error": None if ok else str(body)[:500],
+        "requester": req.requester,
+        "key_alias": _key_alias(keys.key_hash(p.key)),
     }
     return JSONResponse(
         {"result": body, "operation": op},
@@ -830,6 +980,59 @@ async def _sync(m: dict, req: InvokeRequest, p: Principal, region: str):
     )
 
 
+async def _proxy_until_answer_or_disconnect(
+    url: str, body: dict, headers: dict, timeout_s: float, request
+) -> httpx.Response:
+    """POST the request and wait for the answer, the timeout, or the caller's disconnect, whichever comes first.
+    The caller is watched by AWAITING `request.receive()` once the body is consumed: the next message the server
+    hands over is `http.disconnect`, and it arrives through Starlette's BaseHTTPMiddleware wrapper too (the API's
+    `no_store` middleware) — `Request.is_disconnected()` cannot see it there (a cancelled non-blocking receive;
+    starlette discussion 2094; found by the application's acceptance, 2026-10-17). The watcher and the downstream
+    call race; whichever finishes first ends the other (cancelled and joined). A disconnect answers 499 (nobody
+    reads it; the caller's `finally` releases the admission); the timeout answers 504 as before."""
+    client = httpx.AsyncClient(timeout=timeout_s)
+    downstream = asyncio.ensure_future(client.post(url, json=body, headers=headers))
+    watcher = asyncio.ensure_future(_wait_for_disconnect(request)) if request is not None else None
+    try:
+        pending = {downstream} | ({watcher} if watcher else set())
+        while True:
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if downstream in done:
+                return downstream.result()
+            if watcher is not None and watcher in done:
+                if watcher.exception() is None:  # the server reported the caller gone
+                    downstream.cancel()
+                    raise HTTPException(499, "caller disconnected: the synchronous call was cancelled downstream")
+                # a watcher that failed (a server without a receive channel) proves nothing: wait for the answer
+                log.warning("sync disconnect watcher ended: %s", str(watcher.exception())[:120])
+                watcher = None
+                pending = {downstream}
+    except httpx.TimeoutException:
+        raise HTTPException(504, f"endpoint did not answer within {timeout_s}s")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"endpoint unreachable: {e}")
+    finally:
+        for task in (downstream, watcher):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (downstream, watcher):
+            if task is not None:
+                try:
+                    await task  # joined: no task outlives the request
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - the outcome was decided above
+                    pass
+        await client.aclose()
+
+
+async def _wait_for_disconnect(request) -> bool:
+    """Block until the server reports the caller gone (`http.disconnect`); the body is already consumed, so nothing
+    else can arrive. Through BaseHTTPMiddleware the wrapped receive forwards exactly that message."""
+    while True:
+        message = await request.receive()
+        if message.get("type") == "http.disconnect":
+            return True
+
+
 def _price(job: dict) -> float | None:
     m = catalog.get(job["metadata"].get("labels", {}).get("serverless2.nebius/model", "")) or {}
     return m.get("price_per_call")
@@ -837,71 +1040,207 @@ def _price(job: dict) -> float | None:
 
 @app.get("/v1/operations", responses={200: {"model": list[schemas.Operation]}})
 def list_operations(
-    p: Principal = Depends(scoped("read:operations")), limit: int = Query(50, le=500), model: str | None = None
+    response: Response,
+    p: Principal = Depends(scoped("read:operations")),
+    limit: int = Query(50, le=500),
+    model: str | None = None,
+    cursor: str | None = None,
+    created_by_current_key: bool = False,
 ):
-    mine = [j for j in jobs.list_ops(p.namespace, p.tenant, model, 500) if _may_read_operation(p, j)][:limit]
-    # the durable attempt records of every listed operation in one query (a pod the worker cluster removed after
+    """The caller's operations, newest first (`created_at` desc, then id asc: a stable order), as an array (unchanged
+    shape). Every live operation of the tenant over the reachable regions AND every operation the durable attempt
+    records still know (a Job that expired after its TTL: reported from its records, as GET /v1/operations/{id} does)
+    is authorized FIRST (tenant, owner or admin, the key's model allow-list: auth.check_operation_owner), and only
+    then cut to `limit` (≤ 500) from `cursor`. Headers: `X-Next-Cursor` (opaque; pass it as `cursor=` for the next
+    page; absent on the last page) and `X-Regions-Skipped` (regions that could not be read: their live operations are
+    absent from this answer). Before 0.11.94 the live Jobs were cut to 500 BEFORE the owner filter (a caller with
+    many foreign operations in the tenant saw none of its own) and expired operations were not listed."""
+    live, skipped = jobs.list_ops_all(p.namespace, p.tenant, model)
+    entries: list[tuple[str, str, dict | None, dict | None]] = []  # (created_at, id, live job, durable index entry)
+    live_names = set()
+    # the owner check reads the run ledger per Job (0.4 s over 600 Jobs): remembered per listing instance and key,
+    # as long as the listing itself is reused (api 0.11.129)
+    auth_key = (id(live), p.hash, p.role, tuple(p.info.get("models") or []))
+    hit = _ops_auth_cache.get(auth_key)
+    if hit and hit[0] is live and hit[1] > time.time():
+        live_names, entries = set(hit[2]), list(hit[3])
+    else:
+        for j in live:
+            if _may_read_operation(p, j):
+                live_names.add(j["metadata"]["name"])
+                entries.append((j["metadata"].get("creationTimestamp") or "", j["metadata"]["name"], j, None))
+        if len(_ops_auth_cache) > 256:
+            _ops_auth_cache.clear()
+        _ops_auth_cache[auth_key] = (live, time.time() + cfg.OPS_LIST_CACHE_S, set(live_names), list(entries))
+    durable: list[dict] = []
+    if attempts.enabled():
+        try:
+            durable = attempts.durable_index(p.tenant, None if p.role == "admin" else p.owner, model)
+        except Exception as e:  # noqa: BLE001 - the live list stands; the answer says the records were not read
+            log.warning("operations: durable records unreadable, expired operations absent: %s", str(e)[:160])
+            response.headers["X-Records-Skipped"] = "durable"
+    for e in durable:
+        if e["operation"] in live_names:
+            continue
+        if _may_read_operation(p, _synthetic_job(e["operation"], p.tenant, e["mode"], e.get("model"), e["root"])):
+            entries.append((e["created_at"], e["operation"], None, e))
+    # the stable order: created_at desc, then id asc (a root before its continuations created in the same second)
+    if created_by_current_key:
+        # Legacy clients can ask for the admitting key, not every key sharing this
+        # principal. The ordinary list's existing owner/model checks remain first.
+        if skipped or response.headers.get("X-Records-Skipped"):
+            raise HTTPException(503, "complete operation attribution is unavailable")
+        entries = _created_by_current_key(entries, p)
+        response.headers["X-Created-By-Current-Key"] = "true"
+    entries.sort(key=lambda x: x[1])
+    entries.sort(key=lambda x: x[0], reverse=True)
+    response.headers["X-Total-Count"] = str(len(entries))  # every operation the caller may see, before the cut
+    if cursor:
+        c_at, c_id = _decode_cursor(cursor, "o", 2)
+        entries = [x for x in entries if x[0] < c_at or (x[0] == c_at and x[1] > c_id)]
+    page, rest = entries[:limit], entries[limit:]
+    if rest:
+        response.headers["X-Next-Cursor"] = _encode_cursor("o", page[-1][0], page[-1][1])
+    if skipped:
+        response.headers["X-Regions-Skipped"] = ",".join(skipped)
+    page = [(c, n, copy.deepcopy(j) if j is not None else None, e) for c, n, j, e in page]  # the shared listing stays
+    mine = [x[2] for x in page if x[2] is not None]
+    # the durable attempt records of every listed live operation in one query (a pod the worker cluster removed after
     # delivery leaves no live evidence of it; the records are what GET /v1/operations/{id} reports from)
     rows = attempts.for_operations({_root(j) for j in mine}) if attempts.enabled() else {}
     marks = attempts.marks_for({j["metadata"]["name"] for j in mine}) if attempts.enabled() else {}
     out = []
-    for j in mine:
-        name, root = j["metadata"]["name"], _root(j)
-        op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
-        if attempts.enabled():
-            op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name)))
-        out.append(op)
+    for _created, name, j, e in page:
+        if j is not None:
+            root = _root(j)
+            op = jobs.normalise(j, _price(j), [r for r in rows.get(root, []) if r["operation"] == name])
+            if attempts.enabled():
+                op.update(attempts.lifecycle(name, root, rows.get(root, []), marks.get(name), pods=j.get("_pods")))
+            out.append(_who(instances.enrich_operation(op), j))
+        else:
+            op = attempts.synthesize(name, p.tenant)  # the durable record of an expired operation
+            if op is not None:
+                out.append(_who(instances.enrich_operation(op), None))
     return out
+
+
+def _created_by_current_key(entries: list[tuple], p: Principal) -> list[tuple]:
+    names = {
+        value
+        for _, name, job, durable in entries
+        for value in (name, _root(job) if job is not None else durable["root"])
+    }
+    try:
+        durable_keys = keys.admitting_key_hashes(names)
+    except Exception:  # noqa: BLE001 - no DB error, private operation or key in the public response
+        raise HTTPException(503, "complete operation attribution is unavailable") from None
+    caller = keys.key_hash(p.key)
+    selected = []
+    for entry in entries:
+        _, name, job, durable = entry
+        root = _root(job) if job is not None else durable["root"]
+        evidence = durable_keys.get(name, set()) | durable_keys.get(root, set())
+        if job is not None:
+            observed = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/key")
+            if observed is not None:
+                evidence = evidence | {observed}
+        if len(evidence) != 1 or any(not isinstance(h, str) or not keys.HASH_RE.fullmatch(h) for h in evidence):
+            raise HTTPException(503, "complete operation attribution is unavailable")
+        if caller in evidence:
+            selected.append(entry)
+    return selected
+
+
+def _encode_cursor(kind: str, *parts: str) -> str:
+    """An opaque page cursor: its kind (`o` an operations listing, `k` a keyed list) and the position, base64."""
+    return base64.urlsafe_b64encode("|".join((kind, *parts)).encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str, kind: str, n: int) -> list[str]:
+    """The `n` parts of a cursor of `kind`; 400 for anything else (another kind's cursor, garbage, an empty position)."""
+    try:
+        parts = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode().split("|", n)
+    except (ValueError, UnicodeDecodeError):
+        parts = []
+    if len(parts) != n + 1 or parts[0] != kind or not parts[-1]:
+        raise HTTPException(400, "cursor: not one this API issued (X-Next-Cursor of a previous page)")
+    return parts[1:]
+
+
+def _page(response: Response, items: list, key, cursor: str | None, limit: int | None) -> list:
+    """Cursor pagination of a list that is sorted by `key` (a string per item, unique: the cursor is the last key of
+    the page). Headers: `X-Next-Cursor` (absent on the last page) and `X-Total-Count` (every item the caller may
+    see, before the cut). The caller does the expensive per-item work on the returned page only (docs/API.md
+    "Pagination"). Without `limit` the whole list is answered as before 0.11.124 (a client that never paged keeps
+    its answer; the console always pages)."""
+    items = sorted(items, key=key)
+    response.headers["X-Total-Count"] = str(len(items))
+    if cursor:
+        after = _decode_cursor(cursor, "k", 1)[0]
+        items = [x for x in items if key(x) > after]
+    if limit is None:
+        return items
+    page = items[:limit]
+    if len(items) > limit:
+        response.headers["X-Next-Cursor"] = _encode_cursor("k", key(page[-1]))
+    return page
 
 
 def _root(job: dict) -> str:
     return (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or job["metadata"]["name"]
 
 
-def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str]:
-    """The operation's Job. A handle that capacity fallback superseded resolves to its current successor (the
-    original stays readable, docs/SCHEDULING.md); an operation whose Job expired is served from its durable rows."""
-    current, previous = id, None
-    for _ in range(16):
-        try:
-            job, region = jobs.find(p.namespace, current)
-        except HTTPException as e:
-            if e.status_code != 404 or not attempts.enabled():
-                raise
-            rows = [r for r in attempts.for_operation(current) if r["operation"] == current and r["tenant"] == p.tenant]
-            if not rows and previous is not None:
-                return previous  # a verified owner's successor is not created yet
-            synthetic_job = {
-                "metadata": {
-                    "name": current,
-                    "labels": {f"{cfg.LABEL}/tenant": p.tenant, f"{cfg.LABEL}/mode": "run"},
-                    "annotations": {f"{cfg.LABEL}/resumed-from": rows[-1]["root"] if rows else current},
-                }
-            }
-            _check_operation_owner(p, synthetic_job)
-            nxt = attempts.successor_of(current)
-            if follow and nxt and nxt != current:
-                current = nxt
-                continue
-            synthetic = attempts.synthesize(current, p.tenant)
-            if synthetic is None:
-                if previous is not None:  # a successor that is marked but not created yet: the original stands
-                    return previous
-                raise
-            return {**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")
-        _check_operation_owner(p, job)
-        nxt = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/successor")
-        if follow and nxt and nxt != current:
-            current, previous = nxt, (job, region)
-            continue
-        return job, region
-    raise HTTPException(502, f"operation {id}: successor chain too long")
+def _synthetic_job(name: str, tenant: str, mode: str, model: str | None, root: str) -> dict:
+    """The shape the owner check reads for an operation without a Job (auth.check_operation_owner): tenant, mode,
+    model (the allow-list applies) and the root."""
+    labels = {
+        f"{cfg.LABEL}/tenant": tenant,
+        f"{cfg.LABEL}/mode": mode,
+        **({f"{cfg.LABEL}/model": model} if model else {}),
+    }
+    return {"metadata": {"name": name, "labels": labels, "annotations": {f"{cfg.LABEL}/resumed-from": root}}}
+
+
+def _owned(p: Principal, id: str, follow: bool = True) -> tuple[dict, str | None]:
+    """The operation's Job. A handle that a continuation superseded (capacity fallback, recovery, a manual resume)
+    resolves to its current successor (stages.head_of: the successor annotation on the Job, the durable mark once the
+    Job is gone, and the run ledger's lineage head as the authority behind both); an operation whose Job expired is
+    served from its durable rows. The owner check applies to every operation on the way, the named one and the head;
+    a head that is marked but not created yet stands on the member before it."""
+    seen: list[
+        tuple[dict, str | None]
+    ] = []  # the members on the way that exist: a Job, or the durable view of a gone one
+
+    def visit(name: str, job: dict | None, region: str | None) -> None:
+        if job is not None:
+            _check_operation_owner(p, job)
+            seen.append((job, region))
+            return
+        if not attempts.enabled():
+            return
+        rows = [r for r in attempts.for_operation(name) if r["operation"] == name and r["tenant"] == p.tenant]
+        if not rows and seen:
+            return  # a verified owner's successor is not created yet
+        last = rows[-1] if rows else {}
+        synthetic_job = _synthetic_job(
+            name, p.tenant, last.get("mode") or "run", last.get("model"), last.get("root") or name
+        )
+        _check_operation_owner(p, synthetic_job)
+        if (synthetic := attempts.synthesize(name, p.tenant)) is not None:
+            seen.append(({**synthetic_job, "_synthetic": synthetic}, synthetic.get("region")))
+
+    head, job = stages.head_of(p.namespace, id, follow=follow, visit=visit)
+    if job is False:
+        raise HTTPException(502, f"operation {id}: successor chain too long")
+    if job is None and (not seen or not attempts.enabled()):
+        raise HTTPException(404, f"operation {head}: not found")
+    return seen[-1]
 
 
 def _records(p: Principal, job: dict, id: str, region: str | None) -> tuple[list, str]:
     """The attempt records of an operation: the database's (fenced, durable) when this API has one, else the
     uploader's bucket records. Returns (records, root operation)."""
-    root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    root = _root(job)
     rows = [r for r in attempts.for_operation(root) if r["operation"] == id] if attempts.enabled() else []
     if rows:
         return rows, root
@@ -922,20 +1261,45 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
     members = sorted(
         [
             j
-            for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
-            if _may_read_operation(p, j)
-            and (
-                j["metadata"]["name"] == root
-                or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root
+            for j in jobs.list_related(
+                p.namespace,
+                p.tenant,
+                lambda j: j["metadata"]["name"] == root
+                or (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") == root,
             )
+            if _may_read_operation(p, j)
         ],
         key=lambda j: str(j["metadata"].get("creationTimestamp") or ""),
     )
     name = job["metadata"]["name"]
-    all_attempts = st._attempts(job.get("_pods", []), rows)  # every member's records; the live pods are this member's
+    # every member's attempts from that member's own live pods and records (a member listed without pods, or expired,
+    # stands on its records alone); the queried member's pods are the ones its handle already carries
+    pods_by_member = {m["metadata"]["name"]: m.get("_pods") or [] for m in members}
+    pods_by_member[name] = job.get("_pods") or pods_by_member.get(name) or []
+    all_attempts = []
+    for mid, pods in pods_by_member.items():
+        for a in st._attempts(pods, rows, name=mid):
+            a["operation"] = mid
+            all_attempts.append(a)
+    for a in st._attempts([], [r for r in rows if r.get("operation") not in pods_by_member]):
+        a["operation"] = (by_pod.get(a.get("attempt_id")) or {}).get("operation") or name  # an expired member
+        all_attempts.append(a)
+    # a cancelled member's interrupted attempt is the cancel, not a preemption: the rule the member's own handle
+    # applies, from the Job's annotation while it exists; for an expired member (no Job) from its cancel mark, read
+    # once for all of them and never required (a failed read leaves the record's own status)
+    cancelled_members = {
+        m["metadata"]["name"] for m in members if (m["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/cancelled")
+    }
+    expired = {a["operation"] for a in all_attempts} - set(pods_by_member)
+    if expired and attempts.enabled():
+        try:
+            cancelled_members |= {o for o, mk in attempts.marks_for(expired).items() if mk and mk[1]}
+        except Exception as e:  # noqa: BLE001 - provenance of an expired member stays the record's
+            log.warning("chain of %s: cancel marks of expired members unavailable: %s", root, e)
+    for mid in cancelled_members:
+        st.cancel_attempt([a for a in all_attempts if a["operation"] == mid], True)
     for a in all_attempts:
         r = by_pod.get(a.get("attempt_id")) or {}
-        a["operation"] = r.get("operation") or name
         a["attempt_role"] = r.get("role") or a.get("attempt_role") or "run"
         a["image"] = r.get("image")
         d = st._secs(a.get("started_at"), a.get("ended_at"))
@@ -943,12 +1307,21 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
             round(d * a["_gpus"], 1) if d is not None and a.get("ended_at") else None
         )  # unknown stays unknown
     chain, total, complete = [], 0.0, True
+    endpoint_usage = []
     for m in members:
         mid = m["metadata"]["name"]
         mine = [a for a in all_attempts if a["operation"] == mid]
         measured = [a["gpu_seconds"] for a in mine if a["gpu_seconds"] is not None]
         unknown = any(a["gpu_seconds"] is None and a["status"] != "QUEUED" for a in mine)
-        ann = m["metadata"].get("annotations") or {}
+        if st.accounting_annotations(m).get(billing.BILLED) == "unknown" and not mine:
+            unknown = True  # a predecessor billed as unknown with no attempt on record is unknown, not 0 complete
+        ann = st.accounting_annotations(m)
+        if (m["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async":
+            # Endpoint work is measured by its native worker, never by the CPU caller's pod duration.
+            value = st.measured(ann.get(f"{cfg.LABEL}/gpu-seconds"))
+            measured = [value] if value is not None else []
+            unknown = st.usage_of(ann) != "measured"
+            endpoint_usage.append(st.usage_of(ann))
         chain.append(
             {
                 "id": mid,
@@ -971,7 +1344,7 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
                 "reason": ann.get(f"{cfg.LABEL}/fallback") or ann.get(f"{cfg.LABEL}/recovery"),
                 "gpu_seconds": round(sum(measured), 1) if measured else (None if unknown else 0.0),
                 "gpu_seconds_complete": not unknown,
-                "cost": float(ann[f"{cfg.LABEL}/billed"]) if f"{cfg.LABEL}/billed" in ann else None,
+                "cost": st.measured(ann.get(f"{cfg.LABEL}/billed")),  # "unknown" (settled without a measurement) = null
             }
         )
         total += sum(measured)
@@ -983,25 +1356,41 @@ def _chain(p: Principal, op: dict, job: dict, root: str) -> dict:
         "created_at": (root_member or {}).get("created_at")
         or min((a["started_at"] for a in all_attempts if a.get("started_at")), default=op.get("created_at")),
         "started_at": min((a["started_at"] for a in all_attempts if a.get("started_at")), default=None),
-        "attempts": [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts],
+        "attempts": instances.placed(
+            [{k: v for k, v in a.items() if not k.startswith("_")} for a in all_attempts], op.get("cluster")
+        ),
         "chain": chain,
         "successor_created_at": successors[-1]["created_at"] if successors else None,
-        "gpu_seconds": round(total, 1),
+        "gpu_seconds": None if op.get("mode") == "async" and not complete and total == 0 else round(total, 1),
         "gpu_seconds_complete": complete,
-        "cost": round(sum(billed), 6) if billed else None,
+        **(
+            {"usage": "measured" if complete else "unknown" if "unknown" in endpoint_usage else "pending"}
+            if op.get("mode") == "async"
+            else {}
+        ),
+        "cost": round(sum(billed), 6)
+        if billed and (op.get("mode") != "async" or all(c["cost"] is not None for c in chain))
+        else None,
     }
 
 
 def _finalizers(p: Principal, name: str, root: str) -> dict:
     """The application finalizers of an operation (docs/JOBS.md "Finalization by the application"): how many ran
     (`finalize_attempts`) and, while one is QUEUED or RUNNING, the handle shows it: `status FINALIZING`,
-    `finalizing_by`, and the finalizer pod's attempt id, epoch and role (the broker's current attempt)."""
+    `finalizing_by`, and the finalizer pod's complete observed identity (the broker's current attempt).
+    Missing observations must clear the compute attempt's identity, never inherit it."""
     xs = [
         j
-        for j in jobs.list_ops(p.namespace, p.tenant, None, 500)
+        for j in jobs.list_related(
+            p.namespace,
+            p.tenant,
+            lambda j: (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
+            and (
+                (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
+                or (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async"
+            ),
+        )
         if _may_read_operation(p, j)
-        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of") == name
-        and (j["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/attempt-role") == "finalize"
     ]
     out: dict = {"finalize_attempts": len(xs)}
     active = [
@@ -1014,18 +1403,27 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
         a = sorted(active, key=lambda j: str(j["metadata"].get("creationTimestamp") or ""))[-1]
         aname = a["metadata"]["name"]
         rows = [r for r in attempts.for_operation(root) if r["operation"] == aname]
-        latest = rows[-1] if rows else None
+        current = attempts.lifecycle(aname, root, rows, marks=None, pods=a.get("_pods"))
+        role = "export" if (a["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "async" else "finalize"
         out.update(
             {
                 "status": "FINALIZING",
                 "finalizing_by": aname,
                 "error": None,
-                "attempt_id": latest.get("pod") if latest else None,
-                "epoch": latest.get("epoch") if latest else None,
-                "attempt_role": "finalize",
-                "cluster": (latest.get("cluster") or kube.cluster_id_or_none(latest.get("region")))
-                if latest
-                else out.get("cluster"),
+                "attempt_role": role,
+                **{
+                    key: current[key]
+                    for key in (
+                        "attempt_id",
+                        "epoch",
+                        "cluster",
+                        "pod_uid",
+                        "image_digest",
+                        "image_digest_state",
+                        "gang_rank",
+                        "gang_restart",
+                    )
+                },
             }
         )
     return out
@@ -1033,11 +1431,14 @@ def _finalizers(p: Principal, name: str, root: str) -> dict:
 
 def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
     if job.get("_synthetic"):
-        return job["_synthetic"]
+        op = dict(job["_synthetic"])
+        if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
+            op.update(attempts.delivered(op, op["id"], _root(job)))  # a retry that delivered after the Job was gone
+        return op
     name = job["metadata"]["name"]
     records, root = _records(p, job, name, region)
     op = jobs.normalise(job, _price(job), records)
-    op.update(attempts.lifecycle(name, root, records))
+    op.update(attempts.lifecycle(name, root, records, pods=job.get("_pods")))
     if not op.get("cluster") and (job.get("_cluster") or job.get("_region")):
         op["cluster"] = job.get("_cluster") or kube.cluster_id_or_none(
             job["_region"]
@@ -1052,35 +1453,95 @@ def _operation(p: Principal, job: dict, id: str, region: str | None) -> dict:
         op.update(
             _chain(p, op, job, root)
         )  # a chain member, a followed handle, or a root with retries/successors on record
-    if (
-        op["status"] in ("FAILED", "EXPORT_FAILED")
-        and attempts.enabled()
-        and (job["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/mode") == "run"
-    ):
+    if op["status"] in ("FAILED", "EXPORT_FAILED") and attempts.enabled():
+        # a run's application finalizer, or an endpoint call's transfer-only retry: while one runs, the root's handle
+        # shows FINALIZING and the active attempt (the identity a refresh broker verifies against the pod's token)
         op.update(_finalizers(p, name, root))
     if op["status"] in ("EXPORT_FAILED", "FINALIZING", "FAILED") and attempts.enabled():
-        # a transfer-only retry or an application finalizer (`<id>-x<n>`) that delivered closes the original (docs/JOBS.md
-        # "Attempts and finalization", "Finalization by the application"); a FAILED run only ever has finalizers
-        done = [
-            r
-            for r in attempts.for_operation(root)
-            if r["operation"].startswith(f"{name}-x")
-            and (
-                (r.get("export_state") or r.get("export")) == "succeeded"
-                or (r.get("result_ref") and r["status"] == "succeeded")
-            )
-        ]
-        if done:
-            op.update(
-                {
-                    "status": "SUCCEEDED",
-                    "export_state": done[-1].get("export_state") or "succeeded",
-                    "exported_by": done[-1]["operation"],
-                    "result_ref": done[-1].get("result_ref") or op.get("result_ref"),
-                    "error": None,
-                }
-            )  # the delivering attempt's result
+        op.update(attempts.delivered(op, name, root))  # a retry or finalizer that delivered closes the original
+    if op["status"] == "EXPORT_FAILED" and jobs.work_volume_present(job, jobs.home_of(job)) is False:
+        # the text above promises a kept volume and a transfer retry; neither holds once the claim is gone (an older
+        # uploader released it): say so, and offer no resume or export on it (`:export` answers 409 the same way)
+        op["error"] = (
+            "export failed after a successful run and its work volume is already gone: nothing is left to export, "
+            "submit the operation again"
+        )
+        op["resumable"] = False
+    _stage_fields(p, op, job, root)
+    ann = job["metadata"].get("annotations") or {}
+    if ann.get(f"{cfg.LABEL}/endpoint-revision") or ann.get(f"{cfg.LABEL}/endpoint-image"):
+        op["endpoint_revision"] = ann.get(f"{cfg.LABEL}/endpoint-revision")
+        op["endpoint_image"] = ann.get(f"{cfg.LABEL}/endpoint-image")
+    if op.get("mode") == "async" and db.enabled():
+        op["native"] = leases.public(leases.get(name), leases.history(name))  # the worker's side (docs/API.md)
+    return _who(instances.enrich_operation(op), job)
+
+
+_alias_cache: dict = {}  # key hash -> (until, alias): the alias of a key changes rarely, reads are per operation
+
+
+def _key_alias(key_hash: str | None) -> str | None:
+    """The alias of the submitting key (never its value): what the operator reads as "who" on the Serverless side
+    (docs/API.md "Requester"). From the keys table; None without the database or for an unknown hash."""
+    if not key_hash or not db.enabled():
+        return None
+
+    def load() -> str | None:
+        try:
+            return (keys.info(key_hash) or {}).get("key_alias")
+        except Exception as e:  # noqa: BLE001 - a key read never fails an operation read
+            log.warning("key alias of %s unavailable: %s", key_hash[:12], e)
+            return None
+
+    return cached(_alias_cache, key_hash, 60, load)
+
+
+def _who(op: dict, job: dict | None) -> dict:
+    """`requester` (the application's block on the Job) and `key_alias` (the submitting key) on an operation read.
+    An expired operation (no Job) keeps the key the run ledger reserved under."""
+    ann = ((job or {}).get("metadata") or {}).get("annotations") or {}
+    if job is not None:
+        op["requester"] = instances.requester_of(ann)
+    h = ann.get(f"{cfg.LABEL}/key")
+    if not h and db.enabled() and op.get("id"):
+        try:
+            h = keys.reservation_key_of(op["id"])
+        except Exception:  # noqa: BLE001 - the alias is a convenience on the read
+            h = None
+    op["key_alias"] = _key_alias(h)
     return op
+
+
+def _stage_fields(p: Principal, op: dict, job: dict, root: str) -> None:
+    """Stage composition on the handle (docs/JOBS.md "Stage composition"): a root with a graph reports its stages and
+    is terminal only with them; a stage reports its root, dependencies and why it still waits."""
+    if st := stages.stage_of(job):
+        op["stage"] = {k: v for k, v in st.items() if k != "waiting"}
+    if not db.enabled():
+        return
+    g = keys.graph_of(root)
+    if g and g["tenant"] == p.tenant:
+        head = keys.run_head(root) or root
+        own = op if op.get("id") == head else None  # this handle IS the root's lineage head: no second read of it
+        stages.apply_to_root(
+            op, stages.graph_view(p.namespace, g, root_state=stages._state(head, own) if own else None)
+        )
+
+
+def _settle_on_read(p: Principal, job: dict, region: str | None) -> bool:
+    """A finished operation its owner reads before the billing pass reached it is settled now (billing.settle_job:
+    the pass's own body for one operation, under its per-operation lock; idempotent with the CronJob and the other
+    replica), so the first terminal read already carries `usage`/`gpu_seconds` and the key's slot is free instead of
+    `pending` until the next pass (every 2 minutes). Nothing changes for an unfinished operation, an unmeasured one
+    (`unknown`, the reservation kept) or a native call whose worker is still attached (deferred). Never fails the
+    read: an error is logged and the pass settles later."""
+    if job.get("_synthetic") or not db.enabled() or not billing.unsettled(job, p.namespace, jobs.home_of(job)):
+        return False
+    try:
+        return asyncio.run(billing.settle_job(jobs.home_of(job), p.namespace, dict(job)))
+    except Exception as e:  # noqa: BLE001 - the CronJob remains the settler of record
+        log.warning("settle on read of %s failed: %s", job["metadata"].get("name"), e)
+        return False
 
 
 @app.get("/v1/operations/{id}", responses={200: {"model": schemas.Operation}})
@@ -1088,6 +1549,8 @@ def get_operation(id: str, since: int | None = None, p: Principal = Depends(scop
     """`since=<revision>`: 304 while nothing about the operation's attempts changed (polling cursor; the live
     pod state is still re-read on every 200)."""
     job, region = _owned(p, id)
+    if _settle_on_read(p, job, region):
+        job, region = _owned(p, id)  # the same answer carries the settlement (usage, gpu_seconds, the slot free)
     op = _operation(p, job, id, region)
     if (
         since is not None
@@ -1119,10 +1582,17 @@ def get_result(id: str, p: Principal = Depends(scoped("read:results"))):
         return JSONResponse(res, status_code=409)
     prefix = jobs.output_prefix(job)
     application = (op.get("execution") or {}).get("io_mode") == "application"
-    if op["mode"] == "async":
+    if op["mode"] == "async" and not application:
         res["result"] = artifacts.read_json(
             p.namespace, f"operations/{id}/out/response.json", region or REGION, prefix=prefix
         )
+    elif op["mode"] == "async":
+        # application-owned output (docs/JOBS.md "Endpoint calls with private input and application-owned output"): the
+        # capture is in the application's storage; `result_ref` names it, `export_state` says it arrived; a FAILED
+        # call (the endpoint answered 4xx) is delivered the same way and reports both
+        res["result"] = None
+        res["exported_by"] = op.get("exported_by")
+        res["capture_attempt_id"] = op.get("attempt_id")
     res["artifacts"] = (
         artifacts.list_outputs(p.namespace, id, region or REGION, prefix)
         if op["mode"] == "run" and not application
@@ -1137,55 +1607,156 @@ def get_result(id: str, p: Principal = Depends(scoped("read:results"))):
 def export_again(id: str, p: Principal = Depends(scoped("read:results", "run:control"))):
     """Transfer-only retry of an EXPORT_FAILED run (managed I/O): a new operation `<id>-x<n>` with the uploader on the
     kept work volume and a main container that does nothing; the simulation is not rerun (docs/JOBS.md)."""
-    orig, region = _owned(p, id)
-    _continuation_limits(p)
+    pause.check(p.tenant, kind="export")  # exports keep working during a pause unless it says `exports: true`
+    orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     exported = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/export-of")
     if exported:  # a previous retry's handle: the retry is of the compute attempt, never of a retry
         orig, region = _owned(p, exported, follow=False)
-    op = _operation(p, orig, orig["metadata"]["name"], region)
+    name, root = orig["metadata"]["name"], _root(orig)
+    op = _operation(p, orig, name, region)
+    stages.require_current(p, name, root)
     if op.get("finalizing_by"):
         # one active finalizer per root: the call is idempotent while it runs
         active, _ = _owned(p, op["finalizing_by"], follow=False)
         return JSONResponse(jobs.normalise(active, _price(active)), status_code=200)
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
-    finalize = None
-    fz = (m.get("job") or {}).get("finalize")
-    if op["status"] == "FAILED" and fz and (op.get("execution") or {}).get("io_mode") == "application":
-        # the application finalizer (docs/JOBS.md "Finalization by the application"): only after a compute that ended with
-        # one of the model's "delivery pending" exit codes; a failed computation is never finalized into a success
-        name = orig["metadata"]["name"]
-        root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or name
-        rows = (
-            [r for r in attempts.for_operation(root) if r["operation"] == name and r["status"] == "failed"]
-            if attempts.enabled()
-            else []
+    if op["mode"] == "async":
+        # an endpoint call is delivered again when its capture is complete and its delivery failed: EXPORT_FAILED (a 2xx
+        # capture), or FAILED with export_state failed when the capture is an endpoint error (exit 2 or 5); an unknown
+        # outcome (exit 4) or a retry that found nothing (exit 3) has no capture to deliver
+        last_exit = next(
+            (r.get("exit_code") for r in reversed(op.get("attempts") or []) if r.get("exit_code") is not None), None
         )
-        last = rows[-1] if rows else None
-        if last is None or last.get("exit_code") not in fz["onExitCodes"]:
+        failed_capture = op["status"] == "FAILED" and op.get("export_state") == "failed" and last_exit in (0, 2, 5)
+        if op["status"] not in ("EXPORT_FAILED", "FINALIZING") and not failed_capture:
             raise HTTPException(
                 409,
-                f"operation {id} is FAILED with exit code {(last or {}).get('exit_code')}; the model finalizes only after exit codes {fz['onExitCodes']} (compute done, delivery pending)",
+                f"operation {id} is {op['status']}"
+                + (" with no complete capture (inference outcome unknown)" if last_exit == 4 else "")
+                + "; only an endpoint call whose capture is complete and undelivered is delivered again",
             )
-        finalize = {"spec": fz, "attempt": last}
-    elif op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
-        raise HTTPException(
-            409,
-            f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
-            + (
-                " (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)"
-                if op["status"] == "FAILED"
-                else ""
-            ),
+        build = lambda admit: jobs.export_async(p.namespace, name, jobs.home_of(orig), m, admit=admit)  # noqa: E731
+    else:
+        finalize = None
+        fz = (m.get("job") or {}).get("finalize")
+        if op["status"] == "FAILED" and fz and (op.get("execution") or {}).get("io_mode") == "application":
+            # the application finalizer (docs/JOBS.md "Finalization by the application"): only after a compute that
+            # ended with one of the model's "delivery pending" exit codes; a failed computation is never finalized into
+            # a success
+            mine = [r for r in attempts.for_operation(root) if r["operation"] == name] if attempts.enabled() else []
+            # the record that speaks for the newest attempt: a gang's coordinator (rank 0 publishes; the peers' exits
+            # are the gang's teardown, never the delivery verdict), else the newest pod; it must be a failed one
+            last = attempts.authority(mine)
+            if last is not None and last.get("status") != "failed":
+                last = None
+            if last is None or last.get("exit_code") not in fz["onExitCodes"]:
+                raise HTTPException(
+                    409,
+                    f"operation {id} is FAILED with exit code {(last or {}).get('exit_code')}; the model finalizes only after exit codes {fz['onExitCodes']} (compute done, delivery pending)",
+                )
+            finalize = {"spec": fz, "attempt": last}
+        elif op["status"] not in ("EXPORT_FAILED", "FINALIZING"):
+            raise HTTPException(
+                409,
+                f"operation {id} is {op['status']}; only an EXPORT_FAILED (or still FINALIZING) run is exported again"
+                + (
+                    " (a FAILED application run is finalized only when its model declares job.finalize and the compute ended with a 'delivery pending' exit code)"
+                    if op["status"] == "FAILED"
+                    else ""
+                ),
+            )
+        build = lambda admit: jobs.export_again(  # noqa: E731
+            p.namespace,
+            name,
+            jobs.home_of(orig),
+            m,
+            catalog.region_params(m, region) if region else {},
+            finalize=finalize,
+            admit=admit,
         )
-    job, created = jobs.export_again(
-        p.namespace,
-        orig["metadata"]["name"],
-        _home(orig),
-        m,
-        catalog.region_params(m, region) if region else {},
-        finalize=finalize,
-    )
+    job, created = stages.continue_run(root, build, transfer_only=True, ns=p.namespace)
     return _continued(p, job, created, region)
+
+
+@app.get("/v1/operations/{id}/children/{unit_id}", responses={200: {"model": schemas.ChildReadback}})
+def read_child_unit(id: str, unit_id: str, p: Principal = Depends(scoped("read:operations"))):
+    """The owner's read-only readback of one endpoint child of a run (docs/JOBS.md "Endpoint children"): the same
+    authoritative readback the live attempt gets (the durable row, the capture manifest, the attempt record, the
+    live or terminal state), fenced to the operation's owner (`id`: the root or any member of the run), without the
+    attempt-scoped download URL (an owner reads the capture through GET /v1/operations/<child>, its own operation).
+    404 for an unknown unit or another owner's run; nothing is persisted and no id is guessed."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(404, f"operation {id}: no child units (no fleet database)")
+    job, _region = _owned(p, id, follow=False)
+    root = _root(job)
+    out = children.readback(p.namespace, root, unit_id)
+    if out is None:
+        raise HTTPException(404, f"operation {root}: no child unit {unit_id!r}")
+    if out.get("capture"):
+        out["capture"] = {k: v for k, v in out["capture"].items() if k not in ("download_url", "download_expires_in_s")}
+    return out
+
+
+@app.post("/internal/operations/{parent}/children", include_in_schema=False)
+async def create_child(parent: str, body: dict, authorization: str = Header(default="")):
+    """Endpoint children (docs/JOBS.md "Endpoint children"): a live attempt of `parent` (its own projected pod token)
+    asks for one bounded async endpoint child of its root. 201 created, 200 read back (same unit, same request)."""
+    import children
+
+    identity = await _parent_identity(authorization)
+    out, created = await asyncio.to_thread(children.create, identity, parent, body or {})
+    return JSONResponse(out, status_code=201 if created else 200)
+
+
+async def _parent_identity(authorization: str) -> dict:
+    """The verified identity of a run's live attempt calling with its own projected pod token (children.verify_parent_token)."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(404, "endpoint children need the fleet database")
+    token = authorization.split(" ", 1)[1].strip() if authorization.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(401, "the parent attempt's token is required")
+    return await asyncio.to_thread(children.verify_parent_token, token)
+
+
+@app.post("/internal/operations/{child}:refresh", include_in_schema=False)
+async def refresh_child(child: str, request: Request, authorization: str = Header(default="")):
+    """The refresh broker of an endpoint child's caller (docs/JOBS.md "Endpoint children"; services/jobs/bin/call.sh
+    `refresh`): with the child's own operation-scoped token, the renewable input URL and fresh presigned PUT URLs for
+    the capture at the platform-owned destination."""
+    import children
+
+    if not children.enabled():
+        raise HTTPException(501, "endpoint children need the fleet database")
+    token = _bearer(authorization)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    return await asyncio.to_thread(children.refresh, child, token, body if isinstance(body, dict) else {})
+
+
+def _bearer(authorization: str, why: str = "missing bearer token") -> str:
+    """The bearer token of an Authorization header; 401 (`why`) without one."""
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, why)
+    return authorization[7:].strip()
+
+
+@app.get("/internal/operations/{parent}/children/{unit_id}", include_in_schema=False)
+async def read_child(parent: str, unit_id: str, authorization: str = Header(default="")):
+    """Authoritative readback of a unit's child by any live attempt of the root (a successor included)."""
+    import children
+
+    identity = await _parent_identity(authorization)
+    _job, _region, root, _m = await asyncio.to_thread(children._live_parent, identity, parent)
+    out = await asyncio.to_thread(children.readback, identity["namespace"], root, unit_id)
+    if out is None:
+        raise HTTPException(404, f"unit {unit_id} of {root} has no child")
+    return out
 
 
 @app.post("/internal/attempts", include_in_schema=False)
@@ -1195,23 +1766,27 @@ async def record_attempt(request: Request, authorization: str = Header(default="
     from (services/api/attempts.py). 501 on an API without the fleet database (the bucket records stand)."""
     if not attempts.enabled():
         raise HTTPException(501, "this API keeps no attempt records (no fleet database)")
-    if not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer token")
+    token = _bearer(authorization)
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, "a JSON object is expected")
-    region, ns, pod = await asyncio.to_thread(attempts.verify_runner_token, authorization[7:].strip())
+    region, ns, pod = await asyncio.to_thread(attempts.verify_runner_token, token)
     operation = str(body.get("operation") or "")
     try:
         job, _ = await asyncio.to_thread(
             jobs.find, ns, operation
         )  # the manager's Job for a fleet run (the worker holds a mirror)
-        body["root"] = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or operation
+        body["root"] = _root(job)
         body["role"] = (job["metadata"].get("annotations") or {}).get(
             f"{cfg.LABEL}/attempt-role"
         ) or "run"  # the platform's statement, never the pod's
         # the canonical cluster id: the Workload's admitting cluster for a fleet run, else the worker the token came from
         body["cluster"] = job.get("_cluster") or _cluster_of(region)
+        try:  # the explicit continuation reference the run was rendered with (CHECKPOINT_REF): the platform's statement
+            jex = json.loads((job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/execution") or "null") or {}
+            body["_explicit_checkpoint_ref"] = (jex.get("recovery") or {}).get("checkpoint_ref")
+        except ValueError:
+            body["_explicit_checkpoint_ref"] = None
     except HTTPException:
         body["root"] = operation  # the Job is already gone (TTL, cancel): the record still counts
         body["role"] = "run"
@@ -1228,26 +1803,225 @@ def _cluster_of(region: str) -> str:
         raise HTTPException(409, f"attempt record not stamped: {e}")
 
 
-def _home(job: dict) -> str:
-    """The cluster the operation's Job object lives in: the manager for fleet-placed runs."""
-    return REGION if jobs.is_manager_job(job) else (job.get("_region") or REGION)
+# ---- live sessions (docs/API.md "Sessions") -----------------------------------------------------------------------
+@app.post("/v1/models/{model}:session", responses={202: {"model": schemas.Session}}, status_code=202)
+def create_session(
+    model: str,
+    req: schemas.SessionRequest | None = None,
+    p: Principal = Depends(scoped("invoke:sync")),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """An admitted stream to an endpoint: the key's slot and request are taken now (and, for a key with a GPU-second
+    budget, the endpoint's GPUs x timeout_s); the answer carries a one-time claim token the connection presents
+    (`Sec-WebSocket-Protocol: s2-session.<token>` or `x-serverless2-session-claim`) within SESSION_CLAIM_TTL_S.
+    `Idempotency-Key` (owner-scoped): the same request again answers the same session (`replay: true`), with a usable
+    claim that replaces the earlier one while nobody bound it, without one once bound, attached or ended; the key with
+    another request is 409 (sessions.replay)."""
+    sessions.require()
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > sessions.IDEMPOTENCY_KEY_MAX:
+            raise HTTPException(400, f"Idempotency-Key: 1..{sessions.IDEMPOTENCY_KEY_MAX} characters")
+    req = req or schemas.SessionRequest()
+    m = _model(model)
+    # a replay (the owner's key names a session already) keeps the key's model grant, scope and validity checks but
+    # takes no new request from the budget: the admission counted once, at the first create (a key whose last
+    # request this session was recovers its lost answer instead of a 402); the request itself is compared below
+    existing = sessions.find_replay(p.tenant, p.owner, idempotency_key) if idempotency_key else None
+    authorize(p, m["name"], "invoke:sync", budget=existing is None)
+    if m["mode"] == "run":
+        raise HTTPException(400, "sessions are streams to an endpoint; this model is a run class")
+    if p.role == keys.ROUTER["role"]:
+        raise HTTPException(403, "the router key opens no sessions")
+    bound = sessions.transport_deadline_s(m)
+    if req.timeout_s is None:
+        req.timeout_s = bound if bound is not None else 3600  # the longest the transport carries, never above it
+    if bound is not None and req.timeout_s > bound:
+        # the stream would be cut by the endpoint's transport before the session's deadline, mid-stream, with no record
+        # on the session: refused here with the number to use instead (never silently shortened)
+        raise HTTPException(
+            400,
+            f"session timeout_s {req.timeout_s} exceeds the endpoint's transport deadline of {bound} s (the model's "
+            f"timeout_s: Knative ends every request of a single-node endpoint there, WebSocket or NDJSON alike); ask for "
+            f"timeout_s <= {bound}, or raise the model's timeout_s within the fleet's Knative revision maximum",
+        )
+    cluster, region = _deployment_of(m, req.region)
+    try:
+        return sessions.create(
+            keys.key_hash(p.key),
+            p.tenant,
+            p.owner,
+            m["name"],
+            cluster,
+            region,
+            req.timeout_s,
+            sessions.gpus_per_replica(m),
+            idempotency_key=idempotency_key,
+        )
+    except keys.KeyLimit as e:
+        raise HTTPException(e.status, e.detail)
+
+
+def _owned_session(p: Principal, id: str) -> dict:
+    s = sessions.get(id)
+    if s is None or s["tenant"] != p.tenant or s["owner"] != p.owner:
+        raise HTTPException(404, f"session {id}: not found")
+    return s
+
+
+@app.get("/v1/sessions", responses={200: {"model": list[schemas.Session]}})
+def list_sessions(limit: int = Query(default=100, ge=1, le=500), p: Principal = Depends(scoped("read:operations"))):
+    sessions.require()
+    return sessions.list_owner(p.tenant, p.owner, limit)
+
+
+@app.get("/v1/sessions/{id}", responses={200: {"model": schemas.Session}})
+def get_session(id: str, p: Principal = Depends(scoped("read:operations"))):
+    sessions.require()
+    return sessions.public(_owned_session(p, id))
+
+
+@app.post("/v1/sessions/{id}:cancel", responses={200: {"model": schemas.Session}})
+def cancel_session(id: str, p: Principal = Depends(scoped("invoke:sync"))):
+    """A cancellation request: a session nobody bound ends now; a bound or attached one keeps its slot until its
+    worker releases it after cleanup or its pod is confirmed gone (the reconciler)."""
+    sessions.require()
+    _owned_session(p, id)
+    return sessions.public(sessions.cancel(id, "cancelled by the owner"))
+
+
+async def _worker_session(id: str, authorization: str) -> tuple[dict, dict]:
+    """The session and the verified identity of the worker pod calling with its own bound ServiceAccount token."""
+    sessions.require()
+    token = _bearer(authorization, WORKER_TOKEN)
+    s = sessions.get(id)
+    if s is None:
+        raise HTTPException(404, "no such session")
+    return s, await asyncio.to_thread(sessions.verify_worker, token, s, _endpoint_model)
+
+
+WORKER_TOKEN = "a worker calls with its pod's ServiceAccount token"
+
+
+@app.post("/internal/sessions/{id}:attach", include_in_schema=False)
+async def attach_session(id: str, body: schemas.SessionAttach, authorization: str = Header(default="")):
+    """The worker that accepted the connection, before any decoder, reset or GPU work: `bound -> attached` for the
+    connection id the hook injected; a retry with the same (connection, pod) is idempotent; after the attach wait,
+    a cancel or the deadline it fails for good."""
+    _s, worker = await _worker_session(id, authorization)
+    s = await asyncio.to_thread(sessions.attach, id, body.connection, worker, body.worker_session_id)
+    return {**sessions.public(s), "connection": s["connection"], "owner": _session_owner_context(s)}
+
+
+def _session_owner_context(s: dict) -> dict:
+    """The trusted owner context of a session for the worker that attached to it (docs/API.md "Sessions"), as the
+    native execution routes give it (`_owner_context`): the session's durable row (tenant, the stable opaque owner id
+    the admitting key's principal resolved to, the model), written at creation and never changed. Never a request
+    header, never a group derived from the session id, never the key; absent from every public (owner-facing) read."""
+    return {"tenant": s["tenant"], "owner": s["owner"], "model": s["model"]}
+
+
+@app.post("/internal/sessions/{id}:release", include_in_schema=False)
+async def release_session(id: str, body: schemas.SessionRelease, authorization: str = Header(default="")):
+    """The attached worker, after its own post-done cleanup: the only release of an attached session (besides
+    confirmed pod loss). `gpu_seconds` null = unknown (unmetered): the bound stays against the budget."""
+    s, worker = await _worker_session(id, authorization)
+    if s.get("connection") and body.connection != s["connection"]:
+        raise HTTPException(409, "not this session's connection")
+    return sessions.public(await asyncio.to_thread(sessions.release, id, worker, body.outcome, body.gpu_seconds))
+
+
+@app.get("/internal/sessions/{id}", include_in_schema=False)
+async def watch_session(id: str, authorization: str = Header(default="")):
+    """The attached worker's view (only it may watch): status, `cancel_requested`, the deadline."""
+    s, worker = await _worker_session(id, authorization)
+    if s["state"] != "attached" or s["pod_uid"] != worker["uid"]:
+        raise HTTPException(403, "only the attached worker watches its session")
+    return {
+        "id": id,
+        "status": s["state"],
+        "cancel_requested": s["cancel_requested_at"] is not None,
+        "cancel_reason": s["cancel_reason"],
+        "deadline_at": iso(s["deadline_at"]),
+        "owner": _session_owner_context(s),
+    }
+
+
+# ---- native execution leases (docs/API.md "Native execution leases") ----------------------------------------------
+async def _worker_execution(operation: str, authorization: str) -> tuple[dict, dict]:
+    if not db.enabled():
+        raise HTTPException(404, "native execution leases need the control API's ledger")
+    token = _bearer(authorization, WORKER_TOKEN)
+    e = leases.get(operation)
+    if e is None:
+        raise HTTPException(404, f"operation {operation}: no prepared native execution")
+    return e, await asyncio.to_thread(leases.verify_worker, token, e, _endpoint_model)
+
+
+@app.post("/internal/executions/{operation}:attach", include_in_schema=False)
+async def attach_execution(operation: str, body: schemas.NativeAttach, authorization: str = Header(default="")):
+    """The worker, atomically before it enqueues GPU work for the request carrying these markers: the prepared
+    execution of this attempt becomes attached to this pod; a stale attempt, another pod or no prepared execution is
+    409 and the worker fails closed. Idempotent for the same tuple (a dropped response is retried safely)."""
+    _e, worker = await _worker_execution(operation, authorization)
+    out = leases.public(await asyncio.to_thread(leases.attach, operation, body.attempt, worker, body.worker_request_id))
+    out["owner"] = _owner_context(operation)
+    return out
+
+
+@app.post("/internal/executions/{operation}:release", include_in_schema=False)
+async def release_execution(operation: str, body: schemas.NativeRelease, authorization: str = Header(default="")):
+    """The attached worker, after its own settlement (natural completion, or the stop ACK of a drain): outcome, GPU
+    seconds as measured (null = unknown). Frees nothing by itself: the member settles at the join with the caller."""
+    _e, worker = await _worker_execution(operation, authorization)
+    return leases.public(
+        await asyncio.to_thread(
+            leases.release, operation, body.attempt, worker, body.worker_request_id, body.outcome, body.gpu_seconds
+        )
+    )
+
+
+@app.get("/internal/executions/{operation}", include_in_schema=False)
+async def watch_execution(operation: str, authorization: str = Header(default="")):
+    """The attached worker's view: `cancel_requested` (the cooperative abort signal) and the state."""
+    e, worker = await _worker_execution(operation, authorization)
+    if e["state"] != "attached" or e["pod_uid"] != worker["uid"]:
+        raise HTTPException(403, "only the attached worker watches its execution")
+    return {
+        "operation": operation,
+        "state": e["state"],
+        "cancel_requested": e["cancel_requested_at"] is not None,
+        "cancel_reason": e["cancel_reason"],
+        "owner": _owner_context(operation),
+    }
+
+
+def _owner_context(operation: str) -> dict | None:
+    """The trusted owner context of an admitted operation, for the worker that attached to it (docs/API.md "Native
+    execution leases"): the operation's durable owner record (tenant, the stable opaque owner id, model), written at
+    admission by the API and readable only through the pod-authenticated lease routes; never a client header."""
+    record = keys.operation_owner(operation) if db.enabled() else None
+    if not record:
+        return None
+    tenant, owner, model = record
+    return {"tenant": tenant, "owner": owner, "model": model}
 
 
 @app.post("/v1/operations/{id}:cancel", responses={200: {"model": schemas.Operation}})
 def cancel(id: str, p: Principal = Depends(scoped("run:control"))):
-    job, region = _owned(p, id)
+    job, region = _owned(p, id, follow=False)  # cancel the operation named, never its continuation
     if job.get("_synthetic"):
-        raise HTTPException(409, f"operation {id} is over; nothing to cancel")
+        # the Job is gone (TTL). A graph root is still the handle its owner cancels the graph by (docs/JOBS.md "Stage
+        # composition"): every stage member and the root lineage's head go, nothing attaches any more; any other
+        # expired operation has nothing left to cancel
+        return stages.cancel_expired_root(p.namespace, id, job)
     current = job["metadata"]["name"]
     op = _operation(p, job, id, region)
     if op.get("finalizing_by"):  # the root's handle: a cancel stops its active finalizer, the root stays as it is
         job, _ = _owned(p, op["finalizing_by"], follow=False)
         current = job["metadata"]["name"]
-    attempts.mark_cancelled(current)  # a late "succeeded" from the cancelled attempt is refused from now on
-    op = jobs.normalise(jobs.cancel(p.namespace, current, _home(job)))
-    if op["status"] in ("QUEUED", "RUNNING"):
-        op["status"] = "CANCELLED"  # the Job controller converges within seconds (pods get SIGTERM)
-    return op
+    root = (job["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    return stages.cancel_run(p.namespace, job, current, root)
 
 
 @app.post(
@@ -1264,13 +2038,14 @@ def resume(
     A fleet-placed run is resumed through the manager, pinned to the worker that ran it. With a
     `checkpoint_ref` (a portable checkpoint the application restores itself) the volume and the region are not
     needed: the run is placed again, optionally on another `gpu_class` (its image), docs/JOBS.md "Execution options"."""
-    orig, region = _owned(p, id)
-    _continuation_limits(p)
+    pause.check(p.tenant)  # a paused tenant resumes nothing (docs/API.md "Submission pause")
+    orig, region = _owned(p, id, follow=False)  # the named member itself: _require_current names the head
     m = _model(orig["metadata"]["labels"].get("serverless2.nebius/model", ""))
     req = req or ResumeRequest()
     if req.gpu_class and req.gpu_class not in jobs.gpu_classes(m):
         raise HTTPException(400, f"gpu_class {req.gpu_class} is not one of {jobs.gpu_classes(m)}")
-    root = (orig["metadata"].get("annotations") or {}).get(f"{cfg.LABEL}/resumed-from") or id
+    root = _root(orig)
+    stages.require_current(p, orig["metadata"]["name"], root)
     pointer = (
         (attempts.latest_checkpoint(root) or {}).get("checkpoint_ref")
         if attempts.enabled() and not req.checkpoint_ref
@@ -1288,17 +2063,23 @@ def resume(
     )
     if req.gpu_class and placement:
         placement["classes"] = [req.gpu_class]
-    job, created = jobs.resume(
-        p.namespace,
-        orig["metadata"]["name"],
-        _home(orig),
-        m,
-        catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
-        placement,
-        checkpoint_ref=req.checkpoint_ref,
-        gpu_class=req.gpu_class,
-        idem=idempotency_key,
-        pointer=pointer,
+    job, created = stages.continue_run(
+        root,
+        lambda admit: jobs.resume(
+            p.namespace,
+            orig["metadata"]["name"],
+            jobs.home_of(orig),
+            m,
+            catalog.region_params(m, region) if region and not req.checkpoint_ref and not req.gpu_class else {},
+            placement,
+            checkpoint_ref=req.checkpoint_ref,
+            gpu_class=req.gpu_class,
+            idem=idempotency_key,
+            pointer=pointer,
+            admit=admit,
+            restart_from_inputs=bool(req.restart_from_inputs),
+        ),
+        ns=p.namespace,
     )
     return _continued(p, job, created, region)
 
@@ -1307,24 +2088,39 @@ def _continued(p: Principal, job: dict, created: bool, region: str | None) -> JS
     """The response of a continuation: 202 with the new Job, or 200 with the existing one's current state (the
     replay of an idempotent call reports what GET /v1/operations/{id} reports, records included)."""
     if created:
-        return JSONResponse(jobs.normalise(job, _price(job)), status_code=202)
+        return JSONResponse(_who(instances.enrich_operation(jobs.normalise(job, _price(job))), job), status_code=202)
     return JSONResponse(_operation(p, job, job["metadata"]["name"], region), status_code=200)
 
 
 # ---- bindings: confidential inputs for runs (docs/JOBS.md "Execution options") ----
 @app.put("/v1/bindings/{ref}", responses={200: {"model": schemas.Binding}})
-def put_binding(ref: str, req: BindingRequest, p: Principal = Depends(scoped("artifacts:write"))):
-    return execution.put_binding(p.namespace, p.tenant, ref, req.data)
+def put_binding(
+    ref: str,
+    req: BindingRequest,
+    p: Principal = Depends(scoped("artifacts:write")),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+):
+    """Create or replace the caller's binding. A binding belongs to the principal that created it: another principal
+    of the tenant cannot read, replace, revoke or consume it (404); an admin may. `If-Match: <revision>` makes the
+    replacement a compare-and-swap (409 when the binding changed meanwhile)."""
+    return execution.put_binding(p.namespace, p.tenant, ref, req.data, p.owner, p.role == "admin", if_match)
 
 
 @app.get("/v1/bindings", responses={200: {"model": list[schemas.Binding]}})
-def list_bindings(p: Principal = Depends(principal)):
-    return execution.list_bindings(p.namespace)
+def list_bindings(
+    response: Response,
+    p: Principal = Depends(principal),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The caller's bindings by ref, one page at a time (docs/API.md "Pagination")."""
+    rows = execution.list_bindings(p.namespace, p.owner, p.role == "admin")
+    return _page(response, rows, lambda b: str(b.get("ref") or ""), cursor, limit)
 
 
 @app.delete("/v1/bindings/{ref}", status_code=204)
 def delete_binding(ref: str, p: Principal = Depends(scoped("artifacts:write"))):
-    if not execution.delete_binding(p.namespace, ref):
+    if not execution.delete_binding(p.namespace, ref, p.owner, p.role == "admin"):
         raise HTTPException(404, f"binding {ref}: not found")
     return None
 
@@ -1387,10 +2183,7 @@ def _variants_public(m: dict, region: str) -> list[dict]:
         return []
     out = []
     for v in vs:
-        try:
-            st = kube.endpoint_status(v["object"], m["namespace"], region)
-        except (HTTPException, ApiException):
-            st = {"status": "unavailable", "replicas_ready": None}
+        st = _status_of(v["object"], m["namespace"], region)
         out.append(
             {
                 "name": v["name"],
@@ -1406,48 +2199,60 @@ def _variants_public(m: dict, region: str) -> list[dict]:
     return out
 
 
+def _endpoint_view(m: dict, obj: dict, region: str, **extra) -> dict:
+    """The public endpoint (endpoints.to_public) with `extra` and, for an endpoint with variants, their state."""
+    vs = _variants_public(m, region)
+    return {**ep.to_public(m, obj, region), **extra, **({"variants": vs, "routing": m.get("routing")} if vs else {})}
+
+
 @app.get("/v1/endpoints", responses={200: {"model": list[schemas.Endpoint]}})
-def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("read:catalog"))):
+def list_endpoints(
+    response: Response,
+    region: str | None = None,
+    p: Principal = Depends(scoped("read:catalog")),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """Every deployment of every endpoint the key may see: one entry per deployment cluster (`cluster` is the id the
+    catalog keys it by, `region` the Nebius region the API reaches it in), by model id then cluster, one page at a
+    time (docs/API.md "Pagination"): the live state (replicas, pods, rollout) is read for the page only. `region`
+    selects a cluster id or a region."""
     served_regions = kube.regions()
-    if region and region not in served_regions:
-        raise HTTPException(400, f"region {region} is not served by this API")
-    selected_region = region
-    out = []
+    if region and region not in served_regions and kube.cluster_region(region) not in served_regions:
+        raise HTTPException(400, f"region {region} is not served by this API (available: {served_regions})")
+    pairs = []  # (model, cluster id) of every deployment the key may see, before any live read
     for m in catalog.all_models().values():
-        if not allows_model(p, m["name"]):
+        if not allows_model(p, m["name"]) or m["mode"] == "run":
             continue
-        if m["mode"] == "run":
-            continue
-        for region in [selected_region] if selected_region else served_regions:
-            if region not in m["regions"]:
+        for cid in m["regions"]:
+            cluster_region = kube.cluster_region(cid)
+            if region and region not in (cid, cluster_region):
                 continue
-            try:
-                i = _deployed(m, region)
-                if i:
-                    out.append(
-                        {
-                            **ep.to_public(m, i, region),
-                            **(
-                                {"variants": vs, "routing": m.get("routing")}
-                                if (vs := _variants_public(m, region))
-                                else {}
-                            ),
-                        }
-                    )
-            except (HTTPException, ApiException):
-                out.append(
-                    {
-                        "id": m["k8s_name"],
-                        "name": m["display_name"],
-                        "model": m["name"],
-                        "region": region,
-                        "status": "unavailable",
-                        "replicas_ready": None,
-                        "gpu": m.get("gpu"),
-                        "managed_by": m.get("managed_by"),
-                        "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke",
-                    }
-                )
+            if cluster_region not in served_regions:
+                continue
+            pairs.append((m, cid))
+    out = []
+    for m, cid in _page(response, pairs, lambda x: f"{x[0]['name']}|{x[1]}", cursor, limit):
+        cluster_region = kube.cluster_region(cid)
+        try:
+            _deployment_of(m, cid)  # 400 for a cluster this API cannot tell apart from another in its region
+            if i := _deployed(m, cluster_region):
+                out.append(_endpoint_view(m, i, cluster_region, cluster=cid))
+        except (HTTPException, ApiException):
+            out.append(
+                {
+                    "id": m["k8s_name"],
+                    "name": m["display_name"],
+                    "model": m["name"],
+                    "region": cluster_region,
+                    "cluster": cid,
+                    "status": "unavailable",
+                    "replicas_ready": None,
+                    "gpu": m.get("gpu"),
+                    "managed_by": m.get("managed_by"),
+                    "url": f"{PUBLIC_API_URL}/v1/models/{m['name']}:invoke",
+                }
+            )
     return out
 
 
@@ -1455,14 +2260,10 @@ def list_endpoints(region: str | None = None, p: Principal = Depends(scoped("rea
 def get_endpoint(id: str, region: str | None = None, p: Principal = Depends(scoped("read:catalog"))):
     m = _endpoint_model(id)
     check_model(p, m["name"])
-    region = _endpoint_region(m, region)
-    i = _deployed(m, region) or {}
-    if not i:
+    region = _deployment_of(m, region)[1]  # the Nebius region the request is served in (a cluster id or a region)
+    if not (i := _deployed(m, region)):
         raise HTTPException(404, f"endpoint {id} not deployed in {region}")
-    return {
-        **ep.to_public(m, i, region),
-        **({"variants": vs, "routing": m.get("routing")} if (vs := _variants_public(m, region)) else {}),
-    }
+    return _endpoint_view(m, i, region)
 
 
 @app.patch("/v1/endpoints/{id}", responses={200: {"model": schemas.Endpoint}})
@@ -1471,7 +2272,7 @@ def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: 
     m = _endpoint_model(id)
     if m.get("managed_by") != "api" or not m.get("spec"):
         raise HTTPException(403, "This endpoint is managed by the fleet configuration. Update its source definition.")
-    region = _endpoint_region(m, region)
+    region = _deployment_of(m, region)[1]  # the Nebius region the request is served in (a cluster id or a region)
     spec = {**m["spec"], "scaling": {**m["spec"].get("scaling", {})}}
     if req.scaling is not None:
         spec["scaling"].update(req.scaling.model_dump(exclude_none=True))
@@ -1494,15 +2295,6 @@ def update_endpoint(id: str, req: ScalingRequest, region: str | None = None, p: 
     return get_endpoint(id, region, p)
 
 
-def _endpoint_region(m: dict, region: str | None) -> str:
-    selected = region or (REGION if REGION in m["regions"] else m["regions"][0])
-    if selected not in kube.regions():
-        raise HTTPException(400, f"region {selected} is not served by this API")
-    if selected not in m["regions"]:
-        raise HTTPException(404, "Endpoint not deployed in this region")
-    return selected
-
-
 @app.get("/v1/endpoints/{id}/metrics", responses={200: {"model": schemas.Metrics}})
 async def endpoint_metrics(
     id: str,
@@ -1513,7 +2305,7 @@ async def endpoint_metrics(
 ):
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
-    region = _endpoint_region(m, region)
+    region = _deployment_of(m, region)[1]  # the Nebius region the request is served in (a cluster id or a region)
     return await monitoring.metrics("endpoint", m["namespace"], m["k8s_name"], region, range, end)
 
 
@@ -1529,7 +2321,7 @@ async def endpoint_logs(
 ):
     m = await asyncio.to_thread(_endpoint_model, id)
     check_model(p, m["name"])
-    region = _endpoint_region(m, region)
+    region = _deployment_of(m, region)[1]  # the Nebius region the request is served in (a cluster id or a region)
     return await monitoring.logs("endpoint", m["namespace"], m["k8s_name"], region, range, search, limit, end)
 
 
@@ -1561,21 +2353,31 @@ async def operation_logs(
     return await monitoring.logs(kind, p.namespace, id, region or REGION, range, search, limit, end)
 
 
-def _key_public(i: dict, tenant: str) -> dict:
-    exhausted = i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]
-    return {
-        "id": i.get("key_alias"),
-        "key_preview": i.get("key_name"),
-        "alias": i.get("key_alias"),
-        "tenant": tenant,
-        "budget": i.get("max_budget"),
-        "spend": i.get("spend", 0),
-        "models": i.get("models", []),
-        "created_at": i.get("created_at"),
-        "expires_at": i.get("expires"),
-        "status": "exhausted" if exhausted else "active",
-        "role": (i.get("metadata") or {}).get("role", "user"),
-    }
+def _key_update(tenant: str, alias: str, req: KeyUpdate, where: str = "") -> dict:
+    """Budget, model allow-list or expiry of a tenant's key (keys.update); the spend ledger is untouched. The budget
+    set: a number, None when the caller wrote `budget: null` explicitly (unlimited), or keys.UNSET when the field
+    was left out (unchanged): JSON null and absence are different requests here."""
+    if "budget" not in req.model_fields_set and req.models is None and req.expires_days is None:
+        raise HTTPException(400, "nothing to change: pass budget (null = unlimited), models or expires_days")
+    budget = req.budget if "budget" in req.model_fields_set else keys.UNSET
+    return _key_changed(keys.update(tenant, alias, budget, req.models, req.expires_days), tenant, alias, where)
+
+
+def _key_changed(i: dict | None, tenant: str, alias: str, where: str = "") -> dict:
+    """The answer of a key change: 404 when the key is not there; a cached principal would keep the old record for
+    AUTH_CACHE_S, so it is forgotten."""
+    if i is None:
+        raise HTTPException(404, f"key {alias} not found{where}")
+    forget_hash(i["token"])
+    return key_view(i, tenant, admin=True)
+
+
+def _key_minted(tenant: str, req: KeyRequest, metadata: dict, by: str | None) -> dict:
+    """A user key of a tenant (alias `<tenant>-<alias>`, keys.create): the value is returned once."""
+    value, i = keys.create(
+        tenant, f"{tenant}-{req.alias}", req.budget, req.models, req.expires_days, metadata=metadata, by=by
+    )
+    return {**key_view(i, tenant, admin=True), "key": value}
 
 
 def _fleet_only() -> None:
@@ -1583,10 +2385,236 @@ def _fleet_only() -> None:
         raise HTTPException(409, "keys live in the fleet database (DATABASE_URL), which this API does not have")
 
 
-@app.get("/v1/keys", responses={200: {"model": list[schemas.ApiKey]}})
-def list_keys(p: Principal = Depends(admin)):
+# ---- fleet operators (docs/API.md "Fleet operators"): tenants, their keys and usage, with an explicit tenant --------
+def _fleet_tenant(tenant: str) -> str:
+    """A tenant name the fleet surface may address: a DNS label (the tenant namespace is `tenant-<name>`)."""
+    import re
+
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", tenant) or tenant == keys.ROUTER["tenant"]:
+        raise HTTPException(404, f"tenant {tenant} is not a tenant of this fleet")
+    return tenant
+
+
+def _fleet_tenant_view(tenant: str, doc: dict | None, record: dict | None, usage: dict | None) -> dict:
+    return {
+        "tenant": tenant,
+        "namespace": f"{cfg.TENANT_NS_PREFIX}{tenant}",
+        "in_fleet_document": doc is not None,
+        "gpu_quota": (doc or {}).get("gpu_quota"),
+        "fair_share_weight": (doc or {}).get("fair_share_weight"),
+        "dedicated_pools": list((doc or {}).get("dedicated_pools") or []) if doc is not None else None,
+        "assets": list((doc or {}).get("assets") or []) if doc is not None else None,
+        "keys": (record or {}).get("keys", 0),
+        "admins": (record or {}).get("admins", 0),
+        "blocked": (record or {}).get("blocked", 0),
+        "spend": float((record or {}).get("spend", 0.0)),
+        "usage": usage,
+    }
+
+
+@app.get("/v1/fleet/tenants", responses={200: {"model": list[schemas.FleetTenantRecord]}})
+def fleet_tenants(
+    response: Response,
+    p: Principal = Depends(fleet_operator),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """Every tenant of the fleet: the fleet document's tenants (charts/fleet tenants.yaml: quota, fair share,
+    dedicated pools, assets) and every tenant with keys on record, with key counts, spend and what the keys hold,
+    by name, one page at a time (docs/API.md "Pagination"; the usage reads are for the page only). The platform's
+    own keys (router, fleet operators) are not a tenant."""
     _fleet_only()
-    return [_key_public(k, p.tenant) for k in keys.list_tenant(p.tenant)]
+    doc = kube.fleet().get("tenants") or {}
+    record = keys.tenants_on_record()
+    names = _page(response, sorted(set(doc) | set(record)), lambda t: t, cursor, limit)
+    return [_fleet_tenant_view(t, doc.get(t), record.get(t), keys.tenant_usage(t)) for t in names]
+
+
+@app.get("/v1/fleet/tenants/{tenant}", responses={200: {"model": schemas.FleetTenantRecord}})
+def fleet_tenant(tenant: str, p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    doc = (kube.fleet().get("tenants") or {}).get(tenant)
+    record = keys.tenants_on_record().get(tenant)
+    if doc is None and record is None:
+        raise HTTPException(404, f"tenant {tenant} is not a tenant of this fleet")
+    return _fleet_tenant_view(tenant, doc, record, keys.tenant_usage(tenant))
+
+
+@app.get("/v1/fleet/submissions", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions(p: Principal = Depends(fleet_operator)):
+    """The submission pause as it stands (docs/API.md "Submission pause")."""
+    _fleet_only()
+    return pause.state()
+
+
+@app.post("/v1/fleet/submissions:pause", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions_pause(req: schemas.SubmissionPauseRequest, p: Principal = Depends(fleet_operator)):
+    """Pause NEW admissions of some tenants (or all): while paused, their :invoke, :resume and :export answer 503 with
+    Retry-After and create nothing; everything in flight, every read, :cancel, callbacks, results, grants, keys and
+    budgets are untouched. Bounded (`max_s`, 6 h at most): it lifts itself. Explicit: GET /v1/fleet/submissions."""
+    _fleet_only()
+    return pause.pause(
+        req.tenants, req.reason, req.retry_after_s, req.max_s, p.info.get("key_alias") or "fleet", exports=req.exports
+    )
+
+
+@app.post("/v1/fleet/submissions:resume", responses={200: {"model": schemas.SubmissionPause}})
+def fleet_submissions_resume(p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    return pause.resume(p.info.get("key_alias") or "fleet")
+
+
+@app.get("/v1/fleet/operations", responses={200: {"model": list[schemas.FleetOperation]}})
+def fleet_operations(
+    response: Response,
+    p: Principal = Depends(fleet_operator),
+    active: bool = True,
+    tenant: str | None = None,
+    status: str | None = None,
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The fleet operator's read-only view of the operations across every tenant and cluster (docs/API.md "Fleet
+    operations"): with `active=true` (default) the work in flight (RUNNING: a pod is active; QUEUED: admitted or
+    waiting; CANCELLED: cancellation requested, the Job still ending), with `active=false` every operation Job the
+    clusters still hold, terminal ones included (SUCCEEDED, FAILED, CANCELLED, and SUPERSEDED: an original a
+    continuation took over). `status=` (comma-separated) narrows either. Newest first, one page at a time
+    (docs/API.md "Pagination"). Identity and state only: id, tenant, model, mode, status, timestamps, cluster,
+    successor, the submitting key's alias, the owner hash and the requester block; never an input, a result, a
+    reference or a key: an operation's detail stays its owner's. Header `X-Regions-Skipped` names clusters that
+    could not be read."""
+    _fleet_only()
+    items, skipped = jobs.list_fleet_operations()
+    if tenant:
+        items = [j for j in items if (j["metadata"].get("labels") or {}).get(f"{cfg.LABEL}/tenant") == tenant]
+    views = {j["metadata"]["name"]: _fleet_operation_view(j) for j in items}
+    if active:  # in flight only: never a terminal Job, never an original a continuation superseded
+        items = [
+            j for j in items if not jobs.job_terminal(j) and views[j["metadata"]["name"]]["status"] != "SUPERSEDED"
+        ]
+    if status:
+        wanted = {s.strip().upper() for s in status.split(",") if s.strip()}
+        items = [j for j in items if views[j["metadata"]["name"]]["status"] in wanted]
+    if skipped:
+        response.headers["X-Regions-Skipped"] = ",".join(skipped)
+    # newest first: the page helper sorts ascending, so the key is inverted through a sortable complement
+    key = lambda j: _desc_key(f"{j['metadata'].get('creationTimestamp') or ''}|{j['metadata']['name']}")  # noqa: E731
+    page = _page(response, items, key, cursor, limit)
+    return [views[j["metadata"]["name"]] for j in page]
+
+
+def _desc_key(k: str) -> str:
+    """A key whose ascending order is the descending order of `k` (every character complemented)."""
+    return "".join(chr(0x10FFFF - ord(c)) for c in k)
+
+
+def _fleet_operation_view(j: dict) -> dict:
+    md, st = j["metadata"], j.get("status") or {}
+    labels, ann = md.get("labels") or {}, md.get("annotations") or {}
+    worker = j.get("_worker_status") or {}
+    conds = {c.get("type") for c in st.get("conditions") or [] if c.get("status") == "True"}
+    cancelled = bool(ann.get(f"{cfg.LABEL}/cancelled"))
+    if "Complete" in conds:
+        status = "SUCCEEDED"
+    elif "Failed" in conds:
+        status = "CANCELLED" if cancelled else "FAILED"
+    elif ann.get(f"{cfg.LABEL}/successor"):
+        status = "SUPERSEDED"
+    elif cancelled:
+        status = "CANCELLED"  # requested, the Job still ending (as GET /v1/operations/{id} reports it)
+    elif int(worker.get("active") or st.get("active") or 0) > 0 and (worker.get("startTime") or st.get("startTime")):
+        status = "RUNNING"
+    else:
+        status = "QUEUED"
+    return {
+        "id": md["name"],
+        "tenant": labels.get(f"{cfg.LABEL}/tenant"),
+        "model": labels.get(f"{cfg.LABEL}/model"),
+        "mode": labels.get(f"{cfg.LABEL}/mode"),
+        "status": status,
+        "created_at": md.get("creationTimestamp"),
+        "started_at": worker.get("startTime") or st.get("startTime"),
+        "cluster": j.get("_cluster") or kube.cluster_id_or_none(j.get("_region")),
+        "region": j.get("_region"),
+        "successor": ann.get(f"{cfg.LABEL}/successor"),
+        "key_alias": _key_alias(ann.get(f"{cfg.LABEL}/key")),
+        "owner": ann.get(f"{cfg.LABEL}/owner"),
+        "requester": instances.requester_of(ann),
+    }
+
+
+@app.get("/v1/fleet/tenants/{tenant}/keys", responses={200: {"model": list[schemas.ApiKey]}})
+def fleet_list_keys(
+    response: Response,
+    tenant: str,
+    p: Principal = Depends(fleet_operator),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The tenant's keys exactly as its own admin lists them (the same safe projection: never a hash or value), by
+    alias, one page at a time (docs/API.md "Pagination")."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    rows = _page(response, keys.list_tenant(tenant), lambda k: k["key_alias"] or "", cursor, limit)
+    return [key_view(k, tenant, admin=True) for k in rows]
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})
+def fleet_create_key(tenant: str, req: KeyRequest, p: Principal = Depends(fleet_operator)):
+    """A user key of that tenant, as its admin would mint it (no pass-through routes: the fleet operator carries
+    none); the value is returned once."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return _key_minted(tenant, req, {"allowed_passthrough_routes": []}, f"fleet:{p.info.get('key_alias')}")
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys:import", responses={200: {"model": schemas.KeyImportReport}})
+def fleet_import_keys(tenant: str, req: KeyImportRequest, p: Principal = Depends(fleet_operator)):
+    """Pre-hashed user keys of that tenant (docs/API.md "Importing keys"), with the tenant's own rules."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return keys.import_records(
+        req.keys, tenant, f"fleet:{p.info.get('key_alias') or p.info.get('key_name')}", req.dry_run
+    )
+
+
+@app.patch("/v1/fleet/tenants/{tenant}/keys/{alias}", responses={200: {"model": schemas.ApiKey}})
+def fleet_update_key(tenant: str, alias: str, req: KeyUpdate, p: Principal = Depends(fleet_operator)):
+    """Budget, model allow-list (the grant) or expiry of a tenant's key; spend untouched."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return _key_update(tenant, alias, req, f" in tenant {tenant}")
+
+
+@app.post("/v1/fleet/tenants/{tenant}/keys/{alias}:block", responses={200: {"model": schemas.ApiKey}})
+def fleet_block_key(tenant: str, alias: str, blocked: bool = True, p: Principal = Depends(fleet_operator)):
+    """Block (default) or unblock (`?blocked=false`) a tenant's key: the record and its history stay; a blocked
+    key is refused on every request within AUTH_CACHE_S."""
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    return _key_changed(keys.block(tenant, alias, blocked), tenant, alias, f" in tenant {tenant}")
+
+
+@app.delete("/v1/fleet/tenants/{tenant}/keys/{alias}", status_code=204)
+def fleet_revoke_key(tenant: str, alias: str, p: Principal = Depends(fleet_operator)):
+    _fleet_only()
+    tenant = _fleet_tenant(tenant)
+    if not keys.revoke(tenant, alias):
+        raise HTTPException(404, f"key {alias} not found in tenant {tenant}")
+
+
+@app.get("/v1/keys", responses={200: {"model": list[schemas.ApiKey]}})
+def list_keys(
+    response: Response,
+    p: Principal = Depends(admin),
+    limit: int | None = Query(None, ge=1, le=PAGE_MAX),
+    cursor: str | None = None,
+):
+    """The tenant's keys by alias, one page at a time (docs/API.md "Pagination")."""
+    _fleet_only()
+    rows = _page(response, keys.list_tenant(p.tenant), lambda k: k["key_alias"] or "", cursor, limit)
+    return [key_view(k, p.tenant, admin=True) for k in rows]
 
 
 @app.post("/v1/keys", status_code=201, responses={201: {"model": schemas.ApiKey}})
@@ -1595,16 +2623,7 @@ def create_key(req: KeyRequest, p: Principal = Depends(admin)):
     value is returned once and mirrored into LiteLLM (services/api/keys.py)."""
     _fleet_only()
     meta = {"allowed_passthrough_routes": (p.info.get("metadata") or {}).get("allowed_passthrough_routes", [])}
-    value, i = keys.create(
-        p.tenant,
-        f"{p.tenant}-{req.alias}",
-        req.budget,
-        req.models,
-        req.expires_days,
-        metadata=meta,
-        by=p.info.get("key_alias"),
-    )
-    return {**_key_public(i, p.tenant), "key": value}
+    return _key_minted(p.tenant, req, meta, p.info.get("key_alias"))
 
 
 @app.post("/v1/keys:import", responses={200: {"model": schemas.KeyImportReport}})
@@ -1619,13 +2638,7 @@ def import_keys(req: KeyImportRequest, p: Principal = Depends(admin)):
 def update_key(alias: str, req: KeyUpdate, p: Principal = Depends(admin)):
     """Change a key's budget, allowed models or expiry; the spend ledger is untouched (docs/RELIABILITY.md)."""
     _fleet_only()
-    if req.budget is None and req.models is None and req.expires_days is None:
-        raise HTTPException(400, "nothing to change: pass budget, models or expires_days")
-    i = keys.update(p.tenant, alias, req.budget, req.models, req.expires_days)
-    if i is None:
-        raise HTTPException(404, f"key {alias} not found")
-    forget_hash(i["token"])  # a cached principal would keep the old budget for AUTH_CACHE_S
-    return _key_public(i, p.tenant)
+    return _key_update(p.tenant, alias, req)
 
 
 @app.delete("/v1/keys/{alias}", status_code=204)

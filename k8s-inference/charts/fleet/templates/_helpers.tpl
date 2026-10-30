@@ -45,7 +45,19 @@
 {{- if gt $floor 0 }}{{ $nodesForFloor = div (add $floor (sub $s.gpus 1)) $s.gpus }}{{ end -}}
 {{- $nodes := sub (int $p.max_nodes) $nodesForFloor -}}
 {{- $res := default dict $f.node_reserve -}}
-{{- dict "gpu" (sub (mul $s.gpus (int $p.max_nodes)) $floor) "cpu" (mul (sub $s.vcpu (default 2 $res.cpu)) $nodes) "memoryGi" (mul (sub $s.memGi (default 20 $res.memory_gib)) $nodes) "ib" (mul (int (include "fleet.ibDevices" $p)) $nodes) | toYaml -}}
+{{- $eph := include "fleet.ephemeralPerNode" (dict "fleet" $f "boot" (default 512 $p.boot_disk_gib)) | int -}}
+{{- dict "gpu" (sub (mul $s.gpus (int $p.max_nodes)) $floor) "cpu" (mul (sub $s.vcpu (default 2 $res.cpu)) $nodes) "memoryGi" (mul (sub $s.memGi (default 20 $res.memory_gib)) $nodes) "ib" (mul (int (include "fleet.ibDevices" $p)) $nodes) "ephemeralGi" (mul $eph $nodes) | toYaml -}}
+{{- end -}}
+
+{{/* Ephemeral storage one node of a pool may admit (Gi): boot disk x node_reserve.ephemeral_fraction minus
+     node_reserve.ephemeral_gib, never below zero: under the kubelet's allocatable (docs/FLEET.md "Ephemeral storage").
+     args: dict "fleet" "boot" (GiB) */}}
+{{- define "fleet.ephemeralPerNode" -}}
+{{- $res := default dict .fleet.node_reserve -}}
+{{- $fraction := 0.85 }}{{ if hasKey $res "ephemeral_fraction" }}{{ $fraction = $res.ephemeral_fraction }}{{ end -}}
+{{- $reserve := 4 }}{{ if hasKey $res "ephemeral_gib" }}{{ $reserve = $res.ephemeral_gib }}{{ end -}}
+{{- $gi := sub (int (floor (mulf (float64 .boot) ($fraction | float64)))) (int $reserve) -}}
+{{- max 0 $gi -}}
 {{- end -}}
 
 {{/* Kueue quota of a region's system pool for the CPU-only `system` flavor: node_count x (preset minus the per-node
@@ -57,28 +69,70 @@
 {{- $vcpu := index $nums (sub (len $nums) 2) }}{{ $memGi := last $nums -}}
 {{- $res := default (dict "cpu" 4 "memory_gib" 16) $f.system_reserve -}}
 {{- $n := int (default 2 $sp.node_count) -}}
-{{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) | toYaml -}}
+{{- $eph := include "fleet.ephemeralPerNode" (dict "fleet" $f "boot" (default 128 $f.system_boot_disk_gib)) | int -}}
+{{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) "ephemeralGi" (mul $eph $n) | toYaml -}}
 {{- end -}}
 
-{{/* The `system` flavor entries of a queue, first in its flavor list: GPU-free workloads fit them (nominal 0 GPUs, so a
-     GPU request moves on to the pool flavors), CPU and memory from fleet.systemQuota. args: dict "systems" (flavor name ->
-     quota) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
+{{/* A CPU pool's quota (docs/FLEET.md "CPU pools"): max_nodes x preset `<n>vcpu-<n>gb` minus the per-node system_reserve,
+     ephemeral storage per node from its boot disk. args: dict "fleet" "pool" */}}
+{{- define "fleet.cpuPoolQuota" -}}
+{{- $f := .fleet }}{{ $p := .pool -}}
+{{- $parts := regexSplit "[^0-9]+" $p.preset -1 -}}
+{{- $nums := list }}{{ range $x := $parts }}{{ if ne $x "" }}{{ $nums = append $nums (atoi $x) }}{{ end }}{{ end -}}
+{{- if lt (len $nums) 2 }}{{ fail (printf "cpu pool preset %q is not <n>vcpu-<n>gb" $p.preset) }}{{ end -}}
+{{- $vcpu := index $nums (sub (len $nums) 2) }}{{ $memGi := last $nums -}}
+{{- $res := default (dict "cpu" 4 "memory_gib" 16) $f.system_reserve -}}
+{{- $n := int $p.max_nodes -}}
+{{- $eph := include "fleet.ephemeralPerNode" (dict "fleet" $f "boot" (default 128 $p.boot_disk_gib)) | int -}}
+{{- dict "cpu" (max 0 (mul (sub $vcpu (int $res.cpu)) $n)) "memoryGi" (max 0 (mul (sub $memGi (int $res.memory_gib)) $n)) "ephemeralGi" (mul $eph $n) | toYaml -}}
+{{- end -}}
+
+{{/* The GPU-free flavor entries of a queue, first in its flavor list: `system` (the cluster's system nodes), then the
+     CPU pools in fleet.cpuPoolOrder (smallest preset first, then the warm ones; a workload that fits the system nodes
+     stays there, a bigger one takes a CPU pool); nominal 0 GPUs, so a GPU request moves on to the pool flavors. args: dict "systems" (flavor name
+     -> quota) "order" (list of flavor names in order) "lender" (bool: nominal quota; else a tenant queue borrowing it) */}}
 {{- define "fleet.systemFlavors" -}}
-{{- range $name, $q := .systems }}
+{{- $systems := .systems }}{{ $order := default (keys $systems | sortAlpha) .order }}
+{{- /* a tenant queue (`tenant` true) lists no `system` flavor when the fleet policy `tenant_system_flavor` is false
+       (docs/FLEET.md "Customer CPU pools"): customer work never lands on the platform's system nodes, a GPU-free
+       workload takes the region's customer CPU pool (the flavors after `system`) or waits. `default` would turn
+       false into true, so the key is tested explicitly. */}}
+{{- $allow := true }}{{ if and .fleet (hasKey (default dict .fleet) "tenant_system_flavor") }}{{ $allow = .fleet.tenant_system_flavor }}{{ end }}
+{{- $skipSystem := and .tenant (not $allow) }}
+{{- range $name := $order }}{{ $q := index $systems $name }}
+{{- if not (and $skipSystem (or (eq $name "system") (hasSuffix "-system" $name))) }}
 - name: {{ $name }}
   resources:
     {{- if $.lender }}
     - { name: nvidia.com/gpu, nominalQuota: 0 }
     - { name: cpu, nominalQuota: {{ $q.cpu }} }
     - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+    - { name: ephemeral-storage, nominalQuota: {{ $q.ephemeralGi }}Gi }
     - { name: nebius.ai/infiniband, nominalQuota: 0 }
     {{- else }}
     - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: 0 }
     - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
     - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+    - { name: ephemeral-storage, nominalQuota: 0, borrowingLimit: {{ $q.ephemeralGi }}Gi }
     - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: 0 }
     {{- end }}
 {{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* The names of a region's CPU pools in flavor order (docs/FLEET.md "Customer CPU pools"): smallest preset first
+     (its vCPU count), then the warm ones (min_nodes > 0) before the ones that boot from zero, then by name; the API's
+     kube.cpu_pool_order is the same rule. arg: the region's cpu_pools map (may be empty) */}}
+{{- define "fleet.cpuPoolOrder" -}}
+{{- $keyed := list }}
+{{- range $cp, $p := (default dict .) }}
+{{- $v := regexFind "^[0-9]+" (toString $p.preset) | default "0" | int }}
+{{- $warm := ternary 0 1 (gt (default 0 $p.min_nodes | int) 0) }}
+{{- $keyed = append $keyed (printf "%08d|%d|%s" $v $warm $cp) }}
+{{- end }}
+{{- $out := list }}
+{{- range $k := sortAlpha $keyed }}{{ $out = append $out (regexReplaceAll "^[0-9]+\\|[01]\\|" $k "") }}{{ end }}
+{{- $out | toJson -}}
 {{- end -}}
 
 {{/* Index of a pool's capacity type in fleet.capacity_order (unknown types last). args: dict "fleet" "pool" */}}
@@ -163,11 +217,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }}, lendingLimit: 0 }
 - { name: cpu, nominalQuota: {{ $q.cpu }}, lendingLimit: 0 }
 - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi, lendingLimit: 0 }
+- { name: ephemeral-storage, nominalQuota: {{ $q.ephemeralGi }}Gi, lendingLimit: 0 }
 - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }}, lendingLimit: 0 }
 {{- else }}
 - { name: nvidia.com/gpu, nominalQuota: 0, borrowingLimit: {{ $gpu }} }
 - { name: cpu, nominalQuota: 0, borrowingLimit: {{ $q.cpu }} }
 - { name: memory, nominalQuota: 0, borrowingLimit: {{ $q.memoryGi }}Gi }
+- { name: ephemeral-storage, nominalQuota: 0, borrowingLimit: {{ $q.ephemeralGi }}Gi }
 - { name: nebius.ai/infiniband, nominalQuota: 0, borrowingLimit: {{ $q.ib }} }
 {{- end }}
 {{- end -}}
@@ -210,9 +266,9 @@ spec:
     withinClusterQueue: LowerPriority     # customer-batch evicts bulk-backfill
     reclaimWithinCohort: Any              # take back nominal quota (dedicated pools) lent out
   resourceGroups:
-    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
+    - coveredResources: [nvidia.com/gpu, cpu, memory, ephemeral-storage, nebius.ai/infiniband]   # the last: DRA InfiniBand NICs (kueue values deviceClassMappings)
       flavors:
-        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" false) | nindent 8 }}
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" false "tenant" true "fleet" $f) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" $prefer) | fromYamlArray }}
         {{- $owner := include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name)) }}
         {{- if or (not $owner) (eq $owner $tn) }}
@@ -241,9 +297,9 @@ spec:
     matchLabels: { kubernetes.io/metadata.name: models }
   queueingStrategy: BestEffortFIFO
   resourceGroups:
-    - coveredResources: [nvidia.com/gpu, cpu, memory, nebius.ai/infiniband]
+    - coveredResources: [nvidia.com/gpu, cpu, memory, ephemeral-storage, nebius.ai/infiniband]
       flavors:
-        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "lender" true) | nindent 8 }}
+        {{- include "fleet.systemFlavors" (dict "systems" (default dict .systems) "order" .order "lender" true) | nindent 8 }}
         {{- range $name := include "fleet.orderedPools" (dict "fleet" $f "pools" .pools "prefer" "") | fromYamlArray }}
         {{- if not (include "fleet.poolTenant" (dict "fleet" $f "pool" (index $.bare $name))) }}
         {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (index $.pools $name)) | fromYaml }}
@@ -252,6 +308,7 @@ spec:
             - { name: nvidia.com/gpu, nominalQuota: {{ $q.gpu }} }
             - { name: cpu, nominalQuota: {{ $q.cpu }} }
             - { name: memory, nominalQuota: {{ $q.memoryGi }}Gi }
+            - { name: ephemeral-storage, nominalQuota: {{ $q.ephemeralGi }}Gi }
             - { name: nebius.ai/infiniband, nominalQuota: {{ $q.ib }} }
         {{- end }}
         {{- end }}

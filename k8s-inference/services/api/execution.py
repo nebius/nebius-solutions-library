@@ -35,7 +35,7 @@ from kubernetes.client.rest import ApiException
 
 import kube
 from config import LABEL, REGION
-from resilience import retry
+from resilience import cached, retry
 from schemas import RECOVERY_MAX as RECOVERY_MAX
 from schemas import BindingRequest as BindingRequest
 from schemas import ExecutionSpec as ExecutionSpec
@@ -61,22 +61,23 @@ _cache: dict[str, tuple[float, dict]] = {}
 
 
 def tenant_config(ns: str, region: str = REGION) -> dict:
-    """The identities and execution profiles the operator rendered for the tenant (namespace annotations, charts/tenant)."""
-    hit = _cache.get(f"{region}/{ns}")
-    if hit and hit[0] > time.time():
-        return hit[1]
-    try:
-        ann = retry(kube.core(region).read_namespace, ns).metadata.annotations or {}
-    except ApiException as e:
-        raise HTTPException(503 if e.status != 404 else 404, f"tenant namespace {ns}: {e.reason}")
-    out = {}
-    for key, name in ((IDENTITIES_ANNOTATION, "identities"), (PROFILES_ANNOTATION, "execution_profiles")):
+    """The identities and execution profiles the operator rendered for the tenant (namespace annotations, charts/tenant),
+    remembered for a minute."""
+
+    def load() -> dict:
         try:
-            out[name] = json.loads(ann.get(key) or "{}")
-        except ValueError:
-            out[name] = {}
-    _cache[f"{region}/{ns}"] = (time.time() + 60, out)
-    return out
+            ann = retry(kube.core(region).read_namespace, ns).metadata.annotations or {}
+        except ApiException as e:
+            raise HTTPException(503 if e.status != 404 else 404, f"tenant namespace {ns}: {e.reason}")
+        out = {}
+        for key, name in ((IDENTITIES_ANNOTATION, "identities"), (PROFILES_ANNOTATION, "execution_profiles")):
+            try:
+                out[name] = json.loads(ann.get(key) or "{}")
+            except ValueError:
+                out[name] = {}
+        return out
+
+    return cached(_cache, f"{region}/{ns}", 60, load)
 
 
 def capabilities(ns: str, region: str = REGION) -> dict:
@@ -92,6 +93,36 @@ def capabilities(ns: str, region: str = REGION) -> dict:
         "oidc_issuers": dict(REGION_OIDC_ISSUERS),
         "private_input_dir": PRIVATE_DIR,
         "identity_token_file": f"{IDENTITY_DIR}/token",
+        # durable endpoint calls with private input and application-owned output (docs/API.md "Endpoint calls"): the
+        # binding's file contract, per-attempt URL refresh, retained capture for transfer-only export retries
+        "async_private_io": {
+            "version": 1,
+            "refresh": True,
+            "retained_export": True,
+            "binding_keys": [
+                "request.json",
+                "input_url",
+                "response_url",
+                "call_url",
+                "result_ref",
+                "refresh_url",
+                "refresh_token",
+            ],
+        },
+        # bounded application retries of one run (docs/JOBS.md "Retries"): the same Job, member and reservation
+        "retry": {"max_attempts": [1, 10], "default_exit_codes": [137, 143]},
+        # endpoint children of a run (docs/JOBS.md "Endpoint children"): absent on an API without them; an application
+        # refuses before admission when "application" is not among the deliveries it needs
+        "endpoint_children": {
+            "api": "0.11.100",
+            "delivery": ["platform", "application"],
+            "transport": ["refresh", "static"],
+            "request": ["input", "input_ref"],
+            "capture_record": True,
+            "readback": ["capture", "attempt", "outcome"],
+            "observed_attempt_fields": ["pod_uid", "gang_rank", "gang_restart"],
+            "preflight": "parent-admission",
+        },
         # automatic continuation after a confirmed infrastructure loss (docs/SCHEDULING.md): what a caller may ask for
         # application finalizer (docs/JOBS.md "Finalization by the application"): the model-owned command that re-delivers
         "finalize": {
@@ -148,29 +179,29 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         }
     if name := _ref(spec.private_input_ref, "private_input_ref"):
         ex["private_input_ref"] = name
-    if spec.placement:
-        pl = {}
-        if spec.placement.gpu_preference is not None:
-            classes = model.get("gpu_classes") or []
-            pref = [c for c in spec.placement.gpu_preference if c in classes]
-            if not pref:
-                raise HTTPException(
-                    400,
-                    f"gpu_preference {spec.placement.gpu_preference} has no class of model {model.get('name')} ({classes})",
-                )
-            pl["gpu_preference"] = pref
-        if spec.placement.allowed_clusters is not None:
-            regions = [r for r in spec.placement.allowed_clusters if r in (model.get("regions") or [])]
-            if not regions:
-                raise HTTPException(
-                    400,
-                    f"allowed_clusters {spec.placement.allowed_clusters} has no region of model {model.get('name')} ({model.get('regions')})",
-                )
-            pl["allowed_clusters"] = regions
-        if spec.placement.fallback_wait_s is not None:
-            pl["fallback_wait_s"] = spec.placement.fallback_wait_s
-        if pl:
-            ex["placement"] = pl
+    if spec.placement and (pl := _placement(spec.placement, model)):
+        ex["placement"] = pl
+    if spec.graph and spec.stage:
+        raise HTTPException(400, "execution.graph declares a root's stages; execution.stage submits one: not both")
+    if spec.graph:
+        ex["graph"] = validate_graph(spec.graph.stages, spec.graph.deadline_s)
+        import catalog  # a stage may only be bound to a run class that exists (docs/JOBS.md "Delegated stages")
+
+        for sid, mid in (ex["graph"].get("models") or {}).items():
+            bound = catalog.get(mid)
+            if not bound or bound.get("mode") != "run":
+                raise HTTPException(400, f"execution.graph.stages[{sid!r}].model: {mid!r} is not a run class")
+    if spec.stage:
+        if not (STAGE_ID.match(spec.stage.id) and _ref(spec.stage.root, "stage.root")):
+            raise HTTPException(400, "execution.stage: id (letters, digits, -) and root are required")
+        ex["stage"] = {"root": spec.stage.root, "id": spec.stage.id}
+    if spec.require_converged:
+        ex["require_converged"] = True
+    if spec.retry:
+        codes = sorted({int(c) for c in spec.retry.on_exit_codes})
+        if not codes or any(not 1 <= c <= 255 for c in codes):
+            raise HTTPException(400, "execution.retry.on_exit_codes: a non-empty list of exit codes 1..255")
+        ex["retry"] = {"max_attempts": int(spec.retry.max_attempts), "on_exit_codes": codes}
     if spec.recovery:
         ex["recovery"] = {"on_infrastructure_loss": spec.recovery.on_infrastructure_loss}
         if spec.recovery.checkpoint_ref:
@@ -185,6 +216,86 @@ def resolve(spec: ExecutionSpec | None, ns: str, model: dict, region: str = REGI
         elif bounds:
             raise HTTPException(400, f"recovery.{'/'.join(bounds)}: only with on_infrastructure_loss: recover")
     return ex
+
+
+def _placement(placement: PlacementSpec, model: dict) -> dict:
+    """The placement block, narrowed to the model's classes and regions (400 when nothing of the model is left)."""
+    pl = {}
+    if placement.gpu_preference is not None:
+        classes = model.get("gpu_classes") or []
+        pl["gpu_preference"] = [c for c in placement.gpu_preference if c in classes]
+        if not pl["gpu_preference"]:
+            raise HTTPException(
+                400, f"gpu_preference {placement.gpu_preference} has no class of model {model.get('name')} ({classes})"
+            )
+    if placement.allowed_clusters is not None:
+        pl["allowed_clusters"] = [r for r in placement.allowed_clusters if r in (model.get("regions") or [])]
+        if not pl["allowed_clusters"]:
+            raise HTTPException(
+                400,
+                f"allowed_clusters {placement.allowed_clusters} has no region of model {model.get('name')} ({model.get('regions')})",
+            )
+    if placement.fallback_wait_s is not None:
+        pl["fallback_wait_s"] = placement.fallback_wait_s
+    return pl
+
+
+STAGE_ID = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
+MAX_STAGES = 256  # ESMFold-class fan-outs: up to 128 shards plus their collector, with room
+ROOT_STAGE = "root"
+
+
+def validate_graph(stages: dict, deadline_s: int | None) -> dict:
+    """A declared stage graph: 1..MAX_STAGES stage ids, dependencies among them (or `root`), no cycle, no stage named
+    `root`, no self-dependency, no duplicate dependency. Returns the resolved block."""
+    if not stages or len(stages) > MAX_STAGES:
+        raise HTTPException(400, f"execution.graph.stages: 1 to {MAX_STAGES} stages")
+    models: dict[str, str] = {}
+    flat: dict[str, list] = {}
+    for sid, decl in stages.items():
+        if isinstance(decl, dict):
+            flat[sid] = list(decl.get("depends_on") or [])
+            if decl.get("model"):
+                models[sid] = str(decl["model"])
+        elif hasattr(decl, "depends_on"):
+            flat[sid] = list(decl.depends_on or [])
+            if getattr(decl, "model", None):
+                models[sid] = str(decl.model)
+        else:
+            flat[sid] = decl
+    stages = flat
+    for sid, deps in stages.items():
+        if sid == ROOT_STAGE or not STAGE_ID.match(sid):
+            raise HTTPException(400, f"execution.graph.stages: stage id {sid!r} (letters, digits, -; not 'root')")
+        if not isinstance(deps, list) or len(deps) != len(set(deps)):
+            raise HTTPException(400, f"stage {sid!r}: dependencies must be a list without duplicates")
+        for d in deps:
+            if d == sid:
+                raise HTTPException(400, f"stage {sid!r} depends on itself")
+            if d != ROOT_STAGE and d not in stages:
+                raise HTTPException(400, f"stage {sid!r} depends on {d!r}, which is not declared")
+    # cycles: depth-first over the declared edges
+    state: dict[str, int] = {}
+
+    def visit(n: str, path: list[str]) -> None:
+        if state.get(n) == 2:
+            return
+        if state.get(n) == 1:
+            raise HTTPException(400, f"execution.graph.stages: cycle through {' -> '.join(path + [n])}")
+        state[n] = 1
+        for d in stages.get(n) or []:
+            if d != ROOT_STAGE:
+                visit(d, path + [n])
+        state[n] = 2
+
+    for sid in stages:
+        visit(sid, [])
+    out = {"stages": {sid: list(deps) for sid, deps in stages.items()}}
+    if models:
+        out["models"] = models
+    if deadline_s:
+        out["deadline_s"] = int(deadline_s)
+    return out
 
 
 def narrow_placement(placement: dict | None, ex: dict | None) -> dict | None:
@@ -234,6 +345,57 @@ def scope_runner_token(pod: dict) -> None:
             )
 
 
+def _record_mode(uploader: dict) -> None:
+    """The uploader only records the attempt (application I/O): no bucket credentials, no output prefix."""
+    uploader.pop("envFrom", None)
+    uploader["env"] = [e for e in uploader["env"] if e["name"] != "OUTPUT_PREFIX"] + [
+        {"name": "UPLOAD_MODE", "value": "record"}
+    ]
+
+
+def _project_identity(pod: dict, main: dict, identity: dict) -> None:
+    """The pod runs as the identity's ServiceAccount; main gets its projected token (the identity's audience) under
+    IDENTITY_DIR."""
+    pod["serviceAccountName"] = identity["service_account"]
+    token = {"path": "token", "expirationSeconds": 3600}
+    if identity.get("audience"):
+        token["audience"] = identity["audience"]
+    pod.setdefault("volumes", []).append(
+        {"name": "workload-identity", "projected": {"sources": [{"serviceAccountToken": token}]}}
+    )
+    main.setdefault("volumeMounts", []).append(
+        {"name": "workload-identity", "mountPath": IDENTITY_DIR, "readOnly": True}
+    )
+
+
+def _mount_private(pod: dict, main: dict, name: str) -> None:
+    """The operation's private binding copy (`<name>-private`) as files under PRIVATE_DIR, main only."""
+    pod.setdefault("volumes", []).append(
+        {"name": "private-input", "secret": {"secretName": f"{name}-private", "defaultMode": 0o440}}
+    )
+    main.setdefault("volumeMounts", []).append({"name": "private-input", "mountPath": PRIVATE_DIR, "readOnly": True})
+    main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
+
+
+def _identity_and_inputs(pod: dict, main: dict, ex: dict, name: str, token_var: str, merge: bool) -> None:
+    """The workload identity projected into main (its token file named by `token_var`, the identity's env after it:
+    `merge` replaces the caller's variables of the same name, the identity's values win; else they are appended)
+    and the private binding mounted."""
+    identity = ex.get("identity")
+    if identity:
+        _project_identity(pod, main, identity)
+        extra = [{"name": token_var, "value": f"{IDENTITY_DIR}/token"}]
+        extra += [{"name": k, "value": v} for k, v in identity.get("env", {}).items()]
+        if merge:
+            env = {e["name"]: e for e in main.get("env", [])}
+            env.update({e["name"]: e for e in extra})
+            main["env"] = list(env.values())
+        else:
+            main.setdefault("env", []).extend(extra)
+    if ex.get("private_input_ref"):
+        _mount_private(pod, main, name)
+
+
 def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
     """Shape a run pod after its execution block (build_run calls this before the Job shell is built)."""
     main = next(c for c in pod["containers"] if c["name"] == "main")
@@ -244,10 +406,7 @@ def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
         if not main["envFrom"]:
             del main["envFrom"]
         if uploader:
-            uploader.pop("envFrom", None)
-            uploader["env"] = [e for e in uploader["env"] if e["name"] != "OUTPUT_PREFIX"] + [
-                {"name": "UPLOAD_MODE", "value": "record"}
-            ]
+            _record_mode(uploader)
     profile = ex.get("profile")
     if (
         profile
@@ -258,34 +417,22 @@ def apply_run(pod: dict, r: dict, ex: dict, name: str, s3_secret: str) -> None:
             400,
             f"execution profile {profile['name']} keeps the shared filesystem out of the run: no data, no shared checkpoints",
         )
-    identity = ex.get("identity")
-    if identity:
-        pod["serviceAccountName"] = identity["service_account"]
-        token = {"path": "token", "expirationSeconds": 3600}
-        if identity.get("audience"):
-            token["audience"] = identity["audience"]
-        pod.setdefault("volumes", []).append(
-            {"name": "workload-identity", "projected": {"sources": [{"serviceAccountToken": token}]}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "workload-identity", "mountPath": IDENTITY_DIR, "readOnly": True}
-        )
-        env = {e["name"]: e for e in main.get("env", [])}
-        env["AWS_WEB_IDENTITY_TOKEN_FILE"] = {"name": "AWS_WEB_IDENTITY_TOKEN_FILE", "value": f"{IDENTITY_DIR}/token"}
-        for k, v in identity.get("env", {}).items():
-            env[k] = {"name": k, "value": v}  # the identity's values win over the caller's
-        main["env"] = list(env.values())
-    if ex.get("private_input_ref"):
-        pod.setdefault("volumes", []).append(
-            {"name": "private-input", "secret": {"secretName": f"{name}-private", "defaultMode": 0o440}}
-        )
-        main.setdefault("volumeMounts", []).append(
-            {"name": "private-input", "mountPath": PRIVATE_DIR, "readOnly": True}
-        )
-        main.setdefault("env", []).append({"name": "PRIVATE_INPUT_DIR", "value": PRIVATE_DIR})
+    _identity_and_inputs(pod, main, ex, name, "AWS_WEB_IDENTITY_TOKEN_FILE", merge=True)
     ckpt = (ex.get("recovery") or {}).get("checkpoint_ref")
     if ckpt:
         main.setdefault("env", []).append({"name": "CHECKPOINT_REF", "value": ckpt})
+
+
+def apply_async(pod: dict, ex: dict, name: str) -> None:
+    """Shape an endpoint-call pod (mode async) after its execution block (docs/API.md "Endpoint calls"): the private
+    binding mounted for the caller, the workload identity projected, the uploader in record mode (the caller delivers
+    to the application's own destination; the platform bucket is not used)."""
+    main = next(c for c in pod["containers"] if c["name"] == "main")
+    uploader = next((c for c in pod["containers"] if c["name"] == "uploader"), None)
+    if ex.get("io_mode") == "application" and uploader:
+        _record_mode(uploader)
+        main.setdefault("env", []).append({"name": "IO_MODE", "value": "application"})
+    _identity_and_inputs(pod, main, ex, name, "IDENTITY_TOKEN_FILE", merge=False)
 
 
 def apply_job(job: dict, ex: dict) -> None:
@@ -296,6 +443,35 @@ def apply_job(job: dict, ex: dict) -> None:
         job["spec"]["podFailurePolicy"] = {
             "rules": [{"action": "FailJob", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]}]
         }
+
+
+def apply_retry(job: dict, retry: dict) -> None:
+    """A bounded retry policy on a single-node run's Job (docs/JOBS.md "Retries"): at most `max_attempts` pods of this
+    Job, each after an exit in `on_exit_codes` (counted against backoffLimit = max_attempts - 1); any other non-zero
+    exit fails the Job at once; a disruption (node drain, preemption) keeps the platform's own rule (ignored: never an
+    attempt, unless recovery `fail` made it fatal). Rules the run class put first (the finalizer's FailJob codes) stay
+    first. The same Job, member, reservation and GPU bound: nothing is admitted or reserved again."""
+    if job.get("kind") != "Job":
+        raise HTTPException(400, "execution.retry applies to single-node runs (a multi-node run restarts as a whole)")
+    codes = list(retry["on_exit_codes"])
+    rules = job["spec"].setdefault("podFailurePolicy", {}).get("rules") or []
+    leading = [r for r in rules if r.get("action") == "FailJob" and "onExitCodes" in r]  # the finalizer's codes
+    disruption = next(
+        (r for r in rules if any(c.get("type") == "DisruptionTarget" for c in r.get("onPodConditions") or [])),
+        {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}]},
+    )
+    job["spec"]["backoffLimit"] = int(retry["max_attempts"]) - 1
+    job["spec"]["podFailurePolicy"] = {
+        "rules": leading
+        + [
+            disruption,
+            {"action": "Count", "onExitCodes": {"containerName": "main", "operator": "In", "values": codes}},
+            {
+                "action": "FailJob",
+                "onExitCodes": {"containerName": "main", "operator": "NotIn", "values": sorted({0, *codes})},
+            },
+        ]
+    }
 
 
 # ---- bindings: confidential inputs delivered per operation ------------------------------------------------------
@@ -311,9 +487,63 @@ def _secret(region: str, ns: str, name: str) -> dict | None:
         raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
 
 
-def put_binding(ns: str, tenant: str, ref: str, data: dict[str, str], region: str = REGION) -> dict:
-    """Create or replace the tenant's binding `ref`; a replacement also refreshes the copies of the operation it is
-    bound to (the files in a running attempt change within the kubelet's sync period, no restart)."""
+OWNER_ANNOTATION = f"{LABEL}/owner"
+BINDING_UID_ANNOTATION = f"{LABEL}/binding-uid"
+
+
+def _object(name: str, labels, annotations, rv=None, **rest) -> dict:
+    """A Secret to write; `rv` (a resourceVersion) makes the write a compare-and-swap the API server refuses when
+    stale (409)."""
+    md = {"name": name, "labels": labels, "annotations": annotations, **({"resourceVersion": str(rv)} if rv else {})}
+    return {"apiVersion": "v1", "kind": "Secret", "metadata": md, **rest}
+
+
+def _owned_by(secret: dict, owner: str | None, admin: bool) -> bool:
+    """The binding is the caller's: its owner annotation (the stable principal the API records on every operation,
+    auth.Principal.owner) equals the caller's. An admin may act on any binding of the tenant. A binding without an
+    owner (written before owners existed) belongs to the principal of the operation it is bound to, when the fleet
+    database knows that owner (the in-flight runs of the day owners arrived); unbound, it is nobody's to an ordinary
+    caller: its owner re-creates it."""
+    if admin:
+        return True
+    if not owner:
+        return False
+    ann = secret["metadata"].get("annotations") or {}
+    current = ann.get(OWNER_ANNOTATION)
+    if current:
+        return current == owner
+    bound = ann.get(f"{LABEL}/operation")
+    tenant = (secret["metadata"].get("labels") or {}).get(f"{LABEL}/tenant")
+    return bool(bound) and bool(tenant) and _operation_owner(bound, tenant) == owner
+
+
+def _operation_owner(operation: str, tenant: str) -> str | None:
+    """The durable owner of an operation of `tenant` (keys.operation_owner): the binding's own tenant label and the
+    record's tenant must agree, so a record of another tenant never vouches for a binding."""
+    import db
+    import keys
+
+    if not db.enabled():
+        return None
+    rec = keys.operation_owner(operation)
+    return rec[1] if rec and rec[0] == tenant else None
+
+
+def put_binding(
+    ns: str,
+    tenant: str,
+    ref: str,
+    data: dict[str, str],
+    owner: str | None = None,
+    admin: bool = False,
+    if_match: str | None = None,
+    region: str = REGION,
+) -> dict:
+    """Create or replace the caller's binding `ref`; a replacement also refreshes the copies of the operation it is
+    bound to (the files in a running attempt change within the kubelet's sync period, no restart). A binding has an
+    owner (the caller's stable principal, set at creation and never changed); another principal of the tenant sees
+    404. `if_match` (the `revision` a read returned) and the Secret's resourceVersion make the replacement a
+    compare-and-swap: a concurrent write answers 409."""
     _ref(ref, "binding")
     if (
         not data
@@ -324,35 +554,53 @@ def put_binding(ns: str, tenant: str, ref: str, data: dict[str, str], region: st
             400, "binding data: 1 to 64 KiB of string values under file-name keys (letters, digits, . _ -)"
         )
     name = BINDING_PREFIX + ref
-    body = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {"name": name, "labels": {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref}},
-        "stringData": data,
-    }
     core = kube.core(region)
     existing = _secret(region, ns, name)
+    if existing and not _owned_by(existing, owner, admin):
+        raise HTTPException(404, f"binding {ref}: not found")
+    revision = (existing or {}).get("metadata", {}).get("resourceVersion")
+    if existing and if_match is not None and if_match != str(revision):
+        raise HTTPException(409, f"binding {ref} changed (revision {revision}); re-read it before replacing it")
+    if existing:
+        ann = dict(existing["metadata"].get("annotations") or {})
+        ann.setdefault(OWNER_ANNOTATION, owner or "")
+        ann = {k: v for k, v in ann.items() if v}
+    else:
+        ann = {OWNER_ANNOTATION: owner} if owner else {}
+    labels = {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref}
     try:
-        if existing:
-            body["metadata"]["annotations"] = existing["metadata"].get("annotations") or {}
-            body["data"] = None
-            retry(core.replace_namespaced_secret, name, ns, body)
+        if existing:  # a stale replacement (the resourceVersion moved) is refused by the API server
+            body = _object(name, labels, ann, revision, stringData=data, data=None)
+            written = retry(core.replace_namespaced_secret, name, ns, body)
         else:
-            retry(core.create_namespaced_secret, ns, body)
+            written = retry(core.create_namespaced_secret, ns, _object(name, labels, ann, stringData=data))
     except ApiException as e:
+        if e.status == 409:
+            raise HTTPException(409, f"binding {ref} was written concurrently; re-read it and replace it again")
         raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
     bound = ((existing or {}).get("metadata", {}).get("annotations") or {}).get(f"{LABEL}/operation")
     if bound:
-        _refresh_copies(ns, ref, data)
+        _refresh_copies(ns, ref, data, existing)
     return {
         "ref": ref,
         "operation": bound,
         "keys": sorted(data),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "owner": ann.get(OWNER_ANNOTATION),
+        "revision": _revision(written),
     }
 
 
-def list_bindings(ns: str, region: str = REGION) -> list[dict]:
+def _revision(obj) -> str | None:
+    if obj is None:
+        return None
+    md = obj.get("metadata") if isinstance(obj, dict) else getattr(obj, "metadata", None)
+    rv = md.get("resourceVersion") if isinstance(md, dict) else getattr(md, "resource_version", None)
+    return str(rv) if rv else None
+
+
+def list_bindings(ns: str, owner: str | None = None, admin: bool = False, region: str = REGION) -> list[dict]:
+    """The caller's bindings (an admin: every binding of the tenant, with its owner)."""
     try:
         items = _list(region, ns, f"{LABEL}/binding")
     except ApiException as e:
@@ -362,12 +610,16 @@ def list_bindings(ns: str, region: str = REGION) -> list[dict]:
         md = s["metadata"]
         if not md["name"].startswith(BINDING_PREFIX):
             continue  # a per-operation copy
+        if not _owned_by(s, owner, admin):
+            continue
         out.append(
             {
                 "ref": (md.get("labels") or {}).get(f"{LABEL}/binding"),
                 "operation": (md.get("annotations") or {}).get(f"{LABEL}/operation"),
                 "keys": sorted((s.get("data") or {}).keys()),
                 "updated_at": md.get("creationTimestamp"),
+                "owner": (md.get("annotations") or {}).get(OWNER_ANNOTATION),
+                "revision": _revision(s),
             }
         )
     return out
@@ -381,22 +633,40 @@ def _list(region: str, ns: str, selector: str) -> list[dict]:
     ]
 
 
-def delete_binding(ns: str, ref: str, region: str = REGION) -> bool:
-    """Revocation: the copies of a bound operation are emptied first (the files of a running attempt become empty),
-    then removed with the binding."""
+def delete_binding(ns: str, ref: str, owner: str | None = None, admin: bool = False, region: str = REGION) -> bool:
+    """Revocation by the binding's owner (or an admin): the copies of a bound operation are emptied first (the files
+    of a running attempt become empty), then removed with the binding. Another principal's binding: not found."""
     _ref(ref, "binding")
-    if _secret(region, ns, BINDING_PREFIX + ref) is None:
+    existing = _secret(region, ns, BINDING_PREFIX + ref)
+    if existing is None or not _owned_by(existing, owner, admin):
         return False
-    _refresh_copies(ns, ref, {"revoked": ""}, delete=True)
+    # the original goes first, conditionally on being the object that was read (uid and resourceVersion): a binding
+    # re-created under the same ref meanwhile is never deleted by a late revoker; then its copies, by its identity
+    md = existing["metadata"]
     try:
-        retry(kube.core(region).delete_namespaced_secret, BINDING_PREFIX + ref, ns)
+        retry(
+            kube.core(region).delete_namespaced_secret,
+            BINDING_PREFIX + ref,
+            ns,
+            body=_preconditions(md.get("uid"), md.get("resourceVersion")),
+        )
     except ApiException as e:
+        if e.status == 409:
+            raise HTTPException(409, f"binding {ref} changed meanwhile; re-read it before revoking it")
         if e.status != 404:
             raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    _refresh_copies(ns, ref, {"revoked": ""}, existing, delete=True)
     return True
 
 
-def _refresh_copies(ns: str, ref: str, data: dict[str, str], delete: bool = False) -> None:
+def _refresh_copies(ns: str, ref: str, data: dict[str, str], binding: dict, delete: bool = False) -> None:
+    """Replace (or empty and delete) the per-operation copies of `binding`: those under its ref that carry its uid, or
+    (copies from before the uid existed) those of the operation it is bound to. Each replacement keeps the copy's
+    labels, annotations and owner references and is a compare-and-swap on the copy's resourceVersion; a deletion
+    requires the copy's uid and resourceVersion. A copy that changed meanwhile is left alone (the next write sees it)."""
+    md = binding.get("metadata") or {}
+    uid = md.get("uid")
+    bound = (md.get("annotations") or {}).get(f"{LABEL}/operation")
     for r in kube.regions():
         try:
             items = _list(r, ns, f"{LABEL}/binding={ref}")
@@ -406,39 +676,65 @@ def _refresh_copies(ns: str, ref: str, data: dict[str, str], delete: bool = Fals
             name = s["metadata"]["name"]
             if name.startswith(BINDING_PREFIX):
                 continue
+            ann = dict(s["metadata"].get("annotations") or {})
+            copy_uid = ann.get(BINDING_UID_ANNOTATION)
+            if copy_uid:
+                if not uid or copy_uid != uid:
+                    continue  # a copy of another binding that had this ref
+            elif not bound or (s["metadata"].get("labels") or {}).get(f"{LABEL}/operation") != bound:
+                continue  # an old copy without identity: only the bound operation's own
+            if uid:
+                ann[BINDING_UID_ANNOTATION] = uid
+            rv = s["metadata"].get("resourceVersion")
+            body = _object(name, s["metadata"].get("labels"), ann, rv, stringData=data)
+            body["metadata"]["ownerReferences"] = s["metadata"].get("ownerReferences")
             try:
-                retry(
-                    kube.core(r).replace_namespaced_secret,
-                    name,
-                    ns,
-                    {
-                        "apiVersion": "v1",
-                        "kind": "Secret",
-                        "metadata": {
-                            "name": name,
-                            "labels": s["metadata"].get("labels"),
-                            "ownerReferences": s["metadata"].get("ownerReferences"),
-                        },
-                        "stringData": data,
-                    },
-                )
+                written = retry(kube.core(r).replace_namespaced_secret, name, ns, body)
                 if delete:
-                    retry(kube.core(r).delete_namespaced_secret, name, ns)
-            except ApiException:
-                continue
+                    new_rv = _revision(written) or rv
+                    retry(
+                        kube.core(r).delete_namespaced_secret,
+                        name,
+                        ns,
+                        body=_preconditions(s["metadata"].get("uid"), new_rv),
+                    )
+            except ApiException as e:
+                if e.status in (404, 409):
+                    continue  # gone, or changed by a later writer: not ours to touch now
+                raise HTTPException(502, f"kubernetes ({r}): {e.reason}")
+
+
+def _preconditions(uid: str | None, resource_version: str | None):
+    """Delete options that make a deletion conditional on the object being the one that was read."""
+    from kubernetes import client as k8s
+
+    if not uid and not resource_version:
+        return None
+    return k8s.V1DeleteOptions(
+        preconditions=k8s.V1Preconditions(uid=uid, resource_version=str(resource_version) if resource_version else None)
+    )
 
 
 def deliver(
-    ex: dict | None, name: str, root: str, ns: str, tenant: str, regions: list[str], region: str = REGION
+    ex: dict | None,
+    name: str,
+    root: str,
+    ns: str,
+    tenant: str,
+    regions: list[str],
+    region: str = REGION,
+    owner: str | None = None,
 ) -> None:
     """Before an operation is created: claim its binding (one binding serves one operation and that operation's
     resumes; another operation gets 409) and copy the data into the per-operation Secret `<name>-private` in every
-    region the run may land in. Copies carry the operation label; the billing pass removes them when it ends."""
+    region the run may land in. Copies carry the operation label; the billing pass removes them when it ends.
+    `owner` is the operation's (the root's, for a continuation): only the binding's owner consumes it; another
+    principal's binding, or one without an owner, is "no such binding"."""
     ref = (ex or {}).get("private_input_ref")
     if not ref:
         return
     binding = _secret(region, ns, BINDING_PREFIX + ref)
-    if binding is None:
+    if binding is None or not _owned_by(binding, owner, False):
         raise HTTPException(404, f"private_input_ref {ref!r}: no such binding (PUT /v1/bindings/{ref} first)")
     ann = binding["metadata"].get("annotations") or {}
     bound = ann.get(f"{LABEL}/operation")
@@ -446,25 +742,46 @@ def deliver(
         raise HTTPException(
             409, f"binding {ref!r} is bound to operation {bound}; a new operation needs its own binding"
         )
-    if not bound:
+    if not bound or (owner and not ann.get(OWNER_ANNOTATION)):
+        # the claim (and, for a binding from before owners existed, the owner it continues under) is written with the
+        # Secret's resourceVersion: two operations claiming one binding at once cannot both win (the loser re-reads
+        # and finds it bound to the other: 409)
+        claim = dict(ann)
+        claim[f"{LABEL}/operation"] = root
+        if owner:
+            claim.setdefault(OWNER_ANNOTATION, owner)
+        md = binding["metadata"]
+        body = _object(
+            BINDING_PREFIX + ref, md.get("labels"), claim, md.get("resourceVersion"), data=binding.get("data") or {}
+        )
         try:
-            retry(
-                kube.core(region).patch_namespaced_secret,
-                BINDING_PREFIX + ref,
-                ns,
-                {"metadata": {"annotations": {f"{LABEL}/operation": root}}},
-            )
+            retry(kube.core(region).replace_namespaced_secret, BINDING_PREFIX + ref, ns, body)
         except ApiException as e:
-            raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
-    copy = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": f"{name}-private",
-            "labels": {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref, f"{LABEL}/operation": root},
-        },
-        "data": binding.get("data") or {},
+            if e.status == 409:
+                again = _secret(region, ns, BINDING_PREFIX + ref) or {}
+                now_bound = (again.get("metadata", {}).get("annotations") or {}).get(f"{LABEL}/operation")
+                if now_bound == root:
+                    binding = again
+                else:
+                    raise HTTPException(
+                        409,
+                        f"binding {ref!r} was claimed concurrently (by {now_bound}); a new operation needs its own binding",
+                    )
+            else:
+                raise HTTPException(502, f"kubernetes ({region}): {e.reason}")
+    # the copy's annotations name the binding it came from: a refresh or revocation of a later binding under the same
+    # ref (deleted and re-created, possibly by another principal) never reaches this copy
+    provenance = {
+        BINDING_UID_ANNOTATION: binding["metadata"].get("uid"),
+        OWNER_ANNOTATION: (binding["metadata"].get("annotations") or {}).get(OWNER_ANNOTATION) or owner,
+        f"{LABEL}/operation": root,
     }
+    copy = _object(
+        f"{name}-private",
+        {f"{LABEL}/tenant": tenant, f"{LABEL}/binding": ref, f"{LABEL}/operation": root},
+        {k: v for k, v in provenance.items() if v},
+        data=binding.get("data") or {},
+    )
     # `regions` are the run's candidate clusters as the dispatcher names them (cluster ids: `north`, `south`, `hub`, or a
     # region name); the Kubernetes client is keyed by the Nebius region, so every id is mapped through the fleet
     # document first (kube.cluster_region) and deduplicated (two ids in one region share a cluster only never)

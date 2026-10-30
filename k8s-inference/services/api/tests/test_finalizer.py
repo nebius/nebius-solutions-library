@@ -41,7 +41,7 @@ def _fresh_catalog():
 
 
 def _model(spec=SPEC):
-    return catalog.normalise({**models_mod.to_entry(spec, managed_by="api"), "version": 2})
+    return models_mod.definition(spec, managed_by="api", version=2)
 
 
 @pytest.fixture
@@ -74,6 +74,7 @@ def failed_run(client, monkeypatch):
             "gpus": 1,
             "gpu_class": "h100",
             "image_digest": "registry.example/md@sha256:0123",
+            "pod_uid": "compute-pod-uid",
             "started_at": "2026-10-12T19:00:00Z",
             "ended_at": "2026-10-12T19:30:00Z",
             "region": "eu-north1",
@@ -84,6 +85,7 @@ def failed_run(client, monkeypatch):
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: [x for x in rows if x["root"] == root])
     monkeypatch.setattr(attempts, "_marks", lambda operation: marks.get(operation))
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "mark_cancelled", lambda operation: marks.__setitem__(operation, (1, "now", None)))
     return c, fake, op, rows, marks
 
@@ -178,6 +180,8 @@ def test_export_runs_the_model_finalizer_on_the_kept_volume(failed_run):
             "role": "finalize",
             "started_at": "2026-10-12T19:40:00Z",
             "region": "eu-north1",
+            "pod_uid": "finalizer-pod-uid",
+            "image_digest": "registry.example/md@sha256:4567",
         }
     )
     rows[-1]["cluster"] = "north"  # the finalizer's record carries the canonical cluster id
@@ -190,6 +194,9 @@ def test_export_runs_the_model_finalizer_on_the_kept_volume(failed_run):
         and got["attempt_role"] == "finalize"
     )
     assert got["cluster"] == "north" and got["region"] == "eu-north1"
+    assert got["pod_uid"] == "finalizer-pod-uid"
+    assert got["image_digest"] == "registry.example/md@sha256:4567" and got["image_digest_state"] == "observed"
+    assert got["gang_rank"] is None and got["gang_restart"] is None
     assert got["finalize_attempts"] == 1 and [a["attempt_role"] for a in got["attempts"]] == ["run", "finalize"]
     again = c.post(f"/v1/operations/{op}:export", headers=H)
     assert (
@@ -215,6 +222,41 @@ def test_export_runs_the_model_finalizer_on_the_kept_volume(failed_run):
         and got["result_ref"] == "app://md/result/1"
         and "finalizing_by" not in got
     )
+
+
+@pytest.mark.parametrize("record_started", [False, True])
+def test_finalizer_never_inherits_the_compute_pod_identity(failed_run, record_started):
+    c, fake, op, rows, marks = failed_run
+    before = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert before["pod_uid"] == "compute-pod-uid" and before["image_digest"]
+    response = c.post(f"/v1/operations/{op}:export", headers=H)
+    assert response.status_code == 202, response.text
+    x1 = response.json()["id"]
+    if record_started:
+        rows.append(
+            {
+                "operation": x1,
+                "pod": f"{x1}-fin",
+                "root": op,
+                "tenant": "demo",
+                "status": "started",
+                "epoch": 2,
+                "revision": 4,
+                "gpus": 0,
+                "role": "finalize",
+                "started_at": "2026-10-12T19:40:00Z",
+                "region": "eu-north1",
+            }
+        )
+    got = c.get(f"/v1/operations/{op}", headers=H).json()
+    assert got["status"] == "FINALIZING" and got["finalizing_by"] == x1
+    assert got["pod_uid"] is None and got["image_digest"] is None
+    assert got["image_digest_state"] == ("pending" if record_started else None)
+    assert got["attempt_id"] == (f"{x1}-fin" if record_started else None)
+    assert got["epoch"] == (2 if record_started else None)
+    assert got["gang_rank"] is None and got["gang_restart"] is None
+    # The original observation remains visible on its historical attempt.
+    assert got["attempts"][0]["pod_uid"] == "compute-pod-uid"
 
 
 def test_finalizer_retries_keep_the_compute_attempt_and_are_bounded(failed_run):
@@ -472,6 +514,7 @@ def test_finalizer_of_a_fleet_run_is_pinned_to_the_admitting_cluster(client, mon
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     r = c.post(f"/v1/operations/{op}:export", headers=H)
     assert r.status_code == 202, r.text
     x1 = fake.jobs[(NS, f"{op}-x1")]

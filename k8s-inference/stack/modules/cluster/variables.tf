@@ -79,12 +79,13 @@ variable "gpu_operator" {
 variable "cpu_pools" {
   description = "CPU-only node groups for batch work without a GPU; the shape of `regions.*.cpu_pools` in terraform.tfvars."
   type = map(object({
-    platform      = string
-    preset        = string
-    min_nodes     = number
-    max_nodes     = number
-    boot_disk_gib = number
-    labels        = map(string)
+    platform          = string
+    preset            = string
+    min_nodes         = number
+    max_nodes         = number
+    boot_disk_gib     = number
+    labels            = map(string)
+    shared_filesystem = optional(bool, true) # attach and mount the region's weights filesystem (/mnt/weights) like a GPU pool
   }))
   default = {}
 }

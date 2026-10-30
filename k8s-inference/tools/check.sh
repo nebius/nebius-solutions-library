@@ -32,9 +32,11 @@ check_lint() {
   step "Python lint and format (Ruff)"
   (cd "$ROOT" && "$PYTHON" -m ruff check services stack && "$PYTHON" -m ruff format --check services stack)
   step "ShellCheck: fleet scripts and container entry points"
-  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh
+  shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh "$ROOT"/charts/platform/files/*.sh
   step "terraform fmt"
   terraform fmt -check -recursive "$ROOT/stack"
+  step "size budget: services/api code lines against services/api/LOC_BUDGET (docs/ENGINEERING.md)"
+  "$PYTHON" "$ROOT/tools/loc.py"
 }
 
 check_terraform() {
@@ -43,8 +45,24 @@ check_terraform() {
     tf "$d" init -backend=false -input=false > /dev/null
     tf "$d" validate -no-color > /dev/null; echo "   ok $d"
   done
+  step "iam_token is an ephemeral, sensitive input referenced by the platform providers only (a saved plan never freezes it)"
+  "$PYTHON" - "$ROOT" <<'PYEOF7'
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+cfg = (root / "stack/platform/config.tf").read_text()
+m = re.search(r'variable "iam_token" \{(.*?)\n\}', cfg, re.S)
+assert m, "stack/platform/config.tf: no variable iam_token"
+body = m.group(1)
+assert re.search(r"\bephemeral\s*=\s*true", body), "iam_token must be ephemeral = true (a saved plan would freeze the token)"
+assert re.search(r"\bsensitive\s*=\s*true", body), "iam_token must be sensitive = true"
+users = sorted(str(p.relative_to(root)) for p in (root / "stack").rglob("*.tf") if ".terraform" not in p.parts and "var.iam_token" in p.read_text())
+assert users == ["stack/platform/providers.tf"], f"var.iam_token must be referenced by stack/platform/providers.tf only, found in {users}"
+print("   ok iam_token: ephemeral + sensitive, referenced by stack/platform/providers.tf only")
+PYEOF7
   step "terraform.tfvars.example passes the schema validations"
   tf stack/config plan -input=false -lock=false -var-file="$EXAMPLE" > /dev/null; echo "   ok $(basename "$EXAMPLE")"
+  step "fleet operator configuration tests"
+  tf stack/config test -var-file="$EXAMPLE" -no-color
 }
 
 check_render() {
@@ -66,11 +84,26 @@ for cid, c in plan["clusters"].items():
     worker = c["roles"]["worker"]
     yaml.safe_dump({"cluster": cid, "fleet": fleet, "prepull": {"enabled": worker, "images": []}}, open(f"{tmp}/fleet-{cid}.yaml", "w"))
     cluster = {"region": c["region"]} if worker else {"region": c["region"], "manager": True}
-    yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
+    grants = sorted({a for t in (fleet.get("tenants") or {}).values() for a in (t.get("assets") or [])})  # every granted asset renders once
+    yaml.safe_dump({"name": "example", "cluster": cid, "fleet": fleet, "clusters": {cid: cluster}, "assets": grants}, open(f"{tmp}/tenant-{cid}.yaml", "w"))
     for mid, e in catalog.items():
         if "runtime" in e and cid in e.get("deployments", {}):
             yaml.safe_dump(e, open(f"{tmp}/endpoint-{mid}-{cid}.yaml", "w"))
 EOF
+  step "the log shipper (clusters/common/values/alloy.yaml) tolerates every worker-pool taint the cluster module places (docs/OBSERVABILITY.md)"
+  "$PYTHON" - "$ROOT" <<'PYEOF8'
+import re, sys, pathlib, yaml
+root = pathlib.Path(sys.argv[1])
+tf = (root / "stack/modules/cluster/main.tf").read_text()
+taints = {m.group(1) for m in re.finditer(r'taints\s*=\s*\[\{\s*key\s*=\s*"([^"]+)"', tf)}
+assert taints >= {"nvidia.com/gpu", "serverless2.nebius/cpu-pool"}, f"cluster module taints changed: {sorted(taints)}"
+values = yaml.safe_load((root / "clusters/common/values/alloy.yaml").read_text())
+assert values["controller"]["type"] == "daemonset", "alloy must run as a DaemonSet (one shipper per node)"
+tol = {(t["key"], t.get("operator"), t.get("effect")) for t in values["controller"]["tolerations"]}
+for key in sorted(taints):
+    assert (key, "Exists", "NoSchedule") in tol, f"alloy does not tolerate the worker-pool taint {key}: runs on that pool have no logs"
+print("   ok alloy tolerates " + ", ".join(sorted(taints)))
+PYEOF8
   step "helm lint"
   first=$(echo "$clusters" | cut -d' ' -f1)
   helm lint "$ROOT/charts/fleet" -f "$TMP/fleet-$first.yaml" > /dev/null; echo "   ok charts/fleet"
@@ -95,12 +128,79 @@ for n in system:
     spec = flavors[n]["spec"]
     assert not spec.get("tolerations"), f"{cid}: {n} must not tolerate the GPU taint"
     if n == "system":
-        assert spec.get("nodeLabels") == {"serverless2.nebius/pool": "system"}, f"{cid}: {n} must select the system nodes"
+        assert spec.get("nodeLabels", {}).get("serverless2.nebius/pool") == "system", f"{cid}: {n} must select the system nodes"
+        assert spec["nodeLabels"].get("serverless2.nebius/shared-fs") == "false", f"{cid}: {n} must say shared-fs=false (mount_on_system is off in the example)"
+# CPU pools (docs/FLEET.md "CPU pools"): GPU-free flavors right after the system ones; the pool's own taint tolerated, never the GPU one
+cpu = [n for n, d in flavors.items() if d["metadata"].get("labels", {}).get("serverless2.nebius/capacity") == "cpu"]
+for n in cpu:
+    spec = flavors[n]["spec"]
+    tols = {(t["key"], t.get("value")) for t in spec.get("tolerations") or []}
+    assert ("nvidia.com/gpu", "present") not in tols, f"{cid}: CPU pool flavor {n} tolerates the GPU taint"
+    if spec.get("nodeLabels"):
+        assert ("serverless2.nebius/cpu-pool", "present") in tols, f"{cid}: CPU pool flavor {n} does not tolerate its pool taint"
+        assert spec["nodeLabels"].get("serverless2.nebius/pool") == n, f"{cid}: CPU pool flavor {n} selects another pool"
+system = system + cpu  # the GPU-free group of every queue, in this order
+# filesystem-aware placement (docs/FLEET.md): every worker flavor says whether its nodes mount /mnt/weights
+for n, d in flavors.items():
+    if d["spec"].get("nodeLabels"):
+        assert d["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") in ("true", "false"), f"{cid}: flavor {n} carries no serverless2.nebius/shared-fs label"
+# the example's two CPU pools: `prep` mounts (default), `scratch-only` says shared_filesystem = false explicitly (hasKey, not `default`)
+for n, want in (("prep", "true"), ("scratch-only", "false")):
+    if n in flavors:
+        assert flavors[n]["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") == want, f"{cid}: CPU pool {n} must carry shared-fs={want}"
+# per-node fit (docs/SCHEDULING.md "Per-node fit", api 0.11.80): fit.yaml of the fleet document names what ONE node of every
+# flavor admits, from the same helpers that size the quotas: every worker flavor has an entry, the entry's cpu/memory per node
+# times the pool's nodes never exceeds the lender queue's nominal quota of that flavor (the same arithmetic, so the API never
+# admits a shape Kueue's per-node budget would not), and the fit never claims more than the flavor's quota per node
+cm = next((d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "fleet-prices"), None)
+assert cm and "fit.yaml" in cm["data"], f"{cid}: fleet-prices carries no fit.yaml (per-node fit)"
+fit = yaml.safe_load(cm["data"]["fit.yaml"]) or {}
+pools = yaml.safe_load(cm["data"]["pools.yaml"]) or {}
+worker_flavors = [n for n, d in flavors.items() if (d["spec"].get("nodeLabels") or {}).get("serverless2.nebius/pool")]
+if worker_flavors:
+    assert cid in fit, f"{cid}: fit.yaml has no entry for this cluster"
+else:  # the control cluster (manager view): fit.yaml carries every region, as pools.yaml does
+    regions = {p["region"] for p in pools.values()}
+    assert regions <= set(fit), f"{cid}: fit.yaml (manager view) misses regions {sorted(regions - set(fit))}"
+lender = next((q for q in queues if q["metadata"]["name"] == "default"), None)
+nominal = {}
+if lender:
+    for fl in lender["spec"]["resourceGroups"][0]["flavors"]:
+        nominal[fl["name"]] = {r["name"]: str(r.get("nominalQuota", 0)) for r in fl["resources"]}
+def gi(v):
+    v = str(v)
+    return float(v[:-2]) if v.endswith("Gi") else float(v) / 2**30
+for n, d in flavors.items():
+    label = (d["spec"].get("nodeLabels") or {}).get("serverless2.nebius/pool")
+    if not label:
+        continue
+    entry = fit[cid].get(label)
+    assert entry, f"{cid}: flavor {n} (pool {label}) has no fit.yaml entry"
+    assert entry["kind"] in ("system", "cpu", "gpu") and float(entry["cpu"]) >= 0 and float(entry["memory_gib"]) >= 0, f"{cid}: fit {label}: {entry}"
+    assert (entry["kind"] == "gpu") == (d["metadata"].get("labels", {}).get("serverless2.nebius/gpu-class", "none") != "none"), f"{cid}: fit {label} kind {entry['kind']} disagrees with the flavor"
+    assert entry["shared_fs"] == (d["spec"]["nodeLabels"].get("serverless2.nebius/shared-fs") == "true"), f"{cid}: fit {label} shared_fs disagrees with flavor {n}"
+    if n in nominal and n in pools and entry["kind"] == "gpu":
+        nodes = int(pools[n]["max_nodes"])
+        assert float(entry["cpu"]) * nodes >= float(nominal[n]["cpu"]), f"{cid}: fit {label} cpu {entry['cpu']} x {nodes} nodes < the queue's {nominal[n]['cpu']}"
+        assert float(entry["memory_gib"]) * nodes >= gi(nominal[n]["memory"]), f"{cid}: fit {label} memory"
+        assert float(entry["cpu"]) <= float(nominal[n]["cpu"]) or nodes == 0, f"{cid}: fit {label} claims more cpu per node than the whole flavor's quota"
+        assert int(entry["gpus"]) == int(pools[n]["gpus_per_node"]), f"{cid}: fit {label} gpus {entry['gpus']} != preset {pools[n]['gpus_per_node']}"
+print(f"   ok per-node fit {cid}: fit.yaml covers {len([n for n, d in flavors.items() if (d['spec'].get('nodeLabels') or {}).get('serverless2.nebius/pool')])} flavors, per-node x nodes >= queue nominal")
 for q in queues:
+    covered = q["spec"]["resourceGroups"][0]["coveredResources"]
+    assert "ephemeral-storage" in covered, f"{cid}: {q['metadata']['name']} does not cover ephemeral-storage (a run requesting node-local scratch would be NoMatchingFlavor)"
+    for f in q["spec"]["resourceGroups"][0]["flavors"]:
+        res = {r["name"]: r for r in f["resources"]}
+        assert "ephemeral-storage" in res, f"{cid}: {q['metadata']['name']}/{f['name']}: no ephemeral-storage entry"
+        e = res["ephemeral-storage"]
+        budget = e.get("nominalQuota") if e.get("nominalQuota") not in (None, 0) else e.get("borrowingLimit", e.get("nominalQuota"))
+        assert str(budget).endswith("Gi") and int(str(budget)[:-2]) >= 0, f"{cid}: {q['metadata']['name']}/{f['name']}: ephemeral-storage budget {budget!r} (a quantity in Gi, zero allowed: a fleet may reserve the whole disk)"
     fl = q["spec"]["resourceGroups"][0]["flavors"]
     first = [f for f in fl if f["name"] in system]
     rest = [f for f in fl if f["name"] not in system]
     assert fl[:len(first)] == first and first, f"{cid}: {q['metadata']['name']}: system flavors must come first"
+    names = [f["name"] for f in first]
+    assert names == [n for n in names if n not in cpu] + [n for n in names if n in cpu], f"{cid}: {q['metadata']['name']}: CPU pools must follow the system flavors, never precede them"
     for f in first:
         res = {r["name"]: r for r in f["resources"]}
         assert res["nvidia.com/gpu"].get("nominalQuota") == 0 and not res["nvidia.com/gpu"].get("borrowingLimit"), f"{cid}: {q['metadata']['name']}/{f['name']}: GPUs must be 0"
@@ -110,7 +210,7 @@ for q in queues:
         assert (res["nvidia.com/gpu"].get("nominalQuota") or res["nvidia.com/gpu"].get("borrowingLimit") or 0) > 0, f"{cid}: {q['metadata']['name']}/{f['name']}: a GPU pool flavor without GPUs"
         if f["name"] in flavors and flavors[f["name"]]["spec"].get("nodeLabels"):
             assert flavors[f["name"]]["spec"]["nodeLabels"]["serverless2.nebius/pool"] == f["name"], f"{cid}: {f['name']} selects another pool"
-print(f"   ok charts/fleet {cid}: system flavor first ({len(system)}), {sum(len(q['spec']['resourceGroups'][0]['flavors']) for q in queues)} flavor entries in {len(queues)} queues")
+print(f"   ok charts/fleet {cid}: system flavor first ({len(system) - len(cpu)}), CPU pools next ({len(cpu)}), {sum(len(q['spec']['resourceGroups'][0]['flavors']) for q in queues)} flavor entries in {len(queues)} queues, ephemeral-storage covered and budgeted on every flavor")
 PYEOF2
     helm template tenant "$ROOT/charts/tenant" -f "$TMP/tenant-$cid.yaml" > /dev/null; echo "   ok charts/tenant $cid"
     for f in "$TMP"/endpoint-*-"$cid".yaml; do
@@ -118,7 +218,7 @@ PYEOF2
       "$PYTHON" "$ROOT/services/api/models.py" render "$cid" < "$f" > /dev/null; echo "   ok render_endpoint $(basename "$f" .yaml)"
     done
   done
-  step "example model (stack/platform/llm-example.json): the API's spec -> entry -> rendered objects, for the example's first GPU class"
+  step "example model (stack/platform/llm-example.json): the API's spec -> definition -> rendered objects, for the example's first GPU class"
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF'
 import json, subprocess, sys
 tmp, root = sys.argv[1], sys.argv[2]
@@ -129,11 +229,11 @@ pools = {f"{r['id']}-{pn}": {"region": r["id"], "pool": pn, "gpu_class": p["gpu_
 classes = sorted({p["gpu_class"] for p in pools.values() if p.get("gpu_class")})
 spec = dict(json.load(open(f"{root}/stack/platform/llm-example.json")), gpu={"count": 1, "classes": classes[:1]})
 json.dump(pools, open(f"{tmp}/pools.json", "w"))
-r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "entry", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
+r = subprocess.run([sys.executable, f"{root}/services/api/models.py", "definition", "--pools", f"{tmp}/pools.json"], input=json.dumps(spec), capture_output=True, text=True)
 if r.returncode: print(r.stderr); sys.exit(1)
 open(f"{tmp}/llm-example.yaml", "w").write(r.stdout)
 import yaml; e = yaml.safe_load(r.stdout)
-print(f"   ok entry llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
+print(f"   ok definition llm-example: class {classes[:1]}, deployments {sorted(e['deployments'])}")
 json.dump(sorted(e["deployments"]), open(f"{tmp}/llm-example-clusters.json", "w"))
 EOF
   for cid in $("$PYTHON" -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))))' "$TMP/llm-example-clusters.json"); do
@@ -211,7 +311,33 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
         assert all(p.get("sectionName") == "https" for p in routes["api"]["spec"]["parentRefs"]), f"{cid}: the api HTTPRoute attaches to a non-HTTPS listener"
         assert "api-redirect" in routes and any(f.get("type") == "RequestRedirect" and f["requestRedirect"].get("scheme") == "https"
                                                 for r in routes["api-redirect"]["spec"]["rules"] for f in r.get("filters", [])), f"{cid}: no HTTPS redirect route for the API hostname"
-        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect")
+        # the worker routes of the control API (charts/platform/templates/api/api.yaml): every pod-token route a worker
+        # pod calls through S2_API_URL must be routed to the API, and everything else under /internal must stay the
+        # 404 direct response (api 0.11.78 routed /internal/attempts and /internal/authorize only: a worker's
+        # POST /internal/executions/<op>:attach got the catch-all 404 and every native lease was refused)
+        rules = routes["api"]["spec"]["rules"]
+        def prefix_of(r):
+            m = (r.get("matches") or [{}])[0].get("path") or {}
+            return m.get("value") if m.get("type") == "PathPrefix" else None
+        routed = {prefix_of(r) for r in rules if r.get("backendRefs")}
+        for want in ("/internal/attempts", "/internal/authorize", "/internal/executions", "/internal/sessions", "/internal/operations"):
+            assert want in routed, f"{cid}: HTTPRoute api does not route {want} to the API (worker pod-token route)"
+        catch = [r for r in rules if prefix_of(r) == "/internal"]
+        assert catch and not catch[0].get("backendRefs") and any(f.get("extensionRef", {}).get("name") == "api-not-found" for f in catch[0].get("filters", [])), f"{cid}: HTTPRoute api: /internal catch-all must be the api-not-found direct response"
+        assert all(p is None or p.startswith("/internal/") or p == "/internal" for p in map(prefix_of, rules)), f"{cid}: HTTPRoute api routes an unexpected prefix"
+        print(f"   ok security invariants {cid}: metadata service excluded, API HTTPS-only with redirect, worker routes /internal/{{attempts,authorize,executions,sessions,operations}} + /internal 404")
+    # the gateways' access logs carry no query string (signed URLs, api_key parameters) and no credential header
+    proxies = [o for o in objs if o["kind"] == "EnvoyProxy"]
+    assert proxies, f"{cid}: no EnvoyProxy rendered"
+    for o in proxies:
+        settings = ((o["spec"].get("telemetry") or {}).get("accessLog") or {}).get("settings") or []
+        assert settings, f"{cid}: EnvoyProxy {o['metadata']['name']} has no explicit access log format (the default logs the query string)"
+        for st in settings:
+            text = (st.get("format") or {}).get("text") or ""
+            assert "REQ_WITHOUT_QUERY" in text, f"{cid}: EnvoyProxy {o['metadata']['name']} logs the path with its query"
+            for bad in ("%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%", "%REQ(:PATH)%", "AUTHORIZATION", "COOKIE", "API_KEY", "SEC-WEBSOCKET-PROTOCOL"):
+                assert bad.lower() not in text.lower(), f"{cid}: EnvoyProxy {o['metadata']['name']} access log carries {bad}"
+    print(f"   ok access logs {cid}: query-free paths, no credential headers")
 EOF4
   "$PYTHON" - "$TMP" "$ROOT" <<'EOF3'
 import re, sys, yaml
@@ -235,11 +361,72 @@ for cid in open(f"{tmp}/clusters.txt").read().split():
     print(f"   ok dispatcher RBAC {cid}: batch/jobs {sorted(verbs)} covers the source's calls {sorted(called)}, read-only")
 assert found, "no cluster rendered the dispatcher ClusterRole"
 EOF3
+  "$PYTHON" - "$TMP" <<'EOF5'
+import sys, yaml
+tmp = sys.argv[1]
+# the API reads Knative Revisions in `models` on every cluster that runs endpoints (services/api/kube.py _rollout: the
+# ready Revision's stored image is the convergence proof): the control API's own Role and the regional agent's Role
+# both carry the read-only rule, and nothing wider on that group
+seen = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "Role" and o["metadata"].get("namespace") == "models"
+             and o["metadata"]["name"] in ("serverless2-api-endpoints", "serverless2-api-agent-models")]
+    for role in roles:
+        rules = [r for r in role["rules"] if "serving.knative.dev" in r.get("apiGroups", [])]
+        assert rules, f"{cid}: Role {role['metadata']['name']} grants no serving.knative.dev read (kube._rollout needs revisions and services get/list)"
+        for r in rules:
+            assert set(r.get("resources", [])) <= {"revisions", "services"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on serving.knative.dev; revisions and services only"
+            assert set(r["verbs"]) <= {"get", "list"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on serving.knative.dev: read-only"
+        for resource in ("revisions", "services"):  # the ready Revision's image, and the predictor Service's generations (0.11.109 witness)
+            assert any(resource in r.get("resources", []) and {"get", "list"} <= set(r["verbs"]) for r in rules), f"{cid}: Role {role['metadata']['name']}: {resource} get+list missing (a require_converged call is refused 409 while the predictor Service is unreadable)"
+        # the opt-in ingress policy (services/api/render_endpoint.py _ingress_policy) is applied and deleted by the same Roles:
+        # ciliumnetworkpolicies only on cilium.io, nothing wider (no clusterwide policies, no other Cilium objects)
+        cil = [r for r in role["rules"] if "cilium.io" in r.get("apiGroups", [])]
+        assert cil, f"{cid}: Role {role['metadata']['name']} grants nothing on cilium.io (the ingress policy needs ciliumnetworkpolicies)"
+        for r in cil:
+            assert set(r.get("resources", [])) <= {"ciliumnetworkpolicies"}, f"{cid}: Role {role['metadata']['name']} reaches {r['resources']} on cilium.io"
+            assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on ciliumnetworkpolicies"
+        # the trust bundle file of a lease-enabled endpoint (render_endpoint._trust_configmap) is a ConfigMap of the endpoint:
+        # the same Roles apply and remove it; configmaps only, never secrets, in the core group
+        core = [r for r in role["rules"] if "" in r.get("apiGroups", [])]
+        assert any("configmaps" in r.get("resources", []) and {"get", "create", "patch", "delete"} <= set(r["verbs"]) for r in core), f"{cid}: Role {role['metadata']['name']}: configmaps get/create/patch/delete missing (the endpoint trust bundle)"
+        for r in core:
+            assert "secrets" not in r.get("resources", []), f"{cid}: Role {role['metadata']['name']} reaches secrets in models"
+            if "configmaps" in r.get("resources", []):
+                assert set(r["verbs"]) <= {"get", "list", "create", "patch", "delete"}, f"{cid}: Role {role['metadata']['name']} grants {r['verbs']} on configmaps"
+        seen += 1
+        print(f"   ok revision read {cid}: Role {role['metadata']['name']} reads serving.knative.dev revisions and services, read-only; ciliumnetworkpolicies and configmaps scoped")
+assert seen, "no cluster rendered an API Role in the models namespace"
+EOF5
+  step "charts/platform: released-volume cleanup permissions stay tenant-bound"
+  "$PYTHON" - "$TMP" <<'EOF6'
+import sys, yaml
+tmp = sys.argv[1]
+seen = 0
+for cid in open(f"{tmp}/clusters.txt").read().split():
+    objs = [o for o in yaml.safe_load_all(open(f"{tmp}/platform-{cid}.rendered.yaml")) if o]
+    roles = [o for o in objs if o["kind"] == "ClusterRole" and o["metadata"]["name"] == "serverless2-api-tenant"]
+    for role in roles:
+        for resource, expected in (("pods", {"get", "list", "delete"}),
+                                   ("persistentvolumeclaims", {"create", "get", "list", "patch", "delete"})):
+            rules = [r for r in role["rules"] if "" in r.get("apiGroups", []) and resource in r.get("resources", [])]
+            assert len(rules) == 1 and set(rules[0]["verbs"]) == expected, f"{cid}: unexpected tenant {resource} permissions"
+        assert not any(o["kind"] == "ClusterRoleBinding" and o.get("roleRef", {}).get("name") == role["metadata"]["name"] for o in objs), f"{cid}: tenant API role must not be cluster-bound"
+        seen += 1
+        print(f"   ok tenant cleanup RBAC {cid}: exact pods/PVC verbs, no cluster-wide binding")
+assert seen, "no cluster rendered the tenant API role"
+EOF6
 }
 
 check_tests() {
   step "tests: API and dispatcher"
   (cd "$ROOT" && "$PYTHON" -m pytest -q services/api/tests services/dispatcher)
+  step "tests: registry static key bootstrap and the launcher's secret-input gate (fake CLI, fake Terraform)"
+  bash "$ROOT/tools/registry-key-test.sh"
+  step "tests: shared-scratch leaf proof/cleanup/provision (services/jobs/bin/scratch.sh)"
+  bash "$ROOT/tools/scratch-test.sh"
+  bash "$ROOT/tools/node-config-test.sh"
   step "tests: filesystem attachment and GPU scale-to-zero storage"
   tf stack/modules/cluster init -backend=false -input=false > /dev/null
   tf stack/modules/cluster test -no-color
