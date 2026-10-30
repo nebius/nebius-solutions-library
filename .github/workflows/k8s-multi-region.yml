@@ -1,0 +1,53 @@
+name: Kubernetes multi-region
+
+on:
+  pull_request:
+    paths:
+      - 'k8s-multi-region/**'
+      - '.github/workflows/k8s-multi-region.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate fleet generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 'v1.11.4'
+          terraform_wrapper: false
+
+      - name: Install pinned Terragrunt
+        run: |
+          curl -fsSL https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_linux_amd64 -o "$RUNNER_TEMP/terragrunt"
+          echo "f2f6238ad2348855a4e876b90fd31f3f5d106bb234794202a00b2bcc139fa753  $RUNNER_TEMP/terragrunt" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/terragrunt"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Check fleet formatting
+        run: |
+          terragrunt --working-dir=k8s-multi-region hcl fmt --check
+          for profile in k8s-multi-region/*.tfvars.example; do
+            terraform fmt -check - < "$profile"
+          done
+          terraform fmt -check - < k8s-multi-region/backend.hcl.example
+
+      - name: Validate fleet generation without cloud access
+        env:
+          K8S_FLEET_BACKEND: ${{ github.workspace }}/k8s-multi-region/backend.hcl.example
+          K8S_TERRAFORM_SOURCE: git::file://${{ github.workspace }}//k8s-training?ref=${{ github.sha }}
+        run: |
+          for profile in k8s-multi-region/*.tfvars.example; do
+            fleet_dir="$RUNNER_TEMP/fleet-$(basename "$profile")"
+            mkdir -p "$fleet_dir/unit"
+            cp k8s-multi-region/terragrunt.stack.hcl "$fleet_dir/"
+            cp k8s-multi-region/unit/terragrunt.hcl "$fleet_dir/unit/"
+            export K8S_FLEET_CONFIG="$GITHUB_WORKSPACE/$profile"
+            terragrunt --working-dir="$fleet_dir" stack generate
+            terragrunt --working-dir="$fleet_dir/.terragrunt-stack" hcl validate
+          done

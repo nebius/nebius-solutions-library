@@ -1,0 +1,149 @@
+# Terragrunt expands this cluster map into separate regional Terraform states.
+# Export TF_VAR_iam_token separately; keep credentials out of these examples.
+defaults = {
+  loki                          = { enabled = false }
+  tenant_id                     = "tenant-REPLACE"
+  k8s_version                   = "1.35"
+  ssh_public_key                = { path = "/secure/id_ed25519.pub" }
+  cpu_nodes_platform            = "cpu-d3"
+  cpu_nodes_preset              = "8vcpu-32gb"
+  cpu_nodes_fixed_count         = 3
+  cpu_disk_size                 = 512
+  cpu_nodes_public_ips          = false
+  gpu_nodes_public_ips          = false
+  infiniband_fabric             = ""
+  gpu_nodes_autoscaling         = { enabled = true, min_size = 0, max_size = 2 }
+  gpu_nodes_driverfull_image    = true
+  gpu_node_groups               = 2
+  gpu_disk_size                 = 512
+  custom_driver                 = false
+  gpu_operator_values           = <<-YAML
+    gfd:
+      enabled: false
+    nfd:
+      enabled: true
+  YAML
+  network_operator_values       = <<-YAML
+    nfd:
+      enabled: false
+    operator:
+      deployCR: false
+      ofedDriver:
+        initContainer:
+          enable: false
+  YAML
+  enable_filestore              = true
+  existing_filestore            = ""
+  filestore_disk_size_gibibytes = 1024
+  filestore_forbid_deletion     = true
+  filestore_mount_path          = "/mnt/weights"
+  enable_nim_operator           = true
+  nim_operator                  = { version = "3.1.2", runai_cache_reader = {}, values_files = ["/secure/nim-operator-values.yaml"] }
+  enable_dynamo                 = true
+  enable_runai                  = true
+  enable_grafana                = false
+  enable_prometheus             = false
+  enable_nebius_o11y_agent      = false
+  enable_mpi_operator           = true
+  mpi_operator                  = { version = "0.8.2" }
+  enable_opencost               = true
+  opencost = {
+    chart_version  = "2.5.33"
+    namespace      = "monitoring"
+    prometheus_url = "http://prometheus-operated.runai.svc.cluster.local:9090"
+    values_files   = ["/secure/opencost-values.yaml"]
+  }
+  platform_namespaces = ["runai", "knative-serving", "dcgm-exporter"]
+  # GFD values disable devicePlugin and NFD; their existing owners stay unchanged.
+  platform_releases = {
+    nebius-dcgm-exporter = {
+      namespace = "dcgm-exporter", repository = "https://nvidia.github.io/dcgm-exporter/helm-charts", chart = "dcgm-exporter"
+      version   = "4.8.3", values_files = ["/secure/dcgm-exporter-values.yaml"]
+    }
+    gpu-feature-discovery = {
+      namespace = "gpu-operator", repository = "https://nvidia.github.io/k8s-device-plugin", chart = "nvidia-device-plugin"
+      version   = "0.20.1", values_files = ["/secure/gfd-values.yaml"]
+    }
+
+  }
+}
+
+
+clusters = {
+  eu-north1 = {
+    parent_id          = "project-REPLACE-eu"
+    subnet_id          = "vpcsubnet-REPLACE-eu"
+    region             = "eu-north1"
+    cluster_name       = "runai-dynamo-eu"
+    gpu_nodes_platform = "gpu-h100-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { platform = "gpu-l40s-a", preset = "1gpu-24vcpu-96gb", labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                 = "worker"
+      domain               = "cluster.eu.example.com"
+      control_plane_url    = "https://runai.example.com"
+      cluster_uid          = "REPLACE_WITH_REGISTERED_EU_CLUSTER_UUID"
+      bootstrap_token_file = "/secure/runai-eu-bootstrap-token"
+      values_files         = ["/secure/runai-eu-values.yaml"]
+      serving              = { inference_domain = "*.models.eu.example.com", values_files = ["/secure/knative-eu-values.yaml"] }
+    }
+  }
+
+  eu-north2 = {
+    parent_id          = "project-REPLACE-eu2"
+    subnet_id          = "vpcsubnet-REPLACE-eu2"
+    region             = "eu-north2"
+    cluster_name       = "runai-dynamo-eu2"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                 = "worker"
+      domain               = "cluster.eu2.example.com"
+      control_plane_url    = "https://runai.example.com"
+      cluster_uid          = "REPLACE_WITH_REGISTERED_EU2_CLUSTER_UUID"
+      bootstrap_token_file = "/secure/runai-eu2-bootstrap-token"
+      values_files         = ["/secure/runai-eu2-values.yaml"]
+      serving              = { inference_domain = "*.models.eu2.example.com", values_files = ["/secure/knative-eu2-values.yaml"] }
+    }
+  }
+
+  eu-west1 = {
+    parent_id          = "project-REPLACE-west"
+    subnet_id          = "vpcsubnet-REPLACE-west"
+    region             = "eu-west1"
+    cluster_name       = "runai-dynamo-west"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                 = "worker"
+      domain               = "cluster.west.example.com"
+      control_plane_url    = "https://runai.example.com"
+      cluster_uid          = "REPLACE_WITH_REGISTERED_WEST_CLUSTER_UUID"
+      bootstrap_token_file = "/secure/runai-west-bootstrap-token"
+      values_files         = ["/secure/runai-west-values.yaml"]
+      serving              = { inference_domain = "*.models.west.example.com", values_files = ["/secure/knative-west-values.yaml"] }
+    }
+  }
+}
+
+
+# Supply each region's platform_namespaces/platform_secrets for TLS/CA,
+# as in the single-region worker profile. Values maps are replaced, not deep-merged.
+# Install shared optional add-ons through platform_releases, never model endpoints.
+# Customer onboarding, buckets, notebooks and model deployments belong to the
+# external application.
+
+# Use this file as K8S_FLEET_CONFIG; Terragrunt selects every configured cluster.
+
+# Use the managed-driver exporter and Run:ai values in modules/runai/README.md.
