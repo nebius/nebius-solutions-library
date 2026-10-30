@@ -340,16 +340,6 @@ resource "helm_release" "soperator_fluxcd_bootstrap" {
   namespace  = var.flux_namespace
 
   set {
-    name  = "helmRelease.install.disableWait"
-    value = "true"
-  }
-
-  set {
-    name  = "helmRelease.upgrade.disableWait"
-    value = "true"
-  }
-
-  set {
     name  = "helmRepository.url"
     value = var.operator_stable ? "oci://cr.nebius.cloud/soperator" : "oci://cr.nebius.cloud/soperator-unstable"
   }
