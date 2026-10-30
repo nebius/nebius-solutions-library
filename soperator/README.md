@@ -474,6 +474,35 @@ filesystem_jail_submounts = [{
 but removing the retained filesystems from Terraform state is what allows `terraform destroy` to complete
 without trying to delete them.
 
+### Leftover CSI disks
+
+Teardown preserves leftover CSI disks by default. Kubernetes and its CSI driver
+continue to handle normal volume deletion. The fallback cleanup no longer scans
+the project: an unattached disk or a matching namespace does not establish that
+its data is disposable, and cloud disk labels do not record Kubernetes retention policies.
+
+To approve specific disposable disks for fallback deletion, record their owning
+cluster ID before teardown and set their exact disk IDs in the installation configuration:
+
+```hcl
+disk_cleanup = {
+  expected_cluster_id = "mk8scluster-<OWNER-CLUSTER-ID>"
+  disk_ids            = ["computedisk-<DISPOSABLE-DISK-ID>"]
+}
+```
+
+Use a literal cluster ID; a reference to `module.k8s.cluster_id` would create a
+dependency cycle. Exclude disks whose data should be retained, even when they
+belong to the same cluster. The fallback checks project and cluster ownership,
+PVC provenance, deletion protection, readiness, locks, and both attachment modes
+again immediately before each deletion attempt.
+
+Run `terraform apply` to save this approval before `terraform destroy`. Destroy
+uses the policy stored in state, so removing an approval also requires applying
+`disk_cleanup = {}` first. Policy updates alone do not run cleanup. Older state
+without explicit disk approvals safely skips fallback deletion, including when
+destroyed directly after upgrading the module.
+
 ## Backup permissions
 
 Terraform creates a project group `${instance_name}-backup` with
