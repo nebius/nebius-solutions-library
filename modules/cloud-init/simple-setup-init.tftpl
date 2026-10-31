@@ -1,4 +1,14 @@
 #cloud-config
+package_update: true
+package_upgrade: true
+%{if enable_local_disks}
+packages:
+  - nvme-cli
+%{ if local_disks_mount_mode == "raid0" }
+  - mdadm
+%{ endif }
+
+%{endif}
 users:
 %{ for user in users}
   - name: ${user.user_name}
@@ -9,12 +19,149 @@ users:
       - ${user.ssh_public_key}
 %{ endfor}
 
+%{if enable_local_disks}
+write_files:
+  - path: /usr/local/sbin/prepare-local-nvme.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      MODE="${local_disks_mount_mode}"
+      MOUNTPOINT="${local_nvme_drives_path}"
+      EXPECTED_DISKS=${local_disks_expected_count}
+      MD_DEV=/dev/md/local-nvme
+      fail() { echo "[local-nvme] $*" >&2; exit 1; }
 
+      # Only dedicated scratch locations are accepted; reject symlink traversal.
+      [[ "$MOUNTPOINT" =~ ^/(scratch|mnt/[a-zA-Z0-9_-]+|srv/[a-zA-Z0-9_-]+)$ ]] || fail "Unsafe mount path"
+      [[ "$(realpath -m "$MOUNTPOINT")" == "$MOUNTPOINT" ]] || fail "Symlink in mount path"
+      mkdir -p "$MOUNTPOINT"
+      exec 9>/run/local-nvme.lock
+      flock -n 9 || fail "Preparation already running"
+
+      # Retry enumeration, but never guess how many disks constitute the allocation.
+      for attempt in {1..30}; do
+        udevadm settle --timeout=5 || true
+        mapfile -t NVME_DISKS < <(find /dev -maxdepth 1 -regextype posix-extended -regex '/dev/nvme[0-9]+n[0-9]+' -type b | sort -V)
+        [[ "$${#NVME_DISKS[@]}" -eq "$EXPECTED_DISKS" ]] && break
+        sleep 2
+      done
+      [[ "$${#NVME_DISKS[@]}" -eq "$EXPECTED_DISKS" ]] || fail "Expected $EXPECTED_DISKS NVMe devices; found $${#NVME_DISKS[@]}"
+      ROOT_SOURCE=$(findmnt -n -o SOURCE /)
+      ROOT_DISKS=$(lsblk -srnpo NAME "$ROOT_SOURCE") || fail "Cannot identify root backing devices"
+      for disk in "$${NVME_DISKS[@]}"; do
+        grep -Fxq "$disk" <<< "$ROOT_DISKS" && fail "Root backing disk selected: $disk"
+        [[ "$(lsblk -dn -o TYPE "$disk")" == disk ]] || fail "Not a whole disk: $disk"
+        [[ "$(lsblk -nr -o TYPE "$disk" | grep -c '^part$')" == 0 ]] || fail "Partitioned disk: $disk"
+      done
+
+      blank_device() {
+        [[ -z "$(wipefs --noheadings --output TYPE "$1")" ]]
+      }
+      mount_device() {
+        local device="$1" target="$2" fs
+        [[ "$(realpath -m "$target")" == "$target" ]] || fail "Symlink in $target"
+        mkdir -p "$target"
+        if mountpoint -q "$target"; then
+          [[ "$(findmnt -n -o MAJ:MIN --mountpoint "$target")" == "$(lsblk -dn -o MAJ:MIN "$device" | xargs)" ]] || fail "Wrong device mounted at $target"
+        else
+          [[ -z "$(lsblk -nr -o MOUNTPOINTS "$device" | tr -d '[:space:]')" ]] || fail "Device already mounted elsewhere: $device"
+          fs=$(blkid -p -s TYPE -o value "$device" || true)
+          if [[ -z "$fs" ]]; then
+            blank_device "$device" || fail "Unrecognized signature: $device"
+            mkfs.ext4 "$device"
+          elif [[ "$fs" != ext4 ]]; then
+            fail "Unexpected filesystem on $device: $fs"
+          fi
+          mount -t ext4 -o defaults,relatime,rw "$device" "$target"
+        fi
+        chown nobody:nogroup "$target"
+        chmod 1777 "$target"
+      }
+
+      if [[ "$MODE" == raid0 ]]; then
+        uuid=""
+        blank=0
+        for disk in "$${NVME_DISKS[@]}"; do
+          info=$(mdadm --examine --export "$disk" 2>/dev/null || true)
+          member_uuid=$(awk -F= '$1 == "MD_UUID" {print $2}' <<< "$info")
+          if [[ -z "$member_uuid" ]]; then
+            blank_device "$disk" || fail "Non-RAID signature on $disk"
+            [[ "$(lsblk -nr -o NAME "$disk" | wc -l | xargs)" == 1 ]] || fail "Device has holders: $disk"
+            blank=$((blank + 1))
+          else
+            [[ -z "$uuid" || "$uuid" == "$member_uuid" ]] || fail "Mixed RAID arrays"
+            uuid="$member_uuid"
+          fi
+        done
+        if [[ "$blank" -eq "$EXPECTED_DISKS" ]]; then
+          [[ ! -e "$MD_DEV" ]] || fail "RAID name already in use"
+          mdadm --create "$MD_DEV" --name=local-nvme --metadata=1.2 --level=0 --raid-devices="$EXPECTED_DISKS" --run "$${NVME_DISKS[@]}"
+        else
+          [[ "$blank" -eq 0 ]] || fail "Partial RAID signatures; refusing reconstruction"
+          # Locate the array by UUID even when udev assembled it under another name.
+          active=""
+          for candidate in /sys/block/md*; do
+            [[ -e "$candidate" ]] || continue
+            device="/dev/$${candidate##*/}"
+            active_uuid=$(mdadm --detail --export "$device" | awk -F= '$1 == "MD_UUID" {print $2}')
+            [[ "$active_uuid" != "$uuid" ]] || active="$device"
+          done
+          if [[ -n "$active" ]]; then
+            MD_DEV="$active"
+          else
+            [[ ! -e "$MD_DEV" ]] || fail "RAID name already in use"
+            mdadm --assemble "$MD_DEV" --uuid="$uuid" "$${NVME_DISKS[@]}"
+          fi
+        fi
+        md_name=$(basename "$(readlink -f "$MD_DEV")")
+        [[ "$(cat /sys/block/"$md_name"/md/level)" == raid0 ]] || fail "Unexpected RAID level"
+        [[ "$(cat /sys/block/"$md_name"/md/raid_disks)" == "$EXPECTED_DISKS" ]] || fail "Unexpected RAID size"
+        actual=$(find /sys/block/"$md_name"/slaves -mindepth 1 -maxdepth 1 -printf '/dev/%f\n' | sort)
+        expected=$(printf '%s\n' "$${NVME_DISKS[@]}" | sort)
+        [[ "$actual" == "$expected" ]] || fail "Unexpected RAID members"
+        mount_device "$MD_DEV" "$MOUNTPOINT"
+      else
+        mountpoint -q "$MOUNTPOINT" && fail "Raw-mode parent is already a mount"
+        index=0
+        for disk in "$${NVME_DISKS[@]}"; do
+          [[ "$(lsblk -nr -o NAME "$disk" | wc -l | xargs)" == 1 ]] || fail "Device has holders: $disk"
+          mount_device "$disk" "$MOUNTPOINT/disk-$index"
+          index=$((index + 1))
+        done
+      fi
+      # Mounts are recreated by this service on each boot; never persist ephemeral UUIDs.
+  - path: /etc/systemd/system/local-nvme.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prepare and mount local NVMe disks
+      After=systemd-udev-settle.service
+      Wants=systemd-udev-settle.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      TimeoutStartSec=10min
+      ExecStart=/usr/local/sbin/prepare-local-nvme.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+%{ for service in local_disks_dependent_services }
+  - path: /etc/systemd/system/${service}.d/local-nvme.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Requires=local-nvme.service
+      After=local-nvme.service
+%{ endfor }
+%{endif}
+%{ if extra_disk_id != "" || shared_filesystem_id != "" || aws_access_key_id != "" || enable_local_disks }
 runcmd:
-- apt-get update
-- apt-get upgrade
-
-
 # mount disk if provided
 %{ if extra_disk_id != "" }
 # Prepare partition on secondary disk
@@ -74,3 +221,9 @@ runcmd:
 - mount-s3 --upload-checksums=off --maximum-throughput-gbps=200 --allow-delete --allow-overwrite --allow-other --endpoint-url=https://storage.${region}.nebius.cloud:443 ${mount_bucket} ${s3_mount_path}
 %{endif}
 %{endif}
+
+%{if enable_local_disks}
+- systemctl daemon-reload
+- systemctl enable --now local-nvme.service
+%{endif}
+%{ endif }
