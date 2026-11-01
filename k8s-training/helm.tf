@@ -100,8 +100,10 @@ module "runai" {
 }
 
 module "dynamo" {
-  count  = var.enable_dynamo ? 1 : 0
-  source = "../modules/dynamo"
+  count      = var.enable_dynamo ? 1 : 0
+  source     = "../modules/dynamo"
+  parent_id  = var.parent_id
+  cluster_id = nebius_mk8s_v1_cluster.k8s-cluster.id
   config = merge(var.dynamo, {
     scheduler_mode = local.runai_worker ? "runai" : try(var.dynamo.scheduler_mode, "standalone")
   })

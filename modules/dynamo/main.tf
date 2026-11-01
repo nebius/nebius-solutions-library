@@ -1,24 +1,24 @@
-resource "helm_release" "this" {
-  name             = var.config.release_name
+resource "nebius_applications_v1alpha1_k8s_release" "this" {
+  parent_id        = var.parent_id
+  cluster_id       = var.cluster_id
+  application_name = var.config.release_name
   namespace        = var.config.namespace
-  repository       = var.config.chart_path == null ? "https://helm.ngc.nvidia.com/nvidia/ai-dynamo" : null
-  chart            = coalesce(var.config.chart_path, "dynamo-platform")
-  version          = var.config.version
-  create_namespace = true
-  atomic           = true
-  wait_for_jobs    = true
-  timeout          = 1200
+  product_slug     = "nebius/nvidia-dynamo"
 
-  values = concat([for filename in var.config.values_files : file(filename)], [yamlencode({
-    global = {
-      kai-scheduler = { install = var.config.scheduler_mode == "standalone", enabled = true }
-      grove         = { install = var.config.grove_mode == "bundled", enabled = true }
-      etcd          = { install = false }
-      nats          = { install = false }
-      snapshot      = { install = false }
+  sensitive = {
+    set = {
+      "platform.global.kai-scheduler.install"                 = var.config.scheduler_mode == "standalone"
+      "platform.global.kai-scheduler.enabled"                 = true
+      "platform.global.grove.install"                         = var.config.grove_mode == "bundled"
+      "platform.global.grove.enabled"                         = true
+      "platform.global.etcd.install"                          = false
+      "platform.global.nats.install"                          = false
+      "platform.global.snapshot.install"                      = false
+      "platform.dynamo-operator.namespaceRestriction.enabled" = false
+      "platform.dynamo-operator.upgradeCRD"                   = true
+      "platform.dynamo-operator.discoveryBackend"             = "kubernetes"
     }
-    dynamo-operator = { discoveryBackend = "kubernetes" }
-    # Grove owns PodGroup termination; the bundled KAI chart requires this native setting.
-    kai-scheduler = { scheduler = { args = { default-staleness-grace-period = "-1s" } } }
-  })])
+    values  = var.config.values
+    version = sha256(jsonencode(var.config))
+  }
 }

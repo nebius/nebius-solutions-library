@@ -1,8 +1,7 @@
 terraform {
   required_providers {
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 3.0"
+    nebius = {
+      source = "nebius/nebius"
     }
   }
 }
