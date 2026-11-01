@@ -87,8 +87,54 @@ clusters = {
       control_plane_url    = "https://runai.example.com"
       cluster_uid          = "REPLACE_WITH_REGISTERED_EU_CLUSTER_UUID"
       bootstrap_token_file = "/secure/runai-eu-bootstrap-token"
-      values_files         = ["/secure/runai-eu-values.yaml"]
-      serving              = { inference_domain = "*.models.eu.example.com", values_files = ["/secure/knative-eu-values.yaml"] }
+      values               = <<-YAML
+        runai-cluster:
+          clusterConfig:
+            cluster-api:
+              ingress:
+                tlsEnabled: true
+                tls-secret: runai-cluster-domain-tls
+            global:
+              subdomainSupport: false
+              nvidiaDcgmExporter:
+                installedFromGpuOperator: false
+                namespace: dcgm-exporter
+                serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.eu.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.eu.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
     }
   }
 
@@ -109,8 +155,54 @@ clusters = {
       control_plane_url    = "https://runai.example.com"
       cluster_uid          = "REPLACE_WITH_REGISTERED_EU2_CLUSTER_UUID"
       bootstrap_token_file = "/secure/runai-eu2-bootstrap-token"
-      values_files         = ["/secure/runai-eu2-values.yaml"]
-      serving              = { inference_domain = "*.models.eu2.example.com", values_files = ["/secure/knative-eu2-values.yaml"] }
+      values               = <<-YAML
+        runai-cluster:
+          clusterConfig:
+            cluster-api:
+              ingress:
+                tlsEnabled: true
+                tls-secret: runai-cluster-domain-tls
+            global:
+              subdomainSupport: false
+              nvidiaDcgmExporter:
+                installedFromGpuOperator: false
+                namespace: dcgm-exporter
+                serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.eu2.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.eu2.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
     }
   }
 
@@ -131,8 +223,54 @@ clusters = {
       control_plane_url    = "https://runai.example.com"
       cluster_uid          = "REPLACE_WITH_REGISTERED_WEST_CLUSTER_UUID"
       bootstrap_token_file = "/secure/runai-west-bootstrap-token"
-      values_files         = ["/secure/runai-west-values.yaml"]
-      serving              = { inference_domain = "*.models.west.example.com", values_files = ["/secure/knative-west-values.yaml"] }
+      values               = <<-YAML
+        runai-cluster:
+          clusterConfig:
+            cluster-api:
+              ingress:
+                tlsEnabled: true
+                tls-secret: runai-cluster-domain-tls
+            global:
+              subdomainSupport: false
+              nvidiaDcgmExporter:
+                installedFromGpuOperator: false
+                namespace: dcgm-exporter
+                serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.west.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.west.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
     }
   }
 }

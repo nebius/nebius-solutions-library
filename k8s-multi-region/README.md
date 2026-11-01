@@ -80,6 +80,9 @@ GPU drivers and duplicate GPU components.
 The Run:ai/Dynamo profile connects three example worker clusters to one existing
 control plane. First provision that separate CPU cluster using
 [`runai-control-plane.tfvars.example`](../k8s-training/runai-control-plane.tfvars.example).
+That example provisions compute; use the complete Marketplace installer for the
+control plane's database and public URL. Workers require publication of the
+Marketplace package's optional worker component.
 Register every worker through the native API, then supply its distinct UUID,
 fresh bootstrap token, DNS/TLS and regional operator/chart/storage inputs.
 Terragrunt handles fleet execution; Terraform installs the shared components.
