@@ -4,14 +4,14 @@
 
 New integrations are disabled by default:
 
-- `enable_runai`: one Run:ai control plane or registered worker; optional
-  ingress, Prometheus Operator and Knative/Kourier prerequisites.
+- `enable_runai`: a registered Marketplace Run:ai worker, with native Marketplace
+  ingress/Prometheus prerequisites and optional upstream Knative/Kourier.
 - `enable_dynamo`: Dynamo/Grove, reusing Run:ai's KAI scheduler on Run:ai workers.
 - `enable_nim_operator`, `enable_mpi_operator`, `enable_opencost`: the native
   NIM Operator, stock Kubeflow MPI Operator and OpenCost.
 
-The [Run:ai module](../modules/runai/README.md) documents registration, TLS,
-PostgreSQL, prerequisites and the explicit 3.0.20 authenticated-readiness patch.
+The [Run:ai module](../modules/runai/README.md) documents the separate complete
+Marketplace control-plane step, worker registration, TLS and prerequisites.
 Use [Dynamo's module](../modules/dynamo/README.md) for scheduler ownership.
 Customer identities, buckets, notebooks, model workloads and warm-reserve jobs
 belong to the external application, using native APIs.
@@ -25,7 +25,7 @@ protected file inputs:
 - `runai-dynamo.tfvars.example`: a worker with the current platform extensions.
 
 Run:ai profiles select Nebius managed driver images, disable duplicate
-observability installations, and supply TLS/CA/database Secrets.
+observability installations, and supply prerequisite TLS Secrets.
 GPU/Network Operators use the existing Marketplace installers. Optional
 `gpu_operator_values` and `network_operator_values` accept YAML strings.
 Use inline YAML in `.tfvars`, or load a file with `file(...)` in Terraform or
@@ -36,8 +36,8 @@ device plugin and DCGM, including the Marketplace driver CRs. Marketplace owns
 operator chart versions; check installed versions against NVIDIA support matrices.
 Stock GPU discovery uses `platform_releases`; disable its device plugin and NFD.
 
-The write-only credential inputs require Kubernetes provider >=2.36 and Helm
-provider >=3.0.
+Worker bootstrap credentials use a write-only Kubernetes Secret, referenced by
+the stock chart rather than embedded in Helm values.
 
 ### Independently configured regional pools
 
@@ -52,9 +52,11 @@ strings for regions outside the inherited defaults. Check the project's native
 platform catalog and MK8s compatibility matrix before selecting a shape.
 
 Provision infrastructure before installing controllers that require its API.
-For a new Run:ai fleet, install the CPU control plane, register workers through
-the native API/UI, then pass each worker's UUID/bootstrap token and install its
-extensions. Supply namespaces/Secrets before charts that reference them.
+For a new Run:ai fleet, provision the CPU control cluster and install the complete
+control-plane application through Marketplace Console/API. Register real worker
+URLs through the native API/UI, then supply each UUID/bootstrap token and enable
+its Terraform worker module. Supply TLS Secrets and verify optional Knative
+Serving Ready before installing workers that use inference.
 MPI uses its stock versioned manifest, including its own namespace.
 
 Keep existing resources in their original backends. Existing Helm-owned operators

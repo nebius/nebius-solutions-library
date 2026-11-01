@@ -1,36 +1,40 @@
+variable "parent_id" {
+  description = "Project ID."
+  type        = string
+}
+
+variable "cluster_id" {
+  description = "Existing regional Kubernetes cluster ID."
+  type        = string
+}
+
 variable "config" {
-  description = "One native Run:ai control-plane or worker release. Prepare its prerequisites before installation."
+  description = "Registered Run:ai worker installed through the canonical Marketplace application."
   type = object({
-    role                        = string
+    role                        = optional(string, "worker")
     domain                      = string
-    version                     = optional(string, "3.0.20")
-    chart_path                  = optional(string)
-    values_files                = optional(list(string), [])
+    values                      = optional(string)
     install_ingress             = optional(bool, true)
-    ingress_class               = optional(string, "haproxy")
-    ingress_chart_path          = optional(string)
-    ingress_values_files        = optional(list(string), [])
+    ingress_class               = optional(string, "nginx")
+    ingress_values              = optional(string)
     install_prometheus_operator = optional(bool, true)
-    prometheus_values_files     = optional(list(string), [])
-    prometheus_chart_path       = optional(string)
-    control_plane_url           = optional(string)
-    cluster_uid                 = optional(string)
+    prometheus_values           = optional(string)
+    control_plane_url           = string
+    cluster_uid                 = string
     bootstrap_token_revision    = optional(number, 1)
     serving = optional(object({
-      inference_domain      = string
-      tls_secret_name       = optional(string, "runai-cluster-inference-tls")
-      install_operator      = optional(bool, true)
-      operator_version      = optional(string, "1.23.0")
-      operator_chart_path   = optional(string)
-      version               = optional(string, "1.23.0")
-      operator_values_files = optional(list(string), [])
-      values_files          = optional(list(string), [])
+      inference_domain = string
+      tls_secret_name  = optional(string, "runai-cluster-inference-tls")
+      install_operator = optional(bool, true)
+      operator_version = optional(string, "1.23.0")
+      operator_values  = optional(string)
+      spec             = string
     }))
   })
 
   validation {
-    condition     = contains(["control-plane", "worker"], var.config.role)
-    error_message = "Run:ai role must be control-plane or worker."
+    condition     = var.config.role == "worker"
+    error_message = "This module installs workers. Install the full control-plane application through Marketplace Console/API."
   }
 
   validation {
@@ -39,7 +43,7 @@ variable "config" {
   }
 
   validation {
-    condition = var.config.role != "worker" || (
+    condition = (
       try(startswith(var.config.control_plane_url, "https://"), false) &&
       try(trimspace(var.config.cluster_uid) != "", false) &&
       var.config.bootstrap_token_revision >= 1
@@ -49,7 +53,6 @@ variable "config" {
 
   validation {
     condition = var.config.serving == null ? true : (
-      var.config.role == "worker" &&
       startswith(var.config.serving.inference_domain, "*.") &&
       !strcontains(var.config.serving.inference_domain, "://") &&
       trimspace(var.config.serving.tls_secret_name) != ""
@@ -59,14 +62,14 @@ variable "config" {
 }
 
 variable "bootstrap_token" {
-  description = "Fresh native worker bootstrap token. Increment config.bootstrap_token_revision for each worker install/upgrade. Helm release storage still contains this credential."
+  description = "Fresh native bootstrap token, written only to a caller-managed Kubernetes Secret. Increment config.bootstrap_token_revision for rotation."
   type        = string
   default     = null
   sensitive   = true
   ephemeral   = true
 
   validation {
-    condition     = var.config.role != "worker" || try(trimspace(var.bootstrap_token) != "", false)
+    condition     = try(trimspace(var.bootstrap_token) != "", false)
     error_message = "A worker needs a fresh bootstrap_token from its registered control-plane cluster record."
   }
 }

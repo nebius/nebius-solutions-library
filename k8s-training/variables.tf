@@ -770,7 +770,7 @@ variable "enable_runai" {
   nullable = false
   validation {
     condition     = !var.enable_runai || var.runai != null
-    error_message = "enable_runai requires runai configuration (control-plane or worker)."
+    error_message = "enable_runai requires registered worker configuration."
   }
 
 
@@ -792,7 +792,7 @@ variable "dynamo" {
   default     = {}
   nullable    = false
   validation {
-    condition     = !(var.enable_dynamo && var.enable_runai && try(var.runai.role == "worker", false)) || coalesce(try(var.dynamo.scheduler_mode, null), "runai") == "runai"
+    condition     = !(var.enable_dynamo && var.enable_runai) || coalesce(try(var.dynamo.scheduler_mode, null), "runai") == "runai"
     error_message = "Combined Run:ai/Dynamo must reuse Run:ai's KAI owner: omit scheduler_mode or set it to runai."
   }
 }

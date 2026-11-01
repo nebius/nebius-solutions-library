@@ -30,11 +30,10 @@ dependency. Native CRD installation and hooks remain unchanged. Install workload
 after the CRDs exist. Keep credentials in separately managed Secrets; provider
 settings use write-only fields and a configuration hash to trigger updates.
 
-This baseline uses the `v1alpha1` Dynamo workload API. It does **not** reproduce
-the previously qualified Dynamo 1.5.1 fleet's `v1beta1` workloads or its Run:ai
-component-affinity-to-node-pool integration. Those capabilities require a separate
-Marketplace upgrade and runtime qualification. Verify workload ownership, queues
-and actual Pod placement before claiming a working integration.
+This baseline uses the `v1alpha1` Dynamo workload API. `v1beta1` workloads and
+Run:ai component-affinity-to-node-pool integration require a separate Marketplace
+upgrade and runtime qualification. Verify workload ownership, queues and actual
+Pod placement before claiming a working integration.
 
 Run:ai's public URL and cloud resources require its complete Marketplace
 application deployment graph; this Dynamo module does not create them.

@@ -27,7 +27,7 @@ prerequisites.
 `runai_cache_reader = {}` adds only `get/list/watch` for `apps.nvidia.com/nimcaches`
 to Run:ai's existing `runai/cluster-sync` ServiceAccount. Override `namespace`
 and `service_account` inside that object for a different native installation.
-Run:ai 3.0.20 already reads NIMServices but omits NIMCaches from that role.
+Run:ai 3.0.17 already reads NIMServices but omits NIMCaches from that role.
 
 The project owner creates NGC registry/API Secrets, owner PVCs and native
 NIMCache/NIMService manifests. Install the operator first, then plan/apply these

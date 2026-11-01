@@ -1,5 +1,5 @@
-# Separate CPU-only control cluster/state; supply tenant_id, parent_id, subnet_id
-# and iam_token externally. DNS, registry, PostgreSQL and certificates are inputs.
+# CPU-only control cluster/state; supply tenant_id, parent_id, subnet_id
+# and iam_token externally. The complete Marketplace app is a separate step.
 cluster_name               = "runai-control"
 region                     = "eu-north1"
 k8s_version                = "1.35"
@@ -17,28 +17,17 @@ enable_grafana             = false
 enable_prometheus          = false
 enable_nebius_o11y_agent   = false
 loki                       = { enabled = false }
-enable_runai               = true
-runai = {
-  role    = "control-plane"
-  version = "3.0.20"
-  domain  = "runai.example.com"
-  # The second file pins the reviewed readiness-patched workloads image.
-  # See modules/runai/README.md before building or selecting that image.
-  values_files = ["/secure/runai-control-plane-values.yaml", "/secure/runai-readiness-fix-values.yaml"]
-}
-platform_namespaces = ["runai-backend"]
-platform_secrets = {
-  control_tls = {
-    name       = "runai-backend-tls", namespace = "runai-backend", type = "kubernetes.io/tls"
-    data_files = { "tls.crt" = "/secure/control.crt", "tls.key" = "/secure/control.key" }
-  }
-  ca = {
-    name       = "runai-ca-cert", namespace = "runai-backend"
-    data_files = { "runai-ca.pem" = "/secure/ca-chain.pem" }
-  }
-  database = {
-    name       = "runai-postgresql", namespace = "runai-backend"
-    data_files = { "password" = "/secure/postgres-password", "postgres-password" = "/secure/postgres-password" }
-  }
-}
-# No users, customer buckets, notebooks, model releases or inference endpoints.
+network_operator_values    = <<-YAML
+  operator:
+    deployCR: false
+  nfd:
+    enabled: false
+    deployNodeFeatureRules: false
+  sriovNetworkOperator:
+    enabled: false
+  maintenanceOperator:
+    enabled: false
+YAML
+# Install the complete Run:ai application separately through Marketplace Console/API.
+# That graph owns PostgreSQL, credentials, TLS and its generated public URL.
+enable_runai = false

@@ -149,7 +149,6 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
     })
   }
 }
-
 #################
 # GPU NODE GROUPS
 #################

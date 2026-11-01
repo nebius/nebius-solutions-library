@@ -88,15 +88,17 @@ module "nccl-test" {
 
 # Optional upstream controllers. Application workloads and APIs are separate.
 locals {
-  runai_worker = var.enable_runai && try(var.runai.role == "worker", false)
+  runai_worker = var.enable_runai
 }
 
 module "runai" {
   count           = var.enable_runai ? 1 : 0
   source          = "../modules/runai"
+  parent_id       = var.parent_id
+  cluster_id      = nebius_mk8s_v1_cluster.k8s-cluster.id
   config          = var.runai
   bootstrap_token = local.runai_worker ? sensitive(file(var.runai.bootstrap_token_file)) : null
-  depends_on      = [module.network-operator, module.gpu-operator, module.gpu-operator-custom, kubernetes_secret_v1.platform]
+  depends_on      = [module.network-operator, module.gpu-operator, module.gpu-operator-custom, kubernetes_namespace_v1.platform, kubernetes_secret_v1.platform]
 }
 
 module "dynamo" {
@@ -134,9 +136,13 @@ module "nim_operator" {
   depends_on = [module.runai, module.gpu-operator, module.gpu-operator-custom]
 }
 
-# Run:ai owns its project namespaces. Declare only other prerequisite namespaces.
+# Platform prerequisites; Run:ai owns workload project namespaces.
 resource "kubernetes_namespace_v1" "platform" {
-  for_each = var.platform_namespaces
+  for_each = setunion(
+    var.platform_namespaces,
+    local.runai_worker ? toset(["runai"]) : toset([]),
+    local.runai_worker && try(var.runai.serving, null) != null ? toset(["knative-serving"]) : toset([])
+  )
   metadata { name = each.value }
   lifecycle {
     # Native operators own namespace metadata; this resource owns its existence.

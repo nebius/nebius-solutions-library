@@ -2,29 +2,49 @@ resource "helm_release" "serving_operator" {
   count            = local.serving ? (var.config.serving.install_operator ? 1 : 0) : 0
   name             = "knative-operator"
   namespace        = "knative-operator"
-  repository       = var.config.serving.operator_chart_path == null ? "https://knative.github.io/operator" : null
-  chart            = coalesce(var.config.serving.operator_chart_path, "knative-operator")
+  repository       = "https://knative.github.io/operator"
+  chart            = "knative-operator"
   version          = var.config.serving.operator_version
   create_namespace = true
   atomic           = true
   wait_for_jobs    = true
   timeout          = 1200
-  values           = [for filename in var.config.serving.operator_values_files : file(filename)]
+  values           = var.config.serving.operator_values == null ? [] : [var.config.serving.operator_values]
 }
 
-resource "helm_release" "serving" {
-  count            = local.serving ? 1 : 0
-  name             = "runai-serving"
-  namespace        = "knative-serving"
-  chart            = "${path.module}/charts/serving"
-  create_namespace = true
-  atomic           = true
-  timeout          = 1200
-  values = concat([for filename in var.config.serving.values_files : file(filename)], [yamlencode({
-    inferenceDomain = var.config.serving.inference_domain
-    ingressClass    = var.config.ingress_class
-    tlsSecretName   = var.config.serving.tls_secret_name
-    servingVersion  = var.config.serving.version
-  })])
-  depends_on = [helm_release.serving_operator, helm_release.ingress]
+resource "kubectl_manifest" "serving" {
+  count = local.serving ? 1 : 0
+  yaml_body = yamlencode({
+    apiVersion = "operator.knative.dev/v1beta1"
+    kind       = "KnativeServing"
+    metadata   = { name = "knative-serving", namespace = "knative-serving" }
+    spec       = yamldecode(var.config.serving.spec)
+  })
+  depends_on = [helm_release.serving_operator]
+}
+
+resource "kubectl_manifest" "serving_ingress" {
+  count = local.serving ? 1 : 0
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "Ingress"
+    metadata = {
+      name        = "knative-serving"
+      namespace   = "knative-serving"
+      annotations = { "nginx.ingress.kubernetes.io/ssl-redirect" = "true" }
+    }
+    spec = {
+      ingressClassName = var.config.ingress_class
+      rules = [{
+        host = var.config.serving.inference_domain
+        http = { paths = [{
+          path     = "/"
+          pathType = "Prefix"
+          backend  = { service = { name = "kourier", port = { number = 80 } } }
+        }] }
+      }]
+      tls = [{ hosts = [var.config.serving.inference_domain], secretName = var.config.serving.tls_secret_name }]
+    }
+  })
+  depends_on = [kubectl_manifest.serving, nebius_applications_v1alpha1_k8s_release.ingress]
 }

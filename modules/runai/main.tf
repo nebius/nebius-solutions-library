@@ -1,75 +1,102 @@
 locals {
-  worker    = var.config.role == "worker"
-  namespace = local.worker ? "runai" : "runai-backend"
-  serving   = local.worker && var.config.serving != null
+  serving = var.config.serving != null
+  ingress_settings = {
+    "controller.ingressClass"              = var.config.ingress_class
+    "controller.ingressClassResource.name" = var.config.ingress_class
+    "controller.service.type"              = "LoadBalancer"
+  }
+  prometheus_settings = {
+    "stack.prometheus.enabled"       = false
+    "stack.grafana.enabled"          = false
+    "stack.alertmanager.enabled"     = false
+    "stack.nodeExporter.enabled"     = false
+    "stack.kubeStateMetrics.enabled" = false
+    "stack.defaultRules.create"      = false
+    "blackboxExporter.replicaCount"  = 0
+  }
+  worker_settings = {
+    "control-plane.enabled"                                                      = false
+    "runai-cluster.enabled"                                                      = true
+    "runai-cluster.controlPlane.url"                                             = var.config.control_plane_url
+    "runai-cluster.controlPlane.existingSecret"                                  = kubernetes_secret_v1.bootstrap.metadata[0].name
+    "runai-cluster.controlPlane.secretKeys.clientSecret"                         = "bootstrap-token"
+    "runai-cluster.controlPlane.bootstrapToken"                                  = "@/runai/config/client_secret"
+    "runai-cluster.cluster.uid"                                                  = var.config.cluster_uid
+    "runai-cluster.cluster.url"                                                  = "https://${var.config.domain}"
+    "runai-cluster.clusterConfig.global.ingress.ingressClass"                    = var.config.ingress_class
+    "runai-cluster.kai-resource-management.kai-scheduler.global.nvFractions.set" = false
+  }
 }
 
-resource "helm_release" "ingress" {
+resource "nebius_applications_v1alpha1_k8s_release" "ingress" {
   count            = var.config.install_ingress ? 1 : 0
-  name             = "haproxy"
-  namespace        = "haproxy-controller"
-  repository       = var.config.ingress_chart_path == null ? "https://haproxytech.github.io/helm-charts" : null
-  chart            = coalesce(var.config.ingress_chart_path, "kubernetes-ingress")
-  version          = "1.54.3"
-  create_namespace = true
-  atomic           = true
-  wait_for_jobs    = true
-  timeout          = 1200
-  values = concat([yamlencode({ controller = {
-    ingressClass         = var.config.ingress_class
-    ingressClassResource = { enabled = true }
-    service              = { type = "LoadBalancer" }
-  } })], [for filename in var.config.ingress_values_files : file(filename)])
+  parent_id        = var.parent_id
+  cluster_id       = var.cluster_id
+  application_name = "runai-ingress"
+  namespace        = "ingress-nginx"
+  product_slug     = "nebius/nginx-ingress-controller"
+  sensitive = {
+    set     = local.ingress_settings
+    values  = var.config.ingress_values
+    version = sha256(jsonencode([local.ingress_settings, var.config.ingress_values]))
+  }
 }
 
-resource "helm_release" "prometheus_operator" {
-  count            = local.worker && var.config.install_prometheus_operator ? 1 : 0
-  name             = "kube-prometheus-stack"
+resource "nebius_applications_v1alpha1_k8s_release" "prometheus_operator" {
+  count            = var.config.install_prometheus_operator ? 1 : 0
+  parent_id        = var.parent_id
+  cluster_id       = var.cluster_id
+  application_name = "runai-prometheus-operator"
   namespace        = "monitoring"
-  repository       = var.config.prometheus_chart_path == null ? "https://prometheus-community.github.io/helm-charts" : null
-  chart            = coalesce(var.config.prometheus_chart_path, "kube-prometheus-stack")
-  version          = "88.6.5"
-  create_namespace = true
-  atomic           = true
-  wait_for_jobs    = true
-  timeout          = 1200
-  values = concat([yamlencode({
-    prometheus       = { enabled = false }
-    grafana          = { enabled = false }
-    alertmanager     = { enabled = false }
-    nodeExporter     = { enabled = false }
-    kubeStateMetrics = { enabled = false }
-    defaultRules     = { create = false }
-  })], [for filename in var.config.prometheus_values_files : file(filename)])
+  product_slug     = "bitnami/kube-prometheus"
+  sensitive = {
+    set     = local.prometheus_settings
+    values  = var.config.prometheus_values
+    version = sha256(jsonencode([local.prometheus_settings, var.config.prometheus_values]))
+  }
 }
 
-resource "helm_release" "this" {
-  name             = local.worker ? "runai-cluster" : "runai-backend"
-  namespace        = local.namespace
-  repository       = var.config.chart_path == null ? "https://helm.ngc.nvidia.com/nvidia/runai-oss" : null
-  chart            = coalesce(var.config.chart_path, local.worker ? "runai-cluster" : "control-plane")
-  version          = var.config.version
-  create_namespace = true
-  atomic           = true
-  wait_for_jobs    = true
-  timeout          = 2400
+resource "kubernetes_secret_v1" "bootstrap" {
+  metadata {
+    name      = "runai-bootstrap"
+    namespace = "runai"
+  }
+  data_wo          = { "bootstrap-token" = var.bootstrap_token }
+  data_wo_revision = var.config.bootstrap_token_revision
+}
 
-  values = concat(
-    # Fractions need independently qualified drivers; ordinary whole-GPU work is the baseline.
-    local.worker ? [yamlencode({ kai-resource-management = { kai-scheduler = { global = { nvFractions = { set = false } } } } })] : [],
-    local.serving ? [yamlencode({ clusterConfig = { pod-grouper = { args = { gangScheduleKnative = false } } } })] : [],
-    [for filename in var.config.values_files : file(filename)],
-    [local.worker ? yamlencode({
-      controlPlane  = { url = var.config.control_plane_url }
-      cluster       = { uid = var.config.cluster_uid, url = "https://${var.config.domain}" }
-      clusterConfig = { global = { ingress = { ingressClass = var.config.ingress_class } } }
-    }) : yamlencode({ global = { domain = var.config.domain, ingress = { ingressClass = var.config.ingress_class } } })]
-  )
+resource "nebius_applications_v1alpha1_k8s_release" "this" {
+  parent_id        = var.parent_id
+  cluster_id       = var.cluster_id
+  application_name = "runai-cluster"
+  namespace        = "runai"
+  product_slug     = "nebius/nvidia-run-ai"
+  sensitive = {
+    set = merge(local.worker_settings, local.serving ? {
+      "runai-cluster.clusterConfig.pod-grouper.args.gangScheduleKnative" = false
+    } : {})
+    values  = var.config.values
+    version = sha256(jsonencode([local.worker_settings, var.config]))
+  }
+  depends_on = [nebius_applications_v1alpha1_k8s_release.ingress, nebius_applications_v1alpha1_k8s_release.prometheus_operator, kubectl_manifest.serving, kubectl_manifest.serving_ingress]
+}
 
-  set_wo = local.worker ? [{
-    name  = "controlPlane.bootstrapToken"
-    value = var.bootstrap_token
-  }] : []
-  set_wo_revision = local.worker ? var.config.bootstrap_token_revision : null
-  depends_on      = [helm_release.ingress, helm_release.prometheus_operator, helm_release.serving]
+data "kubernetes_resources" "worker" {
+  api_version    = "apps/v1"
+  kind           = "Deployment"
+  namespace      = "runai"
+  field_selector = "metadata.name=runai-operator"
+  depends_on     = [nebius_applications_v1alpha1_k8s_release.this]
+
+  lifecycle {
+    postcondition {
+      condition = anytrue([for deployment in self.objects : try(
+        deployment.spec.selector.matchLabels.name == "runai" &&
+        deployment.spec.template.metadata.labels.app == "runai-operator" &&
+        contains([for container in deployment.spec.template.spec.containers : container.name], "runai-go-operator"),
+        false
+      )])
+      error_message = "The stock Run:ai worker Deployment was not installed. Publish/use Marketplace wrapper 0.3.2 or later; application DEPLOYED alone does not verify a worker."
+    }
+  }
 }

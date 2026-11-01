@@ -1,8 +1,10 @@
-# Plan only: use the real Nebius schema without credentials or API preflights.
+# Infrastructure plans use the real Nebius schema without credentials or preflights.
+# Native-worker apply checks explicitly use only mocked providers.
 provider "nebius" {
   no_credentials           = true
   disable_preflight_checks = true
 }
+mock_provider "nebius" { alias = "native" }
 mock_provider "helm" {}
 mock_provider "kubernetes" {}
 mock_provider "kubectl" {}
@@ -222,17 +224,97 @@ run "unknown_region_uses_explicit_shapes" {
   }
 }
 
-run "control_plane_omits_gpu_installers" {
+run "control_plane_keeps_marketplace_step_separate" {
   command = plan
   variables {
     gpu_node_groups            = 0
     gpu_nodes_driverfull_image = true
-    enable_runai               = true
-    runai                      = { role = "control-plane", domain = "runai.example.com" }
+    enable_runai               = false
   }
   plan_options { target = [module.gpu-operator, module.device-plugin, module.network-operator, module.runai] }
   assert {
-    condition     = length(module.gpu-operator) == 0 && length(module.device-plugin) == 0 && length(module.runai) == 1
-    error_message = "The CPU Run:ai control plane must install without GPU Operator or a redundant device plugin."
+    condition     = length(module.gpu-operator) == 0 && length(module.runai) == 0
+    error_message = "The CPU control profile must leave the complete Run:ai application to its separate Marketplace deployment."
   }
+}
+
+run "runai_native_marketplace_worker" {
+  command = apply
+  providers = {
+    nebius     = nebius.native
+    helm       = helm
+    kubernetes = kubernetes
+    kubectl    = kubectl
+  }
+  module { source = "../modules/runai" }
+  override_data {
+    target = data.kubernetes_resources.worker
+    values = {
+      objects = [{
+        spec = {
+          selector = { matchLabels = { name = "runai" } }
+          template = {
+            metadata = { labels = { app = "runai-operator" } }
+            spec     = { containers = [{ name = "runai-go-operator" }] }
+          }
+        }
+      }]
+    }
+  }
+  variables {
+    parent_id       = "project-test-only"
+    cluster_id      = "mk8scluster-test-only"
+    bootstrap_token = "test-only-bootstrap"
+    config = {
+      domain            = "worker.example.com"
+      control_plane_url = "https://runai.example.com"
+      cluster_uid       = "test-cluster"
+      serving = {
+        inference_domain = "*.models.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          config:
+            domain: {models.example.com: ""}
+        YAML
+      }
+    }
+  }
+  assert {
+    condition     = nebius_applications_v1alpha1_k8s_release.this.product_slug == "nebius/nvidia-run-ai" && nebius_applications_v1alpha1_k8s_release.this.namespace == "runai" && nebius_applications_v1alpha1_k8s_release.ingress[0].product_slug == "nebius/nginx-ingress-controller" && nebius_applications_v1alpha1_k8s_release.prometheus_operator[0].product_slug == "bitnami/kube-prometheus"
+    error_message = "Run:ai workers and available prerequisites must use the canonical native Marketplace products."
+  }
+  assert {
+    condition     = kubernetes_secret_v1.bootstrap.data_wo == null && kubernetes_secret_v1.bootstrap.data_wo_revision == 1 && local.worker_settings["runai-cluster.controlPlane.bootstrapToken"] == "@/runai/config/client_secret" && length(nebius_applications_v1alpha1_k8s_release.this.sensitive.version) == 64
+    error_message = "Bootstrap credentials must remain write-only and use the stock Secret-file contract with a tracked revision."
+  }
+  assert {
+    condition     = yamldecode(kubectl_manifest.serving[0].yaml_body).kind == "KnativeServing" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.ingressClassName == "nginx" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.tls[0].hosts[0] == "*.models.example.com"
+    error_message = "Optional serving must use native manifests and the configured TLS ingress, without a local wrapper chart."
+  }
+}
+
+run "reject_empty_marketplace_worker" {
+  command = apply
+  providers = {
+    nebius     = nebius.native
+    helm       = helm
+    kubernetes = kubernetes
+    kubectl    = kubectl
+  }
+  module { source = "../modules/runai" }
+  variables {
+    parent_id       = "project-test-only"
+    cluster_id      = "mk8scluster-test-only"
+    bootstrap_token = "test-only-bootstrap"
+    config = {
+      domain            = "worker.example.com"
+      control_plane_url = "https://runai.example.com"
+      cluster_uid       = "test-cluster"
+    }
+  }
+  override_data {
+    target = data.kubernetes_resources.worker
+    values = { objects = [] }
+  }
+  expect_failures = [data.kubernetes_resources.worker]
 }
