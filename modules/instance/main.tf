@@ -45,6 +45,8 @@ resource "nebius_compute_v1_instance" "instance" {
     priority      = 3
   } : null
 
+  follows_spot_price = var.preemptible ? {} : null
+
   recovery_policy = var.preemptible ? "FAIL" : "RECOVER"
 
 
