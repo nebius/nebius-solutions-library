@@ -79,6 +79,7 @@ jobs:
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "v1.11.4"
+        terraform_wrapper: false
 
     - name: Test observability access keys with mocked providers
       run: python3 modules/o11y/tests/check_access_keys.py

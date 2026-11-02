@@ -24,8 +24,10 @@ published catalog before applying.
    ingress and Prometheus Operator prerequisites without installing a worker.
 3. Register that URL through the control plane's native UI/API. Supply the real
    UUID, control-plane URL and fresh bootstrap token, then apply the worker.
-4. Verify Connected and a native workload before enabling Dynamo and dependent
-   extensions. Enable optional Knative separately after its Ready condition passes.
+4. With native GPU images, install the worker example's DCGM exporter service
+   before checking Connected, including when GPU capacity is zero. Verify a native
+   workload before enabling Dynamo and dependent extensions. Enable optional
+   Knative separately after its Ready condition passes.
 
 Use the `runai_url` output for the actual endpoint. Public URLs use Nebius Tunnel
 TLS; Run:ai still authenticates and authorizes its API. Tunnel is currently a
