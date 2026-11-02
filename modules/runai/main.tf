@@ -26,13 +26,8 @@ locals {
     "stack.${component}.enabled" => false
   })
   worker_values = {
-    controlPlane = {
-      url            = var.config.control_plane_url
-      existingSecret = "runai-bootstrap"
-      secretKeys     = { clientSecret = "bootstrap-token" }
-      bootstrapToken = "@/runai/config/client_secret"
-    }
-    cluster = { uid = var.config.cluster_uid, url = "https://${local.domain}" }
+    controlPlane = { url = var.config.control_plane_url }
+    cluster      = { uid = var.config.cluster_uid, url = "https://${local.domain}" }
     clusterConfig = merge({ global = { ingress = { ingressClass = var.config.ingress_class }, inference = { enabled = local.serving } } }, local.public_endpoint ? {
       "cluster-api" = { ingress = {
         tlsEnabled  = false
@@ -72,16 +67,6 @@ resource "nebius_applications_v1alpha1_k8s_release" "prometheus_operator" {
   }
 }
 
-resource "kubernetes_secret_v1" "bootstrap" {
-  count = local.worker_install ? 1 : 0
-  metadata {
-    name      = "runai-bootstrap"
-    namespace = "runai"
-  }
-  data_wo          = { "bootstrap-token" = var.bootstrap_token }
-  data_wo_revision = var.config.bootstrap_token_revision
-}
-
 resource "helm_release" "worker" {
   count         = local.worker_install ? 1 : 0
   name          = "runai-cluster"
@@ -93,7 +78,13 @@ resource "helm_release" "worker" {
   wait_for_jobs = true
   timeout       = 1200
   values        = concat(var.config.values == null ? [] : [var.config.values], [yamlencode(local.worker_values)])
-  depends_on    = [kubernetes_secret_v1.bootstrap, nebius_applications_v1alpha1_k8s_release.ingress, nebius_applications_v1alpha1_k8s_release.prometheus_operator, helm_release.tunnel_agent, kubectl_manifest.serving, kubectl_manifest.serving_ingress]
+  set_wo = [{
+    name  = "controlPlane.bootstrapToken"
+    value = var.bootstrap_token
+    type  = "string"
+  }]
+  set_wo_revision = var.config.bootstrap_token_revision
+  depends_on      = [nebius_applications_v1alpha1_k8s_release.ingress, nebius_applications_v1alpha1_k8s_release.prometheus_operator, helm_release.tunnel_agent, kubectl_manifest.serving, kubectl_manifest.serving_ingress]
 }
 
 output "url" {

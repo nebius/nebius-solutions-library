@@ -274,8 +274,8 @@ run "runai_official_worker" {
     error_message = "Workers must use the unchanged official chart and native Marketplace prerequisites."
   }
   assert {
-    condition     = kubernetes_secret_v1.bootstrap[0].data_wo == null && kubernetes_secret_v1.bootstrap[0].data_wo_revision == 1 && local.worker_values.controlPlane.bootstrapToken == "@/runai/config/client_secret"
-    error_message = "Bootstrap credentials must remain write-only and use the stock Secret-file contract."
+    condition     = helm_release.worker[0].set_wo == null && helm_release.worker[0].set_wo_revision == 1 && alltrue([for values in helm_release.worker[0].values : !strcontains(values, "test-only-bootstrap")])
+    error_message = "Bootstrap credentials must remain write-only and absent from ordinary Helm values."
   }
   assert {
     condition     = yamldecode(kubectl_manifest.serving[0].yaml_body).kind == "KnativeServing" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.ingressClassName == "nginx" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.tls[0].hosts[0] == "*.models.example.com"
@@ -293,7 +293,7 @@ run "unregistered_worker_prerequisites_only" {
     config     = { domain = "worker.example.com", cluster_uid = "" }
   }
   assert {
-    condition     = length(helm_release.worker) == 0 && length(kubernetes_secret_v1.bootstrap) == 0 && length(nebius_applications_v1alpha1_k8s_release.ingress) == 1 && length(nebius_applications_v1alpha1_k8s_release.prometheus_operator) == 1
+    condition     = length(helm_release.worker) == 0 && length(nebius_applications_v1alpha1_k8s_release.ingress) == 1 && length(nebius_applications_v1alpha1_k8s_release.prometheus_operator) == 1
     error_message = "Worker registration must be staged after its real endpoint and prerequisites exist."
   }
 }

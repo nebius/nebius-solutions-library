@@ -98,7 +98,7 @@ variable "config" {
 }
 
 variable "bootstrap_token" {
-  description = "Fresh native bootstrap token, written only to a caller-managed Kubernetes Secret. Increment config.bootstrap_token_revision for rotation."
+  description = "Fresh native bootstrap token passed through Helm write-only set_wo; Helm history retains it. Increment config.bootstrap_token_revision when refreshing it."
   type        = string
   default     = ""
   nullable    = false

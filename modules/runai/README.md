@@ -33,11 +33,16 @@ Preview service. Each agent receives only the `applicationtunnel.agent` role
 scoped to its Tunnel. Agent transport uses port 8443; public HTTPS uses 443.
 
 The root reads credentials from protected files. Ephemeral module inputs and
-provider write-only fields keep them out of Terraform state. Tunnel keys and
-worker bootstrap tokens are mounted from write-only Kubernetes Secrets, outside
-Helm values/history. Initial admin/database credentials use the stock chart's
-intended Secret creation. Increment the corresponding revision when rotating
-credentials. Keep state and deployment-system access restricted.
+provider write-only inputs keep them out of Terraform configuration state. Tunnel
+keys are mounted from write-only Kubernetes Secrets, outside Helm values/history.
+The official worker bootstrap token uses Helm's write-only `set_wo`; its two-hour
+token remains in Helm history and hook arguments. Restrict access to those records
+and verify provider metadata redaction during deployment. The native installer
+persists separate runtime client credentials in operator-owned Secrets; runtime
+authentication does not depend on the bootstrap token's lifetime. Initial
+admin/database credentials use the stock chart's intended Secret creation.
+Increment the corresponding revision when rotating credentials. Keep state and
+deployment-system access restricted.
 
 For custom worker DNS, set `public_endpoint = false`, supply `domain`, and
 prepare trusted TLS at ingress before registration. `values`, `ingress_values`
